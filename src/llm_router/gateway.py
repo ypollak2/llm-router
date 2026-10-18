@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -31,6 +32,8 @@ from pydantic import BaseModel
 from llm_router import paths
 from llm_router.route_server import is_auto_model
 
+
+_LOG = logging.getLogger("llm_router.gateway")
 
 
 def _load_dotenv() -> None:
@@ -326,6 +329,62 @@ def _resolve_project_scope(request, body_value: str | None = None) -> str | None
     return str(candidate)
 
 
+def _rate_limit_cause(exc: BaseException) -> BaseException | None:
+    """The provider rate-limit exception behind ``exc``, or None (F76 review MUST-FIX 1).
+
+    By TYPE only: a class named ``RateLimitError`` (litellm, openai and anthropic all use it)
+    on ``exc`` or its ``__cause__`` / ``__context__`` chain. Never by message text: the
+    router's aggregate "All models failed ..." error embeds every model's error, a budget
+    refusal can quote "$0.0429", and "quota exceeded" is a permanent limit - all stay 502.
+    """
+    from llm_router.types import BudgetExceededError
+
+    if isinstance(exc, BudgetExceededError) or type(exc) is RuntimeError:
+        return None  # the router's own aggregate / budget errors, whatever they quote
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen and len(seen) < 8:
+        seen.add(id(cur))
+        if any(c.__name__ == "RateLimitError" for c in type(cur).__mro__):
+            return cur
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+def _retry_after_s(exc: BaseException) -> int | None:
+    """Seconds from the exception's retry-after (attribute or response header), else None."""
+    headers = getattr(getattr(exc, "response", None), "headers", None) or getattr(exc, "headers", None)
+    raw = getattr(exc, "retry_after", None)
+    if raw is None and headers is not None:
+        try:
+            raw = headers.get("retry-after") or headers.get("Retry-After")
+        except AttributeError:
+            raw = None
+    try:
+        secs = float(raw)
+    except (TypeError, ValueError):
+        return None  # absent or an HTTP-date: send none
+    return int(secs) + (secs > int(secs)) if 0 < secs <= 3600 else None
+
+
+def _routing_failure(exc: Exception) -> HTTPException:
+    """The client-facing error for a failed route (F76). The client gets the exception CLASS
+    and a fixed message, never the provider's text (it can echo the prompt); the scrubbed
+    detail goes to the local log only."""
+    from llm_router.proxy.ledger import scrub_detail
+
+    limited = _rate_limit_cause(exc)
+    _LOG.warning("routing failed: %s: %s", type(exc).__name__, scrub_detail(str(exc)))
+    if limited is None:
+        return HTTPException(status_code=502, detail=f"{type(exc).__name__}: routing failed")
+    secs = _retry_after_s(limited)
+    return HTTPException(
+        status_code=429,
+        detail=f"{type(limited).__name__}: upstream rate limit"
+               + (f"; retry after {secs} s" if secs else ""),
+        headers={"Retry-After": str(secs)} if secs else None)
+
+
 async def _route(prompt: str, task_type: str | None, complexity: str | None,
                  prefer_model: str | None = None, project_root: str | None = None,
                  classify_text: str | None = None, *,
@@ -399,12 +458,7 @@ async def _route(prompt: str, task_type: str | None, complexity: str | None,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        from llm_router.router import _is_rate_limit_error
-
-        # F76: a rate limit is 429 (non-stream and stream agree), not a generic 502.
-        raise HTTPException(
-            status_code=429 if _is_rate_limit_error(e) else 502,
-            detail=f"LLM Router routing failed: {e}")
+        raise _routing_failure(e) from e
     return _RoutedResult(out)
 
 
@@ -1085,7 +1139,8 @@ def _sse_response(route_call, build, error_frame) -> StreamingResponse:
         except HTTPException as e:
             yield error_frame(e.status_code, _scrubbed(str(e.detail)))
         except Exception as e:  # noqa: BLE001 - headers are out: the protocol's error event
-            yield error_frame(500, f"stream failed: {type(e).__name__}: {_scrubbed(str(e))}")
+            _LOG.warning("stream failed: %s: %s", type(e).__name__, _scrubbed(str(e)))
+            yield error_frame(500, f"stream failed: {type(e).__name__}")
         finally:
             if not task.done():
                 task.cancel()  # client gone: the router records the cancelled call

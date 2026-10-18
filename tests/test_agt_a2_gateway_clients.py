@@ -675,6 +675,7 @@ def test_stream_with_a_refused_request_is_still_an_http_400_before_any_event(bas
     assert fake.calls == []
 
 
+@pytest.mark.timing
 def test_client_disconnect_cancels_the_upstream_call_and_leaves_one_marked_row(base, fake):
     fake.gate = asyncio.Event()                  # the backend never answers
     with httpx.stream("POST", base + "/v1/chat/completions", json=_body("/v1/chat/completions"),
@@ -753,6 +754,7 @@ def _raw_lines(base, path, body):
         return list(r.iter_lines())
 
 
+@pytest.mark.timing
 def test_stream_sends_keep_alive_comments_while_the_model_works(base, fake, monkeypatch):
     from llm_router import gateway
 
@@ -767,6 +769,7 @@ def test_stream_sends_keep_alive_comments_while_the_model_works(base, fake, monk
     assert "".join(deltas) == FINAL
 
 
+@pytest.mark.timing
 def test_a_call_that_finished_before_the_disconnect_keeps_its_success_row(base, fake):
     with httpx.stream("POST", base + "/v1/chat/completions", json=_body("/v1/chat/completions"),
                       timeout=30) as r:
@@ -780,43 +783,116 @@ def test_a_call_that_finished_before_the_disconnect_keeps_its_success_row(base, 
     assert not fake.cancelled.is_set()
 
 
-RATE = "429 Too Many Requests: rate limit exceeded"
+class RateLimitError(Exception):
+    """Shaped like litellm / openai / anthropic ``RateLimitError`` (found by class name)."""
+
+    def __init__(self, msg="slow down", retry_after=None):
+        super().__init__(msg)
+        self.retry_after = retry_after
+
+
+def _fail_route(monkeypatch, exc):
+    import llm_router.route_server as route_server
+
+    async def failing(payload):
+        raise exc
+
+    monkeypatch.setattr(route_server, "route_payload_async", failing)
+
+
+def _wire_error(path, frames):
+    """(type, code-or-None, message) of the last frame, per wire format."""
+    payload = json.loads(frames[-1][1])
+    err = payload["error"]
+    code = payload.get("code") if path == "/v1/responses" else err.get("code")
+    return err["type"], code, err["message"]
+
+
+def _check_status(path, plain_status, frames, status, kind):
+    assert plain_status == status
+    etype, code, _ = _wire_error(path, frames)
+    assert etype == kind
+    if path != "/v1/messages":      # the Anthropic error event has no code field
+        assert code == str(status)
+    assert (frames[-1][0] == "error") == (path != "/v1/chat/completions")
 
 
 @pytest.mark.parametrize("path", ENDPOINTS)
-def test_rate_limit_is_429_non_stream_and_rate_limit_error_event_when_streaming(
-        base, fake, monkeypatch, path):
-    import llm_router.route_server as route_server
-
-    async def limited(payload):
-        raise RuntimeError(RATE)
-
-    monkeypatch.setattr(route_server, "route_payload_async", limited)
+@pytest.mark.parametrize("make,retry", [
+    (lambda: litellm.RateLimitError(message="slow down", llm_provider="openai", model="gpt-4o"), None),
+    (lambda: RateLimitError(retry_after=7), "7"),
+])
+def test_a_provider_rate_limit_is_429_on_every_endpoint(base, fake, monkeypatch, path, make, retry):
+    _fail_route(monkeypatch, make())
     plain = {k: v for k, v in _body(path).items() if k != "stream"}
-    assert httpx.post(base + path, json=plain, timeout=30).status_code == 429
-    event, data = _frames(base, path, _body(path))[-1]
-    payload = json.loads(data)
-    err = payload["error"]
-    assert err["type"] == "rate_limit_error"
-    assert (event == "error") == (path != "/v1/chat/completions")
+    r = httpx.post(base + path, json=plain, timeout=30)
+    frames = _frames(base, path, _body(path))
+    _check_status(path, r.status_code, frames, 429, "rate_limit_error")
+    assert r.headers.get("retry-after") == retry
+    assert ("retry after 7 s" in _wire_error(path, frames)[2]) == (retry == "7")
 
 
-def test_a_routing_failure_event_is_scrubbed_and_short(base, fake, monkeypatch):
-    import llm_router.route_server as route_server
+def test_a_rate_limit_behind_a_wrapper_is_429(base, fake, monkeypatch):
+    try:
+        try:
+            raise RateLimitError()
+        except RateLimitError as inner:
+            raise ValueError("wrapped") from inner
+    except ValueError as wrapped:
+        _fail_route(monkeypatch, wrapped)
+    plain = {k: v for k, v in _body("/v1/messages").items() if k != "stream"}
+    assert httpx.post(base + "/v1/messages", json=plain, timeout=30).status_code == 429
 
+
+def _not_a_rate_limit():
+    from llm_router.types import BudgetExceededError
+
+    return {
+        "aggregate": RuntimeError(
+            "All models failed for query/simple. Last error: auth. Chain failures: "
+            "1. openai/gpt-4o: 429 Too Many Requests; 2. gemini/x: 401"),
+        "budget": BudgetExceededError("cheapest option costs ~$0.0429, over the cap"),
+        "quota": RuntimeError("quota exceeded for this project"),
+        "plain": RuntimeError("boom"),
+    }
+
+
+@pytest.mark.parametrize("path", ENDPOINTS)
+@pytest.mark.parametrize("name", ["aggregate", "budget", "quota", "plain"])
+def test_anything_that_is_not_itself_a_rate_limit_stays_502(base, fake, monkeypatch, path, name):
+    _fail_route(monkeypatch, _not_a_rate_limit()[name])
+    plain = {k: v for k, v in _body(path).items() if k != "stream"}
+    r = httpx.post(base + path, json=plain, timeout=30)
+    assert "retry-after" not in r.headers
+    frames = _frames(base, path, _body(path))
+    assert r.status_code == 502
+    etype, code, _ = _wire_error(path, frames)
+    assert etype == "api_error"
+    if path != "/v1/messages":
+        assert code == "502"
+
+
+@pytest.mark.parametrize("path", ENDPOINTS)
+def test_provider_error_text_never_reaches_the_client(base, fake, monkeypatch, path):
     secret = "sk-ant-api03-" + "A" * 40
-    tail = "TAIL-OF-THE-PROMPT"
+    seeded = "SEEDED-PROMPT-TEXT-Lisbon-weather"
+    _fail_route(monkeypatch, RuntimeError(f"upstream echoed {seeded} {secret} " + "x" * 400))
+    plain = {k: v for k, v in _body(path, text=seeded).items() if k != "stream"}
+    r = httpx.post(base + path, json=plain, timeout=30)
+    wire = _frames(base, path, _body(path, text=seeded))
+    streamed = "\n".join(d for _, d in wire)
+    for text in (r.text, streamed):
+        assert seeded not in text and secret not in text and "xxxx" not in text, text
+    assert r.status_code == 502 and "RuntimeError: routing failed" in r.text
+    assert _wire_error(path, wire)[2] == "RuntimeError: routing failed"
+    # the same seeded text in a rate limit's message stays out of a 429 too
+    _fail_route(monkeypatch, RateLimitError(f"limit; prompt was {seeded}"))
+    r = httpx.post(base + path, json=plain, timeout=30)
+    assert r.status_code == 429 and seeded not in r.text
+    assert seeded not in "\n".join(d for _, d in _frames(base, path, _body(path, text=seeded)))
 
-    async def failing(payload):
-        raise RuntimeError(f"upstream said {secret} " + "x" * 400 + tail)
 
-    monkeypatch.setattr(route_server, "route_payload_async", failing)
-    for path in ENDPOINTS:
-        message = json.loads(_frames(base, path, _body(path))[-1][1])["error"]["message"]
-        assert secret not in message and tail not in message and len(message) <= 260, message
-
-
-def test_an_unexpected_stream_error_names_the_class_and_scrubs_the_message(base, fake, monkeypatch):
+def test_an_unexpected_stream_error_names_only_the_class(base, fake, monkeypatch):
     from llm_router import gateway
 
     secret = "sk-ant-api03-" + "B" * 40
@@ -828,4 +904,4 @@ def test_an_unexpected_stream_error_names_the_class_and_scrubs_the_message(base,
     monkeypatch.setattr(gateway, "_chat_frames", broken)
     message = json.loads(_frames(base, "/v1/chat/completions", _body("/v1/chat/completions"))[-1][1]
                          )["error"]["message"]
-    assert message.startswith("stream failed: ValueError: ") and secret not in message, message
+    assert message == "stream failed: ValueError", message

@@ -31,9 +31,15 @@ streaming, so the first token arrives when the model has finished. If routing fa
 response has started, the HTTP status is still **200** and the failure arrives as an `error` event in
 the endpoint's own shape (a chat stream sends no `[DONE]` after it); official clients raise on it.
 Requests the gateway refuses (hosted tools, images) are an HTTP 400 before any event.
-The error event is scrubbed like the usage ledger's `detail` column (secrets removed, 200 characters
-at most, exception class plus message, never the prompt). Its `type` is `invalid_request_error` for a
-400, `rate_limit_error` for a 429 (a rate limit from the routed call) and `api_error` otherwise; the
+The error event never carries provider error text (it can echo the prompt). A failed route sends the
+exception class name and a fixed message: `<ExceptionClass>: routing failed` (HTTP 502, `api_error`),
+`<ExceptionClass>: upstream rate limit` (HTTP 429, `rate_limit_error`), or `stream failed: <ExceptionClass>`
+for a fault inside the gateway. The secret-scrubbed detail (200 characters) goes to the local log
+(`llm_router.gateway`) only. A 429 is sent only when the exception itself is a provider `RateLimitError`
+(by type, also through its `__cause__` / `__context__`); the router's "All models failed" error, budget
+refusals and permanent "quota exceeded" errors stay 502. When the rate limit carries a retry-after, the
+non-streamed 429 has a `Retry-After` header and the message ends `; retry after N s` (so does the stream's
+error event); otherwise neither is sent. The error's `type` is `invalid_request_error` for a 400, and the
 non-streamed endpoints return the same status codes.
 
 **`system` on `/v1/messages`.** A string is forwarded as is. A list of blocks (Claude Code and the Claude

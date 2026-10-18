@@ -151,7 +151,7 @@ async def llm_router_agent_start_session(
             When None, uses profile.default_budget_usd.
         parent_session_id: when this session is spawned by another agent,
             chains for cost rollup.
-        framework: which adapter started this session (agno / hermes /
+        framework: which adapter started this session (agno /
             langgraph / crewai / claude-agent-sdk / pydantic-ai). Stored
             in lineage rows for per-framework reporting.
 
