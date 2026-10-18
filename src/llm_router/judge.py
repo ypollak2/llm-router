@@ -161,6 +161,7 @@ def enqueue_for_grading(
         "task_type": task_type,
         "answering_model": answering_model,
         "queued_at": time.time(),
+        judge_hygiene.PREPARED_KEY: True,
     }
     try:
         path = _queue_path()
@@ -215,15 +216,16 @@ def _enforce_queue_cap(path, size_before: int = 0) -> int:
     not checked this time).
     """
     cap = _queue_max_entries()
-    if cap <= 0:
-        return 0
     dropped = 0
     try:
         size = path.stat().st_size
         if size > _EXACT_CHECK_BYTES and size_before // _CHECK_STRIDE_BYTES == size // _CHECK_STRIDE_BYTES:
             return 0
         from llm_router import judge_hygiene
-        judge_hygiene.purge_expired(path)
+        judge_hygiene.purge_expired(path)  # retention holds even when the entry cap is off
+        judge_hygiene.purge_orphans(path)
+        if cap <= 0:
+            return 0
         with open(path) as f:
             lines = [line for line in f.readlines() if line.strip()]
         if len(lines) <= cap:
@@ -454,23 +456,30 @@ async def _grade_one(item: dict) -> str:
     if judge_kind == judge_select.KIND_SUBSCRIPTION:
         # The only judge that spends quota and sends a local answer's prompt off
         # the machine: privacy flag, quota reading and daily caps all fail closed.
-        stop = judge_ledger.admit_haiku(time.time(), est_tokens=text_len // 4)
+        # F97: caps are checked and the call's spend reserved atomically, then released below.
+        stop, rid = judge_ledger.reserve_haiku(time.time(), est_tokens=text_len // 4)
         if stop is not None:
             return _record("ungraded", ledger={"outcome": stop})
+    else:
+        rid = None
 
     outcome: dict = {}
-    ok = await _evaluate_background(
-        item.get("prompt", ""),
-        item.get("response", ""),
-        item.get("task_type", "query"),
-        item.get("routing_decision_id"),
-        model=judge_model,
-        outcome=outcome,
-    )
-    status = "graded" if ok else "failed"
-    return _record(status, outcome.get("score"), ledger={
-        "outcome": status, "tokens": outcome.get("tokens"), "cost_usd": outcome.get("cost_usd"),
-    })
+    try:
+        ok = await _evaluate_background(
+            item.get("prompt", ""),
+            item.get("response", ""),
+            item.get("task_type", "query"),
+            item.get("routing_decision_id"),
+            model=judge_model,
+            outcome=outcome,
+        )
+        status = "graded" if ok else "failed"
+        return _record(status, outcome.get("score"), ledger={
+            "outcome": status, "tokens": outcome.get("tokens"), "cost_usd": outcome.get("cost_usd"),
+        })
+    finally:
+        if rid is not None:
+            judge_ledger.release_reservation(rid, outcome.get("tokens"))
 
 
 async def drain_queue(batch_size: int = 50, time_budget_s: float = 20.0) -> dict:
@@ -491,7 +500,8 @@ async def drain_queue(batch_size: int = 50, time_budget_s: float = 20.0) -> dict
     _recover_orphaned_claims(path)
     from llm_router import judge_hygiene
     judge_hygiene.purge_expired(path)
-    items = _claim_queue(path)
+    judge_hygiene.purge_orphans(path)
+    items, legacy_dropped = judge_hygiene.sanitize_claimed(_claim_queue(path))
     to_process, overflow = items[:batch_size], items[batch_size:]
     _requeue(path, overflow)
 
@@ -509,12 +519,15 @@ async def drain_queue(batch_size: int = 50, time_budget_s: float = 20.0) -> dict
         else:
             failed += 1
 
-    return {
+    result = {
         "graded": graded,
         "ungraded": ungraded,
         "failed": failed,
         "requeued": len(overflow),
     }
+    if legacy_dropped:  # F97: pre-P3.1-4 rows that hygiene refused; counted, never graded
+        result["dropped"] = legacy_dropped
+    return result
 
 
 async def _evaluate_background(

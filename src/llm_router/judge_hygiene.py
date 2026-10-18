@@ -13,6 +13,12 @@ prompt and answer, no redaction, mode 0644, no TTL):
     purged. Claimed entries are deleted at claim (``judge._claim_queue``).
 
 A skip records a failopen code with no text in it.
+
+F97: a row carries ``"prepared": true`` once it has passed :func:`prepare`. A row without
+the marker (queued before P3.1-4) is run through :func:`prepare` when it is claimed
+(:func:`sanitize_claimed`), and dropped if prepare refuses it. Orphaned temp files
+(``<queue>.rewrite.*``, ``<queue>.draining.*``) are physically purged
+(:func:`purge_orphans`).
 """
 
 from __future__ import annotations
@@ -27,6 +33,9 @@ TEXT_CAP = 8000
 _OMITTED = "\n[... omitted ...]\n"
 DEFAULT_MAX_AGE_DAYS = 3.0
 _PRIVATE = 0o600
+PREPARED_KEY = "prepared"
+#: A ``.rewrite.*`` temp file lives for microseconds; one this old was left by a crash.
+REWRITE_ORPHAN_GRACE_S = 600.0
 
 
 def _cap(text: str) -> str:
@@ -132,3 +141,62 @@ def purge_expired(path, now: float | None = None) -> int:
             return 0
         failopen.record("CHZ-FO-JUDGE-QUEUE-PURGED", detail=f"purged={dropped}")
     return dropped
+
+
+def sanitize_claimed(items: list[dict]) -> tuple[list[dict], int]:
+    """(rows safe to hand to a judge, how many were dropped) for a freshly claimed batch.
+
+    A row already marked prepared is kept as is (not re-redacted). Any other row
+    (queued before P3.1-4, raw text) goes through :func:`prepare`: it is rewritten with
+    the prepared text and the marker, or dropped when prepare returns None. The claim
+    already removed the raw row from disk; a kept row is only ever requeued prepared.
+    """
+    kept: list[dict] = []
+    dropped = 0
+    for item in items:
+        if item.get(PREPARED_KEY) is True:
+            kept.append(item)
+            continue
+        text = prepare(str(item.get("prompt") or ""), str(item.get("response") or ""))
+        if text is None:
+            dropped += 1
+            continue
+        kept.append({**item, "prompt": text[0], "response": text[1], PREPARED_KEY: True})
+    if dropped:
+        failopen.record("CHZ-FO-JUDGE-QUEUE-LEGACY-DROPPED", detail=f"dropped={dropped}")
+    return kept, dropped
+
+
+def purge_orphans(path, now: float | None = None) -> int:
+    """Delete temp files a crash left beside the queue; returns how many. Never raises.
+
+    ``<queue>.rewrite.*`` older than ``REWRITE_ORPHAN_GRACE_S``: the rows are still in the
+    queue file (the replace never happened). ``<queue>.draining.*`` older than the retention
+    bound (and the grace): younger ones are still recoverable by ``judge._recover_orphaned_claims``.
+    """
+    now = time.time() if now is None else now
+    age_limit = {".rewrite.": REWRITE_ORPHAN_GRACE_S,
+                 ".draining.": max(max_age_seconds(), REWRITE_ORPHAN_GRACE_S)}
+    removed = 0
+    try:
+        parent = path.parent
+        if not parent.is_dir():
+            return 0
+        for entry in parent.iterdir():
+            for marker, limit in age_limit.items():
+                if not entry.name.startswith(path.name + marker):
+                    continue
+                try:
+                    if now - entry.stat().st_mtime <= limit:
+                        break
+                    entry.unlink()
+                    removed += 1
+                except OSError as exc:
+                    failopen.record("CHZ-FO-JUDGE-QUEUE-ORPHAN-PURGE", exc)
+                break
+    except OSError as exc:
+        failopen.record("CHZ-FO-JUDGE-QUEUE-ORPHAN-PURGE", exc)
+        return removed
+    if removed:
+        failopen.record("CHZ-FO-JUDGE-QUEUE-ORPHAN-PURGED", detail=f"purged={removed}")
+    return removed
