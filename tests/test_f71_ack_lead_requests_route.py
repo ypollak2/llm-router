@@ -26,7 +26,7 @@ REPORTED = [
     "yes please do the migration", "I deployed it, now add logging to the worker",
     "done - please add retries to the client",
     "I tried it. Generate a unit test for foo()", "ok so what happened with the build",
-    "Speed it", "Set it to prod", "Proceed with the plan", "Checked it for bugs",
+    "Speed it", "Set it to prod", "Checked it for bugs",
 ]
 INVENTED = [
     "ok, write the release notes", "okay; fix the flaky test", "yes. Refactor the parser",
@@ -50,6 +50,9 @@ STAYS_COORDINATION = [
     "can you check on it?", "why is it failing again?", "use this plan and get started",
     "just go with your recommendation", "why weren't those drafts used?",
     "are you sure you fixed it? it happens again [Image #6]",
+    # D-222 (F83): moved here from MUST_ROUTE. F71 pinned "Proceed with the plan" as a
+    # request; the owner decided it is coordination, like "continue the plan".
+    "Proceed with the plan",
 ]
 
 
