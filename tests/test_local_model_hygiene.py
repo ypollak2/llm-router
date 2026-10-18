@@ -185,7 +185,7 @@ def test_n19b_classifier_path_unaffected(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "llmr-classifier-38")
     assert discover.ollama_can_generate("ollama/llmr-classifier-38") is False
     assert lc._model() == "llmr-classifier-38"
-    assert lc.DEFAULT_MODEL == "llmr-classifier"
+    assert lc.DEFAULT_MODEL == ""  # F61 (D-205): no named classifier default
 
 
 def test_n19b_allow_list_overrides_name_rules(monkeypatch):
