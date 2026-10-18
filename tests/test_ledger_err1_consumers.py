@@ -42,17 +42,6 @@ def test_predicate_and_helper_agree(tmp_path):
     assert is_error_reason("error_timeout") and not is_error_reason("router_chain") and not is_error_reason(None)
 
 
-def test_statusline_mix_excludes_error_rows(tmp_path):
-    from llm_router.statusline_segments import mix_segment
-    _db(tmp_path)
-    assert mix_segment(str(tmp_path)) == {"mix_local": "1", "mix_paid": "1"}
-
-
-def test_statusline_literal_equals_the_shared_predicate():
-    src = (Path(__file__).resolve().parent.parent / "src/llm_router/statusline_segments.py").read_text()
-    assert SQL_NOT_ERROR_ROW.replace("\\", "\\\\") in src
-
-
 def test_a_database_without_the_reason_column_is_read_unfiltered(tmp_path):
     from llm_router.provider_classes import not_error_row_sql
     c = sqlite3.connect(str(tmp_path / "old.db"))

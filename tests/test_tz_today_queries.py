@@ -127,11 +127,13 @@ def test_statusline_today_savings_use_localtime():
     )
     delegates = [
         n for n in ast.walk(tree)
-        if isinstance(n, ast.ImportFrom) and n.module == "llm_router.dashboard_data"
-        and {a.name for a in n.names} >= {"summary"}
+        if isinstance(n, ast.ImportFrom) and n.module == "llm_router"
+        and {a.name for a in n.names} >= {"ledger_view"}
     ]
+    # P3.4-B2: the segments call ledger_view.window_summary("today"), whose resolve() owns the
+    # local-midnight boundary (dashboard_data.summary delegates to the same function).
     assert delegates, (
-        "statusline no longer delegates to dashboard_data.summary() -- whoever re-added "
+        "statusline no longer delegates to ledger_view.window_summary() -- whoever re-added "
         "its own savings query also re-took ownership of the timezone boundary"
     )
 
