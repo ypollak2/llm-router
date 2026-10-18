@@ -184,7 +184,8 @@ def factory(tmp_path):
             quota=lambda: {"session_pct": 0, "weekly_pct": 0, "age_s": 0},
             pack_fn=lambda item, name, window: [{"role": "user", "content": item["request"]}],
             git_sha=lambda: "deadbeef", gate=lambda constants: None,
-            amend1_t=run_dir / "AMEND1.md", mem_total_fn=lambda: 48 * 2**30)
+            amend1_t=run_dir / "AMEND1.md", amend2_t=run_dir / "AMEND2T.md",
+            mem_total_fn=lambda: 48 * 2**30)
         return cfg, {**c, "LOCAL_MODELS": h.LOCAL}, pool
     return make
 
