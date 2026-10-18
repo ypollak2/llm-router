@@ -103,6 +103,14 @@ def test_record_stamps_usage_error_and_record_raw_unchanged(tmp_path, monkeypatc
 
 def test_timed_render_names_its_path_starts_no_perl_and_leaks_no_stamp(tmp_path):
     home, bindir = _setup(tmp_path)
+    # The miss render starts the detached segment builder. On a loaded runner it
+    # wrote a fresh cache AFTER _seg(home, 60) below, so the "stale" render read a
+    # hit (main CI run 39124655224). A builder interpreter that does nothing keeps
+    # the cache exactly as this test seeds it.
+    noop = bindir / "seg-python-noop"
+    noop.write_text("#!/bin/sh\nexit 0\n")
+    noop.chmod(0o755)
+    (home / ".llm-router" / ".statusline_python").write_text(f"{noop}\n")
     # miss: no cache yet
     _run(home, bindir, LLM_ROUTER_STATUSLINE_TIMING="all")
     # hit: fresh cache; stale: older than the 30 s TTL
