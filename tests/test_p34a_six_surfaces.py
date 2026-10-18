@@ -56,7 +56,30 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # routing_decisions R1 R2 R3 R4 R10 R11 R12 R13 R14 R15, proxy P1 P2 P3 P_edge_in P_edge_out P_old
 # (P_dup is R4's trace; the no-ts, refused and HTTP 529 rows carry no session or are not calls).
 SESSION_EXEC = {"ollama": 3, "codex": 1, "gemini_cli": 1, "openai": 6, "anthropic": 5}
-SESSION_MIX = (3, 2, 11)          # local / subscription / paid
+#
+# HAND CLASSIFICATION (D-205 / P34-PLAN 2.4; written from the seed rows, not from the code).
+# Fixture evidence: proxy auth forwarded=oauth, fallback=api_key; seats.json = one Claude seat,
+# NO API keys; routing_decisions rows carry no auth. Rule order: row auth -> usage "subscription" ->
+# LOCAL_PROVIDERS -> seat (anthropic/claude -> Claude seat) -> unclassified (never paid).
+#   row         provider    evidence                         class
+#   R1,R10      ollama      LOCAL_PROVIDERS                  local
+#   P1          ollama      served = local                   local
+#   R2          codex       no codex seat, no key            unclassified
+#   R13         gemini_cli  no gemini seat, no key           unclassified
+#   R3,R4       openai      no seat, no OPENAI_API_KEY       unclassified
+#   R11,R12,R14,R15  openai same                             unclassified
+#   P2,P_edge_in,P_edge_out,P_old  anthropic  auth oauth     subscription
+#   P3          anthropic   auth api_key                     paid
+# today  (R1 R2 R3 R4 P1 P2 P3):               local R1+P1=2, sub P2=1, paid P3=1, uncl R2+R3+R4=3  (7)
+# 24h    (today + R10 R13):                    local 3, sub 1, paid 1, uncl 3+R13=4                 (9)
+# session(R1-R4 R10-R15 P1 P2 P3 P_edge_in/out P_old):
+#        local R1,R10,P1=3; sub P2,P_edge_in,P_edge_out,P_old=4; paid P3=1;
+#        uncl R2,R13,R3,R4,R11,R12,R14,R15=8                                                      (16)
+SESSION_MIX = (3, 4, 1)           # local / subscription / paid
+SESSION_UNCLASSIFIED = 8
+MIX_SIX = {  # window -> (local, subscription, paid, unclassified), by the table above
+    "today": (2, 1, 1, 3), "24h": (3, 1, 1, 4),
+}
 FIGURE = re.compile(r"\$-?\s?\d|\d+L/\d+|\d+ executed|\d+ ms")
 HAS_N = re.compile(r"\bn=\d|\bn \d|\d+ executed")
 HAS_WINDOW = re.compile(r"\b(session|today|24h|7d|month|lifetime)\b")
@@ -99,6 +122,17 @@ async def six(home, tmp_path_factory):  # noqa: F811 -- pytest fixture name
     env = {"HOME": str(fake), "LLM_ROUTER_HOME": str(home), "TZ": TZNAME, "NO_COLOR": "1",
            "PATH": os.environ.get("PATH", ""), "LLM_ROUTER_STATUS_MODE": "full"}
     return SimpleNamespace(home=home, db=db, env=env)
+
+
+def _expected_line_six(window: str) -> str:
+    """The identity line with this home's hand mix (the A home's mix does not apply: Claude-only seat)."""
+    ex = EXPECTED_EXEC[window]
+    loc, sub, paid, unc = MIX_SIX[window]
+    assert loc + sub + paid + unc == sum(ex.values())
+    usd, n = _saved(window)
+    by = " ".join(f"{p} {c}" for p, c in sorted(ex.items(), key=lambda kv: (-kv[1], kv[0])))
+    return (f"ledger {window}: {sum(ex.values())} executed ({by}) · mix local {loc} / "
+            f"subscription {sub} / paid {paid} / unclassified {unc} · est. saved ${usd:,.2f} (n={n:,})")
 
 
 def _ungrounded(text: str, sep: str) -> list[str]:
@@ -196,14 +230,14 @@ def test_status_bar_figures_carry_n_and_window(six):
 # -- surfaces 3, 4, 5: dashboard summary, `llm-router summary`, kpi (aligned since part A) -------
 
 def test_dashboard_summary_and_kpi_print_the_today_oracle(six):
-    want = _expected_line("today")
+    want = _expected_line_six("today")
     assert _dashboard_line("today", six.db) == want
     assert _kpi_line(1) == want
     assert _ungrounded(want, "\n") == []
 
 
 def test_dashboard_summary_and_summary_command_print_the_24h_oracle(six):
-    want = _expected_line("24h")
+    want = _expected_line_six("24h")
     assert _dashboard_line("24h", six.db) == want
     assert _summary_line(24.0) == want
 
@@ -214,6 +248,8 @@ def test_session_window_is_the_hand_counted_oracle(six):
     w = lv.window_summary("session", session_id="s-main")
     assert dict(w.executed) == SESSION_EXEC and w.n == sum(SESSION_EXEC.values())
     assert (w.local_n, w.subscription_n, w.paid_n) == SESSION_MIX
+    assert w.unclassified_n == SESSION_UNCLASSIFIED
+    assert sum(SESSION_MIX) + SESSION_UNCLASSIFIED == w.n
 
 
 def _summary_markdown() -> str:
@@ -291,16 +327,16 @@ def test_seats_fixture_has_a_claude_seat_and_no_api_key(six):
     assert s is not None and s.claude.present and not any(s.api_keys.values())
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B1: provider_class knows only {codex, gemini_cli, "
-                   "subscription}; a provider covered by a discovered seat reads paid")
 def test_a_seat_covered_provider_is_subscription(six):
-    from llm_router import ledger_view as lv
+    """provider_class stays pure (hook-safe): the caller hands it the discovered seats."""
+    from llm_router import ledger_view as lv, seats
 
-    assert lv.provider_class("anthropic") == "subscription"
+    s = seats.load_seats()
+    assert lv.provider_class("anthropic", seats=s) == "subscription"
+    assert lv.provider_class("openai", seats=s) == "unclassified"     # no seat, no key: never paid
+    assert lv.provider_class("anthropic") == "unclassified"           # no seats given: no evidence
 
 
-@pytest.mark.xfail(strict=True, reason="P3.4-B1: proxy row auth (oauth/api_key) is ignored; every "
-                   "forwarded or fallback call is paid")
 def test_proxy_auth_decides_subscription_vs_paid(tmp_path):
     from llm_router import ledger_view as lv
 

@@ -94,11 +94,12 @@ def test_ledger_view_imports_no_pydantic():
 
 def test_provider_class_copies_equal_their_sources():
     """ledger_view keeps stdlib copies (those modules are not stdlib-only); equality is pinned here."""
-    from llm_router import cost, ledger_view, qa_policy, types
+    from llm_router import ledger_view, qa_policy, types
 
     assert ledger_view.LOCAL_PROVIDERS == types.LOCAL_PROVIDERS
     assert ledger_view.LOCAL_BY_CAUSE_PROVIDERS == qa_policy.QA_STRIP_PROVIDERS
-    assert ledger_view.SUBSCRIPTION_PROVIDERS | ledger_view.LOCAL_PROVIDERS >= cost._FREE_PROVIDERS
+    # D-205: subscription providers are discovered (seats), not listed in ledger_view.
+    assert not hasattr(ledger_view, "SUBSCRIPTION_PROVIDERS")
 
 
 def test_surfaces_flagged_for_ledger_view():

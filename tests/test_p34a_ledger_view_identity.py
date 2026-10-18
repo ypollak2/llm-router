@@ -153,6 +153,15 @@ async def _seed(home: Path) -> Path:
         {"ts": NOW - 51 * MIN, "decision": "forwarded", "upstream_status": 529},                  # HTTP error
     ]
     (home / "proxy_calls.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    # P3.4-B1: the class of a provider comes from discovered seats (D-205), so the home has a
+    # seats file: codex and gemini logins, API keys for the two paid providers, no Claude seat.
+    from llm_router import seats as _seats
+
+    seat_file = _seats.Seats(
+        codex=_seats.Seat(kind="chatgpt", plan="plus"), gemini=_seats.Seat(kind="google"),
+        api_keys={"OPENAI_API_KEY": True, "ANTHROPIC_API_KEY": True},
+        detected_at=datetime.fromtimestamp(NOW, timezone.utc).isoformat())
+    (home / "seats.json").write_text(json.dumps(seat_file.to_dict()))
     (home / "session_start.txt").write_text(str(NOW - 2 * 3600))
     (home / "session_id.txt").write_text("s-main\n")
     return path
