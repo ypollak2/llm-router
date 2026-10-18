@@ -688,6 +688,302 @@ def latency_figures(bounds: Bounds, *, db_path=None, timeout_s: float = 0.5) -> 
              for k, p in LATENCY_PCTS}, len(vals), total)
 
 
+_LOAD_SEATS = object()          # sentinel: read seats.json (the default)
+
+
+# ── session-end panels (P3.4-B4b) ─────────────────────────────────────────────
+#
+# The Stop's box used to scan ``routing_decisions`` / ``usage`` itself, once per panel, each with
+# its own window ("today" by local date, "session" by start time, "14 days" by UTC date) and none
+# carrying its n. These read the same rows as :func:`executed_rows` (``provenance = 'runtime'``,
+# served calls only) over a :class:`Bounds`, and carry ``n`` and the window label. ``None`` = the
+# source is missing or unreadable (a surface prints n/a), never an empty tally.
+
+def _routing_base(con, bounds: Bounds) -> tuple[set[str], str, list] | None:
+    """``(columns, "FROM routing_decisions WHERE ...", params)``; None when the table is absent or
+    the bounds name a session this table cannot filter on (that would be the whole ledger)."""
+    cols = _columns(con, "routing_decisions")
+    if not cols or (bounds.session_id is not None and "session_id" not in cols):
+        return None
+    where, params = bounds.sql(cols)
+    prov = "AND provenance = 'runtime' " if "provenance" in cols else ""
+    return cols, f"FROM routing_decisions WHERE {where} {prov}AND ({real_decision_sql(con)})", params
+
+
+@dataclass(frozen=True)
+class RoutingQuality:
+    """Served decisions in the window and how many ended on the recommended model."""
+
+    n: int
+    on_target: int
+    window: str
+    as_of: str
+
+    @property
+    def off_target(self) -> int:
+        return self.n - self.on_target
+
+
+def routing_quality(bounds: Bounds, *, db_path=None, timeout_s: float = 0.5) -> RoutingQuality | None:
+    con = _connect(db_path, timeout_s)
+    if con is None:
+        return None
+    try:
+        base = _routing_base(con, bounds)
+        if base is None or not {"final_model", "recommended_model"} <= base[0]:
+            return None
+        row = con.execute(  # nosec B608 -- base is built from module constants and bound params
+            f"SELECT COUNT(*), COUNT(CASE WHEN final_model = recommended_model THEN 1 END) {base[1]}",
+            base[2]).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    return RoutingQuality(int(row[0]), int(row[1]), bounds.label, _iso(bounds.until_ts))
+
+
+@dataclass(frozen=True)
+class ClassifierLatency:
+    n: int                  # decisions with a recorded classifier latency
+    avg_ms: float
+    min_ms: float
+    max_ms: float
+    window: str
+    as_of: str
+
+
+def classifier_latency(bounds: Bounds, *, db_path=None, timeout_s: float = 0.5) -> ClassifierLatency | None:
+    """Classifier latency over the decisions that recorded one; None = none recorded (unknown)."""
+    con = _connect(db_path, timeout_s)
+    if con is None:
+        return None
+    try:
+        base = _routing_base(con, bounds)
+        if base is None or "classifier_latency_ms" not in base[0]:
+            return None
+        row = con.execute(  # nosec B608
+            "SELECT COUNT(classifier_latency_ms), AVG(classifier_latency_ms), "
+            f"MIN(classifier_latency_ms), MAX(classifier_latency_ms) {base[1]}", base[2]).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    if not row[0]:
+        return None
+    return ClassifierLatency(int(row[0]), float(row[1]), float(row[2]), float(row[3]),
+                             bounds.label, _iso(bounds.until_ts))
+
+
+TIERS = ("simple", "moderate", "complex", "deep_reasoning")
+
+
+@dataclass(frozen=True)
+class SessionRouting:
+    """The session's routing figures. ``None`` fields are unknown (no costed row, no start time,
+    no baseline days), never 0. Provider classes come from :func:`provider_class` (discovered
+    seats), not a list of provider names (D-205)."""
+
+    n: int                              # served decisions in the window
+    window: str
+    as_of: str
+    cost_usd: float | None              # over the rows that recorded a cost
+    hours: float | None
+    downshift_n: int                    # was_downshifted = 1
+    escalation_n: int                   # simple/moderate work that went to a paid provider
+    cheap_n: int                        # local + subscription
+    p95_s: dict = field(default_factory=dict)   # tier -> seconds (timed rows only)
+    timed_n: int = 0                    # rows that carry a latency (> 0)
+    cost_ratio: float | None = None     # session cost / average earlier local-day cost
+    calls_ratio: float | None = None
+    typical_days: int = 0               # earlier days behind the two ratios
+
+    @property
+    def burn_per_hr(self) -> float | None:
+        if self.cost_usd is None or not self.hours:
+            return None
+        return self.cost_usd / self.hours
+
+
+def session_routing(bounds: Bounds, *, db_path=None, session_start: float | None = None,
+                    seats=_LOAD_SEATS, timeout_s: float = 0.5) -> SessionRouting | None:
+    """One pass over the window's served decisions plus the 15 local days before it for the
+    "vs typical" ratios. None = no database / table, or a session id the table cannot filter on."""
+    seat_obj = _load_seats() if seats is _LOAD_SEATS else seats
+    con = _connect(db_path, timeout_s)
+    if con is None:
+        return None
+    try:
+        base = _routing_base(con, bounds)
+        if base is None:
+            return None
+        cols, frm, params = base
+
+        def col(name: str) -> str:
+            return name if name in cols else "NULL"
+
+        rows = con.execute(  # nosec B608
+            f"SELECT {col('complexity')}, {col('final_provider')}, {col('latency_ms')}, "
+            f"{col('cost_usd')}, {col('was_downshifted')}, {col('reason_code')}, timestamp {frm}",
+            params).fetchall()
+        history = []
+        if "cost_usd" in cols:
+            hist_where, hist_params = rolling(15 * 24.0, now=bounds.until_ts).sql(cols)
+            prov = "AND provenance = 'runtime' " if "provenance" in cols else ""
+            history = con.execute(  # nosec B608
+                "SELECT date(timestamp, 'localtime'), COUNT(cost_usd), SUM(cost_usd), COUNT(*) "
+                f"FROM routing_decisions WHERE {hist_where} {prov}AND ({real_decision_sql(con)}) "
+                "GROUP BY 1", hist_params).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+
+    cost_rows = [r[3] for r in rows if r[3] is not None]
+    first_ts = None
+    if session_start is None and rows:
+        try:
+            first_ts = min(datetime.fromisoformat(str(r[6]).replace("Z", "+00:00").replace(" ", "T"))
+                           .replace(tzinfo=timezone.utc).timestamp() for r in rows)
+        except ValueError:
+            first_ts = None
+    start = session_start if session_start is not None else first_ts
+    hours = None if start is None else max(0.017, (bounds.until_ts - start) / 3600.0)
+
+    downshift = escalations = cheap = 0
+    tier_lat: dict[str, list[float]] = {t: [] for t in TIERS}
+    timed = 0
+    for tier, provider, lat, _cost, shifted, why, _ts in rows:
+        klass = provider_class(provider or "", reason=why, seats=seat_obj)
+        if shifted == 1:
+            downshift += 1
+        if klass in ("local", "subscription"):
+            cheap += 1
+        if klass == "paid" and tier in ("simple", "moderate"):
+            escalations += 1
+        if isinstance(lat, (int, float)) and lat > 0 and tier in tier_lat:
+            tier_lat[tier].append(float(lat))
+            timed += 1
+    p95 = {t: _percentile(sorted(v), 95) / 1000.0 for t, v in tier_lat.items() if v}
+
+    today = datetime.fromtimestamp(bounds.until_ts).strftime("%Y-%m-%d")
+    earlier = [(day, c, total) for day, costed, c, total in history if day != today and costed]
+    cost_ratio = calls_ratio = None
+    if earlier and cost_rows:
+        avg_cost = sum(c for _d, c, _t in earlier) / len(earlier)
+        avg_calls = sum(t for _d, _c, t in earlier) / len(earlier)
+        total_cost = sum(cost_rows)
+        if avg_cost > 0:
+            cost_ratio = total_cost / avg_cost
+        if avg_calls > 0:
+            calls_ratio = len(rows) / avg_calls
+    return SessionRouting(
+        n=len(rows), window=bounds.label, as_of=_iso(bounds.until_ts),
+        cost_usd=sum(cost_rows) if cost_rows else None, hours=hours,
+        downshift_n=downshift, escalation_n=escalations, cheap_n=cheap, p95_s=p95, timed_n=timed,
+        cost_ratio=cost_ratio, calls_ratio=calls_ratio, typical_days=len(earlier))
+
+
+@dataclass(frozen=True)
+class CacheTrend:
+    """Cache-hit share per local day: ``days`` = ((day, rows, hits), ...) oldest first."""
+
+    days: tuple
+    window: str
+    as_of: str
+
+    @property
+    def n(self) -> int:
+        return sum(d[1] for d in self.days)
+
+    def rates(self) -> list[float]:
+        return [d[2] / d[1] * 100 for d in self.days if d[1]]
+
+
+def cache_trend(bounds: Bounds, *, db_path=None, timeout_s: float = 0.5) -> CacheTrend | None:
+    """``usage`` rows that recorded ``cache_hit``, per local day (production provenance)."""
+    con = _connect(db_path, timeout_s)
+    if con is None:
+        return None
+    try:
+        cols = _columns(con, _LEGACY_TABLE)
+        if "cache_hit" not in cols:
+            return None
+        where, params = bounds.sql(cols)
+        days = con.execute(  # nosec B608
+            "SELECT date(timestamp, 'localtime'), COUNT(*), SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) "
+            f"FROM {_LEGACY_TABLE} WHERE cache_hit IS NOT NULL AND {_production_pred(cols)} AND {where} "
+            "GROUP BY 1 ORDER BY 1", params).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    return CacheTrend(tuple((d, int(n), int(h or 0)) for d, n, h in days),
+                      bounds.label, _iso(bounds.until_ts))
+
+
+def session_usage_rows(bounds: Bounds, *, db_path=None, timeout_s: float = 1.0) -> list[dict] | None:
+    """The session's successful ``usage`` rows in insertion order, as dicts with ``task_type``,
+    ``model``, ``provider``, ``complexity``, ``input_tokens``, ``output_tokens``, ``cost_usd``.
+    The bounds' own filter: a session id selects that session's rows, none falls back to
+    ``timestamp >= session start``. None = no database, no table, or a session id the table has
+    no column for."""
+    con = _connect(db_path, timeout_s)
+    if con is None:
+        return None
+    try:
+        cols = _columns(con, _LEGACY_TABLE)
+        if not cols or (bounds.session_id is not None and "session_id" not in cols):
+            return None
+        names = ("task_type", "model", "provider", "complexity", "input_tokens", "output_tokens",
+                 "cost_usd")
+        select = ", ".join(n if n in cols else f"NULL AS {n}" for n in names)
+        where, params = bounds.sql(cols)
+        rows = con.execute(  # nosec B608
+            f"SELECT {select} FROM {_LEGACY_TABLE} WHERE success = 1 AND {where} ORDER BY rowid",
+            params).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    return [dict(zip(names, r)) for r in rows]
+
+
+@dataclass(frozen=True)
+class ModelMix:
+    """Final models of the window's served decisions, most used first."""
+
+    rows: tuple                 # ((model, n), ...)
+    n: int                      # decisions behind ``rows`` (all models, not just the top)
+    newest: str | None          # newest routing_decisions timestamp ever (staleness), or None
+    window: str
+    as_of: str
+
+
+def model_mix(bounds: Bounds, *, db_path=None, limit: int = 8, timeout_s: float = 0.5) -> ModelMix | None:
+    con = _connect(db_path, timeout_s)
+    if con is None:
+        return None
+    try:
+        base = _routing_base(con, bounds)
+        if base is None or "final_model" not in base[0]:
+            return None
+        cols, frm, params = base
+        rows = con.execute(  # nosec B608
+            f"SELECT final_model, COUNT(*) {frm} AND final_model IS NOT NULL AND final_model != '' "
+            "GROUP BY final_model ORDER BY COUNT(*) DESC, final_model LIMIT ?", [*params, int(limit)]
+        ).fetchall()
+        total = con.execute(  # nosec B608
+            f"SELECT COUNT(*) {frm} AND final_model IS NOT NULL AND final_model != ''", params
+        ).fetchone()[0]
+        newest = con.execute("SELECT MAX(timestamp) FROM routing_decisions").fetchone()[0]
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    return ModelMix(tuple((m, int(n)) for m, n in rows), int(total), newest,
+                    bounds.label, _iso(bounds.until_ts))
+
+
 # ── which sources exist (presence and counts only) ────────────────────────────
 
 _JSONL_SOURCES = ("proxy_calls.jsonl", "technical_ops.jsonl", "quota_history.jsonl")
@@ -756,7 +1052,6 @@ def sources_map(*, db_path=None, proxy_path=None, seats=None) -> dict:
 
 # ── the window summary every surface prints ───────────────────────────────────
 
-_LOAD_SEATS = object()          # sentinel: read seats.json (the default)
 
 
 def _load_seats():

@@ -262,6 +262,8 @@ class SessionSummaryDashboard:
         session_cost_ratio: float | None = None,
         session_calls_ratio: float | None = None,
         executed_routes: dict | None = None,
+        session_basis: str = "",
+        typical_basis: str = "",
     ) -> RenderableType:
         """Single panel: execution + hints (left), savings + quota + models."""
         from llm_router.routing_report import executed_provider_rows
@@ -359,6 +361,7 @@ class SessionSummaryDashboard:
                 (" ", ""),
                 eff_bar,
                 (f" {routing_effectiveness_pct:.0f}%", PALETTE.success),
+                (f"  {session_basis}" if session_basis else "", PALETTE.text_dim),
             ))
 
         # Fallback / escalation rate
@@ -366,8 +369,9 @@ class SessionSummaryDashboard:
             fb_color = PALETTE.warning if fallback_pct > 10 else PALETTE.text_dim
             esc_color = PALETTE.error if escalation_pct > 10 else PALETTE.text_dim
             left_lines.append(Text(""))
-            fb_str = f"  Fallback {fallback_count} ({fallback_pct:.0f}%)"
-            esc_str = f"  Escalated {escalation_count} ({escalation_pct:.0f}%)"
+            basis = f"  {session_basis}" if session_basis else ""
+            fb_str = f"  Fallback {fallback_count} ({fallback_pct:.0f}%){basis}"
+            esc_str = f"  Escalated {escalation_count} ({escalation_pct:.0f}%){basis}"
             left_lines.append(Text(fb_str, style=fb_color))
             left_lines.append(Text(esc_str, style=esc_color))
 
@@ -390,6 +394,7 @@ class SessionSummaryDashboard:
                 ("  vs typical ", PALETTE.text_dim),
                 (f"{ratio_sym} {session_cost_ratio:.1f}×", ratio_color),
                 (" cost", PALETTE.text_dim),
+                (f"  {typical_basis}" if typical_basis else "", PALETTE.text_dim),
             ))
 
         # ── Right: savings summary ───────────────────────────────────────────
@@ -463,6 +468,8 @@ class SessionSummaryDashboard:
                 (hr_str, burn_color),
             ))
             right_lines.append(Text(f"  {proj_str}", style=PALETTE.text_dim))
+            if session_basis:
+                right_lines.append(Text(f"  {session_basis}", style=PALETTE.text_dim))
         elif session_cost_usd > 0:
             right_lines.append(Text(""))
             right_lines.append(
@@ -719,6 +726,8 @@ class SessionSummaryDashboard:
         p95_latency: dict[str, float] | None = None,
         daily_cache_trend: list[float] | None = None,
         daily_tokens_saved: list[int] | None = None,
+        p95_basis: str = "",
+        cache_basis: str = "",
     ) -> RenderableType:
         """14-day activity panel: three bar charts side by side + stats."""
         N_ROWS = 8
@@ -835,7 +844,7 @@ class SessionSummaryDashboard:
         tier_entries = [(lbl, p95[k]) for k, lbl in _TIER_LABELS if k in p95]
         if tier_entries:
             lines.append(Text(""))
-            lines.append(Text("p95 latency", style=PALETTE.text_dim))
+            lines.append(Text(f"p95 latency {p95_basis}".rstrip(), style=PALETTE.text_dim))
             parts = []
             for lbl, secs in tier_entries:
                 if secs >= 10:
@@ -863,6 +872,7 @@ class SessionSummaryDashboard:
                 ("cache hits  ", PALETTE.text_dim),
                 spark,
                 (f"  avg {avg_hit:.0f}%", PALETTE.success),
+                (f"  {cache_basis}" if cache_basis else "", PALETTE.text_dim),
             ))
 
         return Panel(
@@ -1051,6 +1061,10 @@ class SessionSummaryDashboard:
         daily_cache_trend: list[float] | None = None,
         daily_tokens_saved: list[int] | None = None,
         executed_routes: dict | None = None,
+        session_basis: str = "",
+        typical_basis: str = "",
+        p95_basis: str = "",
+        cache_basis: str = "",
     ) -> RenderableType:
         """Two-panel dashboard: main summary + 14-day activity + quota timeline."""
         try:
@@ -1088,6 +1102,8 @@ class SessionSummaryDashboard:
             routing_effectiveness_pct=routing_effectiveness_pct,
             session_cost_ratio=session_cost_ratio,
             session_calls_ratio=session_calls_ratio,
+            session_basis=session_basis,
+            typical_basis=typical_basis,
         )
         activity = self.render_activity_panel(
             daily_calls=daily_calls or [],
@@ -1099,6 +1115,8 @@ class SessionSummaryDashboard:
             p95_latency=p95_latency,
             daily_cache_trend=daily_cache_trend,
             daily_tokens_saved=daily_tokens_saved,
+            p95_basis=p95_basis,
+            cache_basis=cache_basis,
         )
         panels: list[RenderableType] = [Text(""), main, Text(""), activity]
         if quota_samples:

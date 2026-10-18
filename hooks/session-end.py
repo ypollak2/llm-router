@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 39
+# llm_router-hook-version: 40
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -107,15 +107,10 @@ def _db_path():
     return os.path.join(_state_dir(), "usage.db")
 def _usage_json():
     return os.path.join(_state_dir(), "usage.json")
-def _star_cta_file():
-    return os.path.join(_state_dir(), "star_cta_shown.txt")
 def _savings_log_path():
     return os.path.join(_state_dir(), "savings_log.jsonl")
 def _session_spend_file():
     return os.path.join(_state_dir(), "session_spend.json")
-
-# Show star CTA once the user has saved at least this much (lifetime)
-STAR_CTA_THRESHOLD_USD = 0.50
 
 # AC-3: derive the host-baseline price from cost.py's single source of truth
 # instead of hardcoding a stale copy. Before this, session-end used $15/$75 (Opus
@@ -369,20 +364,6 @@ def _session_start_iso(ts: float) -> str:
 
 _FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
 _CACHE_PROVIDER = "cache"  # semantic-cache-served call: not paid/free/subscription (provider_classes.py)
-# routing_decisions rows of a failed or cache-served call (LEDGER-ERR-1): not routing decisions.
-# Copy of provider_classes.SQL_REAL_DECISION (hooks cannot import the package); a test pins equality.
-_REAL_DECISION = ("COALESCE(reason_code, '') NOT LIKE 'error\\_%' ESCAPE '\\' "
-                  "AND COALESCE(reason_code, '') != 'cache_hit' AND COALESCE(reason_code, '') != 'breaker_open' AND COALESCE(reason_code, '') != 'refused_no_research_provider' AND COALESCE(final_provider, '') != 'cache'")
-
-
-def _real_decision(conn) -> str:
-    """_REAL_DECISION, or ``1`` when routing_decisions lacks its columns (older database)."""
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(routing_decisions)")}
-    except Exception:
-        return "1"
-    return _REAL_DECISION if {"reason_code", "final_provider"} <= cols else "1"
-
 # D2: providers that have their own dedicated dashboard panel (rendered from
 # their own usage table). Codex is logged to BOTH `usage` (cost.log_usage forces
 # cost_usd=0 for free providers) AND `codex_usage`, so counting it in the
@@ -391,45 +372,41 @@ def _real_decision(conn) -> str:
 _DEDICATED_PANEL_PROVIDERS = {"codex"}
 
 
+def _session_bounds(session_start: float):
+    """The session window: this run's session id when known, else ``session_start`` (labelled)."""
+    from llm_router import ledger_view as _lv
+
+    return _lv.session_scope(session_id=_STOP_SESSION_ID, session_start=session_start)
+
+
 def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], list[dict]]:
     """Return (paid_rows, cc_rows, free_rows) split by provider type.
 
     P3.4-B4 (F32): when this run knows its Claude Code session id, the rows are that
     session's (``usage.session_id``), not every row since a start time: two sessions
     open at once used to show each other's calls. Without an id (no hook payload, no
-    ``--session`` argv) the start-time window is the fallback, as before."""
-    if not os.path.exists(_db_path()):
-        return [], [], []
+    ``--session`` argv) the start-time window is the fallback, as before.
+    P3.4-B4b: the read is ``ledger_view.session_usage_rows`` (None = no database, no table,
+    or a session id the table cannot filter on: no rows, never every row)."""
     try:
-        conn = sqlite3.connect(_db_path())
-        conn.row_factory = sqlite3.Row
-        if _STOP_SESSION_ID:
-            where, arg = "session_id = ? AND success = 1", _STOP_SESSION_ID
-        else:
-            where, arg = "timestamp >= ? AND success = 1", _session_start_iso(session_start)
-        rows = conn.execute(
-            f"""
-            SELECT task_type, model, provider, input_tokens, output_tokens, cost_usd
-            FROM usage
-            WHERE {where}
-            ORDER BY rowid
-            """,  # nosec B608 -- `where` is one of two literals above
-            (arg,),
-        ).fetchall()
-        conn.close()
-        all_rows = [dict(r) for r in rows]
-        # Exclude rows with test/mock model names at the data level
-        clean = [r for r in all_rows if not _is_test_model(r.get("model", ""))
-                 and r.get("provider") != _CACHE_PROVIDER]
-        paid  = [r for r in clean
-                 if r.get("provider") not in _FREE_PROVIDERS | {"subscription"}]
-        cc    = [r for r in clean if r.get("provider") == "subscription"]
-        free  = [r for r in clean
-                 if r.get("provider") in _FREE_PROVIDERS
-                 and r.get("provider") not in _DEDICATED_PANEL_PROVIDERS]  # D2
-        return paid, cc, free
-    except Exception:
+        from llm_router import ledger_view as _lv
+
+        rows = _lv.session_usage_rows(_session_bounds(session_start), db_path=_db_path())
+    except Exception as _exc:  # noqa: BLE001 -- the box renders without rows; say so
+        _record_failopen("CHZ-FO-STOP-SESSION-DATA", _exc)
         return [], [], []
+    if rows is None:
+        return [], [], []
+    # Exclude rows with test/mock model names at the data level
+    clean = [r for r in rows if not _is_test_model(r.get("model", ""))
+             and r.get("provider") != _CACHE_PROVIDER]
+    paid  = [r for r in clean
+             if r.get("provider") not in _FREE_PROVIDERS | {"subscription"}]
+    cc    = [r for r in clean if r.get("provider") == "subscription"]
+    free  = [r for r in clean
+             if r.get("provider") in _FREE_PROVIDERS
+             and r.get("provider") not in _DEDICATED_PANEL_PROVIDERS]  # D2
+    return paid, cc, free
 
 
 _PERIODS = [
@@ -1003,11 +980,12 @@ def _net_session_line(free_rows: list[dict], paid_rows: list[dict]) -> str | Non
     if net >= 0:
         return (
             f"  {_BOLD}Net saved{_RESET}      {_C_GREEN}${net:.4f}{_RESET}  "
-            f"{_C_MUTED}(${baseline:.4f} baseline − ${actual:.4f} paid){_RESET}"
+            f"{_C_MUTED}(${baseline:.4f} baseline − ${actual:.4f} paid, n={len(rows)} session calls){_RESET}"
         )
     return (
         f"  {_BOLD}{_C_ORANGE}⚠ NET LOSS{_RESET}     {_C_ORANGE}-${abs(net):.4f}{_RESET}  "
-        f"{_C_MUTED}(${actual:.4f} paid exceeds ${baseline:.4f} baseline — wasteful paid routing){_RESET}"
+        f"{_C_MUTED}(${actual:.4f} paid exceeds ${baseline:.4f} baseline — wasteful paid routing, "
+        f"n={len(rows)} session calls){_RESET}"
     )
 
 
@@ -1088,74 +1066,45 @@ def _fmt_tok(n: int) -> str:
 
 
 def _query_router_efficiency() -> dict:
-    """Query routing_decisions: return {total, on_target, efficiency_pct}."""
-    if not os.path.exists(_db_path()):
-        return {}
+    """Today's routing decisions and how many ended on the recommended model, from
+    ``ledger_view.routing_quality``: {total, on_target, efficiency_pct, window, ...}; {} = unknown."""
     try:
-        conn = sqlite3.connect(_db_path())
-        cursor = conn.execute("""
-            SELECT
-                COUNT(*) as total,
-                COUNT(CASE WHEN final_model = recommended_model THEN 1 END) as on_target
-            FROM routing_decisions
-            WHERE date(timestamp, 'localtime') = date('now', 'localtime')
-              AND """ + _real_decision(conn) + """
-        """)
-        row = cursor.fetchone()
-        conn.close()
-        if not row or row[0] == 0:
-            return {}
-        total, on_target = row
-        efficiency_pct = (on_target / total) * 100 if total > 0 else 0.0
-        # WP-07: carry the denominator. This rate is over routing decisions we
-        # RECORDED; unobserved_n is the traffic that never reached the table.
-        cov = {"observed_n": 0, "unobserved_n": 0}
-        try:
-            from llm_router.coverage import snapshot as _cov_snapshot
+        from llm_router import ledger_view as _lv
 
-            _s = _cov_snapshot()
-            cov = {"observed_n": _s.observed_n, "unobserved_n": _s.unobserved_n}
-        except Exception:  # noqa: BLE001
-            pass
-        return {
-            "total": total, "on_target": on_target,
-            "efficiency_pct": efficiency_pct, **cov,
-        }
-    except Exception:
-        # WP-13 note: this returns the same {} as the no-rows branch above, so a
-        # broken query is indistinguishable from a quiet day. Left as-is here
-        # deliberately — it is one instance of the ~810-site fail-open triage
-        # that WP-13 sequences late, on purpose, so the whole class is fixed
-        # with one policy rather than piecemeal.
+        q = _lv.routing_quality(_lv.resolve("today"), db_path=_db_path())
+    except Exception as _exc:  # noqa: BLE001
+        _record_failopen("CHZ-FO-STOP-ROUTER-EFFICIENCY", _exc)
         return {}
+    if q is None or q.n == 0:
+        return {}
+    # WP-07: carry the denominator. This rate is over routing decisions we
+    # RECORDED; unobserved_n is the traffic that never reached the table.
+    cov = {"observed_n": 0, "unobserved_n": 0}
+    try:
+        from llm_router.coverage import snapshot as _cov_snapshot
+
+        _s = _cov_snapshot()
+        cov = {"observed_n": _s.observed_n, "unobserved_n": _s.unobserved_n}
+    except Exception as _exc:  # noqa: BLE001
+        _record_failopen("CHZ-FO-STOP-COVERAGE", _exc)
+    return {"total": q.n, "on_target": q.on_target, "efficiency_pct": q.on_target / q.n * 100,
+            "window": q.window, **cov}
 
 
 def _query_classifier_overhead() -> dict:
-    """Query classifier_latency_ms: return {count, avg_ms, min_ms, max_ms}."""
-    if not os.path.exists(_db_path()):
-        return {}
+    """Today's classifier latency over the decisions that recorded one, from
+    ``ledger_view.classifier_latency``: {count, avg_ms, min_ms, max_ms, window}; {} = unknown."""
     try:
-        conn = sqlite3.connect(_db_path())
-        cursor = conn.execute("""
-            SELECT
-                COUNT(*) as count,
-                AVG(classifier_latency_ms) as avg_ms,
-                MIN(classifier_latency_ms) as min_ms,
-                MAX(classifier_latency_ms) as max_ms
-            FROM routing_decisions
-            WHERE date(timestamp, 'localtime') = date('now', 'localtime')
-                AND classifier_latency_ms IS NOT NULL AND """ + _real_decision(conn) + """
-        """)
-        row = cursor.fetchone()
-        conn.close()
-        if not row or row[0] == 0:
-            return {}
-        count, avg_ms, min_ms, max_ms = row
-        return {"count": count, "avg_ms": float(avg_ms) if avg_ms else 0.0,
-                "min_ms": float(min_ms) if min_ms else 0.0,
-                "max_ms": float(max_ms) if max_ms else 0.0}
-    except Exception:
+        from llm_router import ledger_view as _lv
+
+        c = _lv.classifier_latency(_lv.resolve("today"), db_path=_db_path())
+    except Exception as _exc:  # noqa: BLE001
+        _record_failopen("CHZ-FO-STOP-CLASSIFIER-OVERHEAD", _exc)
         return {}
+    if c is None:
+        return {}
+    return {"count": c.n, "avg_ms": c.avg_ms, "min_ms": c.min_ms, "max_ms": c.max_ms,
+            "window": c.window}
 
 
 # ── ANSI color codes ──────────────────────────────────────────────────────────
@@ -1291,7 +1240,7 @@ def _query_cache_hit_stats() -> dict:
         conn = sqlite3.connect(_db_path())
         try:
             row = conn.execute("""
-                SELECT COUNT(*), COALESCE(SUM(hit), 0), COALESCE(SUM(saved_usd), 0)
+                SELECT COUNT(*), COALESCE(SUM(hit), 0), COALESCE(SUM(semantic_cache_lookups.saved_usd), 0)
                 FROM semantic_cache_lookups
                 WHERE date(ts, 'unixepoch', 'localtime') = date('now', 'localtime')
             """).fetchone()
@@ -1309,164 +1258,61 @@ def _query_cache_hit_stats() -> dict:
 
 
 def _query_session_metrics(session_start: float) -> dict:
-    """Single-pass query for burn rate, fallback rate, p95 latency, routing effectiveness.
+    """The session's routing figures from ``ledger_view.session_routing`` (P3.4-B4b).
 
-    Returns:
-        session_cost_usd, burn_rate_per_hr, fallback_count, escalation_count,
-        fallback_pct, escalation_pct, p95_latency (dict by tier in seconds),
-        routing_effectiveness_pct, session_cost_ratio, session_calls_ratio
-    """
-    if not os.path.exists(_db_path()):
-        return {}
+    Keys: total_decisions (n), window, session_cost_usd / burn_rate_per_hr (only when a row
+    recorded a cost), fallback_count / fallback_pct (decisions that were downshifted),
+    escalation_count / escalation_pct, p95_latency (tier -> seconds, timed rows only) with
+    timed_n, routing_effectiveness_pct (local + subscription share), session_cost_ratio /
+    session_calls_ratio (only with earlier days to compare). A figure that is unknown is absent,
+    never 0. {} = no ledger or no decision in the window."""
     try:
-        session_iso = _session_start_iso(session_start)
-        conn = sqlite3.connect(_db_path())
+        from llm_router import ledger_view as _lv
 
-        rows = conn.execute(
-            """
-            SELECT complexity, final_provider, latency_ms, cost_usd,
-                   was_downshifted, timestamp
-            FROM routing_decisions
-            WHERE timestamp >= ? AND (is_real = 1 OR is_real IS NULL) AND """ + _real_decision(conn) + """
-            """,
-            (session_iso,),
-        ).fetchall()
-
-        # 14-day daily costs for "session vs typical" denominator
-        daily = conn.execute(
-            """
-            SELECT date(timestamp, 'localtime') as day,
-                   SUM(cost_usd) as day_cost,
-                   COUNT(*) as day_calls
-            FROM routing_decisions
-            WHERE date(timestamp, 'localtime') >= date('now', '-15 days')
-              AND (is_real = 1 OR is_real IS NULL) AND """ + _real_decision(conn) + """
-            GROUP BY day
-            ORDER BY day
-            """
-        ).fetchall()
-
-        conn.close()
-
-        if not rows:
-            return {}
-
-        from datetime import datetime as _dt, timezone as _tz
-        session_start_dt = _dt.fromtimestamp(session_start, tz=_tz.utc)
-        now_dt = _dt.now(tz=_tz.utc)
-        session_hours = max(0.017, (now_dt - session_start_dt).total_seconds() / 3600)
-
-        _CHEAP = {"ollama", "codex", "gemini_cli"}
-        _PREMIUM = {"anthropic", "openai", "deepseek"}
-
-        total = len(rows)
-        session_cost = sum(r[3] or 0.0 for r in rows)
-        burn_rate = session_cost / session_hours
-
-        fallbacks = sum(1 for r in rows if r[4] == 1)
-        # escalation: simple/moderate task routed to premium API provider
-        escalations = sum(
-            1 for r in rows
-            if (r[0] or "moderate") in ("simple", "moderate") and (r[1] or "") in _PREMIUM
-        )
-
-        # p95 latency per tier (ms → seconds)
-        tier_lat: dict[str, list[float]] = {
-            "simple": [], "moderate": [], "complex": [], "deep_reasoning": []
-        }
-        for r in rows:
-            tier = r[0] if r[0] in tier_lat else "moderate"
-            if r[2] and r[2] > 0:
-                tier_lat[tier].append(r[2])
-        p95_by_tier: dict[str, float] = {}
-        for tier, lats in tier_lat.items():
-            if lats:
-                sl = sorted(lats)
-                p95_by_tier[tier] = sl[min(len(sl) - 1, int(len(sl) * 0.95))] / 1000.0
-
-        # Routing effectiveness: % handled by cheap / subscription providers
-        cheap_count = sum(1 for r in rows if (r[1] or "") in _CHEAP | {"subscription", "gemini"})
-        effectiveness_pct = cheap_count / total * 100
-
-        # Session vs typical: compare session cost/calls to 14-day excluding today
-        today_str = now_dt.astimezone().strftime("%Y-%m-%d")
-        hist = [(dc, dca) for day, dc, dca in daily if day != today_str]
-        cost_ratio = calls_ratio = None
-        if hist:
-            avg_cost = sum(c for c, _ in hist) / len(hist)
-            avg_calls = sum(c for _, c in hist) / len(hist)
-            if avg_cost > 0:
-                cost_ratio = session_cost / avg_cost
-            if avg_calls > 0:
-                calls_ratio = total / avg_calls
-
-        return {
-            "session_cost_usd": session_cost,
-            "session_hours": session_hours,
-            "burn_rate_per_hr": burn_rate,
-            "fallback_count": fallbacks,
-            "escalation_count": escalations,
-            "total_decisions": total,
-            "fallback_pct": fallbacks / total * 100 if total else 0.0,
-            "escalation_pct": escalations / total * 100 if total else 0.0,
-            "p95_latency": p95_by_tier,
-            "routing_effectiveness_pct": effectiveness_pct,
-            "session_cost_ratio": cost_ratio,
-            "session_calls_ratio": calls_ratio,
-        }
-    except Exception:
+        r = _lv.session_routing(_session_bounds(session_start), db_path=_db_path(),
+                                session_start=session_start)
+    except Exception as _exc:  # noqa: BLE001
+        _record_failopen("CHZ-FO-STOP-SESSION-METRICS", _exc)
         return {}
+    if r is None or r.n == 0:
+        return {}
+    out: dict = {
+        "total_decisions": r.n, "window": r.window, "session_hours": r.hours,
+        "fallback_count": r.downshift_n, "escalation_count": r.escalation_n,
+        "fallback_pct": r.downshift_n / r.n * 100, "escalation_pct": r.escalation_n / r.n * 100,
+        "p95_latency": r.p95_s, "timed_n": r.timed_n,
+        "routing_effectiveness_pct": r.cheap_n / r.n * 100,
+        "session_cost_ratio": r.cost_ratio, "session_calls_ratio": r.calls_ratio,
+        "typical_days": r.typical_days,
+    }
+    if r.cost_usd is not None:
+        out["session_cost_usd"] = r.cost_usd
+    if r.burn_per_hr is not None:
+        out["burn_rate_per_hr"] = r.burn_per_hr
+    return out
+
+
+#: The basis of the last cache trend read ("n=412 rows, 14d"); "" = none. Set by
+#: ``_query_daily_cache_trend`` so the render can print the n next to the figure.
+_CACHE_TREND_BASIS = ""
 
 
 def _query_daily_cache_trend() -> list[float]:
-    """Return up to 14 days of daily cache hit rates as % [oldest→newest]."""
-    if not os.path.exists(_db_path()):
-        return []
+    """Up to 14 local days of ``usage`` cache-hit rates as % [oldest->newest], from
+    ``ledger_view.cache_trend``; [] = unknown. Its n and window land in ``_CACHE_TREND_BASIS``."""
+    global _CACHE_TREND_BASIS
+    _CACHE_TREND_BASIS = ""
     try:
-        conn = sqlite3.connect(_db_path())
-        rows = conn.execute(
-            """
-            SELECT date(timestamp, 'localtime') as day,
-                   COUNT(*) as total,
-                   SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) as hits
-            FROM usage
-            WHERE date(timestamp, 'localtime') >= date('now', '-14 days')
-              AND cache_hit IS NOT NULL
-            GROUP BY day
-            ORDER BY day
-            """
-        ).fetchall()
-        conn.close()
-        return [(r[2] or 0) / max(r[1], 1) * 100 for r in rows]
-    except Exception:
-        return []
+        from llm_router import ledger_view as _lv
 
-
-def _query_savings_by_task_type() -> list[dict]:
-    """Query savings_stats and usage: return list of {task_type, calls, saved} sorted by saved DESC."""
-    if not os.path.exists(_db_path()):
+        t = _lv.cache_trend(_lv.resolve("14d"), db_path=_db_path())
+    except Exception as _exc:  # noqa: BLE001
+        _record_failopen("CHZ-FO-STOP-CACHE-TREND", _exc)
         return []
-    try:
-        from llm_router.savings import VERIFIED_SAVED_SQL
-        conn = sqlite3.connect(_db_path())
-        cursor = conn.execute(f"""
-            SELECT
-                task_type,
-                COUNT(*) as calls,
-                SUM({VERIFIED_SAVED_SQL}) as saved
-            FROM savings_stats
-            WHERE date(timestamp, 'localtime') = date('now', 'localtime')
-            GROUP BY task_type
-            ORDER BY saved DESC
-        """)
-        rows = cursor.fetchall()
-        conn.close()
-        result = []
-        for task_type, calls, saved in rows:
-            result.append({"task_type": task_type or "unknown", "calls": calls, "saved": float(saved) if saved else 0.0})
-        return result
-    except Exception:
+    if t is None or not t.n:
         return []
+    _CACHE_TREND_BASIS = f"n={t.n:,} rows, {t.window}"
+    return t.rates()
 
 
 def _query_daily_14d() -> list[tuple[str, int, int, float, int]]:
@@ -1646,15 +1492,18 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
         # from the classifier-log "classified" count above. Label it "routed" so
         # the two denominators are not read as the same number.
         if fallbacks == 0:
-            quality_parts.append(f"{_C_GREEN}0{_RESET} fallbacks ({efficiency['total']} routed)")
+            quality_parts.append(
+                f"{_C_GREEN}0{_RESET} fallbacks ({efficiency['total']} routed, {efficiency['window']})")
         else:
-            quality_parts.append(f"{_C_ORANGE}{fallbacks}{_RESET}/{efficiency['total']} routed fallbacks")
+            quality_parts.append(
+                f"{_C_ORANGE}{fallbacks}{_RESET}/{efficiency['total']} routed fallbacks ({efficiency['window']})")
 
     overhead = _query_classifier_overhead()
     if overhead and overhead['count'] > 0:
         ms = overhead['avg_ms']
         ms_color = _C_GREEN if ms < 50 else (_C_YELLOW if ms < 200 else _C_ORANGE)
-        quality_parts.append(f"{ms_color}{ms:.0f}ms{_RESET} avg routing")
+        quality_parts.append(
+            f"{ms_color}{ms:.0f}ms{_RESET} avg routing (n={overhead['count']}, {overhead['window']})")
 
     cache_stats = _query_cache_hit_stats()
     if cache_stats:
@@ -1671,55 +1520,39 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
 
 
 def _query_session_complexity_breakdown(session_start: float) -> tuple[dict, int]:
-    """Query usage data grouped by task complexity.
+    """The session's ``usage`` rows grouped by task complexity and model
+    (``ledger_view.session_usage_rows``, the same rows as ``_query_session_data``).
 
     Returns ({complexity: [(short_model, count, cost, provider), ...]}, filtered_test_count)
     """
-    if not os.path.exists(_db_path()):
-        return {}, 0
     try:
-        conn = sqlite3.connect(_db_path())
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT complexity, model, COUNT(*) as cnt,
-                   COALESCE(SUM(cost_usd), 0) as total_cost,
-                   provider
-            FROM usage
-            WHERE timestamp >= ? AND success = 1
-            GROUP BY complexity, model
-            ORDER BY complexity, cnt DESC
-            """,
-            (_session_start_iso(session_start),),
-        ).fetchall()
-        conn.close()
+        from llm_router import ledger_view as _lv
 
-        by_complexity = {}
-        filtered_test_calls = 0
-        for r in rows:
-            complexity = r["complexity"] or "moderate"
-            model = r["model"] or "unknown"
-            cnt = r["cnt"]
-            cost = r["total_cost"]
-            provider = r["provider"]
-
-            # Filter out test/mock models from production reports
-            if _is_test_model(model):
-                filtered_test_calls += cnt
-                continue
-
-            if complexity not in by_complexity:
-                by_complexity[complexity] = []
-
-            short_model = model.split("/")[-1] if "/" in model else model
-            if len(short_model) > 20:
-                short_model = short_model[:18] + "…"
-
-            by_complexity[complexity].append((short_model, cnt, cost, provider))
-
-        return by_complexity, filtered_test_calls
-    except Exception:
+        rows = _lv.session_usage_rows(_session_bounds(session_start), db_path=_db_path())
+    except Exception as _exc:  # noqa: BLE001
+        _record_failopen("CHZ-FO-STOP-COMPLEXITY", _exc)
         return {}, 0
+    if rows is None:
+        return {}, 0
+    groups: dict[tuple[str, str], list] = {}
+    for r in rows:
+        key = (r.get("complexity") or "moderate", r.get("model") or "unknown")
+        g = groups.setdefault(key, [0, 0.0, r.get("provider")])
+        g[0] += 1
+        g[1] += r.get("cost_usd") or 0.0
+    by_complexity: dict = {}
+    filtered_test_calls = 0
+    for (complexity, model), (cnt, cost, provider) in sorted(
+            groups.items(), key=lambda kv: (kv[0][0], -kv[1][0])):
+        # Filter out test/mock models from production reports
+        if _is_test_model(model):
+            filtered_test_calls += cnt
+            continue
+        short_model = model.split("/")[-1] if "/" in model else model
+        if len(short_model) > 20:
+            short_model = short_model[:18] + "…"
+        by_complexity.setdefault(complexity, []).append((short_model, cnt, cost, provider))
+    return by_complexity, filtered_test_calls
 
 
 def _format_complexity_breakdown(session_start: float) -> list[str]:
@@ -1995,53 +1828,6 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     lines.append("")
     lines.append(f"  {div}")
     return "\n".join(lines)
-
-
-# ── Star CTA ───────────────────────────────────────────────────────────────────
-
-def _lifetime_saved() -> float:
-    """Return total lifetime savings (USD) across all providers."""
-    if not os.path.exists(_db_path()):
-        return 0.0
-    try:
-        conn = sqlite3.connect(_db_path())
-        rows = conn.execute(
-            "SELECT provider, input_tokens, output_tokens, cost_usd "
-            "FROM usage WHERE success=1"
-        ).fetchall()
-        conn.close()
-        saved = 0.0
-        for provider, in_tok, out_tok, cost in rows:
-            base = ((in_tok or 0) * HOST_INPUT_PER_M
-                    + (out_tok or 0) * HOST_OUTPUT_PER_M) / 1_000_000
-            if provider in _FREE_PROVIDERS:
-                saved += base
-            elif provider != "subscription":
-                # Unclamped (AUD-06): a provider that overspent must subtract
-                # from the total, not contribute zero. Clamping per-row let a
-                # loss-making provider hide inside a profitable aggregate.
-                saved += base - (cost or 0.0)
-        return saved
-    except Exception:
-        return 0.0
-
-
-def _should_show_star_cta(session_saved: float) -> bool:
-    """Return True the first time lifetime savings crosses STAR_CTA_THRESHOLD_USD."""
-    if session_saved <= 0.0:
-        return False
-    if os.path.exists(_star_cta_file()):
-        return False
-    lifetime = _lifetime_saved()
-    if lifetime >= STAR_CTA_THRESHOLD_USD:
-        # Mark as shown so it only fires once
-        try:
-            with open(_star_cta_file(), "w") as f:
-                f.write(f"{lifetime:.4f}")
-        except OSError:
-            pass
-        return True
-    return False
 
 
 # ── Data collection ────────────────────────────────────────────────────────────
@@ -2900,6 +2686,22 @@ def _write_text_atomic(path, text: str) -> None:
                     pass
 
 
+def _session_basis(m: dict) -> str:
+    """n and window for the session's routing figures; "" when there are none."""
+    n = m.get("total_decisions")
+    return f"n={n:,}, {m.get('window', 'session')}" if isinstance(n, int) else ""
+
+
+def _typical_basis(m: dict) -> str:
+    d = m.get("typical_days")
+    return f"(vs {d} earlier day{'s' if d != 1 else ''})" if isinstance(d, int) and d > 0 else ""
+
+
+def _p95_basis(m: dict) -> str:
+    n = m.get("timed_n")
+    return f"(n={n:,} timed, {m.get('window', 'session')})" if isinstance(n, int) and n > 0 else ""
+
+
 def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
                          start, current, is_live, cumulative) -> str:
     """The Rich SessionSummaryDashboard box as plain text (the colored version is
@@ -2992,32 +2794,21 @@ def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
     model_breakdown: dict[str, float] = {}
     model_breakdown_note = ""
     try:
-        if os.path.exists(_db_path()):
-            _mb_conn = sqlite3.connect(_db_path())
-            _mb_rows = _mb_conn.execute(
-                "SELECT final_model, COUNT(*) AS cnt "
-                "FROM routing_decisions "
-                "WHERE final_model IS NOT NULL AND final_model != '' "
-                "  AND date(timestamp) >= date('now', '-14 days') AND " + _real_decision(_mb_conn) + " "
-                "GROUP BY final_model "
-                "ORDER BY cnt DESC "
-                "LIMIT 8"
-            ).fetchall()
-            _mb_newest = _mb_conn.execute(
-                "SELECT MAX(timestamp) FROM routing_decisions"
-            ).fetchone()[0]
-            _mb_conn.close()
-            _mb_total = sum(r[1] for r in _mb_rows)
+        from llm_router import ledger_view as _lv
+
+        _mix = _lv.model_mix(_lv.resolve("14d"), db_path=_db_path(), limit=8)
+        if _mix is not None:
+            _mb_total = sum(n for _m, n in _mix.rows)
             if _mb_total > 0:
-                for _model, _cnt in _mb_rows:
+                for _model, _cnt in _mix.rows:
                     model_breakdown[_model] = (_cnt / _mb_total) * 100
-                model_breakdown_note = "classified routes only"
-            elif _mb_newest:
+                model_breakdown_note = f"classified routes only (n={_mix.n:,}, {_mix.window})"
+            elif _mix.newest:
                 # Rows exist but NONE inside the window. Say so rather than
                 # rendering nothing, which reads as "no routing happened".
-                model_breakdown_note = f"no classified routes since {_mb_newest[:10]}"
-    except Exception:
-        pass
+                model_breakdown_note = f"no classified routes since {_mix.newest[:10]}"
+    except Exception as _exc:  # noqa: BLE001 -- the panel renders without the mix
+        _record_failopen("CHZ-FO-STOP-MODEL-MIX", _exc)
 
     # Gather quota data from Claude subscription.
     # Both *_pct values are stored as 0-100 (not 0-1) — do NOT multiply by 100.
@@ -3114,6 +2905,10 @@ def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
         session_cost_ratio=session_metrics.get("session_cost_ratio"),
         session_calls_ratio=session_metrics.get("session_calls_ratio"),
         daily_cache_trend=daily_cache_trend if daily_cache_trend else None,
+        session_basis=_session_basis(session_metrics),
+        typical_basis=_typical_basis(session_metrics),
+        p95_basis=_p95_basis(session_metrics),
+        cache_basis=_CACHE_TREND_BASIS,
     )
     colored_output = console.export_text(clear=False, styles=True)
     # Save ANSI version to disk — Claude Code UI can't render terminal
