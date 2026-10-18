@@ -512,7 +512,7 @@ def test_cli_daily_and_streak_under_tmp_home(home, capsys):
 def test_kpi_flags_route_to_daily(home, capsys, monkeypatch):
     assert kpi.cmd_kpi(["--daily-render-plist"]) == 0
     out = capsys.readouterr().out
-    assert "PRINT ONLY" in out and "--daily" in out and not os.path.exists(do.daily_dir())
+    assert "com.llm_router.kpi-daily" in out and "<string>--daily</string>" in out and not os.path.exists(do.daily_dir())
     assert kpi.cmd_kpi(["--daily-streak", "--end", "2026-10-19"]) == 1       # nothing written: fails, no crash
     assert "FAIL" in capsys.readouterr().out
     with pytest.raises(SystemExit):
