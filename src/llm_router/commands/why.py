@@ -13,7 +13,7 @@ from llm_router import why
 
 def main(args: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="llm-router why", description="Explain the last routing decisions")
-    p.add_argument("--last", type=int, default=1, help="how many decisions (default 1)")
+    p.add_argument("--last", type=why.clamp_n, default=1, help="how many decisions (default 1, max 1000)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     a = p.parse_args(args or [])
     recs, notes = why.last_decisions(a.last)

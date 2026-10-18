@@ -44,16 +44,33 @@ def _log(**kw):
     asyncio.run(cost.log_routing_decision(**base))
 
 
+def _log_hook(**kw):
+    """A row the way hooks/savings_logger.py:455-481 writes it: classifier_confidence/latency/budget/
+    quality NULL on purpose (P0.8), reason_code "direct", no layer/confidence/abstain/skipped."""
+    base = dict(classifier_type="heuristic", classifier_model=None, classifier_confidence=None,
+                classifier_latency_ms=None, was_downshifted=None, budget_pct_used=None, quality_mode=None,
+                reason_code="direct")
+    base.update(kw)
+    _log(**base)
+
+
+def _log_mcp(**kw):
+    """A row the way router.py:2757-2790 writes it: classifier_confidence/classifier_type/classifier_model
+    set from classification_data (tools/routing.py:383-396), engine layer/confidence never passed."""
+    base = dict(classifier_type="heuristic", classifier_model="engine", classifier_confidence=0.82)
+    base.update(kw)
+    _log(**base)
+
+
 def _seed(home):
     proxy_ledger.write_row({
         "ts": 2_000_000_003.0, "trace_id": "ptrace", "served_model": "claude-haiku-x", "tier": "haiku",
         "tier_reason": "policy_table", "tier_task_type": "query", "tier_complexity": "simple",
         "tier_proposed": "sonnet", "tier_quota_state": "ok", "cls_layer": "L1", "cls_confidence": 0.91,
         "prompt": CANARY}, home / proxy_ledger.LEDGER_NAME)
-    _log(classifier_type="hook", layer="L3", confidence=0.66, reason="lexical", abstain=False,
-         final_model="ollama/hook", reason_code="hook_route", trace_id="htrace")
-    _log(final_model="ollama/mcp", reason_code="mcp_route", layer="L2", confidence=0.7,
-         skipped=[{"model": "codex/x", "reason": "bench", "until": 1.5}], trace_id="mtrace")
+    _log_hook(final_model="ollama/hook", trace_id="htrace")
+    _log_mcp(final_model="ollama/mcp", reason_code="mcp_route",
+             skipped=[{"model": "codex/x", "reason": "bench", "until": 1.5}], trace_id="mtrace")
 
 
 def _by_door(recs):
@@ -69,11 +86,15 @@ def test_three_doors_print_header_and_five_elements(home):
     assert p.splitlines()[0] == "proxy | claude-haiku-x | tier_reason: policy_table"
     assert "query/simple" in p and "0.91" in p and "L1" in p and "ok" in p and "sonnet" in p
     h = why.render(d["hook"])
-    assert h.splitlines()[0] == "hook | ollama/hook | tier_reason: hook_route"
-    assert "code/moderate" in h and "0.66" in h and "L3" in h
+    assert h.splitlines()[0] == "hook | ollama/hook | tier_reason: direct"
+    assert "code/moderate" in h
+    assert "2 confidence:   n/a (not recorded for hook)" in h
+    assert "3 layer:        n/a (engine layer not recorded for hook; classifier: heuristic)" in h
     assert f"4 quota state:  {NA} hook)" in h and f"5 alternatives: {NA} hook)" in h
     m = why.render(d["mcp"])
-    assert "codex/x: bench" in m and "L2" in m and "0.70" in m
+    assert "codex/x: bench" in m
+    assert "2 confidence:   0.82 (classifier)" in m
+    assert "3 layer:        n/a (engine layer not recorded for mcp; classifier: heuristic)" in m
     assert f"4 quota state:  {NA} mcp)" in m
 
 
@@ -81,7 +102,7 @@ def test_join_probe(home):
     """A hook/MCP routing_decisions row can NOT be joined to its decision record today."""
     with call_identity.scope("s-probe") as (_task, trace):
         engine.decide("probe prompt about sorting a list", door="hook", session_id="s-probe")
-        _log(classifier_type="hook", trace_id=trace, final_model="ollama/hook")
+        _log_hook(trace_id=trace, final_model="ollama/hook")
     rows = DL.read_ledger(home)
     assert rows, "the probe found no decision record to check"
     joined = [r for r in rows if r.get("trace_id") == trace]
@@ -91,7 +112,7 @@ def test_join_probe(home):
 
 
 def test_join_fills_missing_layer_when_trace_matches(home):
-    _log(classifier_type="hook", final_model="ollama/hook", trace_id="jt")  # no layer/confidence
+    _log_hook(final_model="ollama/hook", trace_id="jt")  # no layer/confidence
     DL._append_ledger({"decision_id": "d1", "ts": 1.0, "door": "hook", "trace_id": "jt",
                        "layer": "L1", "confidence": 0.55, "abstain": False})
     (rec,), _ = why.last_decisions(1)
@@ -99,14 +120,43 @@ def test_join_fills_missing_layer_when_trace_matches(home):
 
 
 def test_unknown_is_na_never_blank_or_zero(home):
-    _log(classifier_type="hook", final_model="ollama/hook", task_type=None, complexity="",
-         reason_code=None, layer=None, confidence=None, classifier_confidence=0.0)
+    _log_hook(classifier_type="", final_model="ollama/hook", task_type=None, complexity="",
+              reason_code=None)  # confidence NULL = unknown
     (rec,), _ = why.last_decisions(1)
     out = why.render(rec)
-    assert out.count(NA) == 6  # tier_reason + the five elements
+    assert out.count(rec["door"] and "n/a (not recorded for") == 6  # tier_reason + the five elements
     assert "0.00" not in out and ": 0" not in out
     for k in why.ELEMENTS:
-        assert rec[k] == "n/a (not recorded for hook)"
+        assert rec[k] == f"n/a (not recorded for {rec['door']})"
+
+
+def test_classifier_confidence_zero_is_a_real_value(home):
+    _log_mcp(classifier_confidence=0.0, final_model="ollama/mcp")
+    (rec,), _ = why.last_decisions(1)
+    assert "2 confidence:   0.00 (classifier)" in why.render(rec)
+
+
+@pytest.mark.parametrize("kw,door", [
+    (dict(classifier_type="hook"), "hook"),
+    (dict(classifier_type="heuristic", reason_code="direct"), "hook"),  # savings_logger.py:481
+    (dict(classifier_type="sdk", reason_code="direct"), "sdk"),  # sdk.py:373
+    (dict(classifier_type="llm"), "mcp"),
+    (dict(classifier_type="unhinted"), "mcp"),
+    (dict(classifier_type="weird-new"), "router (weird-new)"),
+])
+def test_door_label_from_classifier_type(home, kw, door):
+    _log(final_model="ollama/x", **kw)
+    (rec,), _ = why.last_decisions(1)
+    assert rec["door"] == door
+
+
+def test_n_is_clamped(home, capsys):
+    _seed(home)
+    assert why.clamp_n("9" * 5000) == why.MAX_N and why.clamp_n(10**30) == why.MAX_N
+    assert why.clamp_n("-4") == 1 and why.clamp_n(0) == 1 and why.clamp_n("007") == 7
+    assert why_cmd.main(["--last", "9" * 5000, "--json"]) == 0
+    assert len(json.loads(capsys.readouterr().out)["decisions"]) == 3
+    assert len(json.loads(asyncio.run(_mcp("why", "9" * 5000)))["decisions"]) == 3
 
 
 def test_empty_home_prints_message_and_json_shape(home, capsys):

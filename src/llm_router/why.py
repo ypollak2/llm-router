@@ -30,8 +30,38 @@ ELEMENTS = ("class", "confidence", "layer", "quota_state", "alternatives")
 _SKIP_KEYS = ("model", "reason", "until")  # whitelist: never anything else from skipped_json
 
 
+MAX_N = 1000
+# classifier_type values the MCP/router writer produces: router.py:2761 ("unhinted"/"unknown" or the
+# classification_data value) and tools/routing.py:383-391,580-584 (override/fallback/heuristic/cached/llm).
+_MCP_TYPES = frozenset({"override", "fallback", "heuristic", "cached", "llm", "unhinted", "unknown"})
+
+
 def na(door: str) -> str:
     return f"n/a (not recorded for {door})"
+
+
+def clamp_n(raw) -> int:
+    """Any int or digit string -> 1..MAX_N (a huge digit string must not raise OverflowError/ValueError)."""
+    if isinstance(raw, str):
+        t = raw.strip()
+        if t.startswith("-"):
+            return 1
+        if len(t.lstrip("+0")) > 7:
+            return MAX_N
+        raw = int(t)
+    return min(max(1, raw), MAX_N)
+
+
+def _door(d: dict) -> str:
+    """Door from the writer's evidence: classifier_type, and reason_code 'direct' (savings_logger.py:481)."""
+    ct = d.get("classifier_type")
+    if ct == "sdk":  # sdk.py:373
+        return "sdk"
+    if ct == "hook" or d.get("reason_code") == "direct":  # log_direct_to_db: auto-route / agent-route hooks
+        return "hook"
+    if ct in _MCP_TYPES:
+        return "mcp"
+    return f"router ({ct})" if _s(ct) else "router"
 
 
 def _s(v) -> str | None:
@@ -113,14 +143,21 @@ def _db_records(db: Path, limit: int, notes: list[str]) -> list[dict]:
     out = []
     for r in rows:
         d = dict(r)  # columns a database predates are simply absent -> .get() -> not recorded
-        door = "hook" if d.get("classifier_type") == "hook" else "mcp"
+        door = _door(d)
         ab = d.get("abstain")
-        out.append(_record(door, d.get("final_model"), d.get("reason_code"), _ts(d.get("timestamp")),
+        eng_conf = _num(d.get("confidence"))
+        clf_conf = _num(d.get("classifier_confidence"))  # router.py:2765; NULL on direct rows on purpose
+        rec = (_record(door, d.get("final_model"), d.get("reason_code"), _ts(d.get("timestamp")),
                            d.get("trace_id"),
                            {"class": _cls(d.get("task_type"), d.get("complexity")),
-                            "confidence": _num(d.get("confidence")), "layer": _s(d.get("layer")),
+                            "confidence": eng_conf if eng_conf is not None else clf_conf,
+                            "layer": _s(d.get("layer")),
                             "alternatives": _alternatives(d.get("skipped_json"))},
                            "routing_decisions", None if ab is None else bool(ab)))
+        rec["confidence_source"] = None if eng_conf is None and clf_conf is None else (
+            "engine" if eng_conf is not None else "classifier")
+        rec["classifier_type"] = _s(d.get("classifier_type"))
+        out.append(rec)
     return out
 
 
@@ -133,6 +170,8 @@ def _join(rec: dict, by_trace: dict[str, dict]) -> bool:
         rec["layer"] = _s(d.get("layer"))
     if rec["confidence"] is None:
         rec["confidence"] = _num(d.get("confidence"))
+        if rec["confidence"] is not None:
+            rec["confidence_source"] = "engine"
     if rec["abstain"] is None and isinstance(d.get("abstain"), bool):
         rec["abstain"] = d["abstain"]
     if rec["source"] == "routing_decisions" and _s(d.get("door")):
@@ -147,16 +186,21 @@ def _finish(rec: dict) -> dict:
         v = rec[k]
         if k == "confidence" and v is None and rec.get("abstain"):
             rec[k] = "n/a (engine abstained)"
+        elif k == "layer" and v is None and rec.get("classifier_type"):
+            # classifier_type is how the row was classified, not an engine layer: never shown as one
+            rec[k] = f"n/a (engine layer not recorded for {door}; classifier: {rec['classifier_type']})"
         elif v is None:
             rec[k] = na(door)
     rec.setdefault("decision_id", None)
+    rec.setdefault("confidence_source", None)
+    rec.setdefault("classifier_type", None)
     return rec
 
 
 def last_decisions(n: int = 5, base: Path | None = None) -> tuple[list[dict], list[str]]:
     """The last ``n`` decisions, newest first, plus notes about unreadable sources."""
     base = base or paths.llm_router_home()
-    n = max(1, int(n))
+    n = clamp_n(n)
     notes: list[str] = []
     proxy = [_proxy_record(r) for r in proxy_ledger.read_rows(base / proxy_ledger.LEDGER_NAME)[-n:]]
     seen = {p["trace_id"] for p in proxy if p["trace_id"]}
@@ -175,9 +219,12 @@ def render(rec: dict) -> str:
     if isinstance(alts, list):
         alts = "; ".join(f"{a.get('model', '?')}: {a.get('reason', '?')}" for a in alts) or "none passed over"
     conf = rec["confidence"]
+    src = rec.get("confidence_source")
+    conf_txt = f"{conf:.2f} (classifier)" if isinstance(conf, float) and src == "classifier" else (
+        f"{conf:.2f}" if isinstance(conf, float) else str(conf))
     lines = [f"{rec['door']} | {rec['model']} | tier_reason: {rec['tier_reason']}",
              f"  1 class:        {rec['class']}",
-             f"  2 confidence:   {conf:.2f}" if isinstance(conf, float) else f"  2 confidence:   {conf}",
+             f"  2 confidence:   {conf_txt}",
              f"  3 layer:        {rec['layer']}",
              f"  4 quota state:  {rec['quota_state']}",
              f"  5 alternatives: {alts}"]

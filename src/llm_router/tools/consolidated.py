@@ -290,7 +290,7 @@ async def llm_router_status(view: str = "summary", period: str = "today") -> str
 
         from llm_router import why
 
-        n = int(period) if (period or "").isdigit() and int(period) > 0 else 5
+        n = why.clamp_n(period) if (period or "").isdigit() and period.strip("0") else 5
         recs, notes = await asyncio.to_thread(why.last_decisions, n)
         return json.dumps({"decisions": recs, "notes": notes}, indent=2)
     if v in ("savings", "summary"):
