@@ -56,8 +56,14 @@ from llm_router.provider_classes import not_error_row_sql, real_decision_sql
 
 #: ``types.LOCAL_PROVIDERS`` copy (that module is not stdlib-only); a test pins equality.
 LOCAL_PROVIDERS = frozenset({"ollama", "lm_studio", "vllm", "llamacpp"})
-#: ``cost._FREE_PROVIDERS`` minus local: included in a subscription, no per-token bill.
-SUBSCRIPTION_PROVIDERS = frozenset({"codex", "gemini_cli", "subscription"})
+#: Router provider name -> the attribute of ``seats.Seats`` that would make it a subscription
+#: call (D-205: the seat is discovered on this machine; no plan or model name is written here).
+SEAT_ALIASES = {"anthropic": "claude", "claude": "claude", "codex": "codex", "gemini_cli": "gemini"}
+#: Row evidence words (a proxy row's ``auth`` kind; a ``usage`` row's provider / reason).
+AUTH_SUBSCRIPTION, AUTH_PAID = "oauth", "api_key"
+PROVIDER_SUBSCRIPTION = "subscription"
+REASON_SUBSCRIPTION = "claude_code_subscription"
+CLASSES = ("local", "subscription", "paid", "unclassified")
 PROXY_LOCAL_LABEL = "ollama"
 PROXY_CLAUDE_LABEL = "anthropic"
 
@@ -261,11 +267,14 @@ def _proxy_rows(bounds: Bounds, proxy_path) -> list[dict]:
     return out
 
 
-def executed_by_provider(bounds: Bounds, *, db_path=None, proxy_path=None,
-                         timeout_s: float = 0.25) -> dict[str, int] | None:
-    """``{provider: executed calls}`` in the window (see the module docstring for the rows and
-    the dedupe key). ``None`` only when neither source exists, so "no data" is not "0 calls"."""
-    counts: dict[str, int] = {}
+def executed_rows(bounds: Bounds, *, db_path=None, proxy_path=None,
+                  timeout_s: float = 0.25) -> list[tuple] | None:
+    """The executed calls in the window, once each: ``(provider, auth, reason)``. ``auth`` is a
+    forwarded proxy row's auth kind (``oauth`` / ``api_key``), ``reason`` a decision row's
+    ``reason_code``; both None when the row carries no such evidence. ``None`` only when neither
+    source exists, so "no data" is not "0 calls". See the module docstring for the rows and the
+    dedupe key."""
+    rows: list[tuple] = []
     seen_trace: set[str] = set()
     have_data = False
     con = _connect(db_path, timeout_s)
@@ -277,11 +286,12 @@ def executed_by_provider(bounds: Bounds, *, db_path=None, proxy_path=None,
                 where, params = bounds.sql(cols)
                 prov = "AND provenance = 'runtime' " if "provenance" in cols else ""
                 trace = ", trace_id" if "trace_id" in cols else ", NULL"
-                for provider, tid in con.execute(
-                    f"SELECT COALESCE(NULLIF(final_provider, ''), 'unknown'){trace} "
+                reason = ", reason_code" if "reason_code" in cols else ", NULL"
+                for provider, tid, why in con.execute(
+                    f"SELECT COALESCE(NULLIF(final_provider, ''), 'unknown'){trace}{reason} "
                     f"FROM routing_decisions WHERE {where} {prov}"
                     f"AND ({real_decision_sql(con)})", params):
-                    counts[provider] = counts.get(provider, 0) + 1
+                    rows.append((provider, None, why))
                     if tid:
                         seen_trace.add(tid)
         except sqlite3.Error:
@@ -297,8 +307,23 @@ def executed_by_provider(bounds: Bounds, *, db_path=None, proxy_path=None,
             tid = row.get("trace_id")
             if tid and tid in seen_trace:
                 continue                      # already counted as a routing_decisions row
-            counts[label] = counts.get(label, 0) + 1
-    return counts if have_data else None
+            # the client's auth kind says who pays for a forwarded call; a locally served call
+            # is local whatever header the client sent
+            auth = row.get("auth") if label == PROXY_CLAUDE_LABEL else None
+            rows.append((label, auth if isinstance(auth, str) else None, None))
+    return rows if have_data else None
+
+
+def executed_by_provider(bounds: Bounds, *, db_path=None, proxy_path=None,
+                         timeout_s: float = 0.25) -> dict[str, int] | None:
+    """``{provider: executed calls}`` in the window (:func:`executed_rows`); ``None`` = no data."""
+    rows = executed_rows(bounds, db_path=db_path, proxy_path=proxy_path, timeout_s=timeout_s)
+    if rows is None:
+        return None
+    counts: dict[str, int] = {}
+    for provider, _auth, _why in rows:
+        counts[provider] = counts.get(provider, 0) + 1
+    return counts
 
 
 #: ``qa_policy.QA_STRIP_PROVIDERS`` copy (that module is not stdlib-only); a test pins equality.
@@ -344,21 +369,57 @@ def local_by_cause(bounds: Bounds, *, db_path=None, timeout_s: float = 0.25) -> 
     return out
 
 
-def provider_class(provider: str) -> str:
-    """``local`` | ``subscription`` | ``paid``. Everything that is not provably local or
-    subscription is paid: an unknown provider is never silently called free."""
+def _alias_seat(seats, provider: str):
+    attr = SEAT_ALIASES.get(provider)
+    return getattr(seats, attr, None) if attr else None
+
+
+def provider_class(provider: str, *, auth: str | None = None, reason: str | None = None,
+                   seats=None) -> str:
+    """``local`` | ``subscription`` | ``paid`` | ``unclassified`` (D-205: first match wins, and
+    no plan or model name is written in this module).
+
+    1. Row evidence: a proxy row's ``auth`` (``oauth`` = subscription, ``api_key`` = paid), or a
+       ``usage`` row's provider ``subscription`` / reason ``claude_code_subscription``.
+    2. The router's ``LOCAL_PROVIDERS`` vocabulary.
+    3. Discovered seats (``seats.Seats``): a present seat for the provider (``SEAT_ALIASES``) =
+       subscription; an API-key login, or ``<PROVIDER>_API_KEY`` set = paid.
+    4. Otherwise ``unclassified``: shown on its own, never folded into paid or subscription."""
+    if auth == AUTH_SUBSCRIPTION:
+        return "subscription"
+    if auth == AUTH_PAID:
+        return "paid"
+    if provider == PROVIDER_SUBSCRIPTION or reason == REASON_SUBSCRIPTION:
+        return "subscription"
     if provider in LOCAL_PROVIDERS:
         return "local"
-    if provider in SUBSCRIPTION_PROVIDERS:
-        return "subscription"
-    return "paid"
+    if seats is not None:
+        seat = _alias_seat(seats, provider)
+        if seat is not None and seat.present:
+            return "subscription"
+        if seat is not None and seat.kind == "api-key":
+            return "paid"
+        if (getattr(seats, "api_keys", None) or {}).get(f"{provider.upper()}_API_KEY"):
+            return "paid"
+    return "unclassified"
 
 
-def local_paid_mix(executed: dict[str, int] | None) -> dict[str, int]:
-    """``{local, subscription, paid}`` from :func:`executed_by_provider`'s counts."""
-    mix = {"local": 0, "subscription": 0, "paid": 0}
+def classify_rows(rows: "list[tuple] | None", seats=None) -> dict[str, int] | None:
+    """``{local, subscription, paid, unclassified}`` from :func:`executed_rows`; None = no data."""
+    if rows is None:
+        return None
+    mix = dict.fromkeys(CLASSES, 0)
+    for provider, auth, why in rows:
+        mix[provider_class(provider, auth=auth, reason=why, seats=seats)] += 1
+    return mix
+
+
+def local_paid_mix(executed: dict[str, int] | None, seats=None) -> dict[str, int]:
+    """The four-class mix from per-provider counts (no row evidence: use :func:`classify_rows`
+    for that). ``unclassified`` is its own bucket."""
+    mix = dict.fromkeys(CLASSES, 0)
     for provider, n in (executed or {}).items():
-        mix[provider_class(provider)] += int(n)
+        mix[provider_class(provider, seats=seats)] += int(n)
     return mix
 
 
@@ -548,53 +609,310 @@ def ns_strict(days: int = 7, *, include_research: bool = False) -> dict:
     return kpi._ns_d1_d2(days, kpi._allowed_kinds(include_research), index)[0]
 
 
+# ── Figure: a number with its n, window and source ────────────────────────────
+
+@dataclass(frozen=True)
+class Figure:
+    """One printed number. ``value`` None = unknown (never 0); ``n`` = rows behind it."""
+
+    value: float | None
+    n: int | None
+    window: str
+    as_of: str
+    source: str
+    kind: str = "measured"             # measured | estimated
+    na_reason: str | None = None
+
+    def to_dict(self) -> dict:
+        return {"value": self.value, "n": self.n, "window": self.window, "as_of": self.as_of,
+                "source": self.source, "kind": self.kind, "na_reason": self.na_reason}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Figure":
+        return cls(d.get("value"), d.get("n"), str(d.get("window") or ""),
+                   str(d.get("as_of") or ""), str(d.get("source") or ""),
+                   str(d.get("kind") or "measured"), d.get("na_reason"))
+
+
+def show(fig: "Figure | None", fmt: str = "{}") -> str | None:
+    """The one formatter. None (print ``n/a`` or nothing) when the value or n is unknown or the
+    window is empty: a number without its n and window is not shown (strict NS rule)."""
+    if fig is None or fig.value is None or fig.n is None or not fig.window:
+        return None
+    return fmt.format(fig.value)
+
+
+def _percentile(sorted_vals: list[float], pct: float) -> float:
+    """Nearest-rank percentile of a non-empty sorted list."""
+    rank = max(1, -(-int(pct * len(sorted_vals)) // 100))
+    return sorted_vals[min(rank, len(sorted_vals)) - 1]
+
+
+LATENCY_PCTS = (("p50", 50), ("p95", 95), ("p99", 99))
+
+
+def latency_figures(bounds: Bounds, *, db_path=None, timeout_s: float = 0.5) -> tuple[dict, int | None, int | None]:
+    """``({p50, p95, p99: Figure}, n_recorded, n_total)`` over the executed ``routing_decisions``
+    rows (the same rows as :func:`executed_by_provider`). ``usage.latency_ms`` is NOT NULL so it
+    cannot say "not recorded"; ``routing_decisions.latency_ms`` is nullable. A NULL, or a 0 (the
+    writers' ``latency_ms or 0.0`` default for a missing value: no real call takes 0 ms), is not
+    recorded and is left out of the percentiles. ``n_total`` = rows that could have had one."""
+    as_of, window = _iso(bounds.until_ts), bounds.label
+    source = "routing_decisions.latency_ms (recorded rows only)"
+
+    def unknown(why: str, n: int | None) -> dict:
+        return {k: Figure(None, n, window, as_of, source, "measured", why) for k, _p in LATENCY_PCTS}
+
+    con = _connect(db_path, timeout_s)
+    if con is None:
+        return unknown("source missing", None), None, None
+    try:
+        cols = _columns(con, "routing_decisions")
+        if not cols:
+            return unknown("source missing", None), None, None
+        where, params = bounds.sql(cols)
+        prov = "AND provenance = 'runtime' " if "provenance" in cols else ""
+        base = (f"FROM routing_decisions WHERE {where} {prov}AND ({real_decision_sql(con)})")
+        total = int(con.execute(f"SELECT COUNT(*) {base}", params).fetchone()[0])  # nosec B608
+        vals: list[float] = []
+        if "latency_ms" in cols:
+            vals = sorted(float(r[0]) for r in con.execute(  # nosec B608
+                f"SELECT latency_ms {base} AND latency_ms IS NOT NULL AND latency_ms > 0", params))
+    except sqlite3.Error:
+        return unknown("source unreadable", None), None, None
+    finally:
+        con.close()
+    if not vals:
+        return unknown(f"no latency recorded (0 of {total} rows)", 0), 0, total
+    return ({k: Figure(_percentile(vals, p), len(vals), window, as_of, source)
+             for k, p in LATENCY_PCTS}, len(vals), total)
+
+
+# ── which sources exist (presence and counts only) ────────────────────────────
+
+_JSONL_SOURCES = ("proxy_calls.jsonl", "technical_ops.jsonl", "quota_history.jsonl")
+_DB_SOURCES = ("usage", "routing_decisions", *_PLATFORM_TABLES)
+
+
+def _absent() -> dict:
+    return {"present": False, "rows": None, "newest_ts": None}
+
+
+def _jsonl_stat(path: Path) -> dict:
+    try:
+        lines = [ln for ln in path.read_text(encoding="utf-8", errors="replace").splitlines()
+                 if ln.strip()]
+    except OSError:
+        return _absent()
+    newest = None
+    for ln in reversed(lines):
+        try:
+            row = json.loads(ln)
+        except ValueError:
+            continue
+        ts = row.get("ts", row.get("timestamp")) if isinstance(row, dict) else None
+        if ts is not None:
+            newest = ts
+            break
+    return {"present": True, "rows": len(lines), "newest_ts": newest}
+
+
+def _db_sources(db_path) -> dict:
+    """Presence / rows / newest timestamp of each database table. An unreadable database reports
+    every table absent (the answer is "cannot see it", which a surface prints as n/a)."""
+    out = {name: _absent() for name in _DB_SOURCES}
+    con = _connect(db_path, 0.5)
+    if con is None:
+        return out
+    try:
+        for name in _DB_SOURCES:
+            if not _table_exists(con, name):
+                continue
+            col = "timestamp" if "timestamp" in _columns(con, name) else None
+            row = con.execute(  # nosec B608 -- table names are module constants
+                f"SELECT COUNT(*), {'MAX(' + col + ')' if col else 'NULL'} FROM {name}").fetchone()
+            out[name] = {"present": True, "rows": int(row[0]), "newest_ts": row[1]}
+    except sqlite3.Error:
+        return {name: _absent() for name in _DB_SOURCES}
+    finally:
+        con.close()
+    return out
+
+
+def sources_map(*, db_path=None, proxy_path=None, seats=None) -> dict:
+    """``{name: {present, rows, newest_ts}}`` for each source a surface may print from. Rows are
+    the source's whole row count (not the window's). ``seats.json`` also carries ``stale``."""
+    out = _db_sources(db_path)
+    for name in _JSONL_SOURCES:
+        path = _proxy_ledger_path(proxy_path) if name == "proxy_calls.jsonl" else paths.state_path(name)
+        out[name] = _jsonl_stat(path)
+    if seats is None:
+        out["seats.json"] = {**_absent(), "stale": None}
+    else:
+        out["seats.json"] = {"present": True, "rows": 1, "newest_ts": seats.detected_at or None,
+                             "stale": bool(seats.is_stale())}
+    return out
+
+
 # ── the window summary every surface prints ───────────────────────────────────
+
+_LOAD_SEATS = object()          # sentinel: read seats.json (the default)
+
+
+def _load_seats():
+    from llm_router import seats as _seats          # stdlib-only module
+
+    return _seats.load_seats()
+
 
 @dataclass(frozen=True)
 class LedgerWindow:
+    """Schema v2. Unknown is ``None``, never 0: ``n`` and the class counts are None without any
+    execution source, ``saved_*`` without a usage database."""
+
     as_of: str
-    n: int                       # executed calls in the window (sum of ``executed``)
     window: str                  # label
     source: str
     estimated: bool              # the saved figure is an estimate, never realized money
+    n: int | None = None         # executed calls in the window (sum of ``executed``)
     executed: tuple = ()         # ((provider, n), ...) sorted by -n, provider
-    local_n: int = 0
-    subscription_n: int = 0
-    paid_n: int = 0
-    saved_usd: float = 0.0
-    saved_n: int = 0
-    verified_usd: float = 0.0
-    unverified_usd: float = 0.0
+    local_n: int | None = None
+    subscription_n: int | None = None
+    paid_n: int | None = None
+    unclassified_n: int | None = None
+    saved_usd: float | None = None
+    saved_n: int | None = None
+    verified_usd: float | None = None
+    unverified_usd: float | None = None
+    latency_p50: Figure | None = None
+    latency_p95: Figure | None = None
+    latency_p99: Figure | None = None
+    latency_n_recorded: int | None = None
+    latency_n_total: int | None = None
+    sources: dict = field(default_factory=dict)
     scope: str = "all"
     has_data: bool = True
+    v: int = 2
 
     def line(self) -> str:
         return format_line(self)
 
+    def figures(self) -> dict:
+        """The printed fields as :class:`Figure` s: ``executed``, ``mix_<class>``, ``saved``,
+        ``latency_p50/p95/p99``."""
+        def fig(value, n, source, kind="measured", why=None):
+            return Figure(value, n, self.window, self.as_of, source, kind,
+                          None if value is not None else (why or "source missing"))
 
-def window_summary(window: "str | Bounds" = "24h", *, now=None, db_path=None, proxy_path=None,
-                   session_start: float | None = None,
-                   session_id: str | None = None) -> LedgerWindow:
-    bounds = window if isinstance(window, Bounds) else resolve(
-        window, now=now, session_start=session_start, session_id=session_id)
-    counts = executed_by_provider(bounds, db_path=db_path, proxy_path=proxy_path)
-    money = money_window(bounds, db_path=db_path)
-    mix = local_paid_mix(counts)
-    items = tuple(sorted((counts or {}).items(), key=lambda kv: (-kv[1], kv[0])))
+        out = {"executed": fig(self.n, self.n, self.source),
+               "saved": fig(self.saved_usd, self.saved_n, self.source, "estimated")}
+        for cls in CLASSES:
+            out[f"mix_{cls}"] = fig(getattr(self, f"{cls}_n" if cls != "local" else "local_n"),
+                                    self.n, self.source)
+        for key in ("latency_p50", "latency_p95", "latency_p99"):
+            lat = getattr(self, key)
+            if lat is not None:
+                out[key] = lat
+        return out
+
+    def to_dict(self) -> dict:
+        d = {k: getattr(self, k) for k in self.__dataclass_fields__
+             if k not in ("executed", "latency_p50", "latency_p95", "latency_p99")}
+        d["executed"] = [[p, n] for p, n in self.executed]
+        for key in ("latency_p50", "latency_p95", "latency_p99"):
+            lat = getattr(self, key)
+            d[key] = lat.to_dict() if lat is not None else None
+        return d
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True)
+
+    @classmethod
+    def from_json(cls, text: str) -> "LedgerWindow":
+        d = json.loads(text)
+        if d.get("v") != 2:
+            raise ValueError(f"unsupported LedgerWindow version: {d.get('v')!r}")
+        known = {k: d[k] for k in cls.__dataclass_fields__ if k in d}
+        known["executed"] = tuple((p, n) for p, n in d.get("executed") or ())
+        for key in ("latency_p50", "latency_p95", "latency_p99"):
+            known[key] = Figure.from_dict(d[key]) if d.get(key) else None
+        return cls(**known)
+
+
+_SCOPE_WINDOWS = {"all": "lifetime", "session": "session", "day": "today", "7d": "7d"}
+
+
+def _is_number(x) -> bool:
+    return isinstance(x, (int, float, datetime)) and not isinstance(x, bool)
+
+
+def window_summary(since: "str | Bounds | float | datetime | None" = "24h",
+                   until: "float | datetime | None" = None, scope: str = "all", *,
+                   session_id: str | None = None, name: str | None = None, db_path=None,
+                   proxy_path=None, now=None, session_start: float | None = None,
+                   seats=_LOAD_SEATS) -> LedgerWindow:
+    """Everything a surface prints for one window, from one call.
+
+    * ``window_summary(since, until=None, scope="all"|"session"|"day"|"7d", *, session_id, name)``:
+      ``since`` an epoch (or datetime), ``until`` default now, closed bounds; ``name`` labels it.
+      ``since=None`` takes the named window for ``scope`` (``day`` = today, ``7d``, ``all`` =
+      lifetime, ``session``). ``scope="session"`` with a ``session_id`` narrows to that id.
+    * Legacy: ``window_summary("24h", now=...)`` (a named window string or a ``Bounds``).
+
+    ``seats`` is a ``seats.Seats`` or None (no seats file); by default ``seats.json`` is read, so
+    call this only from a refresher or a CLI, never a hook's synchronous path."""
+    if isinstance(since, Bounds):
+        bounds = since
+    elif _is_number(since):
+        until_ts = _now_ts(now if until is None else until)
+        since_ts = _now_ts(since)
+        sid = session_id if scope == "session" else None
+        label = name or ("custom" if sid is None else f"session {sid[:8]}")
+        bounds = Bounds(name or "custom", label, since_ts, until_ts,
+                        "session_id" if sid else "all", sid)
+    else:
+        if since is None:
+            if scope not in _SCOPE_WINDOWS:
+                raise ValueError(f"unknown scope: {scope!r}")
+            since = _SCOPE_WINDOWS[scope]
+        bounds = resolve(since, now=now if until is None else until,
+                         session_start=session_start, session_id=session_id)
+    seat_obj = _load_seats() if seats is _LOAD_SEATS else seats
+    rows = executed_rows(bounds, db_path=db_path, proxy_path=proxy_path)
+    sources = sources_map(db_path=db_path, proxy_path=proxy_path, seats=seat_obj)
+    lat, n_rec, n_tot = latency_figures(bounds, db_path=db_path)
+    money = money_window(bounds, db_path=db_path) if _db_path(db_path).is_file() else None
+    classes = classify_rows(rows, seat_obj)
+    counts: dict[str, int] = {}
+    for provider, _a, _w in rows or ():
+        counts[provider] = counts.get(provider, 0) + 1
+    items = tuple(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
     return LedgerWindow(
-        as_of=_iso(bounds.until_ts), n=sum(n for _p, n in items), window=bounds.label,
+        as_of=_iso(bounds.until_ts), window=bounds.label,
         source="routing_decisions(runtime)+proxy_calls.jsonl; usage+savings_stats (saved)",
-        estimated=True, executed=items, local_n=mix["local"], subscription_n=mix["subscription"],
-        paid_n=mix["paid"], saved_usd=money.saved_usd, saved_n=money.saved_n,
-        verified_usd=money.verified_usd, unverified_usd=money.unverified_usd,
-        scope=bounds.scope, has_data=counts is not None)
+        estimated=True, n=None if rows is None else len(rows), executed=items,
+        local_n=None if classes is None else classes["local"],
+        subscription_n=None if classes is None else classes["subscription"],
+        paid_n=None if classes is None else classes["paid"],
+        unclassified_n=None if classes is None else classes["unclassified"],
+        saved_usd=None if money is None else money.saved_usd,
+        saved_n=None if money is None else money.saved_n,
+        verified_usd=None if money is None else money.verified_usd,
+        unverified_usd=None if money is None else money.unverified_usd,
+        latency_p50=lat["p50"], latency_p95=lat["p95"], latency_p99=lat["p99"],
+        latency_n_recorded=n_rec, latency_n_total=n_tot, sources=sources,
+        scope=bounds.scope, has_data=rows is not None)
 
 
 def format_line(lw: LedgerWindow) -> str:
-    """The one printed form. Identity tests compare this string across surfaces."""
+    """The one printed form. Identity tests compare this string across surfaces. Unknown parts
+    print ``n/a``; ``unclassified`` appears only when non-zero."""
     if not lw.has_data:
         return f"ledger {lw.window}: no execution data (usage.db and proxy ledger missing)"
+    na = lambda v: "n/a" if v is None else f"{v}"                      # noqa: E731
     by = " ".join(f"{p} {n}" for p, n in lw.executed) or "none"
-    return (f"ledger {lw.window}: {lw.n} executed ({by}) · mix local {lw.local_n} / "
-            f"subscription {lw.subscription_n} / paid {lw.paid_n} · "
-            f"est. saved ${lw.saved_usd:,.2f} (n={lw.saved_n:,})")
+    mix = (f"local {na(lw.local_n)} / subscription {na(lw.subscription_n)} / paid {na(lw.paid_n)}"
+           + (f" / unclassified {lw.unclassified_n}" if lw.unclassified_n else ""))
+    saved = (f"est. saved ${lw.saved_usd:,.2f} (n={lw.saved_n:,})"
+             if lw.saved_usd is not None and lw.saved_n is not None else "est. saved n/a")
+    return f"ledger {lw.window}: {na(lw.n)} executed ({by}) · mix {mix} · {saved}"

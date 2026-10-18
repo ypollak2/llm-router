@@ -127,6 +127,7 @@ def enqueue_for_grading(
     response: str,
     task_type: str,
     answering_model: str,
+    door: str | None = None,
 ) -> bool:
     """Hot-path-safe: sample and append one response to the judge queue.
 
@@ -144,11 +145,12 @@ def enqueue_for_grading(
     """
     if routing_decision_id is None:
         return False
-    sample_rate = float(os.environ.get("LLM_ROUTER_JUDGE_SAMPLE_RATE", "0.1"))
-    if random.random() > sample_rate:
+    from llm_router import judge_sampler
+    if not judge_sampler.pick(door):
         return False
 
     entry = {
+        "door": judge_sampler.normalize_door(door),
         "routing_decision_id": routing_decision_id,
         "prompt": prompt,
         "response": response,
@@ -451,17 +453,28 @@ async def _grade_one(item: dict) -> str:
     # Independence guard: even if _select_judge_model's own filtering were
     # ever bypassed or misconfigured, grading must refuse outright rather
     # than let a model grade its own answer.
-    if judge_model is None or judge_model == answering_model:
-        return "ungraded"
+    from llm_router import judge_sampler
 
+    def _record(status: str, score: float | None = None) -> str:
+        judge_sampler.record_result(
+            door=item.get("door"), answering_model=answering_model,
+            judge_model=judge_model, status=status, score=score,
+        )
+        return status
+
+    if judge_model is None or judge_model == answering_model:
+        return _record("ungraded")
+
+    outcome: dict = {}
     ok = await _evaluate_background(
         item.get("prompt", ""),
         item.get("response", ""),
         item.get("task_type", "query"),
         item.get("routing_decision_id"),
         model=judge_model,
+        outcome=outcome,
     )
-    return "graded" if ok else "failed"
+    return _record("graded" if ok else "failed", outcome.get("score"))
 
 
 async def drain_queue(batch_size: int = 50, time_budget_s: float = 20.0) -> dict:
@@ -512,6 +525,7 @@ async def _evaluate_background(
     task_type: str,
     routing_decision_id: int | None = None,
     model: str = "claude-haiku-4-5-20251001",
+    outcome: dict | None = None,
 ) -> bool:
     """Background evaluation task — runs independently without blocking caller.
 
@@ -543,6 +557,8 @@ async def _evaluate_background(
 
         # Parse score from response
         score = _parse_judge_score(judge_response.content)
+        if outcome is not None:
+            outcome["score"] = score
 
         # Store in database
         if routing_decision_id and score is not None:

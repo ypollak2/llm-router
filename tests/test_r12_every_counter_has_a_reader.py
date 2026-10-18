@@ -59,6 +59,12 @@ _EXACT = {"counters", "snapshot", "count"}
 #: allowlisted wholesale and the allowlist would become the defect.
 NOT_INSTRUMENTATION: dict[str, tuple[str, str]] = {
     # name → (reason, a module that must still reference it — "" to skip)
+    "llm_router.daily_offload:provenance_counts": (
+        "a pure read of the daily/*.json rows' run_by and lateness_h fields; it "
+        "retains nothing, and its reader is `kpi --daily-status` / `--daily-streak "
+        "--json` via run_status() and streak() in the same module (P33-1)",
+        "llm_router/daily_offload.py",
+    ),
     "llm_router.eligibility:evidence_from_counts": (
         "a pure function of its arguments — it turns k/n success counts into "
         "Evidence and retains nothing, so there is no tally for anyone to read",
@@ -311,6 +317,27 @@ def _drive_low_signal_classifications(tmp_path):
     classify.classify_signals(prompt)
 
 
+def _drive_judge_sampled(tmp_home: pathlib.Path) -> None:
+    """Pick one call for judging through the real sampler (P3.1-1).
+
+    conftest switches judging off globally (rate 0), so the driver sets rate 1
+    for the one call — at any lower rate a single call may not be the picked one.
+    """
+    import os
+
+    from llm_router import judge_sampler
+
+    old = os.environ.get("LLM_ROUTER_JUDGE_SAMPLE_RATE")
+    os.environ["LLM_ROUTER_JUDGE_SAMPLE_RATE"] = "1"
+    try:
+        assert judge_sampler.pick("sdk") is True
+    finally:
+        if old is None:
+            os.environ.pop("LLM_ROUTER_JUDGE_SAMPLE_RATE", None)
+        else:
+            os.environ["LLM_ROUTER_JUDGE_SAMPLE_RATE"] = old
+
+
 DRIVERS = {
     "fail_open_events": _drive_fail_open,
     "ledger_events_dropped": _drive_dropped_events,
@@ -321,6 +348,7 @@ DRIVERS = {
     "interception_gaps": _drive_interception_gaps,
     "low_signal_classifications": _drive_low_signal_classifications,
     "draft_acceptance": _drive_draft_acceptance,
+    "judge_sampled": _drive_judge_sampled,
 }
 
 
