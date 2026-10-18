@@ -224,7 +224,7 @@ def test_no_model_literals_in_judge_selection_code(fname):
     assert any(isinstance(n, ast.Constant) and isinstance(n.value, str) for n in ast.walk(tree))
     bad = [n.value for n in ast.walk(tree)
            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings
-           and not n.value.startswith("LLM_ROUTER_") and n.value != "haiku_model"  # env name, config key
+           and not n.value.startswith("LLM_ROUTER_") and n.value not in ("haiku_model", "ollama/")  # config key, provider prefix
            and any(m in n.value.lower() for m in _MODEL_LITERAL)]
     assert not bad, bad
 
