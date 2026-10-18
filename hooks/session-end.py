@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 40
+# llm_router-hook-version: 41
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2087,7 +2087,7 @@ def _condense(summary: str) -> str:
 _STOP_BACKGROUND_STEPS = ("_refresh_northstar_line", "_refresh_ledger_cache", "_fetch_live_usage",
                           "_render_last_summary", "_build_and_save_learned_profile",
                           "_maybe_rescan_profile", "_maybe_evaluate_models",
-                          "_link_decision_outcomes")
+                          "_link_decision_outcomes", "_refresh_judge_summary")
 _STOP_NOTES_FILENAME = "stop_notes.json"
 #: A note older than this is dropped rather than shown.
 _STOP_NOTES_MAX_AGE_S = 24 * 3600
@@ -2262,6 +2262,52 @@ def _cached_northstar_line(session_id: str, now: float | None = None) -> str | N
         return d["line"]
     except Exception:  # noqa: BLE001
         return None
+
+
+# -- P3.1-6: the judge quality line comes from a cache the child writes ------------
+# The child computes the summary from judge_results.jsonl + judge_sampler.json (files, no
+# database) and writes judge_summary.json atomically. The Stop only reads that one small
+# file: no judge file is parsed on the sync path. Absent, unreadable or older than
+# ``_JUDGE_CACHE_MAX_AGE_S`` -> no line (nothing is claimed about judge quality).
+
+_JUDGE_CACHE_FILENAME = "judge_summary.json"
+_JUDGE_CACHE_VERSION = 1
+_JUDGE_CACHE_MAX_AGE_S = 24 * 3600.0
+_JUDGE_DRAIN_SCRIPT = (
+    "import os\n"
+    "try:\n    os.nice(19)\nexcept (AttributeError, OSError):\n    pass\n"
+    "import asyncio\nfrom llm_router.judge import drain_queue\nasyncio.run(drain_queue())\n"
+)
+
+
+def _refresh_judge_summary() -> None:
+    """Child step: write ``judge_summary.json``; then, only when the judge queue is non-empty and
+    none was started in the last ``judge_view.DRAIN_MIN_INTERVAL_S``, start one detached
+    low-priority drain. Never runs on the Stop sync path."""
+    from llm_router import judge_view as _jv
+
+    _jv.refresh_cache()
+    if _detached_spawn_disabled() or not _jv.drain_due():
+        return
+    from llm_router.statusline_tick import _spawn_detached
+
+    _spawn_detached([sys.executable, "-c", _JUDGE_DRAIN_SCRIPT])
+
+
+def _cached_judge_line(now: float | None = None) -> str | None:
+    """The cached judge line, or None. One small file read; never parses judge files, never raises."""
+    try:
+        with open(os.path.join(_state_dir(), _JUDGE_CACHE_FILENAME), encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or d.get("v") != _JUDGE_CACHE_VERSION or not isinstance(d.get("line"), str):
+        return None
+    ts = d.get("generated_ts")
+    now = time.time() if now is None else now
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not 0 <= now - ts <= _JUDGE_CACHE_MAX_AGE_S:
+        return None
+    return d["line"]
 
 
 # -- D-171 S1: ledger-wide figures come from a cache the child writes ------------
@@ -3217,6 +3263,18 @@ def main() -> None:
             final_summary_output = (
                 final_summary_output.rstrip("  " + "═" * (WIDTH - 2))
                 + f"\n  {_qb_line}\n" + "  " + "═" * (WIDTH - 2)
+            )
+    except Exception:
+        pass  # Graceful failure — never break session-end
+
+    # ── P3.1-6: judge quality line (the child's cache; no judge file is parsed here) ──
+    _laps.next("judge_summary")
+    try:
+        _judge_line = _cached_judge_line()
+        if _judge_line:
+            final_summary_output = (
+                final_summary_output.rstrip("  " + "═" * (WIDTH - 2))
+                + f"\n  {_judge_line}\n" + "  " + "═" * (WIDTH - 2)
             )
     except Exception:
         pass  # Graceful failure — never break session-end
