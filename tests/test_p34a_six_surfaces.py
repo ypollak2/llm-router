@@ -519,7 +519,7 @@ async def six_judge(six):
 def test_ledger_window_carries_the_judge_oracle(six_judge, window):
     from llm_router import ledger_view as lv
 
-    w = lv.window_summary(window, now=NOW)
+    w = lv.window_summary(window, now=NOW, judge=True)
     n, mean, self_judge = JUDGE_ORACLE[window]
     assert (w.judge_n, w.judge_mean, w.judge_self_judge) == (n, mean, self_judge)
     assert w.judge_not_informative is True                       # n < 50
@@ -531,19 +531,19 @@ def test_ledger_window_carries_the_judge_oracle(six_judge, window):
 def test_judge_does_not_change_the_ledger_line(six_judge):
     from llm_router import ledger_view as lv
 
-    assert lv.window_summary("24h", now=NOW).line() == _expected_line_six("24h")
+    assert lv.window_summary("24h", now=NOW, judge=True).line() == _expected_line_six("24h")
 
 
 def test_unknown_judge_is_na_never_zero(six_judge):
     from llm_router import ledger_view as lv
 
     # rows carry no session id, so a session window matches none: n=0 -> mean None -> n/a
-    w = lv.window_summary("session", session_id="s-main", now=NOW)
+    w = lv.window_summary("session", session_id="s-main", now=NOW, judge=True)
     assert (w.judge_n, w.judge_mean) == (0, None)
     assert w.judge_line() == "judge: n/a (no judged calls, session s-main)", w.judge_line()
     assert w.figures()["judge"].value is None
     (six_judge.home / "judge_results.jsonl").unlink()              # no judge file at all: unknown, not 0
-    w = lv.window_summary("24h", now=NOW)
+    w = lv.window_summary("24h", now=NOW, judge=True)
     assert (w.judge_n, w.judge_mean, w.judge_self_judge) == (None, None, None)
     assert w.judge_not_informative is True                    # judge_view: n unknown is not informative
     assert w.judge_line() == "judge: n/a (no judged calls, 24h)"
@@ -552,7 +552,7 @@ def test_unknown_judge_is_na_never_zero(six_judge):
 def test_old_cache_without_judge_fields_loads_as_unknown(six_judge):
     from llm_router import ledger_view as lv
 
-    d = json.loads(lv.window_summary("24h", now=NOW).to_json())
+    d = json.loads(lv.window_summary("24h", now=NOW, judge=True).to_json())
     assert d["v"] == 2 and d["judge_n"] == 4                  # additive: the cache version is unchanged
     for k in [k for k in d if k.startswith("judge_")]:
         del d[k]
@@ -574,7 +574,7 @@ def test_kpi_statusline_and_stop_judge_figures_equal_the_ledger_window(six_judge
     from llm_router.commands import kpi
     from tests.test_p35_statusline import UNKNOWN_FIELDS
 
-    lw = lv.window_summary("14d", now=NOW)
+    lw = lv.window_summary("14d", now=NOW, judge=True)
     n, mean = lw.judge_n, lw.judge_mean
     assert (n, mean, lw.window) == (5, 3.0, "14d")           # hand oracle: 4+5+3+2+1 over 5 rows
     sec = kpi._judge_quality(14, NOW, None)
@@ -586,3 +586,48 @@ def test_kpi_statusline_and_stop_judge_figures_equal_the_ledger_window(six_judge
     assert f"judge {mean:.2f} (n={n}, 14d)" in snap.render_line({**UNKNOWN_FIELDS, "judge": field})
     assert _session_end()._cached_judge_line(NOW) == lw.judge_line()
     assert f"n={n}" in lw.judge_line() and "14d" in lw.judge_line()   # something to check: n and window shown
+
+
+# -- P3.1-7 repair: the judge read is opt-in (O(file)); hot paths never pay it ---------------------
+
+def _count_judge_reads(monkeypatch):
+    from llm_router import judge_view as jv
+
+    calls: list[tuple] = []
+    real = jv.judge_summary
+
+    def spy(*a, **k):
+        calls.append(a)
+        return real(*a, **k)
+
+    monkeypatch.setattr(jv, "judge_summary", spy)
+    return calls
+
+
+def test_window_summary_default_does_not_read_the_judge_file(six_judge, monkeypatch):
+    from llm_router import ledger_view as lv
+
+    calls = _count_judge_reads(monkeypatch)
+    w = lv.window_summary("24h", now=NOW)
+    assert calls == [] and w.judge_n is None and w.judge_mean is None
+    assert w.line() == _expected_line_six("24h")                   # the ledger line is unchanged
+    lv.window_summary("24h", now=NOW, judge=True)
+    assert len(calls) == 1                                          # opt-in reads it once
+
+
+def test_dashboard_data_summary_does_not_call_judge_view(six_judge, monkeypatch):
+    """The synchronous Codex Stop hook calls summary('today') and summary('lifetime')."""
+    from llm_router import dashboard_data as dd
+
+    calls = _count_judge_reads(monkeypatch)
+    for period in ("today", "lifetime"):
+        dd.summary(period, now=NOW)
+    assert calls == []
+
+
+def test_kpi_judge_section_parses_the_judge_file_once(six_judge, monkeypatch):
+    from llm_router.commands import kpi
+
+    calls = _count_judge_reads(monkeypatch)
+    sec = kpi._judge_quality(14, NOW, None)
+    assert len(calls) == 1 and sec["n"] == 5

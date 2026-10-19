@@ -2603,11 +2603,12 @@ def _judge_quality(days: float, now_ts: float, win: "_Window | None") -> dict | 
         from llm_router import judge_view as jv
 
         since, until = (win.since, win.until) if win is not None else (now_ts - days * 86400.0, now_ts)
-        d = jv.judge_summary(since, until, label=jv.window_label(days)).to_dict()
+        js = jv.judge_summary(since, until, label=jv.window_label(days), now=until)
+        d = js.to_dict()
         # P3.1-7: the headline figures are the ledger window's (one source); the per-door rows stay judge_view's.
         from llm_router import ledger_view as lv
 
-        j = lv.judge_figures(lv.Bounds("custom", jv.window_label(days), since, until))
+        j = lv.judge_figures(lv.Bounds("custom", jv.window_label(days), since, until), summary=js)
         if j:
             d.update(n=j["judge_n"], mean=j["judge_mean"], self_judge=j["judge_self_judge"],
                      not_informative=j["judge_not_informative"])

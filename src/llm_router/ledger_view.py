@@ -1247,14 +1247,14 @@ def _is_number(x) -> bool:
     return isinstance(x, (int, float, datetime)) and not isinstance(x, bool)
 
 
-def judge_figures(bounds: Bounds) -> dict:
+def judge_figures(bounds: Bounds, summary=None) -> dict:
     """The judge fields of a :class:`LedgerWindow` for ``bounds``, from ``judge_view.judge_summary``
-    (no new judge logic). Unreadable judge files give all-None (unknown), recorded, never 0."""
+    (no new judge logic); pass ``summary`` (an already computed ``JudgeSummary``) to skip the read. Unreadable judge files give all-None (unknown), recorded, never 0."""
     try:
         from llm_router import judge_view
 
-        js = judge_view.judge_summary(bounds.since_ts, bounds.until_ts, bounds.session_id,
-                                      label=bounds.label, now=bounds.until_ts)
+        js = summary if summary is not None else judge_view.judge_summary(
+            bounds.since_ts, bounds.until_ts, bounds.session_id, label=bounds.label, now=bounds.until_ts)
         return {"judge_n": js.n, "judge_mean": js.mean, "judge_self_judge": js.self_judge,
                 "judge_not_informative": js.not_informative}
     except Exception as exc:  # noqa: BLE001 -- the ledger renders without judge figures, recorded
@@ -1276,7 +1276,7 @@ def window_summary(since: "str | Bounds | float | datetime | None" = "24h",
                    until: "float | datetime | None" = None, scope: str = "all", *,
                    session_id: str | None = None, name: str | None = None, db_path=None,
                    proxy_path=None, now=None, session_start: float | None = None,
-                   seats=_LOAD_SEATS, judge: bool = True) -> LedgerWindow:
+                   seats=_LOAD_SEATS, judge: bool = False) -> LedgerWindow:
     """Everything a surface prints for one window, from one call.
 
     * ``window_summary(since, until=None, scope="all"|"session"|"day"|"7d", *, session_id, name)``:
@@ -1288,8 +1288,10 @@ def window_summary(since: "str | Bounds | float | datetime | None" = "24h",
     ``seats`` is a ``seats.Seats`` or None (no seats file); by default ``seats.json`` is read, so
     call this only from a refresher or a CLI, never a hook's synchronous path.
 
-    ``judge`` (P3.1-7) adds the judge figures for the same bounds (``judge_*`` fields); pass False to
-    skip reading ``judge_results.jsonl``."""
+    ``judge`` (P3.1-7) adds the judge figures for the same bounds (``judge_*`` fields). Default False:
+    reading ``judge_results.jsonl`` is O(file), so only a surface that prints the judge line opts in
+    (the kpi judge section, the session-end child's ledger cache); the synchronous Stop paths
+    (``dashboard_data.summary``) and the refreshers never pay it."""
     if isinstance(since, Bounds):
         bounds = since
     elif _is_number(since):
