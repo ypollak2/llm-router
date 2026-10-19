@@ -80,12 +80,13 @@ def _env_files() -> list[str]:
     return [os.path.join(base, ".env"), os.path.join(user, ".env")]
 
 
-def _setting(key: str) -> str | None:
-    """``os.environ[key]`` after ``load_dotenv_files``: the real environment (an empty value counts as set)
+def _setting(key: str, real: str | None) -> str | None:
+    """``os.environ[key]`` after ``load_dotenv_files``; ``real`` is what the caller read from the real
+    environment (``os.environ.get``: ``None`` only when unset). The real environment (an empty value counts as set)
     wins, else the first file that has the key (an empty value counts as set and blocks later files).
     ``None`` when nothing sets it."""
-    if key in os.environ:
-        return os.environ[key]
+    if real is not None:
+        return real
     for env_file in _env_files():
         values = _parse_env(env_file)
         if key in values:
@@ -95,14 +96,14 @@ def _setting(key: str) -> str | None:
 
 def _home() -> str:
     """Same answer as ``paths.llm_router_home()`` after ``env_loader``: a blank value is the default home."""
-    override = (_setting("LLM_ROUTER_HOME") or "").strip()
+    override = (_setting("LLM_ROUTER_HOME", os.environ.get("LLM_ROUTER_HOME")) or "").strip()
     return os.path.expanduser(override) if override else os.path.join(os.path.expanduser("~"), ".llm-router")
 
 
 def _stop_setting() -> str:
     """``LLM_ROUTER_STOP_HOOK``, read from exactly the sources the package reads it from (:func:`_setting`).
     Not from ``<configured home>/.env``: the package does not look there either."""
-    return (_setting("LLM_ROUTER_STOP_HOOK") or "").strip().lower()
+    return (_setting("LLM_ROUTER_STOP_HOOK", os.environ.get("LLM_ROUTER_STOP_HOOK")) or "").strip().lower()
 
 
 def _session_id() -> str | None:
