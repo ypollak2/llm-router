@@ -79,7 +79,7 @@ def test_unclassified_cost_is_not_in_the_paid_figure(home):
                  ("mystery", 0.75), ("mystery", 0.50)])
     text = _net(_mod("f102_mixed"))
     assert "$0.2500 paid" in text, text          # only the row classed paid
-    assert "1.2500" not in text and "1.0000 paid" not in text
+    assert "$1.5000 paid" not in text and "$1.2500 paid" not in text
     assert "n=3 session calls" in text           # local + seat + paid; unclassified is outside n
     assert "unclassified n=2 this session, $1.2500 recorded, not in paid" in text, text
 
