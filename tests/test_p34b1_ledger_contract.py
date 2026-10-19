@@ -34,21 +34,21 @@ def _seats(*, claude=None, codex=None, gemini=None, keys=None, age_s=60.0) -> se
 
 def test_proxy_oauth_rows_are_subscription_with_a_claude_seat_and_no_keys():
     seats = _seats(claude="claude.ai", keys={"ANTHROPIC_API_KEY": False})
-    assert lv.provider_class("anthropic", auth="oauth", seats=seats) == "subscription"
-    assert lv.provider_class("anthropic", seats=seats) == "subscription"      # no row evidence
-    assert lv.provider_class("claude", seats=seats) == "subscription"          # alias
+    assert lv.provider_class("anthropic", auth="oauth", seats=seats, now=NOW) == "subscription"
+    assert lv.provider_class("anthropic", seats=seats, now=NOW) == "subscription"      # no row evidence
+    assert lv.provider_class("claude", seats=seats, now=NOW) == "subscription"          # alias
 
 
 def test_api_key_only_is_paid():
     seats = _seats(keys={"ANTHROPIC_API_KEY": True, "OPENAI_API_KEY": True})
-    assert lv.provider_class("anthropic", seats=seats) == "paid"
-    assert lv.provider_class("openai", seats=seats) == "paid"
+    assert lv.provider_class("anthropic", seats=seats, now=NOW) == "paid"
+    assert lv.provider_class("openai", seats=seats, now=NOW) == "paid"
     assert lv.provider_class("anthropic", auth="api_key", seats=None) == "paid"   # row evidence
 
 
 def test_api_key_login_seat_is_paid_not_subscription():
     seats = _seats(claude="api-key")
-    assert lv.provider_class("anthropic", seats=seats) == "paid"
+    assert lv.provider_class("anthropic", seats=seats, now=NOW) == "paid"
 
 
 def test_no_seats_file_and_no_row_evidence_is_unclassified_never_paid_or_subscription():
@@ -61,9 +61,9 @@ def test_no_seats_file_and_no_row_evidence_is_unclassified_never_paid_or_subscri
 
 def test_seat_aliases_codex_and_gemini_cli():
     seats = _seats(codex="chatgpt", gemini="google")
-    assert lv.provider_class("codex", seats=seats) == "subscription"
-    assert lv.provider_class("gemini_cli", seats=seats) == "subscription"
-    assert lv.provider_class("anthropic", seats=seats) == "unclassified"       # no claude seat
+    assert lv.provider_class("codex", seats=seats, now=NOW) == "subscription"
+    assert lv.provider_class("gemini_cli", seats=seats, now=NOW) == "subscription"
+    assert lv.provider_class("anthropic", seats=seats, now=NOW) == "unclassified"       # no claude seat
 
 
 @pytest.fixture

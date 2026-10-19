@@ -378,8 +378,8 @@ def test_a_seat_covered_provider_is_subscription(six):
     from llm_router import ledger_view as lv, seats
 
     s = seats.load_seats()
-    assert lv.provider_class("anthropic", seats=s) == "subscription"
-    assert lv.provider_class("openai", seats=s) == "unclassified"     # no seat, no key: never paid
+    assert lv.provider_class("anthropic", seats=s, now=NOW) == "subscription"
+    assert lv.provider_class("openai", seats=s, now=NOW) == "unclassified"     # no seat, no key: never paid
     assert lv.provider_class("anthropic") == "unclassified"           # no seats given: no evidence
 
 
