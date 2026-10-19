@@ -159,7 +159,9 @@ def test_condensed_reports_today_lifetime_and_quota(hook, fixture_home):
     line = hook._condense(_BOXED)
     assert "44 executed (24h)" in line
     # P3.4-B4: the today fragment carries the ledger's n ("(n=2)"; the label already says today)
-    assert f"today {today.compact()} (n=" in line
+    # F114: each segment carries its own n (the label leads, so the window is not said twice)
+    est, ver = today.compact().split(" · ")
+    assert f"today {est} (n=" in line and f"{ver} (n=" in line
     assert f"lifetime {lifetime.compact()}" in line
     assert "quota used" in line, "quota missing"
     assert chr(10) not in line, "condensed must be ONE line — it prints every turn"

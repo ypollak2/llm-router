@@ -350,7 +350,9 @@ def test_session_end_today_money_is_the_oracle(six):
     # P35-1 (D-220): measured apart from estimated. Hand oracle: S1 is the one verified (measured)
     # row, 0.50; the rest of the merged figure is the estimate.
     measured = 0.5
-    assert agg["today_compact"] == f"~${usd - measured:,.2f} est. saved · ${measured:,.2f} verified saved (n={n:,}, today)"
+    # F114 (D-247): each segment carries its OWN n, never the merged one.
+    assert agg["today_compact"] == (f"~${usd - measured:,.2f} est. saved (n={n - VERIFIED_TODAY_N:,}, today)"
+                                    f" · ${measured:,.2f} verified saved (n={VERIFIED_TODAY_N:,}, today)")
     # rv-597 carry-forward: the 4-dollar row 2 h before NOW is inside 24h and outside today, so a
     # 24h money window (or the -2h mutant) prints another 2-decimal figure
     usd24, n24 = _saved_six("24h")

@@ -1193,6 +1193,10 @@ def main() -> None:
         #        --watch-interval N (seconds, default 5); --session [ID] (P35-4)
         rest = args[1:]
         if "--session" in rest:
+            if "--watch" in rest:
+                print("llm-router summary: --watch cannot be combined with --session "
+                      "(the session block is a one-shot view)", file=sys.stderr)
+                raise SystemExit(2)
             # P35-4: the session summary block, n + window on every figure. The id after the
             # flag, else session_id.txt.
             from llm_router import session_report

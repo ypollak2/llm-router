@@ -27,6 +27,7 @@ Fields (unknown is ``None`` and prints ``n/a``, never 0):
 """
 from __future__ import annotations
 
+import re
 import time
 from collections import Counter
 
@@ -226,9 +227,31 @@ def recommend(actions: list[dict] | None, quality: dict | None) -> str:
 
 # ── build / render ─────────────────────────────────────────────────────────────
 
+_SID_BAD = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def sanitize_session_id(sid: str | None) -> str | None:
+    """F114: a session id is printed back (``no rows for session X``, the label), so only
+    ``[A-Za-z0-9._-]`` survives; anything else (an ESC, a newline) becomes ``_`` and the id then
+    matches no row. Never empties an id, so a bad one cannot fall back to the current session."""
+    return None if sid is None else _SID_BAD.sub("_", sid)
+
+
+def _has_rows(bounds: lv.Bounds, actions: list[dict] | None, proxy_rows: list[dict] | None) -> bool:
+    """True unless the session id is known to have NO row anywhere (proxy ledger, usage table).
+    Unknown (no usage database to ask) is not 'no rows'."""
+    sid = bounds.session_id
+    if sid is None or actions:
+        return True
+    if any(r.get("session_id") == sid for r in proxy_rows or []):
+        return True
+    usage = _part("CHZ-FO-SESSION-REPORT-USAGE", lambda: lv.session_usage_rows(bounds))
+    return usage is None or bool(usage)
+
+
 def _bounds(session_id: str | None, scope: str, now: float) -> lv.Bounds:
     if scope == "session":
-        sid = session_id or lv.read_session_id()
+        sid = sanitize_session_id(session_id or lv.read_session_id())
         return lv.session_scope(session_id=sid, session_start=lv.read_session_start(), now=now)
     return lv.resolve(scope, now=now)
 
@@ -249,6 +272,7 @@ def build(session_id: str | None = None, *, scope: str = "session", now: float |
     return {
         "v": SCHEMA, "as_of": lv._iso(now), "window": w, "label": bounds.label,
         "session_id": bounds.session_id,
+        "no_rows": not _has_rows(bounds, actions, proxy_rows),
         "targets": targets_field(actions, w),
         "offload": offload_field(actions, w),
         "escalations": escalations_field(proxy_rows, bounds),
@@ -269,9 +293,13 @@ def render(r: dict) -> str:
     """The block (pure): one figure per line, each with its n and window; unknown prints n/a."""
     w = r["window"]
     t = r["targets"]
+    if r.get("no_rows"):
+        return f"no rows for session {r['session_id']}\n"
     lines = [f"{MARKER} {r['label']} · as of {r['as_of']}"]
     if t["n"] is None:
         lines.append(f"  targets n/a (no action ledger, {w})")
+    elif t["n"] == 0:
+        lines.append(f"  targets n/a (n=0 actions, {w})")
     else:
         lines.append(f"  targets local {t['local']} · cheap {t['cheap']} · frontier {t['frontier']} · "
                      f"spread {t['spread']} (n={t['n']} actions, {w}; offload numerator local+cheap "

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 47
+# llm_router-hook-version: 48
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -648,6 +648,26 @@ def _query_cumulative_savings(window_totals: dict | None = None) -> list[tuple[s
     return results
 
 
+def _split_unclassified(paid_rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """F105: (paid, unclassified). Unclassified rows (F102) are never folded into the paid
+    figures (actual / baseline / % saved): a row with no recorded cost would enter them as $0."""
+    unc = [r for r in paid_rows if r.get(_CLASS_KEY) == "unclassified"]
+    return [r for r in paid_rows if r.get(_CLASS_KEY) != "unclassified"], unc
+
+
+def _unclassified_cost(unclassified: list[dict]) -> str:
+    """``$X recorded`` / ``$X recorded (k of n)`` (partial); ``cost n/a`` when no row recorded one (never $0)."""
+    n = len(unclassified)
+    costs = [float(r["cost_usd"]) for r in unclassified if r.get("cost_usd") is not None]
+    if not costs:
+        cost = "cost n/a"
+    elif len(costs) == n:
+        cost = f"${sum(costs):.4f} recorded"
+    else:
+        cost = f"${sum(costs):.4f} recorded ({len(costs)} of {n})"
+    return cost
+
+
 def _aggregate(rows: list[dict]) -> dict[str, dict]:
     tools: dict[str, dict] = {}
     for r in rows:
@@ -853,7 +873,8 @@ def _format_cc_model_section(cc_rows: list[dict]) -> list[str]:
 
 
 def _format_routing_section(
-    tools: dict[str, dict], *, subscription: bool | None = None
+    tools: dict[str, dict], *, subscription: bool | None = None,
+    unclassified: list[dict] | None = None,
 ) -> list[str]:
     """Render the routing panel.
 
@@ -957,6 +978,12 @@ def _format_routing_section(
             # (today) provider panels or the lifetime cumulative panel beside it.
             f"{_C_MUTED}this session{_RESET}",
         ]
+    if unclassified:
+        # F105: not in the calls / actual / baseline / % saved above, and said so.
+        lines.append(
+            f"    {_C_MUTED}(unclassified n={len(unclassified)}, {_unclassified_cost(unclassified)}; "
+            f"not in the figures above){_RESET}"
+        )
     for tool, d in sorted(tools.items(), key=lambda x: -x[1]["count"]):
         clean_models = {m: c for m, c in d["models"].items() if not _is_test_model(m)}
         if not clean_models:
@@ -1003,16 +1030,14 @@ def _net_session_line(free_rows: list[dict], paid_rows: list[dict]) -> str | Non
     """
     # F102: unclassified rows (no fresh seat, not local, not known paid) are never folded into
     # paid (ledger_view contract): they get their own fragment, outside baseline and paid.
-    unclassified = [r for r in paid_rows if r.get(_CLASS_KEY) == "unclassified"]
-    paid_only = [r for r in paid_rows if r.get(_CLASS_KEY) != "unclassified"]
+    paid_only, unclassified = _split_unclassified(paid_rows)
     rows = list(free_rows) + paid_only
     if not rows and not unclassified:
         return None
     uc_frag = ""
     if unclassified:
-        costs = [float(r["cost_usd"]) for r in unclassified if r.get("cost_usd") is not None]
-        uc_cost = f"${sum(costs):.4f} recorded" if costs else "cost n/a"
-        uc_frag = f"; unclassified n={len(unclassified)} this session, {uc_cost}, not in paid"
+        uc_frag = (f"; unclassified n={len(unclassified)} this session, "
+                   f"{_unclassified_cost(unclassified)}, not in paid")
     if not rows:
         return (
             f"  {_BOLD}Net saved{_RESET}      {_C_MUTED}n/a  (no classified session calls"
@@ -1023,7 +1048,7 @@ def _net_session_line(free_rows: list[dict], paid_rows: list[dict]) -> str | Non
     baseline  = _host_baseline(total_in, total_out)
     actual    = sum(float(r.get("cost_usd") or 0.0) for r in paid_only)
     net       = baseline - actual
-    paid_txt  = f"${actual:.4f} paid" if (paid_only or not unclassified) else "paid n/a"
+    paid_txt  = f"${actual:.4f} paid" if paid_only else "no paid calls"
     if net >= 0:
         return (
             f"  {_BOLD}Net saved{_RESET}      {_C_GREEN}${net:.4f}{_RESET}  "
@@ -1781,7 +1806,7 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     if tools:
         if session_lines:
             session_lines.append("")
-        session_lines += _format_routing_section(tools)
+        session_lines += _format_routing_section(tools, unclassified=_split_unclassified(paid_rows)[1])
     if session_start is not None:
         complexity_lines = _format_complexity_breakdown(session_start)
         if complexity_lines:
@@ -2376,17 +2401,25 @@ def _local_day() -> str:
 
 
 def _today_compact(wt) -> str | None:
-    """The Stop's money fragment for today: the ledger's estimated saving with its n and window
-    (``~$1.25 est. saved (n=7, today)``, plus ``· $0.50 verified saved`` when the ledger holds verified savings); None when the ledger has no usage database (n/a, never $0)."""
+    """The Stop's money fragment for today: the estimated and the verified saving as two
+    segments, each with its OWN n and the window (``~$1.25 est. saved (n=7, today) · $0.50
+    verified saved (n=1, today)``). D-247 / F114: never one merged figure or one merged n. A
+    segment the ledger cannot split (an older cache) prints ``n/a``, never the merged total;
+    None when the ledger has no usage database (n/a, never $0)."""
     if wt is None or wt.saved_usd is None or wt.saved_n is None:
         return None
-    # P35-1 (D-220): verified apart from estimated, never one summed figure.
-    measured, estimated = wt.verified_usd, wt.unverified_usd
-    if measured is None or estimated is None:
-        measured, estimated = None, wt.saved_usd
-    from llm_router import ledger_view as _lv
-
-    return f"{_lv.money_fragment(measured, estimated)} (n={wt.saved_n:,}, {wt.window})"
+    est = (wt.unverified_usd, wt.unverified_n)
+    ver = (wt.verified_usd, wt.verified_n)
+    segs = []
+    if None not in est and (est[0] or est[1]):
+        segs.append(f"~${est[0]:,.2f} est. saved (n={est[1]:,}, {wt.window})")
+    if None not in ver and (ver[0] or ver[1]):
+        segs.append(f"${ver[0]:,.2f} verified saved (n={ver[1]:,}, {wt.window})")
+    if None in est:
+        segs.insert(0, f"est. saved n/a ({wt.window})")
+    if None in ver and None not in est:
+        segs.append(f"verified saved n/a ({wt.window})")
+    return " · ".join(segs) or f"~$0.00 est. saved (n=0, {wt.window})"
 
 
 def _compute_ledger_aggregates() -> dict:
@@ -2639,7 +2672,7 @@ def _render_last_summary() -> None:
         return
     session_start = _read_session_start()
     paid_rows, cc_rows, free_rows = _query_session_data(session_start)
-    tools = _aggregate(paid_rows) if paid_rows else {}
+    tools = _aggregate(_split_unclassified(paid_rows)[0]) if paid_rows else {}
     start, current, is_live = _get_cc_usage()
     # _refresh_ledger_cache ran just before: use its cache, not a second ledger scan.
     _STOP_LEDGER = _read_ledger_cache()
@@ -3139,7 +3172,7 @@ def main() -> None:
             paid_rows, cc_rows, free_rows = _query_session_data(session_start)
         else:
             paid_rows, cc_rows, free_rows = [], [], []
-        tools                       = _aggregate(paid_rows) if paid_rows else {}
+        tools                       = _aggregate(_split_unclassified(paid_rows)[0]) if paid_rows else {}
     with _hl_phase("cc_usage"):
         start, current, is_live     = _get_cc_usage()
     with _hl_phase("savings_sync"):
