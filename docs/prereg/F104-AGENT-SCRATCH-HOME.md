@@ -110,6 +110,28 @@ isolation (`sandbox-exec` or a separate OS user) is not part of F104 or F110.
   agent committed. On a hit the work and scratch-HOME copies are deleted (only inside the run
   dir the harness created), but the run dir (ledger, stored output) may still hold the token:
   **purge that run dir and rotate the token (`claude setup-token`)**; the refusal says so.
+  F117: an unreadable (chmod 000) directory in a scanned tree refuses (`unreadable directory
+  in <kind>`, the walk no longer skips it), and the purge first gives each plain directory
+  owner rwx so it can remove it. Every git run on an agent-touched repo goes through
+  `run_git(..., sandbox=True)`: stdout is bytes (a non-UTF-8 diff or log is scanned, not a
+  `UnicodeDecodeError`), capped at 128 MiB and 120 s, and a broken `.git`, timeout, cap or exit
+  code is a `Refuse` that names the git subcommand only; any other scan error also purges before
+  refusing. **Agent-written git config never runs**: git has no switch to ignore a repo's
+  config, so the sandbox mode never reads it. It builds a harness-written git dir (own config,
+  copy of HEAD and index, the agent's objects as alternates and its refs by symlink, data
+  only), runs with `GIT_DIR` there, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `HOME` a temp dir, `--no-pager --no-textconv --no-ext-diff --ignore-submodules=all`, and
+  `-c` overrides for core.fsmonitor, core.hooksPath, diff.external, core.sshCommand, core.gitProxy,
+  core.pager, core.editor, core.askPass, core.alternateRefsCommand, core.attributesFile,
+  gpg.*.program, log.showSignature, credential.helper, protocol.ext.allow and more
+  (`GIT_HARDEN`). The few non-sandbox calls (`init`/`add`/`commit`/`rev-parse` on a repo the
+  harness just made, `worktree remove` of the noncloud worktree) use the overrides only: a
+  `filter.<name>.clean` driver or `diff.<name>.command` named by an in-tree `.gitattributes`
+  cannot be listed away, so `diff`/`status` are never run that way. Limits: unreachable git
+  objects (not on any ref, e.g. after the agent deletes a branch or `git gc`) are not in
+  `git log --all` and are not scanned; core.ignorecase/filemode of the agent's repo is not
+  mirrored in the sandbox config; the noncloud clone's own config is still read by
+  `worktree remove`.
   The opt-in smoke `--claude-call` also scans its scratch HOME and output (PASS/FAIL), to catch
   Claude Code persisting the auth value there, which would make every Claude-arm call refuse
   (not run by F115). The Pi arms and the grader never receive the token. Residual: this

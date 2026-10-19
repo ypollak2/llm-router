@@ -541,3 +541,77 @@ def test_scrub_without_token_fails_closed(setup):
     cfg = setup[0]
     with pytest.raises(h.Refuse, match="no token to scan for"):
         r.scrub_claude_artifacts(None, cfg.run_dir, cfg.run_dir, "", cfg.run_dir)
+
+
+def test_scrub_git_failure_still_purges_and_refuses(setup):
+    """F117: a broken .git (or non-UTF-8 output, timeout) is a Refuse, and the purge runs."""
+    cfg = setup[0]
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    for d in (work, home):
+        d.mkdir(parents=True)
+    r.git(work, "init", "-q")
+    (work / ".git" / "HEAD").write_text("garbage\n")
+    with pytest.raises(h.Refuse, match="refusing"):
+        r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir)
+    assert not home.exists() and not work.exists()
+
+
+def test_scrub_non_utf8_history_is_scanned_not_a_crash(setup):
+    cfg = setup[0]
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    for d in (work, home):
+        d.mkdir(parents=True)
+    r.git(work, "init", "-q")
+    (work / "f.txt").write_bytes(b"\xff\xfe caf\xe9\n")
+    r.git(work, "add", ".")
+    r.git(work, "-c", "user.name=T", "-c", "user.email=t@l", "-c", "commit.gpgsign=false",
+          "commit", "-qm", "base")
+    (work / "f.txt").write_bytes(b"\xff\xfe caf\xe9 " + token.encode() + b"\n")
+    with pytest.raises(h.Refuse, match="token found in (patch|work files)"):
+        r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir)
+    # clean non-UTF-8 repo: no exception
+    work2 = cfg.run_dir / "code_runs" / "w2"
+    work2.mkdir(parents=True)
+    r.git(work2, "init", "-q")
+    (work2 / "f.txt").write_bytes(b"\xff\xfe\n")
+    r.git(work2, "add", ".")
+    r.git(work2, "-c", "user.name=T", "-c", "user.email=t@l", "-c", "commit.gpgsign=false",
+          "commit", "-qm", "base")
+    (work2 / "f.txt").write_bytes(b"\xe9\n")
+    r.scrub_claude_artifacts(token, work2, home, "", cfg.run_dir)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores chmod 000")
+def test_scrub_unreadable_dir_refuses_and_purge_removes_it(setup):
+    cfg = setup[0]
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    (home / "locked").mkdir(parents=True)
+    work.mkdir(parents=True)
+    r.git(work, "init", "-q")
+    (home / "locked" / "t.txt").write_text(token)
+    (home / "locked").chmod(0)
+    with pytest.raises(h.Refuse, match="unreadable directory in agent scratch home"):
+        r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir)
+    assert not home.exists() and not work.exists()
+
+
+def test_purge_inside_symlinked_parent_and_relative_path(setup, tmp_path, monkeypatch):
+    cfg = setup[0]
+    outside = tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "sub" / "keep.txt").write_text("keep")
+    (cfg.run_dir / "link").symlink_to(outside)
+    r.purge_inside(cfg.run_dir, cfg.run_dir / "link" / "sub", cfg.run_dir / "link")
+    assert (outside / "sub" / "keep.txt").exists()
+    inner = cfg.run_dir / "inner"
+    inner.mkdir()
+    (inner / "x.txt").write_text("x")
+    monkeypatch.chdir(cfg.run_dir)
+    r.purge_inside(cfg.run_dir, "inner")
+    assert not inner.exists() and cfg.run_dir.exists()

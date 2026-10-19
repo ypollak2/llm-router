@@ -1725,7 +1725,7 @@ def test_import_guard_refuses_on_signal_oserror_and_timeout(tmp_path, monkeypatc
 def test_agent_pythons_finds_versioned_and_pypy_interpreters(tmp_path):
     d = tmp_path / "d"
     for name in ("python3.13", "pypy3", "pypy", "python", "python3-config", "pythonw.txt",
-                 "python3.13t", "python3.12d", "python3m"):
+                 "pythonw", "pythonista", "python3x", "pypyx", "python3.13t", "python3.12d", "python3m"):
         python_stub(d, name, importable=False)
     found = {Path(p).name for p in h.agent_pythons(str(d))}
     assert found == {"python3.13", "pypy3", "pypy", "python", "python3.13t", "python3.12d",
@@ -1856,3 +1856,109 @@ def test_grader_python_is_cached_per_path(tmp_path, monkeypatch):
     monkeypatch.setattr(h.subprocess, "run", lambda *a, **k: pytest.fail("re-probed"))
     assert h.grader_python(env) == first
     h._GRADER_PYTHON.pop(env["PATH"], None)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores chmod 000")
+def test_scan_for_token_refuses_an_unreadable_directory(tmp_path):
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    root = tmp_path / "tree"
+    hidden = root / "a" / "hidden"
+    hidden.mkdir(parents=True)
+    (hidden / "t.txt").write_text(token)
+    hidden.chmod(0)
+    try:
+        with pytest.raises(h.Refuse, match="unreadable directory in work files") as info:
+            h.scan_for_token(token, "work files", root=root)
+        assert token not in str(info.value) and str(tmp_path) not in str(info.value)
+    finally:
+        hidden.chmod(0o700)
+
+
+def _repo(path):
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "f.txt").write_text("one\n")
+    h.run_git(path, "init", "-q")
+    h.run_git(path, "add", ".")
+    h.run_git(path, "-c", "user.name=T", "-c", "user.email=t@l", "-c", "commit.gpgsign=false",
+              "commit", "-qm", "base")
+    return path
+
+
+def test_run_git_non_utf8_output_is_bytes_not_an_exception(tmp_path):
+    repo = _repo(tmp_path / "r")
+    (repo / "f.txt").write_bytes(b"caf\xe9 \xff\xfe\n")
+    out = h.run_git(repo, "diff", "HEAD", sandbox=True)
+    assert b"caf\xe9" in out
+
+
+def test_run_git_broken_repo_and_missing_repo_refuse(tmp_path):
+    repo = _repo(tmp_path / "r")
+    (repo / ".git" / "HEAD").write_text("garbage\n")
+    with pytest.raises(h.Refuse, match="refusing"):
+        h.run_git(repo, "diff", "HEAD", sandbox=True)
+    shutil.rmtree(repo / ".git" / "objects")
+    with pytest.raises(h.Refuse, match="refusing"):
+        h.run_git(repo, "log", "-p", "--all", sandbox=True)
+    with pytest.raises(h.Refuse, match="no git repository"):
+        h.run_git(tmp_path, "diff", "HEAD", sandbox=True)
+
+
+def test_run_git_caps_output_and_time(tmp_path, monkeypatch):
+    repo = _repo(tmp_path / "r")
+    monkeypatch.setattr(h, "GIT_OUTPUT_CAP", 10)
+    with pytest.raises(h.Refuse, match="git log output over the size cap"):
+        h.run_git(repo, "log", "-p", "--all", sandbox=True)
+    monkeypatch.setattr(h, "GIT_OUTPUT_CAP", 1 << 20)
+    monkeypatch.setattr(h, "GIT_SECONDS", -1.0)
+    with pytest.raises(h.Refuse, match="timed out"):
+        h.run_git(repo, "log", "-p", "--all", sandbox=True)
+
+
+def test_run_git_ignores_malicious_repo_config(tmp_path):
+    """F117: an agent-written .git/config must not run anything (fsmonitor, textconv, external
+    diff, filters, hooks, pager, ssh, includes). The marker file is never created."""
+    repo = _repo(tmp_path / "r")
+    marker = tmp_path / "PWNED"
+    evil = tmp_path / "evil.sh"
+    evil.write_text(f"#!/bin/sh\necho x >> {marker}\ncat \"$@\" 2>/dev/null\n")
+    evil.chmod(0o755)
+    inc = tmp_path / "inc.cfg"
+    inc.write_text(f"[core]\n\tfsmonitor = {evil}\n")
+    (repo / ".gitattributes").write_text("*.txt diff=x filter=x\n")
+    hook = repo / ".git" / "hooks" / "post-index-change"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text(f"#!/bin/sh\necho x >> {marker}\n")
+    hook.chmod(0o755)
+    with (repo / ".git" / "config").open("a") as cfg:
+        cfg.write(
+            f"[core]\n\tfsmonitor = {evil}\n\thooksPath = {hook.parent}\n"
+            f"\tsshCommand = {evil}\n\tpager = {evil}\n\teditor = {evil}\n"
+            f"[diff]\n\texternal = {evil}\n[diff \"x\"]\n\ttextconv = {evil}\n"
+            f"\tcommand = {evil}\n[filter \"x\"]\n\tclean = {evil}\n\tsmudge = {evil}\n"
+            f"\tprocess = {evil}\n[gpg]\n\tprogram = {evil}\n[log]\n\tshowSignature = true\n"
+            f"[include]\n\tpath = {inc}\n"
+        )
+    (repo / "f.txt").write_text("two\n")
+    (repo / "new.txt").write_text("new\n")
+    for args in (("diff", "HEAD"), ("diff", "--name-only", "HEAD"),
+                 ("log", "-p", "--all"), ("ls-files", "--others", "--exclude-standard")):
+        h.run_git(repo, *args, sandbox=True)
+        assert not marker.exists(), args
+    # the trusted path (agent config IS read; core keys overridden, but a `filter=` attribute
+    # cannot be, so it is for harness-made repos and `worktree remove` only, never diff/status)
+    wt = tmp_path / "wt"
+    h.run_git(repo, "worktree", "add", "-q", "-b", "b3", str(wt))
+    h.run_git(wt, "worktree", "remove", "--force", str(wt))
+    assert not marker.exists()
+    # control: with no hardening the same config does run the program, so the test can fail
+    _REAL_RUN(["git", "-C", str(repo), "-c", "core.pager=cat", "status"],
+              capture_output=True, env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
+    assert marker.exists(), "control: unhardened git must trip the planted config"
+
+
+def test_run_git_sandbox_sees_linked_worktree(tmp_path):
+    repo = _repo(tmp_path / "r")
+    wt = tmp_path / "wt"
+    h.run_git(repo, "worktree", "add", "-q", "-b", "b2", str(wt))
+    (wt / "f.txt").write_text("changed\n")
+    assert b"changed" in h.run_git(wt, "diff", "HEAD", sandbox=True)

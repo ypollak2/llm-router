@@ -603,7 +603,9 @@ def agent_path(path: str) -> str:
 
 
 # F115: any python*/pypy* executable (python3.13, pypy3, ...) is an interpreter an agent can run.
-INTERPRETER_NAME = re.compile(r"(python|pypy)[0-9.]*[a-z]*")  # python3.13t, python3.12d, python3m
+# F117: bare python/pypy, or a version suffix with only the t/d/m ABI flags; pythonw, pythonista
+# and the like are not interpreters the agent can run for this purpose and are not probed.
+INTERPRETER_NAME = re.compile(r"(python|pypy)([0-9]+(\.[0-9]+)*[tdm]*)?")  # python3.13t, python3m, pypy3
 IMPORT_PROBE = (
     "import importlib.util,sys; "
     "sys.exit(0 if importlib.util.find_spec('llm_router') is None else 1)"
@@ -730,7 +732,11 @@ def scan_for_token(token: str, kind: str, *, data=None, root: Path | None = None
         return
     deadline = time.monotonic() + SCAN_SECONDS
     budget = [SCAN_TOTAL_CAP]
-    for base, dirs, files in os.walk(root, followlinks=False):
+    def walk_error(_exc: OSError) -> None:
+        # F117: os.walk skips an unreadable directory silently; its token would be missed.
+        raise Refuse(f"refusing: unreadable directory in {kind}")
+
+    for base, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
         for name in dirs + files:
             if time.monotonic() > deadline:
                 raise Refuse(f"refusing: scan time cap exceeded in {kind}")
@@ -744,6 +750,165 @@ def scan_for_token(token: str, kind: str, *, data=None, root: Path | None = None
             if not stat.S_ISREG(mode):  # symlink (file or dir), FIFO, device, socket
                 raise Refuse(f"refusing: symlink or special file in {kind}")
             _scan_file(path, needle, kind, budget)
+
+
+GIT_OUTPUT_CAP = 128 << 20   # bytes of one git command's stdout
+GIT_INDEX_CAP = 256 << 20    # bytes of an index copied into the sandbox git dir
+GIT_SECONDS = 120.0          # wall time of one git command
+GIT_HARDEN = (
+    # Each key below can make git run a command named by repo config, or reach beyond the repo.
+    # The sandbox gitdir (below) already drops the agent's config; these cover the trusted path
+    # and are a second layer.
+    "core.fsmonitor=false", "core.hooksPath=/dev/null", "diff.external=",
+    "core.sshCommand=false", "core.gitProxy=false", "core.pager=cat", "core.editor=false",
+    "core.askPass=false", "core.alternateRefsCommand=false", "core.attributesFile=/dev/null",
+    "core.excludesFile=/dev/null", "core.untrackedCache=false", "gpg.program=false",
+    "gpg.openpgp.program=false", "gpg.x509.program=false", "gpg.ssh.program=false",
+    "log.showSignature=false", "credential.helper=", "protocol.ext.allow=never",
+    "diff.ignoreSubmodules=all", "status.submoduleSummary=false", "submodule.recurse=false",
+    "uploadpack.packObjectsHook=false", "sequence.editor=false",
+)
+
+
+def git_env(home: str) -> dict[str, str]:
+    """Environment for a harness git run: no system or global config, scratch HOME, no prompts."""
+    exe = shutil.which("git") or "/usr/bin/git"
+    return {
+        "PATH": os.pathsep.join([os.path.dirname(exe), "/usr/bin", "/bin"]),
+        "HOME": home, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ATTR_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat", "GIT_EXTERNAL_DIFF": "",
+    }
+
+
+def _plain_file(path: Path, cap: int) -> bytes:
+    """Bytes of a regular, non-symlink file of at most `cap` bytes; Refuse otherwise."""
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > cap:
+            raise Refuse("refusing: unusable git metadata")
+        return path.read_bytes()
+    except OSError:
+        raise Refuse("refusing: unusable git metadata") from None
+
+
+def sandbox_gitdir(work: Path, into: Path) -> Path:
+    """F117: a git dir the harness wrote, for reading an agent-controlled repo. The agent owns
+    `work/.git/config` (and hooks, info/attributes, includes), and git runs commands that config
+    names (fsmonitor, textconv, filters, ...). So the agent's config is never read: this dir
+    holds a harness-written config, a copy of HEAD and the index, and points at the agent's
+    objects (alternates) and refs (symlinks) as data only. Linked worktrees are resolved from
+    the `.git` file. Nothing here is executed."""
+    dotgit = Path(work) / ".git"
+    if dotgit.is_symlink():
+        raise Refuse("refusing: .git is a symlink")
+    if dotgit.is_dir():
+        gitdir = common = dotgit
+    elif dotgit.is_file():
+        text = _plain_file(dotgit, 4096).decode(errors="replace").strip()
+        if not text.startswith("gitdir:"):
+            raise Refuse("refusing: unusable git metadata")
+        gitdir = (Path(work) / text[len("gitdir:"):].strip()).resolve()
+        common = gitdir
+        if (gitdir / "commondir").exists():
+            common = (gitdir / _plain_file(gitdir / "commondir", 4096).decode(
+                errors="replace").strip()).resolve()
+    else:
+        raise Refuse("refusing: no git repository")
+    head = _plain_file(gitdir / "HEAD", 4096)
+    if not (head.startswith(b"ref: refs/") or re.fullmatch(rb"[0-9a-f]{40,64}\n?", head)):
+        raise Refuse("refusing: unusable git metadata")
+    into.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (into / "HEAD").write_bytes(head)
+    (into / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfilemode = true\n"
+    )
+    if (gitdir / "index").exists():
+        (into / "index").write_bytes(_plain_file(gitdir / "index", GIT_INDEX_CAP))
+    objects = common / "objects"
+    refs = common / "refs"
+    if objects.is_symlink() or not objects.is_dir() or refs.is_symlink() or not refs.is_dir():
+        raise Refuse("refusing: unusable git metadata")
+    (into / "objects" / "info").mkdir(parents=True)
+    (into / "objects" / "info" / "alternates").write_text(f"{objects.resolve()}\n")
+    os.symlink(refs.resolve(), into / "refs")
+    packed = common / "packed-refs"
+    if packed.exists():
+        if packed.is_symlink():
+            raise Refuse("refusing: unusable git metadata")
+        os.symlink(packed.resolve(), into / "packed-refs")
+    return into
+
+
+def run_git(work, *args: str, sandbox: bool = False, ok: tuple[int, ...] = (0,)) -> bytes:
+    """F117: stdout bytes of one git command in `work`, hardened against agent-written config.
+
+    `sandbox=True` (use it for any repo an agent touched) reads through `sandbox_gitdir`, so the
+    agent's config is not read at all; otherwise the harness-made repo is used with HARDEN keys.
+    Output is capped (GIT_OUTPUT_CAP) and time-limited (GIT_SECONDS); a non-UTF-8 diff is
+    plain bytes. Every failure (spawn, timeout, cap, exit code not in `ok`, broken repo) is a
+    Refuse that names only the git subcommand."""
+    import selectors
+    import tempfile
+
+    work = Path(work).resolve()
+    verb = next((a for a in args if not a.startswith("-") and "=" not in a), "?")
+    name = verb if re.fullmatch(r"[a-z-]+", verb) else "?"
+    extra = ["--no-textconv", "--no-ext-diff", "--ignore-submodules=all"] if name in (
+        "diff", "log") else []
+    cmd_at = next((i for i, a in enumerate(args) if a == verb), 0)
+    argv = ["git", "--no-pager"]
+    for key in GIT_HARDEN:
+        argv += ["-c", key]
+    argv += [*args[:cmd_at + 1], *extra, *args[cmd_at + 1:]]
+    with tempfile.TemporaryDirectory(prefix="p20git-") as tmp:
+        env = git_env(tmp)
+        if sandbox:
+            env["GIT_DIR"] = str(sandbox_gitdir(work, Path(tmp) / "gd"))
+            env["GIT_WORK_TREE"] = str(work)
+        else:
+            argv[1:1] = ["-C", str(work)]
+        try:
+            proc = subprocess.Popen(
+                argv, cwd=work, env=env, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+        except (OSError, ValueError):
+            raise Refuse(f"refusing: git {name} could not run") from None
+        chunks: list[bytes] = []
+        size = 0
+        deadline = time.monotonic() + GIT_SECONDS
+        problem = ""
+        with selectors.DefaultSelector() as sel:
+            sel.register(proc.stdout, selectors.EVENT_READ)
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    problem = "timed out"
+                    break
+                if not sel.select(min(left, 1.0)):
+                    continue
+                chunk = os.read(proc.stdout.fileno(), 1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > GIT_OUTPUT_CAP:
+                    problem = "output over the size cap"
+                    break
+                chunks.append(chunk)
+        if problem:
+            proc.kill()
+        try:
+            code = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            code = proc.wait()
+        finally:
+            proc.stdout.close()
+        if problem:
+            raise Refuse(f"refusing: git {name} {problem}")
+        if code not in ok:
+            raise Refuse(f"refusing: git {name} failed")
+    return b"".join(chunks)
 
 
 def real_home() -> Path:

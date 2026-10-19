@@ -39,21 +39,21 @@ def contract(path):
     raise h.Refuse("refusing: TEST_CONTRACT literal missing")
 
 
-def git(work, *args):
-    return subprocess.run(
-        ["git", "-C", str(work), *args], stdin=subprocess.DEVNULL,
-        capture_output=True, text=True, timeout=120, check=True,
-    ).stdout.strip()
+def git(work, *args, sandbox=False):
+    """F117: text of one hardened git command (see h.run_git). `sandbox=True` for any repo the
+    agent has touched: its .git/config is then never read."""
+    return h.run_git(work, *args, sandbox=sandbox).decode(errors="replace").strip()
+
+
+def git_bytes(work, *args):
+    """Raw stdout of a git command on an agent-touched repo (non-UTF-8 safe, capped)."""
+    return h.run_git(work, *args, sandbox=True)
 
 
 def empty_patch(work, parent):
-    changed = subprocess.run(
-        ["git", "-C", str(work), "diff", "--quiet", parent],
-        stdin=subprocess.DEVNULL, capture_output=True, timeout=120, check=False,
-    ).returncode
-    if changed not in (0, 1):
-        raise RuntimeError("git diff failed")
-    return changed == 0 and not git(work, "ls-files", "--others", "--exclude-standard")
+    differs = git_bytes(work, "diff", "--name-only", parent)
+    return not differs.strip() and not git(
+        work, "ls-files", "--others", "--exclude-standard", sandbox=True)
 
 
 # Every Pi thinking level but "off" is unsupported, and "off" is sent as reasoning_effort "none":
@@ -98,7 +98,24 @@ def purge_inside(run_dir, *paths):
             continue
         real = target.resolve()
         if real != root and root in real.parents:
+            _open_permissions(real)
             shutil.rmtree(real, ignore_errors=True)
+
+
+def _open_permissions(top):
+    """F117: an agent's chmod 000 directory cannot be listed or emptied; rmtree would leave it
+    (and a token inside) behind silently. Give each plain directory under `top` owner rwx first."""
+    stack = [top]
+    while stack:
+        directory = stack.pop()
+        try:
+            if directory.is_symlink():
+                continue
+            os.chmod(directory, 0o700)
+            stack.extend(Path(e.path) for e in os.scandir(directory)
+                         if e.is_dir(follow_symlinks=False))
+        except OSError:
+            continue
 
 
 def scrub_claude_artifacts(token, work, home, output, run_dir):
@@ -113,8 +130,8 @@ def scrub_claude_artifacts(token, work, home, output, run_dir):
         h.scan_for_token(token, "agent output", data=output)
         h.scan_for_token(token, "work files", root=work)
         h.scan_for_token(token, "agent scratch home", root=home)
-        h.scan_for_token(token, "patch", data=git(work, "diff", "HEAD"))
-        h.scan_for_token(token, "git history", data=git(work, "log", "-p", "--all"))
+        h.scan_for_token(token, "patch", data=git_bytes(work, "diff", "HEAD"))
+        h.scan_for_token(token, "git history", data=git_bytes(work, "log", "-p", "--all"))
     except h.Refuse as exc:
         purge_inside(run_dir, work, home)
         raise h.Refuse(
@@ -122,6 +139,12 @@ def scrub_claude_artifacts(token, work, home, output, run_dir):
             f"but the run dir {run_dir} may still hold the token (agent output, ledgers): "
             "purge it, and rotate the token (claude setup-token)"
         ) from None
+    except Exception:
+        # F117: anything unexpected from the scan must still purge, never skip it.
+        purge_inside(run_dir, work, home)
+        raise h.Refuse("refusing: artifact scan failed; work and agent_home copies were "
+                       "deleted if inside the run dir; purge the run dir and rotate the token"
+                       ) from None
 
 
 def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
@@ -298,7 +321,7 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
         if meta is not None and work is not None:
             try:
                 git(work, "worktree", "remove", "--force", str(work))
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, subprocess.SubprocessError, h.Refuse):
                 row["infra_class"], row["hidden_pass"] = "cleanup_error", None
         row["wall_s"] = cfg.now() - start
     return row
