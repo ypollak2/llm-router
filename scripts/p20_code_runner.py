@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 SPEC = importlib.util.spec_from_file_location(
@@ -23,7 +24,48 @@ SPEC = importlib.util.spec_from_file_location(
 h = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = h
 SPEC.loader.exec_module(h)
-_claude_run = subprocess.run
+
+
+def run_agent_process(argv, *, input=None, text=True, capture_output=True, timeout=900,
+                      cwd=None, env=None, check=False):
+    """F117: `subprocess.run` for the coding agent, in its own session (process group), with a
+    unique env tag. On return, success or timeout, the group, every descendant seen while it
+    ran and every tagged process are killed and gone, so the scrub and purge never race a
+    surviving grandchild. Same result / TimeoutExpired shape as subprocess.run."""
+    import uuid
+    tag = uuid.uuid4().hex
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text,
+        cwd=cwd, env={**(env or {}), h.AGENT_TAG_ENV: tag}, start_new_session=True,
+    )
+    known: set[int] = set()
+    deadline = time.monotonic() + timeout
+    try:
+        pending = input
+        while True:
+            known |= h.descendant_pids(proc.pid)
+            try:
+                out, err = proc.communicate(pending, timeout=min(0.5, max(
+                    0.01, deadline - time.monotonic())))
+                break
+            except subprocess.TimeoutExpired:
+                pending = None
+                # a grandchild may hold the pipes after the agent exited: stop the tree, then
+                # collect what was written; only a still-running agent is a timeout
+                late = proc.poll() is None and time.monotonic() >= deadline
+                if late or proc.poll() is not None:
+                    h.stop_agent_processes(proc.pid, tag, known)
+                    out, err = proc.communicate()
+                    if late:
+                        raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
+                    break
+    finally:
+        h.stop_agent_processes(proc.pid, tag, known)
+        proc.wait()
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+_claude_run = run_agent_process
 
 
 def contract(path):
@@ -98,27 +140,91 @@ def purge_inside(run_dir, *paths):
             continue
         real = target.resolve()
         if real != root and root in real.parents:
-            _open_permissions(real)
+            _open_permissions(root, real)
             shutil.rmtree(real, ignore_errors=True)
 
 
-def _open_permissions(top):
+def _chmod_nofollow(parent_fd, name):
+    """chmod 0700 the directory `name` under `parent_fd`, never through a symlink."""
+    try:
+        os.chmod(name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
+        return True
+    except NotImplementedError:
+        pass  # Linux: no lchmod; go through an O_PATH fd instead
+    except OSError:
+        return False
+    o_path = getattr(os, "O_PATH", None)
+    if o_path is None:
+        return False
+    try:
+        pfd = os.open(name, o_path | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=parent_fd)
+    except OSError:
+        return False
+    try:
+        os.chmod(f"/proc/self/fd/{pfd}", 0o700)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(pfd)
+
+
+def _open_dir(parent_fd, name):
+    """fd of the real directory `name` under `parent_fd` (never a symlink), unlocking a
+    chmod 000 one first; None when it is not a directory or cannot be opened."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        return os.open(name, flags, dir_fd=parent_fd)
+    except PermissionError:
+        if not _chmod_nofollow(parent_fd, name):
+            return None
+    except OSError:
+        return None
+    try:
+        return os.open(name, flags, dir_fd=parent_fd)
+    except OSError:
+        return None
+
+
+def _open_permissions(root, target):
     """F117: an agent's chmod 000 directory cannot be listed or emptied; rmtree would leave it
-    (and a token inside) behind silently. Give each plain directory under `top` owner rwx first."""
-    stack = [top]
-    while stack:
-        directory = stack.pop()
-        try:
-            if directory.is_symlink():
-                continue
-            os.chmod(directory, 0o700)
-            stack.extend(Path(e.path) for e in os.scandir(directory)
-                         if e.is_dir(follow_symlinks=False))
-        except OSError:
+    (and a token inside) behind silently. Give each real directory from `root` down to and
+    under `target` owner rwx first. Everything goes through directory fds with O_NOFOLLOW and
+    fchmod / chmod-by-fd, never a path string, so a symlink swapped in by a live agent cannot
+    redirect the chmod outside the run dir."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in Path(target).relative_to(root).parts:
+            child = _open_dir(fd, part)
+            os.close(fd)
+            fd = child
+            if fd is None:
+                return
+        _chmod_tree(fd)
+    except (OSError, ValueError):
+        pass
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _chmod_tree(fd):
+    try:
+        os.fchmod(fd, 0o700)
+        names = os.listdir(fd)
+    except OSError:
+        return
+    for name in names:
+        child = _open_dir(fd, name)
+        if child is None:
             continue
+        try:
+            _chmod_tree(child)
+        finally:
+            os.close(child)
 
 
-def scrub_claude_artifacts(token, work, home, output, run_dir):
+def scrub_claude_artifacts(token, work, home, output, run_dir, baseline=None):
     """F115: the Claude arm has Bash and the OAuth token in its env; refuse before anything
     it produced (output, work files, patch, scratch HOME) is stored if it carries the token.
     `output` is the call's stdout+stderr text (also on a timeout). No token to look for while
@@ -130,8 +236,10 @@ def scrub_claude_artifacts(token, work, home, output, run_dir):
         h.scan_for_token(token, "agent output", data=output)
         h.scan_for_token(token, "work files", root=work)
         h.scan_for_token(token, "agent scratch home", root=home)
+        # F117: raw objects the agent added (baseline = object ids before it ran), not `log -p`
+        # over the whole shared mirror: covers merges, tags, unreachable commits, replace refs
         h.scan_for_token(token, "patch", data=git_bytes(work, "diff", "HEAD"))
-        h.scan_for_token(token, "git history", data=git_bytes(work, "log", "-p", "--all"))
+        h.scan_new_git_objects(token, work, baseline)
     except h.Refuse as exc:
         purge_inside(run_dir, work, home)
         raise h.Refuse(
@@ -170,6 +278,7 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     cost, served, error, timed_out = 0, "", None, False
     env = h.claude_env(home, cfg.run_dir)
     output = ""
+    baseline = h.git_object_ids(work)  # F117: what the agent adds is what gets scanned
     try:
         result = _claude_run(
             h.claude_argv(c["CLAUDE_SONNET_ID"], cfg.run_dir, tools=None)
@@ -196,7 +305,8 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
         error = "claude_error"
     finally:
         # always scanned, also after a timeout or a parse failure, before grading or storing
-        scrub_claude_artifacts(env.get(h.CLAUDE_AUTH_ENV[0]), work, home, output, cfg.run_dir)
+        scrub_claude_artifacts(env.get(h.CLAUDE_AUTH_ENV[0]), work, home, output, cfg.run_dir,
+                              baseline)
     h.append_row(cfg.run_dir / "ledger.jsonl", {
         "ts": h.utc(cfg), "stage": "code", "set": "code", "arm": arm,
         "item_id": ident, "attempt": attempt, "ok": error is None and not timed_out,
@@ -237,7 +347,7 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
         "attempt": attempt, "tc_sha256": tc_hash, "runner_sha256": runner_hash,
         "ts": start,
     }
-    work, hidden, meta = None, None, None
+    work, hidden, meta, clone = None, None, None, None
     tag = "p20_" + safe(args.arm)
     try:
         ref = item["task_ref"]
@@ -245,7 +355,7 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
             metas = {m["task_id"]: m for m in h.jsonl(args.noncloud_dir / "tasks_meta.jsonl")}
             task_id = ref["task_id"]
             meta = metas[task_id]
-            nc.ensure_clone()
+            clone = Path(nc.ensure_clone())
             work = Path(nc.make_wt(task_id, tag, meta["parent_sha"]))
             parent = meta["parent_sha"]
             prompt = nc.build_prompt(meta)
@@ -318,9 +428,11 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
         if hidden is not None and hidden.exists() and work is not None:
             remove_tests(work / "tests")
             shutil.move(str(hidden), work / "tests")
-        if meta is not None and work is not None:
+        if meta is not None and work is not None and clone is not None:
             try:
-                git(work, "worktree", "remove", "--force", str(work))
+                # F117: from the trusted clone, never `-C work`: work/.git is a pointer file
+                # the agent can rewrite to another repo's config
+                git(clone, "worktree", "remove", "--force", str(work))
             except (OSError, subprocess.SubprocessError, h.Refuse):
                 row["infra_class"], row["hidden_pass"] = "cleanup_error", None
         row["wall_s"] = cfg.now() - start

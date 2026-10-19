@@ -780,6 +780,9 @@ def git_env(home: str) -> dict[str, str]:
         "HOME": home, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ATTR_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
         "GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat", "GIT_EXTERNAL_DIFF": "",
+        # F117: an agent-written refs/replace/<oid> would otherwise show the harness a clean
+        # object where the agent stored a dirty one.
+        "GIT_NO_REPLACE_OBJECTS": "1",
     }
 
 
@@ -811,7 +814,11 @@ def sandbox_gitdir(work: Path, into: Path) -> Path:
             raise Refuse("refusing: unusable git metadata")
         gitdir = (Path(work) / text[len("gitdir:"):].strip()).resolve()
         common = gitdir
-        if (gitdir / "commondir").exists():
+        try:
+            has_common = (gitdir / "commondir").exists()
+        except OSError:
+            raise Refuse("refusing: unusable git metadata") from None
+        if has_common:
             common = (gitdir / _plain_file(gitdir / "commondir", 4096).decode(
                 errors="replace").strip()).resolve()
     else:
@@ -824,8 +831,16 @@ def sandbox_gitdir(work: Path, into: Path) -> Path:
     (into / "config").write_text(
         "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfilemode = true\n"
     )
-    if (gitdir / "index").exists():
+    try:
+        has_index = (gitdir / "index").exists()
+    except OSError:
+        raise Refuse("refusing: unusable git metadata") from None
+    if has_index:
         (into / "index").write_bytes(_plain_file(gitdir / "index", GIT_INDEX_CAP))
+        # F117: the copy's mtime is "now", so git would trust the stat data of an entry edited
+        # in the same second (racy-clean) and miss the edit. Index mtime 1 (0 means "unset" to git) makes every entry
+        # racy, so git compares content.
+        os.utime(into / "index", (1, 1))
     objects = common / "objects"
     refs = common / "refs"
     if objects.is_symlink() or not objects.is_dir() or refs.is_symlink() or not refs.is_dir():
@@ -834,19 +849,24 @@ def sandbox_gitdir(work: Path, into: Path) -> Path:
     (into / "objects" / "info" / "alternates").write_text(f"{objects.resolve()}\n")
     os.symlink(refs.resolve(), into / "refs")
     packed = common / "packed-refs"
-    if packed.exists():
+    try:
+        has_packed = packed.exists() or packed.is_symlink()
+    except OSError:
+        raise Refuse("refusing: unusable git metadata") from None
+    if has_packed:
         if packed.is_symlink():
             raise Refuse("refusing: unusable git metadata")
         os.symlink(packed.resolve(), into / "packed-refs")
     return into
 
 
-def run_git(work, *args: str, sandbox: bool = False, ok: tuple[int, ...] = (0,)) -> bytes:
+def run_git(work, *args: str, sandbox: bool = False, ok: tuple[int, ...] = (0,),
+            stdin_data: bytes | None = None) -> bytes:
     """F117: stdout bytes of one git command in `work`, hardened against agent-written config.
 
     `sandbox=True` (use it for any repo an agent touched) reads through `sandbox_gitdir`, so the
     agent's config is not read at all; otherwise the harness-made repo is used with HARDEN keys.
-    Output is capped (GIT_OUTPUT_CAP) and time-limited (GIT_SECONDS); a non-UTF-8 diff is
+    `stdin_data` is fed to git's stdin through a file. Output is capped (GIT_OUTPUT_CAP) and time-limited (GIT_SECONDS); a non-UTF-8 diff is
     plain bytes. Every failure (spawn, timeout, cap, exit code not in `ok`, broken repo) is a
     Refuse that names only the git subcommand."""
     import selectors
@@ -864,6 +884,11 @@ def run_git(work, *args: str, sandbox: bool = False, ok: tuple[int, ...] = (0,))
     argv += [*args[:cmd_at + 1], *extra, *args[cmd_at + 1:]]
     with tempfile.TemporaryDirectory(prefix="p20git-") as tmp:
         env = git_env(tmp)
+        stdin: Any = subprocess.DEVNULL
+        if stdin_data is not None:
+            feed = Path(tmp) / "stdin"
+            feed.write_bytes(stdin_data)
+            stdin = feed.open("rb")
         if sandbox:
             env["GIT_DIR"] = str(sandbox_gitdir(work, Path(tmp) / "gd"))
             env["GIT_WORK_TREE"] = str(work)
@@ -871,11 +896,14 @@ def run_git(work, *args: str, sandbox: bool = False, ok: tuple[int, ...] = (0,))
             argv[1:1] = ["-C", str(work)]
         try:
             proc = subprocess.Popen(
-                argv, cwd=work, env=env, stdin=subprocess.DEVNULL,
+                argv, cwd=work if sandbox else tmp, env=env, stdin=stdin,
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             )
         except (OSError, ValueError):
             raise Refuse(f"refusing: git {name} could not run") from None
+        finally:
+            if stdin is not subprocess.DEVNULL:
+                stdin.close()
         chunks: list[bytes] = []
         size = 0
         deadline = time.monotonic() + GIT_SECONDS
@@ -911,6 +939,117 @@ def run_git(work, *args: str, sandbox: bool = False, ok: tuple[int, ...] = (0,))
         if code not in ok:
             raise Refuse(f"refusing: git {name} failed")
     return b"".join(chunks)
+
+
+AGENT_TAG_ENV = "P20_AGENT_TAG"
+
+
+def _ps_lines(*flags: str) -> list[str]:
+    try:
+        out = subprocess.run(["ps", *flags], stdin=subprocess.DEVNULL, capture_output=True,
+                             timeout=20, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return out.decode(errors="replace").splitlines()
+
+
+def descendant_pids(root_pid: int) -> set[int]:
+    """Pids below `root_pid` in the process tree now (a child that later setsid()s stays in it)."""
+    kids: dict[int, list[int]] = {}
+    for line in _ps_lines("-axo", "pid=,ppid="):
+        parts = line.split()
+        if len(parts) == 2 and all(x.isdigit() for x in parts):
+            kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+    found, stack = set(), [root_pid]
+    while stack:
+        for pid in kids.get(stack.pop(), []):
+            if pid not in found:
+                found.add(pid)
+                stack.append(pid)
+    return found
+
+
+def tagged_pids(tag: str) -> set[int]:
+    """Pids of this user whose environment carries `tag` (survives setsid and reparenting; not
+    visible for SIP-protected system binaries on macOS, hence also `descendant_pids`)."""
+    needle = f"{AGENT_TAG_ENV}={tag}"
+    found = set()
+    for line in _ps_lines("-E", "-ww", "-U", str(os.getuid()), "-o", "pid=,command="):
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit() and needle in parts[1]:
+            found.add(int(parts[0]))
+    return found - {os.getpid()}
+
+
+def stop_agent_processes(pgid: int | None, tag: str, known: set[int], seconds: float = 10.0) -> None:
+    """F117: kill the agent's process group, every pid seen below it, and every process
+    carrying its env tag, then wait until they are gone. Called before any scan or purge, so
+    nothing the agent started can write while the harness reads. Best effort: a process that
+    cleared its env, reparented before it was seen and is a SIP binary escapes (F104 limit)."""
+    import signal
+    deadline = time.monotonic() + seconds
+    while True:
+        pids = (known | tagged_pids(tag)) - {os.getpid()}
+        if pgid:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        alive = {pid for pid in pids if _alive(pid)}
+        if not alive and not (pgid and _group_alive(pgid)):
+            return
+        if time.monotonic() > deadline:
+            raise Refuse("refusing: agent processes still running; cannot scan safely")
+        time.sleep(0.1)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    state = "".join(_ps_lines("-o", "stat=", "-p", str(pid))).strip()
+    return bool(state) and not state.startswith("Z")
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except OSError:
+        return False
+    for line in _ps_lines("-axo", "pgid=,stat="):
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == str(pgid) and not parts[1].startswith("Z"):
+            return True
+    return False
+
+
+def git_object_ids(work) -> set[str]:
+    """F117: ids of every object in the repo's object store (loose, packed, alternates),
+    reachable or not. Take it before the agent runs and again after: the difference is what
+    the agent added."""
+    out = run_git(work, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)",
+                  sandbox=True)
+    return set(out.decode(errors="replace").split())
+
+
+def scan_new_git_objects(token: str, work, baseline: set[str] | None) -> None:
+    """F117: scan the raw content of every object not in `baseline` (all objects if None).
+    Raw objects cover what `log -p` hides: merges, tags, blobs on no branch, unreachable
+    commits, replaced objects. Only agent-added content counts against GIT_OUTPUT_CAP, so a
+    big shared mirror (noncloud) does not trip it."""
+    new = git_object_ids(work) - (baseline or set())
+    if new:
+        data = run_git(work, "cat-file", "--batch", sandbox=True,
+                       stdin_data=("\n".join(sorted(new)) + "\n").encode())
+        scan_for_token(token, "git objects", data=data)
 
 
 def real_home() -> Path:

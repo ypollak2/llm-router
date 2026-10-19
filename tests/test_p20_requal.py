@@ -1983,3 +1983,135 @@ def test_scan_for_token_vanished_entry_is_skipped_other_errors_refuse(tmp_path, 
     monkeypatch.setattr(h.os, "lstat", lstat_with(PermissionError()))
     with pytest.raises(h.Refuse, match="unreadable entry in work files"):
         h.scan_for_token("TOKEN-abcdef0123456789", "work files", root=root)
+
+
+# ---- F117 repair 1: scan only what the agent added; history-scrub bypasses R1-R4 ----------
+
+_TOKEN = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+_ID = ("-c", "user.name=T", "-c", "user.email=t@l", "-c", "commit.gpgsign=false")
+
+
+def _commit(repo, msg="c"):
+    h.run_git(repo, "add", "-A")
+    h.run_git(repo, *_ID, "commit", "-qm", msg)
+    return h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+
+
+def test_scan_new_objects_cap_counts_only_agent_additions(tmp_path, monkeypatch):
+    """Blocker: a shared mirror's history can exceed the cap; only agent-added content counts."""
+    mirror = _repo(tmp_path / "mirror")
+    for i in range(6):  # base history: ~600 KB of incompressible content
+        (mirror / f"big{i}.bin").write_bytes(os.urandom(100_000))
+        _commit(mirror, f"base{i}")
+    wt = tmp_path / "wt"
+    h.run_git(mirror, "worktree", "add", "-q", "--detach", str(wt))  # noncloud shape
+    monkeypatch.setattr(h, "GIT_OUTPUT_CAP", 64_000)
+    baseline = h.git_object_ids(wt)
+    assert len(baseline) > 6
+    (wt / "fix.py").write_text("value = 1\n")
+    h.run_git(wt, "add", "-A")
+    h.run_git(wt, *_ID, "commit", "-qm", "agent")
+    h.scan_new_git_objects(_TOKEN, wt, baseline)  # small addition: passes under the small cap
+    # control: without a baseline the whole base history is scanned and hits the cap
+    with pytest.raises(h.Refuse, match="output over the size cap"):
+        h.scan_new_git_objects(_TOKEN, wt, None)
+    # and a big agent addition still trips the cap
+    (wt / "huge.bin").write_bytes(os.urandom(200_000))
+    h.run_git(wt, "add", "-A")
+    h.run_git(wt, *_ID, "commit", "-qm", "huge")
+    with pytest.raises(h.Refuse, match="output over the size cap"):
+        h.scan_new_git_objects(_TOKEN, wt, baseline)
+
+
+def _hit(repo, baseline):
+    with pytest.raises(h.Refuse, match="token found in git objects") as info:
+        h.scan_new_git_objects(_TOKEN, repo, baseline)
+    assert _TOKEN not in str(info.value)
+
+
+def test_scan_new_objects_r1_replace_ref_hiding_a_commit(tmp_path):
+    repo = _repo(tmp_path / "r")
+    clean = h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+    baseline = h.git_object_ids(repo)
+    (repo / "f.txt").write_text(f"{_TOKEN}\n")
+    dirty = _commit(repo, "dirty")
+    h.run_git(repo, "reset", "-q", "--hard", clean)
+    h.run_git(repo, "replace", dirty, clean)  # refs/replace/<dirty> -> clean
+    _hit(repo, baseline)
+
+
+def test_git_env_disables_replace_objects(tmp_path):
+    assert h.git_env("x")["GIT_NO_REPLACE_OBJECTS"] == "1"
+    repo = _repo(tmp_path / "r")
+    first = h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+    (repo / "f.txt").write_text("two\n")
+    second = _commit(repo, "second")
+    h.run_git(repo, "replace", "-f", second, first)
+    shown = h.run_git(repo, "cat-file", "-p", second, sandbox=True)
+    assert b"second" in shown  # the real commit, not the replacement
+
+
+def test_scan_new_objects_r2_evil_merge_resolution(tmp_path):
+    repo = _repo(tmp_path / "r")
+    main = h.run_git(repo, "rev-parse", "--abbrev-ref", "HEAD").decode().strip()
+    baseline = h.git_object_ids(repo)
+    h.run_git(repo, "checkout", "-q", "-b", "side")
+    (repo / "g.txt").write_text("g\n")
+    _commit(repo, "side")
+    h.run_git(repo, "checkout", "-q", main)
+    (repo / "h.txt").write_text("h\n")
+    _commit(repo, "main")
+    h.run_git(repo, "merge", "--no-commit", "--no-ff", "side")
+    (repo / "f.txt").write_text(f"{_TOKEN}\n")  # only the merge's resolution carries it
+    h.run_git(repo, "add", "-A")
+    h.run_git(repo, *_ID, "commit", "-qm", "merge")
+    h.run_git(repo, "checkout", "-q", "-b", "tip")
+    merge = h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+    h.run_git(repo, "checkout", "-q", main)
+    h.run_git(repo, "reset", "-q", "--hard", "HEAD~1")
+    h.run_git(repo, "branch", "-f", "tip", merge)
+    h.run_git(repo, "checkout", "-q", main)
+    _hit(repo, baseline)
+
+
+def test_scan_new_objects_r3_tag_pointing_at_a_blob(tmp_path):
+    repo = _repo(tmp_path / "r")
+    baseline = h.git_object_ids(repo)
+    (tmp_path / "t.txt").write_text(f"{_TOKEN}\n")
+    blob = h.run_git(repo, "hash-object", "-w", str(tmp_path / "t.txt")).decode().strip()
+    h.run_git(repo, "tag", "blobtag", blob)
+    _hit(repo, baseline)
+
+
+def test_scan_new_objects_r4_unreachable_object(tmp_path):
+    repo = _repo(tmp_path / "r")
+    baseline = h.git_object_ids(repo)
+    (tmp_path / "t.txt").write_text(f"{_TOKEN}\n")
+    h.run_git(repo, "hash-object", "-w", str(tmp_path / "t.txt"))  # on no ref at all
+    _hit(repo, baseline)
+    # clean additions pass
+    other = _repo(tmp_path / "o")
+    base2 = h.git_object_ids(other)
+    (other / "n.txt").write_text("no secret\n")
+    _commit(other, "n")
+    h.scan_new_git_objects(_TOKEN, other, base2)
+
+
+def test_sandbox_diff_sees_a_same_second_same_size_edit(tmp_path):
+    repo = _repo(tmp_path / "r")
+    (repo / "f.txt").write_text("ONE\n")  # same size as "one\n", inside the commit's second
+    assert b"f.txt" in h.run_git(repo, "diff", "--name-only", "HEAD", sandbox=True)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores chmod 000")
+def test_sandbox_gitdir_unreadable_linked_gitdir_refuses(tmp_path):
+    repo = _repo(tmp_path / "r")
+    wt = tmp_path / "wt"
+    h.run_git(repo, "worktree", "add", "-q", "--detach", str(wt))
+    gitdir = next((repo / ".git" / "worktrees").iterdir())
+    gitdir.chmod(0)
+    try:
+        with pytest.raises(h.Refuse, match="unusable git metadata"):
+            h.run_git(wt, "diff", "HEAD", sandbox=True)
+    finally:
+        gitdir.chmod(0o700)

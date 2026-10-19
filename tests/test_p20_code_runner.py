@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import replace
@@ -615,3 +616,137 @@ def test_purge_inside_symlinked_parent_and_relative_path(setup, tmp_path, monkey
     monkeypatch.chdir(cfg.run_dir)
     r.purge_inside(cfg.run_dir, "inner")
     assert not inner.exists() and cfg.run_dir.exists()
+
+
+# ---- F117 repair 1 ------------------------------------------------------------------------
+
+def test_scrub_unexpected_scan_error_still_purges(setup, monkeypatch):
+    """The generic `except Exception` branch: purge, then a Refuse that carries no detail."""
+    cfg = setup[0]
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    for d in (work, home):
+        d.mkdir(parents=True)
+    r.git(work, "init", "-q")
+    (work / "f.txt").write_text("one\n")
+    r.git(work, "add", ".")
+    r.git(work, "-c", "user.name=T", "-c", "user.email=t@l", "-c", "commit.gpgsign=false",
+          "commit", "-qm", "base")
+
+    def boom(*a, **k):
+        raise PermissionError("secret path /x/y")
+
+    monkeypatch.setattr(h, "scan_new_git_objects", boom)
+    with pytest.raises(h.Refuse, match="artifact scan failed") as info:
+        r.scrub_claude_artifacts("FAKE-OAUTH-TOKEN-abcdef0123456789", work, home, "", cfg.run_dir)
+    assert "/x/y" not in str(info.value)
+    assert not work.exists() and not home.exists()
+
+
+def test_scrub_unreachable_agent_object_is_found(setup):
+    cfg = setup[0]
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    for d in (work, home):
+        d.mkdir(parents=True)
+    r.git(work, "init", "-q")
+    (work / "f.txt").write_text("one\n")
+    r.git(work, "add", ".")
+    r.git(work, "-c", "user.name=T", "-c", "user.email=t@l", "-c", "commit.gpgsign=false",
+          "commit", "-qm", "base")
+    baseline = h.git_object_ids(work)
+    side = cfg.run_dir / "t.txt"
+    side.write_text(token)
+    r.git(work, "hash-object", "-w", str(side))
+    with pytest.raises(h.Refuse, match="token found in git objects"):
+        r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir, baseline)
+    assert not work.exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores chmod 000")
+def test_open_permissions_never_chmods_through_a_swapped_symlink(setup, tmp_path, monkeypatch):
+    cfg = setup[0]
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside.chmod(0o755)
+    base = cfg.run_dir / "w"
+    (base / "sub" / "deep").mkdir(parents=True)
+    (base / "sub" / "deep").chmod(0)
+    real_listdir = os.listdir
+    swapped = []
+
+    def listdir_then_swap(fd):
+        names = real_listdir(fd)
+        if "sub" in names and not swapped:  # the agent swaps `sub` after the harness listed it
+            swapped.append(1)
+            (base / "sub" / "deep").chmod(0o700)
+            shutil.rmtree(base / "sub")
+            (base / "sub").symlink_to(outside)
+        return names
+
+    monkeypatch.setattr(os, "listdir", listdir_then_swap)
+    r._open_permissions(cfg.run_dir, base)
+    monkeypatch.undo()
+    assert swapped and (outside.stat().st_mode & 0o777) == 0o755
+    # unswapped: a chmod 000 directory is opened up
+    (cfg.run_dir / "w2" / "a" / "b").mkdir(parents=True)
+    (cfg.run_dir / "w2" / "a").chmod(0)
+    r._open_permissions(cfg.run_dir, cfg.run_dir / "w2")
+    assert ((cfg.run_dir / "w2" / "a").stat().st_mode & 0o777) == 0o700
+    assert ((cfg.run_dir / "w2" / "a" / "b").stat().st_mode & 0o777) == 0o700
+
+
+_GRANDCHILD = """
+import os, sys, time
+pidfile, outfile, mode = sys.argv[1:4]
+if os.fork() == 0:
+    os.setsid()                      # detached: its own session, not in the agent's group
+    if os.fork() == 0:               # and orphaned (its parent exits), so ppid is 1
+        open(pidfile, "w").write(str(os.getpid()))
+        while True:
+            open(outfile, "a").write("x")
+            time.sleep(0.05)
+    os._exit(0)
+for _ in range(100):
+    if os.path.exists(pidfile) and open(pidfile).read():
+        break
+    time.sleep(0.05)
+if mode == "hang":
+    time.sleep(60)
+print("done")
+"""
+
+
+@pytest.mark.parametrize("mode", ["exit", "hang"])
+def test_agent_process_tree_is_dead_before_run_returns(tmp_path, mode):
+    """F117: the scan must not race a detached grandchild the agent started."""
+    import time
+    pidfile, outfile = tmp_path / "pid", tmp_path / "out"
+    argv = [sys.executable, "-c", _GRANDCHILD, str(pidfile), str(outfile), mode]
+    if mode == "hang":
+        with pytest.raises(subprocess.TimeoutExpired):
+            r.run_agent_process(argv, input="", timeout=3, cwd=tmp_path, env=dict(os.environ))
+    else:
+        done = r.run_agent_process(argv, input="", timeout=30, cwd=tmp_path, env=dict(os.environ))
+        assert done.returncode == 0 and "done" in done.stdout
+    pid = int(pidfile.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    size = outfile.stat().st_size
+    time.sleep(0.4)
+    assert outfile.stat().st_size == size  # nothing writes after the run returned
+
+
+def test_noncloud_worktree_is_removed_from_the_trusted_clone(setup, tmp_path, monkeypatch):
+    calls = []
+    real_git = r.git
+
+    def spy(work, *args, **kwargs):
+        if args[:2] == ("worktree", "remove"):
+            calls.append(Path(work))
+        return real_git(work, *args, **kwargs)
+
+    monkeypatch.setattr(r, "git", spy)
+    invoke(setup)
+    assert calls and all(c == tmp_path / "repo" for c in calls)

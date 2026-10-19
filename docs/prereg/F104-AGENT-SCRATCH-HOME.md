@@ -111,27 +111,48 @@ isolation (`sandbox-exec` or a separate OS user) is not part of F104 or F110.
   dir the harness created), but the run dir (ledger, stored output) may still hold the token:
   **purge that run dir and rotate the token (`claude setup-token`)**; the refusal says so.
   F117: an unreadable (chmod 000) directory in a scanned tree refuses (`unreadable directory
-  in <kind>`, the walk no longer skips it), and the purge first gives each plain directory
-  owner rwx so it can remove it. Every git run on an agent-touched repo goes through
-  `run_git(..., sandbox=True)`: stdout is bytes (a non-UTF-8 diff or log is scanned, not a
-  `UnicodeDecodeError`), capped at 128 MiB and 120 s, and a broken `.git`, timeout, cap or exit
-  code is a `Refuse` that names the git subcommand only; any other scan error also purges before
-  refusing. **Agent-written git config never runs**: git has no switch to ignore a repo's
-  config, so the sandbox mode never reads it. It builds a harness-written git dir (own config,
-  copy of HEAD and index, the agent's objects as alternates and its refs by symlink, data
-  only), runs with `GIT_DIR` there, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
-  `HOME` a temp dir, `--no-pager --no-textconv --no-ext-diff --ignore-submodules=all`, and
-  `-c` overrides for core.fsmonitor, core.hooksPath, diff.external, core.sshCommand, core.gitProxy,
-  core.pager, core.editor, core.askPass, core.alternateRefsCommand, core.attributesFile,
-  gpg.*.program, log.showSignature, credential.helper, protocol.ext.allow and more
-  (`GIT_HARDEN`). The few non-sandbox calls (`init`/`add`/`commit`/`rev-parse` on a repo the
-  harness just made, `worktree remove` of the noncloud worktree) use the overrides only: a
-  `filter.<name>.clean` driver or `diff.<name>.command` named by an in-tree `.gitattributes`
-  cannot be listed away, so `diff`/`status` are never run that way. Limits: unreachable git
-  objects (not on any ref, e.g. after the agent deletes a branch or `git gc`) are not in
-  `git log --all` and are not scanned; core.ignorecase/filemode of the agent's repo is not
-  mirrored in the sandbox config; the noncloud clone's own config is still read by
-  `worktree remove`.
+  in <kind>`, the walk no longer skips it), and the purge first gives each real directory
+  owner rwx so it can remove it (directory fds with O_NOFOLLOW and chmod by fd, never a path
+  string, so a symlink swapped in by a live agent cannot redirect the chmod). Every git run on
+  an agent-touched repo goes through `run_git(..., sandbox=True)`: stdout is bytes (a non-UTF-8
+  diff is scanned, not a `UnicodeDecodeError`), capped at 128 MiB and 120 s, and a broken
+  `.git`, timeout, cap or exit code is a `Refuse` that names the git subcommand only; any
+  other scan error also purges before refusing. **Agent-written git config never runs**: git
+  has no switch to ignore a repo's config, so the sandbox mode never reads it. It builds a
+  harness-written git dir (own config, copy of HEAD and index with mtime 1 so git compares
+  content, the agent's objects as alternates and its refs by symlink, data only), runs with
+  `GIT_DIR` there, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_NO_REPLACE_OBJECTS=1`, `HOME` a temp dir, `--no-pager --no-textconv --no-ext-diff
+  --ignore-submodules=all`, and `-c` overrides for core.fsmonitor, core.hooksPath,
+  diff.external, core.sshCommand, core.gitProxy, core.pager, core.editor, core.askPass,
+  core.alternateRefsCommand, core.attributesFile, gpg.*.program, log.showSignature,
+  credential.helper, protocol.ext.allow and more (`GIT_HARDEN`). The few non-sandbox calls
+  (`init`/`add`/`commit`/`rev-parse` on a repo the harness just made, and `worktree remove`,
+  run as `git -C <trusted clone> worktree remove --force <work>` so the agent-rewritable
+  `work/.git` pointer is never followed) use the overrides only: a `filter.<name>.clean` driver
+  or `diff.<name>.command` named by an in-tree `.gitattributes` cannot be listed away, so
+  `diff`/`status` are never run that way.
+  **Git history scan** (Claude arm): the harness records the object ids of the repo's object
+  store before the agent runs (`git cat-file --batch-all-objects`) and after it scans the raw
+  content (`git cat-file --batch`) of every id that is new, plus `diff HEAD`. That covers
+  merges, tags, blobs on no ref, unreachable commits and `refs/replace` (R1-R4), which
+  `log -p` hid, and only what the agent added counts against the 128 MiB cap, so the noncloud
+  stratum's large shared mirror does not trip it. **Agent processes**: the Claude agent runs in
+  its own session; when it returns (exit or timeout) the harness kills the process group, every
+  descendant it saw while the agent ran (polled every 0.5 s) and every process whose
+  environment carries the run's `P20_AGENT_TAG`, and waits until they are gone before any
+  scan or purge. Limits: a detached grandchild that cleared its environment, was reparented
+  before the harness saw it and is a macOS SIP-protected binary (whose env `ps` hides) can
+  survive and race the scan; the Pi arms are not run in a process group (their runner is the
+  benchmark's `lib_pi`), so a Pi-arm grandchild can survive too (the Pi arms never hold the
+  token); the scan walk skips an entry that vanished between listing and lstat; objects of an
+  alternates chain the agent added to its own object dir count as new and are scanned or hit the
+  cap; core.ignorecase/filemode of the agent's repo is not mirrored in the sandbox config.
+  `pythonw` is no longer matched by the interpreter probe (F117 spec: it is the windowed
+  launcher, not an interpreter the agent runs headless); on a macOS framework install a
+  `pythonw` that can import llm_router would therefore not be probed. Git and scan failures
+  (broken `.git`, timeout, cap) now abort the run with a `Refuse` instead of a `runner_error`
+  row, for every arm including Pi (via `empty_patch`).
   The opt-in smoke `--claude-call` also scans its scratch HOME and output (PASS/FAIL), to catch
   Claude Code persisting the auth value there, which would make every Claude-arm call refuse
   (not run by F115). The Pi arms and the grader never receive the token. Residual: this
