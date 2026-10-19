@@ -418,7 +418,7 @@ class SessionSummaryDashboard:
 
         # ── Right: savings summary ───────────────────────────────────────────
         def _savings_entry(usd: float, tokens: int, label: str,
-                           style: str) -> list[RenderableType]:
+                           style: str, text: str | None = None) -> list[RenderableType]:
             # Label FIRST. At this panel width a trailing label wraps to the next
             # line, and a reader then pairs it with the value below — so lifetime,
             # today and 14-day were each being read as the wrong figure. Leading
@@ -427,7 +427,9 @@ class SessionSummaryDashboard:
             tok_part = f"  {_fmt_tok(tokens)} tok" if tokens > 0 else ""
             return [Text.assemble(
                 (f"  {label:<9}", PALETTE.text_dim),
-                (f"{_fmt_usd(usd):<10}", style),
+                # F116 / D-247: a pre-rendered "verified ... . est. ..." text (own n each) replaces
+                # the single figure; the caller sets it, this never merges the two.
+                (f"{text}" if text is not None else f"{_fmt_usd(usd):<10}", style),
                 (tok_part, PALETTE.text_dim),
             )]
 
@@ -435,23 +437,23 @@ class SessionSummaryDashboard:
             Text("SAVINGS  all sessions", style=f"bold {PALETTE.success}"),
             Text(""),
             *_savings_entry(lifetime_saved, savings.get("lifetime_tokens", 0),
-                            "lifetime", PALETTE.success),
+                            "lifetime", PALETTE.success, savings.get("lifetime_text")),
             *_savings_entry(today_saved, savings.get("today_tokens", 0),
-                            "today", PALETTE.text_primary),
+                            "today", PALETTE.text_primary, savings.get("today_text")),
         ]
         # Show 14-day actuals + projections derived from rolling average
         saved_14d = savings.get("14d", 0.0)
         if saved_14d > 0:
             right_lines.extend(
                 _savings_entry(saved_14d, savings.get("14d_tokens", 0),
-                               "14-day", PALETTE.text_dim)
+                               "14-day", PALETTE.text_dim, savings.get("14d_text"))
             )
             daily_avg = saved_14d / 14
             projected_monthly = daily_avg * 30
             projected_yearly = daily_avg * 365
             right_lines.append(Text(""))
             right_lines.append(
-                Text("  projected (14-day avg)", style=PALETTE.text_dim)
+                Text("  projected (verified, 14-day avg)", style=PALETTE.text_dim)
             )
             right_lines.append(Text.assemble(
                 (f"  ~{_fmt_usd(projected_monthly):<8}", PALETTE.success),
@@ -468,7 +470,7 @@ class SessionSummaryDashboard:
                 if amount > 0:
                     right_lines.extend(
                         _savings_entry(amount, savings.get(f"{key}_tokens", 0),
-                                       label, PALETTE.text_dim)
+                                       label, PALETTE.text_dim, savings.get(f"{key}_text"))
                     )
 
         # Burn rate + projected spend

@@ -1202,7 +1202,12 @@ def main() -> None:
             from llm_router import session_report
             i = rest.index("--session")
             sid = rest[i + 1] if i + 1 < len(rest) and not rest[i + 1].startswith("--") else None
-            print(session_report.render(session_report.build(sid)), end="")
+            try:
+                text = session_report.render(session_report.build(sid))
+            except ValueError as exc:  # F116: an invalid id is refused, not rewritten
+                print(f"llm-router summary: {exc}", file=sys.stderr)
+                raise SystemExit(2) from None
+            print(text, end="")
             raise SystemExit(0)
         from llm_router.observability.summary import cli_summary
         since = 24.0

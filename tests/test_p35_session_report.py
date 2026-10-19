@@ -3,7 +3,7 @@
 Evidence: ``v16/coord/P35-PLAN.md`` (Design, Session summary; PR row P35-4a/4b) and the rv-628
 carry-forward. The fixture-home markers live in tests/test_p35_fixtures.py; this file holds the pure
 oracles (targets, offload, quota saved, recommendation), the n + window rule over the printed block, and
-the session-end child (the Stop's own line never gains the block; the hook pair is v48).
+the session-end child (the Stop's own line never gains the block; the hook pair is v49).
 """
 from __future__ import annotations
 
@@ -214,7 +214,7 @@ async def test_the_stop_line_does_not_carry_the_block(p35):  # noqa: F811
 
 def test_the_hook_pair_is_byte_identical_at_current_version():
     a, b = (ROOT / "hooks" / "session-end.py").read_bytes(), HOOK.read_bytes()
-    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 48"
+    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 49"
 
 
 @pytest.mark.parametrize("bad", [None, []])
@@ -258,20 +258,35 @@ def test_today_compact_with_no_savings_is_a_zero_estimate_with_n_zero():
     assert mod._today_compact(z) == "~$0.00 est. saved (n=0, today)"
 
 
-def test_session_id_is_sanitised_before_it_is_printed():
+def test_session_id_is_refused_when_invalid_never_rewritten():
+    """F116: a bad id is refused (ValueError), not mapped to '_': 'abc def' must not name 'abc_def'."""
     from llm_router import session_report as sr
 
     assert sr.sanitize_session_id("ab-1.2_x") == "ab-1.2_x"
-    assert sr.sanitize_session_id("a\x1b[31mb\n") == "a__31mb_"
     assert sr.sanitize_session_id(None) is None
+    for bad in ("a\x1b[31mb\n", "abc def", "", "a/b"):
+        with pytest.raises(ValueError):
+            sr.sanitize_session_id(bad)
+    with pytest.raises(ValueError):          # an empty id never falls back to the current session
+        sr.build("")
 
 
-async def test_unknown_session_id_is_one_line_with_no_escape_byte(p35):  # noqa: F811
+@pytest.mark.parametrize("bad", ["nope\x1b[31m", "abc def", ""])
+async def test_invalid_session_id_is_refused_exit_2(p35, bad):  # noqa: F811
     env = {**p35.env, "LLM_ROUTER_DB_PATH": str(p35.db), "LLM_ROUTER_NO_DETACHED_SPAWN": "1"}
-    r = subprocess.run([sys.executable, "-m", "llm_router.cli", "summary", "--session", "nope\x1b[31m"],
+    r = subprocess.run([sys.executable, "-m", "llm_router.cli", "summary", "--session", bad],
+                       env=env, capture_output=True, text=True, timeout=120, cwd=ROOT)
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout == ""
+    assert "invalid session id" in r.stderr and "\x1b" not in r.stderr
+
+
+async def test_unknown_valid_session_id_is_one_line(p35):  # noqa: F811
+    env = {**p35.env, "LLM_ROUTER_DB_PATH": str(p35.db), "LLM_ROUTER_NO_DETACHED_SPAWN": "1"}
+    r = subprocess.run([sys.executable, "-m", "llm_router.cli", "summary", "--session", "nope-1"],
                        env=env, capture_output=True, text=True, timeout=120, cwd=ROOT)
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "no rows for session nope__31m\n", repr(r.stdout)
+    assert r.stdout == "no rows for session nope-1\n", repr(r.stdout)
 
 
 def test_targets_line_is_na_at_zero_actions():

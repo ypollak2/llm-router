@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 48
+# llm_router-hook-version: 49
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -619,23 +619,30 @@ def _query_cumulative_savings(window_totals: dict | None = None) -> list[tuple[s
     absent from it is queried here. The Stop does NOT call this: it renders the
     child's cache (``_ledger_cumulative``).
     """
+    return [(label, t.calls, t.tokens, 0, t.saved_usd) for label, t in _cumulative_totals(window_totals)]
+
+
+_CUMULATIVE_WINDOWS = {
+    "today":      "today",
+    "this week":  "week",
+    "14 days":    "14d",
+    "this month": "month",
+    "all time":   "lifetime",
+}
+
+
+def _cumulative_totals(window_totals: dict | None = None) -> list[tuple[str, object]]:
+    """[(period label, WindowTotals)] for every period in ``_PERIODS`` that has a window.
+    A window that cannot be read is left out (never zero-filled)."""
     if not os.path.exists(_db_path()):
         return []
     try:
         from llm_router.dashboard_data import query_window
     except Exception:
         return []
-
-    label_to_window = {
-        "today":      "today",
-        "this week":  "week",
-        "14 days":    "14d",
-        "this month": "month",
-        "all time":   "lifetime",
-    }
-    results: list[tuple[str, int, int, int, float]] = []
+    results: list[tuple[str, object]] = []
     for label, _legacy_where in _PERIODS:
-        window = label_to_window.get(label)
+        window = _CUMULATIVE_WINDOWS.get(label)
         if window is None:
             continue
         try:
@@ -644,8 +651,30 @@ def _query_cumulative_savings(window_totals: dict | None = None) -> list[tuple[s
                 totals = query_window(window, db_path=_db_path())
         except Exception:
             continue
-        results.append((label, totals.calls, totals.tokens, 0, totals.saved_usd))
+        results.append((label, totals))
     return results
+
+
+def _query_cumulative_split(window_totals: dict | None = None) -> dict[str, list]:
+    """F116 / D-247: {period label: [verified_usd, verified_n, est_usd, est_n]} -- the verified
+    and the estimated saving of each period, each with its OWN n, never one merged figure.
+    A period the ledger could not read is absent (renders ``n/a``, never $0)."""
+    out: dict[str, list] = {}
+    for label, t in _cumulative_totals(window_totals):
+        out[label] = [t.saved_usd, t.verified_calls, t.unverified_saved_usd, t.unverified_calls]
+    return out
+
+
+def _split_text(split: list | tuple | None) -> str:
+    """``$2.00 verified (n=2) · ~$5.00 est. (n=4)``; a side the ledger could not give prints
+    ``n/a`` (``verified n/a`` / ``est. n/a``) -- never the merged sum, never $0 for unknown."""
+    def _num(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    ok = isinstance(split, (list, tuple)) and len(split) == 4
+    ver = f"${split[0]:,.2f} verified (n={int(split[1]):,})" if ok and _num(split[0]) and _num(split[1]) else "verified n/a"
+    est = f"~${split[2]:,.2f} est. (n={int(split[3]):,})" if ok and _num(split[2]) and _num(split[3]) else "est. n/a"
+    return f"{ver} · {est}"
 
 
 def _split_unclassified(paid_rows: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -675,7 +704,11 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
         model   = r.get("model", "?")
         in_tok  = r.get("input_tokens")  or 0
         out_tok = r.get("output_tokens") or 0
-        cost    = r.get("cost_usd")      or 0.0
+        # F116: a row with no recorded cost is UNKNOWN, not $0. It adds nothing to "cost" (the sum
+        # of the recorded costs) and is not counted in "cost_n" / "cost_in" / "cost_out", the
+        # n and tokens behind that sum, so every consumer can say "k of n" and keep the unknown out of %.
+        cost_known = r.get("cost_usd") is not None
+        cost    = float(r["cost_usd"]) if cost_known else 0.0
         # Skip test/mock model rows entirely — they should never be in production
         # data, but if they leak through, exclude from user-facing reports.
         if _is_test_model(model):
@@ -683,6 +716,7 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
         if tool not in tools:
             tools[tool] = {"count": 0, "in": 0, "out": 0, "cost": 0.0,
                            "models": {}, "model_totals": {},
+                           "cost_n": 0, "cost_in": 0, "cost_out": 0,
                            "realized_count": 0, "realized_in": 0,
                            "realized_out": 0, "realized_cost": 0.0,
                            "unmeasured_count": 0}
@@ -690,6 +724,10 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
         tools[tool]["in"]     += in_tok
         tools[tool]["out"]    += out_tok
         tools[tool]["cost"]   += cost
+        if cost_known:
+            tools[tool]["cost_n"]   += 1
+            tools[tool]["cost_in"]  += in_tok
+            tools[tool]["cost_out"] += out_tok
         tools[tool]["models"][model] = tools[tool]["models"].get(model, 0) + 1
         # Per-MODEL totals, accumulated from the row that actually carries them.
         # `in`/`out`/`cost` above are the TOOL's totals. The MODELS panel used to
@@ -698,12 +736,13 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
         # equal to the tool's row count. Keeping the real per-model sums here means
         # no consumer has to reconstruct what was never recoverable.
         mt = tools[tool]["model_totals"].setdefault(
-            model, {"calls": 0, "in": 0, "out": 0, "cost": 0.0}
+            model, {"calls": 0, "in": 0, "out": 0, "cost": 0.0, "cost_n": 0}
         )
         mt["calls"] += 1
         mt["in"]    += in_tok
         mt["out"]   += out_tok
         mt["cost"]  += cost
+        mt["cost_n"] += 1 if cost_known else 0
 
         # Point 6/13 — "realized" means the writer observed this row's routed
         # answer REPLACE Claude's turn: hooks/savings_logger.py's
@@ -731,6 +770,18 @@ def _aggregate(rows: list[dict]) -> dict[str, dict]:
 def _host_baseline(in_tok: int, out_tok: int) -> float:
     """What Opus would charge for the same token volume (matches receipt_store)."""
     return (in_tok * HOST_INPUT_PER_M + out_tok * HOST_OUTPUT_PER_M) / 1_000_000
+
+
+def _recorded_cost(tools: dict[str, dict]) -> tuple[float, int, int, int]:
+    """F116: (recorded cost, rows with a cost, their input tokens, their output tokens) -- the cost
+    side of the Routing panel. A row with no recorded cost is unknown, never $0, and its tokens stay
+    out of the baseline the % saved is taken against."""
+    return (
+        sum(t["cost"] for t in tools.values()),
+        sum(t.get("cost_n", t["count"]) for t in tools.values()),
+        sum(t.get("cost_in", t["in"]) for t in tools.values()),
+        sum(t.get("cost_out", t["out"]) for t in tools.values()),
+    )
 
 
 def _load_config_for_subscription():
@@ -872,6 +923,13 @@ def _format_cc_model_section(cc_rows: list[dict]) -> list[str]:
     return lines
 
 
+def _pct_basis(pct: int, known: bool, k: int, n: int) -> str:
+    """``42%`` / ``42% (k of n costed)`` / ``n/a`` -- the % of baseline over the rows with a cost."""
+    if not known:
+        return "n/a"
+    return f"{pct}%" if k >= n else f"{pct}% ({k} of {n} costed)"
+
+
 def _format_routing_section(
     tools: dict[str, dict], *, subscription: bool | None = None,
     unclassified: list[dict] | None = None,
@@ -887,11 +945,19 @@ def _format_routing_section(
     """
     if subscription is None:
         subscription = _is_subscription_mode()
+    if not tools:
+        # F116: a session with only unclassified rows still gets its unclassified line.
+        return [
+            f"    {_C_MUTED}(unclassified n={len(unclassified)}, {_unclassified_cost(unclassified)}; "
+            f"no classified calls){_RESET}"
+        ] if unclassified else []
     total_calls = sum(t["count"] for t in tools.values())
     total_in    = sum(t["in"]    for t in tools.values())
     total_out   = sum(t["out"]   for t in tools.values())
-    total_cost  = sum(t["cost"]  for t in tools.values())
-    total_base  = _host_baseline(total_in, total_out)
+    # F116: cost/baseline/% saved are taken over the rows that recorded a cost (k of n); a row with
+    # no cost_usd is unknown, not $0, and does not enter them.
+    total_cost, cost_k, cost_in, cost_out = _recorded_cost(tools)
+    total_base  = _host_baseline(cost_in, cost_out)
     # AUD-06 / WP-04: NO max(0.0, ...) here. Routing can cost more than the
     # baseline -- overhead, an escalated cheap attempt, a paid provider on a
     # prompt the subscription covered -- and when it does the honest figure is
@@ -900,6 +966,8 @@ def _format_routing_section(
     # and compute_receipt reported the loss correctly all along.
     total_saved = total_base - total_cost
     savings_pct = round(total_saved / total_base * 100) if total_base > 0 else 0
+    cost_known = cost_k > 0
+    partial = cost_known and cost_k < total_calls
     total_tokens = total_in + total_out
 
     # Format token count (human-readable)
@@ -946,7 +1014,7 @@ def _format_routing_section(
             f"    {_C_WHITE}{total_calls}{_RESET} calls  "
             f"{tokens_str} tokens  "
             f"{pct_color}{realized_tokens_str} quota preserved{_RESET}  "
-            f"{_C_MUTED}({savings_pct}% of baseline, {provenance}){_RESET}  "
+            f"{_C_MUTED}({_pct_basis(savings_pct, cost_known, cost_k, total_calls)} of baseline, {provenance}){_RESET}  "
             f"{_C_MUTED}this session{_RESET}{unmeasured_note}",
         ]
     else:
@@ -955,10 +1023,13 @@ def _format_routing_section(
         # session -- technically honest, operationally unreadable, and a number
         # that shape invites someone to "fix" it by restoring the clamp. The
         # magnitude of a loss is what the user can act on; the ratio is not.
-        if total_saved < 0:
+        costed_note = f", {cost_k} of {total_calls} costed" if partial else ""
+        if not cost_known:
+            figure = f"{_C_MUTED}% saved n/a (no cost recorded){_RESET}"
+        elif total_saved < 0:
             figure = (
                 f"{_C_ORANGE}${abs(total_saved):.4f} overspent{_RESET} "
-                f"{_C_MUTED}(gross, {provenance}){_RESET}"
+                f"{_C_MUTED}(gross, {provenance}{costed_note}){_RESET}"
             )
         else:
             # D9: this is baseline-avoided GROSS of routing overhead — qualify it so
@@ -966,13 +1037,20 @@ def _format_routing_section(
             # "% saved" is kept contiguous (the savings-clamp test relies on it).
             figure = (
                 f"{pct_color}{savings_pct}% saved{_RESET} "
-                f"{_C_MUTED}(gross, {provenance}){_RESET}"
+                f"{_C_MUTED}(gross, {provenance}{costed_note}){_RESET}"
             )
+        if not cost_known:
+            cost_txt, base_txt = "actual cost n/a", "baseline n/a"
+        elif partial:
+            cost_txt = f"${total_cost:.4f} actual recorded ({cost_k} of {total_calls})"
+            base_txt = f"${total_base:.4f} baseline (same {cost_k})"
+        else:
+            cost_txt, base_txt = f"${total_cost:.4f} actual", f"${total_base:.4f} baseline"
         lines = [
             f"    {_C_WHITE}{total_calls}{_RESET} calls  "
             f"{tokens_str} tokens  "
-            f"${total_cost:.4f} actual  "
-            f"${total_base:.4f} baseline  "
+            f"{cost_txt}  "
+            f"{base_txt}  "
             f"{figure}  "
             # D5: explicit window so this panel isn't read as comparable to the
             # (today) provider panels or the lifetime cumulative panel beside it.
@@ -1000,19 +1078,27 @@ def _format_routing_section(
         else:
             tool_tokens_str = str(tool_tokens)
 
-        cost_color = _C_GREEN if d["cost"] == 0 else _C_LABEL
+        tool_k = d.get("cost_n", d["count"])
+        if tool_k == 0:
+            tool_cost = "cost n/a"
+        elif tool_k < d["count"]:
+            tool_cost = f"${d['cost']:.4f} ({tool_k} of {d['count']})"
+        else:
+            tool_cost = f"${d['cost']:.4f}"
+        cost_color = _C_GREEN if tool_k and d["cost"] == 0 else _C_LABEL
         lines.append(
             # chz-surface-ok: HISTORICAL report of tools that were actually called;
             # renaming them would misreport what happened.
             f"    {_C_LABEL}{tool:<12}{_RESET}  {d['count']:>3}×  "
-            f"{tool_tokens_str:>6}  {model_short:<20}  {cost_color}${d['cost']:.4f}{_RESET}"
+            f"{tool_tokens_str:>6}  {model_short:<20}  {cost_color}{tool_cost}{_RESET}"
         )
     return lines
 
 
 def _total_saved(tools: dict[str, dict]) -> float:
-    total_in   = sum(t["in"]   for t in tools.values())
-    total_out  = sum(t["out"]  for t in tools.values())
+    # F116: over the rows that recorded a cost (a row with none is unknown, not $0).
+    total_in   = sum(t.get("cost_in", t["in"])   for t in tools.values())
+    total_out  = sum(t.get("cost_out", t["out"]) for t in tools.values())
     total_cost = sum(t["cost"] for t in tools.values())
     baseline   = _host_baseline(total_in, total_out)
     # Unclamped (AUD-06): other surfaces consume this, so clamping here would
@@ -1043,21 +1129,37 @@ def _net_session_line(free_rows: list[dict], paid_rows: list[dict]) -> str | Non
             f"  {_BOLD}Net saved{_RESET}      {_C_MUTED}n/a  (no classified session calls"
             f"{uc_frag}){_RESET}"
         )
+    # F116: a paid row with no recorded cost is UNKNOWN, not $0: it stays out of actual, the baseline
+    # and net (same rows on both sides), and the line says "k of n". Free rows cost nothing by definition.
+    paid_known = [r for r in paid_only if r.get("cost_usd") is not None]
+    missing = len(paid_only) - len(paid_known)
+    rows = list(free_rows) + paid_known
+    if not rows:
+        return (
+            f"  {_BOLD}Net saved{_RESET}      {_C_MUTED}n/a  (cost not recorded for {missing} paid "
+            f"call{'s' if missing != 1 else ''}{uc_frag}){_RESET}"
+        )
     total_in  = sum(int(r.get("input_tokens")  or 0) for r in rows)
     total_out = sum(int(r.get("output_tokens") or 0) for r in rows)
     baseline  = _host_baseline(total_in, total_out)
-    actual    = sum(float(r.get("cost_usd") or 0.0) for r in paid_only)
+    actual    = sum(float(r["cost_usd"]) for r in paid_known)
     net       = baseline - actual
-    paid_txt  = f"${actual:.4f} paid" if paid_only else "no paid calls"
+    if not paid_only:
+        paid_txt = "no paid calls"
+    elif missing:
+        paid_txt = f"${actual:.4f} paid recorded ({len(paid_known)} of {len(paid_only)} paid calls)"
+    else:
+        paid_txt = f"${actual:.4f} paid"
+    n_txt = f"n={len(rows)} session calls" + (f", {missing} paid without cost not counted" if missing else "")
     if net >= 0:
         return (
             f"  {_BOLD}Net saved{_RESET}      {_C_GREEN}${net:.4f}{_RESET}  "
-            f"{_C_MUTED}(${baseline:.4f} baseline − {paid_txt}, n={len(rows)} session calls{uc_frag}){_RESET}"
+            f"{_C_MUTED}(${baseline:.4f} baseline − {paid_txt}, {n_txt}{uc_frag}){_RESET}"
         )
     return (
         f"  {_BOLD}{_C_ORANGE}⚠ NET LOSS{_RESET}     {_C_ORANGE}-${abs(net):.4f}{_RESET}  "
-        f"{_C_MUTED}(${actual:.4f} paid exceeds ${baseline:.4f} baseline — wasteful paid routing, "
-        f"n={len(rows)} session calls{uc_frag}){_RESET}"
+        f"{_C_MUTED}({paid_txt} exceeds ${baseline:.4f} baseline — wasteful paid routing, "
+        f"{n_txt}{uc_frag}){_RESET}"
     )
 
 
@@ -1461,49 +1563,44 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
     if not periods or all(p[1] == 0 for p in periods):
         return []
 
-    period_map = {label: (calls, ti, to, saved) for label, calls, ti, to, saved in periods}
-    all_time = period_map.get("all time", (0, 0, 0, 0.0))
-    today_d = period_map.get("today", (0, 0, 0, 0.0))
-    month_d = period_map.get("this month", (0, 0, 0, 0.0))
-
-    lifetime_saved = all_time[3]
-    # Savings are MODELLED against a counterfactual baseline, not measured, so they
-    # carry the tilde here exactly as render_money() gives them on the status line.
-    # Without it this panel was the last surface asserting a soft number with a hard
-    # face — and because the Stop line EXTRACTS its figure from this text rather than
-    # recomputing it, the bare "$8.97" printed here was the reason the two surfaces
-    # disagreed about the same quantity.
-    saved_hero = f"~${lifetime_saved:.2f}" if lifetime_saved >= 1.0 else f"~${lifetime_saved:.4f}"
-    today_s = f"~${today_d[3]:.2f}" if today_d[3] >= 1.0 else f"~${today_d[3]:.4f}"
+    # F116 / D-247: the verified and the estimated saving are never one figure. Each period
+    # prints both, with its own n; a period the ledger cannot split prints n/a.
+    split = _ledger_cumulative_split()
 
     lines: list[str] = [
         f"  {_BOLD}Savings{_RESET}",
         "",
-        f"    {_C_GREEN}{_BOLD}{saved_hero}{_RESET}  lifetime"
-        f"    {_C_WHITE}{today_s}{_RESET}  today",
+        f"    {_C_GREEN}{_BOLD}lifetime{_RESET}  {_split_text(split.get('all time'))}",
+        f"    {_C_WHITE}today{_RESET}     {_split_text(split.get('today'))}",
         "",
     ]
 
-    # Period grid — vertical for readability
-    for label, calls, _ti, _to, saved in periods:
-        s = f"~${saved:.2f}" if saved >= 1.0 else f"~${saved:.4f}"
+    # Period grid -- vertical for readability
+    for label, calls, _ti, _to, _saved in periods:
         call_str = f"{calls:,}" if calls >= 1000 else str(calls)
         short_label = {"today": "today", "this week": "week", "this month": "month", "all time": "all"}.get(label, label)
         lines.append(
             f"    {short_label:<6}"
-            f"  {_C_WHITE}{s:>8}{_RESET}"
-            f"  {call_str:>6}"
+            f"  {call_str:>6} calls"
+            f"  {_C_WHITE}{_split_text(split.get(label))}{_RESET}"
         )
 
     # Yearly projection — prefer 14-day rolling average for stability
     from datetime import datetime as _dt
     days_this_month = max(1, _dt.now().day)
-    data_14d = period_map.get("14 days", (0, 0, 0, 0.0))
-    month_saved = month_d[3]
-    weekly_data = period_map.get("this week", (0, 0, 0, 0.0))
-    weekly_saved = weekly_data[3]
-    today_saved = today_d[3]
-    saved_14d = data_14d[3]
+    period_map = {label: (calls, ti, to) for label, calls, ti, to, _saved in periods}
+
+    def _ver(label: str) -> float:
+        # The projection extrapolates the VERIFIED saving only (never est. + verified);
+        # a period without a ledger split contributes nothing (unknown, not $0 projected).
+        sp = split.get(label)
+        return float(sp[0]) if isinstance(sp, (list, tuple)) and len(sp) == 4 and isinstance(sp[0], (int, float)) else 0.0
+
+    zero = (0, 0, 0)
+    data_14d, month_d = period_map.get("14 days", zero), period_map.get("this month", zero)
+    weekly_data, today_d = period_map.get("this week", zero), period_map.get("today", zero)
+    month_saved, weekly_saved = _ver("this month"), _ver("this week")
+    today_saved, saved_14d = _ver("today"), _ver("14 days")
     tok_14d = data_14d[1] + data_14d[2]
     month_tok = month_d[1] + month_d[2]
     weekly_tok = weekly_data[1] + weekly_data[2]
@@ -1521,7 +1618,7 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
         proj_mo = rate_usd * 30
         proj_yr = rate_usd * 365
         lines.append(
-            f"    ≈ ${proj_mo:.2f}/mo · ${proj_yr:.0f}/yr · {_fmt_tok(int(rate_tok * 365))} tok/yr  {_C_MUTED}({basis}){_RESET}"
+            f"    ≈ ${proj_mo:.2f}/mo · ${proj_yr:.0f}/yr · {_fmt_tok(int(rate_tok * 365))} tok/yr  {_C_MUTED}(verified, {basis}){_RESET}"
         )
 
     # 14-day sparkline
@@ -1539,7 +1636,7 @@ def _format_cumulative_section(periods: list[tuple[str, int, int, int, float]]) 
         lines.append(
             f"    {_C_WHITE}{total_calls}{_RESET} calls · "
             f"{_C_WHITE}{_fmt_tok(total_tokens)}{_RESET} tok · "
-            f"{_C_GREEN}{saved_14}{_RESET} saved · "
+            f"{_C_GREEN}{saved_14}{_RESET} verified saved · "
             f"avg {_C_WHITE}{avg_calls}{_RESET}/day"
         )
 
@@ -1803,10 +1900,11 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     session_lines: list[str] = []
     if free_rows:
         session_lines += _format_free_section(free_rows, paid_rows)
-    if tools:
+    _unc_rows = _split_unclassified(paid_rows)[1]
+    if tools or _unc_rows:
         if session_lines:
             session_lines.append("")
-        session_lines += _format_routing_section(tools, unclassified=_split_unclassified(paid_rows)[1])
+        session_lines += _format_routing_section(tools, unclassified=_unc_rows)
     if session_start is not None:
         complexity_lines = _format_complexity_breakdown(session_start)
         if complexity_lines:
@@ -2105,9 +2203,9 @@ def _condense(summary: str) -> str:
             for label, window in (("today", "today"), ("lifetime", "lifetime")):
                 compact = _ledger_compact(window)
                 if compact:
-                    # The cached today figure ends "(n=N, today)": the label leads, so the
-                    # window is not said twice.
-                    bits.append(f"{label} {compact.replace(f', {label})', ')')}")
+                    # The cached today figure ends "(n=N, today)" (or "n/a (today)"): the label
+                    # leads, so the window is not said twice.
+                    bits.append(f"{label} {compact.replace(f', {label})', ')').replace(f' ({label})', '')}")
         except Exception:
             pass
 
@@ -2459,6 +2557,7 @@ def _compute_ledger_aggregates() -> dict:
             continue
     try:
         out["cumulative"] = [list(r) for r in _query_cumulative_savings(totals)]
+        out["cumulative_split"] = _query_cumulative_split(totals)
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -2620,6 +2719,18 @@ def _ledger_cumulative() -> list[tuple[str, int, int, int, float]]:
     if _STOP_LEDGER is _LEDGER_LIVE:
         return _query_cumulative_savings()
     return _cached_rows("cumulative", 5)
+
+
+def _ledger_cumulative_split() -> dict[str, list]:
+    """F116: {period label: [verified_usd, verified_n, est_usd, est_n]}; ``{}`` when the ledger
+    (or an older cache) has no split -- the renderers then print ``n/a``, never a merged sum."""
+    if _STOP_LEDGER is _LEDGER_LIVE:
+        return _query_cumulative_split()
+    try:
+        d = _STOP_LEDGER.get("cumulative_split")  # type: ignore[union-attr]
+        return d if isinstance(d, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
 
 
 def _daily_14d_for_render() -> list[tuple[str, int, int, float, int]]:
@@ -2870,23 +2981,20 @@ def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
 
         failopen.record("CHZ-FO-STOP-EXECUTED-ROUTES", _exc)
 
+    # F116 / D-247: each window carries its verified and estimated saving as separate text
+    # ("<key>_text"); the numeric key is set only when the ledger split is known, and then to the
+    # VERIFIED figure alone (never the est. + verified sum). Unknown stays absent, so it prints n/a.
     dashboard_savings = {}
-    for label, calls, total_tokens, _, saved_usd in cumulative:
-        if label == "today":
-            dashboard_savings["today"] = saved_usd
-            dashboard_savings["today_tokens"] = total_tokens
-        elif label == "this week":
-            dashboard_savings["week"] = saved_usd
-            dashboard_savings["week_tokens"] = total_tokens
-        elif label == "14 days":
-            dashboard_savings["14d"] = saved_usd
-            dashboard_savings["14d_tokens"] = total_tokens
-        elif label == "this month":
-            dashboard_savings["month"] = saved_usd
-            dashboard_savings["month_tokens"] = total_tokens
-        elif label == "all time":
-            dashboard_savings["lifetime"] = saved_usd
-            dashboard_savings["lifetime_tokens"] = total_tokens
+    _split = _ledger_cumulative_split()
+    for label, calls, total_tokens, _, _saved_usd in cumulative:
+        key = {"today": "today", "this week": "week", "14 days": "14d",
+               "this month": "month", "all time": "lifetime"}.get(label)
+        if key is None:
+            continue
+        dashboard_savings[f"{key}_text"] = _split_text(_split.get(label))
+        dashboard_savings[f"{key}_tokens"] = total_tokens
+        if label in _split:
+            dashboard_savings[key] = _split[label][0]
 
     # Redirect to StringIO so Rich doesn't pollute stdout.
     # Console(record=True) without file= defaults to sys.stdout AND records;
@@ -2962,9 +3070,9 @@ def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
     # the llm_savings weekly bucket by the lifetime/weekly ratio
     # (RETROSPECTIVE B-6). Value and label must name the same window.
     if not claude_remaining or claude_remaining == "Unknown":
-        weekly_saved = sum(d[4] for d in cumulative if d[0] == "this week")
-        if weekly_saved > 0:
-            claude_remaining = f"~{weekly_saved:.2f} USD saved this week"
+        _wk = _ledger_cumulative_split().get("this week")
+        if _wk and (_wk[0] or _wk[1] or _wk[2] or _wk[3]):
+            claude_remaining = f"saved this week: {_split_text(_wk)}"
 
     gemini_remaining = "Unknown"
 

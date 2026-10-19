@@ -231,10 +231,17 @@ _SID_BAD = re.compile(r"[^A-Za-z0-9._-]")
 
 
 def sanitize_session_id(sid: str | None) -> str | None:
-    """F114: a session id is printed back (``no rows for session X``, the label), so only
-    ``[A-Za-z0-9._-]`` survives; anything else (an ESC, a newline) becomes ``_`` and the id then
-    matches no row. Never empties an id, so a bad one cannot fall back to the current session."""
-    return None if sid is None else _SID_BAD.sub("_", sid)
+    """F116: a session id is printed back (``no rows for session X``, the label), so it must be
+    ``[A-Za-z0-9._-]+``. ``None`` means "no id given" (the caller reads the current session).
+    Anything else -- the empty string, a space, an ESC, a newline -- raises ``ValueError``:
+    it is refused, never rewritten (F114 mapped bad characters to ``_``, so ``abc def`` and
+    ``abc_def`` named the same session), and an empty ``--session ""`` never falls back to the
+    current session."""
+    if sid is None:
+        return None
+    if not sid or _SID_BAD.search(sid):
+        raise ValueError(f"invalid session id {sid!r}: use only letters, digits, '.', '_' and '-'")
+    return sid
 
 
 def _has_rows(bounds: lv.Bounds, actions: list[dict] | None, proxy_rows: list[dict] | None) -> bool:
@@ -251,7 +258,7 @@ def _has_rows(bounds: lv.Bounds, actions: list[dict] | None, proxy_rows: list[di
 
 def _bounds(session_id: str | None, scope: str, now: float) -> lv.Bounds:
     if scope == "session":
-        sid = sanitize_session_id(session_id or lv.read_session_id())
+        sid = sanitize_session_id(session_id if session_id is not None else lv.read_session_id())
         return lv.session_scope(session_id=sid, session_start=lv.read_session_start(), now=now)
     return lv.resolve(scope, now=now)
 
