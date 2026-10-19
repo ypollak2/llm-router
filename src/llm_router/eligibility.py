@@ -34,7 +34,8 @@ States:
             so a supplied gap of 3.0000000000000004 (float noise) is still 3.
   failed    n >= 60 and the rule does not hold.
 
-Not wired into routing; nothing here reads or writes ``local_eligibility.json``.
+Nothing here reads or writes ``local_eligibility.json``. ``eligibility_routing`` (F106) re-checks a
+stored lane with ``grade`` before the router acts on it.
 """
 from __future__ import annotations
 
