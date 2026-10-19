@@ -28,6 +28,8 @@ SPEC.loader.exec_module(h)
 
 
 DRAIN_SECONDS = 30.0   # how long to wait for the agent's pipes after the stop
+MAX_CAPTURE_BYTES = 64 << 20   # F122: per stream, the last N bytes are kept (a survivor can flood)
+PURGE_SECONDS = 120.0  # F122: time budget of one purge; deeper chains are reported, not awaited
 
 
 def run_agent_process(argv, *, input=None, text=True, capture_output=True, timeout=900,
@@ -49,6 +51,7 @@ def run_agent_process(argv, *, input=None, text=True, capture_output=True, timeo
     pending = (input.encode() if isinstance(input, str) else input) or b""
     sent = 0
     bufs = {proc.stdout: [], proc.stderr: []}
+    sizes = {proc.stdout: 0, proc.stderr: 0}
     readers = {proc.stdout, proc.stderr}
     sel = selectors.DefaultSelector()
 
@@ -84,6 +87,14 @@ def run_agent_process(argv, *, input=None, text=True, capture_output=True, timeo
                 chunk = b""
             if chunk:
                 bufs[f].append(chunk)
+                sizes[f] += len(chunk)
+                while sizes[f] > MAX_CAPTURE_BYTES and bufs[f]:  # keep the last N bytes
+                    over = sizes[f] - MAX_CAPTURE_BYTES
+                    if len(bufs[f][0]) <= over:
+                        sizes[f] -= len(bufs[f].pop(0))
+                    else:
+                        bufs[f][0] = bufs[f][0][over:]
+                        sizes[f] -= over
             else:
                 sel.unregister(f)
                 readers.discard(f)
@@ -206,9 +217,21 @@ def _text(value):
     return value or ""
 
 
+class PurgeBudgetExceeded(Exception):
+    """F122: the purge ran past PURGE_SECONDS; what is left is reported, not awaited."""
+
+
+# why the last purge_inside returned False because of the time budget (refusal text only)
+purge_note = ""
+
+
 def purge_inside(run_dir, *paths):
     """Delete each path only if it lies strictly inside the run dir the harness created.
-    Returns False if something could not be removed (the caller then says so)."""
+    Returns False if something could not be removed (the caller then says so). The whole call
+    has a PURGE_SECONDS budget; running out sets `purge_note` and returns False."""
+    global purge_note
+    purge_note = ""
+    deadline = time.monotonic() + PURGE_SECONDS
     root = Path(run_dir).resolve()
     complete = True
     for path in paths:
@@ -217,7 +240,12 @@ def purge_inside(run_dir, *paths):
             continue
         real = target.resolve()
         if real != root and root in real.parents:
-            complete = _delete_tree(root, real) and complete
+            try:
+                complete = _delete_tree(root, real, deadline) and complete
+            except PurgeBudgetExceeded:
+                purge_note = (f"the purge stopped after its {PURGE_SECONDS:.0f} s budget "
+                              "(directory chain too deep); the rest is still on disk")
+                return False
     return complete
 
 
@@ -263,12 +291,14 @@ def _open_dir(parent_fd, name):
         return None
 
 
-def _walk_tree(root_fd, delete):
+def _walk_tree(root_fd, delete, deadline=None):
     """F117: owner-rwx every real directory below `root_fd` (and, if `delete`, remove all of
     it but `root_fd` itself), iteratively and holding ONE directory fd at a time, so a deep
     chain neither recurses nor runs out of descriptors. Moves down by name with O_NOFOLLOW and
     up through `..`, checking the parent's (dev, ino) against the one recorded on the way down.
-    Never follows a symlink. Returns False if anything could not be opened, changed or removed."""
+    Never follows a symlink and never leaves the filesystem of `root_fd` (st_dev). Raises
+    PurgeBudgetExceeded past `deadline` (a time.monotonic value). Returns False if anything
+    could not be opened, changed or removed."""
     ok = True
 
     def enter(fd):
@@ -287,7 +317,10 @@ def _walk_tree(root_fd, delete):
     cur = os.dup(root_fd)
     try:
         frames = [[ident(cur), None, enter(cur)]]  # [identity, name in parent, names left]
+        root_dev = frames[0][0][0]
         while frames:
+            if deadline is not None and time.monotonic() > deadline:
+                raise PurgeBudgetExceeded
             if frames[-1][2]:
                 name = frames[-1][2].pop()
                 try:
@@ -295,6 +328,9 @@ def _walk_tree(root_fd, delete):
                 except OSError:
                     continue
                 if stat.S_ISDIR(info.st_mode):
+                    if info.st_dev != root_dev:  # a mount point: leave it alone
+                        ok = False
+                        continue
                     child = _open_dir(cur, name)
                     if child is None:
                         ok = False
@@ -333,7 +369,7 @@ def _walk_tree(root_fd, delete):
     return ok
 
 
-def _delete_tree(root, target):
+def _delete_tree(root, target, deadline=None):
     """Remove `target` (a path strictly inside `root`) through directory fds, never following a
     symlink and unlocking chmod 000 directories. Returns True only if nothing is left."""
     try:
@@ -352,7 +388,7 @@ def _delete_tree(root, target):
         if child is None:
             return False
         try:
-            ok = _walk_tree(child, True)
+            ok = _walk_tree(child, True, deadline)
         finally:
             os.close(child)
         os.rmdir(parts[-1], dir_fd=fd)
@@ -384,7 +420,8 @@ def scrub_claude_artifacts(token, work, home, output, run_dir, baseline=None):
         done = purge_inside(run_dir, work, home)
         raise h.Refuse(
             f"{exc}; work and agent_home copies were "
-            f"{'deleted' if done else 'NOT fully deleted'} if inside the run dir, "
+            f"{'deleted' if done else 'NOT fully deleted'} if inside the run dir"
+            f"{' (' + purge_note + ')' if purge_note else ''}, "
             f"but the run dir {run_dir} may still hold the token (agent output, ledgers): "
             "purge it, and rotate the token (claude setup-token)"
         ) from None

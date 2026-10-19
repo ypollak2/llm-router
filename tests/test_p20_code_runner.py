@@ -699,6 +699,90 @@ def test_open_permissions_never_chmods_through_a_swapped_symlink(setup, tmp_path
     assert not (cfg.run_dir / "w2").exists()
 
 
+def test_walk_tree_parent_identity_stops_a_rename_out_race(setup, tmp_path, monkeypatch):
+    """F122: a subdirectory renamed out of the root while the walker listed it makes `..`
+    resolve outside the root; without the (dev, ino) check the walker deleted outside/c."""
+    cfg = setup[0]
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "c").write_text("PRECIOUS")
+    base = cfg.run_dir / "w"
+    (base / "b").mkdir(parents=True)
+    (base / "b" / "leaf").write_text("x")
+    (base / "c").write_text("y")
+    real_listdir = os.listdir
+    moved = []
+
+    def listdir_then_rename(fd):
+        names = real_listdir(fd)
+        if sorted(names) == ["b", "c"]:
+            return ["c", "b"]  # b is handled first, c afterwards
+        if names == ["leaf"] and not moved:
+            moved.append(1)
+            os.rename(base / "b", outside / "b")  # the agent moves b out after the listing
+        return names
+
+    monkeypatch.setattr(os, "listdir", listdir_then_rename)
+    assert r._delete_tree(cfg.run_dir, base) is False
+    monkeypatch.undo()
+    assert moved and (outside / "c").read_text() == "PRECIOUS"
+
+
+def test_walk_tree_does_not_descend_into_another_filesystem(setup, monkeypatch):
+    """F122: a directory on a different st_dev (a mount point) is neither entered nor removed."""
+    cfg = setup[0]
+    base = cfg.run_dir / "w"
+    (base / "mnt").mkdir(parents=True)
+    (base / "mnt" / "keep.txt").write_text("x")
+    (base / "plain").mkdir()
+    real_stat, real_fstat = os.stat, os.fstat
+    mnt_ino = real_stat(base / "mnt").st_ino
+
+    def shifted(info):
+        fields = list(info)
+        fields[2] += 1  # st_dev
+        return os.stat_result(fields)
+
+    def fake_stat(path, *a, **kw):
+        info = real_stat(path, *a, **kw)
+        return shifted(info) if info.st_ino == mnt_ino else info
+
+    def fake_fstat(fd):
+        info = real_fstat(fd)
+        return shifted(info) if info.st_ino == mnt_ino else info
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+    assert r._delete_tree(cfg.run_dir, base) is False
+    monkeypatch.undo()
+    assert (base / "mnt" / "keep.txt").exists() and not (base / "plain").exists()
+
+
+def test_purge_stops_at_its_time_budget_and_says_so(setup, monkeypatch):
+    cfg = setup[0]
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    home.mkdir(parents=True)
+    work.mkdir(parents=True)
+    r.git(work, "init", "-q")
+    bottom = _deep_chain(home / "deep", 50)
+    os.close(bottom)
+    (home / "t.txt").write_text(token)
+    monkeypatch.setattr(r, "PURGE_SECONDS", -1.0)
+    with pytest.raises(h.Refuse, match=r"NOT fully deleted.*purge stopped after its -1 s budget"):
+        r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir)
+    assert home.exists()  # the budget ended the purge; the refusal tells the owner to purge
+
+
+def test_capture_buffer_keeps_only_the_last_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr(r, "MAX_CAPTURE_BYTES", 100_000)
+    done = r.run_agent_process(
+        [sys.executable, "-c", "import sys; sys.stdout.write('a'*300000 + 'END')"],
+        cwd=tmp_path, env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]})
+    assert len(done.stdout) == 100_000 and done.stdout.endswith("END")
+
+
 def _deep_chain(top, depth):
     """A directory chain `depth` levels deep (names of one letter), built through dir fds so the
     path is far longer than PATH_MAX. Returns the bottom directory's relative parts."""
@@ -862,14 +946,43 @@ def test_stop_never_signals_a_pid_it_cannot_reverify(bystander):
         leader.wait()
 
 
-def test_stop_does_not_killpg_a_reaped_leader(bystander, monkeypatch):
-    """With the leader gone from the table, no group signal is sent (its pgid may be reused)."""
+def test_stop_with_missing_leader_row_fails_closed_without_signals(bystander, monkeypatch):
+    """F122: a leader absent from the table (reaped, hidden or unparseable) cannot be shown
+    stopped: AgentSurvived, and no group signal is sent (its pgid may be reused)."""
     sent = []
     monkeypatch.setattr(os, "killpg", lambda *a: sent.append(a))
     gone = subprocess.Popen(["true"], start_new_session=True)
     gone.wait()
-    h.stop_agent_processes(gone.pid, {})
+    with pytest.raises(h.AgentSurvived, match="leader missing"):
+        h.stop_agent_processes(gone.pid, {})
     assert not sent and bystander.poll() is None
+
+
+def test_stop_with_emulated_missing_row_of_a_live_leader(monkeypatch):
+    leader = subprocess.Popen(["sleep", "300"], start_new_session=True)
+    try:
+        real = h.process_table
+        monkeypatch.setattr(h, "process_table",
+                            lambda: {p: x for p, x in real().items() if p != leader.pid})
+        with pytest.raises(h.AgentSurvived, match="leader missing"):
+            h.stop_agent_processes(leader.pid, {})
+        assert leader.poll() is None  # nothing was signalled
+    finally:
+        leader.kill()
+        leader.wait()
+
+
+def test_survivor_message_names_pids_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(r, "DRAIN_SECONDS", 1.0)
+    try:
+        with pytest.raises(h.AgentSurvived, match=r"survived \(pids: \d+") as info:
+            _run(tmp_path, "orphan", 30)
+    finally:
+        pidfile = tmp_path / "pid"
+        if pidfile.exists() and pidfile.read_text():
+            with contextlib.suppress(OSError):
+                os.kill(int(pidfile.read_text()), 9)
+    assert "python" not in str(info.value) and "sleep" not in str(info.value)
 
 
 def test_unreadable_process_list_refuses(monkeypatch):
