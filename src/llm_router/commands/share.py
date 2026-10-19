@@ -70,6 +70,21 @@ class SavingsStats:
     total_saved: float = 0.0
     savings_pct: int = 0
     top_model: str = "—"
+    #: False when the ledger could not be read: the saving is then UNKNOWN (D-247), not $0.
+    known: bool = False
+
+    @property
+    def saved_text(self) -> str:
+        """The saving, always labelled an estimate (a baseline price minus the recorded cost,
+        never a verified saving) and ``n/a`` when unknown. Sign goes before the ``$``."""
+        if not self.known:
+            return "est. n/a"
+        sign, v = ("-", -self.total_saved) if self.total_saved < 0 else ("", self.total_saved)
+        return f"est. {sign}${v:,.2f}"
+
+    @property
+    def pct_text(self) -> str:
+        return f"{self.savings_pct}% cheaper (est.)" if self.known else "% cheaper n/a"
 
 
 def _net(baseline_usd: float, actual_usd: float) -> float:
@@ -136,7 +151,7 @@ def _gather_stats(db_path: str | None = None) -> SavingsStats:
                     continue
                 in_tok = r["input_tokens"] or 0
                 out_tok = r["output_tokens"] or 0
-                cost = r["cost_usd"] or 0.0
+                cost = r["cost_usd"]            # None = no cost recorded: unknown, never $0
                 total_calls += 1
                 base = (in_tok * SONNET_IN + out_tok * SONNET_OUT) / 1_000_000
                 if prov in FREE_PROVIDERS:
@@ -144,6 +159,8 @@ def _gather_stats(db_path: str | None = None) -> SavingsStats:
                     total_saved += base
                 elif prov != "subscription":
                     paid_calls += 1
+                    if cost is None:
+                        continue                # unknown cost: out of both the saving and the %
                     actual_paid += cost
                     # AUD-06: signed. This card is meant to be PUBLISHED, and a
                 # clamped figure on a shared card is the worst place for the
@@ -151,7 +168,7 @@ def _gather_stats(db_path: str | None = None) -> SavingsStats:
                 # was never scanned by CHZ-SS-01 because the lint's module
                 # list was hand-maintained; R6 derives it from the surface
                 # registry, which is how this was found.
-                total_saved += _net(base, cost)
+                total_saved += _net(base, 0.0 if cost is None else cost)   # paid+unknown `continue`d above
 
             top_row = conn.execute(
                 "SELECT model, COUNT(*) as n FROM usage "
@@ -181,6 +198,7 @@ def _gather_stats(db_path: str | None = None) -> SavingsStats:
         total_saved=total_saved,
         savings_pct=savings_pct,
         top_model=top_model,
+        known=True,
     )
 
 
@@ -224,8 +242,8 @@ def render_svg(stats: SavingsStats) -> str:
     No external dependencies, no network fonts — uses a generic monospace
     stack so it renders identically on GitHub, PyPI, and social previews.
     """
-    saved = f"${stats.total_saved:,.2f}"
-    pct = f"{stats.savings_pct}% cheaper than always-Sonnet"
+    saved = stats.saved_text
+    pct = f"{stats.pct_text} than always-Sonnet"
     calls = (
         f"{stats.total_calls:,} calls  ·  {stats.free_calls:,} free "
         f"(Ollama / Codex)  ·  {stats.paid_calls:,} paid API"
@@ -281,8 +299,8 @@ def _write_svg(out_path: str) -> int:
 
     print()
     print(f"  {_green('✓')}  Savings card written to {out_path}")
-    _line = (f"${stats.total_saved:,.2f} vs always-Sonnet · "
-             f"{stats.savings_pct}% cheaper · n={stats.total_calls:,} calls")
+    _line = (f"{stats.saved_text} vs always-Sonnet · "
+             f"{stats.pct_text} · n={stats.total_calls:,} calls")
     print(f"     {_dim(_line)}")
     print(f"     {_dim('Embed it:')} ![llm_router savings](savings-card.svg)")
     print()
@@ -309,9 +327,9 @@ def _run_share() -> None:
         # R7: the baseline travels with the number. A bare "$X saved" on a
         # card people paste into a thread is a claim nobody can check, and the
         # audit found three different baselines across the product.
-        _box_line(f"  🤖 llm_router: ${stats.total_saved:.2f} lifetime vs an "
+        _box_line(f"  🤖 llm_router: {stats.saved_text} lifetime vs an "
                   f"always-Sonnet baseline"),
-        _box_line(f"     {stats.savings_pct}% cheaper than always-Sonnet"),
+        _box_line(f"     {stats.pct_text} than always-Sonnet"),
         _box_line(""),
         _box_line(f"  {stats.total_calls:,} total calls tracked"),
         _box_line(f"  {stats.free_calls:,} free  (Ollama / Codex)  ·  {stats.paid_calls:,} paid API"),
@@ -329,8 +347,8 @@ def _run_share() -> None:
 
     # ── Copy plain text to clipboard ─────────────────────────────────
     plain = (
-        f"🤖 llm_router saved me ${stats.total_saved:.2f} (lifetime)\n"
-        f"{stats.savings_pct}% cheaper than always-Sonnet\n\n"
+        f"🤖 llm_router saved me {stats.saved_text} (lifetime)\n"
+        f"{stats.pct_text} than always-Sonnet\n\n"
         f"{stats.total_calls:,} calls tracked  ·  {stats.free_calls:,} free (Ollama/Codex)  ·  "
         f"{stats.paid_calls:,} paid API\n"
         f"Top model: {stats.top_model}\n\n"
@@ -340,8 +358,8 @@ def _run_share() -> None:
 
     # ── Twitter/X intent URL ──────────────────────────────────────────
     tweet = (
-        f"🤖 llm_router saved me ${stats.total_saved:.2f} so far "
-        f"({stats.savings_pct}% cheaper than always-Sonnet)\n\n"
+        f"🤖 llm_router saved me {stats.saved_text} so far "
+        f"({stats.pct_text} than always-Sonnet)\n\n"
         f"{stats.free_calls} free calls (Ollama/Codex) · {stats.paid_calls} paid API calls\n\n"
         f"Open-source MCP router for Claude Code 👇\n"
         f"{REPO} ⭐"

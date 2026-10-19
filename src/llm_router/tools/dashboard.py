@@ -290,7 +290,8 @@ def _render_dashboard(
     lines.append("")
     lines.append(f"  {_GREEN}{_BOLD}{_format_tokens(total_tokens)}{_RESET} tokens routed  ·  "
                  f"{_GREEN}{_BOLD}{total_calls}{_RESET} calls  ·  "
-                 f"{_net_col}{_BOLD}${net_total_saved:.2f}{_RESET} net saved")
+                 f"{_net_col}{_BOLD}{'-' if net_total_saved < 0 else ''}${abs(net_total_saved):.2f}{_RESET} "
+                 f"verified net saved")
     lines.append("")
 
     # ── Time-series sparkline ───────────────────────────────────────────

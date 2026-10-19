@@ -115,12 +115,12 @@ def display_hourly_progress() -> str:
         raw_accuracy = facts.get("accuracy")
         accuracy_str = "n/a" if raw_accuracy is None else f"{int(raw_accuracy * 100)}%"
         gaps = current.get("gap_count", 0)
-        saved = facts.get("total_saved", 0)
+        saved = facts.get("total_saved")          # None = unknown -> n/a (D-247)
 
         line = f"【Hour {current_hour}】 {calls} calls · {accuracy_str} accuracy"
         if gaps > 0:
             line += f" · {gaps} gap{'s' if gaps != 1 else ''}"
-        line += f" · ${saved:.2f} saved"
+        line += " · est. n/a saved" if saved is None else f" · est. {'-' if saved < 0 else ''}${abs(saved):.2f} saved"
         
         return line
     except Exception:

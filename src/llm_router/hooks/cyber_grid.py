@@ -342,30 +342,35 @@ def _build_financial(data: dict) -> Table:
 
     cumulative = data.get("cumulative", [])
     period_map = {label: (calls, ti, to, saved) for label, calls, ti, to, saved in cumulative}
-    all_time = period_map.get("all time", (0, 0, 0, 0.0))
-    today_d = period_map.get("today", (0, 0, 0, 0.0))
+    # D-247 / F119: the cumulative saving is the VERIFIED figure (the est. side is not in this
+    # data), so every figure says "verified" and a window the data lacks prints n/a -- never $0.
+    all_time = period_map.get("all time")
+    today_d = period_map.get("today")
+
+    def _usd(v: float | None) -> str:
+        if v is None:
+            return "n/a"
+        sign, v = ("-", -v) if v < 0 else ("", v)
+        return f"{sign}${v:.2f}" if v >= 1.0 else f"{sign}${v:.4f}"
 
     # Hero number
-    lifetime = all_time[3]
     hero = Text()
-    hero.append(f" ${lifetime:.2f}" if lifetime >= 1.0 else f" ${lifetime:.4f}",
-                style=_NEON_GREEN_BOLD)
-    hero.append("  lifetime", style=_LABEL)
+    hero.append(f" {_usd(all_time[3] if all_time else None)}", style=_NEON_GREEN_BOLD)
+    hero.append("  lifetime verified", style=_LABEL)
     tbl.add_row(hero)
 
     today_line = Text()
-    today_saved = today_d[3]
-    today_str = f"${today_saved:.4f}" if today_saved < 1.0 else f"${today_saved:.2f}"
-    today_line.append(f" {today_str}", style=_WHITE)
-    today_line.append("  today", style=_LABEL)
+    today_line.append(f" {_usd(today_d[3] if today_d else None)}", style=_WHITE)
+    today_line.append("  today verified", style=_LABEL)
     tbl.add_row(today_line)
     tbl.add_row(Text())
 
     # Period grid with token counts
+    tbl.add_row(Text(" verified saved", style=_DIM_GRAY))
     for label, calls, ti, to, saved in cumulative:
         short = {"today": "today", "this week": "week", "this month": "month",
                  "all time": "all"}.get(label, label)
-        s = f"${saved:.2f}" if saved >= 1.0 else f"${saved:.4f}"
+        s = _usd(saved)
         tok_total = ti + to
         tok_str = _fmt_tok(tok_total) if tok_total > 0 else ""
         row = Text()

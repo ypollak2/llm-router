@@ -278,7 +278,7 @@ class SparklinePanel(Static):
         # Sparkline chart
         if self.daily_costs:
             sparkline = self._generate_sparkline(self.daily_costs)
-            lines.append(f"14-day trend: {sparkline}")
+            lines.append(f"14-day trend (verified saved/day): {sparkline}")
 
             # Stats
             avg_cost = sum(self.daily_costs) / len(self.daily_costs)
@@ -287,13 +287,13 @@ class SparklinePanel(Static):
             total_cost = sum(self.daily_costs)
 
             lines.append("")
-            lines.append(f"  Total:  ${total_cost:.2f}")
-            lines.append(f"  Avg:    ${avg_cost:.2f}/day")
-            lines.append(f"  Peak:   ${max_cost:.2f}")
-            lines.append(f"  Low:    ${min_cost:.2f}")
+            lines.append(f"  Total:  ${total_cost:.2f} verified saved")
+            lines.append(f"  Avg:    ${avg_cost:.2f}/day verified saved")
+            lines.append(f"  Peak:   ${max_cost:.2f} verified saved")
+            lines.append(f"  Low:    ${min_cost:.2f} verified saved")
 
             if self.total_savings > 0:
-                lines.append(f"  Saved:  ${self.total_savings:.2f}")
+                lines.append(f"  Saved:  ${self.total_savings:.2f} verified (week)")
         else:
             lines.append("No historical data yet")
 

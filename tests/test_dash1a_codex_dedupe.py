@@ -127,8 +127,9 @@ def test_free_section_does_not_fabricate_tokens():
 
     assert "~est" not in text, "must not tag rows as estimated — no fabrication"
     assert "—" in text, "unknown token volume must render as an em-dash"
-    # The header total and the provider row must both claim exactly $0.
-    assert "$0.0000 gross saved" in text, "no savings may be claimed from unknown tokens"
+    # D-247: unknown token volume is n/a (not "$0.0000") in the header total and the provider row.
+    assert "n/a gross saved" in text, "no savings may be claimed from unknown tokens"
+    assert "$0.0000" not in text, "unknown must not print as zero dollars"
     assert "0.0001" not in text and "0.001" not in text, "no fabricated dollar figure"
 
 

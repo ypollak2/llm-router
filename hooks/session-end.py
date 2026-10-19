@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 49
+# llm_router-hook-version: 50
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -671,9 +671,12 @@ def _split_text(split: list | tuple | None) -> str:
     def _num(v):
         return isinstance(v, (int, float)) and not isinstance(v, bool)
 
+    def _usd(v):                      # sign before the "$": an est. can be negative ("-$1.00")
+        return f"-${-v:,.2f}" if v < 0 else f"${v:,.2f}"
+
     ok = isinstance(split, (list, tuple)) and len(split) == 4
-    ver = f"${split[0]:,.2f} verified (n={int(split[1]):,})" if ok and _num(split[0]) and _num(split[1]) else "verified n/a"
-    est = f"~${split[2]:,.2f} est. (n={int(split[3]):,})" if ok and _num(split[2]) and _num(split[3]) else "est. n/a"
+    ver = f"{_usd(split[0])} verified (n={int(split[1]):,})" if ok and _num(split[0]) and _num(split[1]) else "verified n/a"
+    est = f"~{_usd(split[2])} est. (n={int(split[3]):,})" if ok and _num(split[2]) and _num(split[3]) else "est. n/a"
     return f"{ver} · {est}"
 
 
@@ -1153,11 +1156,11 @@ def _net_session_line(free_rows: list[dict], paid_rows: list[dict]) -> str | Non
     n_txt = f"n={len(rows)} session calls" + (f", {missing} paid without cost not counted" if missing else "")
     if net >= 0:
         return (
-            f"  {_BOLD}Net saved{_RESET}      {_C_GREEN}${net:.4f}{_RESET}  "
+            f"  {_BOLD}Net saved{_RESET}      {_C_GREEN}est. ${net:.4f}{_RESET}  "
             f"{_C_MUTED}(${baseline:.4f} baseline − {paid_txt}, {n_txt}{uc_frag}){_RESET}"
         )
     return (
-        f"  {_BOLD}{_C_ORANGE}⚠ NET LOSS{_RESET}     {_C_ORANGE}-${abs(net):.4f}{_RESET}  "
+        f"  {_BOLD}{_C_ORANGE}⚠ NET LOSS{_RESET}     {_C_ORANGE}est. -${abs(net):.4f}{_RESET}  "
         f"{_C_MUTED}({paid_txt} exceeds ${baseline:.4f} baseline — wasteful paid routing, "
         f"{n_txt}{uc_frag}){_RESET}"
     )
@@ -1187,12 +1190,14 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict] | None = N
         by_provider[p]["out"]   += r.get("output_tokens", 0) or 0
 
     total_saved = 0.0
+    total_known = 0                 # providers whose token volume is known (D-247: unknown != $0)
     total_calls = len(free_rows)
     body: list[str] = []
     for provider, d in sorted(by_provider.items(), key=lambda x: -x[1]["calls"]):
         in_t, out_t = d["in"], d["out"]
         known = (in_t + out_t) > 0
         saved = _host_baseline(in_t, out_t) if known else 0.0
+        total_known += 1 if known else 0
         total_saved += saved
         if known:
             in_k  = f"{in_t  // 1000}k" if in_t  >= 1000 else str(in_t)
@@ -1202,7 +1207,7 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict] | None = N
         else:
             # Unknown token volume — no fabrication, no claimed savings.
             tok_disp   = f"{_C_MUTED}—↑ —↓{_RESET}"
-            saved_disp = f"{_C_MUTED}${saved:.4f}{_RESET}"
+            saved_disp = f"{_C_MUTED}n/a{_RESET}"
         body.append(
             f"    {_C_LABEL}{provider:<10}{_RESET}  {d['calls']:>3}×  "
             f"{tok_disp}  {saved_disp}"
@@ -1217,12 +1222,15 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict] | None = N
     else:
         label = "Local / prepaid"
     saved_color = _C_GREEN if total_saved > 0 else _C_LABEL
+    # The baseline is an estimate (Opus host price on the same tokens): labelled est.; n/a when no
+    # provider reported a token volume (never "$0.0000").
+    saved_txt = f"~${total_saved:.4f} est." if total_known else "n/a"
     lines = [
         f"    {_C_WHITE}{total_calls}{_RESET} calls  ·  "
         # D9: gross of routing overhead (matches the Routing panel; distinct from
         # the Codex/Gemini "realized" figure). "saved{_RESET} vs Claude host" is
         # kept contiguous (the DASH-2 mislabel guard relies on it).
-        f"{saved_color}${total_saved:.4f} gross saved{_RESET} vs Claude host  "
+        f"{saved_color}{saved_txt} gross saved{_RESET} vs Claude host  "
         # D5: this-session window (the {label} is a provider descriptor, not a window)
         f"{_C_MUTED}this session · {label}{_RESET}"
     ]
@@ -1681,7 +1689,9 @@ def _query_session_complexity_breakdown(session_start: float) -> tuple[dict, int
     """The session's ``usage`` rows grouped by task complexity and model
     (``ledger_view.session_usage_rows``, the same rows as ``_query_session_data``).
 
-    Returns ({complexity: [(short_model, count, cost, provider), ...]}, filtered_test_count)
+    Returns ({complexity: [(short_model, count, cost, provider, cost_n), ...]}, filtered_test_count).
+    D-247 / F119: ``cost`` is the sum of the RECORDED costs and is None when no row of the group
+    recorded one (unknown, never $0); ``cost_n`` is how many rows recorded one.
     """
     try:
         from llm_router import ledger_view as _lv
@@ -1695,12 +1705,14 @@ def _query_session_complexity_breakdown(session_start: float) -> tuple[dict, int
     groups: dict[tuple[str, str], list] = {}
     for r in rows:
         key = (r.get("complexity") or "moderate", r.get("model") or "unknown")
-        g = groups.setdefault(key, [0, 0.0, r.get("provider")])
+        g = groups.setdefault(key, [0, 0.0, r.get("provider"), 0])
         g[0] += 1
-        g[1] += r.get("cost_usd") or 0.0
+        if r.get("cost_usd") is not None:
+            g[1] += float(r["cost_usd"])
+            g[3] += 1
     by_complexity: dict = {}
     filtered_test_calls = 0
-    for (complexity, model), (cnt, cost, provider) in sorted(
+    for (complexity, model), (cnt, cost, provider, cost_n) in sorted(
             groups.items(), key=lambda kv: (kv[0][0], -kv[1][0])):
         # Filter out test/mock models from production reports
         if _is_test_model(model):
@@ -1709,7 +1721,8 @@ def _query_session_complexity_breakdown(session_start: float) -> tuple[dict, int
         short_model = model.split("/")[-1] if "/" in model else model
         if len(short_model) > 20:
             short_model = short_model[:18] + "…"
-        by_complexity.setdefault(complexity, []).append((short_model, cnt, cost, provider))
+        by_complexity.setdefault(complexity, []).append(
+            (short_model, cnt, cost if cost_n else None, provider, cost_n))
     return by_complexity, filtered_test_calls
 
 
@@ -1725,29 +1738,37 @@ def _format_complexity_breakdown(session_start: float) -> list[str]:
 
     total_calls = sum(
         cnt for models in complexity_data.values()
-        for _, cnt, _, _ in models
+        for _, cnt, _, _, _ in models
     )
     free_calls = 0
     total_cost = 0.0
+    total_cost_n = 0
 
     for complexity in ["simple", "moderate", "complex"]:
         if complexity not in complexity_data:
             continue
 
         models_list = complexity_data[complexity]
-        cnt_sum = sum(cnt for _, cnt, _, _ in models_list)
-        cost_sum = sum(cost for _, _, cost, _ in models_list)
+        cnt_sum = sum(cnt for _, cnt, _, _, _ in models_list)
+        cost_sum = sum(cost for _, _, cost, _, _ in models_list if cost is not None)
+        cost_k = sum(k for _, _, _, _, k in models_list)
         total_cost += cost_sum
+        total_cost_n += cost_k
 
         model_str_parts = []
-        for model, cnt, cost, provider in models_list:
+        for model, cnt, cost, provider, _k in models_list:
             if provider in ("ollama", "codex", "gemini_cli"):
                 free_calls += cnt
             model_str_parts.append(f"{model} ({cnt}×)")
 
         model_str = " · ".join(model_str_parts)
         c_color = _COMPLEXITY_COLORS.get(complexity, _C_LABEL)
-        cost_tag = f"${cost_sum:.4f}" if cost_sum > 0 else f"{_C_GREEN}free{_RESET}"
+        if cost_k == 0:
+            cost_tag = "cost n/a"          # D-247: no row recorded a cost -> unknown, not free
+        elif cost_sum > 0:
+            cost_tag = f"${cost_sum:.4f}" + (f" ({cost_k} of {cnt_sum})" if cost_k < cnt_sum else "")
+        else:
+            cost_tag = f"{_C_GREEN}free{_RESET}"
 
         lines.append(
             f"    {c_color}{complexity:<10}{_RESET} {cnt_sum:>2}×  {model_str}  {cost_tag}"
@@ -1755,13 +1776,13 @@ def _format_complexity_breakdown(session_start: float) -> list[str]:
 
     if total_calls > 0:
         paid_calls = total_calls - free_calls
-        avg_cost = total_cost / total_calls if total_calls else 0
+        avg_cost = f"${total_cost / total_cost_n:.4f}/call" if total_cost_n else "n/a"
         lines.append(
             f"    {_C_WHITE}{total_calls}{_RESET} routed = "
             f"{_C_GREEN}{free_calls}{_RESET} local + "
             f"{paid_calls} external"
             + (f" + {_C_MUTED}{filtered_test_calls} excluded{_RESET}" if filtered_test_calls > 0 else "")
-            + f"  · avg ${avg_cost:.4f}/call"
+            + f"  · avg {avg_cost}"
         )
 
     return lines
@@ -1812,11 +1833,11 @@ def _format_provider_section(table: str, title: str, emoji: str) -> list[str]:
         total_gross += gross or 0.0
         total_overhead += overhead or 0.0
         gross_tag = f"+${gross:.4f}" if gross > 0 else (f"-${-gross:.4f}" if gross < 0 else "$0.0000")
-        lines.append(f"    {model:<22} {cnt:>3}×  {toks:>6} tok  saved {gross_tag}")
+        lines.append(f"    {model:<22} {cnt:>3}×  {toks:>6} tok  est. saved {gross_tag}")
     realized = total_gross - total_overhead
     lines.append(
         f"    {total_calls} routed · {total_tokens} tok · "
-        f"gross ${total_gross:.4f} · overhead ${total_overhead:.4f} · "
+        f"est. gross ${total_gross:.4f} · overhead ${total_overhead:.4f} · "
         f"realized ${realized:.4f}"
     )
     return lines
@@ -1870,11 +1891,11 @@ def _format_codex_section() -> list[str]:
         total_gross += gross or 0.0
         total_overhead += overhead or 0.0
         gross_tag = f"+${gross:.4f}" if gross > 0 else (f"-${-gross:.4f}" if gross < 0 else "$0.0000")
-        lines.append(f"    {model:<14} {cnt:>3}×  {toks:>6} tok  saved {gross_tag}")
+        lines.append(f"    {model:<14} {cnt:>3}×  {toks:>6} tok  est. saved {gross_tag}")
     realized = total_gross - total_overhead
     summary = (
         f"    {total_calls} routed · {total_tokens} tok · "
-        f"gross ${total_gross:.4f} · overhead ${total_overhead:.4f} · "
+        f"est. gross ${total_gross:.4f} · overhead ${total_overhead:.4f} · "
         f"realized ${realized:.4f}"
     )
     lines.append(summary)
@@ -3015,7 +3036,8 @@ def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
     # because an empty chart is honest about what is known. When there
     # is no daily data, show none.
 
-    total_saved = sum(daily_costs) if daily_costs else 0.0
+    # D-247 / F119: no daily rows -> unknown (None, printed n/a), never a $0.00 total.
+    total_saved = sum(daily_costs) if daily_costs else None
 
     # Gather 14-day model breakdown directly from routing_decisions.final_model.
     # This is the authoritative source — previous code fell through to routing
@@ -3103,20 +3125,24 @@ def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
                 continue
             for model, totals in data.get("model_totals", {}).items():
                 agg = model_agg.setdefault(
-                    model, {"calls": 0, "tokens": 0, "cost": 0.0}
+                    model, {"calls": 0, "tokens": 0, "cost": 0.0, "cost_n": 0}
                 )
                 # Real per-model sums — NOT tool_total * call_count, which
                 # inflated tokens and cost by the tool's row count.
                 agg["calls"]  += totals["calls"]
                 agg["tokens"] += totals["in"] + totals["out"]
                 agg["cost"]   += totals["cost"]
+                agg["cost_n"] += totals.get("cost_n", totals["calls"])
         for model, agg in sorted(model_agg.items(), key=lambda x: -x[1]["calls"]):
             session_models_list.append({
                 "model": model,
                 "calls": agg["calls"],
                 "tokens": agg["tokens"],
+                # D-247 / F119: the sum of the RECORDED costs and how many rows recorded one;
+                # the panel prints n/a when none did and "k of n" when some did. No "saved" key:
+                # there is no per-model saving here, and the old hard-coded 0.0 read as "saved $0".
                 "cost": agg["cost"],
-                "saved": 0.0,
+                "cost_n": agg["cost_n"],
             })
 
     dashboard.print_dashboard(
@@ -3360,7 +3386,7 @@ def main() -> None:
             bar_len = 20
             filled = int(pct / 100 * bar_len)
             bar = _C_GREEN + "━" * filled + "\033[90m" + "─" * (bar_len - filled) + _RESET
-            lines.append(f"  Routing saved    {bar} {pct:.0f}% of baseline (${_saved:.4f})")
+            lines.append(f"  Routing saved    {bar} {pct:.0f}% of baseline (est. ${_saved:.4f})")
             if tokens_reclaimed > 0:
                 tok_k = tokens_reclaimed / 1000
                 lines.append(f"  {tok_k:.0f}K tokens reclaimed" + (f" · +{ext_min:.0f}min runway" if ext_min >= 1 else ""))

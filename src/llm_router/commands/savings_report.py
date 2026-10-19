@@ -143,9 +143,9 @@ def render_savings_report(period: str = "all") -> str:
             return
         spent = "$0.0000" if free_section else f"${s['cost']:.4f}"
         out.append(f"│  {title}")
-        out.append(f"│    {s['calls']:>4} calls · saved ${s['saved']:.4f} vs Claude · {spent} spent")
+        out.append(f"│    {s['calls']:>4} calls · saved ${s['saved']:.4f} (est.) vs Claude · {spent} spent")
         for model, d in sorted(s["by_model"].items(), key=lambda x: -x[1]["saved"])[:10]:
-            out.append(f"│      {model:<26} {d['calls']:>3}×   saved ${d['saved']:.4f}")
+            out.append(f"│      {model:<26} {d['calls']:>3}×   saved ${d['saved']:.4f} (est.)")
         out.append("│")
 
     section("FREE / LOCAL  (ollama · codex · gemini-cli)", free, True)

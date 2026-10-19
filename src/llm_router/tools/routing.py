@@ -642,7 +642,7 @@ async def llm_auto(
         note = unverified_note(lifetime.get("unverified_saved", 0.0),
                                lifetime.get("unverified_tasks", 0))
         lines.append(
-            f"\n📊 **{tasks_routed} tasks routed** — ~${net:.2f} net saved lifetime"
+            f"\n📊 **{tasks_routed} tasks routed** — {'-' if net < 0 else ''}${abs(net):.2f} verified net saved lifetime"
             f"{' ' + note if note else ''}. "
             f"Run `{route_tool('llm_savings')}` for the full breakdown."
         )

@@ -81,7 +81,7 @@ async def _get_stats() -> dict:
         "profiles": [],
         "task_types": [],
         "recent": [],
-        "savings": {"total_saved_usd": 0.0, "total_external_usd": 0.0},
+        "savings": {"total_saved_usd": None, "total_external_usd": None},   # None = unknown (D-247)
         "usage": {},
         "semantic_cache": {"hits": 0},
     }
@@ -371,8 +371,8 @@ tailwind.config = {
               </defs>
             </svg>
             <div class="z-10 text-center">
-              <span id="g-saved" class="text-4xl font-extrabold text-white">$0</span>
-              <p class="text-[10px] font-mono text-outline uppercase mt-1">Lifetime Savings</p>
+              <span id="g-saved" class="text-4xl font-extrabold text-white">n/a</span>
+              <p class="text-[10px] font-mono text-outline uppercase mt-1">Lifetime Savings (est. vs Sonnet)</p>
             </div>
           </div>
         </div>
@@ -507,7 +507,7 @@ tailwind.config = {
         </div>
       </div>
       <div class="w-full space-y-2 text-xs">
-        <div class="flex justify-between"><span class="text-outline">Lifetime Saved</span><span id="p-saved" class="font-mono text-secondary">$0.00</span></div>
+        <div class="flex justify-between"><span class="text-outline">Lifetime Saved (est.)</span><span id="p-saved" class="font-mono text-secondary">n/a</span></div>
         <div class="w-full h-0.5 bg-surface-container-highest rounded-full">
           <div id="p-saved-bar" class="h-full bg-secondary rounded-full transition-all duration-700" style="width:0%"></div>
         </div>
@@ -1050,11 +1050,12 @@ function applyData(d) {
   setText('sb-status', '● Connected');
   setText('sb-profile', (d.config?.profile || '?') + ' | v' + (d.config?.version || '?'));
 
+  const savedKnown = d.savings?.total_saved_usd != null;   // D-247: unknown is n/a, never $0
   const saved = d.savings?.total_saved_usd ?? 0;
   const ext   = d.savings?.total_external_usd ?? 0;
   const eff   = (saved + ext) > 0 ? saved / (saved + ext) : 0;
 
-  setText('g-saved', '$' + saved.toFixed(2));
+  setText('g-saved', savedKnown ? '$' + saved.toFixed(2) : 'n/a');
   setText('eff-pct', Math.round(eff * 100) + '%');
   setText('g-ext-cost', '$' + ext.toFixed(2));
   setText('g-today-cost', '$' + (d.today?.cost_usd || 0).toFixed(4));
@@ -1073,7 +1074,7 @@ function applyData(d) {
   setText('s-tokens',  fmtNum(d.today?.tokens || 0));
   setText('s-semhits', fmtNum(d.semantic_cache?.hits ?? 0));
 
-  setText('p-saved',       '$' + saved.toFixed(2));
+  setText('p-saved',       savedKnown ? '$' + saved.toFixed(2) : 'n/a');
   setText('p-month-cost',  '$' + (d.month?.cost_usd || 0).toFixed(4));
   setText('p-month-calls', String(d.month?.calls || 0));
   setBar('p-saved-bar', eff);

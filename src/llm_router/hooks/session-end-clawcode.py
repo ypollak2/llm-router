@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 4
+# llm_router-hook-version: 5
 """Stop hook (claw-code variant) — session summary: external routing costs + free-model savings.
 
 Identical to session-end.py but omits Claude Code subscription pressure sections
@@ -166,7 +166,7 @@ def _format_routing_section(tools: dict[str, dict]) -> list[str]:
 
     lines = [
         f"  External routing  "
-        f"{total_calls} calls  ·  ${total_cost:.4f}  ·  {savings_pct}% saved vs Sonnet",
+        f"{total_calls} calls  ·  ${total_cost:.4f}  ·  est. {savings_pct}% saved vs Sonnet",
         "",
     ]
     for tool, d in sorted(tools.items(), key=lambda x: -x[1]["count"]):
@@ -194,13 +194,6 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
     if not free_rows:
         return []
 
-    paid_with_tokens = [r for r in paid_rows if (r.get("input_tokens") or 0) > 0]
-    if paid_with_tokens:
-        avg_in  = sum(r.get("input_tokens",  0) for r in paid_with_tokens) / len(paid_with_tokens)
-        avg_out = sum(r.get("output_tokens", 0) for r in paid_with_tokens) / len(paid_with_tokens)
-    else:
-        avg_in, avg_out = 500.0, 300.0
-
     by_provider: dict[str, dict] = {}
     for r in free_rows:
         p = r.get("provider", "?")
@@ -211,31 +204,29 @@ def _format_free_section(free_rows: list[dict], paid_rows: list[dict]) -> list[s
         by_provider[p]["out"]   += r.get("output_tokens", 0) or 0
 
     total_saved = 0.0
+    total_known = 0          # providers with a real token volume (D-247: unknown is n/a, not $0)
     total_calls = len(free_rows)
     body: list[str] = []
     for provider, d in sorted(by_provider.items(), key=lambda x: -x[1]["calls"]):
         in_t, out_t = d["in"], d["out"]
-        est = False
         if in_t == 0 and out_t == 0:
-            in_t  = int(avg_in  * d["calls"])
-            out_t = int(avg_out * d["calls"])
-            est   = True
-        baseline = _host_baseline(in_t, out_t)
-        # Not a clamp: this is the FREE section, where cost is zero by
-        # definition, so the saving IS the baseline and cannot be negative.
-        # Written as `max(0.0, baseline)` it was indistinguishable from the
-        # real clamps three lines away, which is reason enough to drop it.
-        saved    = baseline
+            # No reported token volume: no baseline can be defended. This used to invent tokens
+            # from the average paid call (500/300 when none) and sum them into the total as a
+            # "~est" saving -- a fabricated figure. Unknown now prints n/a and stays out of the sum.
+            body.append(f"  {provider:<10}  {d['calls']:>3}×  —↑ —↓       n/a saved")
+            continue
+        saved = _host_baseline(in_t, out_t)     # FREE section: cost is zero, so saving = baseline
         total_saved += saved
-        est_tag  = " ~est" if est else ""
+        total_known += 1
         in_k  = f"{in_t  // 1000}k" if in_t  >= 1000 else str(in_t)
         out_k = f"{out_t // 1000}k" if out_t >= 1000 else str(out_t)
         body.append(
             f"  {provider:<10}  {d['calls']:>3}×  "
-            f"{in_k}↑ {out_k}↓{est_tag:<5}  ${saved:.4f} saved"
+            f"{in_k}↑ {out_k}↓       est. ${saved:.4f} saved"
         )
 
-    lines = [f"  Free models  {total_calls} calls  ·  ${total_saved:.4f} saved vs Sonnet"
+    saved_txt = f"est. ${total_saved:.4f}" if total_known else "est. n/a"
+    lines = [f"  Free models  {total_calls} calls  ·  {saved_txt} saved vs Sonnet"
              + "  (Ollama/Codex)", ""]
     lines += body
     return lines

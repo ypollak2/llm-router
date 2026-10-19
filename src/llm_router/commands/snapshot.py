@@ -40,6 +40,7 @@ from llm_router.monitoring.periodic import (
     analyze_session_trends,
     format_trend_summary,
 )
+from llm_router.retrospective import format_saved
 from llm_router.terminal_style import Color
 
 
@@ -70,10 +71,18 @@ def format_snapshot_status(snapshot: dict) -> str:
     facts = snapshot.get("facts", {})
 
     lines.append(Color.ORCHESTRATE_BLUE("【Current Status】"))
+    # D-247: the saving is an estimate (baseline minus actual), labelled so, and n/a when the
+    # snapshot has none (a missing / null value is unknown, never "$0.00 (0%)").
+    saved = facts.get("total_saved")
+    cost = facts.get("total_cost")
+    saved_txt = format_saved(saved)
+    if saved is not None and cost is not None and saved + cost > 0:
+        saved_txt += f" ({int(saved / (saved + cost) * 100)}%)"
+    cost_txt = "n/a" if cost is None else f"${cost:.2f}"
     lines.append(
         f"  Calls: {facts.get('total_calls', 0)}  "
-        f"| Cost: ${facts.get('total_cost', 0):.2f}  "
-        f"| Saved: ${facts.get('total_saved', 0):.2f} ({int(facts.get('total_saved', 0) / max(1, facts.get('total_saved', 1) + facts.get('total_cost', 0)) * 100)}%)"
+        f"| Cost: {cost_txt}  "
+        f"| Saved: {saved_txt}"
     )
 
     lines.append(

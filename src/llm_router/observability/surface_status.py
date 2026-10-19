@@ -428,7 +428,7 @@ def compact_line(status: SurfaceStatus, color: Optional[bool] = None) -> str:
         parts.append(c("no route yet", "dim"))
 
     if status.saved_session > 0:
-        parts.append(f"💰 ${status.saved_session:.2f} saved")
+        parts.append(f"💰 ${status.saved_session:.2f} verified saved")
     if status.unverified_session > 0:
         parts.append(c(f"+${status.unverified_session:.2f} unverified", "dim"))
 
@@ -447,7 +447,7 @@ def terminal_title(status: SurfaceStatus) -> str:
     stderr. Title stays short: ``⚡ llm_router: hermes3:8b · $0.03 ✓``.
     """
     model = status.short_model() if status.last_model else "idle"
-    saved = f" · ${status.saved_session:.2f}" if status.saved_session > 0 else ""
+    saved = f" · ${status.saved_session:.2f} verified" if status.saved_session > 0 else ""
     _tok = fmt_tokens(status.last_tokens)
     tok = f" · {_tok}" if _tok else ""
     title = f"⚡ llm_router: {model}{tok}{saved} {status.health_glyph()}"
@@ -494,7 +494,7 @@ def notification(
         last_route_at = float(last.get("route_at", 0) or 0)
         if (now - last_route_at) >= min_interval_s:
             saved = (
-                f" · saved ${status.saved_session:.2f} today"
+                f" · verified saved ${status.saved_session:.2f} today"
                 if status.saved_session > 0
                 else ""
             )
