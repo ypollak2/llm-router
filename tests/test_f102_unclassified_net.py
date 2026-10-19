@@ -122,7 +122,7 @@ def test_classified_rows_with_unclassified_but_no_paid_prints_no_paid_calls(home
 def test_the_hook_pair_is_identical_at_current_version():
     top = (ROOT / "hooks" / "session-end.py").read_bytes()
     assert top == HOOK.read_bytes()
-    assert top.splitlines()[1] == b"# llm_router-hook-version: 48"
+    assert top.splitlines()[1] == b"# llm_router-hook-version: 49"
 
 
 def test_provider_class_docstring_names_the_wall_clock_default():
@@ -165,3 +165,118 @@ def test_zero_paid_rows_read_the_same_with_and_without_unclassified(home):
 def test_no_unclassified_rows_means_no_routing_note(home):
     _seed(home, [("openai", 0.25)])
     assert "unclassified" not in _routing(_mod("f105_none"), None)
+
+
+# -- F116: a paid row with no recorded cost is unknown, never $0 ---------------------------------
+
+def test_net_line_paid_row_without_cost_is_k_of_n_not_zero(home):
+    _seed(home, [("openai", 0.25), ("openai", None)])
+    text = _net(_mod("f116_net_partial"))
+    assert "$0.2500 paid recorded (1 of 2 paid calls)" in text, text
+    assert "1 paid without cost not counted" in text and "n=1 session calls" in text, text
+
+
+def test_net_line_all_paid_rows_without_cost_is_na(home):
+    _seed(home, [("openai", None), ("openai", None)])
+    text = _net(_mod("f116_net_none"))
+    assert text.split("Net saved")[1].lstrip().startswith("n/a") and "cost not recorded for 2 paid calls" in text, text
+    assert "$0.0000" not in text
+
+
+def test_routing_panel_paid_row_without_cost_is_k_of_n_and_pct_uses_known_rows(home):
+    _seed(home, [("openai", 0.25), ("openai", None)])
+    paid, _cc, _free = _mod("f116_panel")._query_session_data(time.time() - 7200)
+    mod = _mod("f116_panel2")
+    tools = mod._aggregate(paid)
+    t = tools["query"]
+    assert (t["count"], t["cost_n"], t["in"], t["cost_in"]) == (2, 1, 2000, 1000)
+    text = ANSI.sub("", "\n".join(mod._format_routing_section(tools, subscription=False)))
+    assert "$0.2500 actual recorded (1 of 2)" in text, text
+    assert f"${mod._host_baseline(1000, 500):.4f} baseline (same 1)" in text, text
+    assert "1 of 2 costed" in text and "$0.2500 (1 of 2)" in text, text
+
+
+def test_routing_panel_no_recorded_cost_is_na_and_no_pct(home):
+    _seed(home, [("openai", None)])
+    paid, _cc, _free = _mod("f116_panel_na")._query_session_data(time.time() - 7200)
+    mod = _mod("f116_panel_na2")
+    text = ANSI.sub("", "\n".join(mod._format_routing_section(mod._aggregate(paid), subscription=False)))
+    assert "actual cost n/a" in text and "baseline n/a" in text and "% saved n/a" in text and "cost n/a" in text, text
+    assert "$0.0000" not in text and "100% saved" not in text
+
+
+def test_routing_panel_with_only_unclassified_rows_still_shows_the_line(home):
+    mod = _mod("f116_unc_only")
+    unc = [{"provider": "mystery", "cost_usd": None, mod._CLASS_KEY: "unclassified"}]
+    text = ANSI.sub("", "\n".join(mod._format_routing_section({}, subscription=False, unclassified=unc)))
+    assert "unclassified n=1, cost n/a" in text, text
+    assert mod._format_routing_section({}, subscription=False) == []
+
+
+def test_aggregate_known_zero_cost_is_not_unknown(home):
+    mod = _mod("f116_zero")
+    t = mod._aggregate([{"task_type": "query", "model": "m", "input_tokens": 10, "output_tokens": 5, "cost_usd": 0.0}])["query"]
+    assert t["cost_n"] == 1 and t["cost"] == 0.0
+
+
+# -- F116 / D-247: the cumulative panel and dashboard never print one merged saved figure --------
+
+def test_split_text_segments_each_with_own_n_and_na_never_merged(home):
+    mod = _mod("f116_split")
+    assert mod._split_text([2.0, 2, 5.0, 4]) == "$2.00 verified (n=2) · ~$5.00 est. (n=4)"
+    assert mod._split_text(None) == "verified n/a · est. n/a"
+    assert mod._split_text([2.0, 2, None, None]) == "$2.00 verified (n=2) · est. n/a"
+    assert "7.00" not in mod._split_text([2.0, 2, 5.0, 4])
+
+
+def test_query_cumulative_split_reads_both_sides_from_the_ledger(home):
+    _seed(home, [("openai", 0.25)])
+    mod = _mod("f116_qsplit")
+    split = mod._query_cumulative_split()
+    assert set(split) == {"today", "this week", "14 days", "this month", "all time"}
+    ver_usd, ver_n, est_usd, est_n = split["all time"]
+    assert ver_n == 0 and est_n >= 1 and ver_usd == 0.0     # usage rows are estimated, never verified
+
+
+def test_dashboard_savings_text_is_split_and_unknown_is_na(home, monkeypatch):
+    mod = _mod("f116_dash")
+    monkeypatch.setattr(mod, "_ledger_cumulative_split", lambda: {"today": [1.0, 1, 2.0, 3]})
+    cumulative = [("today", 4, 100, 0, 3.0), ("all time", 9, 900, 0, 9.0)]
+    seen: dict = {}
+
+    class _Stop(Exception):
+        pass
+
+    class _Dash:
+        def __init__(self, console=None):
+            pass
+
+        def print_dashboard(self, **kw):
+            seen.update(kw["savings"])
+            raise _Stop
+
+    import llm_router.ui.session_summary as ss
+    monkeypatch.setattr(ss, "SessionSummaryDashboard", _Dash)
+    with pytest.raises(_Stop):
+        mod._render_rich_summary(time.time() - 60, [], [], [], {}, None, None, False, cumulative)
+    assert seen["today_text"] == "$1.00 verified (n=1) · ~$2.00 est. (n=3)" and seen["today"] == 1.0
+    assert seen["lifetime_text"] == "verified n/a · est. n/a" and "lifetime" not in seen   # unknown: absent, not 0
+    assert 3.0 not in seen.values() and 9.0 not in seen.values()                      # the merged tuple figure is gone
+
+
+def test_rich_panel_prints_the_text_not_a_single_figure():
+    from io import StringIO
+
+    from rich.console import Console
+
+    from llm_router.ui.session_summary import SessionSummaryDashboard
+
+    buf = StringIO()
+    SessionSummaryDashboard(console=Console(file=buf, width=200, force_terminal=False)).print_dashboard(
+        timestamp="t", decisions=[], savings={"lifetime_text": "verified n/a · est. n/a", "lifetime_tokens": 5,
+                                              "today_text": "$1.00 verified (n=1) · ~$2.00 est. (n=3)"})
+    out = buf.getvalue()
+    top = out.split("14-DAY")[0]          # the 70-column panel wraps the long text; fragments stay whole
+    for frag in ("verified n/a ·", "est. n/a", "$1.00 verified", "(n=1) · ~$2.00 est. (n=3)"):
+        assert frag in top, (frag, top)
+    assert "$0.00" not in top

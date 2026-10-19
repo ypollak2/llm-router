@@ -504,22 +504,35 @@ class TestProductionPolish:
         assert "test-model" not in output
         assert "gpt-4o-mini" in output or "4o-mini" in output
 
-    def test_cumulative_savings_readable_format(self):
-        """Large savings should use $X.XX, small should use $X.XXXX."""
+    def test_cumulative_savings_readable_format(self, monkeypatch):
+        """F116 / D-247: each period prints the verified and the estimated saving as separate
+        segments, each with its own n, never one merged figure."""
         periods = [
             ("today", 10, 5000, 3000, 0.0234),
             ("this week", 50, 25000, 15000, 0.1234),
             ("this month", 200, 100000, 60000, 1.5678),
             ("all time", 5000, 2500000, 1500000, 45.6789),
         ]
-        lines = se._format_cumulative_section(periods)
-        text = "\n".join(lines)
-        # Sub-dollar amounts: 4 decimal places
-        assert "$0.0234" in text
-        assert "$0.1234" in text
-        # Dollar+ amounts: 2 decimal places
-        assert "$1.57" in text
-        assert "$45.68" in text
+        split = {
+            "today": [0.0234, 3, 0.5, 7],
+            "this week": [0.1234, 4, 1.0, 9],
+            "this month": [1.5678, 5, 2.0, 11],
+            "all time": [45.6789, 6, 8.0, 13],
+        }
+        monkeypatch.setattr(se, "_ledger_cumulative_split", lambda: split)
+        text = "\n".join(se._format_cumulative_section(periods))
+        assert "$0.02 verified (n=3) · ~$0.50 est. (n=7)" in text
+        assert "$45.68 verified (n=6) · ~$8.00 est. (n=13)" in text
+        assert "$1.57 verified (n=5)" in text
+        # the merged sum (45.68 + 8.00) is never printed, nor a lone saved total
+        assert "53.68" not in text and "lifetime" in text
+
+    def test_cumulative_savings_without_a_split_is_na_not_the_merged_sum(self, monkeypatch):
+        periods = [("today", 10, 5000, 3000, 0.0234), ("all time", 5000, 2500000, 1500000, 45.6789)]
+        monkeypatch.setattr(se, "_ledger_cumulative_split", lambda: {})
+        text = "\n".join(se._format_cumulative_section(periods))
+        assert "verified n/a · est. n/a" in text
+        assert "45.68" not in text and "0.0234" not in text
 
     def test_consistent_terminology(self, temp_db, session_start):
         """Verify output uses 'local/prepaid' instead of 'free'."""

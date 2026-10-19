@@ -263,9 +263,17 @@ def test_new_reads_are_none_without_a_database(home):
 def test_hook_pair_is_byte_identical_at_the_current_version():
     a, b = (ROOT / "hooks" / "session-end.py").read_bytes(), HOOK.read_bytes()
     assert a == b
-    assert b.splitlines()[1] == b"# llm_router-hook-version: 48"
+    assert b.splitlines()[1] == b"# llm_router-hook-version: 49"
 
 
 def test_the_hook_has_no_private_copy_of_the_decision_predicate():
     text = HOOK.read_text(encoding="utf-8")
     assert "_REAL_DECISION" not in text and "_lifetime_saved" not in text
+
+
+def test_condensed_stop_does_not_say_today_twice_for_an_unsplit_ledger(home, monkeypatch):
+    """F116: "today est. saved n/a (today)" repeated the window the label already gave."""
+    mod = _load_hook("session_end_f116_twice")
+    monkeypatch.setattr(mod, "_ledger_compact", lambda w: "est. saved n/a (today)" if w == "today" else None)
+    line = mod._condense("  1153 decisions routed\n  5h 16%  weekly 18%\n")
+    assert "today est. saved n/a" in line and "n/a (today)" not in line, line

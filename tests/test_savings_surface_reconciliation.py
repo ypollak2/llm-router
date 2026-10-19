@@ -75,7 +75,8 @@ def test_sessionend_no_alltime_labelled_weekly():
     assert 'd[0] == "all time"' not in txt or "saved this week" not in txt, (
         "session-end must not label an all-time total 'saved this week'"
     )
-    assert 'd[0] == "this week"' in txt  # the weekly fallback now reads the weekly bucket
+    # the weekly fallback reads the weekly bucket (F116: its verified / est. split, never a merged sum)
+    assert '.get("this week")' in txt and "saved this week:" in txt
 
 
 def test_sessionstart_digest_uses_opus_not_sonnet_baseline():
