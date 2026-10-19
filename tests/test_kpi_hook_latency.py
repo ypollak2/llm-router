@@ -767,7 +767,7 @@ def test_every_registered_hook_is_instrumented_or_a_named_exception():
     # P0.9: plus "statusline", the shell status line timed through record-raw.
     # P35-3 (D-228): plus "codex-stop", a Codex hook the codex installer registers (not _HOOK_DEFS). It is NOT
     # instrumented on purpose: the recorder is an llm_router import and the hook's contract is stat + one JSON
-    # read; its 300 ms is held by a timing test (tests/test_codex_stop.py), not by a G1 row.
+    # read; its 300 ms is held by a timing test (tests/test_codex_stop.py) and, since F111, by a G1 row the hook appends itself (no recorder import).
     assert set(hl.HOOK_BUDGETS_MS) == set(_EVENTS) | {"statusline", "codex-stop"}, (
         "the budget table and the instrumented hooks differ")
     assert "_hook_latency.begin" not in (HOOKS / "codex-stop.py").read_text()
