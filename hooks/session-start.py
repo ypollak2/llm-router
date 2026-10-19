@@ -1253,7 +1253,7 @@ def _maybe_spawn_maintenance() -> bool:
                 if now - os.stat(tmp).st_mtime > 60:
                     os.unlink(tmp)    # a crashed claimer's leftover; the next session retries
             except OSError:
-                pass
+                return False
             return False
         os.replace(tmp, claim)
         if _spawn_detached(_maintenance_argv()):
