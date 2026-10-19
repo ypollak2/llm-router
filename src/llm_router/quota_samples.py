@@ -114,6 +114,7 @@ def _append(path: Path, row: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
+        os.fchmod(fd, 0o600)  # also tightens a file created earlier with a wider mode
         os.write(fd, (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"))
     finally:
         os.close(fd)
@@ -400,16 +401,27 @@ BASELINE_DAYS = 7
 HISTORY_MAX_GAP_S = STALE_AFTER_S
 
 
+#: A baseline week with fewer measured sessions than this is flagged "partial baseline".
+MIN_BASELINE_SESSIONS = 10
+
+
 def baseline_start_ts() -> float | None:
-    """When the GE6 series began: the earliest ``ts`` in ``quota_samples.jsonl`` or
-    ``quota_history.jsonl``. The plan starts the baseline week at the GE6 deploy; the deploy
-    is not recorded in the repo, but the first row the instrument wrote is that moment.
-    None when neither file has a row."""
-    firsts = []
-    for name in (SAMPLES_NAME, HISTORY_NAME):
-        rows, _ = _read_jsonl(paths.state_path(name))
-        if rows:
-            firsts.append(min(float(r["ts"]) for r in rows))
+    """When the baseline week starts, ASSUMED to be the first ORGANIC row of
+    ``quota_samples.jsonl``: the earliest ``ts`` among rows of sessions that resolve to kind
+    ``organic`` (the filter :func:`quota_burn` applies by default), not the earliest row of any
+    kind, so synthetic/benchmark rows cannot move it. ``quota_samples.jsonl`` is never pruned, so
+    the answer does not move when ``quota_history.jsonl`` is pruned at 30 days (which is why that
+    file is not read here). The plan starts the baseline at the GE6 deploy; the deploy is not
+    recorded in the repo, so this is an assumption and the report labels it so. None when no
+    organic row exists."""
+    rows, _ = _read_jsonl(paths.state_path(SAMPLES_NAME))
+    by_session: dict[str, list[dict]] = {}
+    for r in rows:
+        sid = r.get("session_id")
+        if sid and r.get("kind") in KINDS:
+            by_session.setdefault(str(sid), []).append(r)
+    firsts = [min(float(r["ts"]) for r in srows) for sid, srows in by_session.items()
+              if _kind_for(sid, srows, {}) == "organic"]
     return min(firsts) if firsts else None
 
 
@@ -456,7 +468,8 @@ def _ratio(cur: float | None, base: float | None) -> float | None:
 
 
 def quota_burn_report(since: float, until: float, *, include_research: bool = False,
-                      baseline_start: float | None = None) -> dict[str, Any]:
+                      baseline_start: float | None = None,
+                      now: float | None = None) -> dict[str, Any]:
     """``quota_burn`` for the window plus the same measurement for the baseline week, the
     per-session S3 coverage (criterion P3.7-a) and the install's S7 status.
 
@@ -465,6 +478,7 @@ def quota_burn_report(since: float, until: float, *, include_research: bool = Fa
     burn AND the baseline has a measured per-turn burn; with no usable baseline the coverage
     is n/a (unknown), not 0. This reports a comparison only: it never claims a reduction."""
     out = quota_burn(since, until, include_research=include_research)
+    assumed = baseline_start is None
     start = baseline_start if baseline_start is not None else baseline_start_ts()
     base: dict[str, Any] | None = None
     if start is not None:
@@ -474,8 +488,18 @@ def quota_burn_report(since: float, until: float, *, include_research: bool = Fa
     n = out["coverage"]["sessions"]
     reported = out["reported_sessions"] if ok else None
     lo, hi = _wilson(reported, n) if reported is not None else (None, None)
+    now_ts = time.time() if now is None else now
+    n_base = base["measured"]["n_sessions"] if base else 0
+    week_complete = start is not None and now_ts >= start + BASELINE_DAYS * 86400.0
+    partial = base is not None and (not week_complete or n_base < MIN_BASELINE_SESSIONS)
     overlap = base is not None and since < base["window"]["until"] and base["window"]["since"] < until
     out["baseline"] = base
+    out["baseline_meta"] = {
+        "start": start, "assumed": assumed and start is not None,
+        "basis": "first organic row of quota_samples.jsonl" if assumed else "--baseline-start",
+        "week_complete": week_complete if start is not None else None,
+        "sessions": n_base, "min_sessions": MIN_BASELINE_SESSIONS, "partial": partial,
+    }
     out["history_burn"] = {"current": history_burn(since, until),
                            "baseline": (history_burn(base["window"]["since"], base["window"]["until"])
                                         if base else None)}
@@ -555,16 +579,26 @@ def render_quota_burn_report(r: dict[str, Any]) -> str:
         lines.append("  baseline week: n/a (no quota_samples/quota_history rows yet, so no GE6 baseline)")
     else:
         bw, bm = b["window"], b["measured"]
-        lines.append(f"  baseline week (GE6, first row onward): {_iso(bw['since'])}..{_iso(bw['until'])}: "
+        note = " (assumed: first organic row)" if r["baseline_meta"]["assumed"] else " (explicit --baseline-start)"
+        lines.append(f"  baseline week (GE6){note}: {_iso(bw['since'])}..{_iso(bw['until'])}: "
                      + (f"n_sessions={bm['n_sessions']} n_turns={bm['n_turns']} | 5h pts/turn "
                         f"{_f(bm['five_hour_per_turn'], 3)} | weekly pts/turn {_f(bm['weekly_per_turn'], 3)}"
                         if bm["n_sessions"] else "not informative (n=0 sessions with >= 2 measured samples)"))
+    if r["baseline_meta"]["partial"]:
+        m = r["baseline_meta"]
+        why = []
+        if not m["week_complete"]:
+            why.append("the 7-day week is not complete")
+        if m["sessions"] < m["min_sessions"]:
+            why.append(f"{m['sessions']} measured sessions < minimum {m['min_sessions']}")
+        lines.append("  partial baseline: " + "; ".join(why) + " (ratios below are flagged, not final)")
     if v["overlaps_baseline"]:
         lines.append("  note: this window overlaps the baseline week; the comparison is not independent")
     def _x(ratio: float | None) -> str:
         return "n/a" if ratio is None else f"{ratio:.2f}x baseline"
+    flag = f" [partial baseline, n={r['baseline_meta']['sessions']}]" if r["baseline_meta"]["partial"] else ""
     lines.append(f"  vs baseline (per turn, comparison only, no reduction claimed): 5h {_x(v['five_hour_per_turn_ratio'])}, "
-                 f"weekly {_x(v['weekly_per_turn_ratio'])}")
+                 f"weekly {_x(v['weekly_per_turn_ratio'])}{flag}")
     if v["rate"] is None:
         why = "no measured baseline" if not v["baseline_available"] else "n=0 sessions in the window"
         lines.append(f"  S3 reported vs baseline: n/a ({why}); sessions in window {v['sessions']}")

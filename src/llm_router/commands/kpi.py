@@ -2984,7 +2984,7 @@ def cmd_kpi(args: list[str]) -> int:
                           "(comparison only, no reduction claimed) and the S7 status")
     ap.add_argument("--baseline-start", default=None,
                      help="with --quota-burn: start of the 7-day baseline week (default: the "
-                          "first quota_samples/quota_history row, i.e. the GE6 deploy)")
+                          "first organic quota_samples row, assumed to be the GE6 deploy)")
     ap.add_argument("--retention", action="store_true",
                      help="S7 / P3.7: this install's own 14-day retention status from the local "
                           "active_days.jsonl (install day, active days, active on day 14: "

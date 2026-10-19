@@ -20,9 +20,9 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Item | Value |
 |---|---|
 | Rows | `day` (local calendar date, `YYYY-MM-DD`) and `install_id` (16 random hex characters generated locally on the first row). Nothing else: no prompt text, no session id, no path. Nothing is sent anywhere. |
-| Writer | `active_days.mark_active`, called from `quota_samples.append_session_sample` (the session-start background child and the Stop sample). One tail read per session, one append per new day. |
-| Kept | One row per day, at most 400 rows (`active_days.MAX_ROWS`, about 13 months). Past that the file is rewritten atomically (temp file, fsync, `os.replace`), keeping the FIRST row (the install day and id) and the newest 399. |
+| Writer | `active_days.mark_active`, called from `quota_samples.append_session_sample` (the session-start background child and the Stop sample). Per session: one `stat` of the file (a file whose mtime is today already holds today's row, so no read); the tail read and the append happen at most once per day. Concurrent first writers share one install id (`active_days.id`, created with `O_EXCL`) and same-day duplicate rows are collapsed by the trim. Files are forced to mode 0600 on every write, not only on create. |
+| Kept | One row per day, at most 400 rows (`active_days.MAX_ROWS`, about 13 months). Past that the file is rewritten atomically (temp file, fsync, `os.replace`), keeping the FIRST row (the install day and id) and the newest 399. The trim runs when the file is larger than 400 full rows (53 bytes each, `active_days._ROW_BYTES`). |
 | Install day | The first marker day, not the operating-system install time: no earlier dated record exists. |
-| Reads | `llm-router kpi --retention` and the last line of `llm-router kpi --quota-burn`: install day, active days, day 14, and "active on day 14" as yes / no / not yet (n/a before the first marker). The population rate (S7 70% across users) is LATER (16.1). |
+| Reads | `llm-router kpi --retention` and the last line of `llm-router kpi --quota-burn`: install day, active days, day 14, and "active on day 14" as yes / no / not yet (n/a before the first marker). Strict reading: "yes" needs a row dated exactly day 14; "not yet" holds while today is on or before day 14; active on day 15 but not day 14 is "no". The population rate (S7 70% across users) is LATER (16.1). |
 | Failure | A failed write is recorded with `failopen` code `P37-ACTIVE-DAY`; the session start is never blocked. |
 | Delete | Removing the file resets the install day and id. |
