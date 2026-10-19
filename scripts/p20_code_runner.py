@@ -13,6 +13,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -26,42 +27,116 @@ sys.modules[SPEC.name] = h
 SPEC.loader.exec_module(h)
 
 
+DRAIN_SECONDS = 30.0   # how long to wait for the agent's pipes after the stop
+
+
 def run_agent_process(argv, *, input=None, text=True, capture_output=True, timeout=900,
                       cwd=None, env=None, check=False):
-    """F117: `subprocess.run` for the coding agent, in its own session (process group), with a
-    unique env tag. On return, success or timeout, the group, every descendant seen while it
-    ran and every tagged process are killed and gone, so the scrub and purge never race a
-    surviving grandchild. Same result / TimeoutExpired shape as subprocess.run."""
-    import uuid
-    tag = uuid.uuid4().hex
+    """F117: `subprocess.run` for the coding agent, in its own session (process group).
+
+    While it runs the harness records every process below it (pid + start time, 0.25 s polls).
+    On return, success or timeout, the group is killed while its leader is still unreaped and
+    each recorded process is killed only if its start time still matches (see
+    h.stop_agent_processes), then the pipes are drained for at most DRAIN_SECONDS. Finally no
+    other process may hold `cwd` or the scratch HOME (cwd / open files): if one does, or that
+    cannot be checked, h.AgentSurvived is raised and nothing may be scanned. Same result /
+    TimeoutExpired shape as subprocess.run."""
+    import selectors
     proc = subprocess.Popen(
-        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text,
-        cwd=cwd, env={**(env or {}), h.AGENT_TAG_ENV: tag}, start_new_session=True,
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+        cwd=cwd, env=env, start_new_session=True,
     )
-    known: set[int] = set()
-    deadline = time.monotonic() + timeout
-    try:
-        pending = input
-        while True:
-            known |= h.descendant_pids(proc.pid)
+    pending = (input.encode() if isinstance(input, str) else input) or b""
+    sent = 0
+    bufs = {proc.stdout: [], proc.stderr: []}
+    readers = {proc.stdout, proc.stderr}
+    sel = selectors.DefaultSelector()
+
+    def close_stdin():
+        if proc.stdin and not proc.stdin.closed:
+            with contextlib.suppress(KeyError, ValueError):
+                sel.unregister(proc.stdin)
+            with contextlib.suppress(OSError):
+                proc.stdin.close()
+
+    def pump(wait):
+        nonlocal sent
+        if not sel.get_map():
+            time.sleep(max(wait, 0))
+            return
+        for key, _ in sel.select(max(wait, 0)):
+            f = key.fileobj
+            if f is proc.stdin:
+                try:
+                    sent += os.write(f.fileno(), pending[sent:sent + 65536])
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    sent = len(pending)
+                if sent >= len(pending):
+                    close_stdin()
+                continue
             try:
-                out, err = proc.communicate(pending, timeout=min(0.5, max(
-                    0.01, deadline - time.monotonic())))
+                chunk = os.read(f.fileno(), 1 << 16)
+            except BlockingIOError:
+                continue
+            except OSError:
+                chunk = b""
+            if chunk:
+                bufs[f].append(chunk)
+            else:
+                sel.unregister(f)
+                readers.discard(f)
+
+    known: dict[int, str] = {}
+    late = stopped = False
+    try:
+        for f in (proc.stdout, proc.stderr):
+            os.set_blocking(f.fileno(), False)
+            sel.register(f, selectors.EVENT_READ)
+        if pending:
+            os.set_blocking(proc.stdin.fileno(), False)
+            sel.register(proc.stdin, selectors.EVENT_WRITE)
+        else:
+            close_stdin()
+        deadline = time.monotonic() + timeout
+        while True:
+            table = h.process_table()
+            h.track_agent_tree(known, table, proc.pid)
+            row = table.get(proc.pid)  # never waited on: an exited leader stays listed (Z)
+            if row is None or row.zombie:
                 break
-            except subprocess.TimeoutExpired:
-                pending = None
-                # a grandchild may hold the pipes after the agent exited: stop the tree, then
-                # collect what was written; only a still-running agent is a timeout
-                late = proc.poll() is None and time.monotonic() >= deadline
-                if late or proc.poll() is not None:
-                    h.stop_agent_processes(proc.pid, tag, known)
-                    out, err = proc.communicate()
-                    if late:
-                        raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
-                    break
+            if time.monotonic() >= deadline:
+                late = True
+                break
+            pump(min(0.25, deadline - time.monotonic()))
+        stopped = True
+        h.stop_agent_processes(proc.pid, known)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        end = time.monotonic() + DRAIN_SECONDS
+        while readers and time.monotonic() < end:
+            pump(0.2)
     finally:
-        h.stop_agent_processes(proc.pid, tag, known)
-        proc.wait()
+        if not stopped:
+            with contextlib.suppress(h.Refuse):
+                h.stop_agent_processes(proc.pid, known)
+            proc.poll()
+        sel.close()
+        for f in (proc.stdin, proc.stdout, proc.stderr):
+            with contextlib.suppress(OSError, ValueError, AttributeError):
+                f.close()
+    home = (env or {}).get("HOME")
+    h.assert_dirs_unheld([Path(d) for d in (cwd, home) if d])
+    out = b"".join(bufs[proc.stdout])
+    err = b"".join(bufs[proc.stderr])
+    if text:
+        out, err = out.decode(errors="replace"), err.decode(errors="replace")
+    if late:
+        raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
@@ -132,16 +207,18 @@ def _text(value):
 
 
 def purge_inside(run_dir, *paths):
-    """Delete each path only if it lies strictly inside the run dir the harness created."""
+    """Delete each path only if it lies strictly inside the run dir the harness created.
+    Returns False if something could not be removed (the caller then says so)."""
     root = Path(run_dir).resolve()
+    complete = True
     for path in paths:
         target = Path(path)
         if target.is_symlink() or not target.exists():
             continue
         real = target.resolve()
         if real != root and root in real.parents:
-            _open_permissions(root, real)
-            shutil.rmtree(real, ignore_errors=True)
+            complete = _delete_tree(root, real) and complete
+    return complete
 
 
 def _chmod_nofollow(parent_fd, name):
@@ -186,42 +263,105 @@ def _open_dir(parent_fd, name):
         return None
 
 
-def _open_permissions(root, target):
-    """F117: an agent's chmod 000 directory cannot be listed or emptied; rmtree would leave it
-    (and a token inside) behind silently. Give each real directory from `root` down to and
-    under `target` owner rwx first. Everything goes through directory fds with O_NOFOLLOW and
-    fchmod / chmod-by-fd, never a path string, so a symlink swapped in by a live agent cannot
-    redirect the chmod outside the run dir."""
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def _walk_tree(root_fd, delete):
+    """F117: owner-rwx every real directory below `root_fd` (and, if `delete`, remove all of
+    it but `root_fd` itself), iteratively and holding ONE directory fd at a time, so a deep
+    chain neither recurses nor runs out of descriptors. Moves down by name with O_NOFOLLOW and
+    up through `..`, checking the parent's (dev, ino) against the one recorded on the way down.
+    Never follows a symlink. Returns False if anything could not be opened, changed or removed."""
+    ok = True
+
+    def enter(fd):
+        nonlocal ok
+        try:
+            os.fchmod(fd, 0o700)
+            return os.listdir(fd)
+        except OSError:
+            ok = False
+            return []
+
+    def ident(fd):
+        info = os.fstat(fd)
+        return info.st_dev, info.st_ino
+
+    cur = os.dup(root_fd)
     try:
-        for part in Path(target).relative_to(root).parts:
+        frames = [[ident(cur), None, enter(cur)]]  # [identity, name in parent, names left]
+        while frames:
+            if frames[-1][2]:
+                name = frames[-1][2].pop()
+                try:
+                    info = os.stat(name, dir_fd=cur, follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    child = _open_dir(cur, name)
+                    if child is None:
+                        ok = False
+                    elif ident(child) != (info.st_dev, info.st_ino):
+                        os.close(child)
+                        ok = False
+                    else:
+                        os.close(cur)
+                        cur = child
+                        frames.append([ident(cur), name, enter(cur)])
+                elif delete:
+                    try:
+                        os.unlink(name, dir_fd=cur)
+                    except OSError:
+                        ok = False
+                continue
+            _, name, _ = frames.pop()
+            if not frames:
+                break
+            try:
+                parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=cur)
+            except OSError:
+                return False
+            if ident(parent) != frames[-1][0]:
+                os.close(parent)
+                return False
+            os.close(cur)
+            cur = parent
+            if delete:
+                try:
+                    os.rmdir(name, dir_fd=cur)
+                except OSError:
+                    ok = False
+    finally:
+        os.close(cur)
+    return ok
+
+
+def _delete_tree(root, target):
+    """Remove `target` (a path strictly inside `root`) through directory fds, never following a
+    symlink and unlocking chmod 000 directories. Returns True only if nothing is left."""
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        parts = Path(target).relative_to(root).parts
+        for part in parts[:-1]:
             child = _open_dir(fd, part)
             os.close(fd)
             fd = child
             if fd is None:
-                return
-        _chmod_tree(fd)
+                return False
+        child = _open_dir(fd, parts[-1])
+        if child is None:
+            return False
+        try:
+            ok = _walk_tree(child, True)
+        finally:
+            os.close(child)
+        os.rmdir(parts[-1], dir_fd=fd)
+        return ok
     except (OSError, ValueError):
-        pass
+        return False
     finally:
         if fd is not None:
             os.close(fd)
-
-
-def _chmod_tree(fd):
-    try:
-        os.fchmod(fd, 0o700)
-        names = os.listdir(fd)
-    except OSError:
-        return
-    for name in names:
-        child = _open_dir(fd, name)
-        if child is None:
-            continue
-        try:
-            _chmod_tree(child)
-        finally:
-            os.close(child)
 
 
 def scrub_claude_artifacts(token, work, home, output, run_dir, baseline=None):
@@ -241,9 +381,10 @@ def scrub_claude_artifacts(token, work, home, output, run_dir, baseline=None):
         h.scan_for_token(token, "patch", data=git_bytes(work, "diff", "HEAD"))
         h.scan_new_git_objects(token, work, baseline)
     except h.Refuse as exc:
-        purge_inside(run_dir, work, home)
+        done = purge_inside(run_dir, work, home)
         raise h.Refuse(
-            f"{exc}; work and agent_home copies were deleted if inside the run dir, "
+            f"{exc}; work and agent_home copies were "
+            f"{'deleted' if done else 'NOT fully deleted'} if inside the run dir, "
             f"but the run dir {run_dir} may still hold the token (agent output, ledgers): "
             "purge it, and rotate the token (claude setup-token)"
         ) from None
@@ -277,7 +418,7 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     start = cfg.now()
     cost, served, error, timed_out = 0, "", None, False
     env = h.claude_env(home, cfg.run_dir)
-    output = ""
+    output, survived = "", False
     baseline = h.git_object_ids(work)  # F117: what the agent adds is what gets scanned
     try:
         result = _claude_run(
@@ -301,12 +442,19 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     except subprocess.TimeoutExpired as exc:
         timed_out = True
         output = _text(exc.stdout) + _text(exc.stderr)
+    except h.AgentSurvived:
+        survived = True  # a live agent process: its tree is never scanned (fail closed)
+        raise h.AgentSurvived(
+            "refusing: agent process survived; nothing was scanned. Purge the run dir "
+            f"{cfg.run_dir} once the process is gone and rotate the token (claude setup-token)"
+        ) from None
     except (OSError, ValueError, TypeError, AttributeError):
         error = "claude_error"
     finally:
         # always scanned, also after a timeout or a parse failure, before grading or storing
-        scrub_claude_artifacts(env.get(h.CLAUDE_AUTH_ENV[0]), work, home, output, cfg.run_dir,
-                              baseline)
+        if not survived:
+            scrub_claude_artifacts(env.get(h.CLAUDE_AUTH_ENV[0]), work, home, output,
+                                   cfg.run_dir, baseline)
     h.append_row(cfg.run_dir / "ledger.jsonl", {
         "ts": h.utc(cfg), "stage": "code", "set": "code", "arm": arm,
         "item_id": ident, "attempt": attempt, "ok": error is None and not timed_out,

@@ -2023,6 +2023,31 @@ def test_scan_new_objects_cap_counts_only_agent_additions(tmp_path, monkeypatch)
         h.scan_new_git_objects(_TOKEN, wt, baseline)
 
 
+def test_scan_refuses_an_oversized_commit_object_before_reading_it(tmp_path, monkeypatch):
+    """Round 2: a tiny zlib bomb typed `commit` made git inflate it whole in memory. The declared
+    size is checked first (--batch-check); `--batch` never runs on it."""
+    repo = _repo(tmp_path / "r")
+    baseline = h.git_object_ids(repo)
+    bomb = repo / "bomb"
+    bomb.write_bytes(bytes(3_000_000))  # compresses to a few KB
+    h.run_git(repo, "hash-object", "-w", "-t", "commit", "--literally", str(bomb))
+    monkeypatch.setattr(h, "GIT_OBJECT_CAP", 1 << 20)
+    calls = []
+    real = h.run_git
+
+    def spy(work, *args, **kwargs):
+        calls.append(args[:2])
+        return real(work, *args, **kwargs)
+
+    monkeypatch.setattr(h, "run_git", spy)
+    with pytest.raises(h.Refuse, match=r"oversized git object \(commit\)"):
+        h.scan_new_git_objects(_TOKEN, repo, baseline)
+    assert ("cat-file", "--batch") not in calls
+    # under the limit the same object is read and scanned normally
+    monkeypatch.setattr(h, "GIT_OBJECT_CAP", 64 << 20)
+    h.scan_new_git_objects(_TOKEN, repo, baseline)
+
+
 def _hit(repo, baseline):
     with pytest.raises(h.Refuse, match="token found in git objects") as info:
         h.scan_new_git_objects(_TOKEN, repo, baseline)

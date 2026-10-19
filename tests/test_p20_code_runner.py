@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -686,55 +687,219 @@ def test_open_permissions_never_chmods_through_a_swapped_symlink(setup, tmp_path
         return names
 
     monkeypatch.setattr(os, "listdir", listdir_then_swap)
-    r._open_permissions(cfg.run_dir, base)
+    assert r._delete_tree(cfg.run_dir, base)
     monkeypatch.undo()
-    assert swapped and (outside.stat().st_mode & 0o777) == 0o755
-    # unswapped: a chmod 000 directory is opened up
+    assert swapped and (outside.stat().st_mode & 0o777) == 0o755 and outside.exists()
+    assert not base.exists()  # the swapped-in link was removed, not followed
+    # unswapped: a chmod 000 directory is opened up and removed with its content
     (cfg.run_dir / "w2" / "a" / "b").mkdir(parents=True)
+    (cfg.run_dir / "w2" / "a" / "b" / "t.txt").write_text("x")
     (cfg.run_dir / "w2" / "a").chmod(0)
-    r._open_permissions(cfg.run_dir, cfg.run_dir / "w2")
-    assert ((cfg.run_dir / "w2" / "a").stat().st_mode & 0o777) == 0o700
-    assert ((cfg.run_dir / "w2" / "a" / "b").stat().st_mode & 0o777) == 0o700
+    assert r._delete_tree(cfg.run_dir, cfg.run_dir / "w2")
+    assert not (cfg.run_dir / "w2").exists()
 
 
-_GRANDCHILD = """
+def _deep_chain(top, depth):
+    """A directory chain `depth` levels deep (names of one letter), built through dir fds so the
+    path is far longer than PATH_MAX. Returns the bottom directory's relative parts."""
+    top.mkdir(parents=True)
+    fd = os.open(top, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for _ in range(depth):
+            os.mkdir("a", 0o700, dir_fd=fd)
+            nxt = os.open("a", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores chmod 000")
+def test_deep_chain_is_purged_without_recursion_and_refuse_is_kept(setup):
+    """F117 round 2: a 2000-deep chain with a chmod 000 dir made the recursive purge raise
+    RecursionError and leave the token behind."""
+    cfg = setup[0]
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    home.mkdir(parents=True)
+    work.mkdir(parents=True)
+    r.git(work, "init", "-q")
+    bottom = _deep_chain(home / "deep", 2000)
+    try:
+        fd = os.open("t.txt", os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=bottom)
+        os.write(fd, token.encode())
+        os.close(fd)
+    finally:
+        os.close(bottom)
+    (home / "deep" / "a").chmod(0)
+    with pytest.raises(h.Refuse) as info:
+        r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir)
+    assert token not in str(info.value) and "rotate the token" in str(info.value)
+    assert not home.exists() and not work.exists()  # token file gone with its tree
+
+
+_AGENT = """
 import os, sys, time
-pidfile, outfile, mode = sys.argv[1:4]
-if os.fork() == 0:
-    os.setsid()                      # detached: its own session, not in the agent's group
-    if os.fork() == 0:               # and orphaned (its parent exits), so ppid is 1
-        open(pidfile, "w").write(str(os.getpid()))
-        while True:
-            open(outfile, "a").write("x")
-            time.sleep(0.05)
-    os._exit(0)
-for _ in range(100):
-    if os.path.exists(pidfile) and open(pidfile).read():
-        break
-    time.sleep(0.05)
-if mode == "hang":
+mode, pidfile, outfile = sys.argv[1:4]
+
+def writer(path):
+    open(path, "w").write(str(os.getpid()))
+    while True:
+        open(outfile, "a").write("x")
+        time.sleep(0.05)
+
+def wait_for(path):
+    for _ in range(200):
+        if os.path.exists(path) and open(path).read():
+            return
+        time.sleep(0.05)
+
+if mode == "group":       # a child that stays in the agent's group
+    if os.fork() == 0:
+        writer(pidfile)
+    wait_for(pidfile)
+    time.sleep(1.0)
+elif mode == "session":   # a setsid child whose parent (the agent) is still alive
+    if os.fork() == 0:
+        os.setsid()
+        writer(pidfile)
+    wait_for(pidfile)
+    time.sleep(1.0)
+elif mode == "orphan":    # double fork + setsid, the agent exits at once
+    if os.fork() == 0:
+        os.setsid()
+        if os.fork() == 0:
+            if len(sys.argv) > 4:                 # stdio to /dev/null
+                null = os.open(os.devnull, os.O_RDWR)
+                for fd in (0, 1, 2):
+                    os.dup2(null, fd)
+            writer(pidfile)
+        os._exit(0)
+    wait_for(pidfile)
+elif mode == "hang":
+    if os.fork() == 0:
+        writer(pidfile)
+    wait_for(pidfile)
     time.sleep(60)
 print("done")
 """
 
 
-@pytest.mark.parametrize("mode", ["exit", "hang"])
-def test_agent_process_tree_is_dead_before_run_returns(tmp_path, mode):
-    """F117: the scan must not race a detached grandchild the agent started."""
+def _agent_argv(tmp_path, mode, *extra):
+    return [sys.executable, "-c", _AGENT, mode, str(tmp_path / "pid"), str(tmp_path / "out"),
+            *extra]
+
+
+def _run(tmp_path, mode, timeout=30, *extra):
+    (tmp_path / "home").mkdir(exist_ok=True)
+    env = {**os.environ, "HOME": str(tmp_path / "home")}
+    return r.run_agent_process(_agent_argv(tmp_path, mode, *extra), input="", timeout=timeout,
+                               cwd=tmp_path, env=env)
+
+
+@pytest.fixture
+def bystander():
+    """A process the test starts outside the agent's group and tree: it must never be killed."""
+    proc = subprocess.Popen(["sleep", "300"], start_new_session=True)
+    yield proc
+    proc.kill()
+    proc.wait()
+
+
+@pytest.mark.parametrize("mode", ["group", "session", "hang"])
+def test_agent_tree_is_dead_before_run_returns_and_bystander_lives(tmp_path, bystander, mode):
+    """F117: killpg while the leader is unreaped, plus start-time-verified tracked pids."""
     import time
-    pidfile, outfile = tmp_path / "pid", tmp_path / "out"
-    argv = [sys.executable, "-c", _GRANDCHILD, str(pidfile), str(outfile), mode]
     if mode == "hang":
         with pytest.raises(subprocess.TimeoutExpired):
-            r.run_agent_process(argv, input="", timeout=3, cwd=tmp_path, env=dict(os.environ))
+            _run(tmp_path, mode, timeout=3)
     else:
-        done = r.run_agent_process(argv, input="", timeout=30, cwd=tmp_path, env=dict(os.environ))
+        done = _run(tmp_path, mode)
         assert done.returncode == 0 and "done" in done.stdout
-    pid = int(pidfile.read_text())
-    assert not h._alive(pid)  # dead (a zombie awaiting an init that does not reap counts as dead)
-    size = outfile.stat().st_size
+    pid = int(Path(tmp_path / "pid").read_text())
+    assert pid not in h.process_table() or h.process_table()[pid].zombie
+    size = (tmp_path / "out").stat().st_size
     time.sleep(0.4)
-    assert outfile.stat().st_size == size  # nothing writes after the run returned
+    assert (tmp_path / "out").stat().st_size == size  # nothing writes after the run returned
+    assert bystander.poll() is None  # an unrelated process is never signalled
+
+
+@pytest.mark.parametrize("stdio", ["inherited", "devnull"])
+def test_detached_orphan_makes_the_run_refuse_not_hang(tmp_path, monkeypatch, stdio):
+    """F117 round 2: a double-forked setsid orphan is not provably the agent's, so it is not
+    killed; because it still holds the work dir the run refuses (and never hangs on its pipes)."""
+    import time
+    monkeypatch.setattr(r, "DRAIN_SECONDS", 1.0)
+    extra = ("null",) if stdio == "devnull" else ()
+    started = time.monotonic()
+    try:
+        with pytest.raises(h.AgentSurvived, match="agent process survived"):
+            _run(tmp_path, "orphan", 30, *extra)
+        assert time.monotonic() - started < 20
+    finally:  # the test started this process, the test ends it
+        pidfile = tmp_path / "pid"
+        if pidfile.exists() and pidfile.read_text():
+            with contextlib.suppress(OSError):
+                os.kill(int(pidfile.read_text()), 9)
+
+
+def test_stop_never_signals_a_pid_it_cannot_reverify(bystander):
+    """A recorded pid whose start time differs (the pid was reused) is left alone."""
+    leader = subprocess.Popen(["sleep", "300"], start_new_session=True)
+    try:
+        known = {bystander.pid: "Thu Jan  1 00:00:00 1970"}
+        h.stop_agent_processes(leader.pid, known)
+        assert leader.wait(timeout=10) == -9  # the leader's group was killed, unreaped until now
+        assert bystander.poll() is None
+        # the same pid with its real start time IS the agent's, so it is killed
+        known = {bystander.pid: h.process_table()[bystander.pid].start}
+        second = subprocess.Popen(["sleep", "300"], start_new_session=True)
+        h.stop_agent_processes(second.pid, known)
+        second.wait(timeout=10)
+        assert bystander.wait(timeout=10) == -9
+    finally:
+        leader.kill()
+        leader.wait()
+
+
+def test_stop_does_not_killpg_a_reaped_leader(bystander, monkeypatch):
+    """With the leader gone from the table, no group signal is sent (its pgid may be reused)."""
+    sent = []
+    monkeypatch.setattr(os, "killpg", lambda *a: sent.append(a))
+    gone = subprocess.Popen(["true"], start_new_session=True)
+    gone.wait()
+    h.stop_agent_processes(gone.pid, {})
+    assert not sent and bystander.poll() is None
+
+
+def test_unreadable_process_list_refuses(monkeypatch):
+    monkeypatch.setattr(h, "_ps_lines", lambda *a: [])
+    with pytest.raises(h.AgentSurvived):
+        h.stop_agent_processes(1, {})
+
+
+def test_unverifiable_holder_check_refuses(tmp_path, monkeypatch):
+    monkeypatch.setattr(h, "_open_paths_of_others", lambda dirs, seconds: None)
+    with pytest.raises(h.AgentSurvived, match="cannot rule out"):
+        _run(tmp_path, "group")
+
+
+def test_agent_survivor_skips_the_scan(setup, monkeypatch, capsys):
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", token)
+    fake_claude(setup, monkeypatch)
+    scanned = []
+
+    def survivor(argv, **kwargs):
+        raise h.AgentSurvived("refusing: agent process survived")
+
+    monkeypatch.setattr(r, "_claude_run", survivor)
+    monkeypatch.setattr(r, "scrub_claude_artifacts", lambda *a, **k: scanned.append(1))
+    assert invoke(setup, "sonnet") == 2
+    assert "agent process survived" in capsys.readouterr().err and not scanned
 
 
 def test_noncloud_worktree_is_removed_from_the_trusted_clone(setup, tmp_path, monkeypatch):
