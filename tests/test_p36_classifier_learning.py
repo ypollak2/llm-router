@@ -231,14 +231,17 @@ async def test_proxy_embeds_in_a_worker_thread_never_on_the_loop(world, monkeypa
 
     monkeypatch.setenv("LLM_ROUTER_COMPLEXITY_KNN", "on")
     seen = []
+    release = threading.Event()  # the worker waits here, so "returned first" is not a race
 
     def embed(text, model):
+        release.wait(5)
         seen.append(threading.current_thread() is threading.main_thread())
         return [1.0] + [0.0] * (DIM - 1)
 
     monkeypatch.setattr(ck, "_embed", embed)
     assert prefixes.record_example("p", forced="claude", decided="x", door="proxy", path=world["ex"], embed=True)
     assert seen == []  # the handler returned before any embedding ran
+    release.set()
     for _ in range(200):
         if world["ex"].exists() and "vec" in world["ex"].read_text():
             break
