@@ -266,6 +266,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_INDICATOR": ("llm_router", "surface_status.py", 1),
     "LLM_ROUTER_INVOICE_DISCREPANCY_PCT": ("llm_router", "invoice_reconciliation/__init__.py", 1),
     "LLM_ROUTER_JUDGE_AUTODRAIN": ("llm_router", "hooks/session-start.py", 1),
+    "LLM_ROUTER_MAINTENANCE_AUTO": ("llm_router", "hooks/session-start.py", 1),
+    "LLM_ROUTER_MAINTENANCE_STALE_H": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_JUDGE_CASCADE_SAMPLE_RATE": ("llm_router", "judge_cascade.py", 1),
     "LLM_ROUTER_JUDGE_CASCADE_THRESHOLD": ("llm_router", "judge_cascade.py", 1),
     "LLM_ROUTER_JUDGE_MODEL": ("llm_router", "judge_cascade.py", 1),
