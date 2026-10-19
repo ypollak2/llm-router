@@ -125,7 +125,7 @@ async def test_bypass_is_in_the_ledger_and_in_why(env, home, tmp_path):
     from llm_router import why
 
     _write(home, _qa(FAILED))
-    await _route([BAD, GEMINI], TaskType.GENERATE, exempt="verified_text_job", serve=BAD)
+    await _route([BAD, GEMINI], TaskType.GENERATE, exempt="verified_text_job", serve=GEMINI)
     con = sqlite3.connect(str(env))
     con.row_factory = sqlite3.Row
     try:

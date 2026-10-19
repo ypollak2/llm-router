@@ -330,6 +330,10 @@ def executed_by_provider(bounds: Bounds, *, db_path=None, proxy_path=None,
 LOCAL_BY_CAUSE_PROVIDERS = LOCAL_PROVIDERS | {"openai_compat"}
 
 
+_ANY_REASON = '"reason":"'
+_BYPASS_REASON = '"reason":"eligibility_bypassed"'
+
+
 def local_by_cause(bounds: Bounds, *, db_path=None, timeout_s: float = 0.25) -> dict[str, int] | None:
     """F23: the served-local count split by why local served (``floor`` (F26, wins over the
     others) / ``bench`` / ``last_resort`` / ``other_skip`` / ``policy`` / ``unknown``; one cause per row, first match wins in that order).
@@ -355,9 +359,11 @@ def local_by_cause(bounds: Bounds, *, db_path=None, timeout_s: float = 0.25) -> 
                     "WHEN skipped_json LIKE '%\"reason\":\"bench\"%' THEN 'bench' "
                     "WHEN served_by_last_resort = 1 THEN 'last_resort' "
                     # F112: an eligibility_bypassed note is not a skip; only other entries count.
-                    "WHEN (LENGTH(skipped_json) - LENGTH(REPLACE(skipped_json, '\"reason\":\"', ''))) "
-                    "> (LENGTH(skipped_json) - LENGTH(REPLACE(skipped_json, "
-                    "'\"reason\":\"eligibility_bypassed\"', ''))) THEN 'other_skip' ELSE 'policy' END")
+                    # Occurrence counts: (len - len(REPLACE(s, pat, ''))) / len(pat).
+                    f"WHEN (LENGTH(skipped_json) - LENGTH(REPLACE(skipped_json, '{_ANY_REASON}', '')))"
+                    f" / {len(_ANY_REASON)} > "
+                    f"(LENGTH(skipped_json) - LENGTH(REPLACE(skipped_json, '{_BYPASS_REASON}', '')))"
+                    f" / {len(_BYPASS_REASON)} THEN 'other_skip' ELSE 'policy' END")
         else:
             case = "'unknown'"
         for cause, n in con.execute(
