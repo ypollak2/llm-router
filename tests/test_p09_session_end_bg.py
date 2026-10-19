@@ -358,12 +358,12 @@ def test_an_unwritable_claim_starts_no_child(hook, state, monkeypatch):
 
 # ── #325 review gaps (mutation survivors) ────────────────────────────────────
 
-def test_the_background_steps_are_exactly_these_nine_in_order(hook):
+def test_the_background_steps_are_exactly_these_ten_in_order(hook):
     """The two tests above iterate ``_STOP_BACKGROUND_STEPS`` itself, so dropping a
-    step from it (the profile rescan) left them green."""
+    step from it (the profile rescan) left them green. P35-4 added the session summary block."""
     assert hook._STOP_BACKGROUND_STEPS == (
         "_refresh_northstar_line", "_refresh_ledger_cache", "_fetch_live_usage",
-        "_render_last_summary", "_build_and_save_learned_profile",
+        "_render_last_summary", "_render_session_report", "_build_and_save_learned_profile",
         "_maybe_rescan_profile", "_maybe_evaluate_models", "_link_decision_outcomes",
         "_refresh_judge_summary")
     for name in hook._STOP_BACKGROUND_STEPS:

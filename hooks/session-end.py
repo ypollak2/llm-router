@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 46
+# llm_router-hook-version: 47
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2117,7 +2117,7 @@ def _condense(summary: str) -> str:
 
 #: Steps the child runs, in order; each is fail-open on its own.
 _STOP_BACKGROUND_STEPS = ("_refresh_northstar_line", "_refresh_ledger_cache", "_fetch_live_usage",
-                          "_render_last_summary", "_build_and_save_learned_profile",
+                          "_render_last_summary", "_render_session_report", "_build_and_save_learned_profile",
                           "_maybe_rescan_profile", "_maybe_evaluate_models",
                           "_link_decision_outcomes", "_refresh_judge_summary")
 _STOP_NOTES_FILENAME = "stop_notes.json"
@@ -2649,6 +2649,26 @@ def _render_last_summary() -> None:
                              start, current, is_live, cumulative)
     finally:
         _STOP_LEDGER = _LEDGER_LIVE
+
+
+def _render_session_report() -> None:
+    """Child step (P35-4): the session summary block (``session_report``: targets, offload, escalations,
+    cache hit rate, quota saved, quality vs Frontier, recommendation; every figure with its n and window)
+    appended to last_summary.ansi, which ``_render_last_summary`` rewrote just before in this child.
+    A block from an earlier child is cut at its marker first, so the file holds one. In the full mode the
+    Stop itself writes that file, so the child leaves it alone. The Stop's own line never gains it."""
+    if _stop_hook_mode() == "full":
+        return
+    from llm_router import session_report
+
+    block = session_report.render(session_report.build(_read_session_id()))
+    path = _router_home() / "last_summary.ansi"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    head = text.split(session_report.MARKER, 1)[0].rstrip("\n")
+    _write_text_atomic(path, (head + "\n\n" if head else "") + block)
 
 
 def _run_background_stop_work() -> None:

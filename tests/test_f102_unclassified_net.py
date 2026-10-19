@@ -122,7 +122,7 @@ def test_classified_rows_with_unclassified_but_no_paid_prints_paid_na(home):
 def test_the_hook_pair_is_identical_at_v44():
     top = (ROOT / "hooks" / "session-end.py").read_bytes()
     assert top == HOOK.read_bytes()
-    assert top.splitlines()[1] == b"# llm_router-hook-version: 46"
+    assert top.splitlines()[1] == b"# llm_router-hook-version: 47"
 
 
 def test_provider_class_docstring_names_the_wall_clock_default():

@@ -294,7 +294,7 @@ def test_the_cache_line_prints_its_window():
 
 def test_the_hook_pair_is_byte_identical_at_v43():
     a, b = HOOK_TOP.read_bytes(), HOOK.read_bytes()
-    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 46"
+    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 47"
 
 
 def test_the_stop_path_gains_no_import_or_call():
