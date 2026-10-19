@@ -14,13 +14,52 @@ import * as path from "node:path";
 export const HOST = "pi";
 export const STALE_S = 15 * 60;
 export const REFRESH_MIN_S = 10;
+export const STAMP_DIR = ".pi-summary-refresh.d"; // F111: one stamp per session (the old single stamp starved a second session)
+export const STAMP_KEEP_S = 3600;
+export const STAMP_MAX = 64;
 export const NA = "n/a";
 const PLAIN_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
-export function routerHome(env = process.env) {
-	const o = (env.LLM_ROUTER_HOME ?? "").trim();
-	if (!o) return path.join(os.homedir(), ".llm-router");
-	return o.startsWith("~") ? path.join(os.homedir(), o.slice(1)) : o;
+/**
+ * `env_loader._parse_env_file` for one key: the last `KEY=value` line of a regular file, or null when the key is absent.
+ * Same rules as the package: lines are trimmed; blanks, `#` comments and lines without `=` are skipped; the key is
+ * trimmed; the value is trimmed, then stripped of surrounding quote characters; `export KEY=...` is NOT understood
+ * (the package sees the key `export KEY`). An empty value is a value. Only regular files are read: a FIFO would block.
+ */
+export function dotenvValue(file, key) {
+	try {
+		if (!fs.statSync(file).isFile()) return null;
+		let found = null;
+		for (const raw of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+			const line = raw.trim();
+			if (!line || line.startsWith("#") || !line.includes("=")) continue;
+			const i = line.indexOf("=");
+			if (line.slice(0, i).trim() === key) found = line.slice(i + 1).trim().replace(/^["']+|["']+$/g, "");
+		}
+		return found;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The state home, resolved as the Python package does (F111): `LLM_ROUTER_HOME` from the real environment (an empty
+ * value counts as set, and paths.py then uses the default home), else the first of `<real-env home or ~/.llm-router>/.env`
+ * and `~/.env` that has the key (an empty value counts as set and blocks the later file), else ~/.llm-router.
+ * This module is Node and cannot call the Python env loader, so it reads that one key itself.
+ */
+export function routerHome(env = process.env, homedir = os.homedir()) {
+	const fallback = path.join(homedir, ".llm-router");
+	let o = env.LLM_ROUTER_HOME;
+	if (o === undefined) {
+		for (const f of [path.join(fallback, ".env"), path.join(homedir, ".env")]) {
+			o = dotenvValue(f, "LLM_ROUTER_HOME");
+			if (o !== null) break;
+		}
+	}
+	o = (o ?? "").trim();
+	if (!o) return fallback;
+	return o.startsWith("~") ? path.join(homedir, o.slice(1)) : o;
 }
 
 export function snapshotPath(home, session) {
@@ -52,7 +91,29 @@ export function refreshArgv(session, env = process.env) {
 	return [...prefix, "--host", HOST, "--session", String(session)];
 }
 
-/** Start one refresher unless one was started in the last REFRESH_MIN_S seconds. Never waits, never throws. */
+/** Drop stamps older than STAMP_KEEP_S, then the oldest beyond STAMP_MAX. */
+export function cleanStamps(dir, nowS) {
+	const entries = [];
+	for (const name of fs.readdirSync(dir)) {
+		try {
+			entries.push([fs.statSync(path.join(dir, name)).mtimeMs / 1000, path.join(dir, name)]);
+		} catch {
+			// vanished: skip
+		}
+	}
+	entries.sort((a, b) => a[0] - b[0]);
+	const fresh = entries.filter((e) => nowS - e[0] <= STAMP_KEEP_S);
+	const doomed = [...entries.filter((e) => nowS - e[0] > STAMP_KEEP_S), ...fresh.slice(0, Math.max(0, fresh.length - STAMP_MAX))];
+	for (const [, f] of doomed) {
+		try {
+			fs.unlinkSync(f);
+		} catch {
+			// already gone
+		}
+	}
+}
+
+/** Start one refresher per session unless that session started one in the last REFRESH_MIN_S seconds. Never waits, never throws. */
 export function maybeRefresh(home, session, nowS, { env = process.env, spawnFn = spawn, onProblem = () => {} } = {}) {
 	try {
 		const argv = refreshArgv(session, env);
@@ -60,15 +121,21 @@ export function maybeRefresh(home, session, nowS, { env = process.env, spawnFn =
 			onProblem(`session id ${JSON.stringify(session)} is not a plain id: snapshot not refreshed`);
 			return false;
 		}
-		const stamp = path.join(home, ".pi-summary-refresh");
+		const stampDir = path.join(home, STAMP_DIR);
+		const stamp = path.join(stampDir, `s-${String(session).replace(/[^A-Za-z0-9._-]/g, "_")}`);
 		try {
 			if (nowS - fs.statSync(stamp).mtimeMs / 1000 < REFRESH_MIN_S) return false;
 		} catch {
 			// no stamp yet: due
 		}
-		fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+		fs.mkdirSync(stampDir, { recursive: true, mode: 0o700 });
 		fs.closeSync(fs.openSync(stamp, "w", 0o600));
 		fs.utimesSync(stamp, nowS, nowS);
+		try {
+			cleanStamps(stampDir, nowS);
+		} catch (e) {
+			onProblem(`stamp cleanup failed (${e?.name})`);
+		}
 		const child = spawnFn(argv[0], argv.slice(1), { detached: true, stdio: "ignore" });
 		child.on?.("error", (e) => onProblem(`refresh not started (${e?.code ?? e?.name}): is llm-router on PATH?`));
 		child.unref?.();

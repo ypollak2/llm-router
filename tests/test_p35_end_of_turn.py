@@ -106,11 +106,31 @@ async def test_pi_starts_one_detached_refresher_for_host_pi_and_rate_limits_it(p
     again = _pi(p35.env)
     assert again["spawned"] == [], "one refresher per 10 s"
     old = time.time() - 60
-    stamp = p35.home / ".pi-summary-refresh"
+    stamp = p35.home / ".pi-summary-refresh.d" / f"s-{SID}"
     os.utime(stamp, (old, old))
     assert len(_pi(p35.env)["spawned"]) == 1
     odd = _pi(p35.env, session="../x")
     assert odd["spawned"] == [] and "not a plain id" in odd["stderr"], odd
+
+
+@needs_node
+async def test_pi_resolves_its_home_from_the_default_home_dotenv(p35, tmp_path):  # noqa: F811 -- pytest fixture name
+    """F111: LLM_ROUTER_HOME only in ~/.llm-router/.env still finds the configured home's snapshot."""
+    _publish("pi", REAL_TIME())
+    fake_home = tmp_path / "fakehome"
+    (fake_home / ".llm-router").mkdir(parents=True)
+    (fake_home / ".llm-router" / ".env").write_text(f"LLM_ROUTER_HOME={p35.home}\n")
+    env = {k: v for k, v in p35.env.items() if k != "LLM_ROUTER_HOME"}
+    out = _pi({**env, "HOME": str(fake_home)})
+    assert out["notices"][0][0].startswith("router:"), out
+    assert (p35.home / ".pi-summary-refresh.d").is_dir()
+
+
+@needs_node
+async def test_pi_sessions_do_not_starve_each_others_refresh(p35):  # noqa: F811 -- pytest fixture name
+    assert len(_pi(p35.env)["spawned"]) == 1
+    assert len(_pi(p35.env, session="other-session")["spawned"]) == 1
+    assert _pi(p35.env, session="other-session")["spawned"] == []
 
 
 def test_summary_extension_is_registered_for_the_main_agent_only():
