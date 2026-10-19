@@ -8,7 +8,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("p20_prefreeze_smoke_t", ROOT / "scripts/p20_prefreeze_smoke.py")
 smoke = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = smoke
 spec.loader.exec_module(smoke)
 
 
