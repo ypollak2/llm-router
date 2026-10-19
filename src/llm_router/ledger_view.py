@@ -354,7 +354,10 @@ def local_by_cause(bounds: Bounds, *, db_path=None, timeout_s: float = 0.25) -> 
                     "WHEN skipped_json LIKE '%\"reason\":\"floor\"%' THEN 'floor' "
                     "WHEN skipped_json LIKE '%\"reason\":\"bench\"%' THEN 'bench' "
                     "WHEN served_by_last_resort = 1 THEN 'last_resort' "
-                    "WHEN skipped_json != '[]' THEN 'other_skip' ELSE 'policy' END")
+                    # F112: an eligibility_bypassed note is not a skip; only other entries count.
+                    "WHEN (LENGTH(skipped_json) - LENGTH(REPLACE(skipped_json, '\"reason\":\"', ''))) "
+                    "> (LENGTH(skipped_json) - LENGTH(REPLACE(skipped_json, "
+                    "'\"reason\":\"eligibility_bypassed\"', ''))) THEN 'other_skip' ELSE 'policy' END")
         else:
             case = "'unknown'"
         for cause, n in con.execute(

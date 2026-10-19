@@ -982,6 +982,7 @@ async def llm_edit(
             temperature=0.1,
             ctx=ctx,
             route_directive_id=_read_hook_route_directive(),
+            eligibility_exempt_reason="validated_edit",  # F112 / D-242
         )
 
         instructions, parse_warnings = parse_edit_response(resp.content)
@@ -1134,6 +1135,7 @@ async def llm_text_job(
             temperature=0.2,
             ctx=ctx,
             route_directive_id=_read_hook_route_directive(),
+            eligibility_exempt_reason="verified_text_job",  # F112 / D-242
         )
 
         check = check_output(job, truncated_input, resp.content)
