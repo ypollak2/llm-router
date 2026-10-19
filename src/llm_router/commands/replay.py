@@ -198,19 +198,31 @@ def print_session_replay(
         print()
 
     # Summary
-    total_cost = sum(d.get("cost_usd", 0) for d in decisions)
-    total_saved = sum(d.get("saved_usd", 0) for d in decisions)
+    # D-247: a decision without a recorded cost / saving is UNKNOWN, not $0. Sum only what was
+    # recorded, say "k of n" when partial and n/a when nothing was; the saving is an estimate.
+    costs = [d["cost_usd"] for d in decisions if d.get("cost_usd") is not None]
+    saves = [d["saved_usd"] for d in decisions if d.get("saved_usd") is not None]
+    total_cost = sum(costs)
+    total_saved = sum(saves)
 
+    def _k_of_n(k: int) -> str:
+        return f" ({k} of {len(decisions)} recorded)" if 0 < k < len(decisions) else ""
+
+    cost_txt = f"${total_cost:.2f}{_k_of_n(len(costs))}" if costs else "n/a"
     summary_lines = [
         f"Total routed: {len(decisions)} calls",
-        f"Cost: {Color.CONFIDENCE_GREEN(f'${total_cost:.2f}')}",
+        f"Cost: {Color.CONFIDENCE_GREEN(cost_txt)}",
     ]
 
-    if total_saved > 0:
-        savings_pct = (total_saved / (total_cost + total_saved) * 100) if (total_cost + total_saved) > 0 else 0
+    if saves:
+        savings_pct = (total_saved / (total_cost + total_saved) * 100) if costs and (total_cost + total_saved) > 0 else None
+        pct_txt = f" ({int(savings_pct)}%)" if savings_pct is not None else ""
+        sign = "-" if total_saved < 0 else ""
         summary_lines.append(
-            f"{Color.CONFIDENCE_GREEN(f'Saved: ${total_saved:.2f} ({int(savings_pct)}%)')}"
+            f"{Color.CONFIDENCE_GREEN(f'Saved: est. {sign}${abs(total_saved):.2f}{pct_txt}{_k_of_n(len(saves))}')}"
         )
+    else:
+        summary_lines.append("Saved: est. n/a")
 
     print(Color.ORCHESTRATE_BLUE("─" * 70))
     print("SUMMARY")

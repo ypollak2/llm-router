@@ -357,7 +357,7 @@ class SavingsAnalytics:
                                 "decision, priced token-for-token against the baseline)"))
             output.append(f"  {cyan('Actual cost')}           ${cost:.4f}")
             output.append(f"  {yellow('Opus baseline')}        ${opus_cost:.4f}")
-            output.append(f"  {green('Total saved')}          ${saved:.4f}")
+            output.append(f"  {green('Total saved (est.)')}   ${saved:.4f}")
             output.append(f"  {gold(f'Efficiency: {multiplier}x')} (Opus cost per actual $)")
             if unpriced:
                 output.append(dim(
@@ -444,7 +444,7 @@ class SavingsAnalytics:
                     ])
                 output.append(table(
                     rows,
-                    headers=["Tool", "Uses", "Cost", "Saved"],
+                    headers=["Tool", "Uses", "Cost", "Est. saved"],
                 ))
                 output.append("")
 
@@ -476,7 +476,7 @@ class SavingsAnalytics:
                     ])
                 output.append(table(
                     rows,
-                    headers=["Date", "Uses", "Cost", "Saved", "Savings %"],
+                    headers=["Date", "Uses", "Cost", "Est. saved", "Est. savings %"],
                 ))
                 output.append("")
         else:

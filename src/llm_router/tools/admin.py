@@ -156,7 +156,7 @@ async def llm_usage(period: str = "today") -> str:
     if cache_stats["total_calls_cached"] > 0:
         lines.append(section("💾 PROMPT CACHE SAVINGS ({})".format(period)))
         lines.append(row(f"  Cached calls:  {cache_stats['total_calls_cached']}  ({cache_stats['cache_hit_rate']:.1f}% hit rate)"))
-        lines.append(row(f"  Saved:         ${cache_stats['total_savings_usd']:.4f}"))
+        lines.append(row(f"  Saved:         est. ${cache_stats['total_savings_usd']:.4f}"))
         lines.append(HR)
 
     # ── Section 5: Routing Savings ──
@@ -177,14 +177,14 @@ async def llm_usage(period: str = "today") -> str:
 
         cost_str = f"${s['cost_saved_usd']:.4f}"
         time_str = _state._format_time(s["time_saved_sec"])
-        lines.append(row(f"  Saved:  {cost_str}  |  Time: {time_str}"))
+        lines.append(row(f"  Saved:  est. {cost_str}  |  Time: {time_str}"))
 
         if s["by_model"]:
             lines.append(row(""))
             for model, data in s["by_model"].items():
                 tag = {"haiku": "H", "sonnet": "S", "opus": "O"}.get(model, "?")
                 tok_str = f"{data['tokens']:,}"
-                cell = f"  [{tag}] {model:<8} {data['calls']:>3} calls  {tok_str:>7} tok  saved ${data['cost_saved']:.4f}"
+                cell = f"  [{tag}] {model:<8} {data['calls']:>3} calls  {tok_str:>7} tok  est. saved ${data['cost_saved']:.4f}"
                 lines.append(row(cell))
 
         total_tokens_k = s["total_tokens"] / 1000
@@ -193,7 +193,7 @@ async def llm_usage(period: str = "today") -> str:
             actual_cost = opus_would_cost - s["cost_saved_usd"]
             pct_saved = (s["cost_saved_usd"] / opus_would_cost) * 100
             lines.append(row(""))
-            lines.append(row(f"  Opus would cost: ${opus_would_cost:.4f}  ->  Actual: ${actual_cost:.4f}  ({pct_saved:.0f}% saved)"))
+            lines.append(row(f"  Opus would cost: ${opus_would_cost:.4f}  ->  Actual: ${actual_cost:.4f}  (est. {pct_saved:.0f}% saved)"))
         lines.append(row("  Note: estimate vs Opus baseline (equal tokens)"))
         lines.append(HR)
 
@@ -208,7 +208,7 @@ async def llm_usage(period: str = "today") -> str:
         tok_str = f"{lt['input_tokens']:,} in + {lt['output_tokens']:,} out"
         lines.append(row(f"  Calls:    {lt['total_calls']}    Tokens: {tok_str}"))
         lines.append(row(f"  Actual:   ${lt['actual_cost']:.4f}    Baseline: ${lt['baseline_cost']:.4f}"))
-        lines.append(row(f"  Saved:    ~${lt['saved']:.4f}"))
+        lines.append(row(f"  Saved:    est. ${lt['saved']:.4f}"))
         if lt["by_model"]:
             lines.append(row(""))
             lines.append(row("  Per model:"))
@@ -216,7 +216,7 @@ async def llm_usage(period: str = "today") -> str:
                 short = model.split("/")[-1][:16] if "/" in model else model[:16]
                 lines.append(row(
                     f"    {short:<16}  {md['calls']:>4}x  "
-                    f"${md['actual_cost']:.4f} actual  ~${md['saved']:.4f} saved"
+                    f"${md['actual_cost']:.4f} actual  est. ${md['saved']:.4f} saved"
                 ))
         lines.append(HR)
 
@@ -752,7 +752,7 @@ async def llm_team_report(period: str = "week") -> str:
         lines.append(row("  No routing data for this period."))
     else:
         lines.append(row(f"  Calls:     {calls:,}"))
-        lines.append(row(f"  Saved:     ~${saved:.4f}  (paid ${actual:.4f})"))
+        lines.append(row(f"  Saved:     est. ${saved:.4f}  (paid ${actual:.4f})"))
         lines.append(row(f"  Free tier: {free_pct:.0%}  {bar(free_pct)}"))
 
         top = report.get("top_models", [])
@@ -819,7 +819,7 @@ async def llm_team_push(period: str = "week") -> str:
             f"  Project: {project_id}\n"
             f"  Period:  {period}\n"
             f"  Calls:   {report['total_calls']:,}\n"
-            f"  Saved:   ~${report['saved_usd']:.4f}\n"
+            f"  Saved:   est. ${report['saved_usd']:.4f}\n"
             f"  Free:    {report['free_pct']:.0%}\n"
         )
     return f"✗ Push failed: {message}"

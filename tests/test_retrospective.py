@@ -156,7 +156,7 @@ def test_analyze_facts_ignores_phantom_saved_usd_column(sample_decisions):
     """
     poisoned = [dict(d, saved_usd=99.0) for d in sample_decisions]
     facts = analyze_facts(poisoned, [])
-    assert facts["total_saved"] == 0.0  # phantom column ignored, not summed to 396.0
+    assert facts["total_saved"] is None  # phantom column ignored, not summed to 396.0
 
 
 def test_analyze_facts_empty_session():
@@ -173,7 +173,7 @@ def test_analyze_facts_empty_session():
 
     assert facts["total_calls"] == 0
     assert facts["total_cost"] == 0.0
-    assert facts["total_saved"] == 0.0
+    assert facts["total_saved"] is None
     assert facts["classification_accuracy"] is None
     assert facts["measured"] is False
 
