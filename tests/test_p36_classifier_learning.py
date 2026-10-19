@@ -348,3 +348,122 @@ def test_write_artifact_uses_a_unique_temp_name(tmp_path, monkeypatch):
     for _ in range(2):
         ck.write_artifact(tmp_path / "k.json", [[1.0, 0.0]], [1.0], embedding_model=MODEL)
     assert len(set(seen)) == 2 and all(x != str(tmp_path / "k.json.tmp") for x in seen)
+
+
+def test_purge_leaves_no_user_embedding_in_prev(world):
+    add_examples(world, 10, 0, 1.0)
+    assert run(world).status == cl.ACCEPTED
+    art_path = ck.artifact_path()
+    prev = art_path.with_suffix(art_path.suffix + ".prev")
+    ck.clear_cache()
+    shipped = ck.load_artifact().n - 10
+    assert cl.purge_user_examples().status == cl.ACCEPTED
+    assert prev.exists() and prev.read_bytes() == art_path.read_bytes()
+    assert "learning" not in json.loads(prev.read_text()).get("provenance", {})
+    ck.clear_cache()
+    assert ck.load_artifact().n == shipped  # .prev is byte-equal to this purged artifact
+
+
+def test_lock_times_out_with_a_clear_message_and_exit_2(world, capsys):
+    import threading
+
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with cl._lock(ck.artifact_path()):
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert held.wait(5)
+    try:
+        with pytest.raises(cl.LockTimeout):
+            with cl._lock(ck.artifact_path(), timeout=0.2):
+                pass
+        cl.LOCK_TIMEOUT_S, old = 0.2, cl.LOCK_TIMEOUT_S
+        try:
+            assert learn.main(["--dry-run"]) == 2
+        finally:
+            cl.LOCK_TIMEOUT_S = old
+        assert "holds" in capsys.readouterr().err
+    finally:
+        release.set()
+        t.join(5)
+
+
+def test_lock_degrades_without_fcntl(world, monkeypatch):
+    import sys
+
+    from llm_router import file_lock
+
+    monkeypatch.setattr(file_lock, "_IS_WINDOWS", True)
+    fake = type(sys)("msvcrt")
+    fake.LK_NBLCK, fake.LK_UNLCK = 1, 0
+    calls = []
+    fake.locking = lambda fd, mode, n: calls.append(mode)
+    monkeypatch.setattr(file_lock, "msvcrt", fake, raising=False)
+    with cl._lock(ck.artifact_path()):
+        pass
+    assert calls == [1, 0]
+
+
+def test_prune_does_not_drop_a_concurrent_append(tmp_path):
+    import threading
+
+    path = tmp_path / "ex.jsonl"
+    old = time.time() - examples.MAX_AGE_S - 1000
+    for i in range(300):
+        path.open("a").write(json.dumps({"text_sha": f"old{i:013d}", "source": "redo", "label": 1.0, "ts": old}) + "\n")
+    stop, errs = threading.Event(), []
+    appended = []
+
+    def appender():
+        i = 0
+        while not stop.is_set():
+            sha = f"new{i:013d}"
+            try:
+                examples.append_row({"text_sha": sha, "source": "redo", "label": 1.0, "ts": time.time()}, path=path)
+                appended.append(sha)
+            except Exception as exc:  # noqa: BLE001
+                errs.append(exc)
+            i += 1
+
+    t = threading.Thread(target=appender)
+    t.start()
+    time.sleep(0.05)
+    for _ in range(30):
+        examples.prune(path)
+        with path.open("a") as fh:
+            fh.write(json.dumps({"text_sha": "oldX", "source": "redo", "label": 1.0, "ts": old}) + "\n")
+    stop.set()
+    t.join(10)
+    assert not errs and len(appended) > 5, "the check found nothing to check"
+    have = {r["text_sha"] for r in examples.read_examples(path)}
+    assert set(appended) <= have
+
+
+def test_embed_queue_is_bounded_and_drops_with_failopen(monkeypatch):
+    import asyncio
+    import threading
+
+    from llm_router import failopen
+
+    recorded = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: recorded.append(code))
+    monkeypatch.setattr(examples, "MAX_PENDING_EMBEDS", 3)
+    gate_ = threading.Event()
+    ran = []
+
+    async def go():
+        results = [examples.run_off_loop(lambda i=i: (gate_.wait(5), ran.append(i))) for i in range(6)]
+        gate_.set()
+        for _ in range(100):
+            if examples._pending == 0:
+                break
+            await asyncio.sleep(0.02)
+        return results
+
+    results = asyncio.run(go())
+    assert results == [True] * 3 + [False] * 3
+    assert recorded == ["LR-FO-EXAMPLE-QUEUE"] * 3 and sorted(ran) == [0, 1, 2]

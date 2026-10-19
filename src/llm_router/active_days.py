@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import time
 from datetime import date, timedelta
@@ -159,12 +160,27 @@ def _new_install_id(path: Path) -> str:
         return fresh
 
 
+_ORPHAN_TMP = re.compile(r"active_days\.id\.\d+\.[0-9a-f]+\.tmp")
+
+
 def _sweep_orphan_tmps(path: Path, now: float | None = None, max_age: float = 3600.0) -> None:
-    """Remove ``active_days.id.*.tmp`` files left by a process killed mid-create."""
+    """Remove ``active_days.id.<pid>.<hex>.tmp`` files left by a process killed mid-create.
+
+    Only that exact name form is touched (``active_days.id.backup.tmp`` is not ours). Age is
+    judged with ``lstat`` and removal is an ``unlink``, so a symlink of that name, dangling or
+    not, is judged by itself and removed without following it."""
     cutoff = (time.time() if now is None else now) - max_age
-    for p in path.parent.glob("active_days.id.*.tmp"):
+    try:
+        names = os.listdir(path.parent)
+    except OSError as exc:
+        _record("P37-ACTIVE-DAY-SWEEP", exc)
+        return
+    for name in names:
+        if not _ORPHAN_TMP.fullmatch(name):
+            continue
+        p = path.parent / name
         try:
-            if p.stat().st_mtime < cutoff:
+            if p.lstat().st_mtime < cutoff:
                 p.unlink(missing_ok=True)
         except OSError as exc:
             _record("P37-ACTIVE-DAY-SWEEP", exc)

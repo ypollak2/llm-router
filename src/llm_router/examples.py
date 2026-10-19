@@ -29,12 +29,15 @@ Retention: see ``docs/RETENTION.md`` (``examples.jsonl``). Mode 0600, directory 
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import math
 import os
 import tempfile
+import threading
 import time
 from array import array
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from llm_router import paths, prompt_key
@@ -134,10 +137,40 @@ def _rewrite(target: Path, lines: list[bytes]) -> None:
             os.unlink(temporary)
 
 
+class LockBusy(OSError):
+    """``examples.jsonl.lock`` stayed held past the bound: the write is dropped, not blocked."""
+
+
+LOCK_TIMEOUT_S = 5.0
+
+
+@contextlib.contextmanager
+def _file_lock(target: Path):
+    """Exclusive lock on ``<file>.lock`` around every rewrite and append, so a prune or trim
+    (read, filter, replace) cannot drop a row another process appended in between."""
+    from llm_router import file_lock
+
+    status: dict = {}
+    with file_lock.exclusive_lock(target.with_name(target.name + ".lock"), LOCK_TIMEOUT_S, status) as got:
+        if not got:
+            raise LockBusy(f"examples lock not acquired ({status.get('state')})")
+        yield
+
+
 def prune(path: Path | str | None = None, *, now: float | None = None) -> int:
     """Delete rows older than ``MAX_AGE_S`` from the file itself. Returns the number dropped.
-    Cheap when nothing is old: one line is read. Unparseable lines are kept."""
+    Cheap when nothing is old: one line is read. Unparseable lines are kept. Holds the file
+    lock for the rewrite; raises ``LockBusy`` (an ``OSError``) if it cannot get it."""
     target = Path(path) if path is not None else default_path()
+    cutoff = (time.time() if now is None else now) - MAX_AGE_S
+    oldest = _oldest_ts(target)
+    if oldest is None or oldest >= cutoff:
+        return 0
+    with _file_lock(target):
+        return _prune_locked(target, now=now)
+
+
+def _prune_locked(target: Path, *, now: float | None = None) -> int:
     cutoff = (time.time() if now is None else now) - MAX_AGE_S
     oldest = _oldest_ts(target)
     if oldest is None or oldest >= cutoff:
@@ -158,17 +191,61 @@ def prune(path: Path | str | None = None, *, now: float | None = None) -> int:
     return dropped
 
 
-def run_off_loop(fn, *args, **kwargs) -> None:
-    """Run ``fn`` without blocking the caller. On a running event loop it goes to the default
-    thread executor (fire and forget; ``fn`` must be fail-open); with no loop it runs inline."""
+MAX_PENDING_EMBEDS = 32  # queued + running deferred embeds; more are dropped, not queued
+_pending = 0
+_pending_lock = threading.Lock()
+_pool: ThreadPoolExecutor | None = None
+
+
+def _bounded_pool() -> ThreadPoolExecutor:
+    global _pool
+    with _pending_lock:
+        if _pool is None:
+            _pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="examples-embed")
+        return _pool
+
+
+def run_off_loop(fn, *args, **kwargs) -> bool:
+    """Run ``fn`` without blocking the caller. On a running event loop it goes to a small
+    dedicated pool (fire and forget; ``fn`` must be fail-open) holding at most
+    ``MAX_PENDING_EMBEDS`` jobs: past that the job is dropped, a ``failopen`` row
+    ``LR-FO-EXAMPLE-QUEUE`` is recorded and False is returned. With no loop it runs inline."""
     import asyncio
 
+    global _pending
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         fn(*args, **kwargs)
-        return
-    loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+        return True
+    with _pending_lock:
+        full = _pending >= MAX_PENDING_EMBEDS
+        if not full:
+            _pending += 1
+    if full:
+        from llm_router import failopen
+
+        failopen.record("LR-FO-EXAMPLE-QUEUE", detail=f"embed queue full ({MAX_PENDING_EMBEDS}); example dropped")
+        return False
+
+    def job() -> None:
+        global _pending
+        try:
+            fn(*args, **kwargs)
+        finally:
+            with _pending_lock:
+                _pending -= 1
+
+    try:
+        _bounded_pool().submit(job)
+    except RuntimeError as exc:  # pool shut down at interpreter exit
+        with _pending_lock:
+            _pending -= 1
+        from llm_router import failopen
+
+        failopen.record("LR-FO-EXAMPLE-QUEUE", exc)
+        return False
+    return True
 
 
 def append_row(row: dict, *, path: Path | str | None = None, max_bytes: int = MAX_BYTES) -> None:
@@ -178,14 +255,15 @@ def append_row(row: dict, *, path: Path | str | None = None, max_bytes: int = MA
     target = Path(path) if path is not None else default_path()
     payload = (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8")
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if target.exists():
-        prune(target, now=row.get("ts") if isinstance(row.get("ts"), (int, float)) else None)
-    if target.exists() and target.stat().st_size > max_bytes:
-        lines = target.read_bytes().splitlines(keepends=True)
-        _rewrite(target, lines[len(lines) // 2:])
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    with os.fdopen(fd, "ab") as stream:
-        stream.write(payload)
+    with _file_lock(target):  # prune/trim rewrites and the append are one critical section
+        if target.exists():
+            _prune_locked(target, now=row.get("ts") if isinstance(row.get("ts"), (int, float)) else None)
+        if target.exists() and target.stat().st_size > max_bytes:
+            lines = target.read_bytes().splitlines(keepends=True)
+            _rewrite(target, lines[len(lines) // 2:])
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "ab") as stream:
+            stream.write(payload)
 
 
 def record(text: str | None, source: str, label: float, *, text_sha: str | None = None,

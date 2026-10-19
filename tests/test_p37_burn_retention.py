@@ -543,3 +543,30 @@ def test_orphan_tmp_files_are_swept_only_when_old_and_exact_pattern(home):
     os.utime(other, (past, past))
     ad.mark_active(T0 + 0)  # first row of the day triggers the sweep
     assert not old.exists() and new.exists() and other.exists()
+
+
+def test_sweep_ignores_lookalike_names_and_removes_dangling_symlinks(home, tmp_path):
+    import os
+
+    past = time.time() - 7200
+    keep = [home / "active_days.id.backup.tmp", home / "active_days.id.12.XYZ.tmp",
+            home / "active_days.id.12.abcd.tmp.bak", home / "active_days.id..abcd.tmp"]
+    for p in keep:
+        p.write_text("x")
+        os.utime(p, (past, past))
+    dangling = home / "active_days.id.55.beef01.tmp"
+    dangling.symlink_to(tmp_path / "does-not-exist")
+    os.utime(dangling, (past, past), follow_symlinks=False)
+    target = tmp_path / "outside.txt"
+    target.write_text("keep me")
+    linked = home / "active_days.id.56.beef02.tmp"
+    linked.symlink_to(target)
+    os.utime(linked, (past, past), follow_symlinks=False)
+    young = home / "active_days.id.57.beef03.tmp"
+    young.symlink_to(tmp_path / "also-missing")  # lstat mtime is now: too young
+    assert dangling.is_symlink() and not dangling.exists()  # the case under test exists
+    ad._sweep_orphan_tmps(home / "active_days.jsonl")
+    assert all(p.exists() for p in keep)
+    assert not dangling.is_symlink() and not linked.is_symlink()
+    assert target.read_text() == "keep me"  # not followed
+    assert young.is_symlink()
