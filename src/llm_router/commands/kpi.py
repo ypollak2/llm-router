@@ -2979,7 +2979,16 @@ def cmd_kpi(args: list[str]) -> int:
     ap.add_argument("--quota-burn", action="store_true",
                      help="S3 / GE6: Claude quota burn per session and per human turn from "
                           "quota_samples.jsonl and quota_history.jsonl; needs --since and --until; "
-                          "stale samples are labelled estimated and kept out of the measured line")
+                          "stale samples are labelled estimated and kept out of the measured line; "
+                          "also compares with the baseline week and reports per-session S3 coverage "
+                          "(comparison only, no reduction claimed) and the S7 status")
+    ap.add_argument("--baseline-start", default=None,
+                     help="with --quota-burn: start of the 7-day baseline week (default: the "
+                          "first quota_samples/quota_history row, i.e. the GE6 deploy)")
+    ap.add_argument("--retention", action="store_true",
+                     help="S7 / P3.7: this install's own 14-day retention status from the local "
+                          "active_days.jsonl (install day, active days, active on day 14: "
+                          "yes/no/not yet). Local only; nothing is sent anywhere")
     ap.add_argument("--dry-run", action="store_true",
                      help="with --backfill-tags: report what would be written; write nothing")
     ap.add_argument("--validate-backfill", action="store_true",
@@ -3072,10 +3081,22 @@ def cmd_kpi(args: list[str]) -> int:
             ap.error("--quota-burn: --since and --until must be readable and since < until")
         from llm_router import quota_samples
 
-        burn = quota_samples.quota_burn(q_since, q_until,
-                                        include_research=(parsed.include == "research"))
+        q_base = None
+        if parsed.baseline_start is not None:
+            q_base = _parse_when(parsed.baseline_start)
+            if q_base is None:
+                ap.error("--baseline-start must be readable")
+        burn = quota_samples.quota_burn_report(q_since, q_until,
+                                               include_research=(parsed.include == "research"),
+                                               baseline_start=q_base)
         print(json.dumps(burn, indent=2, default=str) if parsed.json
-              else quota_samples.render_quota_burn(burn))
+              else quota_samples.render_quota_burn_report(burn))
+        return 0
+    if parsed.retention:
+        from llm_router import active_days
+
+        st = active_days.status()
+        print(json.dumps(st, indent=2) if parsed.json else active_days.render_status(st))
         return 0
     if parsed.validate_backfill:
         from llm_router import session_kind_backfill as skb

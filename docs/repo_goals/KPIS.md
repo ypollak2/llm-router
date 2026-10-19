@@ -616,3 +616,29 @@ One row per change goes in [`../KPI-LEDGER.md`](../KPI-LEDGER.md).
 - **O1 has not been reconciled against Claude Code's `total_cost_usd`.** Until it is,
   O1 is an estimate, not a verified figure (see `NORTH_STAR.md`'s point 13 on unverified
   savings).
+
+## S3 quota burn vs the baseline week and S7 retention (P3.7)
+
+`llm-router kpi --quota-burn --since A --until B [--baseline-start T] [--include research] [--json]`
+reports, for the window, the existing GE6 lines (burn per session and per human turn from the
+session start/Stop samples in `quota_samples.jsonl`, stale samples as "estimated") and adds:
+
+* **The baseline week**: the 7 days from the first row the GE6 instrument wrote (the earliest `ts`
+  in `quota_samples.jsonl` or `quota_history.jsonl`, which is the GE6 deploy; override with
+  `--baseline-start`). Its per-turn burn is printed beside the window's, with the ratio per turn
+  (comparison only). A zero or unknown baseline gives "n/a", never a ratio of 0 or infinity.
+  A window that overlaps the baseline week is flagged as not independent.
+* **S3 coverage (P3.7-a)**: sessions in the window with a measured burn, over all sessions in the
+  window (tagged organic by default, owner override applied), with n and a Wilson interval. Without
+  a measured baseline the figure is n/a. Bar: 95%.
+* **Both sources**: session samples and the 5-minute `quota_history.jsonl` series (weekly points
+  burned, 5h points burned, active hours, weekly points per active hour; measured rows only,
+  readings more than 30 minutes apart are not joined).
+* **S7**: the install's own retention line (below).
+
+It never claims the 40% reduction: that is 16.1 (LATER), and one install's window is not a population.
+
+`llm-router kpi --retention [--json]` prints this install's retention status from the local
+`active_days.jsonl` (D-26 option A): install day (the first marker day), active days, day 14, and
+"active on day 14: yes / no / not yet" (n/a before the first marker). Local only; see
+`docs/RETENTION.md` for the file's rows, bound and deletion.
