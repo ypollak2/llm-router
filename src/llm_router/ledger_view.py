@@ -984,7 +984,8 @@ class CacheHitStats:
 
 def cache_hit_stats(bounds: Bounds, *, db_path=None, timeout_s: float = 0.5) -> CacheHitStats | None:
     """Lookups, hits and the hits' recorded saving over ``bounds`` (``ts`` is epoch seconds, closed
-    bounds). None = no database, no table, or no lookup in the window."""
+    bounds; a session-id scope narrows to that session). None = no database, no table, no
+    ``session_id`` column for a session scope, or no lookup in the window."""
     con = _connect(db_path, timeout_s)
     if con is None:
         return None
@@ -998,6 +999,11 @@ def cache_hit_stats(bounds: Bounds, *, db_path=None, timeout_s: float = 0.5) -> 
         if bounds.since_ts is not None:
             parts.append("ts >= ?")
             params.append(bounds.since_ts)
+        if bounds.session_id is not None:       # a session scope: that session's lookups only (P35-4)
+            if "session_id" not in cols:
+                return None
+            parts.append("session_id = ?")
+            params.append(bounds.session_id)
         row = con.execute(  # nosec B608
             f"SELECT COUNT(*), COALESCE(SUM(hit), 0), {saved} FROM semantic_cache_lookups "
             f"WHERE {' AND '.join(parts)}", params).fetchone()

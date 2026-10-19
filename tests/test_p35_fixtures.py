@@ -357,36 +357,87 @@ async def test_codex_stop_message_is_the_snapshot_line(p35):
 
 # -- P35-4 session summary -----------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="P35-4 session summary: session_report.py does not exist")
+# P35-4 session summary (flipped: session_report.py; each marker failed with ImportError first. The rest of
+# the session-summary acceptance is in tests/test_p35_session_report.py)
+
 async def test_session_report_escalations_come_from_tier_reason(p35):
     from llm_router import session_report
 
     r = session_report.build(SID)
     assert r["escalations"]["n"] == ESCALATIONS and r["escalations"]["window"] == "session", r
+    # n=10: the home's 7 timed s-main proxy rows plus the three seeded here (the untimed row is out)
+    assert r["escalations"]["of"] == 10, r["escalations"]
 
 
-@pytest.mark.xfail(strict=True, reason="P35-4 session summary: session_report.py does not exist")
 async def test_session_report_cache_hit_rate_is_na_below_min(p35):
-    from llm_router import session_report
+    from llm_router import semantic_cache, session_report
 
-    assert session_report.build(SID)["cache_hit_rate"]["value"] is None
+    _lookups(p35.db, hits=3, misses=4)                         # 7 < MIN_INFORMATIVE_LOOKUPS
+    c = session_report.build(SID)["cache_hit_rate"]
+    assert c["value"] is None and (c["n"], c["hits"]) == (7, 3), c
+    assert c["na_reason"] == f"n=7 < {semantic_cache.MIN_INFORMATIVE_LOOKUPS} lookups", c
 
 
-@pytest.mark.xfail(strict=True, reason="P35-4 session summary: session_report.py does not exist")
+async def test_session_report_cache_hit_rate_at_min_is_a_value(p35):
+    """Carry-forward (rv-628): a >= MIN_INFORMATIVE_LOOKUPS case asserts the value; another session's
+    lookups are not in this session's n."""
+    from llm_router import semantic_cache, session_report
+
+    mn = semantic_cache.MIN_INFORMATIVE_LOOKUPS
+    _lookups(p35.db, hits=5, misses=mn - 5)                    # exactly the floor
+    _lookups(p35.db, hits=9, misses=0, sid="s-other")
+    c = session_report.build(SID)["cache_hit_rate"]
+    assert (c["n"], c["hits"], c["window"]) == (mn, 5, "session") and c["value"] == 5 / mn, c
+
+
 async def test_session_report_recommendation_is_computed_or_na(p35):
+    """The fixture has 10 decided verdicts: below the eligibility rule's n, so no recommendation, and the
+    reason names that input. The computed branches (eligible / failed) are in test_p35_session_report.py
+    (a constant cannot pass both)."""
     from llm_router import session_report
+    from llm_router.lane_quality import PAIRS_MIN_N
 
     rec = session_report.build(SID)["recommendation"]
-    assert rec.startswith("~") or rec.startswith("no recommendation (n/a: "), rec
+    n = VERDICTS["good"] + VERDICTS["bad"]
+    assert rec == f"no recommendation (n/a: quality vs Frontier n={n} < {PAIRS_MIN_N}, 7d)", rec
 
 
-@pytest.mark.xfail(strict=True, reason="P35-4 session summary: session_report.py does not exist")
 async def test_session_report_spread_is_not_in_the_offload_numerator(p35):
     from llm_router import session_report
 
     t = session_report.build(SID)["targets"]
     assert set(t) >= {"local", "cheap", "frontier", "spread"}
     assert t["offload_numerator"] == t["local"] + t["cheap"], t
+    assert t["n"] == t["local"] + t["cheap"] + t["frontier"] + t["spread"] and t["n"] > 0, t
+
+
+async def test_session_report_quota_saved_and_quality_carry_their_n(p35):
+    """Carry-forward (rv-628): "quota saved ~" and "quality vs Frontier with n" in the printed block."""
+    from llm_router import session_report
+
+    r = session_report.build(SID)
+    q = r["quality"]
+    good, bad = VERDICTS["good"], VERDICTS["bad"]
+    assert (q["k"], q["n"], q["window"], q["undecided"]) == (good, good + bad, "7d", 1), q
+    text = session_report.render(r)
+    assert f"quality vs Frontier {good / (good + bad):.0%} acceptable vs Frontier 100% (n={good + bad}, 7d" in text
+    line = next(ln for ln in text.splitlines() if "quota saved" in ln)
+    assert line.startswith("  quota saved ~") or "quota saved n/a (n=" in line, line
+    assert ", session" in line, line
+
+
+def _lookups(db, *, hits: int, misses: int, sid: str = SID) -> None:
+    import sqlite3
+
+    from llm_router.semantic_cache import CREATE_SEMANTIC_CACHE_LOOKUPS_TABLE
+
+    con = sqlite3.connect(db)
+    con.execute(CREATE_SEMANTIC_CACHE_LOOKUPS_TABLE)
+    for i in range(hits + misses):
+        con.execute("INSERT INTO semantic_cache_lookups (ts, task_type, hit, session_id) VALUES (?, 'query', ?, ?)",
+                    (NOW - (i + 1) * MIN, int(i < hits), sid))
+    con.commit()
+    con.close()
 
 
 # -- P35-5 weekly --------------------------------------------------------------------------------

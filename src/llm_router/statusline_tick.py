@@ -67,6 +67,14 @@ HISTORY_NAME = "quota_history.jsonl"
 HISTORY_STAMP_NAME = ".quota_history.last"
 #: One history row at most this often (the quota TTL above).
 HISTORY_INTERVAL_S = 300.0
+#: F107: history rows older than this are pruned. The longest reader window is 14 days
+#: (``quota_rate``, ``statusline_snapshot.BURN_DAYS``); 30 days is that plus a margin for the
+#: ``kpi --quota-burn`` coverage report. Docs: ``docs/RETENTION.md``.
+HISTORY_RETAIN_S = 30 * 86400.0
+#: ... and never more than this many rows (30 d at 288/day is 8,640; a clock glitch cannot grow it).
+HISTORY_MAX_ROWS = 20_000
+HISTORY_PRUNE_STAMP_NAME = ".quota_history.pruned"
+HISTORY_PRUNE_EVERY_S = 86400.0
 #: A usage.json older than this is recorded ``stale``, not ``measured``.
 QUOTA_STALE_AFTER_S = 30 * 60.0
 #: Longest model / hook name the line will carry before it is cut.
@@ -444,6 +452,82 @@ def maybe_append_history(home: str, usage: dict | None, now: float) -> bool:
             os.close(fd)  # also releases the flock
     except Exception:  # noqa: BLE001 -- a status line never fails over its history
         return False
+
+
+def _sweep_stale_tmp(home: str, hist: str, now: float) -> None:
+    """Remove ``quota_history.jsonl.<pid>.tmp`` left by a crashed prune (older than a day), inside
+    the router home only. Called under the slot lock."""
+    base = os.path.basename(hist)
+    for name in os.listdir(home):
+        if name.startswith(base + ".") and name.endswith(".tmp"):
+            path = os.path.join(home, name)
+            if os.path.isfile(path) and not os.path.islink(path) and now - os.path.getmtime(path) > 86400.0:
+                os.unlink(path)
+
+
+def prune_history(home: str, now: float, *, retain_s: float = HISTORY_RETAIN_S,
+                  max_rows: int = HISTORY_MAX_ROWS) -> bool:
+    """Keep only the rows of ``quota_history.jsonl`` newer than ``retain_s`` (and at most
+    ``max_rows``, newest first); rewrite the file atomically. True when the file was rewritten.
+
+    At most once a day (the mtime of :data:`HISTORY_PRUNE_STAMP_NAME`). Never call this from the
+    synchronous tick: only the background refresher does. It takes the writer's slot lock
+    (``flock`` on the slot stamp) so no append lands between the read and the replace; while it
+    holds the lock the writers skip (the slot stamp is not advanced, so the next tick writes the
+    row). If a writer holds the lock, the prune is skipped and retried on the next call. Lines that
+    are not JSON objects with a numeric ``ts`` are dropped. Raises OSError on a filesystem failure:
+    the caller records it (nothing is swallowed here)."""
+    prune_stamp = os.path.join(home, HISTORY_PRUNE_STAMP_NAME)
+    if os.path.exists(prune_stamp) and 0 <= now - os.path.getmtime(prune_stamp) < HISTORY_PRUNE_EVERY_S:
+        return False
+    hist = os.path.join(home, HISTORY_NAME)
+    if not os.path.exists(hist):
+        return False
+    try:
+        import fcntl
+    except ImportError:
+        return False                       # no flock (Windows): never rewrite under a live writer
+    fd = os.open(os.path.join(home, HISTORY_STAMP_NAME), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False                   # a writer holds the slot: try again on the next call
+        _sweep_stale_tmp(home, hist, now)
+        cutoff = now - retain_s
+        kept: list[bytes] = []
+        total = 0
+        with open(hist, "rb") as fh:
+            for ln in fh:
+                total += 1
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                ts = _num(r.get("ts")) if isinstance(r, dict) else None
+                if ts is not None and ts >= cutoff:
+                    kept.append(ln if ln.endswith(b"\n") else ln + b"\n")
+        kept = kept[-max_rows:]
+        rewritten = len(kept) != total
+        if rewritten:
+            tmp = f"{hist}.{os.getpid()}.tmp"
+            tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(tfd, "wb") as out:
+                    out.writelines(kept)
+                    out.flush()
+                    os.fsync(out.fileno())
+                os.replace(tmp, hist)
+            except BaseException:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+                raise
+        pfd = os.open(prune_stamp, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.close(pfd)
+        os.utime(prune_stamp, (now, now))
+        return rewritten
+    finally:
+        os.close(fd)                       # also releases the flock
 
 
 def _float_or_none(raw: bytes) -> float | None:

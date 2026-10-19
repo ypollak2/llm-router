@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 73
+# llm_router-hook-version: 74
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -226,7 +226,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 73"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 74"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -6021,7 +6021,8 @@ def main() -> None:
     ):
         try:
             from llm_router import okf as _okf
-            _okf_docs = _okf.find_relevant(prompt)
+            with _hl_phase("okf"):  # named so the next latency pass sees it (was unphased: ~1 s)
+                _okf_docs = _okf.find_relevant(prompt)
         except Exception as _exc:  # noqa: BLE001 — retrieval must never break routing
             _okf_docs = []
             _debug_log(f"[INVOCATION {invocation_id:.3f}] OKF LOOKUP FAILED: {_exc}")
