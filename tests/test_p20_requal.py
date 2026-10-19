@@ -1962,3 +1962,24 @@ def test_run_git_sandbox_sees_linked_worktree(tmp_path):
     h.run_git(repo, "worktree", "add", "-q", "-b", "b2", str(wt))
     (wt / "f.txt").write_text("changed\n")
     assert b"changed" in h.run_git(wt, "diff", "HEAD", sandbox=True)
+
+
+def test_scan_for_token_vanished_entry_is_skipped_other_errors_refuse(tmp_path, monkeypatch):
+    root = tmp_path / "tree"
+    root.mkdir()
+    (root / "gone.txt").write_text("x")
+    (root / "ok.txt").write_text("y")
+    real_lstat = os.lstat
+
+    def lstat_with(exc):
+        def fake(path, *a, **k):
+            if str(path).endswith("gone.txt"):
+                raise exc
+            return real_lstat(path, *a, **k)
+        return fake
+
+    monkeypatch.setattr(h.os, "lstat", lstat_with(FileNotFoundError()))
+    h.scan_for_token("TOKEN-abcdef0123456789", "work files", root=root)
+    monkeypatch.setattr(h.os, "lstat", lstat_with(PermissionError()))
+    with pytest.raises(h.Refuse, match="unreadable entry in work files"):
+        h.scan_for_token("TOKEN-abcdef0123456789", "work files", root=root)

@@ -743,6 +743,8 @@ def scan_for_token(token: str, kind: str, *, data=None, root: Path | None = None
             path = os.path.join(base, name)
             try:
                 mode = os.lstat(path).st_mode
+            except FileNotFoundError:
+                continue  # F117: gone since the listing (a git child still finishing): nothing to scan
             except OSError:
                 raise Refuse(f"refusing: unreadable entry in {kind}") from None
             if stat.S_ISDIR(mode):
