@@ -220,6 +220,8 @@ def test_hidden_tests_and_resume(setup, mode, expected, capsys):
 
 def fake_claude(setup, monkeypatch, served=None):
     cfg, c, *_ = setup
+    if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):  # F115: the scrub needs a token to scan for
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "FAKE-OAUTH-TOKEN-default-0123456789")
 
     def call(argv, **kwargs):
         assert "--safe-mode" in argv
@@ -483,3 +485,59 @@ def test_claude_run_without_token_leak_is_unaffected(setup, monkeypatch):
     fake_claude(setup, monkeypatch)
     assert invoke(setup, "sonnet") == 0
     assert len(rows(setup)) == 3
+
+
+def test_claude_timeout_still_scrubs_output_and_work(setup, monkeypatch, capsys):
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", token)
+    fake_claude(setup, monkeypatch)
+
+    def hang(argv, **kwargs):
+        (Path(kwargs["cwd"]) / "notes.txt").write_text(f"printenv {token}\n")
+        raise subprocess.TimeoutExpired(argv, 900, output=b"", stderr=b"partial")
+
+    monkeypatch.setattr(r, "_claude_run", hang)
+    assert invoke(setup, "sonnet") == 2
+    captured = capsys.readouterr()
+    assert "token found in work files" in captured.err
+    assert token not in captured.out + captured.err
+    assert "rotate the token" in captured.err and "claude setup-token" in captured.err
+    assert not rows(setup)
+
+
+def test_claude_timeout_output_is_scanned(setup, monkeypatch, capsys):
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", token)
+    fake_claude(setup, monkeypatch)
+
+    def hang(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 900, output=b"", stderr=f"x {token}".encode())
+
+    monkeypatch.setattr(r, "_claude_run", hang)
+    assert invoke(setup, "sonnet") == 2
+    assert "token found in agent output" in capsys.readouterr().err
+
+
+def test_scrub_hit_purges_work_and_home_inside_run_dir_only(setup, tmp_path):
+    cfg = setup[0]
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    for d in (work, home):
+        d.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(work), "init", "-q"], check=True)
+    (home / "t.txt").write_text(token)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    with pytest.raises(h.Refuse, match="token found in agent scratch home"):
+        r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir)
+    assert not home.exists() and not work.exists()
+    r.purge_inside(cfg.run_dir, outside, cfg.run_dir)
+    assert (outside / "keep.txt").exists() and cfg.run_dir.exists()
+
+
+def test_scrub_without_token_fails_closed(setup):
+    cfg = setup[0]
+    with pytest.raises(h.Refuse, match="no token to scan for"):
+        r.scrub_claude_artifacts(None, cfg.run_dir, cfg.run_dir, "", cfg.run_dir)

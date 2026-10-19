@@ -12,6 +12,7 @@ import os
 import pwd
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -602,7 +603,7 @@ def agent_path(path: str) -> str:
 
 
 # F115: any python*/pypy* executable (python3.13, pypy3, ...) is an interpreter an agent can run.
-INTERPRETER_NAME = re.compile(r"(python|pypy)[0-9.]*")
+INTERPRETER_NAME = re.compile(r"(python|pypy)[0-9.]*[a-z]*")  # python3.13t, python3.12d, python3m
 IMPORT_PROBE = (
     "import importlib.util,sys; "
     "sys.exit(0 if importlib.util.find_spec('llm_router') is None else 1)"
@@ -649,12 +650,18 @@ def assert_no_llm_router_import(env: dict[str, str]) -> None:
             raise Refuse("refusing: python import probe gave no clean answer")
 
 
+_GRADER_PYTHON: dict[str, str] = {}
+
+
 def grader_python(env: dict[str, str]) -> str:
     """The interpreter that runs agent-written code in the grader: first python on env's PATH
     with pytest. It must not import llm_router (guard). A hung or unrunnable probe refuses
     (it is not an agent failure)."""
+    path = env.get("PATH", "")
+    if path in _GRADER_PYTHON:
+        return _GRADER_PYTHON[path]
     assert_no_llm_router_import(env)
-    for exe in agent_pythons(env.get("PATH", "")):
+    for exe in agent_pythons(path):
         try:
             probe = subprocess.run(
                 [exe, "-I", "-c", "import pytest"], env=env, stdin=subprocess.DEVNULL,
@@ -665,15 +672,50 @@ def grader_python(env: dict[str, str]) -> str:
         except OSError:
             raise Refuse("refusing: grader pytest probe could not run") from None
         if probe.returncode == 0:
+            _GRADER_PYTHON[path] = exe  # cache successes only: one probe pass per PATH per process
             return exe
     raise Refuse("refusing: no python on the agent PATH provides pytest for the grader")
+
+
+SCAN_FILE_CAP = 64 << 20     # bytes read from one file
+SCAN_TOTAL_CAP = 512 << 20   # bytes read from one tree
+SCAN_SECONDS = 120.0         # wall time for one tree
+
+
+def _scan_file(path: str, needle: bytes, kind: str, budget: list[int]) -> None:
+    """Open without following a symlink or blocking on a FIFO; read only a regular file."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise Refuse(f"refusing: unreadable or special file in {kind}") from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise Refuse(f"refusing: special file in {kind}")
+        if info.st_size > SCAN_FILE_CAP:
+            raise Refuse(f"refusing: oversized file in {kind}")
+        read, tail = 0, b""
+        while chunk := os.read(fd, 1 << 20):
+            read += len(chunk)
+            budget[0] -= len(chunk)
+            if read > SCAN_FILE_CAP or budget[0] < 0:
+                raise Refuse(f"refusing: scan size cap exceeded in {kind}")
+            if needle in tail + chunk:
+                raise Refuse(f"refusing: token found in {kind}")
+            tail = chunk[-len(needle):]
+    finally:
+        os.close(fd)
 
 
 def scan_for_token(token: str, kind: str, *, data=None, root: Path | None = None) -> None:
     """F115: refuse when the OAuth token value appears in an artifact about to be stored.
 
     `data` is str/bytes; `root` is a directory tree (every file, .git included). Compared in
-    memory; the message names only the artifact kind, never the value or a path."""
+    memory; the message names only the artifact kind, never the value or a path. In a tree only
+    regular, non-symlink files and plain directories are accepted: a FIFO, device, socket or
+    symlink (an agent made it; it could block the harness or read outside the tree) refuses, as
+    does exceeding the per-file, total-size or time cap. Nothing is followed or opened blocking."""
     if not token:
         return
     needle = token.encode()
@@ -681,19 +723,27 @@ def scan_for_token(token: str, kind: str, *, data=None, root: Path | None = None
         blob = data.encode(errors="replace") if isinstance(data, str) else data
         if needle in blob:
             raise Refuse(f"refusing: token found in {kind}")
-    if root is not None and Path(root).is_dir():
-        for base, _dirs, files in os.walk(root):
-            for name in files:
-                try:
-                    with open(os.path.join(base, name), "rb") as handle:
-                        # chunked with overlap so a huge file is not read whole
-                        tail = b""
-                        while chunk := handle.read(1 << 20):
-                            if needle in tail + chunk:
-                                raise Refuse(f"refusing: token found in {kind}")
-                            tail = chunk[-len(needle):]
-                except OSError:
-                    continue
+    if root is None:
+        return
+    root = Path(root)
+    if not root.is_dir() or root.is_symlink():
+        return
+    deadline = time.monotonic() + SCAN_SECONDS
+    budget = [SCAN_TOTAL_CAP]
+    for base, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            if time.monotonic() > deadline:
+                raise Refuse(f"refusing: scan time cap exceeded in {kind}")
+            path = os.path.join(base, name)
+            try:
+                mode = os.lstat(path).st_mode
+            except OSError:
+                raise Refuse(f"refusing: unreadable entry in {kind}") from None
+            if stat.S_ISDIR(mode):
+                continue
+            if not stat.S_ISREG(mode):  # symlink (file or dir), FIFO, device, socket
+                raise Refuse(f"refusing: symlink or special file in {kind}")
+            _scan_file(path, needle, kind, budget)
 
 
 def real_home() -> Path:

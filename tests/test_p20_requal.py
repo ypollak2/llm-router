@@ -491,6 +491,7 @@ def test_grader_python_requires_clean_interpreter_with_pytest(tmp_path):
     exe.chmod(0o755)
     assert h.grader_python({"PATH": str(clean)}) == str(exe)
     exe.write_text("#!/bin/sh\ncase \"$*\" in *find_spec*) exit 0;; esac\nexit 1\n")
+    h._GRADER_PYTHON.clear()  # the interpreter changed under the same PATH: a new run re-probes
     with pytest.raises(h.Refuse, match="pytest"):
         h.grader_python({"PATH": str(clean)})
     bad = python_stub(tmp_path / "bad", "python3", importable=True)
@@ -1723,10 +1724,12 @@ def test_import_guard_refuses_on_signal_oserror_and_timeout(tmp_path, monkeypatc
 
 def test_agent_pythons_finds_versioned_and_pypy_interpreters(tmp_path):
     d = tmp_path / "d"
-    for name in ("python3.13", "pypy3", "pypy", "python", "python3-config", "pythonw.txt"):
+    for name in ("python3.13", "pypy3", "pypy", "python", "python3-config", "pythonw.txt",
+                 "python3.13t", "python3.12d", "python3m"):
         python_stub(d, name, importable=False)
     found = {Path(p).name for p in h.agent_pythons(str(d))}
-    assert found == {"python3.13", "pypy3", "pypy", "python"}
+    assert found == {"python3.13", "pypy3", "pypy", "python", "python3.13t", "python3.12d",
+                     "python3m"}
     bad = python_stub(tmp_path / "bad", "python3.11", importable=True)
     with pytest.raises(h.Refuse, match="importable"):
         h.assert_no_llm_router_import({"PATH": f"{d}{os.pathsep}{bad}"})
@@ -1782,3 +1785,74 @@ def test_scan_for_token_refuses_by_kind_without_the_value(tmp_path):
     with pytest.raises(h.Refuse, match="token found in work files") as err:
         h.scan_for_token(token, "work files", root=tree)
     assert token not in str(err.value) and "notes" not in str(err.value)
+
+
+TOKEN = "FAKE-OAUTH-TOKEN-0123456789"
+
+
+@pytest.mark.timeout(10)
+def test_scan_for_token_refuses_fifo_promptly(tmp_path):
+    tree = tmp_path / "w"
+    tree.mkdir()
+    os.mkfifo(tree / "pipe")  # no writer: a blocking open() would hang forever
+    with pytest.raises(h.Refuse, match="symlink or special file in work files") as err:
+        h.scan_for_token(TOKEN, "work files", root=tree)
+    assert TOKEN not in str(err.value) and "pipe" not in str(err.value)
+
+
+@pytest.mark.timeout(10)
+@pytest.mark.skipif(not os.path.exists("/dev/zero"), reason="needs /dev/zero")
+def test_scan_for_token_refuses_symlink_to_dev_zero(tmp_path):
+    tree = tmp_path / "w"
+    tree.mkdir()
+    (tree / "zero").symlink_to("/dev/zero")
+    with pytest.raises(h.Refuse, match="symlink or special file"):
+        h.scan_for_token(TOKEN, "work files", root=tree)
+
+
+def test_scan_for_token_does_not_follow_symlinks_outside_the_tree(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text(TOKEN)
+    tree = tmp_path / "w"
+    tree.mkdir()
+    (tree / "link").symlink_to(outside)
+    with pytest.raises(h.Refuse, match="symlink or special file") as err:
+        h.scan_for_token(TOKEN, "work files", root=tree)
+    assert "token found" not in str(err.value)  # refused for the kind, file not read
+    (tree / "link").unlink()
+    (tree / "dirlink").symlink_to(tmp_path)  # directory symlink: not followed, refused
+    with pytest.raises(h.Refuse, match="symlink or special file"):
+        h.scan_for_token(TOKEN, "work files", root=tree)
+
+
+def test_scan_for_token_refuses_oversized_file_and_total(tmp_path, monkeypatch):
+    tree = tmp_path / "w"
+    tree.mkdir()
+    (tree / "big").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(h, "SCAN_FILE_CAP", 1024)
+    with pytest.raises(h.Refuse, match="oversized file in work files"):
+        h.scan_for_token(TOKEN, "work files", root=tree)
+    monkeypatch.setattr(h, "SCAN_FILE_CAP", 1 << 20)
+    monkeypatch.setattr(h, "SCAN_TOTAL_CAP", 6000)
+    (tree / "big2").write_bytes(b"x" * 4096)
+    with pytest.raises(h.Refuse, match="size cap exceeded"):
+        h.scan_for_token(TOKEN, "work files", root=tree)
+
+
+def test_scan_for_token_time_cap_refuses(tmp_path, monkeypatch):
+    tree = tmp_path / "w"
+    tree.mkdir()
+    (tree / "a").write_text("x")
+    monkeypatch.setattr(h, "SCAN_SECONDS", -1.0)
+    with pytest.raises(h.Refuse, match="time cap"):
+        h.scan_for_token(TOKEN, "work files", root=tree)
+
+
+def test_grader_python_is_cached_per_path(tmp_path, monkeypatch):
+    stub = python_stub(tmp_path / "s", "python3", importable=False)
+    env = {"PATH": str(stub)}
+    h._GRADER_PYTHON.pop(env["PATH"], None)
+    first = h.grader_python(env)
+    monkeypatch.setattr(h.subprocess, "run", lambda *a, **k: pytest.fail("re-probed"))
+    assert h.grader_python(env) == first
+    h._GRADER_PYTHON.pop(env["PATH"], None)

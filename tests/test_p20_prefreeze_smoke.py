@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 
@@ -79,3 +80,26 @@ def test_smoke_removes_its_own_scratch_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(smoke.h, "agent_path", lambda p: p)
     smoke.main([])
     assert len(made) == 1 and not Path(made[0]).exists()
+
+
+def _fake_claude_call(monkeypatch, tmp_path, persist: bool):
+    token = "FAKE-OAUTH-TOKEN-0123456789"
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", token)
+
+    def run(argv, **kw):
+        if persist:  # Claude Code writing the auth value under its scratch HOME
+            (Path(kw["env"]["HOME"]) / "state.json").write_text(token)
+        return smoke.subprocess.CompletedProcess(
+            argv, 0, json.dumps({"is_error": False, "result": "ok"}), "")
+
+    monkeypatch.setattr(smoke.h, "assert_no_llm_router_import", lambda env: None)
+    monkeypatch.setattr(smoke.subprocess, "run", run)
+    return smoke.check_claude_call(tmp_path / "scr")
+
+
+def test_smoke_claude_call_passes_when_auth_not_persisted(tmp_path, monkeypatch):
+    assert _fake_claude_call(monkeypatch, tmp_path, persist=False) is True
+
+
+def test_smoke_claude_call_fails_when_auth_persisted_under_scratch_home(tmp_path, monkeypatch):
+    assert _fake_claude_call(monkeypatch, tmp_path, persist=True) is False

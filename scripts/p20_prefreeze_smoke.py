@@ -62,7 +62,8 @@ def check_token_file() -> bool:
 
 def check_claude_call(scratch: Path) -> bool:
     try:
-        env = h.claude_env(h.scratch_home(scratch / "claude_home"), scratch)
+        home = h.scratch_home(scratch / "claude_home")
+        env = h.claude_env(home, scratch)
         cwd = scratch / "cwd"
         h.private_dir(cwd)
         result = subprocess.run(
@@ -72,6 +73,13 @@ def check_claude_call(scratch: Path) -> bool:
             timeout=120, cwd=cwd, env=env, check=False,
         )
         value = json.loads(result.stdout)
+        # F115: does Claude Code persist the auth value under the scratch HOME? That would make
+        # every Claude-arm call refuse in the harness scrub; a hit here is a FAIL.
+        token = env.get(h.CLAUDE_AUTH_ENV[0])
+        if not token:
+            return False
+        h.scan_for_token(token, "smoke output", data=(result.stdout or "") + (result.stderr or ""))
+        h.scan_for_token(token, "smoke scratch home", root=home)
     except (h.Refuse, OSError, subprocess.SubprocessError, ValueError):
         return False
     return result.returncode == 0 and not value.get("is_error") and bool(value.get("result"))
