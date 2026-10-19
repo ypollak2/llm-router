@@ -173,7 +173,8 @@ def _expected_line_six(window: str) -> str:
     usd, n = _saved_six(window)
     by = " ".join(f"{p} {c}" for p, c in sorted(ex.items(), key=lambda kv: (-kv[1], kv[0])))
     return (f"ledger {window}: {sum(ex.values())} executed ({by}) · mix local {loc} / "
-            f"subscription {sub} / paid {paid} / unclassified {unc} · est. saved ${usd:,.2f} (n={n:,})")
+            f"subscription {sub} / paid {paid} / unclassified {unc} · est. saved ${usd - 0.5:,.2f} (n={n - 1:,}) "
+            f"· verified saved $0.50 (n=1)")
 
 
 def _ungrounded(text: str, sep: str) -> list[str]:
