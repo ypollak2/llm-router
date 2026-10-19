@@ -1190,9 +1190,17 @@ def main() -> None:
     elif args and args[0] == "summary":
         # Session Summary Dashboard — rich terminal overview.
         # Flags: --since-hours N, --limit N, --markdown, --watch,
-        #        --watch-interval N (seconds, default 5)
-        from llm_router.observability.summary import cli_summary
+        #        --watch-interval N (seconds, default 5); --session [ID] (P35-4)
         rest = args[1:]
+        if "--session" in rest:
+            # P35-4: the session summary block, n + window on every figure. The id after the
+            # flag, else session_id.txt.
+            from llm_router import session_report
+            i = rest.index("--session")
+            sid = rest[i + 1] if i + 1 < len(rest) and not rest[i + 1].startswith("--") else None
+            print(session_report.render(session_report.build(sid)), end="")
+            raise SystemExit(0)
+        from llm_router.observability.summary import cli_summary
         since = 24.0
         limit = 5000
         markdown = False

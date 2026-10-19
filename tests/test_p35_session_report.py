@@ -2,20 +2,27 @@
 
 Evidence: ``v16/coord/P35-PLAN.md`` (Design, Session summary; PR row P35-4a/4b) and the rv-628
 carry-forward. The fixture-home markers live in tests/test_p35_fixtures.py; this file holds the pure
-oracles (targets, offload, quota saved, recommendation) and the n + window rule over the printed block.
-P35-4b adds where the block renders (the session-end child and ``llm-router summary --session``).
+oracles (targets, offload, quota saved, recommendation), the n + window rule over the printed block, and
+the session-end child (the Stop's own line never gains the block; the hook pair is v45).
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from tests.test_p34a_ledger_view_identity import DAY, NOW, home  # noqa: F401  (home is a fixture)
-from tests.test_p34a_six_surfaces import six  # noqa: F401  (six is a fixture)
+from tests.test_p34a_six_surfaces import HOOKS, six  # noqa: F401  (six is a fixture)
 from tests.test_p35_fixtures import _history, _jl, p35  # noqa: F401  (p35 is a fixture)
 from tests.test_p35_fixtures import PP_PER_ACTIVE_HOUR, SID
+
+ROOT = Path(__file__).resolve().parents[1]
+HOOK = HOOKS / "session-end.py"
 
 
 def _act(cls: str, *, numerator: bool = False, sampled: bool = False, first: bool = False,
@@ -144,6 +151,70 @@ async def test_scope_window_reads_the_window_not_the_session(p35):  # noqa: F811
     r = session_report.build(scope="24h")
     assert r["window"] == "24h" and r["session_id"] is None
     assert r["escalations"]["n"] == 2 and r["escalations"]["window"] == "24h", r["escalations"]
+
+
+async def test_cli_summary_session_prints_the_block(p35):  # noqa: F811
+    env = {**p35.env, "LLM_ROUTER_DB_PATH": str(p35.db), "LLM_ROUTER_NO_DETACHED_SPAWN": "1"}
+    r = subprocess.run([sys.executable, "-m", "llm_router.cli", "summary", "--session", SID], env=env,
+                       capture_output=True, text=True, timeout=120, cwd=ROOT)
+    assert r.returncode == 0, r.stderr
+    assert "session summary (P35-4)" in r.stdout and "escalations 2 (n=10 proxy calls, session" in r.stdout, r.stdout
+
+
+# -- session-end: the child renders it, the Stop line does not change -------------------------------
+
+def _hook():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("session_end_p354", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+async def test_the_child_appends_one_block_to_last_summary(p35, monkeypatch):  # noqa: F811
+    from llm_router import session_report
+
+    mod = _hook()
+    monkeypatch.setattr(mod, "_stop_hook_mode", lambda: "condensed")
+    mod._STOP_SESSION_ID = SID
+    (p35.home / "last_summary.ansi").write_text("BOX\n")
+    mod._render_session_report()
+    mod._render_session_report()                               # a second child: still one block
+    text = (p35.home / "last_summary.ansi").read_text()
+    assert text.startswith("BOX\n\n" + session_report.MARKER) and text.count(session_report.MARKER) == 1, text
+    assert "escalations 2 (n=10 proxy calls, session" in text
+    monkeypatch.setattr(mod, "_stop_hook_mode", lambda: "full")
+    (p35.home / "last_summary.ansi").write_text("FULL\n")
+    mod._render_session_report()                               # full mode: the Stop owns the file
+    assert (p35.home / "last_summary.ansi").read_text() == "FULL\n"
+
+
+def test_the_block_is_a_child_step_and_not_on_the_stop_path():
+    mod = _hook()
+    steps = mod._STOP_BACKGROUND_STEPS
+    assert steps[steps.index("_render_last_summary") + 1] == "_render_session_report"
+    tree = ast.parse(HOOK.read_text(encoding="utf-8"))
+    main = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "main")
+    names = {n.id for n in ast.walk(main) if isinstance(n, ast.Name)} | \
+        {n.attr for n in ast.walk(main) if isinstance(n, ast.Attribute)} | \
+        {a.name for n in ast.walk(main) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+    assert names and "session_report" not in names and "_render_session_report" not in names
+
+
+async def test_the_stop_line_does_not_carry_the_block(p35):  # noqa: F811
+    env = {**p35.env, "LLM_ROUTER_DB_PATH": str(p35.db), "LLM_ROUTER_NO_DETACHED_SPAWN": "1",
+           "LLM_ROUTER_STOP_HOOK_MODE": "condensed"}
+    r = subprocess.run([sys.executable, str(HOOK)], input=json.dumps({"session_id": SID}), env=env,
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    msg = json.loads(r.stdout)["systemMessage"]
+    assert msg and "session summary" not in msg and "recommendation" not in msg, msg
+
+
+def test_the_hook_pair_is_byte_identical_at_version_45():
+    a, b = (ROOT / "hooks" / "session-end.py").read_bytes(), HOOK.read_bytes()
+    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 45"
 
 
 @pytest.mark.parametrize("bad", [None, []])
