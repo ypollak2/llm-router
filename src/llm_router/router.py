@@ -6299,8 +6299,21 @@ async def route_and_stream(
         is_subscription_mode=config.llm_router_claude_subscription or config.llm_router_gemini_subscription,
     )
 
+    # F108 / D-235: the F106 eligibility filter on the stream door (same function, lane tier from
+    # the call's own complexity, model_override exempt, fail-open). Events carry the dropped ids.
+    _elig_before = list(models_to_try)
+    if models_to_try and not model_override:
+        models_to_try = _drop_failed_eligibility(
+            models_to_try, task_type, _lane_complexity(complexity_hint, classification_data, c))
+    _elig_dropped = [m for m in _elig_before if m not in models_to_try]
+
     if not models_to_try:
         error_detail = f"No models available for {task_type.value} / {profile.value}"
+        if _elig_dropped:
+            error_detail += (
+                f" (local eligibility removed {', '.join(_elig_dropped)} for the "
+                f"{task_type.value} lane in local_eligibility.json; "
+                "LLM_ROUTER_IGNORE_ELIGIBILITY=1 turns the filter off)")
         from llm_router.runtime_offer import runtime_offer
 
         raise RouterInputError(
@@ -6345,6 +6358,7 @@ async def route_and_stream(
         "candidate_count": len(models_to_try),
         "chain_preview": models_to_try[:3],
         "buffered_mode": False,  # Phase C v0.3.2 doesn't buffer (pass-through)
+        "eligibility_skipped": _elig_dropped,  # F108: failed_eligibility drops, [] when none
     }
 
     # ── STREAMING DISPATCH LOOP: Walk chain with fallback ──────────────────

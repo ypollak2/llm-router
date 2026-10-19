@@ -130,6 +130,14 @@ chain unchanged and records `CHZ-FO-ELIGIBILITY-ROUTING-UNREADABLE`. Each drop i
 `llm-router why`. An explicit `model_override` is left alone. If the drop empties the chain, the
 error names it; under an exceeded daily cap the cap error names both causes.
 
+Doors covered (F108 extends F106 to the rest; same function, lane-tier rule, reason code, opt-out
+and fail-open): `route_and_call` (primary and BUDGET emergency chains), the hook chain builder
+`hooks.chain_builder.build_chain` (which feeds the auto-route DIRECT path, agent-route and the
+Python SDK) and `route_and_stream` (TUI; the dropped ids are in the `route.started` event's
+`eligibility_skipped`). Hook and SDK writers keep no ledger row, so the `failed_eligibility` reason
+shows there only when the caller opened a skip-cause scope; the resulting chain is in the hook trace.
+A hook chain costs one cached `stat`, no JSON parse per call.
+
 Lanes are keyed by the Ollama model name, not its digest. After `ollama pull` of the same tag
 (new weights), the old verdict still applies: re-qualify the model to refresh its lanes.
 
