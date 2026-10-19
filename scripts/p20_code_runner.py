@@ -221,12 +221,16 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
             shutil.move(str(hidden), work / "tests")
             hidden = None
             try:
+                # F113: agent-written code runs on the agent PATH with an interpreter that
+                # cannot import llm_router (grader_python enforces it), never the run venv.
+                grader_env = {"PATH": h.agent_path(os.environ.get("PATH", "")),
+                              "HOME": str(work), "PYTHONDONTWRITEBYTECODE": "1",
+                              **h.AGENT_FIXED_ENV}
                 result = subprocess.run(
-                    [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                    [h.grader_python(grader_env), "-m", "pytest", "-q", "-p", "no:cacheprovider",
                      test_path(ref["test"])],
                     cwd=work, stdin=subprocess.DEVNULL, capture_output=True, timeout=120,
-                    env={"PATH": os.environ.get("PATH", ""), "HOME": str(work),
-                         "PYTHONDONTWRITEBYTECODE": "1"}, check=False,
+                    env=grader_env, check=False,
                 )
                 row["hidden_pass"] = result.returncode == 0
             except subprocess.TimeoutExpired:
