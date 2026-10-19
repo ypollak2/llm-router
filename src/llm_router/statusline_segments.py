@@ -418,8 +418,9 @@ def _within(seconds: float, fn, started: float):
     :data:`RUN_TIMEOUT_S`. SIGALRM is blocked while the handler and timer are swapped (rv-632 r2): a
     signal that lands mid-swap waits instead of finding the wrong handler or skipping the restore, and
     a budget signal still pending once ``fn`` has returned is discarded, not handed to ``os._exit``.
-    The one window left (the budget firing after ``fn`` returns, before the block) raises out of here
-    with no timer armed; :func:`main` re-arms the hard stop on that path."""
+    The mask is per thread, so this holds in a single-threaded process like the refresher; elsewhere
+    the swap is as before. The one window left (the budget firing after ``fn`` returns, before the
+    block) raises out of here with no timer armed; :func:`main` re-arms the hard stop on that path."""
     if not hasattr(signal, "SIGALRM"):
         return fn()
     alrm = {signal.SIGALRM}

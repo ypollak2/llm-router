@@ -441,33 +441,44 @@ def test_main_rearms_the_hard_stop_when_the_budget_escapes_mid_restore(tmp_path)
     assert 1.5 <= took < 2 + 5.0, took
 
 
+_PENDING_DRIVER = r'''
+import signal, sys, time
+from llm_router import statusline_segments as ss
+
+alrm = {signal.SIGALRM}
+fired = []
+signal.signal(signal.SIGALRM, lambda *_: fired.append(1))      # stands in for the os._exit hard stop
+
+
+def fn():
+    signal.pthread_sigmask(signal.SIG_BLOCK, alrm)
+    time.sleep(0.3)                     # the 0.05 s budget fires while blocked: pending on return
+    assert signal.SIGALRM in signal.sigpending()
+    return "done"
+
+
+assert ss._within(0.05, fn, started=time.time()) == "done"
+signal.pthread_sigmask(signal.SIG_UNBLOCK, alrm)
+time.sleep(0.01)
+assert not fired, "the budget's signal reached the hard stop"
+assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= ss.RUN_TIMEOUT_S     # the hard stop is armed again
+signal.setitimer(signal.ITIMER_REAL, 0)
+print("ok")
+'''
+
+
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM watchdog is POSIX only")
-def test_a_budget_signal_still_pending_after_fn_is_not_handed_to_the_hard_stop():
+def test_a_budget_signal_still_pending_after_fn_is_not_handed_to_the_hard_stop(tmp_path):
     """rv-632 r2: SIGALRM is blocked while _within swaps back, and the budget's own signal, if it is
     still pending once fn has returned, is dropped. Before, it reached the restored hard stop
-    (os._exit) and ended a refresher that had finished in time."""
-    from llm_router import statusline_segments as ss
+    (os._exit) and ended a refresher that had finished in time.
 
-    alrm = {signal.SIGALRM}
-    fired = []
-    old = signal.signal(signal.SIGALRM, lambda *_: fired.append(1))  # stands in for os._exit in-process
-
-    def fn():
-        signal.pthread_sigmask(signal.SIG_BLOCK, alrm)
-        time.sleep(0.3)                     # the 0.05 s budget fires while blocked: pending on return
-        assert signal.SIGALRM in signal.sigpending()
-        return "done"
-
-    try:
-        assert ss._within(0.05, fn, started=time.time()) == "done"
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, alrm)
-        time.sleep(0.01)
-        assert not fired, "the budget's signal reached the hard stop"
-        assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= ss.RUN_TIMEOUT_S   # the hard stop is armed again
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, alrm)
-        signal.signal(signal.SIGALRM, old)
+    In a fresh single-threaded process, like the refresher: a signal mask is per thread, and an xdist
+    worker has other threads that would take the process-directed SIGALRM (CI run 39244771777)."""
+    env = {**os.environ, "HOME": str(tmp_path), "LLM_ROUTER_HOME": str(tmp_path / "router")}
+    r = subprocess.run([sys.executable, "-c", _PENDING_DRIVER], env=env, capture_output=True, text=True,
+                       timeout=_DRIVE_TIMEOUT_S)
+    assert r.returncode == 0 and r.stdout.strip() == "ok", (r.returncode, r.stdout, r.stderr[-2000:])
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM watchdog is POSIX only")
