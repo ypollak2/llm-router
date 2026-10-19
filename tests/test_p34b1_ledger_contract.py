@@ -264,3 +264,17 @@ def test_line_never_merges_estimate_and_verified():
     old_cache = lv.LedgerWindow(as_of="x", window="24h", source="s", estimated=True, n=1,
                                 saved_usd=2.5, saved_n=3)          # cache without the split
     assert "est. saved n/a" in old_cache.line() and "2.50" not in old_cache.line()
+
+
+def test_saved_segments_half_unknown_split_prints_the_known_segment_and_na_for_the_other():
+    """F114: a window whose verified half is unknown (older cache) still shows the estimate with its
+    own n, and says n/a for the verified half; never a merged figure."""
+    from dataclasses import replace
+
+    from llm_router import ledger_view as lv
+
+    base = lv.LedgerWindow(as_of="T", source="usage", estimated=True, window="today", saved_usd=7.0, saved_n=6, unverified_usd=5.0, unverified_n=4,
+                           verified_usd=None, verified_n=None)
+    assert lv._saved_segments(base) == "est. saved $5.00 (n=4) · verified saved n/a"
+    flipped = replace(base, unverified_usd=None, unverified_n=None, verified_usd=2.0, verified_n=2)
+    assert lv._saved_segments(flipped) == "verified saved $2.00 (n=2) · est. saved n/a"

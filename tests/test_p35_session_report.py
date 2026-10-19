@@ -3,7 +3,7 @@
 Evidence: ``v16/coord/P35-PLAN.md`` (Design, Session summary; PR row P35-4a/4b) and the rv-628
 carry-forward. The fixture-home markers live in tests/test_p35_fixtures.py; this file holds the pure
 oracles (targets, offload, quota saved, recommendation), the n + window rule over the printed block, and
-the session-end child (the Stop's own line never gains the block; the hook pair is v47).
+the session-end child (the Stop's own line never gains the block; the hook pair is v48).
 """
 from __future__ import annotations
 
@@ -212,9 +212,9 @@ async def test_the_stop_line_does_not_carry_the_block(p35):  # noqa: F811
     assert msg and "session summary" not in msg and "recommendation" not in msg, msg
 
 
-def test_the_hook_pair_is_byte_identical_at_version_46():
+def test_the_hook_pair_is_byte_identical_at_current_version():
     a, b = (ROOT / "hooks" / "session-end.py").read_bytes(), HOOK.read_bytes()
-    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 47"
+    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 48"
 
 
 @pytest.mark.parametrize("bad", [None, []])
@@ -223,3 +223,69 @@ def test_offload_and_targets_never_print_zero_for_unknown(bad):
 
     o, t = sr.offload_field(bad, "session"), sr.targets_field(bad, "session")
     assert o["value"] is None and (t["n"] is None) == (bad is None)
+
+
+# -- F114: the compact money line, summary --session ---------------------------------------------
+
+def _wt(**kw):
+    from llm_router import ledger_view as lv
+
+    return lv.LedgerWindow(as_of="T", source="usage", estimated=True, window="today", saved_usd=7.0, saved_n=6, unverified_usd=5.0, unverified_n=4,
+                           verified_usd=2.0, verified_n=2, **kw)
+
+
+def test_today_compact_gives_each_segment_its_own_n():
+    mod = _hook()
+    assert mod._today_compact(_wt()) == "~$5.00 est. saved (n=4, today) · $2.00 verified saved (n=2, today)"
+
+
+def test_today_compact_without_a_split_is_na_never_the_merged_total():
+    from dataclasses import replace
+
+    mod = _hook()
+    out = mod._today_compact(replace(_wt(), unverified_usd=None, unverified_n=None,
+                                     verified_usd=None, verified_n=None))
+    assert out == "est. saved n/a (today)" and "7.00" not in out
+    half = mod._today_compact(replace(_wt(), verified_usd=None, verified_n=None))
+    assert half == "~$5.00 est. saved (n=4, today) · verified saved n/a (today)"
+
+
+def test_today_compact_with_no_savings_is_a_zero_estimate_with_n_zero():
+    from dataclasses import replace
+
+    mod = _hook()
+    z = replace(_wt(), unverified_usd=0.0, unverified_n=0, verified_usd=0.0, verified_n=0, saved_usd=0.0, saved_n=0)
+    assert mod._today_compact(z) == "~$0.00 est. saved (n=0, today)"
+
+
+def test_session_id_is_sanitised_before_it_is_printed():
+    from llm_router import session_report as sr
+
+    assert sr.sanitize_session_id("ab-1.2_x") == "ab-1.2_x"
+    assert sr.sanitize_session_id("a\x1b[31mb\n") == "a__31mb_"
+    assert sr.sanitize_session_id(None) is None
+
+
+async def test_unknown_session_id_is_one_line_with_no_escape_byte(p35):  # noqa: F811
+    env = {**p35.env, "LLM_ROUTER_DB_PATH": str(p35.db), "LLM_ROUTER_NO_DETACHED_SPAWN": "1"}
+    r = subprocess.run([sys.executable, "-m", "llm_router.cli", "summary", "--session", "nope\x1b[31m"],
+                       env=env, capture_output=True, text=True, timeout=120, cwd=ROOT)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "no rows for session nope__31m\n", repr(r.stdout)
+
+
+def test_targets_line_is_na_at_zero_actions():
+    from llm_router import session_report as sr
+
+    t = sr.targets_field([], "session")
+    r = {"window": "session", "label": "L", "as_of": "T", "targets": t, "no_rows": False,
+         "offload": sr.offload_field([], "session"), "escalations": {"n": None, "na_reason": "x"},
+         "cache_hit_rate": {"value": None, "n": None, "na_reason": "x"}, "quota_saved": None,
+         "quality": None, "judge": None, "recommendation": "r"}
+    assert "  targets n/a (n=0 actions, session)" in sr.render(r)
+
+
+def test_summary_watch_with_session_is_a_clear_error_not_ignored():
+    r = subprocess.run([sys.executable, "-m", "llm_router.cli", "summary", "--session", "x", "--watch"],
+                       capture_output=True, text=True, timeout=120, cwd=ROOT)
+    assert r.returncode == 2 and "--watch cannot be combined with --session" in r.stderr, r.stderr
