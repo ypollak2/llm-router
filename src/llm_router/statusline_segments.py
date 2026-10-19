@@ -385,7 +385,13 @@ def append_history(state: str, now: float) -> bool:
             usage = json.load(fh)
     except (OSError, ValueError):
         usage = None                              # the row is written as source=stale, as the tick does
-    return tick.maybe_append_history(state, usage if isinstance(usage, dict) else None, now)
+    wrote = tick.maybe_append_history(state, usage if isinstance(usage, dict) else None, now)
+    try:
+        tick.prune_history(state, now)            # F107: once a day, here in the background, never in the tick
+    except OSError as exc:
+        from llm_router import failopen
+        failopen.record("F107-HISTORY-PRUNE", exc)
+    return wrote
 
 
 #: The snapshot may take this long inside the refresher; past it the cache is written without it.

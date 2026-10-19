@@ -329,6 +329,9 @@ def refresh(*, host: str, session_id: str, now: float | None = None) -> dict:
         tmp.unlink(missing_ok=True)
         raise
     _part("CHZ-FO-SNAP-PRUNE", _prune)
+    # F107: the fast tick has no refresher of its own; its `--refresh` lands here (daily, off the sync path).
+    from llm_router import statusline_tick
+    _part("F107-HISTORY-PRUNE", lambda: statusline_tick.prune_history(str(paths.llm_router_home()), now))
     return data
 
 
