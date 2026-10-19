@@ -241,9 +241,9 @@ def test_stop_reader_stays_inside_the_hook_budget(home, hook):
     assert per_call_ms < 10, f"{per_call_ms:.2f} ms per Stop read (budget 300 ms for the whole hook)"
 
 
-def test_hook_pair_is_identical_and_bumped_to_41():
+def test_hook_pair_is_identical_and_bumped_to_42():
     a, b = (ROOT / "hooks" / "session-end.py").read_bytes(), HOOK.read_bytes()
-    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 42"
+    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 43"
 
 
 # -- no database in hooks -------------------------------------------------------------

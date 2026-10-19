@@ -1067,15 +1067,18 @@ class Summary:
         )
 
     def compact(self) -> str:
-        """THE single user-facing money FRAGMENT for space-constrained
-        surfaces — the statusline and the Stop line (``session-end.py`` /
-        ``codex-stop.py``). No row count, no baseline name, no trailing
-        punctuation: a caller that needs a period or an emoji prefix adds it
-        at the call site; the figure itself (amount + "est") is never
-        reformatted there. A caller that wants to omit the segment entirely
-        when there is nothing worth showing compares ``estimated_usd``
-        itself rather than parsing this string."""
-        return f"~${self.estimated_usd:,.2f} est"
+        """THE single user-facing money FRAGMENT for space-constrained surfaces — the statusline
+        and the Stop line (``session-end.py`` / ``codex-stop.py``). No row count, no baseline name,
+        no trailing punctuation: a caller that needs a period or an emoji prefix adds it at the
+        call site.
+
+        P35-1 (D-220) reverses the 2026-09-27 merge: measured dollars (``realized_usd``) and the
+        estimate (``unverified_usd``) are two segments and are never added —
+        ``~$5.00 est · $2.00 measured``. A segment with no money in it is left out; with neither,
+        the old ``~$0.00 est`` stands. The word "verified" still never reaches a user."""
+        from llm_router import ledger_view as _lv
+
+        return _lv.money_fragment(self.realized_usd, self.unverified_usd)
 
 
 #: CLI/MCP period strings that don't already match a WindowLiteral.

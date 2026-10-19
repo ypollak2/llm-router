@@ -131,8 +131,8 @@ def test_the_weekly_quota_value_is_not_a_hardcoded_fifty(monkeypatch):
 
     monkeypatch.delenv("LLM_ROUTER_WEEKLY_QUOTA_USD", raising=False)
     monkeypatch.delenv("LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH", raising=False)
-    default = _default_weekly_quota_usd()
-    assert default == pytest.approx(200.0 / 4.345, abs=0.01)
+    # P35-1 (D-205): no built-in plan price at all; unconfigured is None (n/a), not a number.
+    assert _default_weekly_quota_usd() is None
 
 
 def test_the_quota_value_follows_the_users_plan(monkeypatch):

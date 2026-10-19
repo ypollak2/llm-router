@@ -13,17 +13,13 @@ Surfaces
 Calibration
 -----------
 ``weekly_pct`` from claude.ai is denominated in opaque subscription units;
-``saved_usd`` is denominated in dollars. To convert, we need a
-``$_per_pp`` ratio. That ratio is derived from what the SUBSCRIPTION COSTS —
-$200/month over 4.345 weeks, ≈$46/week — not from any token rate, and is
-overridable via ``LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH`` or
-``LLM_ROUTER_WEEKLY_QUOTA_USD``.
-
-It previously read "default $50 — roughly the Opus-equivalent dollar value of
-one week of Claude Pro Max", computed from $15/$75 per million: the retired
-Opus 3 rate. See the note beside ``_default_weekly_quota_usd``. An "observed
-calibration" path deriving the ratio from each user's own historical
-claude_usage remains a follow-up (T-QS-2).
+``saved_usd`` is denominated in dollars. To convert, we need a ``$_per_pp`` ratio, and
+that ratio is the USER's: the weekly quota value in dollars from
+``LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV``, ``LLM_ROUTER_WEEKLY_QUOTA_USD`` or
+``LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH`` (config, D-205). No plan name and no price is
+built in (P35-1): with none configured every pp figure is ``None`` and prints ``n/a``,
+never a guessed number. An "observed calibration" path deriving the ratio from each user's
+own history is ``quota_rate.py`` (median pp per active hour, ~work-hours).
 
 **Quota is not cash.** These figures are percentage points of prepaid capacity.
 They are labelled as quota and must never be added to a dollar saving — a
@@ -50,32 +46,20 @@ from llm_router import paths
 log = get_logger("llm_router.quota_savings")
 
 
-# Default calibration: USD value of one week of subscription quota.
+# Calibration: USD value of one week of subscription quota, from the user's config only.
 #
-# RED8-05 / WP-05: this was a hardcoded 50.0, justified in-comment as a "rough
-# Opus-cost equivalent at $15-in/$75-out per million tokens". That is the
-# RETIRED Opus 3 rate — the same 3x-stale price WP-03 removed everywhere else.
-#
-# The number survives scrutiny, but not for the stated reason, and the
-# difference matters. What a week of quota is WORTH is anchored to what the
-# subscription COSTS, not to any token rate: $200/month over 4.345 weeks is
-# ~$46/week. Deriving it from token prices was the wrong model entirely — under
-# that reasoning the figure would have had to drop by two thirds when Opus
-# repriced, and nobody would have known to touch it.
-#
-# Anchoring to the subscription price also keeps the two quantities honestly
-# distinct: quota is prepaid capacity, cash is money spent. WP-05 forbids
-# summing them, and they are labelled separately downstream.
-_SUBSCRIPTION_USD_PER_MONTH_DEFAULT = 200.0
+# History: RED8-05 / WP-05 replaced a flat $50 (the retired $15/$75 Opus rate) with a
+# plan-price literal; P35-1 (D-205/D-220) removes that literal too. What a week of quota is
+# WORTH is the user's plan price, which only the user (or discovery) knows. Quota is prepaid
+# capacity, cash is money spent: WP-05 forbids summing them, and they are labelled separately.
 _WEEKS_PER_MONTH = 4.345  # 365 / 12 / 7
 
 
-def _default_weekly_quota_usd() -> float:
-    """Weekly quota value in USD, overridable for a different plan.
+def _default_weekly_quota_usd() -> float | None:
+    """Weekly quota value in USD from the user's config, or None when nothing is configured.
 
-    Read at call time rather than frozen at import, so a user on a $20 or $100
-    plan can set an env var and have every derived figure follow. The old
-    constant could not be corrected without editing the source.
+    Read at call time so a user can set an env var and have every derived figure follow.
+    Quota is not cash: the value only converts dollars saved into points of quota.
     """
     override = os.environ.get("LLM_ROUTER_WEEKLY_QUOTA_USD", "").strip()
     if override:
@@ -89,7 +73,7 @@ def _default_weekly_quota_usd() -> float:
             return float(monthly) / _WEEKS_PER_MONTH
         except ValueError:
             log.warning("LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH=%r is not a number", monthly)
-    return _SUBSCRIPTION_USD_PER_MONTH_DEFAULT / _WEEKS_PER_MONTH
+    return None
 
 
 @dataclass(frozen=True)
@@ -101,30 +85,32 @@ class QuotaSavingsSnapshot:
     """
 
     weekly_current_pct: float
-    weekly_pp_saved: float
-    weekly_counterfactual_pct: float
+    weekly_pp_saved: float | None          # None = no plan configured (n/a, never 0)
+    weekly_counterfactual_pct: float | None
     weekly_saved_usd: float
 
     session_current_pct: float
-    session_pp_saved: float
-    session_counterfactual_pct: float
+    session_pp_saved: float | None
+    session_counterfactual_pct: float | None
     session_saved_usd: float
 
-    calibration_usd_per_pp: float
-    calibration_source: str  # "configured" | "observed" — latter reserved
+    calibration_usd_per_pp: float | None
+    calibration_source: str  # "configured" | "unconfigured"
 
     def is_meaningful(self, threshold_pp: float = 0.5) -> bool:
         """True iff at least one window saved more than ``threshold_pp``.
         The routing-notice surface uses this to suppress noise when
         llm_router hasn't done anything cost-relevant yet."""
         return (
-            self.weekly_pp_saved >= threshold_pp
-            or self.session_pp_saved >= threshold_pp
+            (self.weekly_pp_saved is not None and self.weekly_pp_saved >= threshold_pp)
+            or (self.session_pp_saved is not None and self.session_pp_saved >= threshold_pp)
         )
 
     def short_form(self) -> str:
         """Compact suffix for the routing notice line, e.g.
-        ``"saved 7pp wk / 3pp 5h"``."""
+        ``"saved 7pp wk / 3pp 5h"``; ``n/a`` when no plan is configured."""
+        if self.weekly_pp_saved is None or self.session_pp_saved is None:
+            return "saved n/a (no plan configured)"
         return (
             f"saved {self.weekly_pp_saved:.1f}pp wk / "
             f"{self.session_pp_saved:.1f}pp 5h"
@@ -154,30 +140,27 @@ def _start_of_5h_window_utc(now: datetime | None = None) -> datetime:
 # ── Calibration ────────────────────────────────────────────────────────────
 
 
-def _resolve_weekly_quota_usd() -> float:
-    """Read the configured weekly quota in Opus-equivalent USD."""
+def _resolve_weekly_quota_usd() -> float | None:
+    """The configured weekly quota in Opus-equivalent USD; None when nothing valid is configured."""
     raw = os.environ.get("LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV", "")
-    if not raw:
-        return _default_weekly_quota_usd()
-    try:
-        value = float(raw)
-    except ValueError:
-        log.warning(
-            "invalid_weekly_quota_env",
-            value=raw,
-            fallback=_default_weekly_quota_usd(),
-        )
-        return _default_weekly_quota_usd()
-    if value <= 0:
-        return _default_weekly_quota_usd()
-    return value
+    if raw:
+        try:
+            value = float(raw)
+        except ValueError:
+            log.warning("invalid_weekly_quota_env", value=raw)
+        else:
+            if value > 0:
+                return value
+    fallback = _default_weekly_quota_usd()
+    return fallback if fallback is not None and fallback > 0 else None
 
 
-def _calibration_usd_per_pp() -> tuple[float, str]:
-    """Return ``(usd_per_pp, source)``. ``source`` is "configured" or
-    (future) "observed". Today the configured path is the only one;
-    the second tuple element documents that for callers."""
+def _calibration_usd_per_pp() -> tuple[float | None, str]:
+    """Return ``(usd_per_pp, source)``: ``"configured"``, or ``(None, "unconfigured")`` when the
+    user has set no plan value (every pp figure is then n/a)."""
     weekly_usd = _resolve_weekly_quota_usd()
+    if weekly_usd is None:
+        return None, "unconfigured"
     return weekly_usd / 100.0, "configured"
 
 
@@ -252,22 +235,20 @@ def compute_quota_savings(
     session_saved = _sum_saved_usd_since(db, _start_of_5h_window_utc(now))
 
     usd_per_pp, source = _calibration_usd_per_pp()
-    # Guard against pathological calibration (env injected as 0).
-    if usd_per_pp <= 0:
-        usd_per_pp = _default_weekly_quota_usd() / 100.0
-        source = "configured"
-
-    weekly_pp = weekly_saved / usd_per_pp if weekly_saved > 0 else 0.0
-    session_pp = session_saved / usd_per_pp if session_saved > 0 else 0.0
+    if usd_per_pp is None:
+        weekly_pp = session_pp = None
+    else:
+        weekly_pp = weekly_saved / usd_per_pp if weekly_saved > 0 else 0.0
+        session_pp = session_saved / usd_per_pp if session_saved > 0 else 0.0
 
     return QuotaSavingsSnapshot(
         weekly_current_pct=weekly_current_pct,
         weekly_pp_saved=weekly_pp,
-        weekly_counterfactual_pct=weekly_current_pct + weekly_pp,
+        weekly_counterfactual_pct=None if weekly_pp is None else weekly_current_pct + weekly_pp,
         weekly_saved_usd=weekly_saved,
         session_current_pct=session_current_pct,
         session_pp_saved=session_pp,
-        session_counterfactual_pct=session_current_pct + session_pp,
+        session_counterfactual_pct=None if session_pp is None else session_current_pct + session_pp,
         session_saved_usd=session_saved,
         calibration_usd_per_pp=usd_per_pp,
         calibration_source=source,

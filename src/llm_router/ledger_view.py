@@ -633,24 +633,50 @@ class Figure:
     source: str
     kind: str = "measured"             # measured | estimated
     na_reason: str | None = None
+    n_basis: int | None = None         # estimates only: rows behind the conversion rate (the 2nd n)
 
     def to_dict(self) -> dict:
-        return {"value": self.value, "n": self.n, "window": self.window, "as_of": self.as_of,
-                "source": self.source, "kind": self.kind, "na_reason": self.na_reason}
+        d = {"value": self.value, "n": self.n, "window": self.window, "as_of": self.as_of,
+             "source": self.source, "kind": self.kind, "na_reason": self.na_reason}
+        if self.n_basis is not None:
+            d["n_basis"] = self.n_basis
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Figure":
         return cls(d.get("value"), d.get("n"), str(d.get("window") or ""),
                    str(d.get("as_of") or ""), str(d.get("source") or ""),
-                   str(d.get("kind") or "measured"), d.get("na_reason"))
+                   str(d.get("kind") or "measured"), d.get("na_reason"), d.get("n_basis"))
 
 
-def show(fig: "Figure | None", fmt: str = "{}") -> str | None:
+def show(fig: "Figure | None", fmt: str = "{}", *, unit: str | None = None,
+         quantity: str | None = None, with_n: bool = False) -> str | None:
     """The one formatter. None (print ``n/a`` or nothing) when the value or n is unknown or the
-    window is empty: a number without its n and window is not shown (strict NS rule)."""
+    window is empty: a number without its n and window is not shown (strict NS rule).
+
+    ``unit`` (``subscription`` | ``api`` | ``estimate``) and ``quantity`` (``pct`` | ``work_hours`` |
+    ``usd``) render through the units table (:mod:`llm_router.units`, P35-1); ``with_n`` appends the
+    figure's n(s) and window. Without ``unit`` the legacy ``fmt`` path is unchanged."""
     if fig is None or fig.value is None or fig.n is None or not fig.window:
         return None
-    return fmt.format(fig.value)
+    if unit is None:
+        return fmt.format(fig.value)
+    from llm_router import units
+
+    return units.render(fig.value, fig.n, fig.window, kind=fig.kind, unit=unit,
+                        quantity=quantity, n_basis=fig.n_basis, with_n=with_n)
+
+
+def money_fragment(measured_usd: float | None, estimated_usd: float | None) -> str:
+    """The saved-money fragment with measured apart from estimated (P35-1, D-220): the estimate
+    first (``~$5.00 est``), then the measured dollars (``$2.00 measured``), joined by `` · ``.
+    A segment without money is dropped; with neither, ``~$0.00 est``. Never one summed figure."""
+    parts = []
+    if estimated_usd:
+        parts.append(f"~${estimated_usd:,.2f} est")
+    if measured_usd:
+        parts.append(f"${measured_usd:,.2f} measured")
+    return " · ".join(parts) if parts else "~$0.00 est"
 
 
 def _percentile(sorted_vals: list[float], pct: float) -> float:

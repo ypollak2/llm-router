@@ -314,7 +314,10 @@ def test_session_end_box_prints_the_24h_executed_oracle_proxy_rows_included(six)
 def test_session_end_today_money_is_the_oracle(six):
     usd, n = _saved_six("today")
     agg = _session_end()._compute_ledger_aggregates()
-    assert agg["today_compact"] == f"~${usd:,.2f} est (n={n:,}, today)"
+    # P35-1 (D-220): measured apart from estimated. Hand oracle: S1 is the one verified (measured)
+    # row, 0.50; the rest of the merged figure is the estimate.
+    measured = 0.5
+    assert agg["today_compact"] == f"~${usd - measured:,.2f} est · ${measured:,.2f} measured (n={n:,}, today)"
     # rv-597 carry-forward: the 4-dollar row 2 h before NOW is inside 24h and outside today, so a
     # 24h money window (or the -2h mutant) prints another 2-decimal figure
     usd24, n24 = _saved_six("24h")
