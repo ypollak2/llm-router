@@ -6,7 +6,8 @@ The install id is generated locally on the first row and copied to later rows. N
 no session id, no path, no network: nothing leaves the machine, and nothing here is sent anywhere.
 
 Written by :func:`mark_active`, called from ``quota_samples.append_session_sample`` (the session
-start and Stop samples), so it costs one tail read per session and one append per day.
+start and Stop samples), so a session costs one ``stat`` of the file; the tail read and the append happen at most once
+per day (a file whose mtime is today already holds today's row).
 
 Bound: one row per day, at most :data:`MAX_ROWS` rows (about 13 months). Past that the file is
 rewritten atomically keeping the FIRST row (it holds the install day and id) and the newest
@@ -17,7 +18,8 @@ dated record exists. A router that ran before this marker shipped reads its inst
 first day the marker was written.
 
 :func:`status` answers the install's own question, "was I active on day 14 after install?":
-``yes`` / ``no`` / ``not yet`` (day 14 has not arrived), or ``n/a`` when no marker exists.
+``yes`` / ``no`` / ``not yet`` (today is on or before day 14, so day 14 can still happen), or
+``n/a`` when no marker exists. The reading is strict: active on day 15 but not on day 14 is ``no``.
 """
 from __future__ import annotations
 
@@ -35,6 +37,8 @@ NAME = "active_days.jsonl"
 MAX_ROWS = 400
 RETENTION_DAY = 14
 _TAIL_BYTES = 4096
+#: Size of one row: {"day":"YYYY-MM-DD","install_id":<16 hex>} plus newline is 53 bytes.
+_ROW_BYTES = len(json.dumps({"day": "2000-01-01", "install_id": "0" * 16}, separators=(",", ":"))) + 1
 
 
 def _path() -> Path:
@@ -84,20 +88,119 @@ def _last_row(path: Path) -> dict | None:
     return None
 
 
+def _record(code: str, exc: BaseException) -> None:
+    from llm_router import failopen
+
+    failopen.record(code, exc)
+
+
+def _read_winner_id(idp: Path) -> str:
+    """The id another process wrote. An O_EXCL winner may not have written yet: retry briefly."""
+    for _ in range(20):
+        try:
+            got = idp.read_text(encoding="utf-8").strip()
+        except OSError:
+            got = ""
+        if got:
+            return got
+        time.sleep(0.005)
+    return ""
+
+
+def _create_excl(idp: Path, fresh: str) -> str:
+    """Fallback when hard links are unavailable: O_EXCL create of the id file."""
+    try:
+        fd = os.open(str(idp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return _read_winner_id(idp) or fresh
+    try:
+        os.write(fd, fresh.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return fresh
+
+
+def _link_id(path: Path, idp: Path, fresh: str) -> str:
+    tmp = path.with_name(f"active_days.id.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        try:
+            os.write(fd, fresh.encode("utf-8"))
+        finally:
+            os.close(fd)
+        try:
+            os.link(str(tmp), str(idp))
+        except FileExistsError:
+            return _read_winner_id(idp) or fresh
+        return fresh
+    finally:
+        try:
+            os.unlink(str(tmp))
+        except OSError as exc:
+            _record("P37-ACTIVE-DAY-TMP", exc)
+
+
+def _new_install_id(path: Path) -> str:
+    """The install id, created exactly once even when two processes start fresh together.
+    The id is written to a private temp file and hard-linked to ``active_days.id``: the link is
+    atomic and exclusive, so the file is never observed empty and the loser reads the winner's.
+    Where linking fails (FAT/exFAT/SMB, no ``os.link``) the failure is recorded and an O_EXCL
+    create is used instead; the row append always proceeds."""
+    idp = path.with_name("active_days.id")
+    fresh = secrets.token_hex(8)
+    try:
+        return _link_id(path, idp, fresh)
+    except (OSError, AttributeError) as exc:
+        _record("P37-ACTIVE-DAY-LINK", exc)
+    try:
+        return _create_excl(idp, fresh)
+    except OSError as exc:
+        _record("P37-ACTIVE-DAY-IDFILE", exc)
+        return fresh
+
+
+def _sweep_orphan_tmps(path: Path, now: float | None = None, max_age: float = 3600.0) -> None:
+    """Remove ``active_days.id.*.tmp`` files left by a process killed mid-create."""
+    cutoff = (time.time() if now is None else now) - max_age
+    for p in path.parent.glob("active_days.id.*.tmp"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+        except OSError as exc:
+            _record("P37-ACTIVE-DAY-SWEEP", exc)
+
+
 def _append(path: Path, row: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
+        if hasattr(os, "fchmod"):  # absent on Windows; tightens a file created with a wider mode
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError as exc:
+                _record("P37-ACTIVE-DAY-CHMOD", exc)
         os.write(fd, (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"))
     finally:
         os.close(fd)
 
 
+def _dedupe(rows: list[dict]) -> list[dict]:
+    """First row per day, in order: two processes marking the same day leave one row."""
+    seen: set[str] = set()
+    out = []
+    for r in rows:
+        if r["day"] not in seen:
+            seen.add(r["day"])
+            out.append(r)
+    return out
+
+
 def _trim(path: Path) -> None:
-    rows = _read_rows(path)
-    if len(rows) <= MAX_ROWS:
+    raw = _read_rows(path)
+    rows = _dedupe(raw)
+    if len(rows) == len(raw) and len(rows) <= MAX_ROWS:
         return
-    keep = [rows[0]] + rows[-(MAX_ROWS - 1):]
+    keep = rows if len(rows) <= MAX_ROWS else [rows[0]] + rows[-(MAX_ROWS - 1):]
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -108,6 +211,19 @@ def _trim(path: Path) -> None:
     os.replace(tmp, path)
 
 
+def _has_dup_tail(path: Path) -> bool:
+    """True when the last two rows share a day (a concurrent writer raced the check)."""
+    try:
+        with open(path, "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - _TAIL_BYTES))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    rows = [r for r in (_parse_row(ln) for ln in tail.splitlines() if ln.strip()) if r]
+    return len(rows) >= 2 and rows[-1]["day"] == rows[-2]["day"]
+
+
 def mark_active(now: float | None = None) -> bool:
     """Record today (local date) as an active day. True when a row was appended.
 
@@ -115,14 +231,23 @@ def mark_active(now: float | None = None) -> bool:
     try:
         path = _path()
         today = _today(now)
+        if now is None:  # the hooks' path; an injected clock is not the file's clock
+            try:
+                if _today(path.stat().st_mtime) == today:
+                    return False  # written today: today's row is there (one stat, no read)
+            except OSError:
+                pass
         last = _last_row(path)
         if last and last["day"] >= today:
             return False
         install_id = last.get("install_id") if last else None
         if not isinstance(install_id, str) or not install_id:
-            install_id = secrets.token_hex(8)
+            install_id = _new_install_id(path)
         _append(path, {"day": today, "install_id": install_id})
-        if path.stat().st_size > MAX_ROWS * 50:
+        _sweep_orphan_tmps(path)
+        # Trim past a full file (MAX_ROWS rows of _ROW_BYTES), or when a racing writer left
+        # a same-day duplicate. Only reached once a day.
+        if path.stat().st_size > MAX_ROWS * _ROW_BYTES or _has_dup_tail(path):
             _trim(path)
         return True
     except Exception:  # noqa: BLE001 - telemetry never blocks a hook
@@ -146,10 +271,12 @@ def status(now: float | None = None) -> dict[str, Any]:
     days = sorted({r["day"] for r in rows})
     install = date.fromisoformat(days[0])
     day14 = (install + timedelta(days=RETENTION_DAY)).isoformat()
-    if today < day14:
-        verdict = "not yet"
+    if day14 in days:
+        verdict = "yes"
+    elif today <= day14:
+        verdict = "not yet"  # day 14 can still happen today
     else:
-        verdict = "yes" if day14 in days else "no"
+        verdict = "no"
     return {"instrumented": True, "install_day": days[0], "install_id": rows[0].get("install_id"),
             "active_days": len(days),
             "days_since_install": (date.fromisoformat(today) - install).days,

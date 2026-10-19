@@ -623,9 +623,13 @@ One row per change goes in [`../KPI-LEDGER.md`](../KPI-LEDGER.md).
 reports, for the window, the existing GE6 lines (burn per session and per human turn from the
 session start/Stop samples in `quota_samples.jsonl`, stale samples as "estimated") and adds:
 
-* **The baseline week**: the 7 days from the first row the GE6 instrument wrote (the earliest `ts`
-  in `quota_samples.jsonl` or `quota_history.jsonl`, which is the GE6 deploy; override with
-  `--baseline-start`). Its per-turn burn is printed beside the window's, with the ratio per turn
+* **The baseline week**: the 7 days from the first ORGANIC row in `quota_samples.jsonl` (same kind
+  resolution as the burn lines; synthetic and benchmark rows cannot move it; the file is never
+  pruned, so the 30-day prune of `quota_history.jsonl` cannot move it). It is an ASSUMPTION that
+  this is the GE6 deploy: the text says "(assumed: first organic row)" and the JSON carries
+  `baseline_meta.assumed`. Override with `--baseline-start`. The week is flagged "partial
+  baseline" (`baseline_meta.partial`) when it is not complete yet or has fewer than 10 measured
+  sessions (`MIN_BASELINE_SESSIONS`); the ratio is still printed, with n, but flagged. Its per-turn burn is printed beside the window's, with the ratio per turn
   (comparison only). A zero or unknown baseline gives "n/a", never a ratio of 0 or infinity.
   A window that overlaps the baseline week is flagged as not independent.
 * **S3 coverage (P3.7-a)**: sessions in the window with a measured burn, over all sessions in the
@@ -640,5 +644,5 @@ It never claims the 40% reduction: that is 16.1 (LATER), and one install's windo
 
 `llm-router kpi --retention [--json]` prints this install's retention status from the local
 `active_days.jsonl` (D-26 option A): install day (the first marker day), active days, day 14, and
-"active on day 14: yes / no / not yet" (n/a before the first marker). Local only; see
+"active on day 14: yes / no / not yet" (n/a before the first marker). Strict: "not yet" while today is on or before day 14; active on day 15 but not day 14 is "no". Local only; see
 `docs/RETENTION.md` for the file's rows, bound and deletion.
