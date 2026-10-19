@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from dataclasses import replace
@@ -61,11 +62,12 @@ def setup(factory, tmp_path, monkeypatch):
         "def grade_all(*args):\n    return grades, None\n"
     )
     (nc / "lib_pi.py").write_text(
-        "from pathlib import Path\n"
-        "mode = 'pass'\ncalls = 0\nseen = []\n"
+        "import os\nfrom pathlib import Path\n"
+        "mode = 'pass'\ncalls = 0\nseen = []\nenvs = []\n"
         "def run_pi(prompt, cwd, timeout_s):\n"
         "    global calls\n    calls += 1\n"
         "    seen.append((PI_MODEL, globals().get('PI_CONFIG_DIR')))\n"
+        "    envs.append(dict(os.environ))\n"
         "    print('PRIVATE MODEL TEXT')\n"
         "    work = Path(cwd)\n"
         "    assert not (work / 'tests').exists()\n"
@@ -224,6 +226,11 @@ def fake_claude(setup, monkeypatch, served=None):
         assert "--permission-mode" in argv and "--allowedTools" in argv
         assert "ANTHROPIC_BASE_URL" not in kwargs["env"]
         assert "ANTHROPIC_API_KEY" not in kwargs["env"]
+        env = kwargs["env"]
+        assert env["HOME"] != os.environ["HOME"] and Path(env["HOME"]).is_dir()
+        assert Path(env["HOME"]).is_relative_to(cfg.run_dir / "agent_home")
+        assert set(env) <= h.AGENT_ENV_ALLOWED
+        assert not Path(kwargs["cwd"]).is_relative_to(env["HOME"])
         assert not (Path(kwargs["cwd"]) / "tests").exists()
         assert "PRIVATE CONTRACT" in kwargs["input"]
         (Path(kwargs["cwd"]) / "fix.py").write_text("value = 1\n")
@@ -372,3 +379,19 @@ def test_pi_agent_thinking_off(setup):
     assert model["contextWindow"] == h.local_models.num_ctx(arm) == 32768
     assert (config / "models.json").stat().st_mode & 0o777 == 0o600
     assert config.stat().st_mode & 0o777 == 0o700
+
+
+def test_pi_agent_runs_with_scratch_home_and_minimal_env(setup, monkeypatch):
+    """F104: the Pi child env is built from os.environ inside lib_pi, so the runner swaps
+    os.environ for the call and restores it after."""
+    cfg, _, _, arm, pi, *_ = setup
+    caller = dict(os.environ)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(Path(caller["HOME"]) / "state"))
+    assert invoke(setup) == 0
+    assert pi.envs
+    for env in pi.envs:
+        assert env["HOME"] != caller["HOME"]
+        assert Path(env["HOME"]).is_relative_to(cfg.run_dir / "agent_home")
+        assert set(env) <= h.AGENT_ENV_ALLOWED
+    assert os.environ["HOME"] == caller["HOME"]
+    assert os.environ["ANTHROPIC_API_KEY"] == caller["ANTHROPIC_API_KEY"]
