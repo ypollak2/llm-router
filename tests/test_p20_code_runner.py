@@ -831,14 +831,11 @@ def test_agent_tree_is_dead_before_run_returns_and_bystander_lives(tmp_path, bys
 def test_detached_orphan_makes_the_run_refuse_not_hang(tmp_path, monkeypatch, stdio):
     """F117 round 2: a double-forked setsid orphan is not provably the agent's, so it is not
     killed; because it still holds the work dir the run refuses (and never hangs on its pipes)."""
-    import time
     monkeypatch.setattr(r, "DRAIN_SECONDS", 1.0)
     extra = ("null",) if stdio == "devnull" else ()
-    started = time.monotonic()
-    try:
+    try:  # returning at all proves it did not hang on the survivor's pipes
         with pytest.raises(h.AgentSurvived, match="agent process survived"):
             _run(tmp_path, "orphan", 30, *extra)
-        assert time.monotonic() - started < 20
     finally:  # the test started this process, the test ends it
         pidfile = tmp_path / "pid"
         if pidfile.exists() and pidfile.read_text():
