@@ -57,6 +57,7 @@ Usage:
     llm-router replay [--limit N]    — full transcript of routing decisions this session
     llm-router snapshot [--date DATE] — mid-session monitoring: accuracy trends and gap detection
     llm-router retrospect [--weekly] — IAF-style session debrief with routing directives
+    llm-router learn [--dry-run] [--replay PATH] [--json] — fold new examples into the kNN index behind the 2-pt update gate
     llm-router stats [--period recent] — show combined download stats (llm-routing + claude-code-llm_router)
     llm-router verify                — end-to-end health check (30 seconds)
     llm-router gc [--ttl-days N] [--apply] — sweep stale session shards from ~/.llm-router (dry-run by default)
