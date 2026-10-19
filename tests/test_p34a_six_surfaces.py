@@ -178,12 +178,21 @@ def _statusline(six) -> str:
     return ANSI.sub("", r.stdout).strip()
 
 
+#: P35-2 (D-220): the statusline prints the estimate and the measured part as two segments. The A seed's
+#: only verified row today is the `block` savings row S1 ($0.50, host claude_code, after the gate date);
+#: the other 3 rows behind the today total (U1, U2, S2) are unverified.
+VERIFIED_TODAY_USD, VERIFIED_TODAY_N = 0.5, 1
+
+
 def test_statusline_money_is_the_today_oracle(six):
     usd, n = _saved_six("today")
     line = _statusline(six)
-    assert f"~${usd:,.2f} est" in line and f"today n={n}" in line, line
+    est, est_n = usd - VERIFIED_TODAY_USD, n - VERIFIED_TODAY_N
+    assert f"~${est:,.2f} est\u00b7today n={est_n}" in line, line
+    assert f"${VERIFIED_TODAY_USD:,.2f} measured\u00b7today n={VERIFIED_TODAY_N}" in line, line
+    assert f"~${usd:,.2f} est" not in line, line            # measured and estimated are never one figure
     # the extra row is outside today but inside 24h: a wrong money window prints another figure
-    assert f"~${_saved_six('24h')[0]:,.2f} est" not in line, line
+    assert f"~${_saved_six('24h')[0] - VERIFIED_TODAY_USD:,.2f} est" not in line, line
 
 
 def test_statusline_mix_is_the_session_oracle(six):

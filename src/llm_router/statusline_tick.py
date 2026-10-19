@@ -56,6 +56,9 @@ _QUOTA_FIELDS = (("session_pct", "5h"), ("weekly_pct", "wk"), ("sonnet_pct", "so
 REFRESH_STAMP_NAME = ".statusline-refresh.last"
 #: The cache is refreshed in the background at most this often.
 REFRESH_AFTER_S = 60.0
+#: ... and, when a ledger changed since the cache was written, at most this often (P35-2).
+LEDGER_SPAWN_MIN_S = 10.0
+_SESSION_RE = re.compile(r'"session_id"\s*:\s*"([A-Za-z0-9._-]{1,128})"')
 #: Past this age the cached values are not shown at all ("n/a").
 STALE_AFTER_S = 15 * 60.0
 MAX_CHARS = 200
@@ -286,23 +289,50 @@ def _spawn_detached(argv: list[str]) -> int | None:
                             stderr=subprocess.DEVNULL, close_fds=True).pid
 
 
-def maybe_refresh(home: str, cache: dict | None, now: float) -> bool:
-    """Start one detached refresh when the cache is due. Never waits, never raises.
+def ledger_changed_since(home: str, stamp: float) -> bool:
+    """True when a ledger was written after ``stamp`` (P35-2): two ``stat`` calls, no read. The first
+    that exists decides for the database (``usage.db-wal`` takes every write until a checkpoint, so it
+    is the live mtime; ``usage.db`` when there is no WAL), then ``proxy_calls.jsonl``."""
+    for names in (("usage.db-wal", "usage.db"), ("proxy_calls.jsonl",)):
+        for name in names:
+            try:
+                mtime = os.path.getmtime(os.path.join(home, name))
+            except OSError:
+                continue
+            if mtime > stamp:
+                return True
+            break
+    return False
 
-    Returns True when a refresher was started."""
+
+def session_of(raw: bytes) -> str | None:
+    """The ``session_id`` in the session JSON Claude Code pipes in, if it is a plain id."""
+    m = _SESSION_RE.search(raw.decode("utf-8", "replace"))
+    return m.group(1) if m else None
+
+
+def maybe_refresh(home: str, cache: dict | None, now: float, session: str | None = None) -> bool:
+    """Start one detached refresh when the cache is due, or when a ledger changed since it was
+    written (at most one start per :data:`LEDGER_SPAWN_MIN_S` then). Never waits, never raises.
+
+    With a ``session`` the refresher also writes that session's snapshot (``statusline --refresh
+    --host claude_code --session S``). Returns True when a refresher was started."""
     try:
         written = _num((cache or {}).get("written_at"))
-        if written is not None and 0 <= now - written < REFRESH_AFTER_S:
+        age_due = written is None or not 0 <= now - written < REFRESH_AFTER_S
+        if not age_due and not ledger_changed_since(home, written):
             return False
         stamp = os.path.join(home, REFRESH_STAMP_NAME)
         try:
-            if now - os.path.getmtime(stamp) < REFRESH_AFTER_S:
+            if now - os.path.getmtime(stamp) < (REFRESH_AFTER_S if age_due else LEDGER_SPAWN_MIN_S):
                 return False  # one was started recently; it may still be running
         except OSError:
             pass
         argv = _refresh_argv()
         if not argv:
             return False
+        if session and not os.environ.get("LLM_ROUTER_STATUSLINE_REFRESH_CMD", "").strip():
+            argv += ["--host", "claude_code", "--session", session]
         os.makedirs(home, mode=0o700, exist_ok=True)
         fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         os.close(fd)
@@ -409,14 +439,15 @@ def _float_or_none(raw: bytes) -> float | None:
 
 
 def main() -> int:
+    raw = b""
     try:
-        sys.stdin.buffer.read()
+        raw = sys.stdin.buffer.read()
     except (OSError, ValueError, AttributeError):
         pass
     now = time.time()
     home = router_home()
     cache = read_cache(home)
-    maybe_refresh(home, cache, now)
+    maybe_refresh(home, cache, now, session_of(raw))
     usage = read_usage(home)
     maybe_append_history(home, usage, now)
     color = not os.environ.get("NO_COLOR")

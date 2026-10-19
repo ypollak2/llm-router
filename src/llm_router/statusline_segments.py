@@ -25,7 +25,11 @@ values stripped of control characters (a value is data to print, never to run)::
     v=1  written=<epoch s>
     usage=none|fallback|ok  session_pct  weekly_pct  usage_stale=0|1  reset
     ctx_human  ctx_pct
-    money  money_n  money_win              (today's est. saving, its n and window)
+    money  money_n  money_win              (today's ESTIMATED saving "~$X est", its n and window)
+    money_m  money_m_n                     (today's MEASURED saving "$X measured" and its n; never summed
+                                           with the estimate, P35-2)
+    snap_line  snap_at                     (the five-field snapshot line and its data time; the script
+                                           prints it as a second row, "n/a" past 15 min)
     mix_local  mix_sub  mix_paid  mix_unc  mix_n  mix_win  ledger_as_of
                                            (this session's executed calls, from ONE
                                            ``ledger_view.window_summary``; D-218)
@@ -279,7 +283,9 @@ def _ledger(state: str, scope: str, now: float, session: str = ""):
 
 
 def money_segment(state: str, now: float | None = None) -> dict[str, str]:
-    """Today's estimated saving with its n and window (``money``, ``money_n``, ``money_win``)."""
+    """Today's saving as TWO segments, never one sum (P35-2, D-220): the estimate (``money`` =
+    ``~$X est``, ``money_n``) and the measured part (``money_m`` = ``$X measured``, ``money_m_n``),
+    each printed only above the spend floor and each with its own n; ``money_win`` is the window."""
     now = time.time() if now is None else now
     if not os.path.isfile(os.path.join(state, "usage.db")):
         return {}
@@ -288,11 +294,18 @@ def money_segment(state: str, now: float | None = None) -> dict[str, str]:
         from llm_router.dashboard_data import SPEND_FLOOR_USD
 
         lw = _ledger(state, "today", now)
-        fig = None if lw is None else lw.figures()["saved"]
-        text = lv.show(fig, "~${:,.2f} est")
-        if text is None or fig.value < SPEND_FLOOR_USD:
+        if lw is None:
             return {}
-        return {"money": text, "money_n": str(fig.n), "money_win": fig.window}
+        figs = lw.figures()
+        out: dict[str, str] = {}
+        for key, fig, unit, suffix, n_key in (
+                ("money", figs["saved_estimated"], "estimate", " est", "money_n"),
+                ("money_m", figs["saved_measured"], "api", " measured", "money_m_n")):
+            text = lv.show(fig, unit=unit, quantity="usd")
+            if text is not None and fig.value >= SPEND_FLOOR_USD:
+                out[key], out[n_key] = text + suffix, str(fig.n)
+                out["money_win"] = fig.window
+        return out
     except Exception:  # noqa: BLE001 -- never break the line over a reporting figure
         return {}
 
@@ -322,6 +335,58 @@ def mix_segment(state: str, now: float | None = None, session: str = "") -> dict
     out["mix_win"] = "session" if lw.scope == "session_id" else "session~"   # ~ = by timestamp
     out["ledger_as_of"] = lw.as_of
     return out
+
+
+SNAP_HOST = "claude_code"
+#: A snapshot younger than this is reused by the next refresher run instead of recomputed.
+SNAP_REUSE_S = 10.0
+
+
+def snap_segment(state: str, session: str, now: float | None = None, *, refresh: bool = True,
+                 reuse_s: float = 0.0) -> dict[str, str]:
+    """``snap_line`` (the pre-rendered five-field line) and ``snap_at`` (its data time) for the shell.
+
+    The per-session snapshot has ONE writer, ``statusline_snapshot.refresh``; this process is already
+    the detached refresher of the default layout, so it calls it directly (no second refresher).
+    ``refresh=False`` only republishes the snapshot already on disk. Absent when there is no session
+    id, when ``state`` is not the router's own home (the snapshot reads that home), or on failure."""
+    from llm_router import ledger_view as lv
+    from llm_router import paths, statusline_snapshot as snap
+
+    now = time.time() if now is None else now
+    if os.path.realpath(state) != os.path.realpath(str(paths.llm_router_home())):
+        return {}
+    sid = (session if session not in ("", "default") else None) or lv.read_session_id(paths.llm_router_home())
+    if not sid:
+        return {}
+    data = snap.read(SNAP_HOST, sid)
+    if refresh and not (reuse_s and data and 0 <= now - data["written_at"] < reuse_s):
+        data = snap.refresh(host=SNAP_HOST, session_id=sid, now=now)
+    if not data:
+        return {}
+    return {"snap_line": data["line"], "snap_at": str(int(data["written_at"]))}
+
+
+#: The snapshot may take this long inside the refresher; past it the cache is written without it.
+SNAP_BUDGET_S = 10
+
+
+def _within(seconds: int, fn, started: float):
+    """``fn()`` with a SIGALRM budget (TimeoutError past it); the refresher's own hard stop
+    (:data:`RUN_TIMEOUT_S`, counted from ``started``) is re-armed afterwards."""
+    if not hasattr(signal, "SIGALRM"):
+        return fn()
+
+    def _timeout(*_):
+        raise TimeoutError(f"statusline snapshot over its {seconds} s budget")
+
+    hard = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(seconds)
+    try:
+        return fn()
+    finally:
+        signal.signal(signal.SIGALRM, hard)
+        signal.alarm(max(1, int(RUN_TIMEOUT_S - (time.time() - started))))
 
 
 def proxy_segment(state: str) -> dict[str, str]:
@@ -510,7 +575,18 @@ def main(argv: list[str] | None = None) -> int:
         signal.alarm(RUN_TIMEOUT_S)
     now = time.time()
     maybe_refresh_usage(state, now, dict(os.environ))
-    write_cache(state, session, compute(state, ns.transcript, ns.model, dict(os.environ), now, session))
+    seg = compute(state, ns.transcript, ns.model, dict(os.environ), now, session)
+    try:
+        seg.update({k: _clean(v) for k, v in _within(SNAP_BUDGET_S, lambda: snap_segment(
+            state, session, now, reuse_s=SNAP_REUSE_S), started=now).items()})
+    except Exception as exc:  # noqa: BLE001 -- slow or broken snapshot: the line goes out without it
+        try:
+            from llm_router import failopen
+
+            failopen.record("CHZ-FO-STATUSLINE-SNAPSHOT", exc)
+        except ImportError:
+            pass  # a copy without the package cannot account for it; the row is simply absent
+    write_cache(state, session, seg)
     _prune(state)
     return 0
 

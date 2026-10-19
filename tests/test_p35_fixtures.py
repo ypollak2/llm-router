@@ -22,6 +22,7 @@ values written here, never product constants (D-205): the fixture names no model
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -31,7 +32,7 @@ import pytest
 
 from tests.test_p34a_ledger_view_identity import DAY, MIN, NOW, home  # noqa: F401  (home is a fixture)
 from tests.test_p34a_six_surfaces import (  # noqa: F401  (six is a fixture)
-    HOOKS, _statusline, six,
+    ANSI, HOOKS, REAL_TIME, six,
 )
 
 SID = "s-main"
@@ -208,14 +209,79 @@ async def test_work_hours_is_na_below_ten_active_hours_never_zero(home):  # noqa
 
 # -- P35-2 statusline ----------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="P35-2 statusline: default layout lacks router/offload/quality/saved ~h")
+#: Delegations the Codex window counts in the snapshot oracle (budget = the module default, so 20%).
+CODEX_USED = 3
+#: Measured quota rows (5-minute series) inside the last 5 hours: the n behind "Claude 5h".
+CLAUDE_5H_SAMPLES = 3
+#: Per-session quota samples: weekly pp 20 -> 24 over 2 Stop turns = 2.0 pp per Claude turn.
+PP_PER_TURN = 2.0
+#: Actions served off Claude since local midnight (NOW is 01:30 there): session s-main's proxy rows at
+#: -1 and -5 min (local backend), its MCP rows at -10 min (local) and -20 min (spread). The MCP row at
+#: -95 min is before midnight; paid rows never count. ~work-hours = 4 x 2.0 pp / 3.0 pp per hour.
+OFF_CLAUDE_TODAY = 4
+
+
+def seed_snapshot_extras(h: Path) -> None:
+    """The inputs the snapshot's other fields read, on top of the P35 home: a tagged organic session,
+    a Claude quota snapshot, three Codex delegations, per-session quota samples and 5-minute rows
+    inside the last 5 hours (flat weekly %, so the active-hour rate of the fixture is unchanged)."""
+    (h / f"session_kind_{SID}.json").write_text(json.dumps(
+        {"session_id": SID, "kind": "organic", "cwd": "/fixture/proj", "ts": NOW - DAY}))
+    (h / "usage.json").write_text(json.dumps({"session_pct": 37, "weekly_pct": 40, "updated_at": NOW - MIN}))
+    (h / "codex_window.json").write_text(json.dumps({"delegations": [NOW - 10 * MIN, NOW - 5 * MIN, NOW - MIN]}))
+    samples = [(NOW - 3 * 3600, "start", 20.0), (NOW - 2 * 3600, "stop", 22.0), (NOW - 3600, "stop", 24.0)]
+    _jl(h / "quota_samples.jsonl", [
+        {"session_id": SID, "kind": kind, "ts": ts, "five_hour_pct": 10.0, "weekly_pct": wk, "updated_at": ts,
+         "source": "measured", "session_kind": "organic"} for ts, kind, wk in samples])
+    last_wk = 10.0 + sum(PP_PER_ACTIVE_HOUR)
+    _jl(h / "quota_history.jsonl", [
+        {"ts": NOW - (i + 1) * 20 * MIN, "five_hour_pct": 37.0, "weekly_pct": last_wk, "updated_at": NOW,
+         "five_hour_resets_at": None, "source": "measured"} for i in range(CLAUDE_5H_SAMPLES)])
+
+
+def _snapshot_shell(p35) -> list[str]:
+    """Seed via ``statusline_snapshot.refresh``, publish it in the kv cache as the refresher does, run the
+    real shell and return its printed rows. ``snap_at`` is re-stamped to the wall clock (the shell
+    compares it with the wall clock; the fixture's clock is frozen), the same way ``written`` is."""
+    from llm_router import statusline_segments as ss
+    from llm_router import statusline_snapshot as snap
+
+    snap.refresh(host="claude_code", session_id=SID, now=NOW)
+    state = str(p35.home)
+    seg = ss.compute(state, "", "", {"LLM_ROUTER_CLAUDE_SUBSCRIPTION": "1"}, NOW, SID)
+    seg.update(ss.snap_segment(state, SID, NOW, refresh=False))
+    seg["written"] = seg["snap_at"] = str(int(REAL_TIME()))
+    ss.write_cache(state, SID, seg)
+    stdin = json.dumps({"session_id": SID, "cwd": "/fixture/proj", "model": {"id": "fixture"}})
+    r = subprocess.run(["bash", str(HOOKS / "statusline-command.sh")], input=stdin, env=p35.env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return [ANSI.sub("", ln) for ln in r.stdout.strip().splitlines()]
+
+
 async def test_statusline_prints_the_five_fields(p35):
-    line = _statusline(p35)
-    for needle in (f"router: {SERVED}", "offload", "quality", "saved ~"):
-        assert needle in line, (needle, line)
+    """Carry-forward from rv-628: seed via ``statusline_snapshot.refresh``, run the shell, and check all five
+    fields, each with its n and window (hand values: the module constants above)."""
+    seed_snapshot_extras(p35.home)
+    rows = _snapshot_shell(p35)
+    snap_rows = [r for r in rows if r.startswith("router:")]
+    assert len(snap_rows) == 1, rows
+    line = snap_rows[0]
+    fields = line.split(" | ")
+    assert len(fields) == 5, line
+    router, offload, quota, quality, saved = fields
+    assert router == f"router: {SERVED} (policy_table)", router
+    assert offload.startswith("offload ") and re.search(r"\(n=\d+, session", offload), offload
+    assert quota == (f"Claude 5h 37% (n={CLAUDE_5H_SAMPLES}, 5h) / Codex "
+                     f"{100 * CODEX_USED / 15:.0f}% (n={CODEX_USED}, 5h)"), quota
+    good, bad = VERDICTS["good"], VERDICTS["bad"]
+    assert quality == f"quality {good / (good + bad):.0%} (n={good + bad}, 7d)", quality
+    hours = OFF_CLAUDE_TODAY * PP_PER_TURN / MEDIAN_PP
+    assert saved == f"saved ~{hours:.1f} work-hours (n={OFF_CLAUDE_TODAY}, rate n={len(PP_PER_ACTIVE_HOUR)}, today)", saved
+    for f in fields[1:]:           # every figure names its n and its window (the router field is a name, not a figure)
+        assert "(n=" in f and re.search(r"\b(session|5h|7d|today)\b", f), f
 
 
-@pytest.mark.xfail(strict=True, reason="P35-2 statusline: shadow_frontier.verdict_summary does not exist")
 async def test_verdict_summary_oracle(p35):
     from llm_router import shadow_frontier
 
@@ -225,7 +291,6 @@ async def test_verdict_summary_oracle(p35):
     assert abs(s["rate"] - good / (good + bad)) < 1e-9 and s["wilson"][0] < s["rate"] < s["wilson"][1], s
 
 
-@pytest.mark.xfail(strict=True, reason="P35-2 statusline: statusline_snapshot.py does not exist")
 async def test_snapshot_line_router_is_the_newest_proxy_turn(p35):
     from llm_router import statusline_snapshot as snap
 
@@ -234,7 +299,6 @@ async def test_snapshot_line_router_is_the_newest_proxy_turn(p35):
     assert f"quality {VERDICTS['good'] / (VERDICTS['good'] + VERDICTS['bad']):.0%}" in d["line"]
 
 
-@pytest.mark.xfail(strict=True, reason="P35-2 statusline: statusline_snapshot.py does not exist")
 async def test_snapshot_older_than_15_minutes_is_na(p35):
     from llm_router import statusline_snapshot as snap
 

@@ -313,11 +313,13 @@ _seg_int() {
 s_v="" s_written="" s_usage="" s_session_pct="" s_weekly_pct="" s_usage_stale="" s_reset=""
 s_ctx_human="" s_ctx_pct="" s_money="" s_mix_local="" s_mix_paid="" s_proxy_down=""
 s_mix_sub="" s_mix_unc="" s_mix_n="" s_mix_win="" s_money_n="" s_money_win=""
+s_money_m="" s_money_m_n="" s_snap="" s_snap_at=""
 s_health="" s_last="" s_last_stale="" s_last_tok=""
 _seg_load() {
     s_v="" s_written="" s_usage="" s_session_pct="" s_weekly_pct="" s_usage_stale="" s_reset=""
     s_ctx_human="" s_ctx_pct="" s_money="" s_mix_local="" s_mix_paid="" s_proxy_down=""
     s_mix_sub="" s_mix_unc="" s_mix_n="" s_mix_win="" s_money_n="" s_money_win=""
+    s_money_m="" s_money_m_n="" s_snap="" s_snap_at=""
     s_health="" s_last="" s_last_stale="" s_last_tok=""
     [ -r "$_seg_file" ] || return 1
     local k v
@@ -335,6 +337,8 @@ _seg_load() {
             mix_sub) s_mix_sub="$v" ;;           mix_unc) s_mix_unc="$v" ;;
             mix_n) s_mix_n="$v" ;;               mix_win) s_mix_win="$v" ;;
             money_n) s_money_n="$v" ;;           money_win) s_money_win="$v" ;;
+            money_m) s_money_m="$v" ;;           money_m_n) s_money_m_n="$v" ;;
+            snap_line) s_snap="$v" ;;            snap_at) s_snap_at="$v" ;;
         esac
     done < "$_seg_file"
     # Every value used in arithmetic or a numeric test must be digits only: the file
@@ -349,6 +353,11 @@ _seg_load() {
     _seg_int "$s_mix_unc" 9;     s_mix_unc="$_n"
     _seg_int "$s_mix_n" 9;       s_mix_n="$_n"
     _seg_int "$s_money_n" 9;     s_money_n="$_n"
+    _seg_int "$s_money_m_n" 9;   s_money_m_n="$_n"
+    _seg_int "$s_snap_at" 10;    s_snap_at="$_n"
+    # The snapshot line is printed, so it is data to clean: no control characters (an escape in the
+    # file must not reach the terminal), at most 400 characters.
+    s_snap="${s_snap//[$'\001'-$'\037'$'\177']/}"; s_snap="${s_snap:0:400}"
     # A window label is printed, so only the ledger's own names pass (data, never code).
     case "$s_mix_win" in session|session~) ;; *) s_mix_win="" ;; esac
     case "$s_money_win" in today|session|24h|7d|month|lifetime) ;; *) s_money_win="" ;; esac
@@ -440,8 +449,13 @@ fi
 # llm_router`, ~170 ms, which is why it can never sit on this path). Omitted when
 # no interpreter can import llm_router or the day is below the spend floor.
 # P3.4-B2 (D-218): the figure is printed with its window and n, or not at all.
+# P35-2 (D-220): the estimate and the measured part are two segments, each with its own n; they are
+# never one summed figure.
 if [ -n "$s_money" ] && [ -n "$s_money_n" ] && [ -n "$s_money_win" ]; then
     parts+=("💰 ${_GREEN}${s_money}${_RESET}${_DIM}·${s_money_win} n=${s_money_n}${_RESET}")
+fi
+if [ -n "$s_money_m" ] && [ -n "$s_money_m_n" ] && [ -n "$s_money_win" ]; then
+    parts+=("💵 ${_GREEN}${s_money_m}${_RESET}${_DIM}·${s_money_win} n=${s_money_m_n}${_RESET}")
 fi
 
 # ⚖ route mix -- this SESSION's executed calls by class (L local / S subscription / P paid,
@@ -524,6 +538,20 @@ for i in "${!parts[@]}"; do
 done
 
 printf '%s\n' "$result"
+
+# ── Second row: the per-session snapshot line (P35-2) ────────────────────────
+# Five fields, each with its n and window, pre-rendered by statusline_snapshot (the refresher above
+# wrote it into the kv file): this prints it and computes nothing. Past 15 minutes (900 s) of data
+# age, or with no stamp, the row reads n/a. No process: builtins only.
+if [ -n "$s_snap" ]; then
+    _snap_age=999999
+    [ -n "$s_snap_at" ] && [ "$_now" -gt 0 ] && _snap_age=$(( _now - s_snap_at ))
+    if [ "$_snap_age" -ge 0 ] && [ "$_snap_age" -le 900 ]; then
+        printf '%s\n' "${_DIM}${s_snap}${_RESET}"
+    else
+        printf '%s\n' "${_DIM}n/a${_RESET}"
+    fi
+fi
 
 # both: the fast line goes second. Its stdin is /dev/null (the full part above
 # already consumed the session JSON); the tick reads caches only and never waits.
