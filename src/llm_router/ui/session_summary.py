@@ -7,6 +7,7 @@ Style: concise, information-dense, Tokyo Night palette.
 from __future__ import annotations
 
 import datetime
+import re
 from typing import Optional
 
 from rich.console import Console, Group, RenderableType
@@ -121,7 +122,26 @@ def _fmt_tok_axis(n: int, divisor: float, suffix: str) -> str:
 
 
 def _fmt_usd(amount: float) -> str:
-    return f"${amount:.2f}" if amount >= 0.01 else f"${amount:.4f}"
+    # Sign goes before the "$" ("-$1.00", never "$-1.00"): an estimate can be negative.
+    sign, amount = ("-", -amount) if amount < 0 else ("", amount)
+    return f"{sign}${amount:.2f}" if amount >= 0.01 else f"{sign}${amount:.4f}"
+
+
+def _has_period(savings: dict, key: str) -> bool:
+    """Whether a savings period (``14d`` / ``week`` / ``month``) has anything to print.
+
+    D-247 / F119: gating on the verified figure alone hid a period whose saving is est.-only. A
+    pre-rendered ``<key>_text`` carries both sides, so a period shows when it has an unknown side
+    (n/a is information) or any non-zero n; only a fully-known empty period (every n=0) is skipped.
+    Without the text, the numeric (verified) key decides, as before.
+    """
+    text = savings.get(f"{key}_text")
+    if text is None:
+        verified = savings.get(key)
+        return verified is not None and verified > 0
+    if "n/a" in text:
+        return True
+    return any(int(n.replace(",", "")) for n in re.findall(r"n=([\d,]+)", text))
 
 
 def _date_axis_label_row(n: int, today: datetime.date) -> str:
@@ -280,8 +300,9 @@ class SessionSummaryDashboard:
         )
         zero_pct = (zero_cost / total_hits * 100) if total_hits > 0 else 0.0
 
-        today_saved = savings.get("today", 0.0)
-        lifetime_saved = savings.get("lifetime", 0.0)
+        # D-247 / F119: a window the caller could not read is UNKNOWN ("n/a"), never $0.00.
+        today_saved = savings.get("today")
+        lifetime_saved = savings.get("lifetime")
 
         # ── Left: routing breakdown ──────────────────────────────────────────
         policy_sym, policy_color = _POLICY_STYLES.get(
@@ -417,7 +438,14 @@ class SessionSummaryDashboard:
             ))
 
         # ── Right: savings summary ───────────────────────────────────────────
-        def _savings_entry(usd: float, tokens: int, label: str,
+        def _unlabelled_usd(usd: float | None) -> str:
+            # No pre-rendered split text: the numeric key is the VERIFIED figure (the est. side is
+            # then unknown), so it is labelled as such; no key at all prints n/a (never $0.00).
+            if usd is None:
+                return "verified n/a · est. n/a"
+            return f"{_fmt_usd(usd)} verified · est. n/a"
+
+        def _savings_entry(usd: float | None, tokens: int, label: str,
                            style: str, text: str | None = None) -> list[RenderableType]:
             # Label FIRST. At this panel width a trailing label wraps to the next
             # line, and a reader then pairs it with the value below — so lifetime,
@@ -429,7 +457,7 @@ class SessionSummaryDashboard:
                 (f"  {label:<9}", PALETTE.text_dim),
                 # F116 / D-247: a pre-rendered "verified ... . est. ..." text (own n each) replaces
                 # the single figure; the caller sets it, this never merges the two.
-                (f"{text}" if text is not None else f"{_fmt_usd(usd):<10}", style),
+                (f"{text}" if text is not None else _unlabelled_usd(usd), style),
                 (tok_part, PALETTE.text_dim),
             )]
 
@@ -442,32 +470,33 @@ class SessionSummaryDashboard:
                             "today", PALETTE.text_primary, savings.get("today_text")),
         ]
         # Show 14-day actuals + projections derived from rolling average
-        saved_14d = savings.get("14d", 0.0)
-        if saved_14d > 0:
+        saved_14d = savings.get("14d")          # None = unknown
+        if _has_period(savings, "14d"):
             right_lines.extend(
                 _savings_entry(saved_14d, savings.get("14d_tokens", 0),
                                "14-day", PALETTE.text_dim, savings.get("14d_text"))
             )
-            daily_avg = saved_14d / 14
-            projected_monthly = daily_avg * 30
-            projected_yearly = daily_avg * 365
-            right_lines.append(Text(""))
-            right_lines.append(
-                Text("  projected (verified, 14-day avg)", style=PALETTE.text_dim)
-            )
-            right_lines.append(Text.assemble(
-                (f"  ~{_fmt_usd(projected_monthly):<8}", PALETTE.success),
-                ("/month", PALETTE.text_dim),
-            ))
-            right_lines.append(Text.assemble(
-                (f"  ~{_fmt_usd(projected_yearly):<8}", PALETTE.success),
-                ("/year", PALETTE.text_dim),
-            ))
+            if saved_14d is not None and saved_14d > 0:
+                daily_avg = saved_14d / 14
+                projected_monthly = daily_avg * 30
+                projected_yearly = daily_avg * 365
+                right_lines.append(Text(""))
+                right_lines.append(
+                    Text("  projected (verified, 14-day avg)", style=PALETTE.text_dim)
+                )
+                right_lines.append(Text.assemble(
+                    (f"  ~{_fmt_usd(projected_monthly):<8}", PALETTE.success),
+                    ("/month", PALETTE.text_dim),
+                ))
+                right_lines.append(Text.assemble(
+                    (f"  ~{_fmt_usd(projected_yearly):<8}", PALETTE.success),
+                    ("/year", PALETTE.text_dim),
+                ))
         else:
             # Fallback: show week/month if no 14-day data yet
             for key, label in (("week", "week"), ("month", "month")):
-                amount = savings.get(key, 0.0)
-                if amount > 0:
+                amount = savings.get(key)
+                if _has_period(savings, key):
                     right_lines.extend(
                         _savings_entry(amount, savings.get(f"{key}_tokens", 0),
                                        label, PALETTE.text_dim, savings.get(f"{key}_text"))
@@ -636,34 +665,47 @@ class SessionSummaryDashboard:
             total_m_calls = 0
             total_m_tokens = 0
             total_m_cost = 0.0
-            total_m_saved = 0.0
+            total_m_cost_n = 0           # calls whose cost was recorded (D-247: unknown is not $0)
+            total_m_saved: float | None = None   # None until some model reports a saving
             for m in effective_models[:5]:
                 model_name = m.get("model", "unknown")
                 short = model_name.split("/")[-1][:20]
-                calls = m.get("calls", 0)
+                calls = m["calls"]              # effective_models keeps only calls > 0
                 tokens = m.get("tokens", 0)
-                cost = m.get("cost_usd", m.get("cost", 0.0))
-                saved = m.get("saved_usd", m.get("saved", 0.0))
+                # D-247 / F119: an absent cost / saving is UNKNOWN (n/a), never $0. ``cost_n`` is
+                # how many of the model's calls recorded a cost; a caller that sends a bare cost
+                # without it is taken to know every call's.
+                cost = m.get("cost_usd", m.get("cost"))
+                cost_n = m.get("cost_n", calls if cost is not None else 0)
+                if cost is None:
+                    cost_n = 0
+                saved = m.get("saved_usd", m.get("saved"))
                 provider = m.get("provider", "")
                 total_m_calls += calls
                 total_m_tokens += tokens
-                total_m_cost += cost
-                total_m_saved += saved
+                if cost_n:
+                    total_m_cost += cost
+                    total_m_cost_n += cost_n
+                if saved is not None:
+                    total_m_saved = saved if total_m_saved is None else total_m_saved + saved
                 tok_str = _fmt_tok(tokens) if tokens else "—"
                 tier_color = _model_tier_color(short, provider)
                 if provider == "subscription":
                     cost_str = "sub"
                     cost_color = PALETTE.success
-                elif cost == 0 and saved > 0:
+                elif not cost_n:
+                    cost_str = "n/a"
+                    cost_color = PALETTE.text_dim
+                elif cost == 0 and saved is not None and saved > 0:
                     cost_str = "free"
                     cost_color = PALETTE.success
                 elif cost > 0:
-                    cost_str = _fmt_usd(cost)
+                    cost_str = _fmt_usd(cost) + (f" ({cost_n} of {calls})" if cost_n < calls else "")
                     cost_color = PALETTE.warning
                 else:
                     cost_str = "—"
                     cost_color = PALETTE.text_dim
-                saved_str = f"+{_fmt_usd(saved)}" if saved > 0.001 else ""
+                saved_str = f"+{_fmt_usd(saved)}" if saved is not None and saved > 0.001 else ""
                 model_lines.append(Text.assemble(
                     ("  ", PALETTE.text_dim),
                     (f"{short:<20}", tier_color),
@@ -672,13 +714,19 @@ class SessionSummaryDashboard:
                     (f"  {cost_str:<6}", cost_color),
                     (f"  {saved_str}", PALETTE.success),
                 ))
+            if not total_m_cost_n:
+                total_cost_str = "n/a"
+            else:
+                total_cost_str = _fmt_usd(total_m_cost) + (
+                    f" ({total_m_cost_n} of {total_m_calls})" if total_m_cost_n < total_m_calls else "")
             model_lines.append(Text.assemble(
                 ("  ", PALETTE.text_dim),
                 (f"{'total':<20}", PALETTE.text_primary),
                 (f" {total_m_calls:>3}×", PALETTE.text_primary),
                 (f"  {_fmt_tok(total_m_tokens):>6}", PALETTE.text_dim),
-                (f"  {_fmt_usd(total_m_cost):<6}", PALETTE.warning if total_m_cost > 0 else PALETTE.success),
-                (f"  saved {_fmt_usd(total_m_saved)}", PALETTE.success),
+                (f"  {total_cost_str:<6}", PALETTE.warning if total_m_cost > 0 else PALETTE.success),
+                (f"  saved {_fmt_usd(total_m_saved) if total_m_saved is not None else 'n/a'}",
+                 PALETTE.success),
             ))
         elif model_breakdown:
             # The heading carries WHAT THIS COVERS, not just the window. This panel is
@@ -741,7 +789,7 @@ class SessionSummaryDashboard:
         daily_calls: list[int],
         daily_tokens: list[int],
         daily_costs: list[float],
-        total_saved: float = 0.0,
+        total_saved: float | None = None,
         overhead_ms: float = 0.0,
         cache_hit_pct: float = 0.0,
         p95_latency: dict[str, float] | None = None,
@@ -788,7 +836,7 @@ class SessionSummaryDashboard:
         # ── Chart 2: savings/day ──────────────────────────────────────────────
         n_s = min(14, len(daily_costs)) if daily_costs else 0
         save_values = daily_costs[-n_s:] if n_s > 0 else []
-        save_lines: list[RenderableType] = [Text("savings/day", style=PALETTE.text_dim)]
+        save_lines: list[RenderableType] = [Text("verified saved/day", style=PALETTE.text_dim)]
         if save_values and max(save_values) > 0.0001:
             max_saved_day = max(save_values)
             scaled = [int(v * 100_000) for v in save_values]
@@ -835,19 +883,22 @@ class SessionSummaryDashboard:
         total_calls = sum(daily_calls[-n:]) if daily_calls and n > 0 else 0
         total_tokens = sum(daily_tokens[-n:]) if daily_tokens and n > 0 else 0
         avg_calls = total_calls // max(n, 1)
-        avg_saved = (total_saved / max(n, 1)) if n > 0 and total_saved > 0 else 0.0
+        avg_saved = 0.0
+        if n > 0 and total_saved is not None and total_saved > 0:
+            avg_saved = total_saved / max(n, 1)
 
         lines.append(
             Text(
                 f"  {total_calls:,} calls · {_fmt_tok(total_tokens)} tok · "
-                f"{_fmt_usd(total_saved)} over {n} days",
+                f"{_fmt_usd(total_saved) if total_saved is not None else 'n/a'} verified saved "
+                f"over {n} days",
                 style=PALETTE.text_primary,
             )
         )
 
         stats: list[str] = [f"avg {avg_calls}/day"]
         if avg_saved > 0.0001:
-            stats.append(f"avg {_fmt_usd(avg_saved)}/day saved")
+            stats.append(f"avg {_fmt_usd(avg_saved)}/day verified saved")
         if overhead_ms > 0:
             stats.append(f"{overhead_ms:.0f}ms routing overhead")
         if cache_hit_pct > 0:
@@ -1046,7 +1097,7 @@ class SessionSummaryDashboard:
         daily_calls: list[int] | None = None,
         daily_tokens: list[int] | None = None,
         daily_costs: list[float] | None = None,
-        total_saved: float = 0.0,
+        total_saved: float | None = None,
         model_breakdown: dict[str, float] | None = None,
         model_breakdown_note: str | None = None,
         session_models: list[dict] | None = None,

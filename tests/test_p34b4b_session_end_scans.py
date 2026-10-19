@@ -153,7 +153,7 @@ def test_complexity_breakdown_uses_the_same_session_rows(home):
     mod._STOP_SESSION_ID = "A"
     by, filtered = mod._query_session_complexity_breakdown(time.time() - 900)
     assert filtered == 0
-    assert {k: [(m, n) for m, n, _c, _p in v] for k, v in by.items()} == {
+    assert {k: [(m, n) for m, n, *_ in v] for k, v in by.items()} == {
         "moderate": [("gpt-a1", 1)], "simple": [("llama-a2", 1)]}
 
 
@@ -263,7 +263,7 @@ def test_new_reads_are_none_without_a_database(home):
 def test_hook_pair_is_byte_identical_at_the_current_version():
     a, b = (ROOT / "hooks" / "session-end.py").read_bytes(), HOOK.read_bytes()
     assert a == b
-    assert b.splitlines()[1] == b"# llm_router-hook-version: 49"
+    assert b.splitlines()[1] == b"# llm_router-hook-version: 50"
 
 
 def test_the_hook_has_no_private_copy_of_the_decision_predicate():

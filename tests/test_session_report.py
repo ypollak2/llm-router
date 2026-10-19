@@ -208,7 +208,7 @@ class TestMockModelFiltering:
         with patch.object(se, "_db_path", lambda: str(temp_db)):
             result = se._query_session_complexity_breakdown(session_start - 120)
         if "moderate" in result:
-            model_names = [m for m, _, _, _ in result["moderate"]]
+            model_names = [m for m, *_ in result["moderate"]]
             assert "mock-model" not in model_names
 
     def test_cc_model_section_excludes_mock(self):
@@ -277,7 +277,7 @@ class TestCallReconciliation:
         total_paid = len(paid)
         total_complexity = sum(
             cnt for models in complexity.values()
-            for _, cnt, _, _ in models
+            for _, cnt, *_ in models
         )
         assert total_free + total_paid == total_complexity
 

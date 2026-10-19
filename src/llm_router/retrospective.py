@@ -160,14 +160,15 @@ def analyze_facts(
             aggregation layer (INV-COST-004). ``analyze_facts`` never sums a
             per-decision ``saved_usd`` — the ``routing_decisions`` schema has no
             such column, so the old sum was a permanent $0 (AC-7). Defaults to
-            0.0 when not injected.
+            None (unknown, printed n/a) when not injected. It is an ESTIMATE (baseline minus
+            actual), labelled ``est.`` wherever it is printed (D-247).
 
     Returns:
         Dict with: total_calls, total_cost, total_saved, duration_min,
                    correction_count, task_distribution, model_distribution,
                    avg_confidence, classification_accuracy
     """
-    saved = float(total_saved or 0.0)
+    saved = None if total_saved is None else float(total_saved)   # None = unknown, prints n/a
     if not decisions:
         # GH#56: these zeros were written to session snapshots as measured fact.
         # Three files on a reporter's disk, spanning two days, were identical
@@ -511,13 +512,21 @@ def generate_actions(
     return actions
 
 
-def _derive_savings(start: datetime, end: datetime) -> float:
+def format_saved(saved: float | None) -> str:
+    """The session saving as printed: always labelled an estimate, ``n/a`` when unknown, the sign
+    before the ``$`` (D-247). One place so the three retrospective surfaces cannot drift."""
+    if saved is None:
+        return "est. n/a"
+    return f"est. {'-' if saved < 0 else ''}${abs(saved):.4f}"
+
+
+def _derive_savings(start: datetime, end: datetime) -> float | None:
     """Session savings from the canonical aggregation layer (INV-COST-004).
 
     savings = Σ baseline_equivalent − Σ actual over billable attempts in the
     session window. This is the SINGLE source of truth for cost/savings; the
     retrospective delegates rather than keeping its own arithmetic. Fail-open to
-    0.0 so a ledger read never breaks a debrief.
+    None (unknown, never $0) so a ledger read never breaks a debrief.
     """
     try:
         from llm_router.execution_ledger import get_period_accounting
@@ -525,7 +534,7 @@ def _derive_savings(start: datetime, end: datetime) -> float:
         acc = get_period_accounting(start.timestamp(), end.timestamp())
         return round(net_saved(acc.baseline_equivalent_cost_usd, acc.actual_cost_usd), 6)
     except Exception:  # noqa: BLE001 — a ledger read must never break the debrief
-        return 0.0
+        return None
 
 
 def build_retrospective(
@@ -618,7 +627,7 @@ type: feedback
 - **Duration**: {facts.get('duration_min', 0)} minutes
 - **Routed calls**: {facts.get('total_calls', 0)}
 - **Cost**: ${facts.get('total_cost', 0.0):.4f}
-- **Saved**: ${facts.get('total_saved', 0.0):.4f}
+- **Saved**: {format_saved(facts.get('total_saved'))}
 - **Manual corrections**: {facts.get('correction_count', 0)}
 - **Avg confidence**: {facts.get('avg_confidence', 0)*100:.0f}% (over {facts.get('confidence_measured', 0)} of {facts.get('total_calls', 0)} decisions that recorded one)
 - **Accuracy**: {accuracy_str}
@@ -945,7 +954,7 @@ def format_full_report(retro: dict) -> str:
     lines.append(
         f"  Calls: {facts.get('total_calls', 0)}  |  "
         f"Cost: ${facts.get('total_cost', 0.0):.4f}  |  "
-        f"Saved: ${facts.get('total_saved', 0.0):.4f}"
+        f"Saved: {format_saved(facts.get('total_saved'))}"
     )
     lines.append(
         f"  Accuracy: {_format_accuracy_pct(facts)}  |  "

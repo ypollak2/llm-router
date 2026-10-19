@@ -229,7 +229,7 @@ def format_statusline_context(
         )
 
         if _statusline_state.total_saved_session > 0:
-            stats += f" | {Color.CONFIDENCE_GREEN(f'${_statusline_state.total_saved_session:.2f} saved')}"
+            stats += f" | {Color.CONFIDENCE_GREEN(f'est. ${_statusline_state.total_saved_session:.2f} saved')}"
 
         parts.append(f"| {stats}")
 
@@ -267,7 +267,7 @@ def format_replay_summary() -> str:
             * 100
         )
         summary_lines.append(
-            f"  {Color.CONFIDENCE_GREEN(f'{Symbol.CHECK.value} Savings: ${_statusline_state.total_saved_session:.2f} ({int(savings_pct)}%)')}"
+            f"  {Color.CONFIDENCE_GREEN(f'{Symbol.CHECK.value} Savings: est. ${_statusline_state.total_saved_session:.2f} ({int(savings_pct)}%)')}"
         )
 
     if _statusline_state.last_decision:

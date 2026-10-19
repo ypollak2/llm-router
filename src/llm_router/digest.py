@@ -186,7 +186,7 @@ async def format_digest(period: str = "week") -> str:
         "",
         f"  Calls:      {data['calls']:>6}",
         f"  Actual cost: ${data['cost']:.4f}",
-        f"  Saved:       ${data['saved']:.4f} vs Claude baseline",
+        f"  Saved:       est. ${data['saved']:.4f} vs Claude baseline",
     ]
 
     if data["by_provider"]:
@@ -195,14 +195,14 @@ async def format_digest(period: str = "week") -> str:
         for provider, pd in sorted(data["by_provider"].items(), key=lambda x: -x[1]["calls"]):
             lines.append(
                 f"    {provider:<12}  {pd['calls']:>4} calls  "
-                f"${pd['cost']:.4f} cost  ${pd['saved']:.4f} saved"
+                f"${pd['cost']:.4f} cost  est. ${pd['saved']:.4f} saved"
             )
 
     # What if router was off?
     if baseline > 0:
         lines.append("")
         lines.append(f"  📊 Without routing: ~${baseline:.4f} (Claude baseline)")
-        lines.append(f"     Routing saved {savings_pct:.0f}% of potential cost")
+        lines.append(f"     Routing saved est. {savings_pct:.0f}% of potential cost")
 
     # Spend spike alert
     if is_spike:

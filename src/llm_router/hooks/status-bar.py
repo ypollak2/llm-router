@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 9
+# llm_router-hook-version: 10
 """UserPromptSubmit hook — enhanced savings + routing status bar.
 
 Displays a two-mode status line:
@@ -291,18 +291,40 @@ def _enforce_badge(compact: bool = True) -> str:
 
 # ── Format helpers ─────────────────────────────────────────────────────────
 
-def _money_part(lv, label: str, lw) -> str:
-    """``D:$1.42·today n=4`` (green when positive), or ``D:n/a`` when the figure is unknown."""
-    fig = None if lw is None else lw.figures()["saved"]
+def _usd_seg(lv, fig, tag: str) -> str | None:
+    """``~$5.00 est n=4`` / ``$2.00 ver n=1``; ``<tag> n/a`` when the figure is unknown. The sign
+    goes before the ``$`` (an estimate can be negative)."""
     text = lv.show(fig, "{:.2f}")
     if text is None:
+        return f"{tag} n/a"
+    sign, text = ("-", text[1:]) if text.startswith("-") else ("", text)
+    return f"{'~' if tag == 'est' else ''}{sign}${text} {tag} n={fig.n}"
+
+
+def _money_part(lv, label: str, lw) -> str:
+    """``D:~$5.00 est n=4 · $2.00 ver n=1 ·today`` (green when positive): D-247 / F119 -- the
+    estimated and the verified saving are two segments with their own n, NEVER one sum. An empty
+    segment is dropped, an unknown one prints ``<tag> n/a``; no ledger at all is ``D:n/a``."""
+    if lw is None:
         return f"{DIM}{label}:n/a{RST}"
-    col = G if fig.value >= 0.01 else DIM
-    return f"{col}{label}:${text}·{fig.window} n={fig.n}{RST}"
+    figs = lw.figures()
+    est, ver = figs["saved_estimated"], figs["saved_measured"]
+    segs = []
+    for fig, tag in ((est, "est"), (ver, "ver")):
+        known = lv.show(fig, "{:.2f}") is not None
+        if not known or fig.value != 0 or fig.n != 0:
+            segs.append(_usd_seg(lv, fig, tag))
+    if not segs:                      # a known empty window is a real zero, not unknown
+        segs.append(_usd_seg(lv, est, "est"))
+    if all(seg.endswith("n/a") for seg in segs):
+        return f"{DIM}{label}:n/a{RST}" if len(segs) == 2 else f"{DIM}{label}:{segs[0]}{RST}"
+    window = (est if lv.show(est, "{:.2f}") is not None else ver).window
+    col = G if any(f.value >= 0.01 for f in (est, ver) if lv.show(f, "{:.2f}") is not None) else DIM
+    return f"{col}{label}:{' · '.join(segs)} ·{window}{RST}"
 
 
 def _savings_str(lv, compact: bool) -> str:
-    """D:$1.42·today n=4 W:$9.88·7d n=31 [M:$41.15·month n=120 (vs <baseline>)]."""
+    """D:~$1.42 est n=4 · $0.50 ver n=1 ·today W:... [M:... (vs <baseline>)]  (est. and verified apart)."""
     if lv is None:
         return f"{DIM}n/a{RST}"
     keys = [("D", "today"), ("W", "7d")] + ([] if compact else [("M", "month")])
@@ -310,7 +332,7 @@ def _savings_str(lv, compact: bool) -> str:
     parts = [_money_part(lv, label, windows[window]) for label, window in keys]
     if not compact:
         baseline, month = _baseline_label(), windows["month"]
-        if baseline and month is not None and lv.show(month.figures()["saved"]) is not None:
+        if baseline and month is not None and lv.show(month.figures()["saved_estimated"]) is not None:
             parts.append(f"{DIM}(vs {baseline}){RST}")
     return " ".join(parts)
 

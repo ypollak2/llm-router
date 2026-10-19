@@ -132,7 +132,10 @@ def test_the_fixed_source_is_clean() -> None:
 # 112 -> 110 (P3.1-3): get_judge_scores_for_model returns avg_score None (not 0.0)
 # with no judged rows, and its two readers (model_selector, admin.llm_quality_guard)
 # branch on None; reorder_by_quality no longer coerces it either.
-BASELINE = 110
+# 110 -> 104 (F119 / D-247): the savings surfaces keep an unknown cost / saving as None (printed n/a)
+# instead of coercing it to 0 (ui/session_summary MODELS panel + savings entries, replay summary,
+# claw-code free panel).
+BASELINE = 104
 
 
 def _current_count() -> int:

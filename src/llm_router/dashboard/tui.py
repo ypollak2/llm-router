@@ -680,7 +680,7 @@ class SavingsPanel(Static):
             ("Lifetime", d.lifetime_saved, d.lifetime_saved_calls),
         ]
         lines.append(
-            f"  {'Period':<10} {'Saved':>10} {'Calls':>7} {'Trend':>6}"
+            f"  {'Period':<10} {'Verified saved':>14} {'Calls':>7} {'Trend':>6}"
         )
         lines.append(_dim("  " + "─" * 36))
         for label, saved, calls in rows:
@@ -717,7 +717,7 @@ class SavingsPanel(Static):
                 f"  Cost/yr:      {_tc(TN.YELLOW, f'${annual_cost:.2f}')}"
             )
             lines.append(
-                f"  Savings/yr:   {_tc_bold(TN.GREEN, f'${annual_saved:.2f}')}"
+                f"  Savings/yr:   {_tc_bold(TN.GREEN, f'${annual_saved:.2f}')} (verified basis)"
             )
 
         # ── Direct Claude Subscription Usage ──────────────────────────────
@@ -791,7 +791,7 @@ class ActivityPanel(Static):
         lines.append(
             f"  {_tc(TN.CYAN, 'Calls')}: {d.l14_total_calls:<6}  "
             f"{_tc(TN.TEAL, 'Tokens')}: {_fmt_tokens(d.l14_total_tokens):<8}  "
-            f"{_tc(TN.GREEN, 'Saved')}: ${d.l14_savings:.4f}  "
+            f"{_tc(TN.GREEN, 'Verified saved')}: ${d.l14_savings:.4f}  "
             f"{_tc(TN.FG_DIM, 'Avg')}: {avg_calls:.0f}/day"
         )
         lines.append("")

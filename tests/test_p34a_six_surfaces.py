@@ -250,11 +250,20 @@ def _status_bar(six) -> str:
 
 
 def test_status_bar_day_is_the_today_oracle(six):
-    assert f"D:${_saved_six('today')[0]:.2f}" in _status_bar(six)
+    # F119 / D-247: the bar prints the estimate and the verified saving apart, each with its n.
+    usd, n = _saved_six("today")
+    bar = _status_bar(six)
+    assert (f"D:~${usd - VERIFIED_TODAY_USD:.2f} est n={n - VERIFIED_TODAY_N} "
+            f"\u00b7 ${VERIFIED_TODAY_USD:.2f} ver n={VERIFIED_TODAY_N} \u00b7today") in bar, bar
+    assert f"${usd:.2f}" not in bar, bar                    # the merged sum appears nowhere
 
 
 def test_status_bar_week_is_the_7d_oracle(six):
-    assert f"W:${_saved_six('7d')[0]:.2f}" in _status_bar(six)
+    usd, n = _saved_six("7d")
+    ver_usd, ver_n = 0.5 + EXTRA_SAVED_USD, 2
+    bar = _status_bar(six)
+    assert (f"W:~${usd - ver_usd:.2f} est n={n - ver_n} \u00b7 ${ver_usd:.2f} ver n={ver_n} \u00b77d") in bar, bar
+    assert f"${usd:.2f}" not in bar, bar
 
 
 def test_status_bar_session_calls_are_the_session_mix_oracle(six):
@@ -265,10 +274,9 @@ def test_status_bar_session_calls_are_the_session_mix_oracle(six):
 def test_status_bar_figures_carry_n_and_window(six):
     line = _status_bar(six)
     assert _ungrounded(line, "\u2502") == [], line
-    assert "D:$" in line and "sub:" in line, line         # something to check: money and calls present
-    assert re.search(r"D:\$[\d.]+\u00b7today n=\d+", line), line
-    assert re.search(r"W:\$[\d.]+\u00b77d n=\d+", line), line
-    assert re.search(r"M:\$[\d.]+\u00b7month n=\d+", line), line
+    assert "D:~$" in line and "sub:" in line, line        # something to check: money and calls present
+    for label, window in (("D", "today"), ("W", "7d"), ("M", "month")):
+        assert re.search(rf"{label}:~\$[\d.]+ est n=\d+ \u00b7 \$[\d.]+ ver n=\d+ \u00b7{window}", line), line
 
 
 def test_status_bar_baseline_label_is_the_priced_model_not_zero(six):
