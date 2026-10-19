@@ -88,7 +88,7 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
         # AMEND3 (D-202): lock + quiet gate before every local call, any time of day.
         with h.local_call(cfg, c, arm, {"stage": "code", "set": "code", "item_id": ident,
                                         "attempt": attempt}):
-            with h.scrubbed_environ(h.agent_env(home)):
+            with h.scrubbed_environ(h.agent_env(home, run_dir=cfg.run_dir)):
                 result = pi.run_pi(prompt, cwd=work, timeout_s=900)
         timed_out = bool(result["timed_out"])
         infra = not timed_out and (
@@ -104,7 +104,7 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
             + ["--permission-mode", "acceptEdits", "--allowedTools",
                "Read,Edit,Write,Glob,Grep,Bash"],
             input=prompt, text=True, capture_output=True, timeout=900, cwd=work,
-            env=h.claude_env(home), check=False,
+            env=h.claude_env(home, cfg.run_dir), check=False,
         )
         value = json.loads(result.stdout)
         cost = value.get("total_cost_usd", 0)
