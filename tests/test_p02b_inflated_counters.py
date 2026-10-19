@@ -226,8 +226,8 @@ def test_legacy_flat_agentic_rows_are_filtered_at_read_time(tmp_path):
     conn.close()
 
     s = dashboard_data.summary("lifetime", db_path=db)
-    assert s.estimated_usd == pytest.approx(0.25)
-    assert s.estimated_n == 1
+    assert s.unverified_usd + s.realized_usd == pytest.approx(0.25)   # F121: summed in the test only
+    assert s.unverified_n + s.realized_n == 1
     assert "llm_router-agentic-router" not in s.by_model
 
     # Read-time filter only: the row itself is untouched.

@@ -184,7 +184,8 @@ def analyze_facts(
         # number that made these files look real.
         return {
             "total_calls": 0,
-            "total_cost": 0.0,
+            "total_cost": None,       # no decisions: unknown, printed n/a (F121)
+            "cost_n": 0,
             "total_saved": saved,
             "duration_min": 0,
             "correction_count": len(corrections),
@@ -201,7 +202,10 @@ def analyze_facts(
     duration_min = int((end_ts - start_ts).total_seconds() / 60)
 
     # Cost from decisions; savings are DERIVED (injected), never a phantom column.
-    total_cost = sum(d.get("cost_usd", 0) or 0 for d in decisions)
+    # F121 / D-247: a decision with cost_usd NULL has an UNKNOWN cost, not $0. total_cost is the
+    # sum of the RECORDED costs, cost_n the n behind it; None when no decision recorded one.
+    _costs = [float(d["cost_usd"]) for d in decisions if d.get("cost_usd") is not None]
+    total_cost = sum(_costs) if _costs else None
     total_saved = saved
 
     # Distribution by task type and model
@@ -247,6 +251,7 @@ def analyze_facts(
     return {
         "total_calls": len(decisions),
         "total_cost": total_cost,
+        "cost_n": len(_costs),
         "total_saved": total_saved,
         "duration_min": duration_min,
         "correction_count": len(corrections),
@@ -512,6 +517,21 @@ def generate_actions(
     return actions
 
 
+def format_cost(facts: dict) -> str:
+    """The session cost as printed: the recorded sum, ``(k of n recorded)`` when only some
+    decisions recorded a cost, ``n/a`` when none did -- never ``$0.0000`` for an unknown (D-247).
+    One place so the two retrospective surfaces cannot drift."""
+    cost = facts.get("total_cost")
+    if cost is None:
+        return "n/a"
+    n = facts.get("total_calls")
+    k = facts.get("cost_n")
+    text = f"${cost:.4f} recorded"
+    if k is not None and n is not None and k < n:
+        text += f" ({k} of {n})"
+    return text
+
+
 def format_saved(saved: float | None) -> str:
     """The session saving as printed: always labelled an estimate, ``n/a`` when unknown, the sign
     before the ``$`` (D-247). One place so the three retrospective surfaces cannot drift."""
@@ -626,7 +646,7 @@ type: feedback
 
 - **Duration**: {facts.get('duration_min', 0)} minutes
 - **Routed calls**: {facts.get('total_calls', 0)}
-- **Cost**: ${facts.get('total_cost', 0.0):.4f}
+- **Cost**: {format_cost(facts)}
 - **Saved**: {format_saved(facts.get('total_saved'))}
 - **Manual corrections**: {facts.get('correction_count', 0)}
 - **Avg confidence**: {facts.get('avg_confidence', 0)*100:.0f}% (over {facts.get('confidence_measured', 0)} of {facts.get('total_calls', 0)} decisions that recorded one)
@@ -953,7 +973,7 @@ def format_full_report(retro: dict) -> str:
     lines.append("【FACTS】")
     lines.append(
         f"  Calls: {facts.get('total_calls', 0)}  |  "
-        f"Cost: ${facts.get('total_cost', 0.0):.4f}  |  "
+        f"Cost: {format_cost(facts)}  |  "
         f"Saved: {format_saved(facts.get('total_saved'))}"
     )
     lines.append(

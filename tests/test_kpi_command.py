@@ -414,8 +414,7 @@ def test_o1_value_is_always_labelled_est(monkeypatch):
         def display(self):
             return "est. saved $42.00"
 
-        estimated_n = 500
-        estimated_usd = 42.0
+        unverified_n, realized_n = 500, 0
         unverified_usd, realized_usd = 42.0, 0.0
 
     monkeypatch.setattr(dd, "summary", lambda period: FakeSummary())

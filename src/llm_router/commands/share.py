@@ -163,12 +163,11 @@ def _gather_stats(db_path: str | None = None) -> SavingsStats:
                         continue                # unknown cost: out of both the saving and the %
                     actual_paid += cost
                     # AUD-06: signed. This card is meant to be PUBLISHED, and a
-                # clamped figure on a shared card is the worst place for the
-                # defect — it cannot be corrected once it is out. share.py
-                # was never scanned by CHZ-SS-01 because the lint's module
-                # list was hand-maintained; R6 derives it from the surface
-                # registry, which is how this was found.
-                total_saved += _net(base, 0.0 if cost is None else cost)   # paid+unknown `continue`d above
+                    # clamped figure on a shared card cannot be corrected once out.
+                    total_saved += _net(base, cost)
+                else:
+                    # subscription: marginal cost 0 (never double-counted; F121).
+                    total_saved += base
 
             top_row = conn.execute(
                 "SELECT model, COUNT(*) as n FROM usage "

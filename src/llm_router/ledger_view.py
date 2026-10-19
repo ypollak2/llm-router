@@ -466,10 +466,14 @@ class MoneyWindow:
 
     @property
     def saved_usd(self) -> float:
+        """DEPRECATED (F121 / D-247): the merged verified + estimated sum. Kept only to fill the
+        serialised ``LedgerWindow.saved_usd`` field. No surface may print it; use
+        ``verified_usd`` and ``unverified_usd`` with their own n."""
         return self.verified_usd + self.unverified_usd
 
     @property
     def saved_n(self) -> int:
+        """DEPRECATED (F121 / D-247): ``verified_calls + unverified_calls``; see :attr:`saved_usd`."""
         return self.verified_calls + self.unverified_calls
 
 
@@ -586,13 +590,6 @@ def money_window(bounds: Bounds, *, db_path=None, timeout_s: float = 1.0) -> Mon
     finally:
         con.close()
     return out
-
-
-def saved_usd(bounds: Bounds, *, db_path=None) -> tuple[float, int]:
-    """The ONE user-facing saved figure: ``(realized + unverified dollars, n rows behind it)``,
-    always an estimate (``LedgerWindow.estimated``). Same figure as ``Summary.estimated_usd``."""
-    m = money_window(bounds, db_path=db_path)
-    return m.saved_usd, m.saved_n
 
 
 def usage_period_rows(bounds: Bounds, *, db_path=None,
@@ -1180,6 +1177,9 @@ class LedgerWindow:
     subscription_n: int | None = None
     paid_n: int | None = None
     unclassified_n: int | None = None
+    # DEPRECATED (F121 / D-247): the merged verified + estimated sum and its n. Kept in the schema
+    # so v2 cache files and external JSON readers keep parsing, and as the "usage db exists"
+    # gate of the Stop hook. Never print it; read verified_* and unverified_* instead.
     saved_usd: float | None = None
     saved_n: int | None = None
     verified_usd: float | None = None
@@ -1215,7 +1215,6 @@ class LedgerWindow:
                           None if value is not None else (why or "source missing"))
 
         out = {"executed": fig(self.n, self.n, self.source),
-               "saved": fig(self.saved_usd, self.saved_n, self.source, "estimated"),
                "spent": fig(self.spent_usd, self.spent_n, self.source),
                # P35-2: the two halves of "saved", each with its own n, never summed on a statusline
                "saved_measured": fig(self.verified_usd, self.verified_n, self.source),

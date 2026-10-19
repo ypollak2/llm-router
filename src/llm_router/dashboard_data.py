@@ -1030,30 +1030,6 @@ class Summary:
             + f" · baseline {self.baseline_model} · routed n={self.routed_n}"
         )
 
-    @property
-    def estimated_usd(self) -> float:
-        """The ONE dollar figure a user sees: realized + unverified, merged.
-
-        2026-09-27 product decision: on a machine where no routed answer has
-        ever been confirmed to replace a Claude turn, ``realized_usd`` is
-        structurally $0.00 and a "verified $0.00" headline reads as "nothing
-        was saved" beside a real ``unverified_usd`` estimate that says
-        otherwise (see PR #178's incident). Every user-facing surface now
-        shows this single combined figure, always labelled as an estimate
-        (never presented as realized money) via :meth:`display` /
-        :meth:`compact`. The split itself is not lost — ``realized_usd``/
-        ``unverified_usd`` remain on this object for ``doctor``/debug use.
-        """
-        return self.realized_usd + self.unverified_usd
-
-    @property
-    def estimated_n(self) -> int:
-        """Row count behind :attr:`estimated_usd` — ``realized_n +
-        unverified_n``, never ``routed_n`` (a wider activity count that can
-        include rows with no money attached at all; see ``routed_n``'s own
-        docstring)."""
-        return self.realized_n + self.unverified_n
-
     def display(self) -> str:
         """THE single user-facing money string for "longer" surfaces —
         ``llm-router status``, ``savings-report``, ``gain``, and the MCP

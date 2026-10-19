@@ -21,7 +21,7 @@ class Savings:
     def render(self) -> str:
         eff = "∞" if self.efficiency == float("inf") else f"{self.efficiency:.1f}×"
         sign = "+" if self.saved_usd >= 0 else ""
-        return f"saved {sign}${self.saved_usd:.4f} ({eff} vs baseline)"
+        return f"est. saved {sign}${self.saved_usd:.4f} ({eff} vs baseline)"
 
 
 def compute_savings(ledger: TaskLedger, baseline_cost_per_milestone: float) -> Savings:

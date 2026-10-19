@@ -4360,15 +4360,19 @@ async def get_savings_by_period(*, include_simulated: bool = False) -> dict[str,
     result: dict[str, dict] = {}
     for name, window in (("today", "today"), ("week", "7d"), ("month", "month"),
                          ("all_time", "lifetime")):
-        rows = _lv.usage_period_rows(_lv.resolve(window), db_path=_path,
-                                     include_simulated=include_simulated) or []
+        _rows = _lv.usage_period_rows(_lv.resolve(window), db_path=_path,
+                                      include_simulated=include_simulated)
+        # F121 / D-247: None = the ledger could not be read. Zeros below would then read as a
+        # real quiet period, so the window says so (`unreadable`) and /metrics omits its samples.
+        unreadable = _rows is None
+        rows = _rows or []
         actual = baseline = saved_total = 0.0
         calls = 0
+        unpriced_calls = 0       # F121: paid rows with no recorded cost -- out of every figure
         subscription_calls = 0   # T-26: counted, not silently merged
         for provider, in_tok, out_tok, cost in rows:
             in_tok = in_tok or 0
             out_tok = out_tok or 0
-            cost = cost or 0.0
             # T-26 (audit 2026-09-22). `calls` was incremented BEFORE the
             # subscription skip, so `calls` counted rows the dollar figures
             # then ignored: a period's "N calls, $X saved" quoted two
@@ -4378,6 +4382,12 @@ async def get_savings_by_period(*, include_simulated: bool = False) -> dict[str,
             if provider == "subscription":
                 subscription_calls += 1
                 continue  # CC subscription rows have no token cost data
+            if cost is None and provider not in _FREE_PROVIDERS:
+                # F121 / D-247: a paid row with no recorded cost is UNKNOWN, not $0. Counting it
+                # as $0 books its whole baseline as a saving. Out of calls, baseline and saving.
+                unpriced_calls += 1
+                continue
+            cost = 0.0 if cost is None else cost    # free provider: $0 by definition
             calls += 1
             # Always recalculate from actual in/out counts at Opus rates.
             # Stored saved_col used a blended $0.045/1K estimate; accurate
@@ -4410,6 +4420,8 @@ async def get_savings_by_period(*, include_simulated: bool = False) -> dict[str,
             # saved" with no explanation is how a working install reads
             # as idle.
             "subscription_calls": subscription_calls,
+            "unpriced_calls": unpriced_calls,
+            "unreadable": unreadable,
             "efficiency": round(efficiency, 1),
         }
     return result

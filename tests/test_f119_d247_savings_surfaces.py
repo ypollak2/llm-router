@@ -407,7 +407,8 @@ def test_digest_saved_is_est(monkeypatch):
     from llm_router import digest
 
     data = {"calls": 3, "cost": 1.0, "saved": 2.0, "total_in": 1, "total_out": 1,
-            "by_provider": {"ollama": {"calls": 3, "cost": 1.0, "saved": 2.0}}}
+            "paid_calls": 0, "paid_cost_n": 0,
+            "by_provider": {"ollama": {"calls": 3, "cost": 1.0, "saved": 2.0, "cost_n": 0, "paid": False}}}
 
     async def fetch(_p):
         return data
@@ -441,3 +442,233 @@ def test_savings_report_per_model_saved_is_est(tmp_path, monkeypatch):
     text = sr.render_savings_report("all")
     assert "saved $2.0000 (est.) vs Claude" in text and "saved $2.0000 (est.)" in text.split("ollama/m")[1]
     _no_merge(text)
+
+
+# ── F121: leftovers ────────────────────────────────────────────────────────────
+
+def _usage_db(tmp_path, rows):
+    import sqlite3
+
+    db = tmp_path / "usage.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE usage (timestamp TEXT DEFAULT (datetime('now')), provider TEXT, model TEXT,"
+                " input_tokens INT, output_tokens INT, cost_usd REAL, success INT DEFAULT 1,"
+                " is_simulated INT DEFAULT 0, task_type TEXT)")
+    con.executemany("INSERT INTO usage (provider, model, input_tokens, output_tokens, cost_usd) VALUES (?,?,?,?,?)", rows)
+    con.commit()
+    con.close()
+    return str(db)
+
+
+def test_share_free_row_counted_once_not_twice(tmp_path):
+    """F121 bug: a free row was added at `total_saved += base` AND at loop level."""
+    from llm_router.commands.share import SONNET_IN, _gather_stats
+
+    stats = _gather_stats(_usage_db(tmp_path, [("ollama", "qwen", 1_000_000, 0, 0.0)]))
+    assert stats.total_saved == pytest.approx(SONNET_IN)
+    assert stats.free_calls == 1
+
+
+def test_share_subscription_and_paid_rows_each_counted_once(tmp_path):
+    from llm_router.commands.share import SONNET_IN, _gather_stats
+
+    stats = _gather_stats(_usage_db(tmp_path, [("subscription", "m", 1_000_000, 0, 0.0),
+                                               ("openai", "gpt", 1_000_000, 0, 1.0),
+                                               ("openai", "gpt", 1_000_000, 0, None)]))
+    assert stats.total_saved == pytest.approx(SONNET_IN + (SONNET_IN - 1.0))   # unknown-cost row: out
+
+
+def test_metrics_omit_savings_when_ledger_unreadable(monkeypatch):
+    import asyncio
+
+    from llm_router import cost
+    from llm_router.dashboard import server
+
+    async def boom(**_k):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(cost, "get_savings_by_period", boom)
+    text = asyncio.run(server._metrics_text())
+    assert "# TYPE llm_router_savings_usd_total counter" in text
+    assert not re.search(r"^llm_router_savings_usd_total ", text, re.M), text
+    assert not re.search(r"^llm_router_external_usd_total ", text, re.M), text
+
+
+def test_metrics_omit_savings_when_period_marked_unreadable(monkeypatch):
+    import asyncio
+
+    from llm_router import cost
+    from llm_router.dashboard import server
+
+    async def unreadable(**_k):
+        return {"all_time": {"saved_usd": 0.0, "actual_usd": 0.0, "unreadable": True}}
+
+    monkeypatch.setattr(cost, "get_savings_by_period", unreadable)
+    text = asyncio.run(server._metrics_text())
+    assert not re.search(r"^llm_router_savings_usd_total ", text, re.M)
+
+
+def test_metrics_emit_real_zero_and_values(monkeypatch):
+    import asyncio
+
+    from llm_router import cost
+    from llm_router.dashboard import server
+
+    async def ok(**_k):
+        return {"all_time": {"saved_usd": 0.0, "actual_usd": 1.5, "unreadable": False}}
+
+    monkeypatch.setattr(cost, "get_savings_by_period", ok)
+    text = asyncio.run(server._metrics_text())
+    assert re.search(r"^llm_router_savings_usd_total 0\.0000$", text, re.M)       # a real zero stays
+    assert re.search(r"^llm_router_external_usd_total 1\.5000$", text, re.M)
+
+
+def test_savings_by_period_unknown_cost_paid_row_is_out_and_unreadable_flagged(tmp_path, monkeypatch):
+    import asyncio
+
+    from llm_router import cost, ledger_view
+    from llm_router.config import get_config
+
+    db = _usage_db(tmp_path, [("openai", "gpt", 1_000_000, 0, None), ("ollama", "q", 1_000_000, 0, 0.0)])
+    monkeypatch.setattr(get_config(), "llm_router_db_path", db, raising=False)
+
+    async def _noop():
+        class C:
+            async def close(self):
+                return None
+        return C()
+
+    monkeypatch.setattr(cost, "_get_db", _noop)
+    monkeypatch.setattr(ledger_view, "usage_period_rows",
+                        lambda *_a, **_k: [("openai", 1_000_000, 0, None), ("ollama", 1_000_000, 0, 0.0)])
+    out = asyncio.run(cost.get_savings_by_period())["all_time"]
+    assert out["unpriced_calls"] == 1 and out["calls"] == 1 and out["unreadable"] is False
+    monkeypatch.setattr(ledger_view, "usage_period_rows", lambda *_a, **_k: None)
+    assert asyncio.run(cost.get_savings_by_period())["all_time"]["unreadable"] is True
+
+
+def test_retrospective_cost_known_sum_k_of_n_and_na():
+    from llm_router import retrospective as r
+
+    def d(c):
+        return {"timestamp": "2026-10-19T10:00:00", "cost_usd": c, "task_type": "t", "final_model": "m"}
+
+    partial = r.analyze_facts([d(1.0), d(None), d(0.5)], [])
+    assert partial["total_cost"] == pytest.approx(1.5) and partial["cost_n"] == 2
+    assert r.format_cost(partial) == "$1.5000 recorded (2 of 3)"
+    none = r.analyze_facts([d(None), d(None)], [])
+    assert none["total_cost"] is None and r.format_cost(none) == "n/a"
+    full = r.analyze_facts([d(0.25)], [])
+    assert r.format_cost(full) == "$0.2500 recorded"
+    assert r.format_cost(r.analyze_facts([], [])) == "n/a"
+
+
+def test_digest_unknown_paid_cost_is_na_and_out_of_saving(tmp_path, monkeypatch):
+    import asyncio
+
+    from llm_router import digest
+
+    db = _usage_db(tmp_path, [("openai", "gpt", 1_000_000, 0, None), ("openai", "gpt", 1_000_000, 0, 1.0)])
+    import sqlite3
+
+    class _Cur:
+        def __init__(self, rows):
+            self._r = rows
+
+        async def fetchall(self):
+            return self._r
+
+        async def fetchone(self):
+            return self._r[0] if self._r else None
+
+    class _Db:
+        def __init__(self):
+            self._c = sqlite3.connect(db)
+
+        async def execute(self, sql, *a):
+            return _Cur(self._c.execute(sql, *a).fetchall())
+
+        async def close(self):
+            self._c.close()
+
+    async def get():
+        return _Db()
+
+    monkeypatch.setattr(digest, "_get_db", get)
+    data = asyncio.run(digest._fetch_period_data("all time"))
+    assert data["paid_calls"] == 2 and data["paid_cost_n"] == 1 and data["cost"] == pytest.approx(1.0)
+    assert digest._cost_text(data["cost"], 1, 2) == "$1.0000 (1 of 2 paid recorded)"
+    assert digest._cost_text(0.0, 0, 2) == "n/a" and digest._cost_text(0.0, 0, 0) == "$0.0000"
+    sold = digest._host_baseline(1_000_000, 0)
+    assert data["saved"] == pytest.approx(sold - 1.0)        # the unknown row is not a full-baseline saving
+
+
+def test_gain_cost_cells_k_of_n_and_na():
+    from llm_router.commands import gain
+
+    assert gain._fmt_cost({"count": 3, "cost": 1.0, "cost_n": 2}) == "$1.0000 (2 of 3)"
+    assert gain._fmt_cost({"count": 3, "cost": 0.0, "cost_n": 0}) == "n/a"
+    assert gain._fmt_cost({"count": 3, "cost": 2.0}) == "$2.0000"
+
+
+def test_quota_savings_unreadable_ledger_is_none_not_zero(tmp_path):
+    from datetime import datetime, timezone
+
+    from llm_router import quota_savings as q
+
+    assert q._sum_saved_usd_since(tmp_path / "nope.db", datetime.now(timezone.utc)) is None
+    db = _usage_db(tmp_path, [])          # readable ledger, no usage.saved_usd column
+    assert q._sum_saved_usd_since(__import__("pathlib").Path(db), datetime.now(timezone.utc)) is None
+
+
+def test_team_label_is_est_and_telegram_paid_unknown_is_na():
+    from llm_router import team
+
+    assert team._savings_label({"provenance": "measured", "baseline_equivalent_avoided_usd": 2.0,
+                                "real_dollars_avoided_usd": 0.0}).startswith("est. $2.0000")
+    msg = team._telegram_message({"provenance": "unknown", "actual_usd": 0.0}, "1")["text"]
+    assert "paid n/a" in msg and "paid \\$0.0000" not in msg
+
+
+def test_agentic_savings_render_is_est():
+    from llm_router.agentic.savings import Savings
+
+    assert Savings(1.0, 3.0, 2.0, 3.0).render().startswith("est. saved +$2.0000")
+
+
+def test_explain_dashboard_total_not_merged(tmp_path, monkeypatch):
+    from llm_router.commands import explain_dashboard as ed
+
+    db = _usage_db(tmp_path, [("openai", "gpt", 10, 10, None), ("openai", "gpt", 10, 10, 0.5)])
+    monkeypatch.setattr(ed, "_db_path", lambda: __import__("pathlib").Path(db))
+    text = _plain("\n".join(ed._savings_panel_block()))
+    assert "1 of 2 recorded" in text and "est. saved (platform tables)" in text
+    assert "verified saved (savings_stats)" in text
+    assert "  saved:" not in text
+
+
+def test_kpi_o1_gate_uses_larger_segment_n_not_a_sum(monkeypatch):
+    from llm_router import dashboard_data as dd
+    from llm_router.commands import kpi
+
+    class S:
+        unverified_n, realized_n = 30, 30      # a SUM (60) would clear MIN_N=50; neither segment does
+        unverified_usd, realized_usd = 1.0, 1.0
+
+        def display(self):
+            return "est. saved $1.00 (n=30) · $1.00 verified saved (n=30)"
+
+    monkeypatch.setattr(dd, "summary", lambda period: S())
+    monkeypatch.setattr(dd, "newest_timestamp", lambda: None)
+    out = kpi._o1_quota_avoided(7)
+    assert out["measurable"] is False and out["n"] == 30
+
+
+def test_merged_sums_are_gone():
+    from llm_router import dashboard_data as dd
+    from llm_router import ledger_view as lv
+
+    assert not hasattr(dd.Summary, "estimated_usd") and not hasattr(dd.Summary, "estimated_n")
+    assert not hasattr(lv, "saved_usd")
+    assert "saved" not in lv.LedgerWindow(as_of="T", window="today", source="usage", estimated=True).figures()
+    assert "saved_usd" in lv.LedgerWindow.__dataclass_fields__     # deprecated field kept: v2 JSON compat

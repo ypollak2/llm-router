@@ -285,7 +285,7 @@ def test_status_verified_line_n_is_verified_rows_not_call_volume(
     from llm_router.ui import status_premium as sp
 
     canonical = dashboard_data.summary("today", db_path=db)
-    assert canonical.estimated_n == 11, "premise: 10 unverified + 1 verified"
+    assert (canonical.unverified_n, canonical.realized_n) == (10, 1), "premise: 10 unverified + 1 verified"
     totals = dashboard_data.query_window("today", db_path=db)
     assert totals.calls == 16, "premise: raw activity volume is wider (16)"
 

@@ -189,15 +189,21 @@ async def llm_quota_saved() -> str:
             "`LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH` (your plan's monthly price) to convert dollars "
             "saved into points of quota._"
         )
+    if snap.weekly_pp_saved is None or snap.session_pp_saved is None:
+        return (
+            "**Quota saved by routing**\n\n"
+            f"• Weekly: {snap.weekly_current_pct:.1f}% now · est. saved n/a (usage ledger unreadable)\n"
+            f"•   5h:  {snap.session_current_pct:.1f}% now · est. saved n/a (usage ledger unreadable)"
+        )
     lines = [
-        "**Quota saved by routing — cumulative this period**",
+        "**Quota saved by routing (est.) — cumulative this period**",
         "",
         f"• Weekly: {snap.weekly_current_pct:.1f}% now "
         f"→ would be {snap.weekly_counterfactual_pct:.1f}% on Opus "
-        f"(saved {snap.weekly_pp_saved:.1f}pp · ${snap.weekly_saved_usd:.2f})",
+        f"(est. saved {snap.weekly_pp_saved:.1f}pp · ${snap.weekly_saved_usd:.2f})",
         f"•   5h:  {snap.session_current_pct:.1f}% now "
         f"→ would be {snap.session_counterfactual_pct:.1f}% on Opus "
-        f"(saved {snap.session_pp_saved:.1f}pp · ${snap.session_saved_usd:.2f})",
+        f"(est. saved {snap.session_pp_saved:.1f}pp · ${snap.session_saved_usd:.2f})",
         "",
         f"_Calibration: ${snap.calibration_usd_per_pp:.2f}/pp "
         f"(source: {snap.calibration_source}; override via "

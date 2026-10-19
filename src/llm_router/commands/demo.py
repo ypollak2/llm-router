@@ -82,6 +82,10 @@ def _baseline_usd(model: str, input_tokens, output_tokens, actual_usd: float) ->
     return pricing.cost_usd(baseline_model, in_tok, out_tok)
 
 
+#: Providers whose calls cost $0 by definition (a missing cost_usd is $0 there, unknown elsewhere).
+_FREE_PROVIDERS = {"ollama", "codex", "gemini_cli"}
+
+
 def _load_real_routing_history(db_path: str, limit: int = 8) -> list[tuple]:
     """Return the last *limit* real routing decisions from usage.db.
 
@@ -94,7 +98,7 @@ def _load_real_routing_history(db_path: str, limit: int = 8) -> list[tuple]:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT prompt, task_type, complexity, model, cost_usd, "
+            "SELECT prompt, task_type, complexity, model, cost_usd, provider, "
             "input_tokens, output_tokens "
             "FROM usage WHERE success=1 AND provider!='subscription' "
             "AND prompt IS NOT NULL "
@@ -114,7 +118,12 @@ def _load_real_routing_history(db_path: str, limit: int = 8) -> list[tuple]:
         compl  = (r["complexity"] or "moderate")[:12]
         raw_model = r["model"] or "?"
         model  = raw_model.split("/")[-1][:18]
-        cost_val = float(r["cost_usd"] or 0.0)
+        if r["cost_usd"] is None and (r["provider"] or "") not in _FREE_PROVIDERS:
+            # F121 / D-247: a paid row with no recorded cost is UNKNOWN, not $0. It is shown as
+            # n/a and dropped from the comparison (see the unpriced_rows disclosure below).
+            result.append((f'"{prompt}"', task, compl, model, "n/a", None))
+            continue
+        cost_val = float(r["cost_usd"]) if r["cost_usd"] is not None else 0.0   # free provider: $0 by definition
         cost   = f"${cost_val:.5f}" if cost_val < 0.001 else f"${cost_val:.4f}"
         try:
             baseline = _baseline_usd(raw_model, r["input_tokens"], r["output_tokens"], cost_val)
@@ -281,22 +290,22 @@ def _run_demo() -> None:
         savings_pct = 100 * (savings_amount / total_baseline)
         baseline_label = _baseline_model_label()
 
-        print(f"\n  {_bold('Cost Comparison:')}  {_dim(f'(n={compared_rows} of {len(cases)} calls)')}")
+        print(f"\n  {_bold('Cost Comparison:')}  {_dim(f'(est. vs baseline, n={compared_rows} of {len(cases)} calls)')}")
         print(f"    {_red(f'Always-{baseline_label}:')} ${total_baseline:.4f} per batch")
         print(f"    {_green('Smart Routing:')} ${total_routed:.5f} per batch")
 
         if savings_amount > 0:
-            print(f"\n  {_bold('Savings:')}  {_green(f'${savings_amount:.4f}')} ({_green(f'{savings_pct:.0f}%')} cheaper)")
+            print(f"\n  {_bold('Savings:')}  est. {_green(f'${savings_amount:.4f}')} ({_green(f'{savings_pct:.0f}%')} cheaper)")
             if savings_pct > 70:
                 print(f"  {_yellow('→')} {_green('Excellent savings')} — routing paid for itself immediately")
             elif savings_pct > 50:
                 print(f"  {_yellow('→')} {_green('Good savings')} — paying for advanced features at budget prices")
         elif savings_amount == 0:
-            print(f"\n  {_bold('Savings:')}  $0.0000 (0%) — these calls already ran on {baseline_label}")
+            print(f"\n  {_bold('Savings:')}  est. $0.0000 (0%) — these calls already ran on {baseline_label}")
         else:
             # Routing cost MORE. Say so. The word "cheaper" is not available for
             # a negative number, and hiding the sign is how a demo lies.
-            print(f"\n  {_bold('Savings:')}  {_red(f'-${abs(savings_amount):.4f}')} "
+            print(f"\n  {_bold('Savings:')}  est. {_red(f'-${abs(savings_amount):.4f}')} "
                   f"({_red(f'{abs(savings_pct):.0f}%')} {_red('more expensive')})")
             print(f"  {_yellow('→')} This batch cost more than {baseline_label} would have")
 
