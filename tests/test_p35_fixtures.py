@@ -172,7 +172,7 @@ def test_measured_is_apart_from_estimated():
     s = Summary(period="today", baseline_model="x", realized_usd=2.0, realized_n=3,
                 unverified_usd=5.0, unverified_n=4, routed_n=9, unmeasured_n=0)
     text = s.compact()
-    assert "$2.00 measured" in text and "~$5.00 est" in text, text   # two segments, never the merged $7.00
+    assert "$2.00 verified saved" in text and "~$5.00 est. saved" in text, text   # two segments, never the merged $7.00
     assert "$7.00" not in text, text
 
 
@@ -328,16 +328,14 @@ async def test_snapshot_older_than_15_minutes_is_na(p35):
     assert snap.read_line("claude_code", SID, now=NOW + 16 * MIN) == "n/a"
 
 
-# -- P35-3 end-of-turn ---------------------------------------------------------------------------
+# -- P35-3 end-of-turn (flipped; the rest of the acceptance is in tests/test_p35_end_of_turn.py) --------
 
-@pytest.mark.xfail(strict=True, reason="P35-3 end-of-turn: codex-stop has no HOOK_BUDGETS_MS entry")
 def test_codex_stop_has_a_300ms_budget():
     from llm_router.hook_latency import HOOK_BUDGETS_MS
 
     assert HOOK_BUDGETS_MS.get("codex-stop") == 300
 
 
-@pytest.mark.xfail(strict=True, reason="P35-3 end-of-turn: Pi has no summary.ts extension")
 def test_pi_installs_a_summary_extension():
     from llm_router.commands import pi
 
@@ -345,13 +343,14 @@ def test_pi_installs_a_summary_extension():
     assert (Path(__file__).resolve().parents[1] / "integrations" / "pi" / "extensions" / "summary.ts").is_file()
 
 
-@pytest.mark.xfail(strict=True, reason="P35-3 end-of-turn: codex-stop prints its own ledger sum, not the snapshot line")
 async def test_codex_stop_message_is_the_snapshot_line(p35):
     snaps = p35.home / "snapshots"
     snaps.mkdir()
-    (snaps / f"codex-{SID}.json").write_text(json.dumps({"line": "router: fixture-line", "written_at": NOW}))
+    # written_at is on the wall clock: the hook judges staleness with it (the fixture's clock is frozen)
+    (snaps / f"codex-{SID}.json").write_text(json.dumps({"line": "router: fixture-line", "written_at": REAL_TIME()}))
+    env = {**p35.env, "LLM_ROUTER_STATUSLINE_REFRESH_CMD": "true"}     # no real refresher from a test
     r = subprocess.run([sys.executable, str(HOOKS / "codex-stop.py")], input=json.dumps({"session_id": SID}),
-                       env=p35.env, capture_output=True, text=True, timeout=120)
+                       env=env, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["systemMessage"] == "router: fixture-line", r.stdout
 

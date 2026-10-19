@@ -154,6 +154,7 @@ HOOK_BUDGETS_MS: dict[str, int] = {
     "bash-compress": 300,
     "session-start": 2_000,
     "session-end": 300,
+    "codex-stop": 300,  # P35-3 (D-228): the house Stop-hook budget; stat + one JSON read, no llm_router import
     "statusline": 100,
 }
 

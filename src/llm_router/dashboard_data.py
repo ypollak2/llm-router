@@ -1058,13 +1058,18 @@ class Summary:
         """THE single user-facing money string for "longer" surfaces —
         ``llm-router status``, ``savings-report``, ``gain``, and the MCP
         ``llm_router_status`` gain view. One implementation; no surface
-        formats its own money string (2026-09-27 product decision — see
-        ``estimated_usd``'s docstring for why "verified"/"unverified" no
-        longer appears here)."""
-        return (
-            f"est. saved ${self.estimated_usd:,.2f} "
-            f"(n={self.estimated_n:,}) vs {self.baseline_model}"
-        )
+        formats its own money string. F103: the estimate and the verified
+        savings are two segments with their own n, never one merged sum
+        (``est. saved $5.00 (n=4) · $2.00 verified saved (n=1) vs <baseline>``);
+        a segment with no rows is left out."""
+        parts = []
+        if self.unverified_usd or self.unverified_n:
+            parts.append(f"est. saved ${self.unverified_usd:,.2f} (n={self.unverified_n:,})")
+        if self.realized_usd or self.realized_n:
+            parts.append(f"${self.realized_usd:,.2f} verified saved (n={self.realized_n:,})")
+        if not parts:
+            parts.append("est. saved $0.00 (n=0)")
+        return " · ".join(parts) + f" vs {self.baseline_model}"
 
     def compact(self) -> str:
         """THE single user-facing money FRAGMENT for space-constrained surfaces — the statusline
@@ -1072,10 +1077,11 @@ class Summary:
         no trailing punctuation: a caller that needs a period or an emoji prefix adds it at the
         call site.
 
-        P35-1 (D-220) reverses the 2026-09-27 merge: measured dollars (``realized_usd``) and the
+        P35-1 (D-220) reverses the 2026-09-27 merge: verified savings (``realized_usd``) and the
         estimate (``unverified_usd``) are two segments and are never added —
-        ``~$5.00 est · $2.00 measured``. A segment with no money in it is left out; with neither,
-        the old ``~$0.00 est`` stands. The word "verified" still never reaches a user."""
+        ``~$5.00 est. saved · $2.00 verified saved``. A segment with no money in it is left out;
+        with neither, ``~$0.00 est. saved``. F103: both are counterfactual SAVINGS, so neither
+        is labelled "measured" (that reads as money spent)."""
         from llm_router import ledger_view as _lv
 
         return _lv.money_fragment(self.realized_usd, self.unverified_usd)

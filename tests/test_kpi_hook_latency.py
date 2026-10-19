@@ -640,7 +640,7 @@ def test_a_real_auto_route_process_that_classifies_and_logs_names_those_phases(t
 _PHASE_NAMES = {
     # D-171 L1: engine / availability / mini_summary / trend name time that was unattributed.
     "auto-route": {"session_io", "zce", "hud", "classify", "db_write", "draft_chain",
-                   "engine", "availability", "mini_summary", "trend"},
+                   "engine", "availability", "mini_summary", "trend", "okf"},
     "status-bar": {"read_cache", "spawn"},  # P0.9-b
     # P0.9: ollama_up, pxpipe and rules_update moved into the background child.
     "session-start": {"session_io", "reset_state", "proxy_health", "usage", "hints", "bg_spawn", "banner",
@@ -765,8 +765,12 @@ def test_every_registered_hook_is_instrumented_or_a_named_exception():
         "the installer registers a hook this test does not know (or dropped one): "
         f"{registered ^ (set(_EVENTS) | {'context-capture'})}")
     # P0.9: plus "statusline", the shell status line timed through record-raw.
-    assert set(hl.HOOK_BUDGETS_MS) == set(_EVENTS) | {"statusline"}, (
+    # P35-3 (D-228): plus "codex-stop", a Codex hook the codex installer registers (not _HOOK_DEFS). It is NOT
+    # instrumented on purpose: the recorder is an llm_router import and the hook's contract is stat + one JSON
+    # read; its 300 ms is held by a timing test (tests/test_codex_stop.py), not by a G1 row.
+    assert set(hl.HOOK_BUDGETS_MS) == set(_EVENTS) | {"statusline", "codex-stop"}, (
         "the budget table and the instrumented hooks differ")
+    assert "_hook_latency.begin" not in (HOOKS / "codex-stop.py").read_text()
     assert "hook_latency" not in (HOOKS / "context-capture.py").read_text()
 
 

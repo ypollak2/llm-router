@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 46
+# llm_router-hook-version: 47
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -2019,16 +2019,12 @@ def _condense(summary: str) -> str:
     `dashboard_data.summary()` fixed that (PR #178) — a bare, unlabelled
     `lifetime $X` may not appear again.
 
-    2026-09-27 product decision: PR #178's fix labelled the two halves
-    explicitly ("verified $X · est +$Y"), which solved the unlabelled-bare-$
-    problem but then showed "verified $0.00" on every machine where no
-    routed answer has ever been confirmed to replace a Claude turn — reading
-    as "nothing was saved" beside a real, nonzero estimate. Every user-facing
-    surface (this line included) now shows ONE combined, always-labelled
-    estimate via `Summary.compact()` — "today ~$X est · lifetime ~$Y est" —
-    instead. The verified/unverified split still exists on the `Summary`
-    object (`Summary.headline()`, internal/`doctor` use); it just no longer
-    reaches this line.
+    History: the 2026-09-27 decision merged verified and unverified into ONE
+    estimate; P35-1 (D-220) reversed it and F103 relabelled the parts. Each
+    window now prints two segments, never added, via `Summary.compact()`:
+    "today ~$X est. saved · $Y verified saved (n=N, today) · lifetime ...".
+    A segment with no money is left out. Neither is "measured": both are
+    counterfactual savings, not metered spend.
     """
     plain = _ANSI_RE.sub("", summary)
 
@@ -2075,12 +2071,12 @@ def _condense(summary: str) -> str:
     # disturbing them.
     if executed_header or used_5h is not None or used_wk is not None:
         try:
-            # 2026-09-27 product decision: ONE labelled estimate per window
-            # (realized+unverified merged), never "verified"/"unverified"
-            # wording — Summary.compact() is the single implementation this
-            # line, the statusline, and codex-stop.py all call. On the Stop the
-            # fragment is the child's cached ``Summary.compact()`` (D-171 S1):
-            # absent on a first run, then the line carries no money figures.
+            # P35-1/F103: two labelled segments per window ("~$X est. saved ·
+            # $Y verified saved"), never merged — Summary.compact() is the
+            # single implementation this line and the statusline share. On the
+            # Stop the fragment is the child's cached ``Summary.compact()``
+            # (D-171 S1): absent on a first run, then the line carries no
+            # money figures.
             for label, window in (("today", "today"), ("lifetime", "lifetime")):
                 compact = _ledger_compact(window)
                 if compact:
@@ -2381,10 +2377,10 @@ def _local_day() -> str:
 
 def _today_compact(wt) -> str | None:
     """The Stop's money fragment for today: the ledger's estimated saving with its n and window
-    (``~$1.25 est (n=7, today)``, plus ``· $0.50 measured`` when the ledger holds measured dollars); None when the ledger has no usage database (n/a, never $0)."""
+    (``~$1.25 est. saved (n=7, today)``, plus ``· $0.50 verified saved`` when the ledger holds verified savings); None when the ledger has no usage database (n/a, never $0)."""
     if wt is None or wt.saved_usd is None or wt.saved_n is None:
         return None
-    # P35-1 (D-220): measured apart from estimated, never one summed figure.
+    # P35-1 (D-220): verified apart from estimated, never one summed figure.
     measured, estimated = wt.verified_usd, wt.unverified_usd
     if measured is None or estimated is None:
         measured, estimated = None, wt.saved_usd

@@ -171,9 +171,13 @@ def _expected_line_six(window: str) -> str:
     loc, sub, paid, unc = MIX_SIX[window]
     assert loc + sub + paid + unc == sum(ex.values())
     usd, n = _saved_six(window)
+    # D-247: verified is its own segment. S1 ($0.50) is verified everywhere; the extra B2 row
+    # (gemini_cli, $4.00) is verified too and sits only in the 24h/7d windows.
+    ver_usd, ver_n = (0.5 + EXTRA_SAVED_USD, 2) if window in ("24h", "7d") else (0.5, 1)
     by = " ".join(f"{p} {c}" for p, c in sorted(ex.items(), key=lambda kv: (-kv[1], kv[0])))
     return (f"ledger {window}: {sum(ex.values())} executed ({by}) · mix local {loc} / "
-            f"subscription {sub} / paid {paid} / unclassified {unc} · est. saved ${usd:,.2f} (n={n:,})")
+            f"subscription {sub} / paid {paid} / unclassified {unc} · est. saved ${usd - ver_usd:,.2f} (n={n - ver_n:,}) "
+            f"· verified saved ${ver_usd:,.2f} (n={ver_n:,})")
 
 
 def _ungrounded(text: str, sep: str) -> list[str]:
@@ -198,7 +202,7 @@ def _statusline(six) -> str:
     return ANSI.sub("", r.stdout).strip()
 
 
-#: P35-2 (D-220): the statusline prints the estimate and the measured part as two segments. The A seed's
+#: P35-2 (D-220): the statusline prints the estimate and the verified part as two segments. The A seed's
 #: only verified row today is the `block` savings row S1 ($0.50, host claude_code, after the gate date);
 #: the other 3 rows behind the today total (U1, U2, S2) are unverified.
 VERIFIED_TODAY_USD, VERIFIED_TODAY_N = 0.5, 1
@@ -208,9 +212,9 @@ def test_statusline_money_is_the_today_oracle(six):
     usd, n = _saved_six("today")
     line = _statusline(six)
     est, est_n = usd - VERIFIED_TODAY_USD, n - VERIFIED_TODAY_N
-    assert f"~${est:,.2f} est\u00b7today n={est_n}" in line, line
-    assert f"${VERIFIED_TODAY_USD:,.2f} measured\u00b7today n={VERIFIED_TODAY_N}" in line, line
-    assert f"~${usd:,.2f} est" not in line, line            # measured and estimated are never one figure
+    assert f"~${est:,.2f} est. saved\u00b7today n={est_n}" in line, line
+    assert f"${VERIFIED_TODAY_USD:,.2f} verified saved\u00b7today n={VERIFIED_TODAY_N}" in line, line
+    assert f"~${usd:,.2f} est" not in line, line            # verified and estimated are never one figure
     # the extra row is outside today but inside 24h: a wrong money window prints another figure
     assert f"~${_saved_six('24h')[0] - VERIFIED_TODAY_USD:,.2f} est" not in line, line
 
@@ -346,7 +350,7 @@ def test_session_end_today_money_is_the_oracle(six):
     # P35-1 (D-220): measured apart from estimated. Hand oracle: S1 is the one verified (measured)
     # row, 0.50; the rest of the merged figure is the estimate.
     measured = 0.5
-    assert agg["today_compact"] == f"~${usd - measured:,.2f} est · ${measured:,.2f} measured (n={n:,}, today)"
+    assert agg["today_compact"] == f"~${usd - measured:,.2f} est. saved · ${measured:,.2f} verified saved (n={n:,}, today)"
     # rv-597 carry-forward: the 4-dollar row 2 h before NOW is inside 24h and outside today, so a
     # 24h money window (or the -2h mutant) prints another 2-decimal figure
     usd24, n24 = _saved_six("24h")

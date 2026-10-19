@@ -26,7 +26,7 @@ values stripped of control characters (a value is data to print, never to run)::
     usage=none|fallback|ok  session_pct  weekly_pct  usage_stale=0|1  reset
     ctx_human  ctx_pct
     money  money_n  money_win              (today's ESTIMATED saving "~$X est", its n and window)
-    money_m  money_m_n                     (today's MEASURED saving "$X measured" and its n; never summed
+    money_m  money_m_n                     (today's VERIFIED saving "$X verified saved" and its n; never summed
                                            with the estimate, P35-2)
     snap_line  snap_at                     (the five-field snapshot line and its data time; the script
                                            prints it as a second row, "n/a" past 15 min)
@@ -284,7 +284,8 @@ def _ledger(state: str, scope: str, now: float, session: str = ""):
 
 def money_segment(state: str, now: float | None = None) -> dict[str, str]:
     """Today's saving as TWO segments, never one sum (P35-2, D-220): the estimate (``money`` =
-    ``~$X est``, ``money_n``) and the measured part (``money_m`` = ``$X measured``, ``money_m_n``),
+    ``~$X est. saved``, ``money_n``) and the verified part (``money_m`` = ``$X verified saved``,
+    ``money_m_n``),
     each printed only above the spend floor and each with its own n; ``money_win`` is the window."""
     now = time.time() if now is None else now
     if not os.path.isfile(os.path.join(state, "usage.db")):
@@ -299,8 +300,8 @@ def money_segment(state: str, now: float | None = None) -> dict[str, str]:
         figs = lw.figures()
         out: dict[str, str] = {}
         for key, fig, unit, suffix, n_key in (
-                ("money", figs["saved_estimated"], "estimate", " est", "money_n"),
-                ("money_m", figs["saved_measured"], "api", " measured", "money_m_n")):
+                ("money", figs["saved_estimated"], "estimate", " est. saved", "money_n"),
+                ("money_m", figs["saved_measured"], "api", " verified saved", "money_m_n")):
             text = lv.show(fig, unit=unit, quantity="usd")
             if text is not None and fig.value >= SPEND_FLOOR_USD:
                 out[key], out[n_key] = text + suffix, str(fig.n)
@@ -385,7 +386,13 @@ def append_history(state: str, now: float) -> bool:
             usage = json.load(fh)
     except (OSError, ValueError):
         usage = None                              # the row is written as source=stale, as the tick does
-    return tick.maybe_append_history(state, usage if isinstance(usage, dict) else None, now)
+    wrote = tick.maybe_append_history(state, usage if isinstance(usage, dict) else None, now)
+    try:
+        tick.prune_history(state, now)            # F107: once a day, here in the background, never in the tick
+    except OSError as exc:
+        from llm_router import failopen
+        failopen.record("F107-HISTORY-PRUNE", exc)
+    return wrote
 
 
 #: The snapshot may take this long inside the refresher; past it the cache is written without it.

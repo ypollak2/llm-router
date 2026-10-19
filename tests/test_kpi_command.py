@@ -416,6 +416,7 @@ def test_o1_value_is_always_labelled_est(monkeypatch):
 
         estimated_n = 500
         estimated_usd = 42.0
+        unverified_usd, realized_usd = 42.0, 0.0
 
     monkeypatch.setattr(dd, "summary", lambda period: FakeSummary())
     o1 = _kpis()["O1"]

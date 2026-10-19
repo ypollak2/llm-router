@@ -63,25 +63,67 @@ def active_hour_pps(rows: list[dict]) -> list[float]:
     return [v for _, v in sorted(per_hour.items())]
 
 
+#: Bytes read per step when scanning the file from its end.
+_TAIL_CHUNK = 256 * 1024
+#: Rows are appended in time order, but two windows' clocks can differ a little: the backward scan
+#: only stops at a row this much older than the window start.
+_TAIL_SLACK_S = 3600.0
+
+
+def _parse(line: bytes, since: float, rows: list[dict]) -> int:
+    """Append the row on ``line`` to ``rows`` when it is in the window; return 1 for a bad line."""
+    if not line.strip():
+        return 0
+    try:
+        r = json.loads(line)
+    except ValueError:
+        return 1
+    if not isinstance(r, dict):
+        return 1
+    ts = _num(r.get("ts"))
+    if ts is not None and ts >= since:           # a row with no timestamp is not in any window
+        rows.append(r)
+    return 0
+
+
 def _read(path: Path, since: float) -> tuple[list[dict], int]:
+    """Rows with ``ts >= since`` in file order, reading only the tail of the file (F107): the file
+    is scanned backward in :data:`_TAIL_CHUNK` blocks until a complete line older than ``since`` by
+    :data:`_TAIL_SLACK_S` is seen, so the cost is the window, not the file's whole history.
+    ``bad`` counts the bad lines in the part that was read."""
     rows: list[dict] = []
     bad = 0
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            try:
-                r = json.loads(line)
-            except ValueError:
-                bad += 1
-                continue
-            if not isinstance(r, dict):
-                bad += 1
-            else:
-                ts = _num(r.get("ts"))
-                if ts is not None and ts >= since:       # a row with no timestamp is not in any window
-                    rows.append(r)
+    with path.open("rb") as f:
+        pos = f.seek(0, 2)
+        carry = b""                               # the cut-off start of the previously read block
+        while pos > 0:
+            start = max(0, pos - _TAIL_CHUNK)
+            f.seek(start)
+            block = f.read(pos - start) + carry
+            pos = start
+            lines = block.split(b"\n")
+            carry = lines[0] if start > 0 else b""
+            complete = lines[1:] if start > 0 else lines
+            chunk_rows: list[dict] = []
+            for ln in complete:
+                bad += _parse(ln, since, chunk_rows)
+            rows[:0] = chunk_rows                 # older block goes in front: file order is kept
+            if start > 0 and _older_than_window(complete, since - _TAIL_SLACK_S):
+                break
     return rows, bad
+
+
+def _older_than_window(lines: list[bytes], cutoff: float) -> bool:
+    """True when the first parseable line of ``lines`` has ``ts < cutoff`` (the scan can stop)."""
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        ts = _num(r.get("ts")) if isinstance(r, dict) else None
+        if ts is not None:
+            return ts < cutoff
+    return False
 
 
 def median_pp_per_active_hour(*, now: float | None = None, days: int = 14,

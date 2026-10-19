@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -1556,3 +1557,46 @@ def test_without_amend4_sidecar_behaviour_is_unchanged(factory):
     assert set(got) == {"sha256", "frozen_utc", "amend1_sha256", "amend1_frozen_utc",
                         "amend2_sha256", "amend2_frozen_utc", "amend3_sha256",
                         "amend3_frozen_utc", "constants"}
+
+
+def fake_exe(directory, name):
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / name
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    return directory
+
+
+def test_agent_path_drops_llm_router_and_keeps_needed_tools(tmp_path, monkeypatch):
+    real, _ = plant_real_home(tmp_path, monkeypatch)
+    bad = fake_exe(tmp_path / "bad", "llm-router")
+    fake_exe(bad, "node")  # node shares the dir with llm-router: dropped whole, fails closed
+    chu = fake_exe(tmp_path / "chu", "llm_router")
+    local = fake_exe(real / ".local/bin", "git")
+    good = fake_exe(tmp_path / "good", "node")
+    junk = fake_exe(tmp_path / "junk", "unrelated-tool")
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (bad, chu, local, good, junk, "/bin"))))
+    env = h.agent_env(h.scratch_home(tmp_path / "scratch"))
+    dirs = env["PATH"].split(os.pathsep)
+    assert str(good) in dirs and "/bin" in dirs
+    for gone in (bad, chu, local, junk):
+        assert str(gone) not in dirs
+    for name in h.DENIED_EXECUTABLES:
+        assert shutil.which(name, path=env["PATH"]) is None
+
+
+def test_agent_env_refuses_when_llm_router_resolves_on_path(tmp_path, monkeypatch):
+    plant_real_home(tmp_path, monkeypatch)
+    bad = fake_exe(tmp_path / "bad", "llm-router")
+    with pytest.raises(h.Refuse, match="llm-router is reachable"):
+        h.assert_agent_env({"HOME": str(tmp_path / "s"), "PATH": f"/bin{os.pathsep}{bad}"})
+
+
+def test_agent_env_refuses_home_inside_real_home_unless_under_run_dir(tmp_path, monkeypatch):
+    real, _ = plant_real_home(tmp_path, monkeypatch)
+    inside = real / "stuff" / "scratch"
+    with pytest.raises(h.Refuse, match="inside the real HOME"):
+        h.assert_agent_env({"HOME": str(inside), "PATH": "/bin"})
+    with pytest.raises(h.Refuse, match="inside the real HOME"):
+        h.assert_agent_env({"HOME": str(inside), "PATH": "/bin"}, run_dir=real / "other")
+    h.assert_agent_env({"HOME": str(inside), "PATH": "/bin"}, run_dir=real / "stuff")

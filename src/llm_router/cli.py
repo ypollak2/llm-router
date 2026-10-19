@@ -82,7 +82,7 @@ Usage:
     llm-router run-hook <name>  — execute one installed hook by name (debugging)
 
   Inspection and reporting
-    llm-router summary          — session summary of routing and savings
+    llm-router summary [--session [ID]] — session summary of routing and savings; --session: one session's block, each figure with n
     llm-router routing          — current routing configuration
     llm-router routing-report   — routing accuracy and share over a window
     llm-router routing-health   — reach, context, USED and latency per day, with n

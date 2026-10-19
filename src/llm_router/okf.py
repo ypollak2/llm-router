@@ -315,6 +315,14 @@ class OKFConcept:
 # Parsing
 # ---------------------------------------------------------------------------
 
+# libyaml's C scanner parses the same safe subset ~9x faster than the pure-Python
+# SafeLoader (2000 front-matter blocks: 555 ms -> 61 ms, same parsed result). The hook
+# re-parses the whole bundle in every process, so this is the dominant cost of a
+# context-dependent prompt (autoroute-latency-findings.md). Hosts whose PyYAML has no
+# libyaml fall back to SafeLoader: same semantics, just slower.
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
 def _parse_okf(text: str, path: Path) -> OKFConcept | None:
     """Parse markdown + YAML frontmatter into OKFConcept. Returns None on failure."""
     if not text.startswith("---"):
@@ -323,7 +331,7 @@ def _parse_okf(text: str, path: Path) -> OKFConcept | None:
     if len(parts) < 3:
         return None
     try:
-        fm = yaml.safe_load(parts[1])
+        fm = yaml.load(parts[1], Loader=_YAML_LOADER)  # nosec B506 - CSafeLoader/SafeLoader only
         if not isinstance(fm, dict):
             return None
         fm = fm or {}
@@ -640,6 +648,17 @@ def _score(concept: OKFConcept, keywords: list[str]) -> int:
     while the store held 2 docs, decisive once `okf index` put 1063 in it.
     """
     title_raw = concept.title
+    # Cheap exit, same answer: every token, symbol and name matched below is a substring
+    # of the lowercased title/tags/description/body/key_symbols, and a plural-tolerant
+    # match needs at least ``kw`` minus a trailing "s" to be present. A doc containing no
+    # keyword stem at all scores 0, so skip its four tokenisations (this loop runs over
+    # every doc in the project, once per process, on the hook's hot path).
+    _hay = "\n".join((
+        title_raw, " ".join(concept.tags), concept.description, concept.body,
+        "\n".join(str(x) for x in (concept.extra.get("key_symbols") or [])),
+    )).lower()
+    if not any((kw[:-1] if kw.endswith("s") else kw) in _hay for kw in keywords):
+        return 0
     # Keyed on TYPE, not on whether the title happens to look like a path. A
     # SessionNote's title is the user's own sentence, and "fix the webhook backoff
     # in retry.py" contains ".py" — under a shape test it was treated as a source

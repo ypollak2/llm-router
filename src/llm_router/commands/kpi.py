@@ -1531,7 +1531,7 @@ def _o1_quota_avoided(days: int, win: "_Window | None" = None) -> dict:
             "session tagging; not reconciled against the proxy ledger]")
     if n < MIN_N:
         return _too_few(n, newest_ts=newest) | {"value": f"{TOO_FEW} ({display}, n={n})"}
-    return _measured(note, n, newest_ts=newest, estimated_usd=s.estimated_usd)
+    return _measured(note, n, newest_ts=newest, estimated_usd=s.unverified_usd, verified_usd=s.realized_usd)
 
 
 def _ledger_line(days: int, win: "_Window | None") -> str:

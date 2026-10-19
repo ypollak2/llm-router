@@ -138,6 +138,14 @@ Python SDK) and `route_and_stream` (TUI; the dropped ids are in the `route.start
 shows there only when the caller opened a skip-cause scope; the resulting chain is in the hook trace.
 A hook chain costs one cached `stat`, no JSON parse per call.
 
+Exempt (F112 / D-242): `llm_text_job` and `llm_edit` gate their output with a mechanical
+acceptance check and a fallback, so a weak local model costs a retry, not a wrong answer. They pass
+an internal `eligibility_exempt_reason` ("verified_text_job" / "validated_edit"; not an MCP
+parameter) and keep the chain in both the primary and the BUDGET emergency chain. Each model the
+filter would have dropped is recorded as `eligibility_bypassed` (lane, source = the caller id) in
+`skipped_json`; it is a build-time reason and does not count as `other_skip` in the local-by-cause
+report. Every other caller, `route_and_stream` and the hook chain builder still filter.
+
 Lanes are keyed by the Ollama model name, not its digest. After `ollama pull` of the same tag
 (new weights), the old verdict still applies: re-qualify the model to refresh its lanes.
 

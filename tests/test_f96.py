@@ -45,10 +45,11 @@ def test_lists_are_populated():
     assert len(MUST_ROUTE) == 4 and len(STAYS_COORDINATION) == 5
 
 
-def test_hook_copies_identical_and_version_73():
+def test_hook_copies_identical_and_version_at_least_73():
     assert SHIPPED.read_bytes() == REPO_COPY.read_bytes()
     head = SHIPPED.read_text().splitlines()[1]
-    assert head == "# llm_router-hook-version: 73"
+    assert head.startswith("# llm_router-hook-version: ")
+    assert int(head.rsplit(" ", 1)[1]) >= 73
     assert f'_THIS_VERSION_LINE = "{head}"' in SHIPPED.read_text()
 
 

@@ -1126,10 +1126,18 @@ def _lane_complexity(
     return c
 
 
-def _drop_failed_eligibility(models: list[str], task_type: TaskType, c: Complexity) -> list[str]:
-    """F106 / D-235: ``eligibility_routing.filter_chain``; the chain is kept if the filter raises."""
+def _drop_failed_eligibility(
+    models: list[str], task_type: TaskType, c: Complexity, exempt_reason: str | None = None,
+) -> list[str]:
+    """F106 / D-235: ``eligibility_routing.filter_chain``; the chain is kept if the filter raises.
+
+    F112 / D-242: ``exempt_reason`` (internal; a caller whose output a mechanical check gates)
+    keeps the chain unchanged and only records what the filter would have dropped.
+    """
     try:
         from llm_router import eligibility_routing
+        if exempt_reason:
+            return eligibility_routing.note_bypass(models, task_type, c, exempt_reason)
         return eligibility_routing.filter_chain(models, task_type, c)
     except Exception as exc:  # noqa: BLE001 - fail-open: the chain stays as built
         from llm_router import failopen
@@ -2999,6 +3007,8 @@ async def _dispatch_model_loop(
     semantic_key=None,
     # F106: the lane tier route_and_call derived (``_lane_complexity``); None -> ``c``.
     lane_complexity: Complexity | None = None,
+    # F112: see route_and_call(eligibility_exempt_reason=...).
+    eligibility_exempt_reason: str | None = None,
     # LEDGER-ERR-1: the caller's own list, used AS the attempt list, so a failure that
     # escapes this function (timeout, cancel, exhaustion) still tells the caller which
     # model was being attempted. None keeps the old private list.
@@ -4033,7 +4043,7 @@ async def _dispatch_model_loop(
         # D-116: apply shared Q&A ordering here too; timeout demotion below still wins.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
         emergency_chain = _drop_failed_eligibility(  # F106: the call's lane tier, not BUDGET's
-            emergency_chain, task_type, lane_complexity or c
+            emergency_chain, task_type, lane_complexity or c, eligibility_exempt_reason
         )
         if emergency_chain and capability_needs is not None:
             # P2.4: the emergency chain is filtered too; the primary chain already was.
@@ -4519,6 +4529,10 @@ async def route_and_call(
     context_door: str = "gateway",
     tools: list[dict] | None = None,
     tool_choice: object | None = None,
+    # F112 / D-242: internal. A caller whose output is gated by a mechanical acceptance check
+    # with a fallback (llm_text_job, llm_edit) names itself here; the F106 failed-lane filter
+    # then keeps the chain and only records ``eligibility_bypassed``. Never an MCP parameter.
+    eligibility_exempt_reason: str | None = None,
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -5102,7 +5116,8 @@ async def route_and_call(
         # after every step that can add a local entry, before the daily-cap step.
         _elig_before = list(models_to_try)
         if models_to_try and not model_override:
-            models_to_try = _drop_failed_eligibility(models_to_try, task_type, _lane_c)
+            models_to_try = _drop_failed_eligibility(
+                models_to_try, task_type, _lane_c, eligibility_exempt_reason)
         _elig_dropped = [m for m in _elig_before if m not in models_to_try]
 
         # TQ-007 (applied LAST — RED1-01/RED1-02 fix): a daily spend cap was
@@ -5618,6 +5633,7 @@ async def route_and_call(
             scope_root=_scope_root,
             semantic_key=_semantic_key,
             lane_complexity=_lane_c,  # F106
+            eligibility_exempt_reason=eligibility_exempt_reason,  # F112
             chain_attempts_out=_attempt_trace,
             conversation=messages,
             context_door=context_door,

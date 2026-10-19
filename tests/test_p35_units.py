@@ -33,7 +33,7 @@ def test_unknown_figure_prints_nothing_never_zero():
 def test_an_estimated_figure_is_always_marked_whatever_the_unit():
     assert show(_fig(kind="estimated"), unit="api", quantity="usd") == "~$3.00"
     assert show(_fig(kind="estimated"), unit="subscription", quantity="pct") == "~3% of window"
-    assert show(_fig(kind="measured"), unit="subscription", quantity="work_hours") == "~3 work-hours"
+    assert show(_fig(kind="measured", n_basis=4), unit="subscription", quantity="work_hours") == "~3 work-hours"
     assert not show(_fig(kind="measured"), unit="api", quantity="usd").startswith("~")
 
 
@@ -55,10 +55,10 @@ def test_figure_dict_round_trip_keeps_the_second_n_only_when_present():
 
 
 def test_money_fragment_never_sums_measured_and_estimated():
-    assert money_fragment(2.0, 5.0) == "~$5.00 est · $2.00 measured"
-    assert money_fragment(0.0, 5.0) == "~$5.00 est"
-    assert money_fragment(2.0, 0.0) == "$2.00 measured"
-    assert money_fragment(0.0, 0.0) == "~$0.00 est"
+    assert money_fragment(2.0, 5.0) == "~$5.00 est. saved · $2.00 verified saved"
+    assert money_fragment(0.0, 5.0) == "~$5.00 est. saved"
+    assert money_fragment(2.0, 0.0) == "$2.00 verified saved"
+    assert money_fragment(0.0, 0.0) == "~$0.00 est. saved"
     assert "$7.00" not in money_fragment(2.0, 5.0)
 
 
@@ -120,7 +120,7 @@ def test_work_hours_guards_unknowns_and_a_zero_rate():
 # -- no plan prices in product code (D-205) -------------------------------------------------------
 
 #: A dollar plan price: "$200" or "200/month" in product code.
-_PRICE = re.compile(r"\$\s?200\b|\b200(\.0)?\s*/\s*(month|mo)\b|_USD_PER_MONTH_DEFAULT")
+_PRICE = re.compile(r"\$\s?200\b|\b200(\.0)?\s*/\s*(month|mo)\b|_USD_PER_MONTH_DEFAULT|(?i:price|plan|month|usd|quota)\w*\s*[:=]\s*200(\.0)?\b")
 #: Plan names. Allowed in prose elsewhere (onboarding questions, docs); never in the modules that
 #: turn quota into numbers.
 _PLAN = re.compile(r"Pro Max|Max ?(5x|20x)|Claude (Pro|Max)\b|ChatGPT (Plus|Pro)\b")
@@ -142,6 +142,8 @@ def test_no_plan_price_or_plan_name_in_the_money_path_of_product_code():
 
 def test_the_scan_catches_what_it_claims_to():
     assert _PRICE.search("_SUBSCRIPTION_USD_PER_MONTH_DEFAULT = 200.0")
+    assert _PRICE.search("plan_cost = 200.0") and _PRICE.search("WEEKLY_USD = 200")   # unnamed constant
+    assert not _PRICE.search('"haiku": 200.0,') and not _PRICE.search("price = 1200.0")
     assert _PRICE.search("# $200/month plan") and _PRICE.search("price 200 / month")
     assert _PLAN.search("one week of Claude Pro Max") and _PLAN.search("a ChatGPT Plus account")
     assert not _PRICE.search("a $2000 budget") and not _PLAN.search("a Max and a Pro tier")

@@ -64,9 +64,15 @@ def _default_weekly_quota_usd() -> float | None:
     override = os.environ.get("LLM_ROUTER_WEEKLY_QUOTA_USD", "").strip()
     if override:
         try:
-            return float(override)
+            value = float(override)
         except ValueError:
             log.warning("LLM_ROUTER_WEEKLY_QUOTA_USD=%r is not a number; ignoring", override)
+        else:
+            if 0 < value < float("inf"):
+                return value
+            # A zero, negative or infinite price is not a plan value: fall through to the monthly
+            # setting instead of letting it mask a valid one (F103, rv-630).
+            log.warning("LLM_ROUTER_WEEKLY_QUOTA_USD=%r is not a positive finite price; ignoring", override)
     monthly = os.environ.get("LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH", "").strip()
     if monthly:
         try:

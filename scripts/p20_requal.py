@@ -562,6 +562,42 @@ AGENT_ENV_ALLOWED = frozenset(
 )
 
 
+# F110 (rv-642): PATH was still the owner's, so an agent could run `llm-router uninstall`.
+# `launchctl` stays reachable (it lives in /bin); the threat is llm-router calling it, so
+# removing every llm-router executable from PATH is the guard. Not a sandbox.
+SYSTEM_PATH_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+AGENT_PATH_TOOLS = ("node", "npm", "npx", "git", "python", "python3", "uv")  # dirs kept
+# The legacy-brand CLI is not named here: the identity gate forbids that string in runtime code.
+DENIED_EXECUTABLES = ("llm-router", "llm_router")
+
+
+def has_denied_executable(path_dirs) -> bool:
+    joined = os.pathsep.join(map(str, path_dirs))
+    return any(shutil.which(name, path=joined) for name in DENIED_EXECUTABLES)
+
+
+def agent_path(path: str) -> str:
+    """Allow-listed PATH: system dirs plus caller dirs that hold a needed tool (node, git,
+    python, uv), minus any dir with an llm-router executable, ~/.local/bin and the uv
+    tool dirs. A dir holding both node and llm-router is dropped whole (fails closed)."""
+    home = real_home()
+    banned = {home / ".local/bin", home / ".local/share/uv"}
+    kept: list[str] = [d for d in SYSTEM_PATH_DIRS if Path(d).is_dir()]
+    for entry in path.split(os.pathsep):
+        if not entry or entry in kept:
+            continue
+        d = Path(entry)
+        resolved = d.resolve()
+        if any(resolved == b or b in resolved.parents for b in banned):
+            continue
+        if has_denied_executable([d]) or not any(
+            shutil.which(t, path=str(d)) for t in AGENT_PATH_TOOLS
+        ):
+            continue
+        kept.append(entry)
+    return os.pathsep.join(kept)
+
+
 def real_home() -> Path:
     """The account's home from the user database, which an overridden $HOME cannot move."""
     return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
@@ -577,7 +613,7 @@ def scratch_home(path: Path) -> Path:
     return path
 
 
-def assert_agent_env(env: dict[str, str]) -> None:
+def assert_agent_env(env: dict[str, str], run_dir: Path | None = None) -> None:
     """Refuse to launch an agent whose environment could reach the owner's install."""
     home = env.get("HOME")
     if not home:
@@ -586,11 +622,17 @@ def assert_agent_env(env: dict[str, str]) -> None:
     caller = os.environ.get("HOME")
     if resolved == real_home() or (caller and resolved == Path(caller).resolve()):
         raise Refuse("refusing: agent HOME is the real HOME")
+    if resolved.is_relative_to(real_home()) and not (
+        run_dir is not None and resolved.is_relative_to(Path(run_dir).resolve())
+    ):
+        raise Refuse("refusing: agent HOME is inside the real HOME outside the run dir")
+    if env.get("PATH") is not None and has_denied_executable(env["PATH"].split(os.pathsep)):
+        raise Refuse("refusing: llm-router is reachable on the agent PATH")
     if set(env) - AGENT_ENV_ALLOWED:
         raise Refuse("refusing: unexpected key in agent environment")
 
 
-def agent_env(home: Path, *, claude: bool = False) -> dict[str, str]:
+def agent_env(home: Path, *, claude: bool = False, run_dir: Path | None = None) -> dict[str, str]:
     """Minimal agent environment: scratch HOME, PATH/LANG, and (Claude only) auth material.
 
     Auth is either CLAUDE_CODE_OAUTH_TOKEN passed through, or the file named by
@@ -598,6 +640,8 @@ def agent_env(home: Path, *, claude: bool = False) -> dict[str, str]:
     never printed or logged; failures name no path.
     """
     env = {k: os.environ[k] for k in AGENT_PASS_ENV if k in os.environ}
+    if "PATH" in env:
+        env["PATH"] = agent_path(env["PATH"])
     env["HOME"] = str(home)
     if claude:
         env["LLM_ROUTER_SESSION_KIND"] = "research"
@@ -611,7 +655,7 @@ def agent_env(home: Path, *, claude: bool = False) -> dict[str, str]:
                 target.chmod(0o600)
             except OSError as exc:
                 raise Refuse("refusing: Claude credentials file unusable") from exc
-    assert_agent_env(env)
+    assert_agent_env(env, run_dir)
     return env
 
 
@@ -628,8 +672,8 @@ def scrubbed_environ(env: dict[str, str]):
         os.environ.update(saved)
 
 
-def claude_env(home: Path) -> dict[str, str]:
-    return agent_env(home, claude=True)
+def claude_env(home: Path, run_dir: Path | None = None) -> dict[str, str]:
+    return agent_env(home, claude=True, run_dir=run_dir)
 
 
 class ClaudeCLI:
@@ -637,7 +681,7 @@ class ClaudeCLI:
         self.run_dir = run_dir
 
     def __call__(self, model_id: str, prompt: str, *, timeout: int) -> dict:
-        env = claude_env(scratch_home(self.run_dir / "claude_home"))
+        env = claude_env(scratch_home(self.run_dir / "claude_home"), self.run_dir)
         if "ANTHROPIC_BASE_URL" in env or "ANTHROPIC_API_KEY" in env:
             raise Refuse("refusing: Claude environment")
         cwd = self.run_dir / "claude_cwd"

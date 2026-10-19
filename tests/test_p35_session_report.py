@@ -3,7 +3,7 @@
 Evidence: ``v16/coord/P35-PLAN.md`` (Design, Session summary; PR row P35-4a/4b) and the rv-628
 carry-forward. The fixture-home markers live in tests/test_p35_fixtures.py; this file holds the pure
 oracles (targets, offload, quota saved, recommendation), the n + window rule over the printed block, and
-the session-end child (the Stop's own line never gains the block; the hook pair is v46).
+the session-end child (the Stop's own line never gains the block; the hook pair is v47).
 """
 from __future__ import annotations
 
@@ -214,7 +214,7 @@ async def test_the_stop_line_does_not_carry_the_block(p35):  # noqa: F811
 
 def test_the_hook_pair_is_byte_identical_at_version_46():
     a, b = (ROOT / "hooks" / "session-end.py").read_bytes(), HOOK.read_bytes()
-    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 46"
+    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 47"
 
 
 @pytest.mark.parametrize("bad", [None, []])

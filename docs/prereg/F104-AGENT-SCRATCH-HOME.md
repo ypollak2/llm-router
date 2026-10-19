@@ -35,7 +35,33 @@ under a scratch HOME. Run one smoke `claude -p` call with the scratch env before
 ## Limits
 
 A scratch HOME is not a sandbox. An agent can still use absolute paths or `pwd` lookups. Stronger
-isolation (`sandbox-exec` or a separate OS user) is not part of F104.
+isolation (`sandbox-exec` or a separate OS user) is not part of F104 or F110.
+
+### F110 hardening (rv-642 residual)
+
+* PATH: the agent PATH is an allow-list built by `agent_path()`: `/usr/bin /bin /usr/sbin /sbin`
+  plus caller directories that hold node, npm, npx, git, python, python3 or uv. Any directory
+  holding an `llm-router` or `llm_router` executable is dropped (so the run's venv bin
+  is gone), as are `~/.local/bin` and the uv tool dirs. A directory with both node and
+  llm-router is dropped whole and fails closed (the Pi dry run shows it). `assert_agent_env`
+  refuses (exit 2, no secret named) if `shutil.which("llm-router")` still resolves on that PATH.
+* `launchctl` remains reachable (it lives in `/bin`). The threat is `llm-router uninstall`
+  calling it against the user's launchd domain, which HOME does not scope; removing llm-router
+  from PATH is the guard. An agent that calls `launchctl` directly by name is not prevented.
+* Not covered: the legacy-brand CLI is not on the deny list (the identity gate forbids its name
+  in runtime code); it is only dropped when its directory is dropped for another reason.
+* HOME: `assert_agent_env` also refuses a HOME inside `real_home()` unless it is under the run dir.
+* The hidden-test runner (`p20_code_runner`, a grader, not an agent) keeps the caller PATH.
+* Because `~/.local/bin` is dropped, a `claude` installed only there will not resolve in the
+  agent env and the call fails closed (`claude_error`).
+
+### Pre-freeze smoke checklist (not run by F104 or F110)
+
+1. One `claude -p` call with the scratch env (`claude_env(scratch_home(...), run_dir)`): confirm
+   Keychain/OAuth auth works under the scratch HOME and that `claude` resolves on the filtered
+   PATH. Unverified; it fails closed.
+2. One Pi dry run with `agent_env`: confirm `node` resolves on the filtered PATH.
+3. Print `agent_path(os.environ["PATH"])` and confirm no llm-router or `~/.local/bin`.
 
 ## Prereg
 

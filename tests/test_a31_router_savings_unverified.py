@@ -153,8 +153,9 @@ def test_the_savings_report_labels_unverified_beside_the_verified_total(
     # 0.50 (verified) + 47.00 (unverified: 1+2+4+8 = router/gateway/sdk/NULL
     # host, plus the 32 pre-gate row) = 47.50, n = 1 + 5 = 6. The agentic
     # flat credit (16) is excluded entirely since Phase 0.2b.
-    assert "est. saved $47.50 (n=6)" in out
-    assert "verified" not in out.lower()
+    # F103: two segments, never the merged $47.50 / n=6.
+    assert "est. saved $47.00 (n=5) · $0.50 verified saved (n=1)" in out
+    assert "$47.50" not in out and "unverified" not in out.lower() and "measured" not in out.lower()
 
 
 def test_the_savings_report_still_shows_the_verified_figure_when_nothing_is_unverified(
@@ -169,8 +170,8 @@ def test_the_savings_report_still_shows_the_verified_figure_when_nothing_is_unve
     monkeypatch.setattr(savings_report, "_get_db_path",
                         lambda: _db(tmp_path, gated))
     out = savings_report.render_savings_report("all")
-    assert "est. saved $0.50 (n=1)" in out
-    assert "verified" not in out.lower()
+    assert "$0.50 verified saved (n=1) vs" in out
+    assert "est. saved" not in out and "unverified" not in out.lower()
 
 
 def test_unverified_note_is_empty_at_zero_and_keeps_small_amounts_visible():

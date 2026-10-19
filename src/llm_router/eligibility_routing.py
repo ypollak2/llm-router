@@ -187,3 +187,23 @@ def filter_chain(models: list[str], task_type: Any, complexity: Any) -> list[str
             source=source[:SOURCE_MAX] if isinstance(source, str) else None,
         )
     return kept
+
+
+def note_bypass(models: list[str], task_type: Any, complexity: Any, reason: str) -> list[str]:
+    """F112 / D-242: the chain unchanged; record each entry :func:`filter_chain` would have dropped.
+
+    For callers whose output a mechanical acceptance check gates, with a fallback. ``reason`` is
+    the caller's id (``source`` of the skip entry). No prompt text.
+    """
+    if not models or _opted_out():
+        return models
+    key = lane_key(task_type, complexity)
+    index = load() if key is not None else None
+    if key is None or not index:
+        return models
+    lane, tier = key
+    for m in models:
+        if failed_lane(index, m, lane, tier) is not None:
+            skip_causes.note(m, skip_causes.ELIGIBILITY_BYPASSED, lane=f"{lane}/{tier}",
+                             source=reason[:SOURCE_MAX])
+    return models

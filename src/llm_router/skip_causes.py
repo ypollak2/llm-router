@@ -34,7 +34,10 @@ LOCAL_TIMEOUT = "local_timeout"      # local model timed out, answer already in 
 FLOOR = "floor"                      # F26: chain was empty after all filters; served from the last-resort floor (``tier``)
 FAILED_ELIGIBILITY = "failed_eligibility"  # F106: local model measurably failed this lane (``lane``, ``k``, ``n``, ``source``)
 
-BUILD_REASONS = frozenset({UNAVAILABLE, BLOCKED, POLICY, CAPABILITY_FILTERED, FLOOR, FAILED_ELIGIBILITY})
+ELIGIBILITY_BYPASSED = "eligibility_bypassed"  # F112: failed-lane filter skipped for a verified job (``lane``, ``source``=caller)
+
+BUILD_REASONS = frozenset({UNAVAILABLE, BLOCKED, POLICY, CAPABILITY_FILTERED, FLOOR, FAILED_ELIGIBILITY,
+                           ELIGIBILITY_BYPASSED})
 
 # Causes the report splits local share into (see routing_report.executed_routes).
 CAUSE_BENCH = "bench"
