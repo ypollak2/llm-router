@@ -89,30 +89,47 @@ def _last_row(path: Path) -> dict | None:
 
 
 def _new_install_id(path: Path) -> str:
-    """The install id, created exactly once even when two processes start fresh together:
-    an ``O_EXCL`` create of ``active_days.id`` decides the winner, the loser reads the winner's."""
+    """The install id, created exactly once even when two processes start fresh together.
+    The id is written to a private temp file and hard-linked to ``active_days.id``: the link is
+    atomic and exclusive, so the file is never observed empty and the loser reads the winner's."""
     idp = path.with_name("active_days.id")
     fresh = secrets.token_hex(8)
+    tmp = path.with_name(f"active_days.id.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        fd = os.open(str(idp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
         try:
-            got = idp.read_text(encoding="utf-8").strip()
-        except OSError:
-            got = ""
-        return got if got else fresh
-    try:
-        os.write(fd, fresh.encode("utf-8"))
+            os.write(fd, fresh.encode("utf-8"))
+        finally:
+            os.close(fd)
+        try:
+            os.link(str(tmp), str(idp))
+        except FileExistsError:
+            try:
+                got = idp.read_text(encoding="utf-8").strip()
+            except OSError:
+                got = ""
+            return got if got else fresh
+        return fresh
     finally:
-        os.close(fd)
-    return fresh
+        try:
+            os.unlink(str(tmp))
+        except OSError as exc:
+            from llm_router import failopen
+
+            failopen.record("P37-ACTIVE-DAY-TMP", exc)
 
 
 def _append(path: Path, row: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        os.fchmod(fd, 0o600)
+        if hasattr(os, "fchmod"):  # absent on Windows; tightens a file created with a wider mode
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError as exc:
+                from llm_router import failopen
+
+                failopen.record("P37-ACTIVE-DAY-CHMOD", exc)
         os.write(fd, (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"))
     finally:
         os.close(fd)

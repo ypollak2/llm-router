@@ -390,3 +390,24 @@ def test_dedupe_on_trim_collapses_same_day_rows(home):
                             for x in ("2020-01-01", d, d)))
     ad._trim(path)
     assert [r["day"] for r in _rows(path)] == ["2020-01-01", d]
+
+
+def test_appends_survive_platform_without_fchmod(home, monkeypatch):
+    """Windows has no os.fchmod: both appends must still write their row."""
+    import os
+
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    assert not hasattr(os, "fchmod")
+    assert ad.mark_active(T0) is True
+    assert _rows(home / ad.NAME)[0]["day"] == _day(T0)
+    sp = home / qs.SAMPLES_NAME
+    qs._append(sp, {"ts": 1})
+    assert _rows(sp) == [{"ts": 1}]
+
+
+def test_install_id_file_is_never_observed_empty(home):
+    path = home / ad.NAME
+    first = ad._new_install_id(path)
+    assert (home / "active_days.id").read_text() == first
+    assert ad._new_install_id(path) == first  # loser path reads the winner's full id
+    assert [p.name for p in home.iterdir() if p.name.endswith(".tmp")] == []

@@ -114,7 +114,13 @@ def _append(path: Path, row: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        os.fchmod(fd, 0o600)  # also tightens a file created earlier with a wider mode
+        if hasattr(os, "fchmod"):  # absent on Windows; tightens a file created with a wider mode
+            try:
+                os.fchmod(fd, 0o600)
+            except OSError as exc:
+                from llm_router import failopen
+
+                failopen.record("CHZ-FO-QUOTA-SAMPLE-CHMOD", exc)
         os.write(fd, (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"))
     finally:
         os.close(fd)
