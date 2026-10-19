@@ -27,7 +27,9 @@ from llm_router import decision_ledger, paths
 from llm_router.proxy import ledger as proxy_ledger
 
 ELEMENTS = ("class", "confidence", "layer", "quota_state", "alternatives")
-_SKIP_KEYS = ("model", "reason", "until")  # whitelist: never anything else from skipped_json
+# whitelist: never anything else from skipped_json. lane/k/n/source: F106 failed_eligibility
+# entries (a lane id, two integers and a source id; no prompt text).
+_SKIP_KEYS = ("model", "reason", "until", "lane", "k", "n", "source")
 
 
 MAX_N = 1000
@@ -213,11 +215,22 @@ def last_decisions(n: int = 5, base: Path | None = None) -> tuple[list[dict], li
     return recs, notes
 
 
+def _lane_note(a: dict) -> str:
+    """`` (qa/simple 13/113, p2.0-requal)`` for an F106 entry; ``""`` for any other."""
+    if not a.get("lane"):
+        return ""
+    k, n = a.get("k"), a.get("n")
+    counts = f" {k}/{n}" if k is not None and n is not None else ""
+    src = f", {str(a['source'])[:64]}" if a.get("source") else ""  # eligibility_routing.SOURCE_MAX
+    return f" ({a['lane']}{counts}{src})"
+
+
 def render(rec: dict) -> str:
     """Header (door, model served, tier_reason) and the five elements. Ids only, no prompt text."""
     alts = rec["alternatives"]
     if isinstance(alts, list):
-        alts = "; ".join(f"{a.get('model', '?')}: {a.get('reason', '?')}" for a in alts) or "none passed over"
+        alts = "; ".join(f"{a.get('model', '?')}: {a.get('reason', '?')}{_lane_note(a)}"
+                         for a in alts) or "none passed over"
     conf = rec["confidence"]
     src = rec.get("confidence_source")
     conf_txt = f"{conf:.2f} (classifier)" if isinstance(conf, float) and src == "classifier" else (
