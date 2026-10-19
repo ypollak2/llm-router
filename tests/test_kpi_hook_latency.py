@@ -643,7 +643,8 @@ _PHASE_NAMES = {
                    "engine", "availability", "mini_summary", "trend"},
     "status-bar": {"read_cache", "spawn"},  # P0.9-b
     # P0.9: ollama_up, pxpipe and rules_update moved into the background child.
-    "session-start": {"session_io", "reset_state", "proxy_health", "usage", "hints", "bg_spawn", "banner"},
+    "session-start": {"session_io", "reset_state", "proxy_health", "usage", "hints", "bg_spawn", "banner",
+                      "maintenance"},  # P35-5
 }
 
 

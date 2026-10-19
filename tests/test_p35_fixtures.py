@@ -22,6 +22,7 @@ values written here, never product constants (D-205): the fixture names no model
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -106,9 +107,17 @@ async def p35(six):  # noqa: F811 -- pytest fixture name
     d = DAILY_FIRST
     while d <= DAILY_LAST:
         i = (d - DAILY_FIRST).days
+        n = 40 + i
+        k = int(round(n * (0.5 + 0.01 * i)))
+        # The daily-offload/2 shape weekly_report reads: counts, the action line and a breakdown
+        # (code n-3 plus docs n=3, so docs is always below the 30-action floor).
         daily_offload.write_day({
             "schema": daily_offload.SCHEMA, "date": d.isoformat(), "partial": False, "run_by": "scheduler",
-            "populations": {"organic": {"action": {"measured": True, "n": 40 + i, "rate": 0.5 + 0.01 * i}}},
+            "populations": {"organic": {
+                "action": {"measured": True, "k": k, "n": n, "value": round(k / n, 4)},
+                "counts": {"action": {"k": k, "n": n}, "turn": {"k": 5, "n": 10}},
+                "breakdown": {"by_task_group": {"code": {"k": k - 1, "n": n - 3}, "docs": {"k": 1, "n": 3}}},
+            }},
         }, base=daily_offload.daily_dir())
         d += timedelta(days=1)
     return six
@@ -307,21 +316,22 @@ async def test_session_report_spread_is_not_in_the_offload_numerator(p35):
 
 # -- P35-5 weekly --------------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="P35-5 weekly: weekly_report.py does not exist")
+# P35-5 weekly (flipped: weekly_report.py, kpi --maintenance; the rest of the weekly acceptance is in
+# tests/test_p35_weekly.py)
+
 async def test_weekly_report_from_daily_rows(p35):
     from llm_router import weekly_report
 
     w = weekly_report.build_week("2026-W41")          # Mon 2026-10-05 .. Sun 10-11, all seeded
     assert w["days"] == 7 and w["offload"]["ci"] and w["breakdowns"], w
     assert w["delta_vs_previous_week"] is None, w     # W40 has 3 seeded days: below the floor, no delta
+    assert (w["offload"]["k"], w["offload"]["n"]) == (182, 322), w["offload"]
+    assert len(w["trend"]) == 7 and all(t["n"] for t in w["trend"]), w["trend"]
 
 
-@pytest.mark.xfail(strict=True, reason="P35-5 weekly: kpi --maintenance does not exist")
-async def test_kpi_maintenance_flag_is_accepted(p35):
+async def test_kpi_maintenance_flag_is_accepted(p35, capsys, monkeypatch):
     from llm_router.commands import kpi
 
-    try:
-        rc = kpi.cmd_kpi(["--maintenance"])
-    except SystemExit as e:                            # argparse rejects the unknown flag today
-        rc = e.code
-    assert rc == 0
+    monkeypatch.setattr(os, "nice", lambda inc: 0)      # never lower the priority of the test process
+    assert kpi.cmd_kpi(["--maintenance"]) == 0
+    assert (p35.home / "weekly" / "2026-W41.json").is_file(), capsys.readouterr().out

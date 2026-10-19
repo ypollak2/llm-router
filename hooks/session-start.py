@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 41
+# llm_router-hook-version: 42
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1203,6 +1203,68 @@ def _spawn_detached(argv: list[str]) -> bool:
         return False
 
 
+#: Minimum gap between two maintenance spawn claims (a child that fails must not respawn on every session).
+_MAINTENANCE_COOLDOWN_S = 3600.0
+
+
+def _maintenance_argv() -> list[str]:
+    """``kpi --maintenance`` as the CLI entry (the interpreter form, or the frozen binary itself)."""
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return [sys.executable, "kpi", "--maintenance"]
+    return [sys.executable, "-m", "llm_router.cli", "kpi", "--maintenance"]
+
+
+def _maybe_spawn_maintenance() -> bool:
+    """P35-5: when the daily/weekly roll-up is stale, start ONE detached ``kpi --maintenance``.
+
+    Stat only, no llm_router import (session-start must stay cheap): the stamp is
+    ``weekly/.last_run.json`` (written by every maintenance run, mtime = last run), older than
+    LLM_ROUTER_MAINTENANCE_STALE_H hours (default 24) or absent means stale. Skipped while the benchmark
+    marker ``bench.active`` exists, when LLM_ROUTER_MAINTENANCE_AUTO is off, when the state dir does not
+    exist, and within an hour of the last spawn claim. Returns True when a child was started. Never raises."""
+    try:
+        if os.environ.get("LLM_ROUTER_MAINTENANCE_AUTO", "").strip().lower() in ("0", "off", "false", "no"):
+            return False
+        home = _state_dir()
+        if not os.path.isdir(home) or os.path.exists(os.path.join(home, "bench.active")):
+            return False
+        try:
+            stale_h = float(os.environ.get("LLM_ROUTER_MAINTENANCE_STALE_H", "") or 24.0)
+        except ValueError:
+            stale_h = 24.0
+        now = time.time()
+        try:
+            age = now - os.stat(os.path.join(home, "weekly", ".last_run.json")).st_mtime
+            if 0 <= age < max(stale_h, 0.0) * 3600.0:
+                return False
+        except OSError:
+            pass                      # never ran: stale
+        claim = os.path.join(home, "maintenance_spawn.claim")
+        try:
+            if 0 <= now - os.stat(claim).st_mtime < _MAINTENANCE_COOLDOWN_S:
+                return False
+        except OSError:
+            pass                      # no claim yet
+        tmp = claim + ".new"
+        try:                          # exclusive create + atomic rename: two racing hooks cannot both claim
+            os.close(os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        except FileExistsError:
+            try:
+                if now - os.stat(tmp).st_mtime > 60:
+                    os.unlink(tmp)    # a crashed claimer's leftover; the next session retries
+            except OSError:
+                return False
+            return False
+        os.replace(tmp, claim)
+        if _spawn_detached(_maintenance_argv()):
+            return True
+        os.unlink(claim)              # nothing started: let the next session try
+        return False
+    except Exception as exc:  # noqa: BLE001 -- a roll-up trigger must never break session start
+        print(f"session-start: maintenance trigger skipped ({type(exc).__name__})", file=sys.stderr)
+        return False
+
+
 def _usage_is_measured(cached: object) -> bool:
     """True only for a usage.json that carries real percentages.
 
@@ -2367,6 +2429,9 @@ def main() -> None:
             or os.getcwd(),
             _sid if isinstance(_sid, str) else "",
         )
+
+    with _hl_phase("maintenance"):
+        _maybe_spawn_maintenance()
 
     # Visible UI signal — Claude Code surfaces stderr as
     # "SessionStart:startup hook success: <msg>". Print the BANNER box first
