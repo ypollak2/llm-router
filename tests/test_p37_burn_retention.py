@@ -405,9 +405,141 @@ def test_appends_survive_platform_without_fchmod(home, monkeypatch):
     assert _rows(sp) == [{"ts": 1}]
 
 
-def test_install_id_file_is_never_observed_empty(home):
+@pytest.fixture()
+def fo(monkeypatch):
+    """Capture failopen.record calls."""
+    from llm_router import failopen
+
+    calls = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: calls.append(code))
+    return calls
+
+
+def test_install_id_loser_reads_winner_and_leaves_no_tmp(home):
     path = home / ad.NAME
     first = ad._new_install_id(path)
     assert (home / "active_days.id").read_text() == first
-    assert ad._new_install_id(path) == first  # loser path reads the winner's full id
+    assert ad._new_install_id(path) == first
     assert [p.name for p in home.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_link_failing_falls_back_and_row_is_written(home, monkeypatch, fo):
+    import os
+
+    def boom(*a, **k):
+        raise PermissionError(1, "no hard links here")
+
+    monkeypatch.setattr(os, "link", boom)
+    assert ad.mark_active(T0) is True
+    rows = _rows(home / ad.NAME)
+    assert rows[0]["day"] == _day(T0)
+    assert (home / "active_days.id").read_text() == rows[0]["install_id"]
+    assert "P37-ACTIVE-DAY-LINK" in fo
+    assert [p.name for p in home.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_link_absent_falls_back_and_row_is_written(home, monkeypatch, fo):
+    import os
+
+    monkeypatch.delattr(os, "link")
+    assert ad.mark_active(T0) is True
+    rows = _rows(home / ad.NAME)
+    assert (home / "active_days.id").read_text() == rows[0]["install_id"]
+    assert "P37-ACTIVE-DAY-LINK" in fo
+
+
+def test_fallback_loser_reads_winner_id(home, monkeypatch):
+    import os
+
+    monkeypatch.delattr(os, "link")
+    (home / "active_days.id").write_text("w" * 16)
+    assert ad._new_install_id(home / ad.NAME) == "w" * 16
+
+
+def test_tmp_unlink_failure_is_reported_not_raised(home, monkeypatch, fo):
+    import os
+
+    real = os.unlink
+
+    def bad(p, *a, **k):
+        if str(p).endswith(".tmp"):
+            raise PermissionError(13, "locked")
+        return real(p, *a, **k)
+
+    monkeypatch.setattr(os, "unlink", bad)
+    assert ad.mark_active(T0) is True
+    assert "P37-ACTIVE-DAY-TMP" in fo
+    assert _rows(home / ad.NAME)[0]["day"] == _day(T0)
+
+
+def test_fchmod_oserror_still_appends_and_is_reported(home, monkeypatch, fo):
+    import os
+
+    def boom(*a, **k):
+        raise OSError(1, "not permitted")
+
+    monkeypatch.setattr(os, "fchmod", boom)
+    assert ad.mark_active(T0) is True
+    assert _rows(home / ad.NAME)[0]["day"] == _day(T0)
+    assert "P37-ACTIVE-DAY-CHMOD" in fo
+
+
+def _slow_reader(args):
+    """Poll for the id file; return every distinct content seen (including "")."""
+    home, stop_at = args
+    seen = set()
+    idp = Path(home) / "active_days.id"
+    while time.time() < stop_at:
+        try:
+            seen.add(idp.read_text())
+        except FileNotFoundError:
+            pass
+    return sorted(seen)
+
+
+def _slow_creator(args):
+    home = args
+    import os
+
+    real_write = os.write
+
+    def slow_write(fd, data):
+        time.sleep(0.3)  # widen the create-to-content window an O_EXCL+write design exposes
+        return real_write(fd, data)
+
+    os.write = slow_write
+    try:
+        return ad._new_install_id(Path(home) / ad.NAME)
+    finally:
+        os.write = real_write
+
+
+def test_install_id_file_is_never_observed_empty(home):
+    """A reader polling while the creator's write is slow must never see an empty id file
+    (fails on an open(O_EXCL)-then-write design, passes with temp file + os.link)."""
+    import multiprocessing as mp
+
+    ctx = mp.get_context("fork")
+    with ctx.Pool(2) as pool:
+        r = pool.map_async(_slow_reader, [(str(home), time.time() + 1.0)])
+        time.sleep(0.1)
+        iid = pool.apply(_slow_creator, (str(home),))
+        seen = r.get(timeout=10)[0]
+    assert seen, "reader never saw the id file: the check found nothing to check"
+    assert "" not in seen
+    assert seen == [iid]
+
+
+def test_orphan_tmp_files_are_swept_only_when_old_and_exact_pattern(home):
+    import os
+
+    old = home / "active_days.id.123.abcd.tmp"
+    new = home / "active_days.id.124.abcd.tmp"
+    other = home / "other.tmp"
+    for p in (old, new, other):
+        p.write_text("x")
+    past = time.time() - 7200
+    os.utime(old, (past, past))
+    os.utime(other, (past, past))
+    ad.mark_active(T0 + 0)  # first row of the day triggers the sweep
+    assert not old.exists() and new.exists() and other.exists()

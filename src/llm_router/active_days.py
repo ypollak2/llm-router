@@ -88,12 +88,39 @@ def _last_row(path: Path) -> dict | None:
     return None
 
 
-def _new_install_id(path: Path) -> str:
-    """The install id, created exactly once even when two processes start fresh together.
-    The id is written to a private temp file and hard-linked to ``active_days.id``: the link is
-    atomic and exclusive, so the file is never observed empty and the loser reads the winner's."""
-    idp = path.with_name("active_days.id")
-    fresh = secrets.token_hex(8)
+def _record(code: str, exc: BaseException) -> None:
+    from llm_router import failopen
+
+    failopen.record(code, exc)
+
+
+def _read_winner_id(idp: Path) -> str:
+    """The id another process wrote. An O_EXCL winner may not have written yet: retry briefly."""
+    for _ in range(20):
+        try:
+            got = idp.read_text(encoding="utf-8").strip()
+        except OSError:
+            got = ""
+        if got:
+            return got
+        time.sleep(0.005)
+    return ""
+
+
+def _create_excl(idp: Path, fresh: str) -> str:
+    """Fallback when hard links are unavailable: O_EXCL create of the id file."""
+    try:
+        fd = os.open(str(idp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return _read_winner_id(idp) or fresh
+    try:
+        os.write(fd, fresh.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return fresh
+
+
+def _link_id(path: Path, idp: Path, fresh: str) -> str:
     tmp = path.with_name(f"active_days.id.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -104,19 +131,43 @@ def _new_install_id(path: Path) -> str:
         try:
             os.link(str(tmp), str(idp))
         except FileExistsError:
-            try:
-                got = idp.read_text(encoding="utf-8").strip()
-            except OSError:
-                got = ""
-            return got if got else fresh
+            return _read_winner_id(idp) or fresh
         return fresh
     finally:
         try:
             os.unlink(str(tmp))
         except OSError as exc:
-            from llm_router import failopen
+            _record("P37-ACTIVE-DAY-TMP", exc)
 
-            failopen.record("P37-ACTIVE-DAY-TMP", exc)
+
+def _new_install_id(path: Path) -> str:
+    """The install id, created exactly once even when two processes start fresh together.
+    The id is written to a private temp file and hard-linked to ``active_days.id``: the link is
+    atomic and exclusive, so the file is never observed empty and the loser reads the winner's.
+    Where linking fails (FAT/exFAT/SMB, no ``os.link``) the failure is recorded and an O_EXCL
+    create is used instead; the row append always proceeds."""
+    idp = path.with_name("active_days.id")
+    fresh = secrets.token_hex(8)
+    try:
+        return _link_id(path, idp, fresh)
+    except (OSError, AttributeError) as exc:
+        _record("P37-ACTIVE-DAY-LINK", exc)
+    try:
+        return _create_excl(idp, fresh)
+    except OSError as exc:
+        _record("P37-ACTIVE-DAY-IDFILE", exc)
+        return fresh
+
+
+def _sweep_orphan_tmps(path: Path, now: float | None = None, max_age: float = 3600.0) -> None:
+    """Remove ``active_days.id.*.tmp`` files left by a process killed mid-create."""
+    cutoff = (time.time() if now is None else now) - max_age
+    for p in path.parent.glob("active_days.id.*.tmp"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+        except OSError as exc:
+            _record("P37-ACTIVE-DAY-SWEEP", exc)
 
 
 def _append(path: Path, row: dict) -> None:
@@ -127,9 +178,7 @@ def _append(path: Path, row: dict) -> None:
             try:
                 os.fchmod(fd, 0o600)
             except OSError as exc:
-                from llm_router import failopen
-
-                failopen.record("P37-ACTIVE-DAY-CHMOD", exc)
+                _record("P37-ACTIVE-DAY-CHMOD", exc)
         os.write(fd, (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"))
     finally:
         os.close(fd)
@@ -195,6 +244,7 @@ def mark_active(now: float | None = None) -> bool:
         if not isinstance(install_id, str) or not install_id:
             install_id = _new_install_id(path)
         _append(path, {"day": today, "install_id": install_id})
+        _sweep_orphan_tmps(path)
         # Trim past a full file (MAX_ROWS rows of _ROW_BYTES), or when a racing writer left
         # a same-day duplicate. Only reached once a day.
         if path.stat().st_size > MAX_ROWS * _ROW_BYTES or _has_dup_tail(path):
