@@ -438,9 +438,11 @@ def test_both_prints_full_line_then_fast_line(tmp_path):
     assert wait_for_cache(tmp_path), "the detached build never wrote the segment cache"
     out, _ = _both(tmp_path)
     lines = out.splitlines()
-    assert len(lines) == 2, out
+    # P35-2: the full layout is two rows now (the line, then the snapshot row), then the fast line.
+    assert len(lines) == 3, out
     assert not lines[0].startswith("llm-router · "), lines[0]
-    assert lines[1].startswith("llm-router · "), lines[1]
+    assert lines[1].startswith("router: "), lines[1]
+    assert lines[2].startswith("llm-router · "), lines[2]
     assert "segments pending" not in lines[0], lines[0]
     full, _ = _run(_env(tmp_path, "true", fast=False))
     assert lines[0] == full.splitlines()[0]

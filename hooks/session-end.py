@@ -2408,7 +2408,7 @@ def _compute_ledger_aggregates() -> dict:
         try:
             from llm_router import ledger_view as _lv
 
-            windows[key] = _lv.window_summary(name)
+            windows[key] = _lv.window_summary(name, judge=True)  # P3.1-7: the Stop reads the judge from this cache
             out[key] = windows[key].to_json()
         except Exception as _exc:  # noqa: BLE001 -- one window failing leaves it out of the cache
             _record_failopen("CHZ-FO-STOP-LEDGER-WINDOW", _exc)

@@ -25,7 +25,11 @@ values stripped of control characters (a value is data to print, never to run)::
     v=1  written=<epoch s>
     usage=none|fallback|ok  session_pct  weekly_pct  usage_stale=0|1  reset
     ctx_human  ctx_pct
-    money  money_n  money_win              (today's est. saving, its n and window)
+    money  money_n  money_win              (today's ESTIMATED saving "~$X est", its n and window)
+    money_m  money_m_n                     (today's MEASURED saving "$X measured" and its n; never summed
+                                           with the estimate, P35-2)
+    snap_line  snap_at                     (the five-field snapshot line and its data time; the script
+                                           prints it as a second row, "n/a" past 15 min)
     mix_local  mix_sub  mix_paid  mix_unc  mix_n  mix_win  ledger_as_of
                                            (this session's executed calls, from ONE
                                            ``ledger_view.window_summary``; D-218)
@@ -61,11 +65,11 @@ CACHE_TTL_S = 30
 STALE_MARK_S = 90
 #: Hard stop for a stuck refresh (SIGALRM): the lock is freed, the line keeps drawing.
 RUN_TIMEOUT_S = 30
-_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f]")   # C0, DEL and C1 (U+009B is CSI on some terminals)
 
 
 def _clean(value: object) -> str:
-    """One line, no control characters: a cache value can never carry an escape or a newline."""
+    """One line, no C0/C1 control characters: a cache value can never carry an escape or a newline."""
     return _CTRL.sub(" ", str(value)).strip()
 
 
@@ -279,7 +283,9 @@ def _ledger(state: str, scope: str, now: float, session: str = ""):
 
 
 def money_segment(state: str, now: float | None = None) -> dict[str, str]:
-    """Today's estimated saving with its n and window (``money``, ``money_n``, ``money_win``)."""
+    """Today's saving as TWO segments, never one sum (P35-2, D-220): the estimate (``money`` =
+    ``~$X est``, ``money_n``) and the measured part (``money_m`` = ``$X measured``, ``money_m_n``),
+    each printed only above the spend floor and each with its own n; ``money_win`` is the window."""
     now = time.time() if now is None else now
     if not os.path.isfile(os.path.join(state, "usage.db")):
         return {}
@@ -288,11 +294,18 @@ def money_segment(state: str, now: float | None = None) -> dict[str, str]:
         from llm_router.dashboard_data import SPEND_FLOOR_USD
 
         lw = _ledger(state, "today", now)
-        fig = None if lw is None else lw.figures()["saved"]
-        text = lv.show(fig, "~${:,.2f} est")
-        if text is None or fig.value < SPEND_FLOOR_USD:
+        if lw is None:
             return {}
-        return {"money": text, "money_n": str(fig.n), "money_win": fig.window}
+        figs = lw.figures()
+        out: dict[str, str] = {}
+        for key, fig, unit, suffix, n_key in (
+                ("money", figs["saved_estimated"], "estimate", " est", "money_n"),
+                ("money_m", figs["saved_measured"], "api", " measured", "money_m_n")):
+            text = lv.show(fig, unit=unit, quantity="usd")
+            if text is not None and fig.value >= SPEND_FLOOR_USD:
+                out[key], out[n_key] = text + suffix, str(fig.n)
+                out["money_win"] = fig.window
+        return out
     except Exception:  # noqa: BLE001 -- never break the line over a reporting figure
         return {}
 
@@ -322,6 +335,115 @@ def mix_segment(state: str, now: float | None = None, session: str = "") -> dict
     out["mix_win"] = "session" if lw.scope == "session_id" else "session~"   # ~ = by timestamp
     out["ledger_as_of"] = lw.as_of
     return out
+
+
+SNAP_HOST = "claude_code"
+#: A snapshot younger than this is reused by the next refresher run instead of recomputed.
+SNAP_REUSE_S = 10.0
+
+
+def snap_segment(state: str, session: str, now: float | None = None, *, refresh: bool = True,
+                 reuse_s: float = 0.0) -> dict[str, str]:
+    """``snap_line`` (the pre-rendered five-field line) and ``snap_at`` (its data time) for the shell.
+
+    The per-session snapshot has ONE writer, ``statusline_snapshot.refresh``; this process is already
+    the detached refresher of the default layout, so it calls it directly (no second refresher).
+    ``refresh=False`` only republishes the snapshot already on disk. Absent when there is no session
+    id, when ``state`` is not the router's own home (the snapshot reads that home), or on failure."""
+    from llm_router import ledger_view as lv
+    from llm_router import paths, statusline_snapshot as snap
+
+    now = time.time() if now is None else now
+    if os.path.realpath(state) != os.path.realpath(str(paths.llm_router_home())):
+        return {}
+    sid = (session if session not in ("", "default") else None) or lv.read_session_id(paths.llm_router_home())
+    if not sid:
+        return {}
+    data = snap.read(SNAP_HOST, sid)
+    if refresh and not (reuse_s and data and 0 <= now - data["written_at"] < reuse_s):
+        data = snap.refresh(host=SNAP_HOST, session_id=sid, now=now)
+    if not data:
+        return {}
+    return {"snap_line": data["line"], "snap_at": str(int(data["written_at"]))}
+
+
+def append_history(state: str, now: float) -> bool:
+    """One ``quota_history.jsonl`` row per 5-minute slot from this refresher too (rv-632): the fast tick
+    was its only writer, so in the default layout the history stayed empty and ``saved`` (whose rate is
+    the median pp per active hour of that history) could never print a value. Same function, same
+    slot lock and stamp as the tick (``statusline_tick.maybe_append_history``), so the two layouts never
+    write a slot twice. Only into the router's own home (the file quota_rate reads); a copy without the
+    package writes nothing. True when a row was written."""
+    try:
+        from llm_router import paths, statusline_tick as tick
+    except ImportError:
+        return False                              # a hooks copy without the package: the tick stays the writer
+    if os.path.realpath(state) != os.path.realpath(str(paths.llm_router_home())):
+        return False
+    try:
+        with open(os.path.join(state, "usage.json"), encoding="utf-8") as fh:
+            usage = json.load(fh)
+    except (OSError, ValueError):
+        usage = None                              # the row is written as source=stale, as the tick does
+    return tick.maybe_append_history(state, usage if isinstance(usage, dict) else None, now)
+
+
+#: The snapshot may take this long inside the refresher; past it the cache is written without it.
+SNAP_BUDGET_S = 10
+
+
+class SnapshotBudgetExceeded(BaseException):
+    """The snapshot ran past its budget. A BaseException on purpose (rv-632 must-fix 2): every snapshot
+    field runs under ``except Exception`` (one failing field prints n/a), and a TimeoutError there was
+    swallowed, the snapshot went on, and no alarm was left armed for whatever hung next."""
+
+
+def _hard_exit(*_):
+    os._exit(1)
+
+
+def _arm_hard_stop(started: float) -> None:
+    """The refresher's hard stop: handler ``os._exit(1)``, timer = what is left of :data:`RUN_TIMEOUT_S`
+    counted from ``started`` (at or past it, it fires at once)."""
+    signal.signal(signal.SIGALRM, _hard_exit)
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, RUN_TIMEOUT_S - (time.time() - started)))
+
+
+def _within(seconds: float, fn, started: float):
+    """``fn()`` under a SIGALRM budget of ``min(seconds, what is left of the hard stop)``: past it
+    :class:`SnapshotBudgetExceeded` unwinds the whole snapshot (no ``except Exception`` stops it).
+
+    The previous handler (the refresher's hard stop, ``os._exit``) is restored and re-armed with the
+    time the hard stop has left on every way out, so the run as a whole never goes past
+    :data:`RUN_TIMEOUT_S`. SIGALRM is blocked while the handler and timer are swapped (rv-632 r2): a
+    signal that lands mid-swap waits instead of finding the wrong handler or skipping the restore, and
+    a budget signal still pending once ``fn`` has returned is discarded, not handed to ``os._exit``.
+    The mask is per thread, so this holds in a single-threaded process like the refresher; elsewhere
+    the swap is as before. The one window left (the budget firing after ``fn`` returns, before the
+    block) raises out of here with no timer armed; :func:`main` re-arms the hard stop on that path."""
+    if not hasattr(signal, "SIGALRM"):
+        return fn()
+    alrm = {signal.SIGALRM}
+    left = RUN_TIMEOUT_S - (time.time() - started)
+
+    def _timeout(*_):
+        raise SnapshotBudgetExceeded(f"statusline snapshot over its {min(seconds, left):.1f} s budget")
+
+    signal.pthread_sigmask(signal.SIG_BLOCK, alrm)
+    hard = signal.signal(signal.SIGALRM, _timeout)
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, min(seconds, left)))
+    try:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, alrm)   # a signal that came mid-swap fires here
+        return fn()
+    finally:
+        signal.pthread_sigmask(signal.SIG_BLOCK, alrm)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        if signal.SIGALRM in signal.sigpending():
+            signal.sigwait(alrm)                            # the budget's own signal: fn is done, drop it
+        signal.signal(signal.SIGALRM, hard)
+        # what remains of the hard stop; at or past it, fire the restored handler at once
+        signal.setitimer(signal.ITIMER_REAL, max(0.001, RUN_TIMEOUT_S - (time.time() - started)))
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, alrm)
 
 
 def proxy_segment(state: str) -> dict[str, str]:
@@ -505,12 +627,25 @@ def main(argv: list[str] | None = None) -> int:
         pass
     except OSError:
         return 0
-    if hasattr(signal, "SIGALRM"):
-        signal.signal(signal.SIGALRM, lambda *_: os._exit(1))
-        signal.alarm(RUN_TIMEOUT_S)
     now = time.time()
+    if hasattr(signal, "SIGALRM"):
+        _arm_hard_stop(now)
     maybe_refresh_usage(state, now, dict(os.environ))
-    write_cache(state, session, compute(state, ns.transcript, ns.model, dict(os.environ), now, session))
+    seg = compute(state, ns.transcript, ns.model, dict(os.environ), now, session)
+    append_history(state, now)
+    try:
+        seg.update({k: _clean(v) for k, v in _within(SNAP_BUDGET_S, lambda: snap_segment(
+            state, session, now, reuse_s=SNAP_REUSE_S), started=now).items()})
+    except (Exception, SnapshotBudgetExceeded) as exc:  # noqa: BLE001 -- slow or broken: no row, line goes out
+        if hasattr(signal, "SIGALRM"):
+            _arm_hard_stop(now)                   # the budget may have fired mid-restore: hard stop back on
+        try:
+            from llm_router import failopen
+
+            failopen.record("CHZ-FO-STATUSLINE-SNAPSHOT", exc)
+        except ImportError:
+            pass  # a copy without the package cannot account for it; the row is simply absent
+    write_cache(state, session, seg)
     _prune(state)
     return 0
 

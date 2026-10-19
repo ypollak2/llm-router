@@ -96,6 +96,7 @@ class TestEventSequencing:
             "complexity",
             "candidate_count",
             "chain_preview",
+            "eligibility_skipped",  # F108
             "buffered_mode",
         }
         assert route_started_keys == expected
