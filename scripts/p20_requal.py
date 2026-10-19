@@ -9,7 +9,9 @@ import hashlib
 import json
 import math
 import os
+import pwd
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -549,12 +551,85 @@ def claude_argv(model_id: str, run_dir: Path, tools: str | None) -> list[str]:
     return args + (["--tools", tools] if tools is not None else [])
 
 
-def claude_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env.pop("ANTHROPIC_BASE_URL", None)
-    env.pop("ANTHROPIC_API_KEY", None)
-    env["LLM_ROUTER_SESSION_KIND"] = "research"
+# F104 (incidents F86 2026-10-18, F86-2 2026-10-19): agent subprocesses ran with the owner's
+# real HOME and twice deleted the live llm-router install. Agents now get a per-task scratch
+# HOME and an allow-listed environment; nothing else from the caller's environment is passed.
+AGENT_PASS_ENV = ("PATH", "LANG", "LC_ALL", "USER", "LOGNAME")  # USER: macOS Keychain account
+CLAUDE_AUTH_ENV = ("CLAUDE_CODE_OAUTH_TOKEN",)  # subscription token; forwarded, never logged
+CLAUDE_CREDENTIALS_ENV = "P20_CLAUDE_CREDENTIALS_FILE"  # optional file copied into scratch HOME
+AGENT_ENV_ALLOWED = frozenset(
+    AGENT_PASS_ENV + CLAUDE_AUTH_ENV + ("HOME", "LLM_ROUTER_SESSION_KIND")
+)
+
+
+def real_home() -> Path:
+    """The account's home from the user database, which an overridden $HOME cannot move."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+
+
+def scratch_home(path: Path) -> Path:
+    """A fresh private directory to serve as an agent's HOME."""
+    if path.resolve() == real_home():
+        raise Refuse("refusing: agent scratch HOME is the real HOME")
+    if path.exists():
+        shutil.rmtree(path)
+    private_dir(path)
+    return path
+
+
+def assert_agent_env(env: dict[str, str]) -> None:
+    """Refuse to launch an agent whose environment could reach the owner's install."""
+    home = env.get("HOME")
+    if not home:
+        raise Refuse("refusing: agent environment has no HOME")
+    resolved = Path(home).resolve()
+    caller = os.environ.get("HOME")
+    if resolved == real_home() or (caller and resolved == Path(caller).resolve()):
+        raise Refuse("refusing: agent HOME is the real HOME")
+    if set(env) - AGENT_ENV_ALLOWED:
+        raise Refuse("refusing: unexpected key in agent environment")
+
+
+def agent_env(home: Path, *, claude: bool = False) -> dict[str, str]:
+    """Minimal agent environment: scratch HOME, PATH/LANG, and (Claude only) auth material.
+
+    Auth is either CLAUDE_CODE_OAUTH_TOKEN passed through, or the file named by
+    P20_CLAUDE_CREDENTIALS_FILE copied to <home>/.claude/.credentials.json (0600). Values are
+    never printed or logged; failures name no path.
+    """
+    env = {k: os.environ[k] for k in AGENT_PASS_ENV if k in os.environ}
+    env["HOME"] = str(home)
+    if claude:
+        env["LLM_ROUTER_SESSION_KIND"] = "research"
+        env.update({k: os.environ[k] for k in CLAUDE_AUTH_ENV if os.environ.get(k)})
+        source = os.environ.get(CLAUDE_CREDENTIALS_ENV)
+        if source:
+            target = home / ".claude" / ".credentials.json"
+            try:
+                private_dir(target.parent)
+                shutil.copyfile(source, target)
+                target.chmod(0o600)
+            except OSError as exc:
+                raise Refuse("refusing: Claude credentials file unusable") from exc
+    assert_agent_env(env)
     return env
+
+
+@contextlib.contextmanager
+def scrubbed_environ(env: dict[str, str]):
+    """Run code that builds a child env from os.environ (the Pi helper) with `env` instead."""
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def claude_env(home: Path) -> dict[str, str]:
+    return agent_env(home, claude=True)
 
 
 class ClaudeCLI:
@@ -562,7 +637,7 @@ class ClaudeCLI:
         self.run_dir = run_dir
 
     def __call__(self, model_id: str, prompt: str, *, timeout: int) -> dict:
-        env = claude_env()
+        env = claude_env(scratch_home(self.run_dir / "claude_home"))
         if "ANTHROPIC_BASE_URL" in env or "ANTHROPIC_API_KEY" in env:
             raise Refuse("refusing: Claude environment")
         cwd = self.run_dir / "claude_cwd"

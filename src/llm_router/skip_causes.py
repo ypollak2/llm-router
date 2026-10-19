@@ -32,8 +32,9 @@ AGENT_POLICY = "agent_policy"        # agent routing policy (provider preference
 QUALITY = "quality"                  # quality circuit-breaker skip
 LOCAL_TIMEOUT = "local_timeout"      # local model timed out, answer already in hand
 FLOOR = "floor"                      # F26: chain was empty after all filters; served from the last-resort floor (``tier``)
+FAILED_ELIGIBILITY = "failed_eligibility"  # F106: local model measurably failed this lane (``lane``, ``k``, ``n``, ``source``)
 
-BUILD_REASONS = frozenset({UNAVAILABLE, BLOCKED, POLICY, CAPABILITY_FILTERED, FLOOR})
+BUILD_REASONS = frozenset({UNAVAILABLE, BLOCKED, POLICY, CAPABILITY_FILTERED, FLOOR, FAILED_ELIGIBILITY})
 
 # Causes the report splits local share into (see routing_report.executed_routes).
 CAUSE_BENCH = "bench"
