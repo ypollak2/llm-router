@@ -15,15 +15,13 @@ This module must remain cheap to import from hooks.
 
 from __future__ import annotations
 
-import json
-import os
+import os  # noqa: F401 (tests patch prefixes.os.open)
 from pathlib import Path
 import re
-import tempfile
 import time
 from dataclasses import dataclass
 
-from llm_router import failopen, paths, prompt_key
+from llm_router import examples, failopen, paths, prompt_key
 
 PREFIX_NAMES = ("local", "claude", "opus", "sonnet", "haiku", "codex")
 CLAUDE_TIER_PREFIXES = ("opus", "sonnet", "haiku")
@@ -153,21 +151,8 @@ def record_example(stripped_text, forced, decided, door, *, now=None, path=None)
             "door": door,
             "ts": time.time() if now is None else now,
         }
-        payload = (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8")
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if target.exists() and target.stat().st_size > _MAX_BYTES:
-            lines = target.read_bytes().splitlines(keepends=True)
-            fd, temporary = tempfile.mkstemp(prefix=".examples-", dir=target.parent)
-            try:
-                with os.fdopen(fd, "wb") as stream:
-                    stream.writelines(lines[len(lines) // 2:])
-                os.replace(temporary, target)
-            finally:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "ab") as stream:
-            stream.write(payload)
+        row.update(examples.embedding_fields(stripped_text))
+        examples.append_row(row, path=target, max_bytes=_MAX_BYTES)
         return True
     except Exception as exc:  # noqa: BLE001 -- telemetry is fail-open
         failopen.record("LR-FO-PREFIX-EXAMPLE", exc)

@@ -911,6 +911,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "soak",
         "gain",
         "retrospect",
+        "learn",
         "snapshot",
         "stats",
         "savings-report",
@@ -931,7 +932,7 @@ _HELP_FLAGS = ("-h", "--help")
 # position (argparse, or an explicit check over all args).
 _OWN_HELP_ANYWHERE = frozenset({
     "audit", "calibrate", "cp", "dev-refresh", "discover", "gc", "install", "inventory", "invoice",
-    "judge", "kpi", "last", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
+    "judge", "kpi", "last", "learn", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
     "proxy",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
     "statusline", "team-sync", "test-delta", "verify", "welcome", "why",
@@ -1331,6 +1332,9 @@ def main() -> None:
             sys.exit(2)
         print(show_gain(_period))
         sys.exit(0)
+    elif args and args[0] == "learn":
+        from llm_router.commands.learn import main as _learn_main
+        sys.exit(_learn_main(args[1:]))
     elif args and args[0] == "retrospect":
         from llm_router.commands.retrospect import main as _retrospect_main
         sys.exit(_retrospect_main(args[1:]))  # CFG-010: propagate the exit code

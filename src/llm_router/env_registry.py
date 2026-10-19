@@ -115,6 +115,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_CLAUDE_TIMEOUT": ("llm_router", "claude_agent.py", 1),
     "LLM_ROUTER_CODEX_BASELINE": ("llm_router", "cost.py", 1),
     "LLM_ROUTER_CODEX_MODELS": ("llm_router", "codex_agent.py", 1),
+    # PLAN v16 P3.6: held-out replay set for the learning update gate; min usable rows; conservative-mode switch.
+    "LLM_ROUTER_LEARNING_REPLAY": ("llm_router", "classifier_learning.py", 1),
+    "LLM_ROUTER_LEARNING_MIN_REPLAY": ("llm_router", "classifier_learning.py", 1),
+    "LLM_ROUTER_CLASSIFIER_CONSERVATIVE": ("llm_router", "classifier_health.py", 1),
     "LLM_ROUTER_COMPLEXITY_KNN": ("llm_router", "complexity_knn.py", 1),
     "LLM_ROUTER_COMPLEXITY_KNN_ARTIFACT": ("llm_router", "complexity_knn.py", 1),
     "LLM_ROUTER_COMPLEXITY_KNN_THRESHOLD": ("llm_router", "complexity_knn.py", 1),

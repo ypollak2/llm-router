@@ -258,6 +258,10 @@ class PremiumStatusCommand:
                 Panel(_breaker, border_style=PALETTE.warning, expand=False),
                 Text(""),
             ]
+        # P3.6-b: classifier agreement with n, the PSI drift line and the conservative-mode notice.
+        _health = self.render_classifier_health()
+        if str(_health):
+            panels += [Panel(_health, border_style=PALETTE.muted_border, expand=False), Text("")]
         # Providers benched until a reported reset time — same only-when-present rule.
         _resets = self.render_provider_resets()
         if str(_resets):
@@ -336,6 +340,22 @@ class PremiumStatusCommand:
         except Exception:  # noqa: BLE001 — status must still render
             return Text()
         return out
+
+    def render_classifier_health(self) -> Text:
+        """P3.6-b: 7-day shadow agreement with n, the PSI drift line, and the one-line
+        conservative-mode notice while it is on. Checking here is what moves the mode."""
+        try:
+            from llm_router import classifier_health
+
+            update = classifier_health.evaluate_and_update()
+            out = Text("🎯  Classifier\n", style=f"bold {PALETTE.accent}")
+            for line in classifier_health.lines(update.health):
+                out.append(f"  {line}\n", style=PALETTE.text_dim)
+            if update.notice:
+                out.append(f"  {update.notice}\n", style=PALETTE.warning)
+            return out
+        except Exception:  # noqa: BLE001 — status must still render
+            return Text()
 
     def render_provider_resets(self) -> Text:
         """Providers skipped until a reset time they reported. Empty ``Text``

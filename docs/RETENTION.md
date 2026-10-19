@@ -26,3 +26,22 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Reads | `llm-router kpi --retention` and the last line of `llm-router kpi --quota-burn`: install day, active days, day 14, and "active on day 14" as yes / no / not yet (n/a before the first marker). Strict reading: "yes" needs a row dated exactly day 14; "not yet" holds while today is on or before day 14; active on day 15 but not day 14 is "no". The population rate (S7 70% across users) is LATER (16.1). |
 | Failure | A failed write is recorded with `failopen` code `P37-ACTIVE-DAY`; the session start is never blocked. |
 | Delete | Removing the file resets the install day and id. |
+
+## `examples.jsonl` (P3.6-a, R-CLS-5, R-RTE-7; B-02 applies)
+
+| Item | Value |
+|---|---|
+| Rows | `text_sha` (16 hex chars of the normalised prompt, `prompt_key`), `source` (`prefix`, `redo`, `rule`), `label` (0 or 1: does the prompt need a frontier model), `ts`. Forced-prefix rows keep their original `forced`, `decided`, `door` fields. **Prompt text is never stored.** |
+| Embedding | `vec` (L2-normalised float32, base64) and `model`, only when `LLM_ROUTER_COMPLEXITY_KNN` is on and a kNN artifact exists. That is the same data the kNN artifact (`complexity_knn.json`) already holds for its own rows, so the store holds no more about a prompt than the index does. A redo press has no prompt text any more (only the proxy ledger's `text_sha` for the turn), so its row has no `vec` and cannot join the index. |
+| Writers | `prefixes.record_example` (hook, proxy, MCP: a forced `local:`/`claude:`/... prefix), `receipt_band` signal `redone` through `examples.record_redo` (a human `r` press; a `k` press is not recorded, it is not a test), `user_rules.add_rules` for a `local_only` ("always local") rule (the rule's own text). Files 0600, directory 0700. |
+| Kept | Rows newer than 180 days (`examples.MAX_AGE_S`, enforced by every reader) and at most about 2 MiB (`examples.MAX_BYTES`): past that the oldest half is dropped on the next append. |
+| Reader | `llm-router learn` (`classifier_learning.apply`). Accepted examples are copied into `complexity_knn.json` (embeddings and 0/1 labels only; the applied `text_sha` list, at most 5,000, sits in its provenance so a row is applied once). Deleting `examples.jsonl` does not remove what an accepted update already put in the artifact; `complexity_knn.json.prev` keeps the artifact from before the last accepted update. |
+| Failure | A failed write is recorded with `failopen` code `LR-FO-EXAMPLE` (or `LR-FO-PREFIX-EXAMPLE` for a prefix row); routing is never blocked. |
+
+## `classifier_learning.jsonl` and `classifier_conservative.json` (P3.6)
+
+| Item | Value |
+|---|---|
+| `classifier_learning.jsonl` | One row per `llm-router learn` run: `ts`, `status`, `reason`, number of examples, and the replay `n`, exact-match and under-route of the current and candidate index. No text, no hashes. Two generations of 256 KiB (`capped_log`). |
+| `classifier_conservative.json` | The conservative-mode switch: `active`, `checked_at`, `since`, `drop_pts`, window sizes. Written by the status and `kpi` checks; ignored once `checked_at` is 7 days old. |
+| Replay set | Named by `LLM_ROUTER_LEARNING_REPLAY`; owned by the person, never copied or logged by the router. |

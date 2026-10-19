@@ -290,7 +290,12 @@ def add_rules(parsed: list[dict], text: str, path: Path | None = None) -> tuple[
             added.append(stored)
         return out
 
-    return mutate_rules(change, path), added
+    stored = mutate_rules(change, path)
+    if any(r.get("kind") == "local_only" for r in added):
+        from llm_router import examples
+
+        examples.record(text, "rule", 0.0)  # P3.6: an "always local" rule is a label-0 example
+    return stored, added
 
 
 def remove_rule(rule_id: str, path: Path | None = None) -> list[dict]:

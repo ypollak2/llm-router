@@ -1061,8 +1061,10 @@ class ClaudeTierPolicy:
         with phases("classify"):
             choice = await classify(tier_text(body))
         task, cx = choice.get("task_type"), choice.get("complexity")
+        from llm_router import classifier_health
 
-        target = self.tier_for(task, cx) or req_tier
+        # P3.6-b: conservative mode looks the tier up one level higher; the ledger keeps the measured class
+        target = self.tier_for(task, classifier_health.bias_complexity(cx)) or req_tier
         proposed = target.name  # pre-override: the policy table's own answer
         reason = REASON_POLICY
         if not self.allow_upgrade and self.rank[target.name] > self.rank[req_tier.name]:

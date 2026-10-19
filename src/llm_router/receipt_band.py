@@ -400,6 +400,10 @@ def cmd_mod(args: list[str]) -> int:
 
         try:
             user_signal.record(parsed.key, parsed.signal, parsed.surface)
+            if parsed.signal == user_signal.SIGNAL_REDONE:
+                from llm_router import examples
+
+                examples.record_redo(parsed.key)  # P3.6: a human-validated redo is a label-1 example
         except (ValueError, OSError) as exc:
             print(f"llm-router mod signal: not recorded: {exc}", file=sys.stderr)
             return 1
