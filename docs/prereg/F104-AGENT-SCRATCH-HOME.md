@@ -110,6 +110,71 @@ isolation (`sandbox-exec` or a separate OS user) is not part of F104 or F110.
   agent committed. On a hit the work and scratch-HOME copies are deleted (only inside the run
   dir the harness created), but the run dir (ledger, stored output) may still hold the token:
   **purge that run dir and rotate the token (`claude setup-token`)**; the refusal says so.
+  F117: an unreadable (chmod 000) directory in a scanned tree refuses (`unreadable directory
+  in <kind>`, the walk no longer skips it), and the purge first gives each real directory
+  owner rwx so it can remove it (directory fds with O_NOFOLLOW and chmod by fd, never a path
+  string, so a symlink swapped in by a live agent cannot redirect the chmod). Every git run on
+  an agent-touched repo goes through `run_git(..., sandbox=True)`: stdout is bytes (a non-UTF-8
+  diff is scanned, not a `UnicodeDecodeError`), capped at 128 MiB and 120 s, and a broken
+  `.git`, timeout, cap or exit code is a `Refuse` that names the git subcommand only; any
+  other scan error also purges before refusing. **Agent-written git config never runs**: git
+  has no switch to ignore a repo's config, so the sandbox mode never reads it. It builds a
+  harness-written git dir (own config, copy of HEAD and index with mtime 1 so git compares
+  content, the agent's objects as alternates and its refs by symlink, data only), runs with
+  `GIT_DIR` there, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_NO_REPLACE_OBJECTS=1`, `HOME` a temp dir, `--no-pager --no-textconv --no-ext-diff
+  --ignore-submodules=all`, and `-c` overrides for core.fsmonitor, core.hooksPath,
+  diff.external, core.sshCommand, core.gitProxy, core.pager, core.editor, core.askPass,
+  core.alternateRefsCommand, core.attributesFile, gpg.*.program, log.showSignature,
+  credential.helper, protocol.ext.allow and more (`GIT_HARDEN`). The few non-sandbox calls
+  (`init`/`add`/`commit`/`rev-parse` on a repo the harness just made, and `worktree remove`,
+  run as `git -C <trusted clone> worktree remove --force <work>` so the agent-rewritable
+  `work/.git` pointer is never followed) use the overrides only: a `filter.<name>.clean` driver
+  or `diff.<name>.command` named by an in-tree `.gitattributes` cannot be listed away, so
+  `diff`/`status` are never run that way.
+  **Git history scan** (Claude arm): the harness records the object ids of the repo's object
+  store before the agent runs (`git cat-file --batch-all-objects`) and after it scans the raw
+  content (`git cat-file --batch`) of every id that is new, plus `diff HEAD`. That covers
+  merges, tags, blobs on no ref, unreachable commits and `refs/replace` (R1-R4), which
+  `log -p` hid, and only what the agent added counts against the 128 MiB cap, so the noncloud
+  stratum's large shared mirror does not trip it. **Agent processes** (round 2, fail closed): the Claude agent runs in its own session. Every
+  0.25 s the harness reads one `ps` snapshot and records `(pid, start time)` of each process
+  below the agent (a pid is recorded only through a parent link to a process already proven to be
+  the agent's). When the agent returns (exit or timeout) the harness calls `killpg` on the agent's
+  group **only while the leader is still unreaped** (it never waits on it before the kill, and
+  skips the signal if the leader is not listed with pgid == pid), then signals each recorded pid
+  **only if its start time, re-read now, still equals the recorded one**. A pid whose identity
+  cannot be re-verified is never signalled, and nothing is matched by environment or argv text
+  (the earlier env-tag match is gone: it could hit unrelated processes). The pipes are then
+  drained for at most 30 s and closed. Finally no other process may hold the work dir or the
+  scratch HOME as cwd or open file (`/proc` on Linux, `lsof -Fpn` elsewhere, 60 s limit): if one
+  does, or the check cannot run, the run raises `AgentSurvived` (a `Refuse`), the live tree is
+  **not scanned**, and the owner purges the run dir and rotates the token. Residual, stated
+  plainly: a process that was never seen below the agent (it double-forked, `setsid`'d and the
+  agent exited within one 0.25 s poll, whatever its environment or binary) is not killed; the
+  harness refuses only if it holds the work dir or scratch HOME. A survivor that holds neither
+  (cwd elsewhere, no open file there) is not detected, and a survivor can still write the dirs by
+  path later or send the token over the network. The start-time check has the 1 s resolution of
+  `ps lstart`, and there is a millisecond window between the snapshot and the signal. The Pi
+  arms are not run in a process group (their runner is the benchmark's `lib_pi`), so a Pi-arm
+  grandchild can survive too (the Pi arms never hold the token). Other limits: the scan walk
+  skips an entry that vanished between listing and lstat; objects of an alternates chain the
+  agent added to its own object dir count as new and are scanned or hit the cap;
+  core.ignorecase/filemode of the agent's repo is not mirrored in the sandbox config. **Git
+  storage git cannot enumerate** (a stray file in `objects/`, a pack without its `.idx`) is not
+  scanned, and a token compressed (zlib) inside any such file or pack is not found by the
+  literal-value scan anyway; the work/scratch file walk does not reach the shared object dir
+  (it can be the multi-GB noncloud mirror). Memory: before an object is read its declared type
+  and size come from `git cat-file --batch-check`; an agent-added object over 64 MiB is refused
+  (kind only) so a tiny zlib bomb typed `commit` is never inflated, and the reading git child
+  runs with `RLIMIT_AS` 4 GiB where the OS enforces it (macOS does not).
+  The purge is iterative (one directory fd at a time, `..` checked by device and inode), so a
+  directory chain of any depth is removed and a purge that cannot finish is reported in the
+  refusal text. `pythonw` is no longer matched by the interpreter probe (F117 spec: it is the
+  windowed launcher, not an interpreter the agent runs headless); on a macOS framework install a
+  `pythonw` that can import llm_router would therefore not be probed. Git and scan failures
+  (broken `.git`, timeout, cap) now abort the run with a `Refuse` instead of a `runner_error`
+  row, for every arm including Pi (via `empty_patch`).
   The opt-in smoke `--claude-call` also scans its scratch HOME and output (PASS/FAIL), to catch
   Claude Code persisting the auth value there, which would make every Claude-arm call refuse
   (not run by F115). The Pi arms and the grader never receive the token. Residual: this

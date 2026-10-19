@@ -1725,7 +1725,7 @@ def test_import_guard_refuses_on_signal_oserror_and_timeout(tmp_path, monkeypatc
 def test_agent_pythons_finds_versioned_and_pypy_interpreters(tmp_path):
     d = tmp_path / "d"
     for name in ("python3.13", "pypy3", "pypy", "python", "python3-config", "pythonw.txt",
-                 "python3.13t", "python3.12d", "python3m"):
+                 "pythonw", "pythonista", "python3x", "pypyx", "python3.13t", "python3.12d", "python3m"):
         python_stub(d, name, importable=False)
     found = {Path(p).name for p in h.agent_pythons(str(d))}
     assert found == {"python3.13", "pypy3", "pypy", "python", "python3.13t", "python3.12d",
@@ -1856,3 +1856,287 @@ def test_grader_python_is_cached_per_path(tmp_path, monkeypatch):
     monkeypatch.setattr(h.subprocess, "run", lambda *a, **k: pytest.fail("re-probed"))
     assert h.grader_python(env) == first
     h._GRADER_PYTHON.pop(env["PATH"], None)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores chmod 000")
+def test_scan_for_token_refuses_an_unreadable_directory(tmp_path):
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    root = tmp_path / "tree"
+    hidden = root / "a" / "hidden"
+    hidden.mkdir(parents=True)
+    (hidden / "t.txt").write_text(token)
+    hidden.chmod(0)
+    try:
+        with pytest.raises(h.Refuse, match="unreadable directory in work files") as info:
+            h.scan_for_token(token, "work files", root=root)
+        assert token not in str(info.value) and str(tmp_path) not in str(info.value)
+    finally:
+        hidden.chmod(0o700)
+
+
+def _repo(path):
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "f.txt").write_text("one\n")
+    h.run_git(path, "init", "-q")
+    h.run_git(path, "add", ".")
+    h.run_git(path, "-c", "user.name=T", "-c", "user.email=t@l", "-c", "commit.gpgsign=false",
+              "commit", "-qm", "base")
+    return path
+
+
+def test_run_git_non_utf8_output_is_bytes_not_an_exception(tmp_path):
+    repo = _repo(tmp_path / "r")
+    (repo / "f.txt").write_bytes(b"caf\xe9 \xff\xfe\n")
+    out = h.run_git(repo, "diff", "HEAD", sandbox=True)
+    assert b"caf\xe9" in out
+
+
+def test_run_git_broken_repo_and_missing_repo_refuse(tmp_path):
+    repo = _repo(tmp_path / "r")
+    (repo / ".git" / "HEAD").write_text("garbage\n")
+    with pytest.raises(h.Refuse, match="refusing"):
+        h.run_git(repo, "diff", "HEAD", sandbox=True)
+    shutil.rmtree(repo / ".git" / "objects")
+    with pytest.raises(h.Refuse, match="refusing"):
+        h.run_git(repo, "log", "-p", "--all", sandbox=True)
+    with pytest.raises(h.Refuse, match="no git repository"):
+        h.run_git(tmp_path, "diff", "HEAD", sandbox=True)
+
+
+def test_run_git_caps_output_and_time(tmp_path, monkeypatch):
+    repo = _repo(tmp_path / "r")
+    monkeypatch.setattr(h, "GIT_OUTPUT_CAP", 10)
+    with pytest.raises(h.Refuse, match="git log output over the size cap"):
+        h.run_git(repo, "log", "-p", "--all", sandbox=True)
+    monkeypatch.setattr(h, "GIT_OUTPUT_CAP", 1 << 20)
+    monkeypatch.setattr(h, "GIT_SECONDS", -1.0)
+    with pytest.raises(h.Refuse, match="timed out"):
+        h.run_git(repo, "log", "-p", "--all", sandbox=True)
+
+
+def test_run_git_ignores_malicious_repo_config(tmp_path):
+    """F117: an agent-written .git/config must not run anything (fsmonitor, textconv, external
+    diff, filters, hooks, pager, ssh, includes). The marker file is never created."""
+    repo = _repo(tmp_path / "r")
+    marker = tmp_path / "PWNED"
+    evil = tmp_path / "evil.sh"
+    evil.write_text(f"#!/bin/sh\necho x >> {marker}\ncat \"$@\" 2>/dev/null\n")
+    evil.chmod(0o755)
+    inc = tmp_path / "inc.cfg"
+    inc.write_text(f"[core]\n\tfsmonitor = {evil}\n")
+    (repo / ".gitattributes").write_text("*.txt diff=x filter=x\n")
+    hook = repo / ".git" / "hooks" / "post-index-change"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text(f"#!/bin/sh\necho x >> {marker}\n")
+    hook.chmod(0o755)
+    with (repo / ".git" / "config").open("a") as cfg:
+        cfg.write(
+            f"[core]\n\tfsmonitor = {evil}\n\thooksPath = {hook.parent}\n"
+            f"\tsshCommand = {evil}\n\tpager = {evil}\n\teditor = {evil}\n"
+            f"[diff]\n\texternal = {evil}\n[diff \"x\"]\n\ttextconv = {evil}\n"
+            f"\tcommand = {evil}\n[filter \"x\"]\n\tclean = {evil}\n\tsmudge = {evil}\n"
+            f"\tprocess = {evil}\n[gpg]\n\tprogram = {evil}\n[log]\n\tshowSignature = true\n"
+            f"[include]\n\tpath = {inc}\n"
+        )
+    (repo / "f.txt").write_text("two\n")
+    (repo / "new.txt").write_text("new\n")
+    for args in (("diff", "HEAD"), ("diff", "--name-only", "HEAD"),
+                 ("log", "-p", "--all"), ("ls-files", "--others", "--exclude-standard")):
+        h.run_git(repo, *args, sandbox=True)
+        assert not marker.exists(), args
+    # the trusted path (agent config IS read; core keys overridden, but a `filter=` attribute
+    # cannot be, so it is for harness-made repos and `worktree remove` only, never diff/status)
+    wt = tmp_path / "wt"
+    h.run_git(repo, "worktree", "add", "-q", "-b", "b3", str(wt))
+    h.run_git(wt, "worktree", "remove", "--force", str(wt))
+    assert not marker.exists()
+    # control: with no hardening the same config does run the program, so the test can fail
+    _REAL_RUN(["git", "-C", str(repo), "-c", "core.pager=cat", "status"],
+              capture_output=True, env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
+    assert marker.exists(), "control: unhardened git must trip the planted config"
+
+
+def test_run_git_sandbox_sees_linked_worktree(tmp_path):
+    repo = _repo(tmp_path / "r")
+    wt = tmp_path / "wt"
+    h.run_git(repo, "worktree", "add", "-q", "-b", "b2", str(wt))
+    (wt / "f.txt").write_text("changed\n")
+    assert b"changed" in h.run_git(wt, "diff", "HEAD", sandbox=True)
+
+
+def test_scan_for_token_vanished_entry_is_skipped_other_errors_refuse(tmp_path, monkeypatch):
+    root = tmp_path / "tree"
+    root.mkdir()
+    (root / "gone.txt").write_text("x")
+    (root / "ok.txt").write_text("y")
+    real_lstat = os.lstat
+
+    def lstat_with(exc):
+        def fake(path, *a, **k):
+            if str(path).endswith("gone.txt"):
+                raise exc
+            return real_lstat(path, *a, **k)
+        return fake
+
+    monkeypatch.setattr(h.os, "lstat", lstat_with(FileNotFoundError()))
+    h.scan_for_token("TOKEN-abcdef0123456789", "work files", root=root)
+    monkeypatch.setattr(h.os, "lstat", lstat_with(PermissionError()))
+    with pytest.raises(h.Refuse, match="unreadable entry in work files"):
+        h.scan_for_token("TOKEN-abcdef0123456789", "work files", root=root)
+
+
+# ---- F117 repair 1: scan only what the agent added; history-scrub bypasses R1-R4 ----------
+
+_TOKEN = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+_ID = ("-c", "user.name=T", "-c", "user.email=t@l", "-c", "commit.gpgsign=false")
+
+
+def _commit(repo, msg="c"):
+    h.run_git(repo, "add", "-A")
+    h.run_git(repo, *_ID, "commit", "-qm", msg)
+    return h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+
+
+def test_scan_new_objects_cap_counts_only_agent_additions(tmp_path, monkeypatch):
+    """Blocker: a shared mirror's history can exceed the cap; only agent-added content counts."""
+    mirror = _repo(tmp_path / "mirror")
+    for i in range(6):  # base history: ~600 KB of incompressible content
+        (mirror / f"big{i}.bin").write_bytes(os.urandom(100_000))
+        _commit(mirror, f"base{i}")
+    wt = tmp_path / "wt"
+    h.run_git(mirror, "worktree", "add", "-q", "--detach", str(wt))  # noncloud shape
+    monkeypatch.setattr(h, "GIT_OUTPUT_CAP", 64_000)
+    baseline = h.git_object_ids(wt)
+    assert len(baseline) > 6
+    (wt / "fix.py").write_text("value = 1\n")
+    h.run_git(wt, "add", "-A")
+    h.run_git(wt, *_ID, "commit", "-qm", "agent")
+    h.scan_new_git_objects(_TOKEN, wt, baseline)  # small addition: passes under the small cap
+    # control: without a baseline the whole base history is scanned and hits the cap
+    with pytest.raises(h.Refuse, match="output over the size cap"):
+        h.scan_new_git_objects(_TOKEN, wt, None)
+    # and a big agent addition still trips the cap
+    (wt / "huge.bin").write_bytes(os.urandom(200_000))
+    h.run_git(wt, "add", "-A")
+    h.run_git(wt, *_ID, "commit", "-qm", "huge")
+    with pytest.raises(h.Refuse, match="output over the size cap"):
+        h.scan_new_git_objects(_TOKEN, wt, baseline)
+
+
+def test_scan_refuses_an_oversized_commit_object_before_reading_it(tmp_path, monkeypatch):
+    """Round 2: a tiny zlib bomb typed `commit` made git inflate it whole in memory. The declared
+    size is checked first (--batch-check); `--batch` never runs on it."""
+    repo = _repo(tmp_path / "r")
+    baseline = h.git_object_ids(repo)
+    bomb = repo / "bomb"
+    bomb.write_bytes(bytes(3_000_000))  # compresses to a few KB
+    h.run_git(repo, "hash-object", "-w", "-t", "commit", "--literally", str(bomb))
+    monkeypatch.setattr(h, "GIT_OBJECT_CAP", 1 << 20)
+    calls = []
+    real = h.run_git
+
+    def spy(work, *args, **kwargs):
+        calls.append(args[:2])
+        return real(work, *args, **kwargs)
+
+    monkeypatch.setattr(h, "run_git", spy)
+    with pytest.raises(h.Refuse, match=r"oversized git object \(commit\)"):
+        h.scan_new_git_objects(_TOKEN, repo, baseline)
+    assert ("cat-file", "--batch") not in calls
+    # under the limit the same object is read and scanned normally
+    monkeypatch.setattr(h, "GIT_OBJECT_CAP", 64 << 20)
+    h.scan_new_git_objects(_TOKEN, repo, baseline)
+
+
+def _hit(repo, baseline):
+    with pytest.raises(h.Refuse, match="token found in git objects") as info:
+        h.scan_new_git_objects(_TOKEN, repo, baseline)
+    assert _TOKEN not in str(info.value)
+
+
+def test_scan_new_objects_r1_replace_ref_hiding_a_commit(tmp_path):
+    repo = _repo(tmp_path / "r")
+    clean = h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+    baseline = h.git_object_ids(repo)
+    (repo / "f.txt").write_text(f"{_TOKEN}\n")
+    dirty = _commit(repo, "dirty")
+    h.run_git(repo, "reset", "-q", "--hard", clean)
+    h.run_git(repo, "replace", dirty, clean)  # refs/replace/<dirty> -> clean
+    _hit(repo, baseline)
+
+
+def test_git_env_disables_replace_objects(tmp_path):
+    assert h.git_env("x")["GIT_NO_REPLACE_OBJECTS"] == "1"
+    repo = _repo(tmp_path / "r")
+    first = h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+    (repo / "f.txt").write_text("two\n")
+    second = _commit(repo, "second")
+    h.run_git(repo, "replace", "-f", second, first)
+    shown = h.run_git(repo, "cat-file", "-p", second, sandbox=True)
+    assert b"second" in shown  # the real commit, not the replacement
+
+
+def test_scan_new_objects_r2_evil_merge_resolution(tmp_path):
+    repo = _repo(tmp_path / "r")
+    main = h.run_git(repo, "rev-parse", "--abbrev-ref", "HEAD").decode().strip()
+    baseline = h.git_object_ids(repo)
+    h.run_git(repo, "checkout", "-q", "-b", "side")
+    (repo / "g.txt").write_text("g\n")
+    _commit(repo, "side")
+    h.run_git(repo, "checkout", "-q", main)
+    (repo / "h.txt").write_text("h\n")
+    _commit(repo, "main")
+    h.run_git(repo, *_ID, "merge", "--no-commit", "--no-ff", "side")
+    (repo / "f.txt").write_text(f"{_TOKEN}\n")  # only the merge's resolution carries it
+    h.run_git(repo, "add", "-A")
+    h.run_git(repo, *_ID, "commit", "-qm", "merge")
+    h.run_git(repo, "checkout", "-q", "-b", "tip")
+    merge = h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+    h.run_git(repo, "checkout", "-q", main)
+    h.run_git(repo, "reset", "-q", "--hard", "HEAD~1")
+    h.run_git(repo, "branch", "-f", "tip", merge)
+    h.run_git(repo, "checkout", "-q", main)
+    _hit(repo, baseline)
+
+
+def test_scan_new_objects_r3_tag_pointing_at_a_blob(tmp_path):
+    repo = _repo(tmp_path / "r")
+    baseline = h.git_object_ids(repo)
+    (tmp_path / "t.txt").write_text(f"{_TOKEN}\n")
+    blob = h.run_git(repo, "hash-object", "-w", str(tmp_path / "t.txt")).decode().strip()
+    h.run_git(repo, "tag", "blobtag", blob)
+    _hit(repo, baseline)
+
+
+def test_scan_new_objects_r4_unreachable_object(tmp_path):
+    repo = _repo(tmp_path / "r")
+    baseline = h.git_object_ids(repo)
+    (tmp_path / "t.txt").write_text(f"{_TOKEN}\n")
+    h.run_git(repo, "hash-object", "-w", str(tmp_path / "t.txt"))  # on no ref at all
+    _hit(repo, baseline)
+    # clean additions pass
+    other = _repo(tmp_path / "o")
+    base2 = h.git_object_ids(other)
+    (other / "n.txt").write_text("no secret\n")
+    _commit(other, "n")
+    h.scan_new_git_objects(_TOKEN, other, base2)
+
+
+def test_sandbox_diff_sees_a_same_second_same_size_edit(tmp_path):
+    repo = _repo(tmp_path / "r")
+    (repo / "f.txt").write_text("ONE\n")  # same size as "one\n", inside the commit's second
+    assert b"f.txt" in h.run_git(repo, "diff", "--name-only", "HEAD", sandbox=True)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores chmod 000")
+def test_sandbox_gitdir_unreadable_linked_gitdir_refuses(tmp_path):
+    repo = _repo(tmp_path / "r")
+    wt = tmp_path / "wt"
+    h.run_git(repo, "worktree", "add", "-q", "--detach", str(wt))
+    gitdir = next((repo / ".git" / "worktrees").iterdir())
+    gitdir.chmod(0)
+    try:
+        with pytest.raises(h.Refuse, match="unusable git metadata"):
+            h.run_git(wt, "diff", "HEAD", sandbox=True)
+    finally:
+        gitdir.chmod(0o700)

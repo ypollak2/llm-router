@@ -603,7 +603,9 @@ def agent_path(path: str) -> str:
 
 
 # F115: any python*/pypy* executable (python3.13, pypy3, ...) is an interpreter an agent can run.
-INTERPRETER_NAME = re.compile(r"(python|pypy)[0-9.]*[a-z]*")  # python3.13t, python3.12d, python3m
+# F117: bare python/pypy, or a version suffix with only the t/d/m ABI flags; pythonw, pythonista
+# and the like are not interpreters the agent can run for this purpose and are not probed.
+INTERPRETER_NAME = re.compile(r"(python|pypy)([0-9]+(\.[0-9]+)*[tdm]*)?")  # python3.13t, python3m, pypy3
 IMPORT_PROBE = (
     "import importlib.util,sys; "
     "sys.exit(0 if importlib.util.find_spec('llm_router') is None else 1)"
@@ -730,13 +732,19 @@ def scan_for_token(token: str, kind: str, *, data=None, root: Path | None = None
         return
     deadline = time.monotonic() + SCAN_SECONDS
     budget = [SCAN_TOTAL_CAP]
-    for base, dirs, files in os.walk(root, followlinks=False):
+    def walk_error(_exc: OSError) -> None:
+        # F117: os.walk skips an unreadable directory silently; its token would be missed.
+        raise Refuse(f"refusing: unreadable directory in {kind}")
+
+    for base, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
         for name in dirs + files:
             if time.monotonic() > deadline:
                 raise Refuse(f"refusing: scan time cap exceeded in {kind}")
             path = os.path.join(base, name)
             try:
                 mode = os.lstat(path).st_mode
+            except FileNotFoundError:
+                continue  # F117: gone since the listing (a git child still finishing): nothing to scan
             except OSError:
                 raise Refuse(f"refusing: unreadable entry in {kind}") from None
             if stat.S_ISDIR(mode):
@@ -744,6 +752,377 @@ def scan_for_token(token: str, kind: str, *, data=None, root: Path | None = None
             if not stat.S_ISREG(mode):  # symlink (file or dir), FIFO, device, socket
                 raise Refuse(f"refusing: symlink or special file in {kind}")
             _scan_file(path, needle, kind, budget)
+
+
+GIT_OUTPUT_CAP = 128 << 20   # bytes of one git command's stdout
+GIT_INDEX_CAP = 256 << 20    # bytes of an index copied into the sandbox git dir
+GIT_SECONDS = 120.0          # wall time of one git command
+GIT_OBJECT_CAP = 64 << 20    # declared size of one agent-added object (checked before reading it)
+GIT_MEMORY_CAP = 4 << 30     # RLIMIT_AS of the git child that reads the objects (where enforced)
+GIT_HARDEN = (
+    # Each key below can make git run a command named by repo config, or reach beyond the repo.
+    # The sandbox gitdir (below) already drops the agent's config; these cover the trusted path
+    # and are a second layer.
+    "core.fsmonitor=false", "core.hooksPath=/dev/null", "diff.external=",
+    "core.sshCommand=false", "core.gitProxy=false", "core.pager=cat", "core.editor=false",
+    "core.askPass=false", "core.alternateRefsCommand=false", "core.attributesFile=/dev/null",
+    "core.excludesFile=/dev/null", "core.untrackedCache=false", "gpg.program=false",
+    "gpg.openpgp.program=false", "gpg.x509.program=false", "gpg.ssh.program=false",
+    "log.showSignature=false", "credential.helper=", "protocol.ext.allow=never",
+    "diff.ignoreSubmodules=all", "status.submoduleSummary=false", "submodule.recurse=false",
+    "uploadpack.packObjectsHook=false", "sequence.editor=false",
+)
+
+
+def git_env(home: str) -> dict[str, str]:
+    """Environment for a harness git run: no system or global config, scratch HOME, no prompts."""
+    exe = shutil.which("git") or "/usr/bin/git"
+    return {
+        "PATH": os.pathsep.join([os.path.dirname(exe), "/usr/bin", "/bin"]),
+        "HOME": home, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ATTR_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat", "GIT_EXTERNAL_DIFF": "",
+        # F117: an agent-written refs/replace/<oid> would otherwise show the harness a clean
+        # object where the agent stored a dirty one.
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+
+
+def _plain_file(path: Path, cap: int) -> bytes:
+    """Bytes of a regular, non-symlink file of at most `cap` bytes; Refuse otherwise."""
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > cap:
+            raise Refuse("refusing: unusable git metadata")
+        return path.read_bytes()
+    except OSError:
+        raise Refuse("refusing: unusable git metadata") from None
+
+
+def sandbox_gitdir(work: Path, into: Path) -> Path:
+    """F117: a git dir the harness wrote, for reading an agent-controlled repo. The agent owns
+    `work/.git/config` (and hooks, info/attributes, includes), and git runs commands that config
+    names (fsmonitor, textconv, filters, ...). So the agent's config is never read: this dir
+    holds a harness-written config, a copy of HEAD and the index, and points at the agent's
+    objects (alternates) and refs (symlinks) as data only. Linked worktrees are resolved from
+    the `.git` file. Nothing here is executed."""
+    dotgit = Path(work) / ".git"
+    if dotgit.is_symlink():
+        raise Refuse("refusing: .git is a symlink")
+    if dotgit.is_dir():
+        gitdir = common = dotgit
+    elif dotgit.is_file():
+        text = _plain_file(dotgit, 4096).decode(errors="replace").strip()
+        if not text.startswith("gitdir:"):
+            raise Refuse("refusing: unusable git metadata")
+        gitdir = (Path(work) / text[len("gitdir:"):].strip()).resolve()
+        common = gitdir
+        try:
+            has_common = (gitdir / "commondir").exists()
+        except OSError:
+            raise Refuse("refusing: unusable git metadata") from None
+        if has_common:
+            common = (gitdir / _plain_file(gitdir / "commondir", 4096).decode(
+                errors="replace").strip()).resolve()
+    else:
+        raise Refuse("refusing: no git repository")
+    head = _plain_file(gitdir / "HEAD", 4096)
+    if not (head.startswith(b"ref: refs/") or re.fullmatch(rb"[0-9a-f]{40,64}\n?", head)):
+        raise Refuse("refusing: unusable git metadata")
+    into.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (into / "HEAD").write_bytes(head)
+    (into / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfilemode = true\n"
+    )
+    try:
+        has_index = (gitdir / "index").exists()
+    except OSError:
+        raise Refuse("refusing: unusable git metadata") from None
+    if has_index:
+        (into / "index").write_bytes(_plain_file(gitdir / "index", GIT_INDEX_CAP))
+        # F117: the copy's mtime is "now", so git would trust the stat data of an entry edited
+        # in the same second (racy-clean) and miss the edit. Index mtime 1 (0 means "unset" to git) makes every entry
+        # racy, so git compares content.
+        os.utime(into / "index", (1, 1))
+    objects = common / "objects"
+    refs = common / "refs"
+    if objects.is_symlink() or not objects.is_dir() or refs.is_symlink() or not refs.is_dir():
+        raise Refuse("refusing: unusable git metadata")
+    (into / "objects" / "info").mkdir(parents=True)
+    (into / "objects" / "info" / "alternates").write_text(f"{objects.resolve()}\n")
+    os.symlink(refs.resolve(), into / "refs")
+    packed = common / "packed-refs"
+    try:
+        has_packed = packed.exists() or packed.is_symlink()
+    except OSError:
+        raise Refuse("refusing: unusable git metadata") from None
+    if has_packed:
+        if packed.is_symlink():
+            raise Refuse("refusing: unusable git metadata")
+        os.symlink(packed.resolve(), into / "packed-refs")
+    return into
+
+
+def _limit_memory(limit: int) -> Callable[[], None]:
+    def apply() -> None:
+        import resource
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+        except (OSError, ValueError):
+            pass  # not supported here; the declared-size check is the primary bound
+    return apply
+
+
+def run_git(work, *args: str, sandbox: bool = False, ok: tuple[int, ...] = (0,),
+            stdin_data: bytes | None = None, memory: int | None = None) -> bytes:
+    """F117: stdout bytes of one git command in `work`, hardened against agent-written config.
+
+    `sandbox=True` (use it for any repo an agent touched) reads through `sandbox_gitdir`, so the
+    agent's config is not read at all; otherwise the harness-made repo is used with HARDEN keys.
+    `stdin_data` is fed to git's stdin through a file. Output is capped (GIT_OUTPUT_CAP) and time-limited (GIT_SECONDS); a non-UTF-8 diff is
+    plain bytes. `memory` sets RLIMIT_AS on the child (best effort: macOS does not enforce it). Every failure (spawn, timeout, cap, exit code not in `ok`, broken repo) is a
+    Refuse that names only the git subcommand."""
+    import selectors
+    import tempfile
+
+    work = Path(work).resolve()
+    verb = next((a for a in args if not a.startswith("-") and "=" not in a), "?")
+    name = verb if re.fullmatch(r"[a-z-]+", verb) else "?"
+    extra = ["--no-textconv", "--no-ext-diff", "--ignore-submodules=all"] if name in (
+        "diff", "log") else []
+    cmd_at = next((i for i, a in enumerate(args) if a == verb), 0)
+    argv = ["git", "--no-pager"]
+    for key in GIT_HARDEN:
+        argv += ["-c", key]
+    argv += [*args[:cmd_at + 1], *extra, *args[cmd_at + 1:]]
+    with tempfile.TemporaryDirectory(prefix="p20git-") as tmp:
+        env = git_env(tmp)
+        stdin: Any = subprocess.DEVNULL
+        if stdin_data is not None:
+            feed = Path(tmp) / "stdin"
+            feed.write_bytes(stdin_data)
+            stdin = feed.open("rb")
+        if sandbox:
+            env["GIT_DIR"] = str(sandbox_gitdir(work, Path(tmp) / "gd"))
+            env["GIT_WORK_TREE"] = str(work)
+        else:
+            argv[1:1] = ["-C", str(work)]
+        try:
+            proc = subprocess.Popen(
+                argv, cwd=work if sandbox else tmp, env=env, stdin=stdin,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                preexec_fn=_limit_memory(memory) if memory else None,
+            )
+        except (OSError, ValueError):
+            raise Refuse(f"refusing: git {name} could not run") from None
+        finally:
+            if stdin is not subprocess.DEVNULL:
+                stdin.close()
+        chunks: list[bytes] = []
+        size = 0
+        deadline = time.monotonic() + GIT_SECONDS
+        problem = ""
+        with selectors.DefaultSelector() as sel:
+            sel.register(proc.stdout, selectors.EVENT_READ)
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    problem = "timed out"
+                    break
+                if not sel.select(min(left, 1.0)):
+                    continue
+                chunk = os.read(proc.stdout.fileno(), 1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > GIT_OUTPUT_CAP:
+                    problem = "output over the size cap"
+                    break
+                chunks.append(chunk)
+        if problem:
+            proc.kill()
+        try:
+            code = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            code = proc.wait()
+        finally:
+            proc.stdout.close()
+        if problem:
+            raise Refuse(f"refusing: git {name} {problem}")
+        if code not in ok:
+            raise Refuse(f"refusing: git {name} failed")
+    return b"".join(chunks)
+
+
+class AgentSurvived(Refuse):
+    """An agent process outlived the kill, or that could not be ruled out: nothing may be read."""
+
+
+def _ps_lines(*flags: str) -> list[str]:
+    try:
+        out = subprocess.run(["ps", *flags], stdin=subprocess.DEVNULL, capture_output=True,
+                             timeout=20, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return out.decode(errors="replace").splitlines()
+
+
+@dataclass(frozen=True)
+class ProcRow:
+    ppid: int
+    pgid: int
+    zombie: bool
+    start: str   # `ps lstart` text: with the pid it names one process (1 s resolution)
+
+
+def process_table() -> dict[int, ProcRow]:
+    """One `ps` snapshot of every process: pid -> parent, group, state, start time."""
+    table: dict[int, ProcRow] = {}
+    for line in _ps_lines("-axo", "pid=,ppid=,pgid=,stat=,lstart="):
+        parts = line.split(None, 4)
+        if len(parts) == 5 and all(x.isdigit() for x in parts[:3]):
+            table[int(parts[0])] = ProcRow(int(parts[1]), int(parts[2]), parts[3].startswith("Z"),
+                                           " ".join(parts[4].split()))
+    return table
+
+
+def track_agent_tree(known: dict[int, str], table: dict[int, ProcRow], leader: int) -> None:
+    """Record (pid -> start time) of every process below the agent leader or below an already
+    recorded pid whose start time still matches, in the same snapshot. A pid is only ever
+    recorded through a parent link to a process proven to be the agent's."""
+    kids: dict[int, list[int]] = {}
+    for pid, row in table.items():
+        kids.setdefault(row.ppid, []).append(pid)
+    stack = [leader] + [p for p, start in known.items() if p in table and table[p].start == start]
+    seen = set(stack)
+    while stack:
+        for pid in kids.get(stack.pop(), []):
+            if pid not in seen:
+                seen.add(pid)
+                known[pid] = table[pid].start
+                stack.append(pid)
+
+
+def stop_agent_processes(leader: int, known: dict[int, str], seconds: float = 10.0) -> None:
+    """F117: kill the agent and wait until it is gone, before any scan or purge reads the tree.
+
+    Only processes provably the agent's are signalled: `killpg(leader)` while the leader (a
+    session leader, so pgid == pid) is still unreaped, which the caller guarantees by not
+    waiting on it before this call (the table must still list it with pgid == leader), and each
+    pid in `known` whose start time, re-read now, equals the one recorded when it was first
+    seen below the agent. A pid whose identity cannot be re-verified is never signalled.
+    Raises AgentSurvived if the table cannot be read or something is still alive at the end."""
+    import signal
+    deadline = time.monotonic() + seconds
+    while True:
+        table = process_table()
+        if not table:
+            raise AgentSurvived("refusing: agent process survived (process list unreadable)")
+        track_agent_tree(known, table, leader)
+        row = table.get(leader)
+        group = row is not None and row.pgid == leader
+        if group:
+            try:
+                os.killpg(leader, signal.SIGKILL)
+            except OSError:
+                pass
+        alive = {pid for pid, start in known.items()
+                 if pid in table and table[pid].start == start and not table[pid].zombie
+                 and pid != os.getpid()}
+        for pid in alive:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        members = {pid for pid, r in table.items() if r.pgid == leader and not r.zombie}
+        if not alive and not (group and members):
+            return
+        if time.monotonic() > deadline:
+            raise AgentSurvived("refusing: agent process survived")
+        time.sleep(0.1)
+
+
+def _open_paths_of_others(dirs: list[Path], seconds: float) -> bool | None:
+    """True if some process other than this one has its cwd or an open file under any of
+    `dirs`, False if none, None if that could not be determined."""
+    roots = [os.path.realpath(d) for d in dirs]
+    me = os.getpid()
+
+    def under(path: str) -> bool:
+        return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+    proc = Path("/proc")
+    if (proc / "self" / "fd").exists():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit() or int(entry.name) == me:
+                continue
+            try:
+                links = [os.readlink(entry / "cwd")]
+                links += [os.readlink(f) for f in (entry / "fd").iterdir()]
+            except OSError:
+                continue
+            if any(under(link) for link in links):
+                return True
+        return False
+    try:
+        done = subprocess.run(["lsof", "-nP", "-w", "-Fpn"], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=seconds, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode not in (0, 1):
+        return None
+    pid = 0
+    for line in done.stdout.decode(errors="replace").splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith("n") and pid not in (0, me) and under(line[1:]):
+            return True
+    return False
+
+
+def assert_dirs_unheld(dirs: list[Path], seconds: float = 60.0) -> None:
+    """F117: after the kill, refuse unless no other process holds (cwd or open file) the work
+    dir or the scratch HOME. A live process there would race the scan, so it is never scanned."""
+    held = _open_paths_of_others(dirs, seconds)
+    if held is None:
+        raise AgentSurvived("refusing: cannot rule out a surviving agent process")
+    if held:
+        raise AgentSurvived("refusing: agent process survived")
+
+
+def git_object_ids(work) -> set[str]:
+    """F117: ids of every object in the repo's object store (loose, packed, alternates),
+    reachable or not. Take it before the agent runs and again after: the difference is what
+    the agent added."""
+    out = run_git(work, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)",
+                  sandbox=True)
+    return set(out.decode(errors="replace").split())
+
+
+def scan_new_git_objects(token: str, work, baseline: set[str] | None) -> None:
+    """F117: scan the raw content of every object not in `baseline` (all objects if None).
+    Raw objects cover what `log -p` hides: merges, tags, blobs on no branch, unreachable
+    commits, replaced objects. Only agent-added content counts against GIT_OUTPUT_CAP, so a
+    big shared mirror (noncloud) does not trip it."""
+    new = git_object_ids(work) - (baseline or set())
+    if not new:
+        return
+    ids = ("\n".join(sorted(new)) + "\n").encode()
+    # declared type and size first: git inflates a commit or tree whole in memory, so a tiny
+    # zlib bomb must be refused before it is read (blobs stream; the output cap bounds them)
+    info = run_git(work, "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+                   sandbox=True, stdin_data=ids).decode(errors="replace").splitlines()
+    if len(info) != len(new):
+        raise Refuse("refusing: unreadable git object")
+    for line in info:
+        parts = line.split()
+        if len(parts) != 3 or not parts[2].isdigit():
+            raise Refuse("refusing: unreadable git object")
+        if int(parts[2]) > GIT_OBJECT_CAP:
+            raise Refuse(f"refusing: oversized git object ({parts[1]})")
+    data = run_git(work, "cat-file", "--batch", sandbox=True, stdin_data=ids,
+                   memory=GIT_MEMORY_CAP)
+    scan_for_token(token, "git objects", data=data)
 
 
 def real_home() -> Path:
