@@ -15,10 +15,13 @@ they are the only option left; zero-Claude mode blocks the submission.
 
 from __future__ import annotations
 
+import logging
 import os
 import json
 
 from llm_router.hooks.direct_executor import ModelSpec
+
+log = logging.getLogger("llm_router.hooks.chain_builder")
 
 
 # ── Available Models ──────────────────────────────────────────────────────────
@@ -282,6 +285,8 @@ def _drop_failed_eligibility(chain: list[ModelSpec], complexity: str, task_type:
         kept = set(eligibility_routing.filter_chain(ids, task_type, complexity))
         if len(kept) == len(set(ids)):
             return chain
+        dropped = [i for i in ids if i not in kept]
+        log.debug("F109: failed-eligibility dropped %s for %s/%s", dropped, task_type, complexity)
         return [s for s, i in zip(chain, ids) if i in kept]
     except Exception as exc:  # noqa: BLE001 - fail-open: the chain stays as built
         from llm_router import failopen

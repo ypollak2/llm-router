@@ -26,8 +26,9 @@ TASK-TYPE MAPPING (honest scope, PREREG-P20-requal section 4).
   router reads the call's own complexity (``complexity_hint``, else the classifier's
   ``classification_data["complexity"]``), also when the caller passes an explicit ``profile=``.
 
-Only the ``ollama`` provider is matched: the file's keys are bare Ollama names
-(``eligibility_store``), and the measured identity is an Ollama model. An untagged name matches
+Only local providers are matched (F109: ``qa_policy.QA_STRIP_PROVIDERS``, the router's own
+local-provider detection, not a name list here): the file's keys are bare model names
+(``eligibility_store``) and the provider prefix is dropped before lookup. An untagged name matches
 its ``:latest`` form, as Ollama resolves it. Model names come only from the file and the chain.
 
 VISIBILITY. Each skip is a ``skip_causes`` entry (``failed_eligibility`` with lane, k, n, source),
@@ -51,7 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_router import eligibility, paths, skip_causes
-from llm_router.qa_policy import QA_TASK_TYPES
+from llm_router.qa_policy import QA_STRIP_PROVIDERS, QA_TASK_TYPES
 from llm_router.types import TaskType
 
 ELIGIBILITY_NAME = "local_eligibility.json"
@@ -65,7 +66,9 @@ TASK_LANE: dict[str, str] = {
 LANE_TIERS: frozenset[str] = frozenset({"simple", "moderate"})
 #: The verdicts acted on. ``inconclusive`` (power-limited) is "no decision" in the prereg.
 ACT_ON_VERDICTS: frozenset[str] = frozenset({"failed"})
-MATCHED_PROVIDERS: frozenset[str] = frozenset({"ollama"})
+#: F109: the router's own local-provider set (``qa_policy.QA_STRIP_PROVIDERS``, the D-116 test of
+#: "runs on the user's machine"); no provider literal here.
+MATCHED_PROVIDERS: frozenset[str] = QA_STRIP_PROVIDERS
 
 _FO_UNREADABLE = "CHZ-FO-ELIGIBILITY-ROUTING-UNREADABLE"
 #: Longest ``source`` id written to the skip record (ledger ``skipped_json``, ``why``).
@@ -87,8 +90,9 @@ def _opted_out() -> bool:
 
 
 def _norm(name: str) -> str:
-    """Ollama resolves an untagged name to ``:latest``; compare in that form."""
-    name = name.split("/", 1)[1] if name.startswith("ollama/") else name
+    """Drop a local provider prefix; Ollama resolves an untagged name to ``:latest``, compare so."""
+    head, sep, rest = name.partition("/")
+    name = rest if sep and head in MATCHED_PROVIDERS else name
     return name if ":" in name else f"{name}:latest"
 
 
