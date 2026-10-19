@@ -395,6 +395,8 @@ def provider_class(provider: str, *, auth: str | None = None, reason: str | None
        subscription; an API-key login, or ``<PROVIDER>_API_KEY`` set = paid. Seats older than
        ``seats.STALE_AFTER_SECONDS`` at ``now`` (default: the clock) are ignored (F99): a lapsed
        seat must not class a call as subscription.
+       A caller that omits ``now=`` gets wall-clock staleness (the live clock), not the time of
+       the row it is classing; pass ``now=`` to classify a past session as it was then.
     4. Otherwise ``unclassified``: shown on its own, never folded into paid or subscription."""
     if auth == AUTH_SUBSCRIPTION:
         return "subscription"

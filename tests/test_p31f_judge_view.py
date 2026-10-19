@@ -243,7 +243,7 @@ def test_stop_reader_stays_inside_the_hook_budget(home, hook):
 
 def test_hook_pair_is_identical_and_bumped_to_42():
     a, b = (ROOT / "hooks" / "session-end.py").read_bytes(), HOOK.read_bytes()
-    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 43"
+    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 44"
 
 
 # -- no database in hooks -------------------------------------------------------------
