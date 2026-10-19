@@ -454,6 +454,17 @@ def maybe_append_history(home: str, usage: dict | None, now: float) -> bool:
         return False
 
 
+def _sweep_stale_tmp(home: str, hist: str, now: float) -> None:
+    """Remove ``quota_history.jsonl.<pid>.tmp`` left by a crashed prune (older than a day), inside
+    the router home only. Called under the slot lock."""
+    base = os.path.basename(hist)
+    for name in os.listdir(home):
+        if name.startswith(base + ".") and name.endswith(".tmp"):
+            path = os.path.join(home, name)
+            if os.path.isfile(path) and not os.path.islink(path) and now - os.path.getmtime(path) > 86400.0:
+                os.unlink(path)
+
+
 def prune_history(home: str, now: float, *, retain_s: float = HISTORY_RETAIN_S,
                   max_rows: int = HISTORY_MAX_ROWS) -> bool:
     """Keep only the rows of ``quota_history.jsonl`` newer than ``retain_s`` (and at most
@@ -482,6 +493,7 @@ def prune_history(home: str, now: float, *, retain_s: float = HISTORY_RETAIN_S,
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return False                   # a writer holds the slot: try again on the next call
+        _sweep_stale_tmp(home, hist, now)
         cutoff = now - retain_s
         kept: list[bytes] = []
         total = 0

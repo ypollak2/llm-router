@@ -129,3 +129,29 @@ def test_quota_rate_tail_read_small_and_odd_files(tmp_path):
     p.write_text(json.dumps(_row(NOW, 1.0)))                       # no trailing newline
     assert quota_rate._read(p, 0.0)[0] == [_row(NOW, 1.0)]
     assert quota_rate._read(p, NOW + 1)[0] == []
+
+
+def test_quota_rate_tail_read_handles_crlf_lines(tmp_path):
+    rows = _series(2)
+    lf = tmp_path / "lf.jsonl"
+    crlf = tmp_path / "crlf.jsonl"
+    _write(lf, rows)
+    crlf.write_bytes(b"".join(json.dumps(r, separators=(",", ":")).encode() + b"\r\n" for r in rows))
+    a, bad_a = quota_rate._read(lf, NOW - DAY)
+    b, bad_b = quota_rate._read(crlf, NOW - DAY)
+    assert a == b and a and bad_a == bad_b == 0
+
+
+def test_prune_removes_stale_tmp_files_only(tmp_path):
+    hist = tmp_path / tick.HISTORY_NAME
+    _write(hist, _series(1))
+    old = tmp_path / (tick.HISTORY_NAME + ".111.tmp")
+    new = tmp_path / (tick.HISTORY_NAME + ".222.tmp")
+    other = tmp_path / "unrelated.tmp"
+    for f in (old, new, other):
+        f.write_text("x")
+    os.utime(old, (NOW - 2 * DAY, NOW - 2 * DAY))
+    os.utime(other, (NOW - 2 * DAY, NOW - 2 * DAY))
+    os.utime(new, (NOW - 60, NOW - 60))
+    tick.prune_history(str(tmp_path), NOW)
+    assert not old.exists() and new.exists() and other.exists()
