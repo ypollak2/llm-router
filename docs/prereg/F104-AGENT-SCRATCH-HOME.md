@@ -27,10 +27,21 @@ statusLine, `rules/llm_router.md`). Cause: `claude_env()` in `scripts/p20_requal
 
 ## Auth (never printed or logged)
 
-Claude authenticates by one of: macOS Keychain (account from `USER`), `CLAUDE_CODE_OAUTH_TOKEN`
-passed through, or `P20_CLAUDE_CREDENTIALS_FILE` copied to `<scratch>/.claude/.credentials.json`
-(0600). Not verified here (no benchmark or `claude` call was run): whether Keychain lookup works
-under a scratch HOME. Run one smoke `claude -p` call with the scratch env before the freeze.
+Claude authenticates by one of: `CLAUDE_CODE_OAUTH_TOKEN` passed through, or (F113)
+`P20_CLAUDE_CREDENTIALS_FILE`. Under the scratch HOME the macOS Keychain is not visible:
+`claude -p` answers "Not logged in" (confirmed 2026-10-19), so the Keychain is not a usable path.
+
+### Owner step (F113)
+
+1. Run `claude setup-token` in a terminal and put the printed token in
+   `~/.llm-router-bench/claude-oauth-token` (suggested path), mode 0600
+   (`chmod 600`; the directory 0700).
+2. Export `P20_CLAUDE_CREDENTIALS_FILE=~/.llm-router-bench/claude-oauth-token` for the harness.
+
+The harness reads the file and sets `CLAUDE_CODE_OAUTH_TOKEN` only in the Claude child's env
+(`claude_env`, not the Pi env). It never logs, prints or writes the value (nothing is copied into
+the scratch HOME; the earlier copy to `.claude/.credentials.json` is gone). It refuses, naming no
+path and no value, when the file is group/world accessible, empty or unreadable.
 
 ## Limits
 
@@ -51,17 +62,38 @@ isolation (`sandbox-exec` or a separate OS user) is not part of F104 or F110.
 * Not covered: the legacy-brand CLI is not on the deny list (the identity gate forbids its name
   in runtime code); it is only dropped when its directory is dropped for another reason.
 * HOME: `assert_agent_env` also refuses a HOME inside `real_home()` unless it is under the run dir.
-* The hidden-test runner (`p20_code_runner`, a grader, not an agent) keeps the caller PATH.
+* The hidden-test runner (`p20_code_runner`, a grader, not an agent) kept the caller PATH in F110; F113 replaces that (below).
 * Because `~/.local/bin` is dropped, a `claude` installed only there will not resolve in the
   agent env and the call fails closed (`claude_error`).
 
-### Pre-freeze smoke checklist (not run by F104 or F110)
+### F113 hardening (rv-643 residual)
 
-1. One `claude -p` call with the scratch env (`claude_env(scratch_home(...), run_dir)`): confirm
-   Keychain/OAuth auth works under the scratch HOME and that `claude` resolves on the filtered
-   PATH. Unverified; it fails closed.
-2. One Pi dry run with `agent_env`: confirm `node` resolves on the filtered PATH.
-3. Print `agent_path(os.environ["PATH"])` and confirm no llm-router or `~/.local/bin`.
+* Import guard: `assert_agent_env` runs every `python` / `python3` that resolves on the agent PATH
+  as `python -I -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('llm_router')
+  is None else 1)"` with the agent env, and refuses (exit 2) if any can import `llm_router`
+  (exit 1 or a probe timeout both refuse). `PYTHONNOUSERSITE=1` is in the agent env and the
+  allow-list.
+* Hidden-test grader: `p20_code_runner` now runs agent-written code with `agent_path(...)` as PATH
+  and an interpreter picked by `grader_python`: the first python on that PATH that passes the
+  import guard and can `import pytest`. It no longer uses the run venv python. Consequence:
+  the owner needs a python on the filtered PATH that has pytest and not llm_router (for example a
+  Homebrew python with pytest); otherwise the grader refuses (fails closed) instead of grading.
+* uvx note (not guarded): `uvx` / `uv tool run` can fetch `llm-router` from the index into a cache
+  under the scratch HOME. That leaves the owner install untouched, but the agent could then run a
+  fresh copy. `uv` stays on the PATH because the agents need it for their own tasks.
+
+### Pre-freeze smoke checklist (F113; none of it was run by F104, F110 or F113's build)
+
+Helper: `python scripts/p20_prefreeze_smoke.py [--claude-call]` prints `PASS`/`FAIL` per check and
+nothing else. Exit 0 when all pass.
+
+1. `claude -p` under the scratch HOME with the token (owner-run, spends one call):
+   `P20_CLAUDE_CREDENTIALS_FILE=... python scripts/p20_prefreeze_smoke.py --claude-call`
+   checks `claude_token` (file mode and content) and `claude_call` (one real call).
+2. Pi node resolution: `node_on_agent_path` confirms `node` resolves on the filtered PATH.
+3. Import guard: `import_guard` confirms at least one python is on the agent PATH and none
+   imports `llm_router`.
+4. Print `agent_path(os.environ["PATH"])` and confirm no llm-router or `~/.local/bin`.
 
 ## Prereg
 

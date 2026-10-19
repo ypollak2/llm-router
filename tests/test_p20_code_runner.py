@@ -35,6 +35,9 @@ def setup(factory, tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(home / "state"))
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://forbidden")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "forbidden")
+    # F113: the real grader needs a pytest-capable python that cannot import llm_router;
+    # the guard itself is tested in test_p20_requal. Here the run's python stands in.
+    monkeypatch.setattr(h, "grader_python", lambda env: sys.executable)
     cfg, c, _ = factory()
     nc, rx = tmp_path / "nc", tmp_path / "rx"
     nc.mkdir()
@@ -395,3 +398,12 @@ def test_pi_agent_runs_with_scratch_home_and_minimal_env(setup, monkeypatch):
         assert set(env) <= h.AGENT_ENV_ALLOWED
     assert os.environ["HOME"] == caller["HOME"]
     assert os.environ["ANTHROPIC_API_KEY"] == caller["ANTHROPIC_API_KEY"]
+
+
+def test_grader_uses_agent_path_and_python_without_llm_router():
+    # Source-level guard (F113): the hidden-test grader must not run the run venv python
+    # or the caller PATH. Behaviour is covered by the grader_python tests in test_p20_requal.
+    src = (ROOT / "scripts/p20_code_runner.py").read_text()
+    grading = src[src.index("grader_env ="):src.index("row[\"hidden_pass\"] = result.returncode")]
+    assert "h.agent_path(" in grading and "h.grader_python(grader_env)" in grading
+    assert "sys.executable" not in grading
