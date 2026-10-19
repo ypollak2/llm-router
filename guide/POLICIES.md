@@ -108,6 +108,28 @@ If you want byte-identical pre-v10 routing (deterministic A/B vs v9), opt out:
 export LLM_ROUTER_BANDIT=off
 ```
 
+## Measured local eligibility (F106)
+
+`route_and_call` (MCP `llm` / `llm_route`, gateway, route server) drops an `ollama/*` model from a
+chain when `local_eligibility.json` records a **powered failure** for that model on the call's lane:
+lane `grade` and `verdict` are both `failed` (PREREG-P20-requal §10). Owner decision D-235.
+
+| Router task type | Lane | Tier |
+|---|---|---|
+| query, research, generate, analyze, coordinate, introspect (`qa_policy.QA_TASK_TYPES`, the qa set's population) | `qa` | simple / moderate |
+| code | `code` | simple / moderate |
+| anything else; complex / deep_reasoning | none, no effect | |
+
+`unknown`, `probe`, `not_informative`, `inconclusive` (power-limited) and `eligible` lanes, a missing
+model or a missing file change nothing; `eligible` grants no authority. A corrupt file leaves the
+chain unchanged and records `CHZ-FO-ELIGIBILITY-ROUTING-UNREADABLE`. Each drop is a
+`failed_eligibility` entry (lane, k, n, source) in `routing_decisions.skipped_json`, shown by
+`llm-router why`. An explicit `model_override` is left alone. Opt out (pre-F106 chain):
+
+```bash
+export LLM_ROUTER_IGNORE_ELIGIBILITY=1
+```
+
 ## Validating a policy
 
 ```bash

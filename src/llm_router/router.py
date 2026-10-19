@@ -1102,6 +1102,17 @@ async def _build_and_filter_chain(
     return models_to_try
 
 
+def _drop_failed_eligibility(models: list[str], task_type: TaskType, c: Complexity) -> list[str]:
+    """F106 / D-235: ``eligibility_routing.filter_chain``; the chain is kept if the filter raises."""
+    try:
+        from llm_router import eligibility_routing
+        return eligibility_routing.filter_chain(models, task_type, c)
+    except Exception as exc:  # noqa: BLE001 - fail-open: the chain stays as built
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ROUTER-ELIGIBILITY-FILTER", exc)
+        return models
+
+
 def _keep_reachable_providers(models: list[str], config) -> list[str]:
     """The provider filter of ``_build_and_filter_chain``: keep a model only when its provider is
     configured, or its subprocess/local/subscription tier is really available (not a phantom entry).
@@ -3995,6 +4006,7 @@ async def _dispatch_model_loop(
         )
         # D-116: apply shared Q&A ordering here too; timeout demotion below still wins.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
+        emergency_chain = _drop_failed_eligibility(emergency_chain, task_type, c)  # F106
         if emergency_chain and capability_needs is not None:
             # P2.4: the emergency chain is filtered too; the primary chain already was.
             from llm_router import capability_filter as _cf
@@ -5055,6 +5067,14 @@ async def route_and_call(
         if models_to_try and not model_override:
             models_to_try = _strip_local_for_qa(models_to_try, task_type)
 
+        # F106 / D-235: drop a local model from a lane it measurably failed (powered `failed`
+        # verdict in local_eligibility.json). Same placement and override exemption as D-116:
+        # after every step that can add a local entry, before the daily-cap step.
+        _elig_before = list(models_to_try)
+        if models_to_try and not model_override:
+            models_to_try = _drop_failed_eligibility(models_to_try, task_type, c)
+        _elig_dropped = [m for m in _elig_before if m not in models_to_try]
+
         # TQ-007 (applied LAST — RED1-01/RED1-02 fix): a daily spend cap was
         # exceeded → confine the FINAL chain to free-local providers. This runs
         # after every chain-mutation step (precision-tier fronting, subject
@@ -5156,6 +5176,14 @@ async def route_and_call(
             # as a likely cause — otherwise the generic "install Ollama / set a key"
             # message is misleading (the fix may just be to unblock a provider).
             await _release_reservation_if_held()  # RED1-3-01: don't leak on empty-chain
+            if _elig_dropped:
+                raise NoRoutableModelsError(
+                    f"No routable models for {task_type.value}/{c.value}: every remaining "
+                    f"candidate ({', '.join(_elig_dropped)}) measurably failed this lane in "
+                    "local_eligibility.json (F106). Fix: connect a non-local provider, or set "
+                    "LLM_ROUTER_IGNORE_ELIGIBILITY=1 to route to it anyway.",
+                    task_type, profile,
+                )
             _blocked = _blocked_providers()
             if _blocked:
                 raise NoRoutableModelsError(
