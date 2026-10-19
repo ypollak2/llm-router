@@ -167,8 +167,8 @@ async def llm_quota_saved() -> str:
     dollars. The dollar figure is included as supporting context.
 
     Calibration is via the ``LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV`` env
-    var (default $50/week of Opus-equivalent spend = 100% weekly
-    quota). Override to match your plan.
+    var (the dollar value of 100% weekly quota on your plan). With no
+    plan value configured the pp figures print ``n/a``.
     """
     from llm_router.quota_savings import compute_quota_savings
     snap = compute_quota_savings()
@@ -178,6 +178,14 @@ async def llm_quota_saved() -> str:
             f"`{route_tool('llm_check_usage')}` (or `llm_refresh_claude_usage`) to "
             "populate the snapshot before the quota-saved metric is "
             "available."
+        )
+    if snap.calibration_usd_per_pp is None:
+        return (
+            "**Quota saved by routing**\n\n"
+            f"• Weekly: {snap.weekly_current_pct:.1f}% now · saved n/a (no plan value configured)\n"
+            f"•   5h:  {snap.session_current_pct:.1f}% now · saved n/a (no plan value configured)\n\n"
+            "_Set `LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV` to the dollar value of 100% weekly "
+            "quota on your plan to convert dollars saved into points of quota._"
         )
     lines = [
         "**Quota saved by routing — cumulative this period**",

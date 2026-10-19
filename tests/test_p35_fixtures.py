@@ -45,14 +45,18 @@ PP_PER_ACTIVE_HOUR = [1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5]        # 12 active hou
 MEDIAN_PP = 3.0
 MIN_ACTIVE_HOURS = 10
 
-#: The units table (plan section Design, Units): (resource_kind, value) -> printed text.
-#: subscription = % of window and ~work-hours; api = $; estimate = ~. Measured and estimated are
-#: separate segments. Hand-written; ``show(fig, unit=kind)`` must reproduce it.
+#: The units table (plan section Design, Units): (resource_kind, quantity) -> printed text, plain
+#: and with both n's (P35-1, carry-forward from rv-628). The figure is n=12 over 7d; an estimate
+#: that converts through a rate (work-hours) also carries the rate's n (``n_basis``=10 active hours).
+#: subscription = % of window and ~work-hours; api = $; estimate = ~. Hand-written;
+#: ``show(fig, unit=kind, quantity=what)`` must reproduce it.
 UNITS_ORACLE = [
-    ("subscription", "pct", 37.5, "measured", "37.5% of window"),
-    ("subscription", "work_hours", 2.5, "estimated", "~2.5 work-hours"),
-    ("api", "usd", 1.5, "measured", "$1.50"),
-    ("estimate", "usd", 1.5, "estimated", "~$1.50"),
+    # unit, quantity, value, fig kind, n_basis, plain text, text with n(s) and window
+    ("subscription", "pct", 37.5, "measured", None, "37.5% of window", "37.5% of window (n=12, 7d)"),
+    ("subscription", "work_hours", 2.5, "estimated", 10, "~2.5 work-hours",
+     "~2.5 work-hours (n=12, rate n=10, 7d)"),
+    ("api", "usd", 1.5, "measured", None, "$1.50", "$1.50 (n=12, 7d)"),
+    ("estimate", "usd", 1.5, "estimated", None, "~$1.50", "~$1.50 (n=12, 7d)"),
 ]
 
 
@@ -140,53 +144,75 @@ async def test_fixture_seeds_every_ledger(p35):
     con = sqlite3.connect(p35.db)
     assert con.execute("SELECT COUNT(*) FROM routing_decisions WHERE session_id=?", (SID,)).fetchone()[0] > 0
     con.close()
-    assert os.environ["LLM_ROUTER_HOME"] == str(h), "fixture must not be the real home"
+    assert p35.env["LLM_ROUTER_HOME"] == str(h), "the fixture runs on its own home, not the real one"
 
 
 def test_oracles_are_not_empty():
     assert len(UNITS_ORACLE) >= 4 and {k for k, *_ in UNITS_ORACLE} == {"subscription", "api", "estimate"}
-    assert {e for *_, e in UNITS_ORACLE} and all(e for *_, e in UNITS_ORACLE)
+    assert all(row[-1] and row[-2] for row in UNITS_ORACLE)
     assert len(PP_PER_ACTIVE_HOUR) >= MIN_ACTIVE_HOURS and sorted(PP_PER_ACTIVE_HOUR)[5:7] == [3, 3]
     assert (DAILY_LAST - DAILY_FIRST).days + 1 == 14
 
 
 # -- P35-1 units ---------------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="P35-1 units: show(unit=) and the units table do not exist")
-@pytest.mark.parametrize("kind,what,value,fig_kind,expected", UNITS_ORACLE)
-def test_units_table_oracle(kind, what, value, fig_kind, expected):
+@pytest.mark.parametrize("kind,what,value,fig_kind,n_basis,plain,with_n", UNITS_ORACLE)
+def test_units_table_oracle(kind, what, value, fig_kind, n_basis, plain, with_n):
     from llm_router.ledger_view import Figure, show
 
-    fig = Figure(value, 12, "7d", "2026-10-17T00:00:00", "fixture", fig_kind)
-    assert show(fig, unit=kind, quantity=what) == expected
+    fig = Figure(value, 12, "7d", "2026-10-17T00:00:00", "fixture", fig_kind, None, n_basis)
+    assert show(fig, unit=kind, quantity=what) == plain
+    assert show(fig, unit=kind, quantity=what, with_n=True) == with_n
 
 
-@pytest.mark.xfail(strict=True, reason="P35-1 units: Summary.compact() still merges measured with estimated")
 def test_measured_is_apart_from_estimated():
     from llm_router.dashboard_data import Summary
 
     s = Summary(period="today", baseline_model="x", realized_usd=2.0, realized_n=3,
                 unverified_usd=5.0, unverified_n=4, routed_n=9, unmeasured_n=0)
     text = s.compact()
-    assert "$2.00" in text and "$5.00" in text, text      # two segments, never the merged $7.00
+    assert "$2.00 measured" in text and "~$5.00 est" in text, text   # two segments, never the merged $7.00
     assert "$7.00" not in text, text
 
 
-@pytest.mark.xfail(strict=True, reason="P35-1 units: quota_rate.py does not exist")
 async def test_quota_rate_median_per_active_hour(p35):
     from llm_router import quota_rate
 
     r = quota_rate.median_pp_per_active_hour(now=NOW, days=14)
-    assert r.value == MEDIAN_PP and r.n == len(PP_PER_ACTIVE_HOUR), r
+    assert r.value == MEDIAN_PP and r.n == len(PP_PER_ACTIVE_HOUR) and r.window == "14d", r
 
 
-@pytest.mark.xfail(strict=True, reason="P35-1 units: quota_rate.py does not exist")
 async def test_quota_rate_is_na_below_ten_active_hours(home):  # noqa: F811
     from llm_router import quota_rate
 
     _jl(home / "quota_history.jsonl", _history(PP_PER_ACTIVE_HOUR[:6], NOW - 3 * DAY))
     r = quota_rate.median_pp_per_active_hour(now=NOW, days=14)
     assert r.value is None and "n/a (6 of 10 active hours)" in r.na_reason, r
+
+
+async def test_work_hours_is_quota_pct_saved_over_median_pp_per_active_hour(p35):
+    """7.5 pp saved at the fixture's median 3.0 pp per active hour = 2.5 work-hours, with both n's."""
+    from llm_router import quota_rate
+    from llm_router.ledger_view import show
+
+    rate = quota_rate.median_pp_per_active_hour(now=NOW, days=14)
+    assert quota_rate.work_hours(7.5, rate) == 7.5 / MEDIAN_PP == 2.5
+    fig = quota_rate.work_hours_figure(7.5, 12, rate, window="7d", as_of="t", source="fixture")
+    assert fig.kind == "estimated" and (fig.n, fig.n_basis) == (12, len(PP_PER_ACTIVE_HOUR))
+    assert show(fig, unit="subscription", quantity="work_hours", with_n=True) == \
+        f"~2.5 work-hours (n=12, rate n={len(PP_PER_ACTIVE_HOUR)}, 7d)"
+
+
+async def test_work_hours_is_na_below_ten_active_hours_never_zero(home):  # noqa: F811
+    from llm_router import quota_rate
+    from llm_router.ledger_view import show
+
+    _jl(home / "quota_history.jsonl", _history(PP_PER_ACTIVE_HOUR[:6], NOW - 3 * DAY))
+    rate = quota_rate.median_pp_per_active_hour(now=NOW, days=14)
+    assert quota_rate.work_hours(7.5, rate) is None
+    fig = quota_rate.work_hours_figure(7.5, 12, rate, window="7d", as_of="t", source="fixture")
+    assert fig.value is None and "6 of 10 active hours" in fig.na_reason
+    assert show(fig, unit="subscription", quantity="work_hours") is None
 
 
 # -- P35-2 statusline ----------------------------------------------------------------------------

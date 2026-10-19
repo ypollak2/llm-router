@@ -374,8 +374,17 @@ def _alias_seat(seats, provider: str):
     return getattr(seats, attr, None) if attr else None
 
 
+def seats_stale(seats, now: float | None = None) -> bool:
+    """True when the discovered seats are too old to classify a call by (F99). The age rule is
+    ``seats.Seats.is_stale`` (``seats.STALE_AFTER_SECONDS``): the same judgement ``sources_map``
+    reports as ``seats.json`` ``stale`` and the session-start / rescan paths use to re-detect. A
+    seats object with no ``is_stale`` (a bare stand-in) carries no age and is not judged."""
+    judge = getattr(seats, "is_stale", None)
+    return bool(judge(now)) if callable(judge) else False
+
+
 def provider_class(provider: str, *, auth: str | None = None, reason: str | None = None,
-                   seats=None) -> str:
+                   seats=None, now: float | None = None) -> str:
     """``local`` | ``subscription`` | ``paid`` | ``unclassified`` (D-205: first match wins, and
     no plan or model name is written in this module).
 
@@ -383,7 +392,9 @@ def provider_class(provider: str, *, auth: str | None = None, reason: str | None
        ``usage`` row's provider ``subscription`` / reason ``claude_code_subscription``.
     2. The router's ``LOCAL_PROVIDERS`` vocabulary.
     3. Discovered seats (``seats.Seats``): a present seat for the provider (``SEAT_ALIASES``) =
-       subscription; an API-key login, or ``<PROVIDER>_API_KEY`` set = paid.
+       subscription; an API-key login, or ``<PROVIDER>_API_KEY`` set = paid. Seats older than
+       ``seats.STALE_AFTER_SECONDS`` at ``now`` (default: the clock) are ignored (F99): a lapsed
+       seat must not class a call as subscription.
     4. Otherwise ``unclassified``: shown on its own, never folded into paid or subscription."""
     if auth == AUTH_SUBSCRIPTION:
         return "subscription"
@@ -393,7 +404,7 @@ def provider_class(provider: str, *, auth: str | None = None, reason: str | None
         return "subscription"
     if provider in LOCAL_PROVIDERS:
         return "local"
-    if seats is not None:
+    if seats is not None and not seats_stale(seats, now):
         seat = _alias_seat(seats, provider)
         if seat is not None and seat.present:
             return "subscription"
@@ -404,22 +415,22 @@ def provider_class(provider: str, *, auth: str | None = None, reason: str | None
     return "unclassified"
 
 
-def classify_rows(rows: "list[tuple] | None", seats=None) -> dict[str, int] | None:
+def classify_rows(rows: "list[tuple] | None", seats=None, now: float | None = None) -> dict[str, int] | None:
     """``{local, subscription, paid, unclassified}`` from :func:`executed_rows`; None = no data."""
     if rows is None:
         return None
     mix = dict.fromkeys(CLASSES, 0)
     for provider, auth, why in rows:
-        mix[provider_class(provider, auth=auth, reason=why, seats=seats)] += 1
+        mix[provider_class(provider, auth=auth, reason=why, seats=seats, now=now)] += 1
     return mix
 
 
-def local_paid_mix(executed: dict[str, int] | None, seats=None) -> dict[str, int]:
+def local_paid_mix(executed: dict[str, int] | None, seats=None, now: float | None = None) -> dict[str, int]:
     """The four-class mix from per-provider counts (no row evidence: use :func:`classify_rows`
     for that). ``unclassified`` is its own bucket."""
     mix = dict.fromkeys(CLASSES, 0)
     for provider, n in (executed or {}).items():
-        mix[provider_class(provider, seats=seats)] += int(n)
+        mix[provider_class(provider, seats=seats, now=now)] += int(n)
     return mix
 
 
@@ -622,24 +633,50 @@ class Figure:
     source: str
     kind: str = "measured"             # measured | estimated
     na_reason: str | None = None
+    n_basis: int | None = None         # estimates only: rows behind the conversion rate (the 2nd n)
 
     def to_dict(self) -> dict:
-        return {"value": self.value, "n": self.n, "window": self.window, "as_of": self.as_of,
-                "source": self.source, "kind": self.kind, "na_reason": self.na_reason}
+        d = {"value": self.value, "n": self.n, "window": self.window, "as_of": self.as_of,
+             "source": self.source, "kind": self.kind, "na_reason": self.na_reason}
+        if self.n_basis is not None:
+            d["n_basis"] = self.n_basis
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Figure":
         return cls(d.get("value"), d.get("n"), str(d.get("window") or ""),
                    str(d.get("as_of") or ""), str(d.get("source") or ""),
-                   str(d.get("kind") or "measured"), d.get("na_reason"))
+                   str(d.get("kind") or "measured"), d.get("na_reason"), d.get("n_basis"))
 
 
-def show(fig: "Figure | None", fmt: str = "{}") -> str | None:
+def show(fig: "Figure | None", fmt: str = "{}", *, unit: str | None = None,
+         quantity: str | None = None, with_n: bool = False) -> str | None:
     """The one formatter. None (print ``n/a`` or nothing) when the value or n is unknown or the
-    window is empty: a number without its n and window is not shown (strict NS rule)."""
+    window is empty: a number without its n and window is not shown (strict NS rule).
+
+    ``unit`` (``subscription`` | ``api`` | ``estimate``) and ``quantity`` (``pct`` | ``work_hours`` |
+    ``usd``) render through the units table (:mod:`llm_router.units`, P35-1); ``with_n`` appends the
+    figure's n(s) and window. Without ``unit`` the legacy ``fmt`` path is unchanged."""
     if fig is None or fig.value is None or fig.n is None or not fig.window:
         return None
-    return fmt.format(fig.value)
+    if unit is None:
+        return fmt.format(fig.value)
+    from llm_router import units
+
+    return units.render(fig.value, fig.n, fig.window, kind=fig.kind, unit=unit,
+                        quantity=quantity, n_basis=fig.n_basis, with_n=with_n)
+
+
+def money_fragment(measured_usd: float | None, estimated_usd: float | None) -> str:
+    """The saved-money fragment with measured apart from estimated (P35-1, D-220): the estimate
+    first (``~$5.00 est``), then the measured dollars (``$2.00 measured``), joined by `` · ``.
+    A segment without money is dropped; with neither, ``~$0.00 est``. Never one summed figure."""
+    parts = []
+    if estimated_usd:
+        parts.append(f"~${estimated_usd:,.2f} est")
+    if measured_usd:
+        parts.append(f"${measured_usd:,.2f} measured")
+    return " · ".join(parts) if parts else "~$0.00 est"
 
 
 def _percentile(sorted_vals: list[float], pct: float) -> float:
@@ -791,6 +828,7 @@ class SessionRouting:
     downshift_n: int                    # was_downshifted = 1
     escalation_n: int                   # simple/moderate work that went to a paid provider
     cheap_n: int                        # local + subscription
+    unclassified_n: int = 0             # no evidence and no fresh seat: in neither cheap nor escalation
     p95_s: dict = field(default_factory=dict)   # tier -> seconds (timed rows only)
     timed_n: int = 0                    # rows that carry a latency (> 0)
     cost_ratio: float | None = None     # session cost / average earlier local-day cost
@@ -849,15 +887,17 @@ def session_routing(bounds: Bounds, *, db_path=None, session_start: float | None
     start = session_start if session_start is not None else first_ts
     hours = None if start is None else max(0.017, (bounds.until_ts - start) / 3600.0)
 
-    downshift = escalations = cheap = 0
+    downshift = escalations = cheap = unclassified = 0
     tier_lat: dict[str, list[float]] = {t: [] for t in TIERS}
     timed = 0
     for tier, provider, lat, _cost, shifted, why, _ts in rows:
-        klass = provider_class(provider or "", reason=why, seats=seat_obj)
+        klass = provider_class(provider or "", reason=why, seats=seat_obj, now=bounds.until_ts)
         if shifted == 1:
             downshift += 1
         if klass in ("local", "subscription"):
             cheap += 1
+        if klass == "unclassified":
+            unclassified += 1
         if klass == "paid" and tier in ("simple", "moderate"):
             escalations += 1
         if isinstance(lat, (int, float)) and lat > 0 and tier in tier_lat:
@@ -879,7 +919,7 @@ def session_routing(bounds: Bounds, *, db_path=None, session_start: float | None
     return SessionRouting(
         n=len(rows), window=bounds.label, as_of=_iso(bounds.until_ts),
         cost_usd=sum(cost_rows) if cost_rows else None, hours=hours,
-        downshift_n=downshift, escalation_n=escalations, cheap_n=cheap, p95_s=p95, timed_n=timed,
+        downshift_n=downshift, escalation_n=escalations, cheap_n=cheap, unclassified_n=unclassified, p95_s=p95, timed_n=timed,
         cost_ratio=cost_ratio, calls_ratio=calls_ratio, typical_days=len(earlier))
 
 
@@ -919,6 +959,51 @@ def cache_trend(bounds: Bounds, *, db_path=None, timeout_s: float = 0.5) -> Cach
         con.close()
     return CacheTrend(tuple((d, int(n), int(h or 0)) for d, n, h in days),
                       bounds.label, _iso(bounds.until_ts))
+
+
+@dataclass(frozen=True)
+class CacheHitStats:
+    """Semantic-cache lookups in a window (``semantic_cache_lookups``: one row per lookup, hit or
+    miss). ``saved_usd`` None = the table records no saving (unknown), never 0."""
+
+    lookups: int
+    hits: int
+    saved_usd: float | None
+    window: str
+    as_of: str
+
+    @property
+    def n(self) -> int:
+        return self.lookups
+
+
+def cache_hit_stats(bounds: Bounds, *, db_path=None, timeout_s: float = 0.5) -> CacheHitStats | None:
+    """Lookups, hits and the hits' recorded saving over ``bounds`` (``ts`` is epoch seconds, closed
+    bounds). None = no database, no table, or no lookup in the window."""
+    con = _connect(db_path, timeout_s)
+    if con is None:
+        return None
+    try:
+        cols = _columns(con, "semantic_cache_lookups")
+        if not {"ts", "hit"} <= cols:
+            return None
+        saved = ("COALESCE(SUM(CASE WHEN hit = 1 THEN saved_usd END), 0)"
+                 if "saved_usd" in cols else "NULL")
+        parts, params = ["ts <= ?"], [bounds.until_ts]
+        if bounds.since_ts is not None:
+            parts.append("ts >= ?")
+            params.append(bounds.since_ts)
+        row = con.execute(  # nosec B608
+            f"SELECT COUNT(*), COALESCE(SUM(hit), 0), {saved} FROM semantic_cache_lookups "
+            f"WHERE {' AND '.join(parts)}", params).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    if not row or not row[0]:
+        return None
+    return CacheHitStats(int(row[0]), int(row[1]), None if row[2] is None else float(row[2]),
+                         bounds.label, _iso(bounds.until_ts))
 
 
 def session_usage_rows(bounds: Bounds, *, db_path=None, timeout_s: float = 1.0) -> list[dict] | None:
@@ -1180,7 +1265,7 @@ def window_summary(since: "str | Bounds | float | datetime | None" = "24h",
     sources = sources_map(db_path=db_path, proxy_path=proxy_path, seats=seat_obj)
     lat, n_rec, n_tot = latency_figures(bounds, db_path=db_path)
     money = money_window(bounds, db_path=db_path) if _db_path(db_path).is_file() else None
-    classes = classify_rows(rows, seat_obj)
+    classes = classify_rows(rows, seat_obj, now=bounds.until_ts)
     counts: dict[str, int] = {}
     for provider, _a, _w in rows or ():
         counts[provider] = counts.get(provider, 0) + 1

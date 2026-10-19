@@ -118,6 +118,30 @@ def test_delta_only_when_both_weeks_are_informative(home):
     assert w["delta_vs_previous_week"] is None and "2026-W39" in w["delta_note"] and "n=120" in w["delta_note"]
 
 
+def test_ci_method_label_is_in_json_and_markdown(home):
+    _week(MON41, 20, 40)
+    w = wr.build_week("2026-W41")
+    assert w["offload"]["ci_method"] == "wilson_pooled_independent"
+    assert w["offload"]["turn"]["ci_method"] == "wilson_pooled_independent"
+    assert all(v["ci_method"] == wr.CI_METHOD for m in w["breakdowns"].values() for v in m.values())
+    assert w["breakdowns"]["by_task_group"]
+    md = wr.render(w)
+    assert "Wilson 95% CI (assumes independent actions; daily rows carry no per-session counts)" in md
+
+
+def test_delta_needs_the_same_population_in_both_weeks(home):
+    for i in range(7):                                     # W41 as release_clock, W40 as organic
+        r = _row(MON41 + timedelta(days=i), 24, 40)
+        r["populations"] = {"release_clock": r["populations"]["organic"]}
+        do.write_day(r)
+    _week(MON40, 16, 40)
+    w = wr.build_week("2026-W41")
+    assert w["population"] == "release_clock" and w["offload"]["informative"]
+    assert w["delta_vs_previous_week"] is None
+    assert "release_clock" in w["delta_note"] and "organic" in w["delta_note"]
+    assert "different populations" in wr.render(w)
+
+
 def test_partial_old_schema_and_unreadable_rows_are_not_pooled(home):
     _week(MON41, 20, 40, skip=(0, 1, 2))
     do.write_day(_row(MON41, 20, 40, partial=True), partial=True)

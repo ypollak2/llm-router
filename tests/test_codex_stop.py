@@ -77,8 +77,11 @@ def test_stop_reports_distinct_windows_and_preserves_session_on_repeated_turns(s
     # print as a bare "lifetime {money}", indistinguishable from an
     # unverified estimate; the PR #178 fix labelled the split, and this
     # later fix merges it into a single always-estimate figure.
-    assert "today ~$1.25 est" in first
-    assert "lifetime ~$4.75 est" in first
+    # P35-1 (D-220): these block-mode rows are MEASURED dollars; measured is never merged with, or
+    # labelled as, an estimate.
+    assert "today $1.25 measured" in first
+    assert "lifetime $4.75 measured" in first
+    assert "~$1.25" not in first and "~$4.75" not in first
     assert run_stop(stop_env) == first
     assert session.read_bytes() == before
 

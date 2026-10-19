@@ -71,6 +71,10 @@ def _int(x: Any) -> int | None:
     return x if isinstance(x, int) and not isinstance(x, bool) and x >= 0 else None
 
 
+CI_METHOD = "wilson_pooled_independent"
+CI_LABEL = "Wilson 95% CI (assumes independent actions; daily rows carry no per-session counts)"
+
+
 def _line(k: int, n: int, minimum: int, days: int) -> dict:
     """Pooled ``{k, n, value, ci, informative, reason}``; value and ci only when the floors are met."""
     from llm_router import daily_offload as do
@@ -78,6 +82,7 @@ def _line(k: int, n: int, minimum: int, days: int) -> dict:
     return {"k": k, "n": n, "min_n": minimum,
             "value": round(k / n, 4) if ok else None,
             "ci": do.wilson_ci(k, n) if ok else None,
+            "ci_method": CI_METHOD,
             "informative": ok,
             "reason": None if ok else (f"not informative (n={n} < {minimum})" if n < minimum else
                                        f"not informative (n={n}, only {days} day(s) with a row, need {MIN_WEEK_DAYS})")}
@@ -189,9 +194,12 @@ def build_week(iso_week: str, *, base: Path | None = None, now: float | None = N
     prev_id = iso_week_of(start - timedelta(days=7))
     prev = build_week(prev_id, base=base, now=now, _previous=False)
     cur_o, prev_o = w["offload"], prev["offload"]
-    if cur_o and prev_o and cur_o["informative"] and prev_o["informative"]:
+    if cur_o and prev_o and w["population"] != prev["population"]:
+        w["delta_note"] = (f"no delta claimed; different populations ({iso_week}: {w['population']}, "
+                           f"{prev_id}: {prev['population']})")
+    elif cur_o and prev_o and cur_o["informative"] and prev_o["informative"]:
         w["delta_vs_previous_week"] = {"previous_week": prev_id, "value": round(cur_o["value"] - prev_o["value"], 4),
-                                       "n": cur_o["n"], "previous_n": prev_o["n"],
+                                       "population": w["population"], "n": cur_o["n"], "previous_n": prev_o["n"],
                                        "note": "difference of two pooled rates; no significance claimed"}
     else:
         def why(o, label):
@@ -223,7 +231,8 @@ def render(w: dict) -> str:
     if not o:
         out += [f"offload: n/a (no daily row in {win})"]
         return "\n".join(out) + "\n"
-    out += [f"offload per action: {_fmt(o)}", f"offload per turn: {_fmt(o['turn'])}",
+    out += [f"CI: {CI_LABEL}", "",
+            f"offload per action: {_fmt(o)}", f"offload per turn: {_fmt(o['turn'])}",
             f"gap to 0.60: {'n/a' if o['gap_to_0.60'] is None else format(o['gap_to_0.60'], '+.4f')}"]
     d = w["delta_vs_previous_week"]
     out.append("vs previous week: " + (f"{d['value']:+.4f} (n={d['n']} vs {d['previous_n']}; {d['note']})"
