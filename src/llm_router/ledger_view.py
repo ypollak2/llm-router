@@ -1175,6 +1175,12 @@ class LedgerWindow:
     latency_p99: Figure | None = None
     latency_n_recorded: int | None = None
     latency_n_total: int | None = None
+    # P3.1-7: the judge's figures for THIS window's bounds, read once from ``judge_view.judge_summary``.
+    # None = unknown (no judge_results.jsonl, or an older cache without the field); never 0.
+    judge_n: int | None = None
+    judge_mean: float | None = None         # None at judge_n 0
+    judge_self_judge: int | None = None
+    judge_not_informative: bool | None = None   # fewer than judge_view.MIN_N judged answers
     sources: dict = field(default_factory=dict)
     scope: str = "all"
     has_data: bool = True
@@ -1203,7 +1209,12 @@ class LedgerWindow:
             lat = getattr(self, key)
             if lat is not None:
                 out[key] = lat
+        out["judge"] = Figure(self.judge_mean, self.judge_n, self.window, self.as_of, "judge_results.jsonl",
+                              "measured", None if self.judge_mean is not None else "no judged calls")
         return out
+
+    def judge_line(self) -> str:
+        return judge_line(self)
 
     def to_dict(self) -> dict:
         d = {k: getattr(self, k) for k in self.__dataclass_fields__
@@ -1236,11 +1247,36 @@ def _is_number(x) -> bool:
     return isinstance(x, (int, float, datetime)) and not isinstance(x, bool)
 
 
+def judge_figures(bounds: Bounds) -> dict:
+    """The judge fields of a :class:`LedgerWindow` for ``bounds``, from ``judge_view.judge_summary``
+    (no new judge logic). Unreadable judge files give all-None (unknown), recorded, never 0."""
+    try:
+        from llm_router import judge_view
+
+        js = judge_view.judge_summary(bounds.since_ts, bounds.until_ts, bounds.session_id,
+                                      label=bounds.label, now=bounds.until_ts)
+        return {"judge_n": js.n, "judge_mean": js.mean, "judge_self_judge": js.self_judge,
+                "judge_not_informative": js.not_informative}
+    except Exception as exc:  # noqa: BLE001 -- the ledger renders without judge figures, recorded
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-LEDGER-JUDGE", exc)
+        return {}
+
+
+def judge_line(lw: LedgerWindow) -> str:
+    """``judge: mean X (n=N, window)`` / ``judge: n/a (...)``: ``judge_view.format_line`` over this window's figures."""
+    from llm_router import judge_view
+
+    return judge_view.format_line({"window": {"label": lw.window}, "n": lw.judge_n, "mean": lw.judge_mean,
+                                   "not_informative": bool(lw.judge_not_informative)})
+
+
 def window_summary(since: "str | Bounds | float | datetime | None" = "24h",
                    until: "float | datetime | None" = None, scope: str = "all", *,
                    session_id: str | None = None, name: str | None = None, db_path=None,
                    proxy_path=None, now=None, session_start: float | None = None,
-                   seats=_LOAD_SEATS) -> LedgerWindow:
+                   seats=_LOAD_SEATS, judge: bool = True) -> LedgerWindow:
     """Everything a surface prints for one window, from one call.
 
     * ``window_summary(since, until=None, scope="all"|"session"|"day"|"7d", *, session_id, name)``:
@@ -1250,7 +1286,10 @@ def window_summary(since: "str | Bounds | float | datetime | None" = "24h",
     * Legacy: ``window_summary("24h", now=...)`` (a named window string or a ``Bounds``).
 
     ``seats`` is a ``seats.Seats`` or None (no seats file); by default ``seats.json`` is read, so
-    call this only from a refresher or a CLI, never a hook's synchronous path."""
+    call this only from a refresher or a CLI, never a hook's synchronous path.
+
+    ``judge`` (P3.1-7) adds the judge figures for the same bounds (``judge_*`` fields); pass False to
+    skip reading ``judge_results.jsonl``."""
     if isinstance(since, Bounds):
         bounds = since
     elif _is_number(since):
@@ -1295,7 +1334,7 @@ def window_summary(since: "str | Bounds | float | datetime | None" = "24h",
         spent_n=None if money is None else money.calls,
         latency_p50=lat["p50"], latency_p95=lat["p95"], latency_p99=lat["p99"],
         latency_n_recorded=n_rec, latency_n_total=n_tot, sources=sources,
-        scope=bounds.scope, has_data=rows is not None)
+        scope=bounds.scope, has_data=rows is not None, **(judge_figures(bounds) if judge else {}))
 
 
 def format_line(lw: LedgerWindow) -> str:
