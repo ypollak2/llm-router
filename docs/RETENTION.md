@@ -14,3 +14,15 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Prune | `statusline_tick.prune_history`: atomic rewrite (temp file, fsync, `os.replace`) under the writers' slot lock, at most once a day (mtime of `.quota_history.pruned`), run only by the background refresher (`statusline_segments.append_history`, `statusline_snapshot.refresh`), never by the synchronous status-line tick. Lines that are not JSON objects with a numeric `ts` are dropped by the rewrite. |
 | Failure | A failed prune is recorded with `failopen` code `F107-HISTORY-PRUNE`; the file is left as it was. |
 | Reads | `quota_rate` reads only the tail of the file it needs (backward scan in 256 KiB blocks). |
+
+## `active_days.jsonl` (P3.7, S7, D-26 option A)
+
+| Item | Value |
+|---|---|
+| Rows | `day` (local calendar date, `YYYY-MM-DD`) and `install_id` (16 random hex characters generated locally on the first row). Nothing else: no prompt text, no session id, no path. Nothing is sent anywhere. |
+| Writer | `active_days.mark_active`, called from `quota_samples.append_session_sample` (the session-start background child and the Stop sample). One tail read per session, one append per new day. |
+| Kept | One row per day, at most 400 rows (`active_days.MAX_ROWS`, about 13 months). Past that the file is rewritten atomically (temp file, fsync, `os.replace`), keeping the FIRST row (the install day and id) and the newest 399. |
+| Install day | The first marker day, not the operating-system install time: no earlier dated record exists. |
+| Reads | `llm-router kpi --retention` and the last line of `llm-router kpi --quota-burn`: install day, active days, day 14, and "active on day 14" as yes / no / not yet (n/a before the first marker). The population rate (S7 70% across users) is LATER (16.1). |
+| Failure | A failed write is recorded with `failopen` code `P37-ACTIVE-DAY`; the session start is never blocked. |
+| Delete | Removing the file resets the install day and id. |

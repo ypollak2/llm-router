@@ -122,7 +122,15 @@ def _append(path: Path, row: dict) -> None:
 def append_session_sample(session_id: str | None, kind: str, *, now: float | None = None) -> bool:
     """Append one SessionStart (``kind="start"``) or Stop (``"stop"``) sample.
 
-    Never raises; returns True when a row was written."""
+    Also marks today as an active day (``active_days.jsonl``, S7, local only); that is
+    independent of the sample and never raises. Never raises; returns True when a
+    quota row was written."""
+    try:
+        from llm_router import active_days
+
+        active_days.mark_active(now)
+    except Exception:  # noqa: BLE001 - the retention marker never blocks the sample
+        pass
     try:
         if not session_id or not isinstance(session_id, str) or kind not in KINDS:
             return False
@@ -362,6 +370,7 @@ def quota_burn(since: float, until: float, *, include_research: bool = False) ->
                      "covered": covered, "rate": covered / n_sessions if n_sessions else None,
                      "wilson_lo": lo, "wilson_hi": hi},
         "history": history,
+        "reported_sessions": len(measured),
         "informative": m_line["n_sessions"] > 0,
     }
 
@@ -382,6 +391,112 @@ def _history(since: float, until: float) -> dict[str, Any]:
         "first_ts": ts[0] if ts else None, "last_ts": ts[-1] if ts else None,
         "largest_gap_s": max(gaps) if gaps else None,
     }
+
+
+# ── S3 vs the baseline week (P3.7) ──────────────────────────────────────────
+
+BASELINE_DAYS = 7
+#: Two history rows further apart than this are not one continuous reading.
+HISTORY_MAX_GAP_S = STALE_AFTER_S
+
+
+def baseline_start_ts() -> float | None:
+    """When the GE6 series began: the earliest ``ts`` in ``quota_samples.jsonl`` or
+    ``quota_history.jsonl``. The plan starts the baseline week at the GE6 deploy; the deploy
+    is not recorded in the repo, but the first row the instrument wrote is that moment.
+    None when neither file has a row."""
+    firsts = []
+    for name in (SAMPLES_NAME, HISTORY_NAME):
+        rows, _ = _read_jsonl(paths.state_path(name))
+        if rows:
+            firsts.append(min(float(r["ts"]) for r in rows))
+    return min(firsts) if firsts else None
+
+
+def history_burn(since: float, until: float) -> dict[str, Any]:
+    """Second S3 source: burn from the 5-minute ``quota_history.jsonl`` series. Measured rows
+    only; rises are summed inside runs whose neighbours are at most :data:`HISTORY_MAX_GAP_S`
+    apart. ``per_active_hour`` is the weekly rise per UTC hour that had a rise; None (n/a)
+    with no active hour."""
+    rows, _ = _read_jsonl(paths.state_path(HISTORY_NAME))
+    good = sorted((r for r in rows if since <= float(r["ts"]) <= until
+                   and r.get("source") == SOURCE_MEASURED
+                   and _num(r.get("five_hour_pct")) is not None
+                   and _num(r.get("weekly_pct")) is not None), key=lambda r: float(r["ts"]))
+    runs: list[list[dict]] = []
+    for r in good:
+        if runs and float(r["ts"]) - float(runs[-1][-1]["ts"]) <= HISTORY_MAX_GAP_S:
+            runs[-1].append(r)
+        else:
+            runs.append([r])
+    h5 = wk = 0.0
+    hours: set[int] = set()
+    for run in runs:
+        if len(run) < 2:
+            continue
+        a, _ = _burn([float(r["five_hour_pct"]) for r in run],
+                     [_num(r.get("five_hour_resets_at")) for r in run])
+        h5 += a
+        for prev, cur in zip(run, run[1:]):
+            rise = float(cur["weekly_pct"]) - float(prev["weekly_pct"])
+            if rise > 0:
+                wk += rise
+                hours.add(int(float(cur["ts"]) // 3600))
+    n_pairs = sum(len(r) - 1 for r in runs if len(r) >= 2)
+    return {"measured_rows": len(good), "pairs": n_pairs, "active_hours": len(hours),
+            "five_hour_delta_sum": h5 if n_pairs else None,
+            "weekly_delta_sum": wk if n_pairs else None,
+            "weekly_per_active_hour": (wk / len(hours)) if hours else None}
+
+
+def _ratio(cur: float | None, base: float | None) -> float | None:
+    if cur is None or base is None or base <= 0:
+        return None
+    return cur / base
+
+
+def quota_burn_report(since: float, until: float, *, include_research: bool = False,
+                      baseline_start: float | None = None) -> dict[str, Any]:
+    """``quota_burn`` for the window plus the same measurement for the baseline week, the
+    per-session S3 coverage (criterion P3.7-a) and the install's S7 status.
+
+    The baseline week is the :data:`BASELINE_DAYS` days from ``baseline_start`` (default
+    :func:`baseline_start_ts`). A session is "reported vs baseline" when it has a measured
+    burn AND the baseline has a measured per-turn burn; with no usable baseline the coverage
+    is n/a (unknown), not 0. This reports a comparison only: it never claims a reduction."""
+    out = quota_burn(since, until, include_research=include_research)
+    start = baseline_start if baseline_start is not None else baseline_start_ts()
+    base: dict[str, Any] | None = None
+    if start is not None:
+        base = quota_burn(start, start + BASELINE_DAYS * 86400.0, include_research=include_research)
+    cur_m = out["measured"]
+    ok = base is not None and base["measured"]["five_hour_per_turn"] is not None
+    n = out["coverage"]["sessions"]
+    reported = out["reported_sessions"] if ok else None
+    lo, hi = _wilson(reported, n) if reported is not None else (None, None)
+    overlap = base is not None and since < base["window"]["until"] and base["window"]["since"] < until
+    out["baseline"] = base
+    out["history_burn"] = {"current": history_burn(since, until),
+                           "baseline": (history_burn(base["window"]["since"], base["window"]["until"])
+                                        if base else None)}
+    out["s3_vs_baseline"] = {
+        "baseline_available": ok, "overlaps_baseline": overlap,
+        "sessions": n, "reported": reported,
+        "rate": (reported / n) if reported is not None and n else None,
+        "wilson_lo": lo, "wilson_hi": hi,
+        "five_hour_per_turn_ratio": _ratio(cur_m["five_hour_per_turn"],
+                                           base["measured"]["five_hour_per_turn"] if base else None),
+        "weekly_per_turn_ratio": _ratio(cur_m["weekly_per_turn"],
+                                        base["measured"]["weekly_per_turn"] if base else None),
+        "claims_reduction": False,
+    }
+    try:
+        from llm_router import active_days
+
+        out["retention"] = active_days.status()
+    except Exception:  # noqa: BLE001
+        out["retention"] = None
+    return out
 
 
 # ── rendering ───────────────────────────────────────────────────────────────
@@ -429,4 +544,43 @@ def render_quota_burn(r: dict[str, Any]) -> str:
     lines.append(f"  history (5-min series): {h['rows']} rows ({h['measured']} measured, {h['stale']} stale), "
                  f"{h['slots_filled']}/{h['slots']} 5-min slots filled, first {_iso(h['first_ts'])}, "
                  f"last {_iso(h['last_ts'])}, largest gap {_f(h['largest_gap_s'], 0)} s")
+    return "\n".join(lines)
+
+
+def render_quota_burn_report(r: dict[str, Any]) -> str:
+    """:func:`render_quota_burn` plus the baseline comparison, the S3 coverage and S7."""
+    lines = [render_quota_burn(r)]
+    b, v = r["baseline"], r["s3_vs_baseline"]
+    if b is None:
+        lines.append("  baseline week: n/a (no quota_samples/quota_history rows yet, so no GE6 baseline)")
+    else:
+        bw, bm = b["window"], b["measured"]
+        lines.append(f"  baseline week (GE6, first row onward): {_iso(bw['since'])}..{_iso(bw['until'])}: "
+                     + (f"n_sessions={bm['n_sessions']} n_turns={bm['n_turns']} | 5h pts/turn "
+                        f"{_f(bm['five_hour_per_turn'], 3)} | weekly pts/turn {_f(bm['weekly_per_turn'], 3)}"
+                        if bm["n_sessions"] else "not informative (n=0 sessions with >= 2 measured samples)"))
+    if v["overlaps_baseline"]:
+        lines.append("  note: this window overlaps the baseline week; the comparison is not independent")
+    def _x(ratio: float | None) -> str:
+        return "n/a" if ratio is None else f"{ratio:.2f}x baseline"
+    lines.append(f"  vs baseline (per turn, comparison only, no reduction claimed): 5h {_x(v['five_hour_per_turn_ratio'])}, "
+                 f"weekly {_x(v['weekly_per_turn_ratio'])}")
+    if v["rate"] is None:
+        why = "no measured baseline" if not v["baseline_available"] else "n=0 sessions in the window"
+        lines.append(f"  S3 reported vs baseline: n/a ({why}); sessions in window {v['sessions']}")
+    else:
+        lines.append(f"  S3 reported vs baseline: {v['reported']}/{v['sessions']} sessions "
+                     f"({_f(v['rate'] * 100, 1)}%, Wilson {_f(v['wilson_lo'] * 100, 1)}-"
+                     f"{_f(v['wilson_hi'] * 100, 1)}%); P3.7-a bar 95%")
+    for key, label in (("current", "this window"), ("baseline", "baseline week")):
+        h = r["history_burn"][key]
+        if h is None:
+            continue
+        lines.append(f"  5-min series burn, {label}: {h['measured_rows']} measured rows, {h['pairs']} pairs, "
+                     f"weekly +{_f(h['weekly_delta_sum'])} pts, 5h +{_f(h['five_hour_delta_sum'])} pts, "
+                     f"{h['active_hours']} active hours, {_f(h['weekly_per_active_hour'])} weekly pts/active hour")
+    if r.get("retention"):
+        from llm_router import active_days
+
+        lines.append("  " + active_days.render_status(r["retention"]))
     return "\n".join(lines)
