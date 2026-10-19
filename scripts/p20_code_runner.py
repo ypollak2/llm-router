@@ -77,6 +77,53 @@ def pi_config(run_dir, arm):
     return root
 
 
+def grader_env(home):
+    """F113/F115: agent-written code is graded on the agent PATH, HOME at `home`."""
+    return {"PATH": h.agent_path(os.environ.get("PATH", "")), "HOME": str(home),
+            "PYTHONDONTWRITEBYTECODE": "1", **h.AGENT_FIXED_ENV}
+
+
+def _text(value):
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
+def purge_inside(run_dir, *paths):
+    """Delete each path only if it lies strictly inside the run dir the harness created."""
+    root = Path(run_dir).resolve()
+    for path in paths:
+        target = Path(path)
+        if target.is_symlink() or not target.exists():
+            continue
+        real = target.resolve()
+        if real != root and root in real.parents:
+            shutil.rmtree(real, ignore_errors=True)
+
+
+def scrub_claude_artifacts(token, work, home, output, run_dir):
+    """F115: the Claude arm has Bash and the OAuth token in its env; refuse before anything
+    it produced (output, work files, patch, scratch HOME) is stored if it carries the token.
+    `output` is the call's stdout+stderr text (also on a timeout). No token to look for while
+    the Claude arm is active is itself a refusal (fail closed). On a hit the work and scratch
+    HOME copies are deleted (only inside run_dir) and the refusal tells the owner what to do."""
+    if not token:
+        raise h.Refuse("refusing: no token to scan for while the Claude arm is active")
+    try:
+        h.scan_for_token(token, "agent output", data=output)
+        h.scan_for_token(token, "work files", root=work)
+        h.scan_for_token(token, "agent scratch home", root=home)
+        h.scan_for_token(token, "patch", data=git(work, "diff", "HEAD"))
+        h.scan_for_token(token, "git history", data=git(work, "log", "-p", "--all"))
+    except h.Refuse as exc:
+        purge_inside(run_dir, work, home)
+        raise h.Refuse(
+            f"{exc}; work and agent_home copies were deleted if inside the run dir, "
+            f"but the run dir {run_dir} may still hold the token (agent output, ledgers): "
+            "purge it, and rotate the token (claude setup-token)"
+        ) from None
+
+
 def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     # F104: the agent's HOME is a fresh per-attempt scratch dir outside `work`, never the
     # owner's real HOME (it deleted the live install twice: F86, F86-2).
@@ -98,14 +145,17 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     h.quota_guard(cfg, c)
     start = cfg.now()
     cost, served, error, timed_out = 0, "", None, False
+    env = h.claude_env(home, cfg.run_dir)
+    output = ""
     try:
         result = _claude_run(
             h.claude_argv(c["CLAUDE_SONNET_ID"], cfg.run_dir, tools=None)
             + ["--permission-mode", "acceptEdits", "--allowedTools",
                "Read,Edit,Write,Glob,Grep,Bash"],
             input=prompt, text=True, capture_output=True, timeout=900, cwd=work,
-            env=h.claude_env(home, cfg.run_dir), check=False,
+            env=env, check=False,
         )
+        output = _text(result.stdout) + _text(result.stderr)
         value = json.loads(result.stdout)
         cost = value.get("total_cost_usd", 0)
         if (isinstance(cost, bool) or not isinstance(cost, (int, float))
@@ -116,10 +166,14 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
         error = "claude_error" if result.returncode or value.get("is_error") else None
         if served != c["CLAUDE_SONNET_ID"]:
             error = "served_model_mismatch"
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         timed_out = True
+        output = _text(exc.stdout) + _text(exc.stderr)
     except (OSError, ValueError, TypeError, AttributeError):
         error = "claude_error"
+    finally:
+        # always scanned, also after a timeout or a parse failure, before grading or storing
+        scrub_claude_artifacts(env.get(h.CLAUDE_AUTH_ENV[0]), work, home, output, cfg.run_dir)
     h.append_row(cfg.run_dir / "ledger.jsonl", {
         "ts": h.utc(cfg), "stage": "code", "set": "code", "arm": arm,
         "item_id": ident, "attempt": attempt, "ok": error is None and not timed_out,
@@ -223,14 +277,12 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
             try:
                 # F113: agent-written code runs on the agent PATH with an interpreter that
                 # cannot import llm_router (grader_python enforces it), never the run venv.
-                grader_env = {"PATH": h.agent_path(os.environ.get("PATH", "")),
-                              "HOME": str(work), "PYTHONDONTWRITEBYTECODE": "1",
-                              **h.AGENT_FIXED_ENV}
+                genv = grader_env(work)
                 result = subprocess.run(
-                    [h.grader_python(grader_env), "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                    [h.grader_python(genv), "-m", "pytest", "-q", "-p", "no:cacheprovider",
                      test_path(ref["test"])],
                     cwd=work, stdin=subprocess.DEVNULL, capture_output=True, timeout=120,
-                    env=grader_env, check=False,
+                    env=genv, check=False,
                 )
                 row["hidden_pass"] = result.returncode == 0
             except subprocess.TimeoutExpired:
@@ -285,6 +337,9 @@ def run(cfg, args):
     })
     if not pending:
         return counts
+    if any(i["stratum"] == "rx_edit" for i in pending):
+        h._GRADER_PYTHON.clear()  # a run probes once, then caches per PATH
+        h.grader_python(grader_env(cfg.run_dir))  # F115 preflight: refuse before any agent runs
     if args.arm != "sonnet":
         if cfg.ollama.list_ids().get(args.arm) != set(c[f"ID_{args.arm}"].split(",")):
             raise h.Refuse("refusing: model identity differs")
