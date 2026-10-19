@@ -44,6 +44,7 @@ class RouteStarted(TypedDict):
     complexity: str
     candidate_count: int
     chain_preview: list[str]
+    eligibility_skipped: list[str]
     buffered_mode: bool
 
 

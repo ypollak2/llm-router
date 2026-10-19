@@ -261,8 +261,32 @@ def build_chain(complexity: str, zone: str, task_type: str, *,
         mapped = map_reader.apply_to_chain(
             chain, key=lambda s: f"{'anthropic' if s.provider == 'claude' else s.provider}/{s.model}")
     except Exception:
+        # Not a skipped step: the eligibility filter below still has to run on this chain.
+        return _drop_failed_eligibility(chain, complexity, task_type)
+    return _drop_failed_eligibility(_sink_unvalidated_specs(mapped, task_type), complexity, task_type)
+
+
+def _drop_failed_eligibility(chain: list[ModelSpec], complexity: str, task_type: str
+                             ) -> list[ModelSpec]:
+    """F108 / D-235: the F106 filter (``eligibility_routing.filter_chain``) on the hook DIRECT,
+    agent-route and SDK chains, which all come through ``build_chain``. Last step, after the map
+    reorder and the unvalidated sink, so nothing can put a failed local model back. The call's
+    own complexity is the tier (``complex`` has no lane). One cached ``stat`` per call. Fails
+    open: the chain stays as built if the filter raises."""
+    if not chain:
         return chain
-    return _sink_unvalidated_specs(mapped, task_type)
+    try:
+        from llm_router import eligibility_routing
+
+        ids = [f"{s.provider}/{s.model}" for s in chain]
+        kept = set(eligibility_routing.filter_chain(ids, task_type, complexity))
+        if len(kept) == len(set(ids)):
+            return chain
+        return [s for s, i in zip(chain, ids) if i in kept]
+    except Exception as exc:  # noqa: BLE001 - fail-open: the chain stays as built
+        from llm_router import failopen
+        failopen.record("CHZ-FO-HOOK-ELIGIBILITY-FILTER", exc)
+        return chain
 
 
 def _sink_unvalidated_specs(chain: list[ModelSpec], task_type: str) -> list[ModelSpec]:
