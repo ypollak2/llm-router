@@ -1,12 +1,14 @@
 """llm-router learn — fold new examples into the L3 kNN index, behind the update gate.
 
-Command: llm-router learn [--dry-run] [--replay PATH] [--json]
+Command: llm-router learn [--dry-run] [--replay PATH] [--json] | --purge-user-examples
 
 Reads ``examples.jsonl`` (forced prefixes, human-validated redos, "always local" rules),
 builds a candidate kNN index and re-scores it against the held-out replay set
 (``--replay`` or ``LLM_ROUTER_LEARNING_REPLAY``). The index is replaced only when exact-match
 and under-route each worsen by at most 2 points; otherwise it is left as it was. Exit 0 for
 accepted or nothing new, 1 for rejected. ``--dry-run`` gates and reports without installing.
+``--purge-user-examples`` rebuilds the index without the user-derived embeddings earlier runs
+added (the previous index stays as ``.prev``); delete ``examples.jsonl`` as well.
 """
 from __future__ import annotations
 
@@ -19,11 +21,13 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="llm-router learn", description=__doc__.splitlines()[0])
     ap.add_argument("--dry-run", action="store_true", help="gate the update, install nothing")
     ap.add_argument("--replay", default=None, help="held-out replay JSONL (default: LLM_ROUTER_LEARNING_REPLAY)")
+    ap.add_argument("--purge-user-examples", action="store_true",
+                    help="remove the user-derived embeddings earlier runs added to the index")
     ap.add_argument("--json", action="store_true", help="print the verdict as JSON")
     args = ap.parse_args(argv)
     from llm_router import classifier_learning as cl
 
-    v = cl.apply(dry_run=args.dry_run, replay=args.replay)
+    v = cl.purge_user_examples() if args.purge_user_examples else cl.apply(dry_run=args.dry_run, replay=args.replay)
     if args.json:
         def m(x):
             return None if x is None else {"n": x.n, "exact": x.exact, "under_route": x.under_route}

@@ -294,7 +294,7 @@ def add_rules(parsed: list[dict], text: str, path: Path | None = None) -> tuple[
     if any(r.get("kind") == "local_only" for r in added):
         from llm_router import examples
 
-        examples.record(text, "rule", 0.0)  # P3.6: an "always local" rule is a label-0 example
+        examples.record(text, "rule", 0.0)  # P3.6: hash-only evidence; a rule sentence is not a prompt, never embedded
     return stored, added
 
 

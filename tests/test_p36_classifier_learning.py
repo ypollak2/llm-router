@@ -131,7 +131,7 @@ def test_store_holds_hashes_and_embeddings_never_text(world, monkeypatch):
     secret = "a private prompt that must not be stored"
     monkeypatch.setenv("LLM_ROUTER_COMPLEXITY_KNN", "on")
     monkeypatch.setattr(ck, "_embed", lambda text, model: [1.0] + [0.0] * (DIM - 1))
-    assert examples.record(secret, "rule", 0.0, path=world["ex"], now=5.0)
+    assert examples.record(secret, "prefix", 0.0, path=world["ex"], now=5.0, embed=True)
     raw = world["ex"].read_text()
     assert secret not in raw
     row, = examples.read_examples(world["ex"], now=6.0)
@@ -142,7 +142,7 @@ def test_store_holds_hashes_and_embeddings_never_text(world, monkeypatch):
 def test_no_vector_when_knn_is_off(world, monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_COMPLEXITY_KNN", raising=False)
     monkeypatch.setattr(ck, "_embed", lambda *a: pytest.fail("embedded while the index is off"))
-    assert examples.record("x", "rule", 0.0, path=world["ex"], now=5.0)
+    assert examples.record("x", "prefix", 0.0, path=world["ex"], now=5.0, embed=True)
     assert examples.read_examples(world["ex"], now=6.0)[0]["vec"] is None
 
 
@@ -177,17 +177,174 @@ def test_redo_press_becomes_a_label_one_example_by_hash(tmp_path):
     assert (row["source"], row["label"], row["text_sha"], row["vec"]) == ("redo", 1.0, "d" * 16, None)
 
 
-def test_always_local_rule_is_recorded(tmp_path, monkeypatch):
+def test_always_local_rule_is_recorded_hash_only(tmp_path, monkeypatch):
     from llm_router import user_rules
 
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("LLM_ROUTER_COMPLEXITY_KNN", "on")  # even with the kNN on, a rule is never embedded
+    monkeypatch.setattr(ck, "_embed", lambda *a: pytest.fail("a rule sentence was embedded"))
     user_rules.add_rules([{"kind": "local_only", "task": "query"}], "always local for queries",
                          path=tmp_path / "routing.yaml")
     row, = examples.read_examples(tmp_path / "home" / "examples.jsonl")
-    assert (row["source"], row["label"]) == ("rule", 0.0)
+    assert (row["source"], row["label"], row["vec"]) == ("rule", 0.0, None)
     user_rules.add_rules([{"kind": "no_paid_api"}], "no paid api", path=tmp_path / "routing.yaml")
     assert len(examples.read_examples(tmp_path / "home" / "examples.jsonl")) == 1
 
 
 def test_decode_roundtrip():
     assert list(array("f", [0.6, 0.8])) == pytest.approx(list(examples.decode_vec(examples.encode_vec([3, 4]))))
+
+
+# ── repair round 1: latency, privacy, retention, held-out, concurrency ───────
+
+
+def _network_forbidden(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_COMPLEXITY_KNN", "on")
+    calls = []
+
+    def boom(text, model):
+        calls.append(text)
+        raise AssertionError("embedder called")
+
+    monkeypatch.setattr(ck, "_embed", boom)
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("network call"))
+    return calls
+
+
+def test_hook_hot_path_makes_no_embed_or_network_call(world, monkeypatch):
+    from llm_router import prefixes
+
+    calls = _network_forbidden(monkeypatch)
+    assert prefixes.record_example("write a poem", forced="local", decided="ollama", door="hook", path=world["ex"])
+    assert calls == []
+    row, = examples.read_examples(world["ex"])
+    assert row["vec"] is None and row["label"] == 0.0  # hash-only; learn can never embed it later
+
+
+async def test_proxy_embeds_in_a_worker_thread_never_on_the_loop(world, monkeypatch):
+    import asyncio
+    import threading
+
+    from llm_router import prefixes
+
+    monkeypatch.setenv("LLM_ROUTER_COMPLEXITY_KNN", "on")
+    seen = []
+
+    def embed(text, model):
+        seen.append(threading.current_thread() is threading.main_thread())
+        return [1.0] + [0.0] * (DIM - 1)
+
+    monkeypatch.setattr(ck, "_embed", embed)
+    assert prefixes.record_example("p", forced="claude", decided="x", door="proxy", path=world["ex"], embed=True)
+    assert seen == []  # the handler returned before any embedding ran
+    for _ in range(200):
+        if world["ex"].exists() and "vec" in world["ex"].read_text():
+            break
+        await asyncio.sleep(0.01)
+    assert seen == [False]  # embedded, off the event-loop thread
+    assert examples.read_examples(world["ex"])[0]["vec"] is not None
+
+
+def test_old_rows_are_deleted_from_disk_on_append_and_in_learn(world):
+    old = {"text_sha": "o" * 16, "source": "redo", "label": 1.0, "ts": 100.0}
+    examples.append_row(old, path=world["ex"])
+    now = 100.0 + examples.MAX_AGE_S + 5
+    examples.append_row({"text_sha": "n" * 16, "source": "redo", "label": 0.0, "ts": now}, path=world["ex"])
+    shas = [json.loads(x)["text_sha"] for x in world["ex"].read_text().splitlines()]
+    assert shas == ["n" * 16]  # the 180-day-old row is gone from the file, not just hidden
+    examples.append_row({"text_sha": "m" * 16, "source": "redo", "label": 0.0, "ts": 1e9}, path=world["ex"])
+    assert examples.prune(world["ex"], now=1e9 + examples.MAX_AGE_S + 1) == 1  # "n" already went with the append of "m"
+    assert world["ex"].read_text() == ""
+    # learn prunes too, even when nothing is learnable
+    examples.append_row({"text_sha": "z" * 16, "source": "redo", "label": 1.0, "ts": 5.0}, path=world["ex"])
+    cl.apply(examples_path=world["ex"], now=5.0 + examples.MAX_AGE_S + 1)
+    assert world["ex"].read_text() == ""
+
+
+def test_replay_rows_without_text_sha_reject_the_file(world):
+    add_examples(world, 10, 0, 1.0)
+    lines = world["replay"].read_text().splitlines()
+    row = json.loads(lines[0])
+    del row["text_sha"]
+    world["replay"].write_text("\n".join([json.dumps(row)] + lines[1:]) + "\n")
+    v = run(world)
+    assert v.status == cl.REJECTED and v.reason.startswith("replay_missing_text_sha") and "1 replay row" in v.reason
+    assert not world["art"].with_suffix(".json.prev").exists()
+    with pytest.raises(cl.ReplayError):
+        cl.load_replay(world["replay"])
+
+
+def test_purge_user_examples_restores_the_shipped_rows(world):
+    add_examples(world, 10, 0, 1.0)
+    add_examples(world, 10, 1, 0.0)
+    shipped = ck.load_artifact().n
+    assert run(world).status == cl.ACCEPTED
+    ck.clear_cache()
+    assert ck.load_artifact().n == shipped + 20
+    v = cl.purge_user_examples()
+    assert v.status == cl.ACCEPTED and v.added == -20
+    ck.clear_cache()
+    art = ck.load_artifact()
+    assert art.n == shipped and "learning" not in art.provenance
+    assert cl.purge_user_examples().status == cl.NOTHING_NEW
+    assert learn.main(["--purge-user-examples"]) == 0
+
+
+def test_two_concurrent_learn_runs_lose_nothing(world, tmp_path):
+    import threading
+
+    ex_a, ex_b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    for ex, center, label, tag in ((ex_a, 0, 1.0, "aa"), (ex_b, 1, 0.0, "bb")):
+        for i in range(10):
+            examples.append_row({"text_sha": f"{tag}{i:014d}", "source": "prefix", "label": label, "ts": 1e9 + i,
+                                 "vec": examples.encode_vec(vec(center, world["rng"])), "model": MODEL}, path=ex)
+    shipped = ck.load_artifact().n
+    out, start = {}, threading.Barrier(2)
+
+    def go(name, ex):
+        start.wait()
+        out[name] = cl.apply(examples_path=ex, now=1e9 + 100)
+
+    threads = [threading.Thread(target=go, args=(n, e)) for n, e in (("a", ex_a), ("b", ex_b))]
+    [t.start() for t in threads]
+    [t.join(30) for t in threads]
+    assert {v.status for v in out.values()} == {cl.ACCEPTED}, out
+    ck.clear_cache()
+    art = ck.load_artifact()
+    applied = set(art.provenance["learning"]["applied_shas"])
+    assert art.n == shipped + 20 and len(applied) == 20  # neither run's examples were dropped
+    assert not [p for p in world["art"].parent.iterdir() if p.name.endswith(".tmp")]  # no stray temp files
+    assert (world["art"].parent / "knn.json.prev").exists()  # the artifact from before the last update
+
+
+def test_base_changed_mid_run_writes_nothing_and_keeps_the_other_runs_shas(world, monkeypatch):
+    add_examples(world, 10, 0, 1.0)
+    other = world["art"].read_bytes()
+    real_gate = cl.gate
+
+    def gate_then_other_run_wins(base, cand, replay, **kw):
+        v = real_gate(base, cand, replay, **kw)
+        # another run installs its own artifact between our read and our swap
+        art2 = cl.build_candidate(base, [vec(0, world["rng"])], [1.0], ["theirs" + "0" * 10], now=1.0)
+        ck.write_artifact(world["art"], [list(r) for r in art2.rows], list(art2.labels),
+                          embedding_model=MODEL, k=art2.k, provenance=art2.provenance)
+        return v
+
+    monkeypatch.setattr(cl, "gate", gate_then_other_run_wins)
+    v = run(world)
+    assert v.status == cl.REJECTED and v.reason.startswith("base_changed_during_run")
+    ck.clear_cache()
+    assert ck.load_artifact().provenance["learning"]["applied_shas"] == ["theirs" + "0" * 10]
+    assert not world["art"].with_suffix(".json.prev").exists()  # never overwrite .prev for a base we did not read
+    assert other != world["art"].read_bytes()
+
+
+def test_write_artifact_uses_a_unique_temp_name(tmp_path, monkeypatch):
+    seen = []
+    real = __import__("os").replace
+    monkeypatch.setattr("os.replace", lambda a, b: (seen.append(str(a)), real(a, b))[1])
+    for _ in range(2):
+        ck.write_artifact(tmp_path / "k.json", [[1.0, 0.0]], [1.0], embedding_model=MODEL)
+    assert len(set(seen)) == 2 and all(x != str(tmp_path / "k.json.tmp") for x in seen)

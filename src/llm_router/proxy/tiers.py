@@ -415,6 +415,10 @@ def with_complexity_knn(base=None):
         if ks is None:
             choice["complexity_score"] = None
             return choice
+        from llm_router import classifier_health
+
+        # P3.6-b: both live deciders answered; one text-free row {ts, rules_tier, knn_tier, source}
+        classifier_health.record_agreement(choice.get("complexity"), ks.needs_frontier)
         choice["complexity"] = complexity_knn.frontier_complexity(choice.get("complexity"), ks.needs_frontier)
         choice["complexity_score"] = round(ks.score, 4)
         return choice

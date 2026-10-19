@@ -138,8 +138,12 @@ def strip_body(body: dict) -> dict | None:
     return None
 
 
-def record_example(stripped_text, forced, decided, door, *, now=None, path=None) -> bool:
-    """Append one private, bounded example. Evidence failures never stop routing."""
+def record_example(stripped_text, forced, decided, door, *, now=None, path=None, embed=False) -> bool:
+    """Append one private, bounded example. Evidence failures never stop routing.
+
+    Hash-only by default (the hook: no network call on its hot path). ``embed=True`` (the
+    proxy and MCP, which run an event loop) adds the user-derived embedding when the kNN
+    index is on, computed and written in a worker thread so the loop is never blocked."""
     try:
         if door not in {"hook", "proxy", "mcp"}:
             raise ValueError("invalid prefix example door")
@@ -151,8 +155,19 @@ def record_example(stripped_text, forced, decided, door, *, now=None, path=None)
             "door": door,
             "ts": time.time() if now is None else now,
         }
-        row.update(examples.embedding_fields(stripped_text))
-        examples.append_row(row, path=target, max_bytes=_MAX_BYTES)
+
+        if not (embed and examples.embedding_wanted()):
+            examples.append_row(row, path=target, max_bytes=_MAX_BYTES)
+            return True
+
+        def write_deferred() -> None:
+            try:
+                row.update(examples.embedding_fields(stripped_text))
+                examples.append_row(row, path=target, max_bytes=_MAX_BYTES)
+            except Exception as exc:  # noqa: BLE001 -- telemetry is fail-open
+                failopen.record("LR-FO-PREFIX-EXAMPLE", exc)
+
+        examples.run_off_loop(write_deferred)
         return True
     except Exception as exc:  # noqa: BLE001 -- telemetry is fail-open
         failopen.record("LR-FO-PREFIX-EXAMPLE", exc)

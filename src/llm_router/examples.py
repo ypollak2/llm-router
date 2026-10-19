@@ -5,20 +5,24 @@ One row per thing the user taught the router. It is the only input of the L3 kNN
 learning step (``classifier_learning``). Under D-121 the local LLM classifier is
 killed, so there is no L2 few-shot consumer: the rows feed the L3 kNN index only.
 
-What a row holds (privacy: never more than the kNN index already holds)
------------------------------------------------------------------------
+What a row holds (privacy: user-derived embeddings)
+---------------------------------------------------
 ``text_sha`` (16 hex chars of the normalised prompt, ``prompt_key``), ``source``, ``label``
-(P(needs frontier), 0 or 1), ``ts``, and, only when the kNN index is switched on and
-an artifact exists, ``vec`` (the L2-normalised embedding, base64 float32) with ``model``.
-The kNN artifact stores exactly those embeddings, so this adds no information about
-the prompt. Prompt text is never written. A source that has no prompt text at hand
-(a key press on a past turn) writes a row without ``vec``: it is evidence, and it
-cannot join the index.
+(P(needs frontier), 0 or 1), ``ts``. A forced-prefix row may also hold ``vec`` (the
+L2-normalised embedding of the user's own prompt, base64 float32) with ``model``, but only
+when the kNN index is on, an artifact exists AND the writer is off the hot path (the proxy
+and MCP defer the embed to a worker thread; the hook writes hash-only). These are
+USER-DERIVED embeddings: they come from the person's prompts, not from the shipped corpus,
+and an embedding is partly invertible. ``learn`` copies them into ``complexity_knn.json``;
+``learn --purge-user-examples`` removes them again. Prompt text is never written. A
+source with no prompt text at hand (a key press on a past turn) and an "always local" rule
+sentence (not a prompt: its embedding would pollute the kNN neighbourhood) write a hash-only
+row: evidence, never part of the index.
 
 Sources: ``prefix`` (a forced ``local:`` / ``claude:`` ..., the legacy row shape
 ``forced``/``decided``/``door`` is kept), ``redo`` (the person pressed ``r`` on a routed
-turn: a human-validated redo, label 1), ``rule`` (an "always local" user rule; its own
-text is the example, label 0).
+turn: a human-validated redo, label 1), ``rule`` (an "always local" user rule; hash of
+its sentence only, label 0).
 
 Retention: see ``docs/RETENTION.md`` (``examples.jsonl``). Mode 0600, directory 0700.
 """
@@ -75,9 +79,23 @@ def decode_vec(blob: str) -> array:
     return arr
 
 
+def embedding_wanted() -> bool:
+    """True when an embedding could be attached (the kNN index is on). When False, the write is
+    a plain local append and needs no worker thread."""
+    try:
+        from llm_router import complexity_knn
+
+        return complexity_knn.enabled()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def embedding_fields(text: str) -> dict:
     """``{"vec", "model"}`` for ``text``, or ``{}`` unless the kNN index is on and has an
-    artifact (the embedding model is the artifact's). Any failure gives ``{}``."""
+    artifact (the embedding model is the artifact's). Any failure gives ``{}``.
+
+    SYNCHRONOUS (one Ollama call, up to its timeout): never call it on an event loop or in a
+    hook; wrap the caller in ``run_off_loop``."""
     try:
         from llm_router import complexity_knn
 
@@ -94,31 +112,87 @@ def embedding_fields(text: str) -> dict:
         return {}
 
 
+def _oldest_ts(target: Path) -> float | None:
+    """``ts`` of the first line (rows are appended in time order), or None if unreadable."""
+    try:
+        with target.open("rb") as fh:
+            first = fh.readline()
+        ts = json.loads(first).get("ts")
+        return float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _rewrite(target: Path, lines: list[bytes]) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=".examples-", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.writelines(lines)
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def prune(path: Path | str | None = None, *, now: float | None = None) -> int:
+    """Delete rows older than ``MAX_AGE_S`` from the file itself. Returns the number dropped.
+    Cheap when nothing is old: one line is read. Unparseable lines are kept."""
+    target = Path(path) if path is not None else default_path()
+    cutoff = (time.time() if now is None else now) - MAX_AGE_S
+    oldest = _oldest_ts(target)
+    if oldest is None or oldest >= cutoff:
+        return 0
+    keep: list[bytes] = []
+    dropped = 0
+    for line in target.read_bytes().splitlines(keepends=True):
+        try:
+            ts = json.loads(line).get("ts")
+        except (ValueError, AttributeError):
+            ts = None
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts < cutoff:
+            dropped += 1
+        else:
+            keep.append(line)
+    if dropped:
+        _rewrite(target, keep)
+    return dropped
+
+
+def run_off_loop(fn, *args, **kwargs) -> None:
+    """Run ``fn`` without blocking the caller. On a running event loop it goes to the default
+    thread executor (fire and forget; ``fn`` must be fail-open); with no loop it runs inline."""
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        fn(*args, **kwargs)
+        return
+    loop.run_in_executor(None, lambda: fn(*args, **kwargs))
+
+
 def append_row(row: dict, *, path: Path | str | None = None, max_bytes: int = MAX_BYTES) -> None:
-    """Append one row (0600, bounded: past ``max_bytes`` the oldest half is dropped
-    first). Raises on a failed write; callers decide how to fail open."""
+    """Append one row (0600, bounded: rows older than 180 days are deleted first, and past
+    ``max_bytes`` the oldest half is dropped). Raises on a failed write; callers decide how
+    to fail open."""
     target = Path(path) if path is not None else default_path()
     payload = (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8")
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if target.exists():
+        prune(target, now=row.get("ts") if isinstance(row.get("ts"), (int, float)) else None)
     if target.exists() and target.stat().st_size > max_bytes:
         lines = target.read_bytes().splitlines(keepends=True)
-        fd, temporary = tempfile.mkstemp(prefix=".examples-", dir=target.parent)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.writelines(lines[len(lines) // 2:])
-            os.replace(temporary, target)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        _rewrite(target, lines[len(lines) // 2:])
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "ab") as stream:
         stream.write(payload)
 
 
 def record(text: str | None, source: str, label: float, *, text_sha: str | None = None,
-           now: float | None = None, path: Path | str | None = None) -> bool:
-    """Append a ``source`` example. ``text`` (when given) is hashed and, when the kNN index
-    is on, embedded; it is never stored. Pass ``text_sha`` when only the hash is known."""
+           now: float | None = None, path: Path | str | None = None, embed: bool = False) -> bool:
+    """Append a ``source`` example. ``text`` (when given) is hashed; it is never stored. Only
+    ``embed=True`` (a prompt, written off the hot path) adds its embedding when the kNN index
+    is on. Pass ``text_sha`` when only the hash is known."""
     from llm_router import failopen
 
     try:
@@ -128,7 +202,7 @@ def record(text: str | None, source: str, label: float, *, text_sha: str | None 
             raise ValueError("an example needs a prompt or its hash")
         row = {"text_sha": text_sha or prompt_key.key(text), "source": source,
                "label": float(label), "ts": time.time() if now is None else now}
-        if text is not None:
+        if text is not None and embed:
             row.update(embedding_fields(text))
         append_row(row, path=path)
         return True

@@ -1,4 +1,4 @@
-"""P3.6-b: shadow agreement with n, the PSI line, and the conservative-mode trigger. Synthetic rows."""
+"""P3.6-b: rules-vs-kNN agreement with n, the PSI line, and the conservative-mode trigger. Synthetic rows."""
 import json
 
 import pytest
@@ -9,8 +9,17 @@ NOW = 2_000_000_000.0
 DAY = 86400.0
 
 
-def rows(n, agree, age_days, *, rules="sonnet", other="opus"):
-    """n shadow rows, ``agree`` of them matching, ``age_days`` old."""
+def rows(n, agree, age_days, *, rules="moderate"):
+    """n rules-vs-kNN rows, ``agree`` of them on the same side of the frontier boundary, ``age_days`` old.
+    ``rules`` below the boundary agrees with knn "standard"; a disagreeing row says "frontier"."""
+    other = "standard" if rules not in ch._FRONTIER_TIERS else "frontier"
+    flip = "frontier" if other == "standard" else "standard"
+    return [{"ts": int(NOW - age_days * DAY - i), "rules_tier": rules,
+             "knn_tier": other if i < agree else flip, "source": "proxy"} for i in range(n)]
+
+
+def shadow_rows(n, agree, age_days, *, rules="sonnet", other="opus"):
+    """The killed LLM classifier's shadow rows (fallback source only)."""
     return [{"kind": "classifier_shadow", "ts": NOW - age_days * DAY - i, "source": "llm",
              "rules": {"tier": rules}, "llm": {"tier": rules if i < agree else other}} for i in range(n)]
 
@@ -69,8 +78,52 @@ def test_windows_do_not_overlap_and_ignore_non_answers():
     recs = rows(100, 100, 1) + rows(100, 0, 40)  # older than 35 days: in neither window
     h = ch.compute(recs, now=NOW)
     assert (h.recent.n, h.baseline.n) == (100, 0) and h.drop_pts is None and not h.measurable
-    recs = [dict(r, source="error") for r in rows(50, 50, 1)] + [{"kind": "other", "ts": NOW}]
-    assert ch.compute(recs, now=NOW).recent.n == 0
+    junk = [{"ts": NOW, "rules_tier": "moderate", "knn_tier": "maybe"}, {"ts": NOW, "kind": "other"},
+            {"ts": NOW, "rules_tier": 3, "knn_tier": "frontier"}]
+    assert ch.compute(junk, now=NOW).recent.n == 0
+
+
+def test_agreement_is_the_frontier_boundary_not_tier_equality():
+    recs = [{"ts": NOW - 5, "rules_tier": t, "knn_tier": k} for t, k in (
+        ("simple", "standard"), ("moderate", "standard"), ("complex", "frontier"),
+        ("deep_reasoning", "frontier"), ("simple", "frontier"), ("complex", "standard"))]
+    h = ch.compute(recs, now=NOW)
+    assert (h.recent.n, h.recent.agree) == (6, 4) and h.source == ch.SOURCE_KNN
+
+
+def test_record_agreement_writes_a_text_free_row_and_compute_reads_it():
+    assert ch.record_agreement("complex", False, now=NOW - 60)
+    assert ch.record_agreement(type("C", (), {"value": "simple"})(), False, now=NOW - 30)
+    assert not ch.record_agreement(None, True)
+    raw = ch.agreement_path().read_text()
+    assert set(json.loads(raw.splitlines()[0])) == {"ts", "rules_tier", "knn_tier", "source"}
+    h = ch.compute(None, now=NOW)
+    assert (h.recent.n, h.recent.agree, h.source) == (2, 1, ch.SOURCE_KNN)
+
+
+def test_off_with_no_rows_reads_not_measured_knn_off(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_COMPLEXITY_KNN", raising=False)
+    h = ch.compute(None, now=NOW)
+    assert ch.lines(h)[0] == "classifier agreement (rules vs kNN): not measured (kNN off, n=0)"
+    monkeypatch.setenv("LLM_ROUTER_COMPLEXITY_KNN", "on")
+    assert "not measured (n=0 in the last 35 days)" in ch.lines(ch.compute(None, now=NOW))[0]
+
+
+def test_llm_shadow_file_is_only_a_labelled_fallback(monkeypatch):
+    from llm_router.proxy import llm_shadow
+
+    sp = llm_shadow.shadow_path()
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text("\n".join(json.dumps(r) for r in shadow_rows(5, 4, 1)) + "\n")
+    monkeypatch.setattr("time.time", lambda: NOW)
+    h = ch.compute(None, now=NOW)
+    assert h.source == ch.SOURCE_FALLBACK and (h.recent.n, h.recent.agree) == (5, 4)
+    assert "LLM-shadow fallback" in ch.lines(h)[0]
+    ch.record_agreement("moderate", False, now=NOW - 5)  # a kNN row wins over the fallback
+    assert ch.compute(None, now=NOW).source == ch.SOURCE_KNN
+    sp.unlink()
+    ch.agreement_path().unlink()
+    assert ch.compute(None, now=NOW).recent.n == 0  # no file, no fallback
 
 
 def test_local_counts_as_haiku():
@@ -80,11 +133,11 @@ def test_local_counts_as_haiku():
 
 
 def test_status_lines_show_n_and_psi():
-    shifted = rows(60, 60, 1, rules="opus") + rows(60, 60, 10, rules="haiku")
+    shifted = rows(60, 60, 1, rules="complex") + rows(60, 60, 10, rules="simple")
     text = "\n".join(ch.lines(ch.compute(shifted, now=NOW)))
-    assert "n=60" in text and "PSI" in text and "large shift" in text
+    assert "n=60" in text and "PSI" in text and "large shift" in text and "not accuracy" in text
     empty = "\n".join(ch.lines(ch.compute([], now=NOW)))
-    assert "not measured (n=0" in empty and "PSI" in empty and "0.0%" not in empty
+    assert "not measured (kNN off, n=0" in empty and "PSI" in empty and "0.0%" not in empty
     thin = "\n".join(ch.lines(ch.compute(rows(10, 10, 1) + rows(10, 10, 10), now=NOW)))
     assert "too few to trigger" in thin and "not measured" in thin
 
@@ -105,9 +158,7 @@ def test_bias_moves_one_level_when_active_only():
 
 
 def test_status_renders_the_lines(monkeypatch):
-    from llm_router.proxy import llm_shadow
-
-    monkeypatch.setattr(llm_shadow, "read_records", lambda path=None, days=None: rows(120, 90, 1) + rows(300, 270, 10))
+    monkeypatch.setattr(ch, "read_agreement", lambda path=None, days=None: rows(120, 90, 1) + rows(300, 270, 10))
     import time
 
     monkeypatch.setattr(time, "time", lambda: NOW)
@@ -140,3 +191,39 @@ async def test_conservative_mode_moves_the_proxy_tier_up_one_level():
 
     assert await tier(False) == (SONNET, "moderate")
     assert await tier(True) == (OPUS, "moderate")  # served a tier up; the ledger keeps the measured class
+
+
+def test_is_active_reads_the_state_file_once_per_version(monkeypatch):
+    import time
+
+    ch._write_state({"active": True, "checked_at": time.time()})
+    ch._STATE_CACHE.clear()
+    reads = []
+    real = json.loads
+    monkeypatch.setattr(ch.json, "loads", lambda *a, **k: reads.append(1) or real(*a, **k))
+    assert all(ch.is_active() for _ in range(50))
+    assert len(reads) == 1  # 50 decisions, one parse
+    ch._write_state({"active": False, "checked_at": time.time()})
+    assert not ch.is_active() and len(reads) == 2  # a new file version is seen at once
+    ch.state_path().unlink()
+    assert not ch.is_active()
+
+
+async def test_with_complexity_knn_records_the_agreement_row(monkeypatch):
+    from llm_router import complexity_knn
+    from llm_router.proxy import tiers as pt
+
+    async def knn(text):
+        return complexity_knn.ComplexityScore(0.9, True, 0.8, 0.5)
+
+    async def base(text):
+        return {"task_type": "query", "complexity": "simple"}
+
+    monkeypatch.setattr(complexity_knn, "complexity_score", knn)
+    choice = await pt.with_complexity_knn(base)("a private prompt")
+    assert choice["complexity"] == "complex"
+    row, = [json.loads(x) for x in ch.agreement_path().read_text().splitlines()]
+    assert (row["rules_tier"], row["knn_tier"], row["source"]) == ("simple", "frontier", "proxy")
+    assert "private" not in ch.agreement_path().read_text()
+    h = ch.compute(None, now=row["ts"] + 5)
+    assert (h.recent.n, h.recent.agree) == (1, 0)

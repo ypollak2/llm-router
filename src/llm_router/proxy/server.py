@@ -1090,7 +1090,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 if is_first_call(body) or row["step_class"] == "turn_first":
                     example_written = True
                     user_prefixes.record_example(
-                        ov.stripped, forced=ov.name, decided=outcome, door="proxy")
+                        ov.stripped, forced=ov.name, decided=outcome, door="proxy", embed=True)
             except Exception as exc:  # noqa: BLE001 -- telemetry is fail-open
                 failopen.record("LR-FO-PROXY-PREFIX", exc)
 

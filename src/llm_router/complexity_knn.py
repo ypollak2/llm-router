@@ -145,9 +145,17 @@ def write_artifact(path: str | Path, vectors, labels, *, embedding_model: str, *
     }
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(target.suffix + ".tmp")
-    tmp.write_text(json.dumps(doc), encoding="utf-8")
-    os.replace(tmp, target)
+    import tempfile
+
+    # A unique temp name per writer: two concurrent writers never share (and tear) one file.
+    fd, tmp = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(doc))
+        os.replace(tmp, target)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     return target
 
 

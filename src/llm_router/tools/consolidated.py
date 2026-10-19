@@ -244,7 +244,7 @@ async def llm(
         override, model, reply = None, None, None
     if override:
         prompt = override.stripped
-        prefixes.record_example(prompt, forced=override.name, decided=model or decided, door="mcp")
+        prefixes.record_example(prompt, forced=override.name, decided=model or decided, door="mcp", embed=True)
     model_kwargs = {"model": model} if model is not None else {}
     async with _ledger_guard(t) as guard:
         if reply is not None:

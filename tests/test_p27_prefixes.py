@@ -1,5 +1,6 @@
 """P2.7: shared prefixes and the real MCP completion door."""
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -40,7 +41,7 @@ def test_examples(tmp_path, monkeypatch):
     assert secret not in target.read_text()
     assert target.stat().st_mode & 0o777 == 0o600
     assert target.parent.stat().st_mode & 0o777 == 0o700
-    line = json.dumps(dict(row, text_sha="x" * 100)) + "\n"
+    line = json.dumps(dict(row, text_sha="x" * 100, ts=time.time())) + "\n"  # recent: 180-day pruning must not eat the filler
     target.write_text(line * (2 * 1024 * 1024 // len(line) + 2))
     before = target.stat().st_size
     assert prefixes.record_example("newest", "codex", "codex/test", "mcp", path=target)

@@ -20,7 +20,12 @@ GT-500 in production; a synthetic fixture in tests). One row per held-out prompt
 (``truth`` = a complexity name may replace ``needs_frontier``; ``complex`` means frontier.)
 Rows are embedded in advance with the artifact's embedding model, so the gate makes no model
 call. Held-out stays held out: an example whose ``text_sha`` is in the replay set is never
-added to the index.
+added to the index, so ``text_sha`` is REQUIRED on every replay row: a replay file with a row
+that lacks it is rejected whole (an unhashed row could be trained on and scored on).
+
+One ``learn`` at a time: a lock file (``complexity_knn.json.lock``, ``flock``) serialises
+runs, the base artifact is re-checked before the swap and ``.prev`` is written only for a base
+that is still the one this run read, so a concurrent run's ``applied_shas`` are never dropped.
 
 Fail closed: no replay set, an unreadable one, or fewer than ``LLM_ROUTER_LEARNING_MIN_REPLAY``
 (default 100) usable rows, and the update is rejected. An empty set passes everything, so it
@@ -29,9 +34,11 @@ learned. Every decision is one row (counts and rates, no text) in ``classifier_l
 """
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
 import os
-import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,11 +90,17 @@ class Verdict:
         return self.status == ACCEPTED
 
 
+class ReplayError(ValueError):
+    """The replay file cannot be trusted (a row without ``text_sha``)."""
+
+
 def load_replay(path: Path | str | None) -> list[tuple]:
-    """``[(vector, needs_frontier, text_sha | None)]``; unusable rows are skipped."""
+    """``[(vector, needs_frontier, text_sha)]``; unparseable rows are skipped, but a parseable
+    row without a ``text_sha`` raises ``ReplayError``: the held-out guard needs every hash."""
     if path is None:
         return []
     out: list[tuple] = []
+    missing = 0
     try:
         with Path(path).open(encoding="utf-8") as fh:
             for line in fh:
@@ -99,12 +112,17 @@ def load_replay(path: Path | str | None) -> list[tuple]:
                         truth = bool(raw["needs_frontier"])
                     else:
                         truth = str(raw["truth"]) == "complex"
-                    sha = raw.get("text_sha") if isinstance(raw.get("text_sha"), str) else None
-                    out.append((vec, truth, sha))
                 except (ValueError, KeyError, TypeError):
                     continue
+                sha = raw.get("text_sha")
+                if not isinstance(sha, str) or not sha:
+                    missing += 1
+                    continue
+                out.append((vec, truth, sha))
     except OSError:
         return []
+    if missing:
+        raise ReplayError(f"{missing} replay row(s) have no text_sha")
     return out
 
 
@@ -185,17 +203,87 @@ def _log(verdict: Verdict, *, dry_run: bool, now: float) -> None:
         pass  # the decision itself stands; a failed log row is not a reason to learn or not
 
 
+def _file_id(path: Path) -> str | None:
+    """Content hash of a file, or None when it does not exist."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+@contextlib.contextmanager
+def _lock(target: Path):
+    """Exclusive ``flock`` on ``<artifact>.lock`` for the whole run (blocks until free)."""
+    import fcntl
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(target) + ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing releases the lock
+
+
+def _write_prev(target: Path) -> None:
+    """Copy the live artifact to ``<artifact>.prev`` atomically (unique temp name)."""
+    prev = target.with_suffix(target.suffix + ".prev")
+    fd, tmp = tempfile.mkstemp(prefix=prev.name + ".", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            out.write(target.read_bytes())
+        os.replace(tmp, prev)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _install(target: Path, cand: complexity_knn.Artifact, base_id: str | None) -> None:
+    """Swap ``cand`` in. Raises ``BaseChanged`` when the artifact is no longer the base this run read."""
+    if _file_id(target) != base_id:
+        raise BaseChanged()
+    if target.exists():
+        _write_prev(target)
+    complexity_knn.write_artifact(
+        target, [list(r) for r in cand.rows], list(cand.labels), embedding_model=cand.embedding_model,
+        k=cand.k, kappa=cand.kappa, temperature=cand.temperature, threshold=cand.threshold,
+        provenance=cand.provenance)
+    complexity_knn.clear_cache()
+
+
+class BaseChanged(Exception):
+    pass
+
+
 def apply(*, dry_run: bool = False, replay: Path | str | None = None,
           examples_path: Path | str | None = None, now: float | None = None) -> Verdict:
-    """Build the candidate from new examples, gate it, and (unless ``dry_run``) install it."""
+    """Build the candidate from new examples, gate it, and (unless ``dry_run``) install it.
+    Serialised by a lock file; also deletes example rows older than 180 days."""
+    with _lock(complexity_knn.artifact_path()):
+        return _apply_locked(dry_run=dry_run, replay=replay, examples_path=examples_path, now=now)
+
+
+def _apply_locked(*, dry_run, replay, examples_path, now) -> Verdict:
     stamp = time.time() if now is None else now
+    try:
+        examples.prune(examples_path, now=stamp)
+    except OSError:
+        pass  # retention housekeeping must not stop a learning run
+    complexity_knn.clear_cache()
+    target = complexity_knn.artifact_path()
+    base_id = _file_id(target)
     art = complexity_knn.load_artifact()
     if art is None:
         v = Verdict(REJECTED, "no_base_artifact: nothing to compare an update with")
         _log(v, dry_run=dry_run, now=stamp)
         return v
     rows = examples.read_examples(examples_path, now=stamp)
-    replay_rows = load_replay(Path(replay) if replay else replay_path())
+    try:
+        replay_rows = load_replay(Path(replay) if replay else replay_path())
+    except ReplayError as exc:
+        v = Verdict(REJECTED, f"replay_missing_text_sha: {exc}")
+        _log(v, dry_run=dry_run, now=stamp)
+        return v
     vecs, labels, shas = candidate_rows(art, rows, {r[2] for r in replay_rows if r[2]})
     if not shas:
         return Verdict(NOTHING_NEW, "no new examples with an embedding",
@@ -204,16 +292,48 @@ def apply(*, dry_run: bool = False, replay: Path | str | None = None,
     v = gate(art, cand, replay_rows)
     v = Verdict(v.status, v.reason, v.base, v.candidate, len(shas))
     if v.accepted and not dry_run:
-        target = complexity_knn.artifact_path()
         try:
-            if target.exists():
-                shutil.copy2(target, target.with_suffix(target.suffix + ".prev"))
-            complexity_knn.write_artifact(
-                target, [list(r) for r in cand.rows], list(cand.labels), embedding_model=cand.embedding_model,
-                k=cand.k, kappa=cand.kappa, temperature=cand.temperature, threshold=cand.threshold,
-                provenance=cand.provenance)
-            complexity_knn.clear_cache()
+            _install(target, cand, base_id)
+        except BaseChanged:
+            v = Verdict(REJECTED, "base_changed_during_run: the artifact was replaced by another run; nothing written",
+                        v.base, v.candidate, len(shas))
         except OSError as exc:
             v = Verdict(REJECTED, f"write_failed: {type(exc).__name__}", v.base, v.candidate, len(shas))
     _log(v, dry_run=dry_run, now=stamp)
     return v
+
+
+def purge_user_examples() -> Verdict:
+    """Rebuild the artifact without the user-derived rows ``learn`` appended.
+
+    ``learn`` only ever appends, so those rows are the LAST ``examples_added_total`` rows of the
+    artifact (``build_complexity_knn.py`` writes a fresh artifact with no ``learning`` provenance).
+    The previous artifact is kept as ``.prev``. ``applied_shas`` is cleared, so a later
+    ``learn`` would apply the still-stored examples again: delete ``examples.jsonl`` too."""
+    stamp = time.time()
+    with _lock(complexity_knn.artifact_path()):
+        complexity_knn.clear_cache()
+        target = complexity_knn.artifact_path()
+        base_id = _file_id(target)
+        art = complexity_knn.load_artifact()
+        if art is None:
+            return Verdict(REJECTED, "no_base_artifact: nothing to purge")
+        n = (art.provenance.get("learning") or {}).get("examples_added_total")
+        if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
+            return Verdict(NOTHING_NEW, "no user-derived rows in the artifact")
+        if n >= art.n:
+            return Verdict(REJECTED, "purge_would_empty_the_artifact: restore the shipped one instead")
+        prov = {k: v for k, v in art.provenance.items() if k != "learning"}
+        prov["learning_purged"] = {"at": stamp, "rows": n}
+        cand = complexity_knn.Artifact.from_parts(
+            list(art.rows[:-n]), list(art.labels[:-n]), embedding_model=art.embedding_model, k=art.k,
+            kappa=art.kappa, temperature=art.temperature, threshold=art.threshold, provenance=prov)
+        try:
+            _install(target, cand, base_id)
+        except BaseChanged:
+            return Verdict(REJECTED, "base_changed_during_run: nothing written")
+        except OSError as exc:
+            return Verdict(REJECTED, f"write_failed: {type(exc).__name__}")
+        v = Verdict(ACCEPTED, "user_derived_rows_removed", added=-n)
+        _log(v, dry_run=False, now=stamp)
+        return v
