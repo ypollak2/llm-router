@@ -171,10 +171,13 @@ def _expected_line_six(window: str) -> str:
     loc, sub, paid, unc = MIX_SIX[window]
     assert loc + sub + paid + unc == sum(ex.values())
     usd, n = _saved_six(window)
+    # D-247: verified is its own segment. S1 ($0.50) is verified everywhere; the extra B2 row
+    # (gemini_cli, $4.00) is verified too and sits only in the 24h/7d windows.
+    ver_usd, ver_n = (0.5 + EXTRA_SAVED_USD, 2) if window in ("24h", "7d") else (0.5, 1)
     by = " ".join(f"{p} {c}" for p, c in sorted(ex.items(), key=lambda kv: (-kv[1], kv[0])))
     return (f"ledger {window}: {sum(ex.values())} executed ({by}) · mix local {loc} / "
-            f"subscription {sub} / paid {paid} / unclassified {unc} · est. saved ${usd - 0.5:,.2f} (n={n - 1:,}) "
-            f"· verified saved $0.50 (n=1)")
+            f"subscription {sub} / paid {paid} / unclassified {unc} · est. saved ${usd - ver_usd:,.2f} (n={n - ver_n:,}) "
+            f"· verified saved ${ver_usd:,.2f} (n={ver_n:,})")
 
 
 def _ungrounded(text: str, sep: str) -> list[str]:
