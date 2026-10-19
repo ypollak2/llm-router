@@ -415,6 +415,10 @@ def with_complexity_knn(base=None):
         if ks is None:
             choice["complexity_score"] = None
             return choice
+        from llm_router import classifier_health
+
+        # P3.6-b: both live deciders answered; one text-free row {ts, rules_tier, knn_tier, source}
+        classifier_health.record_agreement(choice.get("complexity"), ks.needs_frontier)
         choice["complexity"] = complexity_knn.frontier_complexity(choice.get("complexity"), ks.needs_frontier)
         choice["complexity_score"] = round(ks.score, 4)
         return choice
@@ -1061,8 +1065,10 @@ class ClaudeTierPolicy:
         with phases("classify"):
             choice = await classify(tier_text(body))
         task, cx = choice.get("task_type"), choice.get("complexity")
+        from llm_router import classifier_health
 
-        target = self.tier_for(task, cx) or req_tier
+        # P3.6-b: conservative mode looks the tier up one level higher; the ledger keeps the measured class
+        target = self.tier_for(task, classifier_health.bias_complexity(cx)) or req_tier
         proposed = target.name  # pre-override: the policy table's own answer
         reason = REASON_POLICY
         if not self.allow_upgrade and self.rank[target.name] > self.rank[req_tier.name]:

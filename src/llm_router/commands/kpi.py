@@ -2446,6 +2446,21 @@ def _classifier_shadow_summary(days: float, win: "_Window | None" = None,
     }
 
 
+def _classifier_health_lines() -> list[str]:
+    """P3.6-b: 7-day shadow agreement with n, PSI drift, and the conservative-mode notice. Looking
+    here (the daily ``kpi`` run included) is also what re-checks the mode."""
+    try:
+        from llm_router import classifier_health
+
+        update = classifier_health.evaluate_and_update()
+        h = update.health
+        if not (h.recent.n or h.baseline.n or update.notice):
+            return []  # nothing measured: status says so, the scorecard stays quiet
+        return classifier_health.lines(h) + ([update.notice] if update.notice else [])
+    except Exception:  # noqa: BLE001 -- informational lines must never break the scorecard
+        return []
+
+
 def _classifier_shadow_line(s: dict | None) -> str | None:
     if not s or not (s.get("n") or s.get("drops")):
         return None
@@ -2867,6 +2882,7 @@ def render_scorecard(data: dict) -> str:
     if classifier_line:
         lines.append(classifier_line)
         lines += _classifier_vs_rules_lines(data.get("classifier_shadow"))
+    lines += _classifier_health_lines()
     ledger_line = _decision_ledger_line()
     if ledger_line:
         lines.append(ledger_line)
