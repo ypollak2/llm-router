@@ -4,7 +4,7 @@
 |--------------|--------------|-------------------|--------------------------------------------------|
 | subscription | pct          | ``37.5% of window`` | share of the quota window                        |
 | subscription | work_hours   | ``~2.5 work-hours`` | quota-% saved / median pp per active hour        |
-| api          | usd          | ``$1.50``           | money actually metered                           |
+| api          | usd          | ``$1.50``           | a dollar figure that is not marked ``~``         |
 | estimate     | usd          | ``~$1.50``          | a counterfactual dollar figure                   |
 
 Rules, enforced here and nowhere else:
@@ -45,6 +45,8 @@ def render(value: float, n: int, window: str, *, kind: str, unit: str, quantity:
         text = f"{mark}{_num(value)} work-hours"
     else:
         text = f"{mark}${value:,.2f}"
+    if quantity == "work_hours" and n_basis is None:
+        return "n/a"  # work-hours need the rate behind them (its own n); without it the figure is unknown
     if not with_n:
         return text
     ns = f"n={n:,}" if n_basis is None else f"n={n:,}, rate n={n_basis:,}"

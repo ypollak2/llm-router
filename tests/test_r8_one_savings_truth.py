@@ -143,6 +143,16 @@ def test_by_model_reconciles_with_the_headline_when_nothing_is_simulated(fixture
 # ── Cross-surface agreement ────────────────────────────────────────────────
 
 
+_MONEY = (r"est\. saved \$([\d,.]+) \(n=([\d,]+)\)"
+          r"(?: · \$([\d,.]+) verified saved \(n=([\d,]+)\))? vs (\S+)")
+
+
+def _figs(m):
+    """(est_usd, est_n, verified_usd, verified_n, baseline): F103 -- two segments, never one sum."""
+    num = lambda g: float(g.replace(",", "")) if g is not None else 0.0  # noqa: E731
+    return (num(m.group(1)), int(num(m.group(2))), num(m.group(3)), int(num(m.group(4))), m.group(5))
+
+
 def _status_figures(db_path):
     """(estimated_usd, estimated_n, baseline) as `llm-router status` renders
     them for the "Today" row — read straight off the `rich.console.Group`'s
@@ -164,14 +174,11 @@ def _status_figures(db_path):
     import re
 
     m = re.search(
-        r"Today\s+est\. saved \$([\d,.]+) \(n=([\d,]+)\) vs (\S+)",
+        r"Today\s+" + _MONEY,
         text,
     )
     assert m, f"could not find Today's estimate in:\n{text}"
-    return (
-        float(m.group(1).replace(",", "")), int(m.group(2).replace(",", "")),
-        m.group(3),
-    )
+    return _figs(m)
 
 
 def _savings_report_figures(period="day"):
@@ -180,12 +187,9 @@ def _savings_report_figures(period="day"):
     from llm_router.commands.savings_report import render_savings_report
 
     text = render_savings_report(period)
-    m = re.search(r"est\. saved \$([\d,.]+) \(n=([\d,]+)\) vs (\S+)", text)
+    m = re.search(_MONEY, text)
     assert m, f"could not find the canonical headline in:\n{text}"
-    return (
-        float(m.group(1).replace(",", "")), int(m.group(2).replace(",", "")),
-        m.group(3),
-    )
+    return _figs(m)
 
 
 def _gain_figures(period="today"):
@@ -194,12 +198,9 @@ def _gain_figures(period="today"):
     from llm_router.commands.gain import show_gain
 
     text = show_gain(period)
-    m = re.search(r"est\. saved \$([\d,.]+) \(n=([\d,]+)\) vs (\S+)", text)
+    m = re.search(_MONEY, text)
     assert m, f"could not find the canonical headline in gain's output:\n{text}"
-    return (
-        float(m.group(1).replace(",", "")), int(m.group(2).replace(",", "")),
-        m.group(3),
-    )
+    return _figs(m)
 
 
 def _statusline_figures(db_path):
@@ -210,8 +211,8 @@ def _statusline_figures(db_path):
     pass `summary("today").compact()` through."""
     totals = dashboard_data.query_window("today", db_path=db_path)
     return (
-        totals.saved_usd + totals.unverified_saved_usd,
-        totals.verified_calls + totals.unverified_calls,
+        totals.unverified_saved_usd, totals.unverified_calls,
+        totals.saved_usd, totals.verified_calls, None,
     )
 
 
@@ -224,14 +225,18 @@ def test_four_surfaces_report_identical_figures(fixture_home):
     gain = _gain_figures("today")
     statusline = _statusline_figures(db)
 
-    for label, (usd, n, baseline) in (
+    for label, (usd, n, vusd, vn, baseline) in (
         ("status", status), ("savings-report", report), ("gain", gain),
     ):
-        assert usd == pytest.approx(canonical.estimated_usd), label
-        assert n == canonical.estimated_n, label
+        assert usd == pytest.approx(canonical.unverified_usd), label
+        assert n == canonical.unverified_n, label
+        assert vusd == pytest.approx(canonical.realized_usd), label
+        assert vn == canonical.realized_n, label
         assert baseline == canonical.baseline_model, label
 
-    # statusline: same merged total, read directly off query_window (what
-    # Summary.compact() merges) rather than parsed text.
-    assert statusline[0] == pytest.approx(canonical.estimated_usd)
-    assert statusline[1] == canonical.estimated_n
+    # statusline: the same two segments, read directly off query_window (what
+    # Summary.compact() prints) rather than parsed text -- never one merged total.
+    assert statusline[0] == pytest.approx(canonical.unverified_usd)
+    assert statusline[1] == canonical.unverified_n
+    assert statusline[2] == pytest.approx(canonical.realized_usd)
+    assert statusline[3] == canonical.realized_n

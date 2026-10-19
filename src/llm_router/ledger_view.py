@@ -670,15 +670,18 @@ def show(fig: "Figure | None", fmt: str = "{}", *, unit: str | None = None,
 
 
 def money_fragment(measured_usd: float | None, estimated_usd: float | None) -> str:
-    """The saved-money fragment with measured apart from estimated (P35-1, D-220): the estimate
-    first (``~$5.00 est``), then the measured dollars (``$2.00 measured``), joined by `` · ``.
-    A segment without money is dropped; with neither, ``~$0.00 est``. Never one summed figure."""
+    """The saved-money fragment with verified apart from estimated (P35-1, D-220; F103): the
+    estimate first (``~$5.00 est. saved``), then the verified counterfactual savings
+    (``$2.00 verified saved``), joined by `` · ``. Both are SAVINGS against a baseline, never
+    metered spend, so neither is called "measured". A segment without money is dropped; with
+    neither, ``~$0.00 est. saved``. Never one summed figure. (``measured_usd`` is the ledger's
+    ``verified_usd``.)"""
     parts = []
     if estimated_usd:
-        parts.append(f"~${estimated_usd:,.2f} est")
+        parts.append(f"~${estimated_usd:,.2f} est. saved")
     if measured_usd:
-        parts.append(f"${measured_usd:,.2f} measured")
-    return " · ".join(parts) if parts else "~$0.00 est"
+        parts.append(f"${measured_usd:,.2f} verified saved")
+    return " · ".join(parts) if parts else "~$0.00 est. saved"
 
 
 def _percentile(sorted_vals: list[float], pct: float) -> float:

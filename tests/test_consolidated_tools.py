@@ -190,9 +190,9 @@ async def test_llm_router_status_gain_view_shows_the_estimate_not_the_split(
     conn.close()
 
     out = await consolidated.llm_router_status("gain", period="today")
-    assert "est. saved $1.25 (n=1) vs" in out, out
-    assert "verified" not in out.lower(), (
-        f"'verified'/'unverified' must not reach the MCP gain view: {out!r}"
+    assert "$1.25 verified saved (n=1) vs" in out, out
+    assert "unverified" not in out.lower() and "measured" not in out.lower(), (
+        f"'unverified'/'measured' must not reach the MCP gain view: {out!r}"
     )
 
 

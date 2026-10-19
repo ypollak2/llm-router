@@ -172,7 +172,7 @@ def test_measured_is_apart_from_estimated():
     s = Summary(period="today", baseline_model="x", realized_usd=2.0, realized_n=3,
                 unverified_usd=5.0, unverified_n=4, routed_n=9, unmeasured_n=0)
     text = s.compact()
-    assert "$2.00 measured" in text and "~$5.00 est" in text, text   # two segments, never the merged $7.00
+    assert "$2.00 verified saved" in text and "~$5.00 est. saved" in text, text   # two segments, never the merged $7.00
     assert "$7.00" not in text, text
 
 
