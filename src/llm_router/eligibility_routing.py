@@ -22,7 +22,9 @@ TASK-TYPE MAPPING (honest scope, PREREG-P20-requal section 4).
 * ``code`` lane: the code set (hidden-test coding tasks) maps to router ``code``.
 * ``tech_op`` lane: no router task type. Unmapped, so no effect.
 * Tier: router complexity ``simple``/``moderate`` maps to the lane tier of the same name.
-  ``complex``/``deep_reasoning`` have no lane (the sets drop complex items), so no effect.
+  ``complex``/``deep_reasoning`` have no lane (the sets drop complex items), so no effect. The
+  router reads the call's own complexity (``complexity_hint``, else the classifier's
+  ``classification_data["complexity"]``), also when the caller passes an explicit ``profile=``.
 
 Only the ``ollama`` provider is matched: the file's keys are bare Ollama names
 (``eligibility_store``), and the measured identity is an Ollama model. An untagged name matches
@@ -33,7 +35,11 @@ which ``routing_decisions.skipped_json`` stores and ``llm-router why`` shows. No
 
 CACHE. The parsed file is cached keyed by (path, mtime_ns, size); a call does one ``stat``. A
 corrupt or unreadable file records a fail-open event (exception class only) once per file
-version and leaves the chain unchanged.
+version, and a file that cannot be ``stat``-ed (other than missing) once per (path, error
+class); either way the chain is unchanged. The ``source`` id is cut to ``SOURCE_MAX`` chars.
+
+DIGEST. A lane is keyed by the Ollama name only, not its digest: after ``ollama pull`` of the
+same tag the old verdict still applies until the model is re-qualified.
 
 OPT-OUT. ``LLM_ROUTER_IGNORE_ELIGIBILITY=1`` turns the filter off (byte-identical pre-F106 chain).
 """
@@ -62,9 +68,13 @@ ACT_ON_VERDICTS: frozenset[str] = frozenset({"failed"})
 MATCHED_PROVIDERS: frozenset[str] = frozenset({"ollama"})
 
 _FO_UNREADABLE = "CHZ-FO-ELIGIBILITY-ROUTING-UNREADABLE"
+#: Longest ``source`` id written to the skip record (ledger ``skipped_json``, ``why``).
+SOURCE_MAX = 64
 
 # (path, mtime_ns, size) -> normalised index (None = file present but unusable).
 _cache: tuple[tuple[str, int, int], dict[str, dict] | None] | None = None
+# (path, error class) pairs whose ``stat`` failure was already recorded.
+_stat_failed: set[tuple[str, str]] = set()
 
 
 def eligibility_path() -> Path:
@@ -98,8 +108,11 @@ def load(path: Path | None = None) -> dict[str, dict] | None:
     except FileNotFoundError:
         return None  # no measurements yet: the normal state, not a failure
     except OSError as exc:
-        from llm_router import failopen
-        failopen.record(_FO_UNREADABLE, exc)
+        seen = (str(target), type(exc).__name__)
+        if seen not in _stat_failed:  # once per (path, error class), not on every call
+            _stat_failed.add(seen)
+            from llm_router import failopen
+            failopen.record(_FO_UNREADABLE, exc)
         return None
     key = (str(target), st.st_mtime_ns, st.st_size)
     if _cache is not None and _cache[0] == key:
@@ -117,6 +130,7 @@ def load(path: Path | None = None) -> dict[str, dict] | None:
 def reset_cache() -> None:
     global _cache
     _cache = None
+    _stat_failed.clear()
 
 
 def lane_key(task_type: Any, complexity: Any) -> tuple[str, str] | None:
@@ -170,6 +184,6 @@ def filter_chain(models: list[str], task_type: Any, complexity: Any) -> list[str
         skip_causes.note(
             m, skip_causes.FAILED_ELIGIBILITY, lane=f"{lane}/{tier}",
             k=_count_or_none(rec.get("k")), n=_count_or_none(rec.get("n")),
-            source=source if isinstance(source, str) else None,
+            source=source[:SOURCE_MAX] if isinstance(source, str) else None,
         )
     return kept

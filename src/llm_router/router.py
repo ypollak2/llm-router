@@ -1102,6 +1102,30 @@ async def _build_and_filter_chain(
     return models_to_try
 
 
+def _lane_complexity(
+    complexity_hint: Complexity | str | None, classification_data: dict | None, c: Complexity
+) -> Complexity:
+    """F106: the call's complexity for the eligibility lane tier.
+
+    ``_resolve_profile`` leaves ``c`` at MODERATE when the caller passes ``profile=`` (MCP
+    ``llm_route`` always does, with the classifier's complexity in ``classification_data``), so
+    ``c`` alone would read a complex call as moderate. Order: ``complexity_hint`` if given, else a
+    valid ``classification_data["complexity"]``, else ``c``."""
+    if complexity_hint is not None:
+        if isinstance(complexity_hint, Complexity):
+            return complexity_hint
+        try:
+            return Complexity(complexity_hint)
+        except ValueError:
+            return c
+    if isinstance(classification_data, dict):
+        try:
+            return Complexity(classification_data.get("complexity"))
+        except ValueError:
+            return c
+    return c
+
+
 def _drop_failed_eligibility(models: list[str], task_type: TaskType, c: Complexity) -> list[str]:
     """F106 / D-235: ``eligibility_routing.filter_chain``; the chain is kept if the filter raises."""
     try:
@@ -2973,6 +2997,8 @@ async def _dispatch_model_loop(
     scope_root: str | None = None,
     # P0.5: the semantic-cache key route_and_call checked under; stored under it.
     semantic_key=None,
+    # F106: the lane tier route_and_call derived (``_lane_complexity``); None -> ``c``.
+    lane_complexity: Complexity | None = None,
     # LEDGER-ERR-1: the caller's own list, used AS the attempt list, so a failure that
     # escapes this function (timeout, cancel, exhaustion) still tells the caller which
     # model was being attempted. None keeps the old private list.
@@ -4006,7 +4032,9 @@ async def _dispatch_model_loop(
         )
         # D-116: apply shared Q&A ordering here too; timeout demotion below still wins.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
-        emergency_chain = _drop_failed_eligibility(emergency_chain, task_type, c)  # F106
+        emergency_chain = _drop_failed_eligibility(  # F106: the call's lane tier, not BUDGET's
+            emergency_chain, task_type, lane_complexity or c
+        )
         if emergency_chain and capability_needs is not None:
             # P2.4: the emergency chain is filtered too; the primary chain already was.
             from llm_router import capability_filter as _cf
@@ -4758,6 +4786,8 @@ async def route_and_call(
     # F25 / D-170 (4): a row the MCP ledger guard writes for this call names this profile.
     _ci_scope.note_ledger_profile(profile)
     effective_complexity = c.value if hasattr(c, "value") else str(complexity_hint or "moderate")
+    # F106: the eligibility lane tier, read from the call's own complexity even under profile=.
+    _lane_c = _lane_complexity(complexity_hint, classification_data, c)
     available = config.available_providers
     with traced_span(
         "route_and_call",
@@ -5072,7 +5102,7 @@ async def route_and_call(
         # after every step that can add a local entry, before the daily-cap step.
         _elig_before = list(models_to_try)
         if models_to_try and not model_override:
-            models_to_try = _drop_failed_eligibility(models_to_try, task_type, c)
+            models_to_try = _drop_failed_eligibility(models_to_try, task_type, _lane_c)
         _elig_dropped = [m for m in _elig_before if m not in models_to_try]
 
         # TQ-007 (applied LAST — RED1-01/RED1-02 fix): a daily spend cap was
@@ -5125,6 +5155,15 @@ async def route_and_call(
                     # block. Any remaining candidate is a metered paid provider
                     # the cap forbids.
                     await _release_reservation_if_held()
+                    if _elig_dropped:
+                        # F106: the dropped local models were the free-local survivors the cap
+                        # would have served; name both causes, not the cap alone.
+                        raise BudgetExceededError(
+                            f"{_daily_cap_exc} Also, local eligibility (F106) removed "
+                            f"{', '.join(_elig_dropped)}: measurably failed the "
+                            f"{task_type.value}/{_lane_c.value} lane in local_eligibility.json. "
+                            "Set LLM_ROUTER_IGNORE_ELIGIBILITY=1 to route to it anyway."
+                        ) from _daily_cap_exc
                     raise _daily_cap_exc
 
         # P2.4: the capability filter is the LAST transform (RED1-01/RED1-02: a hard
@@ -5178,7 +5217,7 @@ async def route_and_call(
             await _release_reservation_if_held()  # RED1-3-01: don't leak on empty-chain
             if _elig_dropped:
                 raise NoRoutableModelsError(
-                    f"No routable models for {task_type.value}/{c.value}: every remaining "
+                    f"No routable models for {task_type.value}/{_lane_c.value}: every remaining "
                     f"candidate ({', '.join(_elig_dropped)}) measurably failed this lane in "
                     "local_eligibility.json (F106). Fix: connect a non-local provider, or set "
                     "LLM_ROUTER_IGNORE_ELIGIBILITY=1 to route to it anyway.",
@@ -5578,6 +5617,7 @@ async def route_and_call(
             ledger_route_id=_ledger_route_id,
             scope_root=_scope_root,
             semantic_key=_semantic_key,
+            lane_complexity=_lane_c,  # F106
             chain_attempts_out=_attempt_trace,
             conversation=messages,
             context_door=context_door,

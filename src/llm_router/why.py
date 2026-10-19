@@ -221,7 +221,7 @@ def _lane_note(a: dict) -> str:
         return ""
     k, n = a.get("k"), a.get("n")
     counts = f" {k}/{n}" if k is not None and n is not None else ""
-    src = f", {a['source']}" if a.get("source") else ""
+    src = f", {str(a['source'])[:64]}" if a.get("source") else ""  # eligibility_routing.SOURCE_MAX
     return f" ({a['lane']}{counts}{src})"
 
 

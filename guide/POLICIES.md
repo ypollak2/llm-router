@@ -120,11 +120,20 @@ lane `grade` and `verdict` are both `failed` (PREREG-P20-requal §10). Owner dec
 | code | `code` | simple / moderate |
 | anything else; complex / deep_reasoning | none, no effect | |
 
+The tier is the call's own complexity: `complexity_hint`, else the classifier's complexity
+(`llm_route` passes it with an explicit profile), so a complex call is never filtered.
+
 `unknown`, `probe`, `not_informative`, `inconclusive` (power-limited) and `eligible` lanes, a missing
 model or a missing file change nothing; `eligible` grants no authority. A corrupt file leaves the
 chain unchanged and records `CHZ-FO-ELIGIBILITY-ROUTING-UNREADABLE`. Each drop is a
 `failed_eligibility` entry (lane, k, n, source) in `routing_decisions.skipped_json`, shown by
-`llm-router why`. An explicit `model_override` is left alone. Opt out (pre-F106 chain):
+`llm-router why`. An explicit `model_override` is left alone. If the drop empties the chain, the
+error names it; under an exceeded daily cap the cap error names both causes.
+
+Lanes are keyed by the Ollama model name, not its digest. After `ollama pull` of the same tag
+(new weights), the old verdict still applies: re-qualify the model to refresh its lanes.
+
+Opt out (pre-F106 chain):
 
 ```bash
 export LLM_ROUTER_IGNORE_ELIGIBILITY=1
