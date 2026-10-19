@@ -1166,6 +1166,8 @@ class LedgerWindow:
     saved_n: int | None = None
     verified_usd: float | None = None
     unverified_usd: float | None = None
+    verified_n: int | None = None       # rows behind verified_usd (the measured segment's n)
+    unverified_n: int | None = None     # rows behind unverified_usd (the estimated segment's n)
     spent_usd: float | None = None      # money actually spent in the window (usage + platform tables)
     spent_n: int | None = None
     latency_p50: Figure | None = None
@@ -1190,7 +1192,10 @@ class LedgerWindow:
 
         out = {"executed": fig(self.n, self.n, self.source),
                "saved": fig(self.saved_usd, self.saved_n, self.source, "estimated"),
-               "spent": fig(self.spent_usd, self.spent_n, self.source)}
+               "spent": fig(self.spent_usd, self.spent_n, self.source),
+               # P35-2: the two halves of "saved", each with its own n, never summed on a statusline
+               "saved_measured": fig(self.verified_usd, self.verified_n, self.source),
+               "saved_estimated": fig(self.unverified_usd, self.unverified_n, self.source, "estimated")}
         for cls in CLASSES:
             out[f"mix_{cls}"] = fig(getattr(self, f"{cls}_n" if cls != "local" else "local_n"),
                                     self.n, self.source)
@@ -1284,6 +1289,8 @@ def window_summary(since: "str | Bounds | float | datetime | None" = "24h",
         saved_n=None if money is None else money.saved_n,
         verified_usd=None if money is None else money.verified_usd,
         unverified_usd=None if money is None else money.unverified_usd,
+        verified_n=None if money is None else money.verified_calls,
+        unverified_n=None if money is None else money.unverified_calls,
         spent_usd=None if money is None else money.cost_usd,
         spent_n=None if money is None else money.calls,
         latency_p50=lat["p50"], latency_p95=lat["p95"], latency_p99=lat["p99"],

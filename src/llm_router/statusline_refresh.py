@@ -194,20 +194,62 @@ def refresh(now: float | None = None) -> bool:
         return True
 
 
+def _cache_due(now: float) -> bool:
+    """True when ``statusline_cache.json`` is missing, unreadable or older than the tick's refresh age."""
+    from llm_router import statusline_tick as tick
+
+    try:
+        written = json.loads(cache_path().read_text(encoding="utf-8")).get("written_at")
+    except (OSError, ValueError, AttributeError):
+        return True
+    return not isinstance(written, (int, float)) or not 0 <= now - written < tick.REFRESH_AFTER_S
+
+
+def _safe_id(value: str) -> str:
+    import argparse
+    import re
+
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value):
+        raise argparse.ArgumentTypeError(f"not a plain id: {value!r}")
+    return value
+
+
 def cmd_statusline(args: list[str]) -> int:
-    """``llm-router statusline [--refresh]``: refresh the cache, or print the line."""
+    """``llm-router statusline [--refresh [--host H --session S]]``: refresh the caches, or print the line.
+
+    ONE entry point for every refresher (P35-2). ``--refresh`` recomputes the global
+    ``statusline_cache.json`` (the fast tick's input); with ``--session`` it first writes the
+    per-session snapshot (``statusline_snapshot.refresh``, the five-field line) for ``--host``
+    (default ``claude_code``). The default layout's own refresher (``statusline_segments``) calls the
+    same snapshot function, so no second refresher exists."""
     import argparse
 
     ap = argparse.ArgumentParser(prog="llm-router statusline")
     ap.add_argument("--refresh", action="store_true",
                     help="recompute statusline_cache.json now (the status line starts this itself)")
+    ap.add_argument("--host", type=_safe_id, default="claude_code",
+                    help="with --session: the host whose snapshot is written (claude_code, codex, pi)")
+    ap.add_argument("--session", type=_safe_id, default=None,
+                    help="with --refresh: also write this session's snapshot (snapshots/<host>-<session>.json)")
     parsed = ap.parse_args(args)
     if parsed.refresh:
         # Watchdog: a hung KPI source must not hold the refresh lock forever (every
         # later refresh would back off and the line would read n/a until a kill).
         if hasattr(signal, "SIGALRM"):
             signal.alarm(REFRESH_TIMEOUT_S)
-        return 0 if refresh() else 1
+        snap_ok = True
+        if parsed.session:
+            from llm_router import statusline_snapshot
+
+            try:
+                statusline_snapshot.refresh(host=parsed.host, session_id=parsed.session)
+            except Exception as exc:  # noqa: BLE001 -- recorded; the global cache is still refreshed
+                _note_failure("CHZ-FO-STATUSLINE-SNAPSHOT", exc)
+                snap_ok = False
+        if parsed.session and not _cache_due(time.time()):
+            return 0 if snap_ok else 1      # a ledger-triggered run: the snapshot is what changed
+        wrote = refresh()
+        return 0 if (wrote if not parsed.session else snap_ok) else 1
     from llm_router import statusline_tick as tick
 
     home = tick.router_home()

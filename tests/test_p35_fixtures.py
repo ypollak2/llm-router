@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import date, timedelta
@@ -32,7 +33,7 @@ import pytest
 
 from tests.test_p34a_ledger_view_identity import DAY, MIN, NOW, home  # noqa: F401  (home is a fixture)
 from tests.test_p34a_six_surfaces import (  # noqa: F401  (six is a fixture)
-    HOOKS, _statusline, six,
+    ANSI, HOOKS, REAL_TIME, six,
 )
 
 SID = "s-main"
@@ -217,14 +218,91 @@ async def test_work_hours_is_na_below_ten_active_hours_never_zero(home):  # noqa
 
 # -- P35-2 statusline ----------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="P35-2 statusline: default layout lacks router/offload/quality/saved ~h")
+#: Delegations the Codex window counts in the snapshot oracle, printed as a count against the budget
+#: (the module default, 15): ``Codex 3/15 delegations (5h)`` (D-237: a count, never a % with its n).
+CODEX_USED = 3
+#: Per-session quota samples: weekly pp 20 -> 24 over 2 Stop turns = 2.0 pp per Claude turn (quota_burn's
+#: pooled ratio: sum of weekly deltas / sum of Stop turns).
+PP_PER_TURN = 2.0
+#: HUMAN TURNS served off Claude since local midnight (NOW is 01:30 there), the unit PP_PER_TURN is in
+#: (rv-632 must-fix 1). Counted: the local turn_first proxy row at -90 s (its turn has no escalation) and
+#: the zero-Claude hook turn at -70 s. NOT counted: the local turn_first row at -4 min (redone: the
+#: escalation rows at -3 and -2 min are in its own turn), the turn_first row a paid model served at
+#: -30 min, the local proxy rows at -1 and -5 min (no step_class: not a turn), and the MCP rows
+#: (local_assist: Claude made the turn's first call). ~work-hours = 2 x 2.0 pp / 3.0 pp per hour.
+TURNS_OFF_CLAUDE_TODAY = 2
+
+
+def seed_snapshot_extras(h: Path) -> None:
+    """The inputs the snapshot's other fields read, on top of the P35 home: a tagged organic session,
+    one Claude quota poll (1 min old), three Codex delegations, per-session quota samples, and the turns
+    behind TURNS_OFF_CLAUDE_TODAY (proxy_calls.jsonl is rewritten in time order, as the proxy appends it:
+    the router field reads the newest row from the tail)."""
+    (h / f"session_kind_{SID}.json").write_text(json.dumps(
+        {"session_id": SID, "kind": "organic", "cwd": "/fixture/proj", "ts": NOW - DAY}))
+    (h / "usage.json").write_text(json.dumps({"session_pct": 37, "weekly_pct": 40, "updated_at": NOW - MIN}))
+    (h / "codex_window.json").write_text(json.dumps({"delegations": [NOW - 10 * MIN, NOW - 5 * MIN, NOW - MIN]}))
+    samples = [(NOW - 3 * 3600, "start", 20.0), (NOW - 2 * 3600, "stop", 22.0), (NOW - 3600, "stop", 24.0)]
+    _jl(h / "quota_samples.jsonl", [
+        {"session_id": SID, "kind": kind, "ts": ts, "five_hour_pct": 10.0, "weekly_pct": wk, "updated_at": ts,
+         "source": "measured", "session_kind": "organic"} for ts, kind, wk in samples])
+    turn = {"session_id": SID, "step_class": "turn_first", "tier_reason": "policy_table"}
+    rows = [json.loads(ln) for ln in (h / "proxy_calls.jsonl").read_text().splitlines() if ln.strip()]
+    rows += [{**turn, "ts": NOW - 90, "decision": "served", "served_model": "fixture/local-turn", "trace_id": "T-t1"},
+             {**turn, "ts": NOW - 4 * MIN, "decision": "served", "served_model": "fixture/local-turn",
+              "trace_id": "T-t2"},
+             {**turn, "ts": NOW - 30 * MIN, "decision": "forwarded", "served_model": "fixture/frontier",
+              "upstream_status": 200, "trace_id": "T-t3"}]
+    rows.sort(key=lambda r: r["ts"] if isinstance(r.get("ts"), (int, float)) else 0.0)
+    (h / "proxy_calls.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    _jl(h / "edit_outcomes.jsonl", [{"ts": NOW - 70, "source": "zero_claude", "applied": True, "session_id": SID,
+                                     "turn_id": "z1", "session_kind": "organic"}])
+
+
+def _snapshot_shell(p35) -> list[str]:
+    """Seed via ``statusline_snapshot.refresh``, publish it in the kv cache as the refresher does, run the
+    real shell and return its printed rows. ``snap_at`` is re-stamped to the wall clock (the shell
+    compares it with the wall clock; the fixture's clock is frozen), the same way ``written`` is."""
+    from llm_router import statusline_segments as ss
+    from llm_router import statusline_snapshot as snap
+
+    snap.refresh(host="claude_code", session_id=SID, now=NOW)
+    state = str(p35.home)
+    seg = ss.compute(state, "", "", {"LLM_ROUTER_CLAUDE_SUBSCRIPTION": "1"}, NOW, SID)
+    seg.update(ss.snap_segment(state, SID, NOW, refresh=False))
+    seg["written"] = seg["snap_at"] = str(int(REAL_TIME()))
+    ss.write_cache(state, SID, seg)
+    stdin = json.dumps({"session_id": SID, "cwd": "/fixture/proj", "model": {"id": "fixture"}})
+    r = subprocess.run(["bash", str(HOOKS / "statusline-command.sh")], input=stdin, env=p35.env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return [ANSI.sub("", ln) for ln in r.stdout.strip().splitlines()]
+
+
 async def test_statusline_prints_the_five_fields(p35):
-    line = _statusline(p35)
-    for needle in (f"router: {SERVED}", "offload", "quality", "saved ~"):
-        assert needle in line, (needle, line)
+    """Carry-forward from rv-628: seed via ``statusline_snapshot.refresh``, run the shell, and check all five
+    fields, each with its n and window (hand values: the module constants above)."""
+    seed_snapshot_extras(p35.home)
+    rows = _snapshot_shell(p35)
+    snap_rows = [r for r in rows if r.startswith("router:")]
+    assert len(snap_rows) == 1, rows
+    line = snap_rows[0]
+    fields = line.split(" | ")
+    assert len(fields) == 5, line
+    router, offload, quota, quality, saved = fields
+    assert router == f"router: {SERVED} (policy_table)", router
+    assert offload.startswith("offload ") and re.search(r"\(n=\d+, session", offload), offload
+    # one usage.json poll, 1 min old: its n is that one poll and its age (rv-632 must-fix 3)
+    assert quota == f"Claude 5h 37% (n=1 poll, age 1m, 5h) / Codex {CODEX_USED}/15 delegations (5h)", quota
+    good, bad = VERDICTS["good"], VERDICTS["bad"]
+    assert quality == f"quality {good / (good + bad):.0%} (n={good + bad}, 7d)", quality
+    hours = TURNS_OFF_CLAUDE_TODAY * PP_PER_TURN / MEDIAN_PP          # 1.33: hand-derived above
+    assert saved == (f"saved ~{hours:.1f} work-hours (n={TURNS_OFF_CLAUDE_TODAY}, rate n={len(PP_PER_ACTIVE_HOUR)}, "
+                     "today)"), saved
+    for f in fields[1:]:           # every figure names its n and its window (the router field is a name, not a figure)
+        assert "(n=" in f and re.search(r"\b(session|5h|7d|today)\b", f), f
 
 
-@pytest.mark.xfail(strict=True, reason="P35-2 statusline: shadow_frontier.verdict_summary does not exist")
 async def test_verdict_summary_oracle(p35):
     from llm_router import shadow_frontier
 
@@ -234,7 +312,6 @@ async def test_verdict_summary_oracle(p35):
     assert abs(s["rate"] - good / (good + bad)) < 1e-9 and s["wilson"][0] < s["rate"] < s["wilson"][1], s
 
 
-@pytest.mark.xfail(strict=True, reason="P35-2 statusline: statusline_snapshot.py does not exist")
 async def test_snapshot_line_router_is_the_newest_proxy_turn(p35):
     from llm_router import statusline_snapshot as snap
 
@@ -243,7 +320,6 @@ async def test_snapshot_line_router_is_the_newest_proxy_turn(p35):
     assert f"quality {VERDICTS['good'] / (VERDICTS['good'] + VERDICTS['bad']):.0%}" in d["line"]
 
 
-@pytest.mark.xfail(strict=True, reason="P35-2 statusline: statusline_snapshot.py does not exist")
 async def test_snapshot_older_than_15_minutes_is_na(p35):
     from llm_router import statusline_snapshot as snap
 

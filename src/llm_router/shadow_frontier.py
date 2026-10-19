@@ -680,6 +680,32 @@ def judge_pending(*, run: Callable[[str, str], dict] = claude_judge, rng: Callab
     return summary
 
 
+def verdict_summary(*, now: float | None = None, days: int = 7, path: Path | None = None) -> dict:
+    """Quality vs Frontier over the last ``days`` days, from the blind-judge verdict rows (P35-2).
+
+    ``k`` = verdicts where the served (cheap) answer was ``acceptable``; ``n`` = verdicts that
+    decided. ``cannot_judge`` rows and rows with no boolean ``acceptable`` are not verdicts: they are
+    counted apart in ``undecided``. ``rate`` and ``wilson`` (95 percent) are None at n=0 (unknown,
+    never 0); ``window`` is ``"<days>d"``."""
+    from llm_router.shadow_eval import wilson
+
+    now = time.time() if now is None else now
+    since = now - days * 86400.0
+    k = n = undecided = 0
+    for row in _read_rows(path or verdicts_path()):
+        ts = row.get("ts")
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not since <= ts <= now:
+            continue
+        acc = row.get("acceptable")
+        if row.get("cannot_judge") or not isinstance(acc, bool):
+            undecided += 1
+            continue
+        n += 1
+        k += acc
+    return {"n": n, "k": k, "rate": (k / n) if n else None, "wilson": wilson(k, n),
+            "window": f"{days}d", "undecided": undecided}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m llm_router.shadow_frontier",
                                  description="GE4 Frontier shadow: blind A/B judge over stored pairs.")
