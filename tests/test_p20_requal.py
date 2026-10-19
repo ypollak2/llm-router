@@ -1687,3 +1687,98 @@ def test_agent_env_refuses_home_inside_real_home_unless_under_run_dir(tmp_path, 
     with pytest.raises(h.Refuse, match="inside the real HOME"):
         h.assert_agent_env({"HOME": str(inside), "PATH": "/bin"}, run_dir=real / "other")
     h.assert_agent_env({"HOME": str(inside), "PATH": "/bin"}, run_dir=real / "stuff")
+
+
+@pytest.mark.parametrize("code", [2, 126, 127, 139])
+def test_import_guard_fails_closed_on_any_nonzero_probe_exit(tmp_path, code):
+    stub = tmp_path / "s"
+    stub.mkdir()
+    exe = stub / "python3"
+    exe.write_text(f"#!/bin/sh\nexit {code}\n")
+    exe.chmod(0o755)
+    with pytest.raises(h.Refuse, match="no clean answer"):
+        h.assert_no_llm_router_import({"PATH": str(stub)})
+
+
+def test_import_guard_refuses_on_signal_oserror_and_timeout(tmp_path, monkeypatch):
+    stub = python_stub(tmp_path / "s", "python3", importable=False)
+    env = {"PATH": str(stub)}
+    killed = tmp_path / "k"
+    killed.mkdir()
+    (killed / "python3").write_text("#!/bin/sh\nkill -9 $$\n")
+    (killed / "python3").chmod(0o755)
+    with pytest.raises(h.Refuse, match="no clean answer"):
+        h.assert_no_llm_router_import({"PATH": str(killed)})
+    for exc, text in ((OSError("/secret/path"), "could not run"),
+                      (subprocess.TimeoutExpired("x", 1), "timed out")):
+        def boom(*a, _e=exc, **k):
+            raise _e
+        monkeypatch.setattr(h.subprocess, "run", boom)
+        with pytest.raises(h.Refuse, match=text) as err:
+            h.assert_no_llm_router_import(env)
+        assert err.value.__cause__ is None and "/secret/path" not in str(err.value)
+    monkeypatch.undo()
+    h.assert_no_llm_router_import(env)
+
+
+def test_agent_pythons_finds_versioned_and_pypy_interpreters(tmp_path):
+    d = tmp_path / "d"
+    for name in ("python3.13", "pypy3", "pypy", "python", "python3-config", "pythonw.txt"):
+        python_stub(d, name, importable=False)
+    found = {Path(p).name for p in h.agent_pythons(str(d))}
+    assert found == {"python3.13", "pypy3", "pypy", "python"}
+    bad = python_stub(tmp_path / "bad", "python3.11", importable=True)
+    with pytest.raises(h.Refuse, match="importable"):
+        h.assert_no_llm_router_import({"PATH": f"{d}{os.pathsep}{bad}"})
+
+
+def test_grader_python_hung_or_unrunnable_pytest_probe_refuses(tmp_path, monkeypatch):
+    stub = python_stub(tmp_path / "s", "python3", importable=False)
+    real_run = subprocess.run
+
+    def hung(argv, *a, **k):
+        if "import pytest" in argv:
+            raise subprocess.TimeoutExpired(argv, 1)
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr(h.subprocess, "run", hung)
+    with pytest.raises(h.Refuse, match="timed out"):
+        h.grader_python({"PATH": str(stub)})
+
+    def gone(argv, *a, **k):
+        if "import pytest" in argv:
+            raise OSError("nope")
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr(h.subprocess, "run", gone)
+    with pytest.raises(h.Refuse, match="could not run"):
+        h.grader_python({"PATH": str(stub)})
+
+
+def test_credentials_file_error_drops_the_path_cause(tmp_path, monkeypatch):
+    missing = tmp_path / "no-such-token-file"
+    with pytest.raises(h.Refuse) as err:
+        h.read_oauth_token(str(missing))
+    assert err.value.__cause__ is None and err.value.__suppress_context__
+    binary = tmp_path / "bin"
+    binary.write_bytes(b"\xff\xfe\x00")
+    binary.chmod(0o600)
+    with pytest.raises(h.Refuse, match="unusable"):
+        h.read_oauth_token(str(binary))
+
+
+def test_scan_for_token_refuses_by_kind_without_the_value(tmp_path):
+    token = "FAKE-OAUTH-TOKEN-0123456789"
+    h.scan_for_token(token, "patch", data="clean diff")
+    h.scan_for_token("", "patch", data=token)  # no token configured: nothing to find
+    with pytest.raises(h.Refuse, match="token found in patch") as err:
+        h.scan_for_token(token, "patch", data=f"+KEY={token}\n")
+    assert token not in str(err.value)
+    tree = tmp_path / "w"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "sub" / "ok.txt").write_text("nothing here")
+    h.scan_for_token(token, "work files", root=tree)
+    (tree / "sub" / "notes.txt").write_bytes(b"x" * ((1 << 20) - 5) + token.encode() + b"y")
+    with pytest.raises(h.Refuse, match="token found in work files") as err:
+        h.scan_for_token(token, "work files", root=tree)
+    assert token not in str(err.value) and "notes" not in str(err.value)

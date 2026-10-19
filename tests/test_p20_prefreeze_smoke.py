@@ -29,7 +29,7 @@ def test_smoke_prints_pass_fail_only(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv(smoke.h.CLAUDE_CREDENTIALS_ENV, str(token))
     assert smoke.main(["--scratch", str(tmp_path / "scr")]) == 0
     out = capsys.readouterr().out
-    assert out.splitlines() == ["PASS import_guard", "PASS node_on_agent_path", "PASS claude_token"]
+    assert out.splitlines() == ["PASS import_guard", "PASS grader_python", "PASS node_on_agent_path", "PASS claude_token"]
     assert "SECRET" not in out and str(token) not in out
 
 
@@ -44,7 +44,7 @@ def test_smoke_fails_on_importable_python_and_loose_token(tmp_path, monkeypatch,
     monkeypatch.setenv(smoke.h.CLAUDE_CREDENTIALS_ENV, str(token))
     assert smoke.main(["--scratch", str(tmp_path / "scr")]) == 1
     out = capsys.readouterr().out
-    assert out.splitlines() == ["FAIL import_guard", "FAIL node_on_agent_path", "FAIL claude_token"]
+    assert out.splitlines() == ["FAIL import_guard", "FAIL grader_python", "FAIL node_on_agent_path", "FAIL claude_token"]
     assert "SECRET" not in out
 
 
@@ -53,3 +53,29 @@ def test_smoke_empty_python_set_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(smoke.h, "agent_path", lambda p: p)
     assert smoke.check_import_guard({"PATH": str(tmp_path)}) is False
     assert os.environ["PATH"] == str(tmp_path)
+
+
+def test_smoke_grader_python_fails_without_pytest(tmp_path):
+    no_pytest = tmp_path / "np"
+    no_pytest.mkdir()
+    exe = no_pytest / "python3"
+    exe.write_text("#!/bin/sh\ncase \"$*\" in *'import pytest'*) exit 1;; esac\nexit 0\n")
+    exe.chmod(0o755)
+    env = {"PATH": str(no_pytest)}
+    assert smoke.check_import_guard(env) is True
+    assert smoke.check_grader_python(env) is False
+
+
+def test_smoke_removes_its_own_scratch_dir(tmp_path, monkeypatch):
+    made = []
+    real = smoke.tempfile.mkdtemp
+
+    def tracking(*a, **k):
+        made.append(real(*a, dir=str(tmp_path), **k))
+        return made[-1]
+
+    monkeypatch.setattr(smoke.tempfile, "mkdtemp", tracking)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(smoke.h, "agent_path", lambda p: p)
+    smoke.main([])
+    assert len(made) == 1 and not Path(made[0]).exists()

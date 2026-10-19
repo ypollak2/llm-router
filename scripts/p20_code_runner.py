@@ -77,6 +77,21 @@ def pi_config(run_dir, arm):
     return root
 
 
+def grader_env(home):
+    """F113/F115: agent-written code is graded on the agent PATH, HOME at `home`."""
+    return {"PATH": h.agent_path(os.environ.get("PATH", "")), "HOME": str(home),
+            "PYTHONDONTWRITEBYTECODE": "1", **h.AGENT_FIXED_ENV}
+
+
+def scrub_claude_artifacts(token, work, home, result):
+    """F115: the Claude arm has Bash and the OAuth token in its env; refuse before anything
+    it produced (output, work files, patch, scratch HOME) is stored if it carries the token."""
+    h.scan_for_token(token, "agent output", data=(result.stdout or "") + (result.stderr or ""))
+    h.scan_for_token(token, "work files", root=work)
+    h.scan_for_token(token, "agent scratch home", root=home)
+    h.scan_for_token(token, "patch", data=git(work, "diff", "HEAD"))
+
+
 def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     # F104: the agent's HOME is a fresh per-attempt scratch dir outside `work`, never the
     # owner's real HOME (it deleted the live install twice: F86, F86-2).
@@ -98,14 +113,16 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     h.quota_guard(cfg, c)
     start = cfg.now()
     cost, served, error, timed_out = 0, "", None, False
+    env = h.claude_env(home, cfg.run_dir)
     try:
         result = _claude_run(
             h.claude_argv(c["CLAUDE_SONNET_ID"], cfg.run_dir, tools=None)
             + ["--permission-mode", "acceptEdits", "--allowedTools",
                "Read,Edit,Write,Glob,Grep,Bash"],
             input=prompt, text=True, capture_output=True, timeout=900, cwd=work,
-            env=h.claude_env(home, cfg.run_dir), check=False,
+            env=env, check=False,
         )
+        scrub_claude_artifacts(env.get(h.CLAUDE_AUTH_ENV[0]), work, home, result)
         value = json.loads(result.stdout)
         cost = value.get("total_cost_usd", 0)
         if (isinstance(cost, bool) or not isinstance(cost, (int, float))
@@ -223,14 +240,12 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
             try:
                 # F113: agent-written code runs on the agent PATH with an interpreter that
                 # cannot import llm_router (grader_python enforces it), never the run venv.
-                grader_env = {"PATH": h.agent_path(os.environ.get("PATH", "")),
-                              "HOME": str(work), "PYTHONDONTWRITEBYTECODE": "1",
-                              **h.AGENT_FIXED_ENV}
+                genv = grader_env(work)
                 result = subprocess.run(
-                    [h.grader_python(grader_env), "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                    [h.grader_python(genv), "-m", "pytest", "-q", "-p", "no:cacheprovider",
                      test_path(ref["test"])],
                     cwd=work, stdin=subprocess.DEVNULL, capture_output=True, timeout=120,
-                    env=grader_env, check=False,
+                    env=genv, check=False,
                 )
                 row["hidden_pass"] = result.returncode == 0
             except subprocess.TimeoutExpired:
@@ -285,6 +300,8 @@ def run(cfg, args):
     })
     if not pending:
         return counts
+    if any(i["stratum"] == "rx_edit" for i in pending):
+        h.grader_python(grader_env(cfg.run_dir))  # F115 preflight: refuse before any agent runs
     if args.arm != "sonnet":
         if cfg.ollama.list_ids().get(args.arm) != set(c[f"ID_{args.arm}"].split(",")):
             raise h.Refuse("refusing: model identity differs")

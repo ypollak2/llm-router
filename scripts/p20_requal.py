@@ -601,7 +601,8 @@ def agent_path(path: str) -> str:
     return os.pathsep.join(kept)
 
 
-PYTHON_NAMES = ("python", "python3")
+# F115: any python*/pypy* executable (python3.13, pypy3, ...) is an interpreter an agent can run.
+INTERPRETER_NAME = re.compile(r"(python|pypy)[0-9.]*")
 IMPORT_PROBE = (
     "import importlib.util,sys; "
     "sys.exit(0 if importlib.util.find_spec('llm_router') is None else 1)"
@@ -609,46 +610,90 @@ IMPORT_PROBE = (
 
 
 def agent_pythons(path: str) -> list[str]:
-    """Every distinct python/python3 executable that resolves on `path`."""
+    """Every distinct python*/pypy* executable in a directory of `path` (sorted per dir)."""
     found: list[str] = []
     for entry in path.split(os.pathsep):
-        for name in PYTHON_NAMES:
-            exe = shutil.which(name, path=entry) if entry else None
-            if exe and exe not in found:
+        if not entry:
+            continue
+        try:
+            names = sorted(os.listdir(entry))
+        except OSError:
+            continue
+        for name in names:
+            if not INTERPRETER_NAME.fullmatch(name):
+                continue
+            exe = os.path.join(entry, name)
+            if os.path.isfile(exe) and os.access(exe, os.X_OK) and exe not in found:
                 found.append(exe)
     return found
 
 
 def assert_no_llm_router_import(env: dict[str, str]) -> None:
-    """Refuse when any python/python3 on env's PATH can import llm_router (F113).
+    """Refuse unless every python*/pypy* on env's PATH answers the probe with exit 0 (F115).
 
-    Fails closed: exit 1 (importable) or a probe timeout refuses. Names no path."""
+    Fail closed: exit 0 ("not importable") is the only pass. Exit 1 (importable), any other
+    exit (2, 126/127 shim failure), a signal, a timeout or an OSError all refuse. Names no path."""
     for exe in agent_pythons(env.get("PATH", "")):
         try:
             result = subprocess.run(
                 [exe, "-I", "-c", IMPORT_PROBE], env=env, stdin=subprocess.DEVNULL,
                 capture_output=True, timeout=30, check=False,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise Refuse("refusing: python import probe timed out") from exc
+        except subprocess.TimeoutExpired:
+            raise Refuse("refusing: python import probe timed out") from None
         except OSError:
-            continue  # cannot run, cannot import
+            raise Refuse("refusing: python import probe could not run") from None
         if result.returncode == 1:
             raise Refuse("refusing: llm_router is importable from a python on the agent PATH")
+        if result.returncode != 0:
+            raise Refuse("refusing: python import probe gave no clean answer")
 
 
 def grader_python(env: dict[str, str]) -> str:
-    """The interpreter that runs agent-written code in the grader: first python3/python on
-    env's PATH. It must not import llm_router (guard) and must provide pytest."""
+    """The interpreter that runs agent-written code in the grader: first python on env's PATH
+    with pytest. It must not import llm_router (guard). A hung or unrunnable probe refuses
+    (it is not an agent failure)."""
     assert_no_llm_router_import(env)
     for exe in agent_pythons(env.get("PATH", "")):
-        probe = subprocess.run(
-            [exe, "-I", "-c", "import pytest"], env=env, stdin=subprocess.DEVNULL,
-            capture_output=True, timeout=30, check=False,
-        )
+        try:
+            probe = subprocess.run(
+                [exe, "-I", "-c", "import pytest"], env=env, stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=30, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise Refuse("refusing: grader pytest probe timed out") from None
+        except OSError:
+            raise Refuse("refusing: grader pytest probe could not run") from None
         if probe.returncode == 0:
             return exe
     raise Refuse("refusing: no python on the agent PATH provides pytest for the grader")
+
+
+def scan_for_token(token: str, kind: str, *, data=None, root: Path | None = None) -> None:
+    """F115: refuse when the OAuth token value appears in an artifact about to be stored.
+
+    `data` is str/bytes; `root` is a directory tree (every file, .git included). Compared in
+    memory; the message names only the artifact kind, never the value or a path."""
+    if not token:
+        return
+    needle = token.encode()
+    if data is not None:
+        blob = data.encode(errors="replace") if isinstance(data, str) else data
+        if needle in blob:
+            raise Refuse(f"refusing: token found in {kind}")
+    if root is not None and Path(root).is_dir():
+        for base, _dirs, files in os.walk(root):
+            for name in files:
+                try:
+                    with open(os.path.join(base, name), "rb") as handle:
+                        # chunked with overlap so a huge file is not read whole
+                        tail = b""
+                        while chunk := handle.read(1 << 20):
+                            if needle in tail + chunk:
+                                raise Refuse(f"refusing: token found in {kind}")
+                            tail = chunk[-len(needle):]
+                except OSError:
+                    continue
 
 
 def real_home() -> Path:
@@ -701,8 +746,9 @@ def read_oauth_token(source: str) -> str:
         finally:
             if fd >= 0:
                 os.close(fd)
-    except OSError as exc:
-        raise Refuse("refusing: Claude credentials file unusable") from exc
+    except (OSError, ValueError):
+        # from None: the OSError text carries the file path (F115).
+        raise Refuse("refusing: Claude credentials file unusable") from None
     if not token:
         raise Refuse("refusing: Claude credentials file is empty")
     return token
