@@ -156,22 +156,30 @@ isolation (`sandbox-exec` or a separate OS user) is not part of F104 or F110.
   (cwd elsewhere, no open file there) is not detected, and a survivor can still write the dirs by
   path later or send the token over the network. The start-time check has the 1 s resolution of
   `ps lstart`, and there is a millisecond window between the snapshot and the signal. The Pi
+  arms are not run in a process group (their runner is the benchmark's `lib_pi`), so a Pi-arm
+  grandchild can survive too (the Pi arms never hold the token).
+
   **F122 limits.** (1) The stop fails closed if the agent leader's row is missing from the
   `ps` snapshot (a reaped, hidden or unparseable row cannot be shown stopped): `AgentSurvived`,
   no signal. (2) `AgentSurvived` names the surviving pids (pids only, no command lines). (3) The
   purge has a 120 s budget; on overrun it stops and the refusal text says the purge was
-  incomplete (a very deep directory chain), and the owner purges the run dir by hand. The purge
-  never descends into a directory on another filesystem (`st_dev`; a mount point is left and
-  counted as not deleted). (4) The captured stdout/stderr of the agent keep only their last
-  64 MiB each, so a survivor that floods its pipes cannot exhaust memory (a result longer than
-  that loses its start and fails to parse as JSON, i.e. a `claude_error`). (5) The holder check
+  incomplete ("time budget exceeded", e.g. a very deep chain or a slow disk; a path after the
+  stop still gets 15 s, and the refusal names the paths not fully deleted), and the owner purges
+  the run dir by hand. The purge never descends into a directory on another filesystem
+  (`st_dev`; a mount point is left and counted as not deleted). Limit: on Linux a bind mount of
+  the same filesystem has the same `st_dev` and is **not** detected. (4) The captured
+  stdout/stderr of the agent keep only their last 64 MiB each, so a survivor that floods its
+  pipes cannot exhaust memory. Every byte is scanned for the token as it is read, before the cap
+  drops any (with a token-length overlap across chunks and the cut), so a token in the dropped
+  part is still found: the run refuses with purge and rotate ("token found in agent output").
+  Any cut at all is refused too ("agent output over cap"); a real result is far smaller. (5) The holder check
   can **false-positive** and then refuses (fails closed): Spotlight/mds or another indexer, or
   the owner's own shell with its cwd inside a scratch dir, count as holders of the dir; close
   that shell or wait for the indexer, then purge the run dir. (6) The Linux `/proc` branch reads
   `cwd` and `fd` links only, so a process that holds the dir through an `mmap` alone (file
   closed, mapping kept) is **not seen**; `lsof` on macOS lists mapped files and does see it.
-  arms are not run in a process group (their runner is the benchmark's `lib_pi`), so a Pi-arm
-  grandchild can survive too (the Pi arms never hold the token). Other limits: the scan walk
+
+  Other limits: the scan walk
   skips an entry that vanished between listing and lstat; objects of an alternates chain the
   agent added to its own object dir count as new and are scanned or hit the cap;
   core.ignorecase/filemode of the agent's repo is not mirrored in the sandbox config. **Git

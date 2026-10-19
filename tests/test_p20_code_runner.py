@@ -770,9 +770,40 @@ def test_purge_stops_at_its_time_budget_and_says_so(setup, monkeypatch):
     os.close(bottom)
     (home / "t.txt").write_text(token)
     monkeypatch.setattr(r, "PURGE_SECONDS", -1.0)
-    with pytest.raises(h.Refuse, match=r"NOT fully deleted.*purge stopped after its -1 s budget"):
+    monkeypatch.setattr(r, "PURGE_EXTRA_SECONDS", -1.0)
+    with pytest.raises(h.Refuse, match=r"NOT fully deleted.*time budget exceeded") as info:
         r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir)
+    assert "chain too deep" not in str(info.value)
+    assert "code_runs/w" in str(info.value) and "agent_home/x" in str(info.value)  # named
     assert home.exists()  # the budget ended the purge; the refusal tells the owner to purge
+
+
+def test_purge_after_budget_stop_still_attempts_the_remaining_paths(setup, monkeypatch):
+    cfg = setup[0]
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    home.mkdir(parents=True)
+    work.mkdir(parents=True)
+    r.git(work, "init", "-q")
+    (home / "t.txt").write_text(token)
+    monkeypatch.setattr(r, "PURGE_SECONDS", -1.0)  # work: stopped at once; home: extra budget
+    with pytest.raises(h.Refuse, match=r"NOT fully deleted.*not fully deleted: code_runs/w;") as info:
+        r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir)
+    assert "agent_home" not in str(info.value).split("not fully deleted: ")[1].split(";")[0]
+    assert not home.exists() and work.exists()
+
+
+def test_scrub_unexpected_error_branch_reports_the_budget_note(setup, monkeypatch):
+    cfg = setup[0]
+    work = cfg.run_dir / "code_runs" / "w"
+    work.mkdir(parents=True)
+    monkeypatch.setattr(r, "PURGE_SECONDS", -1.0)
+    monkeypatch.setattr(r, "PURGE_EXTRA_SECONDS", -1.0)
+    monkeypatch.setattr(h, "scan_for_token", lambda *a, **k: 1 / 0)
+    with pytest.raises(h.Refuse, match=r"scan failed.*NOT fully deleted.*time budget exceeded"):
+        r.scrub_claude_artifacts("FAKE-OAUTH-TOKEN-abcdef0123456789", work, cfg.run_dir / "nohome",
+                                 "", cfg.run_dir)
 
 
 def test_capture_buffer_keeps_only_the_last_bytes(tmp_path, monkeypatch):
@@ -781,6 +812,77 @@ def test_capture_buffer_keeps_only_the_last_bytes(tmp_path, monkeypatch):
         [sys.executable, "-c", "import sys; sys.stdout.write('a'*300000 + 'END')"],
         cwd=tmp_path, env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]})
     assert len(done.stdout) == 100_000 and done.stdout.endswith("END")
+
+
+_CAP_TOKEN = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+_CAP = 100_000
+_CAP_PLACE = {  # where the token starts in a 300000-byte stream
+    "very_start": 0,
+    "straddles_the_cut": 300_000 - _CAP - 10,   # bytes before this offset are dropped
+    "straddles_a_chunk_boundary": 65_536 - 5,   # the reader reads 64 KiB at a time
+}
+
+
+def _flood(tmp_path, offset, token=_CAP_TOKEN, stream="stdout"):
+    code = ("import sys; t=sys.argv[1]; o=int(sys.argv[2]); n=300000; "
+            "s=('a'*o + t).ljust(n, 'b'); "
+            f"sys.{stream}.write(s + 'END'); sys.{stream}.flush()")
+    return [sys.executable, "-c", code, token, str(offset)]
+
+
+@pytest.mark.parametrize("where", sorted(_CAP_PLACE))
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_capture_cap_never_hides_a_token_from_the_scan(tmp_path, monkeypatch, where, stream):
+    monkeypatch.setattr(r, "MAX_CAPTURE_BYTES", _CAP)
+    done = r.run_agent_process(
+        _flood(tmp_path, _CAP_PLACE[where], stream=stream), cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"],
+             "CLAUDE_CODE_OAUTH_TOKEN": _CAP_TOKEN})
+    kept = done.stdout + done.stderr
+    assert done.capture_flag == "token found in agent output"
+    if where != "straddles_a_chunk_boundary":
+        assert _CAP_TOKEN not in kept  # the kept tail no longer holds it: only the flag does
+
+
+def test_capture_cut_without_a_token_is_flagged_over_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(r, "MAX_CAPTURE_BYTES", _CAP)
+    done = r.run_agent_process(
+        _flood(tmp_path, 0, token="not-the-token"), cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"],
+             "CLAUDE_CODE_OAUTH_TOKEN": _CAP_TOKEN})
+    assert done.capture_flag == "agent output over cap"
+    small = r.run_agent_process(
+        [sys.executable, "-c", "print('ok')"], cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"],
+             "CLAUDE_CODE_OAUTH_TOKEN": _CAP_TOKEN})
+    assert small.capture_flag is None
+
+
+@pytest.mark.parametrize("where", sorted(_CAP_PLACE))
+@pytest.mark.parametrize("flood", ["token", "plain"])
+def test_agent_refuses_and_purges_on_capped_output(setup, monkeypatch, capsys, where, flood):
+    """End to end through agent(): the head/cut token, or any cut, refuses with purge + rotate."""
+    cfg = setup[0]
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", _CAP_TOKEN)
+    fake_claude(setup, monkeypatch)
+    monkeypatch.setattr(r, "MAX_CAPTURE_BYTES", _CAP)
+    real = r.run_agent_process
+    seen = {}
+
+    def flooding(argv, **kwargs):
+        seen["home"] = Path(kwargs["env"]["HOME"])
+        (seen["home"] / "t.txt").write_text("scratch")
+        argv = _flood(Path(kwargs["cwd"]), _CAP_PLACE[where],
+                      token=_CAP_TOKEN if flood == "token" else "not-the-token")
+        return real(argv, **{**kwargs, "input": ""})
+
+    monkeypatch.setattr(r, "_claude_run", flooding)
+    assert invoke(setup, "sonnet") == 2
+    err = capsys.readouterr().err
+    assert ("token found in agent output" if flood == "token" else "agent output over cap") in err
+    assert "rotate the token" in err and _CAP_TOKEN not in err
+    assert not seen["home"].exists() and not rows(setup)
+    assert cfg.run_dir.exists()
 
 
 def _deep_chain(top, depth):
@@ -983,6 +1085,20 @@ def test_survivor_message_names_pids_only(tmp_path, monkeypatch):
             with contextlib.suppress(OSError):
                 os.kill(int(pidfile.read_text()), 9)
     assert "python" not in str(info.value) and "sleep" not in str(info.value)
+
+
+def test_agent_survivor_message_keeps_the_pids(setup, monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "FAKE-OAUTH-TOKEN-abcdef0123456789")
+    fake_claude(setup, monkeypatch)
+
+    def survivor(argv, **kwargs):
+        raise h.AgentSurvived("refusing: agent process survived (pids: 4242, 4243)")
+
+    monkeypatch.setattr(r, "_claude_run", survivor)
+    assert invoke(setup, "sonnet") == 2
+    err = capsys.readouterr().err
+    assert "pids: 4242, 4243" in err and "nothing was scanned" in err
+    assert "claude setup-token" in err
 
 
 def test_unreadable_process_list_refuses(monkeypatch):

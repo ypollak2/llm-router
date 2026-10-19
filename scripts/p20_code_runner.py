@@ -30,6 +30,7 @@ SPEC.loader.exec_module(h)
 DRAIN_SECONDS = 30.0   # how long to wait for the agent's pipes after the stop
 MAX_CAPTURE_BYTES = 64 << 20   # F122: per stream, the last N bytes are kept (a survivor can flood)
 PURGE_SECONDS = 120.0  # F122: time budget of one purge; deeper chains are reported, not awaited
+PURGE_EXTRA_SECONDS = 15.0  # F122 repair: each path after a budget stop still gets this long
 
 
 def run_agent_process(argv, *, input=None, text=True, capture_output=True, timeout=900,
@@ -52,6 +53,13 @@ def run_agent_process(argv, *, input=None, text=True, capture_output=True, timeo
     sent = 0
     bufs = {proc.stdout: [], proc.stderr: []}
     sizes = {proc.stdout: 0, proc.stderr: 0}
+    # F122 repair: the token is looked for in EVERY byte as it is read, before any byte is
+    # dropped by the cap (tails: the last len(token)-1 bytes of each stream, so a token that
+    # straddles two chunks, or the cut, is found). Nothing about the token is ever logged.
+    token = (env or {}).get(h.CLAUDE_AUTH_ENV[0])
+    needle = token.encode() if token else b""
+    tails = {proc.stdout: b"", proc.stderr: b""}
+    seen = {"token": False, "cut": False}
     readers = {proc.stdout, proc.stderr}
     sel = selectors.DefaultSelector()
 
@@ -86,9 +94,15 @@ def run_agent_process(argv, *, input=None, text=True, capture_output=True, timeo
             except OSError:
                 chunk = b""
             if chunk:
+                if needle:
+                    window = tails[f] + chunk
+                    if needle in window:
+                        seen["token"] = True
+                    tails[f] = window[max(len(window) - len(needle) + 1, 0):]
                 bufs[f].append(chunk)
                 sizes[f] += len(chunk)
                 while sizes[f] > MAX_CAPTURE_BYTES and bufs[f]:  # keep the last N bytes
+                    seen["cut"] = True
                     over = sizes[f] - MAX_CAPTURE_BYTES
                     if len(bufs[f][0]) <= over:
                         sizes[f] -= len(bufs[f].pop(0))
@@ -146,9 +160,17 @@ def run_agent_process(argv, *, input=None, text=True, capture_output=True, timeo
     err = b"".join(bufs[proc.stderr])
     if text:
         out, err = out.decode(errors="replace"), err.decode(errors="replace")
+    # F122 repair: what the caller must refuse on although the kept text may look clean. A cut
+    # is refused too (fail closed): a real result is far below the cap.
+    flag = ("token found in agent output" if seen["token"]
+            else "agent output over cap" if seen["cut"] else None)
     if late:
-        raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
-    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+        exc = subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
+        exc.capture_flag = flag
+        raise exc
+    done = subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    done.capture_flag = flag
+    return done
 
 
 _claude_run = run_agent_process
@@ -234,18 +256,24 @@ def purge_inside(run_dir, *paths):
     deadline = time.monotonic() + PURGE_SECONDS
     root = Path(run_dir).resolve()
     complete = True
+    left = []
     for path in paths:
         target = Path(path)
         if target.is_symlink() or not target.exists():
             continue
         real = target.resolve()
         if real != root and root in real.parents:
+            if left:  # the budget is spent: every remaining path still gets a short attempt
+                deadline = time.monotonic() + PURGE_EXTRA_SECONDS
             try:
                 complete = _delete_tree(root, real, deadline) and complete
             except PurgeBudgetExceeded:
-                purge_note = (f"the purge stopped after its {PURGE_SECONDS:.0f} s budget "
-                              "(directory chain too deep); the rest is still on disk")
-                return False
+                complete = False
+                left.append(str(real.relative_to(root)))
+    if left:
+        purge_note = (f"time budget exceeded ({PURGE_SECONDS:.0f} s, then "
+                      f"{PURGE_EXTRA_SECONDS:.0f} s per remaining path); not fully deleted: "
+                      f"{', '.join(left)}; the rest is still on disk")
     return complete
 
 
@@ -400,15 +428,20 @@ def _delete_tree(root, target, deadline=None):
             os.close(fd)
 
 
-def scrub_claude_artifacts(token, work, home, output, run_dir, baseline=None):
+def scrub_claude_artifacts(token, work, home, output, run_dir, baseline=None,
+                           capture_flag=None):
     """F115: the Claude arm has Bash and the OAuth token in its env; refuse before anything
     it produced (output, work files, patch, scratch HOME) is stored if it carries the token.
     `output` is the call's stdout+stderr text (also on a timeout). No token to look for while
     the Claude arm is active is itself a refusal (fail closed). On a hit the work and scratch
-    HOME copies are deleted (only inside run_dir) and the refusal tells the owner what to do."""
+    HOME copies are deleted (only inside run_dir) and the refusal tells the owner what to do.
+    `capture_flag` (F122 repair) is what run_agent_process saw while capturing: the token in the
+    output, or an output cut by the capture cap. Either refuses the same way, with a purge."""
     if not token:
         raise h.Refuse("refusing: no token to scan for while the Claude arm is active")
     try:
+        if capture_flag:
+            raise h.Refuse(f"refusing: {capture_flag}")
         h.scan_for_token(token, "agent output", data=output)
         h.scan_for_token(token, "work files", root=work)
         h.scan_for_token(token, "agent scratch home", root=home)
@@ -427,10 +460,11 @@ def scrub_claude_artifacts(token, work, home, output, run_dir, baseline=None):
         ) from None
     except Exception:
         # F117: anything unexpected from the scan must still purge, never skip it.
-        purge_inside(run_dir, work, home)
+        done = purge_inside(run_dir, work, home)
         raise h.Refuse("refusing: artifact scan failed; work and agent_home copies were "
-                       "deleted if inside the run dir; purge the run dir and rotate the token"
-                       ) from None
+                       f"{'deleted' if done else 'NOT fully deleted'} if inside the run dir"
+                       f"{' (' + purge_note + ')' if purge_note else ''}; "
+                       "purge the run dir and rotate the token") from None
 
 
 def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
@@ -455,7 +489,7 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     start = cfg.now()
     cost, served, error, timed_out = 0, "", None, False
     env = h.claude_env(home, cfg.run_dir)
-    output, survived = "", False
+    output, survived, flag = "", False, None
     baseline = h.git_object_ids(work)  # F117: what the agent adds is what gets scanned
     try:
         result = _claude_run(
@@ -466,6 +500,7 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
             env=env, check=False,
         )
         output = _text(result.stdout) + _text(result.stderr)
+        flag = getattr(result, "capture_flag", None)
         value = json.loads(result.stdout)
         cost = value.get("total_cost_usd", 0)
         if (isinstance(cost, bool) or not isinstance(cost, (int, float))
@@ -479,10 +514,11 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     except subprocess.TimeoutExpired as exc:
         timed_out = True
         output = _text(exc.stdout) + _text(exc.stderr)
-    except h.AgentSurvived:
+        flag = getattr(exc, "capture_flag", None)
+    except h.AgentSurvived as survivor:
         survived = True  # a live agent process: its tree is never scanned (fail closed)
-        raise h.AgentSurvived(
-            "refusing: agent process survived; nothing was scanned. Purge the run dir "
+        raise h.AgentSurvived(  # the inner message names the surviving pids (pids only)
+            f"{survivor}; nothing was scanned. Purge the run dir "
             f"{cfg.run_dir} once the process is gone and rotate the token (claude setup-token)"
         ) from None
     except (OSError, ValueError, TypeError, AttributeError):
@@ -491,7 +527,7 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
         # always scanned, also after a timeout or a parse failure, before grading or storing
         if not survived:
             scrub_claude_artifacts(env.get(h.CLAUDE_AUTH_ENV[0]), work, home, output,
-                                   cfg.run_dir, baseline)
+                                   cfg.run_dir, baseline, flag)
     h.append_row(cfg.run_dir / "ledger.jsonl", {
         "ts": h.utc(cfg), "stage": "code", "set": "code", "arm": arm,
         "item_id": ident, "attempt": attempt, "ok": error is None and not timed_out,
