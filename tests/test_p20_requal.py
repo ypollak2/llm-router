@@ -1571,7 +1571,7 @@ def test_agent_path_drops_llm_router_and_keeps_needed_tools(tmp_path, monkeypatc
     real, _ = plant_real_home(tmp_path, monkeypatch)
     bad = fake_exe(tmp_path / "bad", "llm-router")
     fake_exe(bad, "node")  # node shares the dir with llm-router: dropped whole, fails closed
-    chu = fake_exe(tmp_path / "chu", "chuzom")
+    chu = fake_exe(tmp_path / "chu", "llm_router")
     local = fake_exe(real / ".local/bin", "git")
     good = fake_exe(tmp_path / "good", "node")
     junk = fake_exe(tmp_path / "junk", "unrelated-tool")

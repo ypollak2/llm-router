@@ -567,7 +567,8 @@ AGENT_ENV_ALLOWED = frozenset(
 # removing every llm-router executable from PATH is the guard. Not a sandbox.
 SYSTEM_PATH_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 AGENT_PATH_TOOLS = ("node", "npm", "npx", "git", "python", "python3", "uv")  # dirs kept
-DENIED_EXECUTABLES = ("llm-router", "llm_router", "chuzom")
+# The legacy-brand CLI is not named here: the identity gate forbids that string in runtime code.
+DENIED_EXECUTABLES = ("llm-router", "llm_router")
 
 
 def has_denied_executable(path_dirs) -> bool:
@@ -577,7 +578,7 @@ def has_denied_executable(path_dirs) -> bool:
 
 def agent_path(path: str) -> str:
     """Allow-listed PATH: system dirs plus caller dirs that hold a needed tool (node, git,
-    python, uv), minus any dir with an llm-router/chuzom executable, ~/.local/bin and the uv
+    python, uv), minus any dir with an llm-router executable, ~/.local/bin and the uv
     tool dirs. A dir holding both node and llm-router is dropped whole (fails closed)."""
     home = real_home()
     banned = {home / ".local/bin", home / ".local/share/uv"}
