@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 43
+# llm_router-hook-version: 44
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -384,6 +384,9 @@ def _session_bounds(session_start: float):
     return _lv.session_scope(session_id=_STOP_SESSION_ID, session_start=session_start)
 
 
+_CLASS_KEY = "_class"  # F102: set on rows whose provider_class is "unclassified"
+
+
 def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], list[dict]]:
     """Return (paid_rows, cc_rows, free_rows) split by provider type.
 
@@ -394,7 +397,8 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], l
     F99: the split comes from ``ledger_view.provider_class`` over the discovered, fresh seats, not
     from provider-name lists (D-205): the host's own ``subscription`` rows are cc; ``local`` and
     seat-covered ``subscription`` providers are free; ``paid`` and ``unclassified`` stay in the
-    paid list, which prints each call's recorded cost (a stale or missing seat unclassifies a
+    paid list (F102: tagged ``_class="unclassified"``, so ``_net_session_line`` prints them as their own
+    fragment, not as paid) with each call's recorded cost (a stale or missing seat unclassifies a
     provider, it does not make it free). A provider with a dedicated panel is in none of the three.
     P3.4-B4b: the read is ``ledger_view.session_usage_rows`` (None = no database, no table,
     or a session id the table cannot filter on: no rows, never every row)."""
@@ -426,10 +430,14 @@ def _query_session_data(session_start: float) -> tuple[list[dict], list[dict], l
             continue
         if provider == _lv.PROVIDER_SUBSCRIPTION:
             cc.append(r)
-        elif _lv.provider_class(provider, seats=seat_obj) in ("local", "subscription"):
-            free.append(r)
         else:
-            paid.append(r)
+            cls = _lv.provider_class(provider, seats=seat_obj)
+            if cls in ("local", "subscription"):
+                free.append(r)
+            elif cls == "paid":
+                paid.append(r)
+            else:  # F102: unclassified rides in the list but is tagged, never counted as paid
+                paid.append({**r, _CLASS_KEY: cls})
     return paid, cc, free
 
 
@@ -993,23 +1001,38 @@ def _net_session_line(free_rows: list[dict], paid_rows: list[dict]) -> str | Non
     paid routing (e.g. a $0.10 draft) makes the session a net loss, it says so
     in red instead of hiding it behind a notional free-tier "saved" figure.
     """
-    rows = list(free_rows) + list(paid_rows)
-    if not rows:
+    # F102: unclassified rows (no fresh seat, not local, not known paid) are never folded into
+    # paid (ledger_view contract): they get their own fragment, outside baseline and paid.
+    unclassified = [r for r in paid_rows if r.get(_CLASS_KEY) == "unclassified"]
+    paid_only = [r for r in paid_rows if r.get(_CLASS_KEY) != "unclassified"]
+    rows = list(free_rows) + paid_only
+    if not rows and not unclassified:
         return None
+    uc_frag = ""
+    if unclassified:
+        costs = [float(r["cost_usd"]) for r in unclassified if r.get("cost_usd") is not None]
+        uc_cost = f"${sum(costs):.4f} recorded" if costs else "cost n/a"
+        uc_frag = f"; unclassified n={len(unclassified)} this session, {uc_cost}, not in paid"
+    if not rows:
+        return (
+            f"  {_BOLD}Net saved{_RESET}      {_C_MUTED}n/a  (no classified session calls"
+            f"{uc_frag}){_RESET}"
+        )
     total_in  = sum(int(r.get("input_tokens")  or 0) for r in rows)
     total_out = sum(int(r.get("output_tokens") or 0) for r in rows)
     baseline  = _host_baseline(total_in, total_out)
-    actual    = sum(float(r.get("cost_usd") or 0.0) for r in paid_rows)
+    actual    = sum(float(r.get("cost_usd") or 0.0) for r in paid_only)
     net       = baseline - actual
+    paid_txt  = f"${actual:.4f} paid" if (paid_only or not unclassified) else "paid n/a"
     if net >= 0:
         return (
             f"  {_BOLD}Net saved{_RESET}      {_C_GREEN}${net:.4f}{_RESET}  "
-            f"{_C_MUTED}(${baseline:.4f} baseline − ${actual:.4f} paid, n={len(rows)} session calls){_RESET}"
+            f"{_C_MUTED}(${baseline:.4f} baseline − {paid_txt}, n={len(rows)} session calls{uc_frag}){_RESET}"
         )
     return (
         f"  {_BOLD}{_C_ORANGE}⚠ NET LOSS{_RESET}     {_C_ORANGE}-${abs(net):.4f}{_RESET}  "
         f"{_C_MUTED}(${actual:.4f} paid exceeds ${baseline:.4f} baseline — wasteful paid routing, "
-        f"n={len(rows)} session calls){_RESET}"
+        f"n={len(rows)} session calls{uc_frag}){_RESET}"
     )
 
 
