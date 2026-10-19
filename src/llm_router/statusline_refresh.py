@@ -205,6 +205,26 @@ def _cache_due(now: float) -> bool:
     return not isinstance(written, (int, float)) or not 0 <= now - written < tick.REFRESH_AFTER_S
 
 
+def _flush_pending_ledgers() -> None:
+    """Import the pending ``savings_log.jsonl`` and ``routing_quality.jsonl`` entries before a snapshot is
+    built from the database. The Codex Stop hook used to do this inline on every turn (P35-3 moved it
+    here, detached, so the hook only reads the snapshot); the same atomic importers the other reporting
+    surfaces use, so nothing is counted twice. A failed import is recorded and the snapshot still runs."""
+    import asyncio
+
+    from llm_router.cost import import_routing_quality_ledger, import_savings_log, savings_log_path
+
+    async def _both() -> None:
+        if savings_log_path().exists():
+            await import_savings_log()
+        await import_routing_quality_ledger()
+
+    try:
+        asyncio.run(_both())
+    except Exception as exc:  # noqa: BLE001 -- recorded; the snapshot is built from what is already imported
+        _note_failure("CHZ-FO-STATUSLINE-IMPORT", exc)
+
+
 def _safe_id(value: str) -> str:
     import argparse
     import re
@@ -239,6 +259,7 @@ def cmd_statusline(args: list[str]) -> int:
             signal.alarm(REFRESH_TIMEOUT_S)
         snap_ok = True
         if parsed.session:
+            _flush_pending_ledgers()
             from llm_router import statusline_snapshot
 
             try:

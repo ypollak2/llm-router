@@ -224,11 +224,13 @@ def _import_hook(name: str):
 
 
 # Hooks that used to carry a private loader, and hooks that had none at all.
+# NOT codex-stop (P35-3): it imports nothing from llm_router, so it cannot call the loader; it reads its one
+# knob, LLM_ROUTER_STOP_HOOK, from <home>/.env itself (tests/test_codex_stop.py pins that, env wins).
 _HOOKS_THAT_LOAD_DOTENV = [
     "auto-route", "session-start", "agent-route", "stop-enforce",
     "enforce-route", "status-bar", "bash-compress", "subagent-start",
     "session-end", "usage-refresh", "agent-depth-release", "cc-usage-track",
-    "agent-error", "codex-post-tool", "codex-stop", "gemini-cli-auto-route",
+    "agent-error", "codex-post-tool", "gemini-cli-auto-route",
     "gemini-cli-post-tool", "gemini-cli-session-end", "opencode-post-tool",
     "playwright-compress", "response-router", "session-end-clawcode",
     "status-bar-clawcode",
