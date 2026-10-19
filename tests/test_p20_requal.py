@@ -2061,7 +2061,7 @@ def test_scan_new_objects_r2_evil_merge_resolution(tmp_path):
     h.run_git(repo, "checkout", "-q", main)
     (repo / "h.txt").write_text("h\n")
     _commit(repo, "main")
-    h.run_git(repo, "merge", "--no-commit", "--no-ff", "side")
+    h.run_git(repo, *_ID, "merge", "--no-commit", "--no-ff", "side")
     (repo / "f.txt").write_text(f"{_TOKEN}\n")  # only the merge's resolution carries it
     h.run_git(repo, "add", "-A")
     h.run_git(repo, *_ID, "commit", "-qm", "merge")

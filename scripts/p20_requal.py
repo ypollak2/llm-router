@@ -970,14 +970,26 @@ def descendant_pids(root_pid: int) -> set[int]:
 
 
 def tagged_pids(tag: str) -> set[int]:
-    """Pids of this user whose environment carries `tag` (survives setsid and reparenting; not
-    visible for SIP-protected system binaries on macOS, hence also `descendant_pids`)."""
+    """Pids of this user whose environment carries `tag` (survives setsid and reparenting).
+    Linux reads /proc/<pid>/environ; macOS asks `ps -E`, which hides the environment of
+    SIP-protected system binaries, hence also `descendant_pids`."""
     needle = f"{AGENT_TAG_ENV}={tag}"
     found = set()
-    for line in _ps_lines("-E", "-ww", "-U", str(os.getuid()), "-o", "pid=,command="):
-        parts = line.split(None, 1)
-        if len(parts) == 2 and parts[0].isdigit() and needle in parts[1]:
-            found.add(int(parts[0]))
+    proc = Path("/proc")
+    if (proc / "self" / "environ").exists():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                if needle.encode() in (entry / "environ").read_bytes():
+                    found.add(int(entry.name))
+            except OSError:
+                continue
+    else:
+        for line in _ps_lines("-E", "-ww", "-U", str(os.getuid()), "-o", "pid=,command="):
+            parts = line.split(None, 1)
+            if len(parts) == 2 and parts[0].isdigit() and needle in parts[1]:
+                found.add(int(parts[0]))
     return found - {os.getpid()}
 
 

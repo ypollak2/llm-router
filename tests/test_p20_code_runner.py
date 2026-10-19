@@ -731,8 +731,7 @@ def test_agent_process_tree_is_dead_before_run_returns(tmp_path, mode):
         done = r.run_agent_process(argv, input="", timeout=30, cwd=tmp_path, env=dict(os.environ))
         assert done.returncode == 0 and "done" in done.stdout
     pid = int(pidfile.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    assert not h._alive(pid)  # dead (a zombie awaiting an init that does not reap counts as dead)
     size = outfile.stat().st_size
     time.sleep(0.4)
     assert outfile.stat().st_size == size  # nothing writes after the run returned
