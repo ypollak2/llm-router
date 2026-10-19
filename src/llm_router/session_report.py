@@ -19,7 +19,7 @@ Fields (unknown is ``None`` and prints ``n/a``, never 0):
 * ``quota_saved``: ~ estimate. Human turns served off Claude x measured weekly pp per Claude turn
   (``quota_samples.quota_burn``, 14 days) = ``~% of window``; divided by the median pp per active hour
   (``quota_rate``) = ``~work-hours``. Both carry their n's.
-* ``quality``: quality vs Frontier from the blind-judge verdicts (7 days; not per session: the verdict
+* ``quality``: quality vs Frontier from the blind-judge verdicts (``shadow_frontier.verdict_summary``) (7 days; not per session: the verdict
   rows carry no session id): k acceptable of n decided, beside the Frontier answer's own rate.
   ``judge``: the judge cache (``judge_summary.json``) as a separate line.
 * ``recommendation``: computed from ``targets`` and ``quality`` (see :func:`recommend`), marked ``~``,
@@ -27,7 +27,6 @@ Fields (unknown is ``None`` and prints ``n/a``, never 0):
 """
 from __future__ import annotations
 
-import json
 import time
 from collections import Counter
 
@@ -165,34 +164,16 @@ def quota_saved_field(actions: list[dict] | None, window: str, now: float) -> di
 
 
 def quality_field(now: float, days: int = QUALITY_DAYS) -> dict:
-    """Quality vs Frontier: verdicts in ``days`` where the served answer was ``acceptable`` (k) of those
-    that decided (n), and the Frontier answer's own acceptable rate over the rows that judged it."""
-    from llm_router.proxy import haiku_guard
-    from llm_router.shadow_eval import wilson
+    """Quality vs Frontier: ``shadow_frontier.verdict_summary`` (the statusline's source, P35-2): verdicts
+    in ``days`` where the served answer was ``acceptable`` (k) of those that decided (n), and the Frontier
+    answer's own acceptable rate over the rows that judged it."""
+    from llm_router import shadow_frontier
 
-    k = n = fk = fn = undecided = 0
-    try:
-        text = haiku_guard.shadow_verdicts_path().read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        text = ""
-    for line in text.splitlines():
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        ts = row.get("ts") if isinstance(row, dict) else None
-        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not now - days * 86400.0 <= ts <= now:
-            continue
-        acc = row.get("acceptable")
-        if row.get("cannot_judge") or not isinstance(acc, bool):
-            undecided += 1
-            continue
-        n, k = n + 1, k + acc
-        if isinstance(row.get("frontier_acceptable"), bool):
-            fn, fk = fn + 1, fk + row["frontier_acceptable"]
-    return {"value": k / n if n else None, "k": k, "n": n, "wilson": wilson(k, n),
+    s = shadow_frontier.verdict_summary(now=now, days=days)
+    fk, fn = s["frontier_k"], s["frontier_n"]
+    return {"value": s["rate"], "k": s["k"], "n": s["n"], "wilson": s["wilson"],
             "frontier_value": fk / fn if fn else None, "frontier_k": fk, "frontier_n": fn,
-            "undecided": undecided, "window": f"{days}d"}
+            "undecided": s["undecided"], "window": s["window"]}
 
 
 def judge_field(now: float) -> dict:

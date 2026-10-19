@@ -685,13 +685,14 @@ def verdict_summary(*, now: float | None = None, days: int = 7, path: Path | Non
 
     ``k`` = verdicts where the served (cheap) answer was ``acceptable``; ``n`` = verdicts that
     decided. ``cannot_judge`` rows and rows with no boolean ``acceptable`` are not verdicts: they are
-    counted apart in ``undecided``. ``rate`` and ``wilson`` (95 percent) are None at n=0 (unknown,
+    counted apart in ``undecided``. ``frontier_k`` / ``frontier_n``: the Frontier answer's own
+    acceptable count over the decided rows that judged it. ``rate`` and ``wilson`` (95 percent) are None at n=0 (unknown,
     never 0); ``window`` is ``"<days>d"``."""
     from llm_router.shadow_eval import wilson
 
     now = time.time() if now is None else now
     since = now - days * 86400.0
-    k = n = undecided = 0
+    k = n = undecided = fk = fn = 0
     for row in _read_rows(path or verdicts_path()):
         ts = row.get("ts")
         if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not since <= ts <= now:
@@ -702,8 +703,11 @@ def verdict_summary(*, now: float | None = None, days: int = 7, path: Path | Non
             continue
         n += 1
         k += acc
+        if isinstance(row.get("frontier_acceptable"), bool):   # the Frontier answer's own verdict
+            fn += 1
+            fk += row["frontier_acceptable"]
     return {"n": n, "k": k, "rate": (k / n) if n else None, "wilson": wilson(k, n),
-            "window": f"{days}d", "undecided": undecided}
+            "window": f"{days}d", "undecided": undecided, "frontier_k": fk, "frontier_n": fn}
 
 
 def main(argv: list[str] | None = None) -> int:
