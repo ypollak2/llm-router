@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import signal
 import stat
 import subprocess
 import sys
@@ -41,8 +43,8 @@ def _kv(state_home: Path, **fields) -> None:
     (state_home / ".llm-router" / f"statusline_seg_{SHELL_SID}.kv").write_text("".join(f"{k}={v}\n" for k, v in kv.items()))
 
 
-LINE = ("router: m (r) | offload n/a (n=3, session, no quality-sampled lane) | Claude 5h 37% (n=3, 5h) / "
-        "Codex 20% (n=3, 5h) | quality 80% (n=10, 7d) | saved ~2.7 work-hours (n=4, rate n=12, today)")
+LINE = ("router: m (r) | offload n/a (n=3, session, no quality-sampled lane) | Claude 5h 37% (n=1 poll, age 1m, 5h)"
+        " / Codex 20% (n=3, 5h) | quality 80% (n=10, 7d) | saved ~1.3 work-hours (n=2, rate n=12, today)")
 
 
 # -- the line: unknown is n/a, never 0, and every field keeps its n and window -------------------
@@ -50,7 +52,8 @@ LINE = ("router: m (r) | offload n/a (n=3, session, no quality-sampled lane) | C
 UNKNOWN_FIELDS = {
     "router": {"model": None, "reason": None, "ts": None},
     "offload": {"k": 0, "n": 0, "window": "session", "value": None, "why": None},
-    "quota": {"claude": {"pct": None, "n": 0, "window": "5h"}, "codex": {"pct": None, "n": None, "window": "5h"}},
+    "quota": {"claude": {"pct": None, "n": 0, "age_s": None, "window": "5h"},
+              "codex": {"pct": None, "n": None, "window": "5h"}},
     "quality": {"n": 0, "k": 0, "rate": None, "wilson": None, "window": "7d"},
     "saved": {"value": None, "n": None, "window": "today", "as_of": "", "source": "", "kind": "estimated",
               "na_reason": "n/a (3 of 10 active hours)", "n_basis": 3},
@@ -127,7 +130,63 @@ async def test_saved_is_worked_out_from_the_measured_turn_burn(p35):  # noqa: F8
     d = snap.refresh(host="claude_code", session_id=SID, now=NOW)    # no quota_samples.jsonl in the bare P35 home
     assert d["fields"]["saved"]["value"] is None and d["line"].endswith("saved n/a (n/a (quota saved unknown))")
     seed_snapshot_extras(p35.home)
-    assert snap.refresh(host="claude_code", session_id=SID, now=NOW)["fields"]["saved"]["value"] == pytest.approx(8 / 3)
+    # 2 turns off Claude today x 2.0 pp per turn / 3.0 pp per active hour (hand oracle in test_p35_fixtures)
+    assert snap.refresh(host="claude_code", session_id=SID, now=NOW)["fields"]["saved"]["value"] == pytest.approx(4 / 3)
+
+
+def _action(**kw):
+    a = {"first": True, "door": "proxy", "served_class": "local", "redone": False, "ts": NOW - 60}
+    return {**a, **kw}
+
+
+def test_saved_counts_turns_that_replace_a_claude_turn_and_nothing_else():
+    """rv-632 must-fix 1: the burn is weekly pp per human Stop turn, so only units that replace a Claude
+    turn are multiplied by it."""
+    from llm_router import statusline_snapshot as snap
+
+    since = NOW - 3600
+    counted = [_action(), _action(door="hook"), _action(served_class="very_cheap"), _action(served_class="spread"),
+               _action(door="subagent")]                   # a sub-agent-labelled row the transcript put on the main thread
+    left_out = [_action(first=False),                      # a continuation call of a turn
+                _action(door="mcp"), _action(door="direct"),  # local_assist: inside a Claude turn
+                _action(door="techop", first=False),
+                _action(served_class="haiku"), _action(served_class="paid"),   # Claude / paid served it
+                _action(redone=True),                      # Claude answered it again
+                _action(ts=since - 1)]                     # before the window
+    assert snap.turns_off_claude(counted, since) == len(counted) == 5
+    assert snap.turns_off_claude(left_out, since) == 0
+    assert snap.turns_off_claude(counted + left_out, since) == 5
+
+
+async def test_saved_with_no_turn_off_claude_is_na_never_zero(p35):  # noqa: F811 -- pytest fixture name
+    from llm_router import statusline_snapshot as snap
+
+    seed_snapshot_extras(p35.home)
+    fig = snap.saved_field([_action(first=False)], NOW)                # burn and rate known, n=0 turns
+    assert fig.value is None and fig.n == 0 and fig.na_reason == "n=0 turns off Claude, today", fig
+    fields = {**UNKNOWN_FIELDS, "saved": fig.to_dict()}
+    assert snap.render_line(fields).endswith("saved n/a (n=0 turns off Claude, today)")
+
+
+def test_claude_5h_names_its_one_poll_and_is_never_a_value_with_n_0(tmp_path, monkeypatch):
+    """rv-632 must-fix 3: the % is one usage.json poll, so its n is that poll (plus its age); with no
+    poll it is n/a. History rows (only the fast tick wrote them) are not its n."""
+    from llm_router import statusline_snapshot as snap
+
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    (tmp_path / "quota_history.jsonl").write_text("".join(json.dumps(
+        {"ts": NOW - i * 300, "source": "measured", "five_hour_pct": 1.0, "weekly_pct": 1.0}) + "\n" for i in range(5)))
+    q = snap.quota_field(NOW)                                         # history rows, but no poll
+    assert (q["claude"]["pct"], q["claude"]["n"]) == (None, 0)
+    line = snap.render_line({**UNKNOWN_FIELDS, "quota": q})
+    assert "Claude 5h n/a (n=0, 5h)" in line, line
+    (tmp_path / "usage.json").write_text(json.dumps({"session_pct": 37, "weekly_pct": 40, "updated_at": NOW - 150}))
+    q = snap.quota_field(NOW)
+    assert (q["claude"]["pct"], q["claude"]["n"], q["claude"]["age_s"]) == (37.0, 1, 150.0)
+    line = snap.render_line({**UNKNOWN_FIELDS, "quota": q})
+    assert "Claude 5h 37% (n=1 poll, age 2m, 5h)" in line, line
+    for f in line.split(" | "):
+        assert not re.search(r"\d+% \(n=0\b", f), f"a value printed with n=0: {f}"
 
 
 # -- the refreshers: one snapshot function, one CLI, the tick adds two stats ----------------------
@@ -249,3 +308,150 @@ def test_the_cache_hit_render_p95_is_inside_the_statusline_bar(shell_home, tmp_p
     assert len(samples) == PERCENTILE_SAMPLES
     p95 = sw.percentile(samples, 0.95)
     assert p95 <= BAR_MS, f"p95 {p95:.1f} ms over the {BAR_MS:.0f} ms statusline bar (n={len(samples)})"
+
+
+# -- rv-632: the refresher's hard stop survives the snapshot budget --------------------------------
+
+_DRIVER = r'''
+import sys, time
+from llm_router import statusline_segments as ss, statusline_snapshot as snap
+
+state, hard, budget, mode = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
+ss.RUN_TIMEOUT_S, ss.SNAP_BUDGET_S = hard, budget
+ss.maybe_refresh_usage = lambda *a: None
+ss.compute = lambda *a: {"health": "ok"}
+ss.append_history = lambda *a: False
+
+
+def hang(*a, **k):
+    while True:
+        time.sleep(0.05)
+
+
+def slow(*a, **k):
+    try:
+        time.sleep(5)                 # the budget fires in here ...
+    except Exception:                 # ... and a field's own catch-all must not end the stop
+        pass
+    return []
+
+
+snap._actions = slow                  # the first field: slow
+snap.quality_field = hang             # a later field: hangs (it never returns)
+if mode == "after":                   # the snapshot is fine; what comes after it hangs
+    ss.snap_segment = lambda *a, **k: {}
+    ss.write_cache = lambda *a: hang()
+sys.exit(ss.main(["--state", state, "--session", "s1"]))
+'''
+
+
+def _drive(tmp_path, mode: str, hard: float = 2.0, budget: float = 0.4):
+    state = tmp_path / "router"
+    state.mkdir(exist_ok=True)
+    env = {**os.environ, "HOME": str(tmp_path), "LLM_ROUTER_HOME": str(state)}
+    t0 = time.monotonic()
+    r = subprocess.run([sys.executable, "-c", _DRIVER, str(state), str(hard), str(budget), mode], env=env,
+                       capture_output=True, text=True, timeout=30)
+    return r, time.monotonic() - t0, state
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM watchdog is POSIX only")
+def test_a_slow_field_then_a_hanging_field_still_ends_the_refresher(tmp_path):
+    """rv-632 must-fix 2. Before: the budget's TimeoutError was swallowed inside the slow field, the
+    snapshot went on into the hanging field with no alarm armed, and the refresher held its lock for
+    ever (this run hit the 30 s subprocess timeout). Now the budget unwinds the snapshot and the line is
+    written without the row."""
+    r, took, state = _drive(tmp_path, "fields")
+    assert r.returncode == 0, (r.returncode, r.stderr[-2000:])
+    assert took < 2.0 + 5.0, took                                     # well inside the injected hard stop
+    kv = (state / "statusline_seg_s1.kv").read_text()
+    assert "health=ok" in kv and "snap_line" not in kv, kv
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM watchdog is POSIX only")
+def test_the_hard_stop_is_rearmed_after_the_snapshot_block(tmp_path):
+    """Whatever hangs after the snapshot is ended by the re-armed hard stop (os._exit(1))."""
+    r, took, _ = _drive(tmp_path, "after", hard=1.5)
+    assert r.returncode == 1, (r.returncode, r.stderr[-2000:])        # the hard stop's own exit code
+    assert 1.0 <= took < 1.5 + 5.0, took
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM watchdog is POSIX only")
+def test_the_snapshot_budget_is_what_is_left_of_the_hard_stop(monkeypatch):
+    """min(SNAP_BUDGET_S, remaining of RUN_TIMEOUT_S), never a fresh 10 s; afterwards the remaining hard
+    stop is armed again."""
+    from llm_router import statusline_segments as ss
+
+    fired = []
+    old = signal.signal(signal.SIGALRM, lambda *_: fired.append(1))  # stands in for os._exit in-process
+    try:
+        started = time.time() - (ss.RUN_TIMEOUT_S - 3.0)               # 3 s of the hard stop left
+        armed = ss._within(10, lambda: signal.getitimer(signal.ITIMER_REAL)[0], started=started)
+        assert 0 < armed <= 3.0, armed
+        rearmed = signal.getitimer(signal.ITIMER_REAL)[0]
+        assert 0 < rearmed <= 3.0, rearmed
+        assert signal.getsignal(signal.SIGALRM) is not None and not fired
+        with pytest.raises(ss.SnapshotBudgetExceeded):
+            ss._within(0.05, lambda: time.sleep(2), started=time.time())
+        assert not isinstance(ss.SnapshotBudgetExceeded("x"), Exception)   # no `except Exception` catches it
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+# -- rv-632 non-blocking: tick stamp, history writer, C1 controls ----------------------------------
+
+def test_a_snapshot_only_run_stops_the_ledger_respawn(tmp_path, monkeypatch):
+    """The ledger change is judged against the session's snapshot, which a snapshot-only run moves (the
+    global cache stamp it does not move made the tick respawn every 10 s for up to a minute)."""
+    from llm_router import statusline_tick as tick
+
+    monkeypatch.delenv("LLM_ROUTER_STATUSLINE_REFRESH_CMD", raising=False)
+    monkeypatch.setattr(tick, "_refresh_argv", lambda: ["/bin/llm-router", "statusline", "--refresh"])
+    spawned = []
+    monkeypatch.setattr(tick, "_spawn_detached", lambda argv: spawned.append(argv))
+    now = 1_000_000.0
+    cache = {"written_at": now - 30}
+    proxy = tmp_path / "proxy_calls.jsonl"
+    proxy.write_text("{}\n")
+    os.utime(proxy, (now - 20, now - 20))                             # after the cache
+    snap_file = tmp_path / "snapshots" / "claude_code-s1.json"
+    snap_file.parent.mkdir()
+    snap_file.write_text("{}")
+    os.utime(snap_file, (now - 15, now - 15))                         # ... but the snapshot has it
+    assert tick.maybe_refresh(str(tmp_path), cache, now, "s1") is False and spawned == []
+    os.utime(proxy, (now - 5, now - 5))                               # a new write after the snapshot
+    assert tick.maybe_refresh(str(tmp_path), cache, now, "s1") is True and len(spawned) == 1
+    snap_file.unlink()                                                # no snapshot: the cache stamp decides
+    assert tick.maybe_refresh(str(tmp_path), cache, now + 11, "s1") is True
+
+
+def test_the_segments_refresher_writes_the_quota_history_too(tmp_path, monkeypatch):
+    """rv-632 (a): the default layout had no history writer, so saved was always n/a there."""
+    from llm_router import statusline_segments as ss
+
+    rhome = tmp_path / "router"
+    rhome.mkdir()
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(rhome))
+    now = time.time()
+    (rhome / "usage.json").write_text(json.dumps({"session_pct": 37, "weekly_pct": 40, "updated_at": now - 60}))
+    assert ss.append_history(str(tmp_path / "other"), now) is False   # never a rhome it was not given
+    assert not (tmp_path / "other" / "quota_history.jsonl").exists()
+    assert ss.append_history(str(rhome), now) is True
+    assert ss.append_history(str(rhome), now + 10) is False            # one row per 5-minute slot (tick's own lock)
+    rows = [json.loads(ln) for ln in (rhome / "quota_history.jsonl").read_text().splitlines()]
+    assert len(rows) == 1 and rows[0]["source"] == "measured" and rows[0]["weekly_pct"] == 40, rows
+    assert stat.S_IMODE((rhome / "quota_history.jsonl").stat().st_mode) == 0o600
+
+
+def test_c1_controls_are_stripped_in_python_and_in_the_shell(shell_home, tmp_path):
+    from llm_router import statusline_segments as ss
+    from llm_router import statusline_snapshot as snap
+
+    assert snap._clean("m\x9b31mX\x85y") == "m 31mX y"
+    assert ss._clean("a\x9bb\x1bc") == "a b c"
+    _kv(shell_home, snap_line="router: x\u009b31mred\u0085 café | quality 1% (n=1, 7d)",
+        snap_at=str(int(time.time())))
+    out, _ = _run(shell_home, tmp_path, _stdin(tmp_path))
+    assert "\u009b" not in out and "\u0085" not in out, repr(out)
+    assert "router: x31mred café | quality 1% (n=1, 7d)" in out, repr(out)   # multibyte text is kept

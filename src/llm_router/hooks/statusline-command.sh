@@ -356,8 +356,15 @@ _seg_load() {
     _seg_int "$s_money_m_n" 9;   s_money_m_n="$_n"
     _seg_int "$s_snap_at" 10;    s_snap_at="$_n"
     # The snapshot line is printed, so it is data to clean: no control characters (an escape in the
-    # file must not reach the terminal), at most 400 characters.
-    s_snap="${s_snap//[$'\001'-$'\037'$'\177']/}"; s_snap="${s_snap:0:400}"
+    # file must not reach the terminal), at most 400 characters. C0 and DEL, then C1 (U+0080-U+009F,
+    # UTF-8 C2 80-C2 9F; U+009B is CSI on some terminals) as bytes: in the C locale for the two
+    # patterns only (bash 3.2 has no \u escapes), then the caller's locale is back for the 400 cap.
+    _lc_set="${LC_ALL+x}" _lc_was="${LC_ALL-}"
+    LC_ALL=C
+    s_snap="${s_snap//[$'\001'-$'\037'$'\177']/}"
+    s_snap="${s_snap//$'\302'[$'\200'-$'\237']/}"
+    if [ -n "$_lc_set" ]; then LC_ALL="$_lc_was"; else unset LC_ALL; fi
+    s_snap="${s_snap:0:400}"
     # A window label is printed, so only the ledger's own names pass (data, never code).
     case "$s_mix_win" in session|session~) ;; *) s_mix_win="" ;; esac
     case "$s_money_win" in today|session|24h|7d|month|lifetime) ;; *) s_money_win="" ;; esac

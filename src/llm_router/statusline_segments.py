@@ -65,11 +65,11 @@ CACHE_TTL_S = 30
 STALE_MARK_S = 90
 #: Hard stop for a stuck refresh (SIGALRM): the lock is freed, the line keeps drawing.
 RUN_TIMEOUT_S = 30
-_CTRL = re.compile(r"[\x00-\x1f\x7f]")
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f]")   # C0, DEL and C1 (U+009B is CSI on some terminals)
 
 
 def _clean(value: object) -> str:
-    """One line, no control characters: a cache value can never carry an escape or a newline."""
+    """One line, no C0/C1 control characters: a cache value can never carry an escape or a newline."""
     return _CTRL.sub(" ", str(value)).strip()
 
 
@@ -367,26 +367,60 @@ def snap_segment(state: str, session: str, now: float | None = None, *, refresh:
     return {"snap_line": data["line"], "snap_at": str(int(data["written_at"]))}
 
 
+def append_history(state: str, now: float) -> bool:
+    """One ``quota_history.jsonl`` row per 5-minute slot from this refresher too (rv-632): the fast tick
+    was its only writer, so in the default layout the history stayed empty and ``saved`` (whose rate is
+    the median pp per active hour of that history) could never print a value. Same function, same
+    slot lock and stamp as the tick (``statusline_tick.maybe_append_history``), so the two layouts never
+    write a slot twice. Only into the router's own home (the file quota_rate reads); a copy without the
+    package writes nothing. True when a row was written."""
+    try:
+        from llm_router import paths, statusline_tick as tick
+    except ImportError:
+        return False                              # a hooks copy without the package: the tick stays the writer
+    if os.path.realpath(state) != os.path.realpath(str(paths.llm_router_home())):
+        return False
+    try:
+        with open(os.path.join(state, "usage.json"), encoding="utf-8") as fh:
+            usage = json.load(fh)
+    except (OSError, ValueError):
+        usage = None                              # the row is written as source=stale, as the tick does
+    return tick.maybe_append_history(state, usage if isinstance(usage, dict) else None, now)
+
+
 #: The snapshot may take this long inside the refresher; past it the cache is written without it.
 SNAP_BUDGET_S = 10
 
 
-def _within(seconds: int, fn, started: float):
-    """``fn()`` with a SIGALRM budget (TimeoutError past it); the refresher's own hard stop
-    (:data:`RUN_TIMEOUT_S`, counted from ``started``) is re-armed afterwards."""
+class SnapshotBudgetExceeded(BaseException):
+    """The snapshot ran past its budget. A BaseException on purpose (rv-632 must-fix 2): every snapshot
+    field runs under ``except Exception`` (one failing field prints n/a), and a TimeoutError there was
+    swallowed, the snapshot went on, and no alarm was left armed for whatever hung next."""
+
+
+def _within(seconds: float, fn, started: float):
+    """``fn()`` under a SIGALRM budget of ``min(seconds, what is left of the hard stop)``: past it
+    :class:`SnapshotBudgetExceeded` unwinds the whole snapshot (no ``except Exception`` stops it).
+
+    The refresher's own hard stop (:data:`RUN_TIMEOUT_S` from ``started``, handler ``os._exit``) is
+    restored and re-armed with the time it has left on every way out, so the run as a whole never
+    goes past :data:`RUN_TIMEOUT_S`."""
     if not hasattr(signal, "SIGALRM"):
         return fn()
+    left = RUN_TIMEOUT_S - (time.time() - started)
 
     def _timeout(*_):
-        raise TimeoutError(f"statusline snapshot over its {seconds} s budget")
+        raise SnapshotBudgetExceeded(f"statusline snapshot over its {min(seconds, left):.1f} s budget")
 
     hard = signal.signal(signal.SIGALRM, _timeout)
-    signal.alarm(seconds)
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, min(seconds, left)))
     try:
         return fn()
     finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, hard)
-        signal.alarm(max(1, int(RUN_TIMEOUT_S - (time.time() - started))))
+        # what remains of the hard stop; at or past it, fire the restored handler at once
+        signal.setitimer(signal.ITIMER_REAL, max(0.001, RUN_TIMEOUT_S - (time.time() - started)))
 
 
 def proxy_segment(state: str) -> dict[str, str]:
@@ -572,14 +606,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if hasattr(signal, "SIGALRM"):
         signal.signal(signal.SIGALRM, lambda *_: os._exit(1))
-        signal.alarm(RUN_TIMEOUT_S)
+        signal.setitimer(signal.ITIMER_REAL, RUN_TIMEOUT_S)
     now = time.time()
     maybe_refresh_usage(state, now, dict(os.environ))
     seg = compute(state, ns.transcript, ns.model, dict(os.environ), now, session)
+    append_history(state, now)
     try:
         seg.update({k: _clean(v) for k, v in _within(SNAP_BUDGET_S, lambda: snap_segment(
             state, session, now, reuse_s=SNAP_REUSE_S), started=now).items()})
-    except Exception as exc:  # noqa: BLE001 -- slow or broken snapshot: the line goes out without it
+    except (Exception, SnapshotBudgetExceeded) as exc:  # noqa: BLE001 -- slow or broken: no row, line goes out
         try:
             from llm_router import failopen
 

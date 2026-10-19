@@ -305,6 +305,18 @@ def ledger_changed_since(home: str, stamp: float) -> bool:
     return False
 
 
+def _snapshot_mtime(home: str, session: str | None) -> float | None:
+    """mtime of ``snapshots/claude_code-<session>.json`` (the name ``statusline_snapshot.snapshot_path``
+    gives it, same character rule), or None when there is none."""
+    if not session:
+        return None
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session)
+    try:
+        return os.path.getmtime(os.path.join(home, "snapshots", f"claude_code-{safe}.json"))
+    except OSError:
+        return None                               # no snapshot yet: the caller falls back to the cache stamp
+
+
 def session_of(raw: bytes) -> str | None:
     """The ``session_id`` in the session JSON Claude Code pipes in, if it is a plain id."""
     m = _SESSION_RE.search(raw.decode("utf-8", "replace"))
@@ -316,11 +328,14 @@ def maybe_refresh(home: str, cache: dict | None, now: float, session: str | None
     written (at most one start per :data:`LEDGER_SPAWN_MIN_S` then). Never waits, never raises.
 
     With a ``session`` the refresher also writes that session's snapshot (``statusline --refresh
-    --host claude_code --session S``). Returns True when a refresher was started."""
+    --host claude_code --session S``), and a ledger change is judged against THAT snapshot's mtime
+    (one more ``stat``): a snapshot-only run does not move the global cache's ``written_at``, so
+    comparing with it re-spawned every 10 s until the next 60 s refresh (rv-632). With no snapshot
+    yet, the cache stamp decides. Returns True when a refresher was started."""
     try:
         written = _num((cache or {}).get("written_at"))
         age_due = written is None or not 0 <= now - written < REFRESH_AFTER_S
-        if not age_due and not ledger_changed_since(home, written):
+        if not age_due and not ledger_changed_since(home, _snapshot_mtime(home, session) or written):
             return False
         stamp = os.path.join(home, REFRESH_STAMP_NAME)
         try:

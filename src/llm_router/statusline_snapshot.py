@@ -6,7 +6,8 @@ tick). It writes ``snapshots/<host>-<session>.json`` (0600, atomic, newest :data
 pre-rendered ``line``; every reader (the shell, the Codex Stop hook, the Pi extension) prints that
 line and computes nothing, so the surfaces agree by construction::
 
-    router: <model> (<reason>) | offload <x>% (n=, session) | Claude 5h <p>% (n=, 5h) / Codex <p>% (n=, 5h)
+    router: <model> (<reason>) | offload <x>% (n=, session)
+        | Claude 5h <p>% (n=1 poll, age <m>m, 5h) / Codex <p>% (n=, 5h)
         | quality <q>% (n=, 7d) | saved ~<h> work-hours (n=, rate n=, today)
 
 Rules: an unknown field prints ``n/a`` (never 0) and still names its n and window; a snapshot older
@@ -35,7 +36,8 @@ QUALITY_DAYS = 7
 SESSION_ACTION_DAYS = 7
 BURN_DAYS = 14
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
-_CTRL = re.compile(r"[\x00-\x1f\x7f|]")
+#: C0, DEL and C1 (U+0080-U+009F: U+009B is CSI on some terminals) controls, and the field separator.
+_CTRL = re.compile(r"[\x00-\x1f\x7f-\x9f|]")
 _NAME_MAX = 48
 
 
@@ -149,33 +151,24 @@ def offload_field(actions: list[dict] | None, session_id: str) -> dict:
 
 
 def quota_field(now: float) -> dict:
-    """Claude 5h from ``usage.json`` (not a fallback, not stale) and Codex from the delegation window;
-    n = measured quota samples in the 5h window / delegations counted in it."""
-    out: dict = {"claude": {"pct": None, "n": 0, "window": "5h"},
+    """Claude 5h from ONE ``usage.json`` poll (not a fallback, not pending, not stale) and Codex from the
+    delegation window.
+
+    The Claude % is a single reading, so its n is that reading: ``n=1`` plus the poll's age when it is
+    used, ``n=0`` and no value when there is none. The 5-minute ``quota_history.jsonl`` rows are other
+    readings and are NOT the n of this figure (rv-632 must-fix 3). Codex: n = delegations counted in
+    its 5h window."""
+    out: dict = {"claude": {"pct": None, "n": 0, "age_s": None, "window": "5h"},
                  "codex": {"pct": None, "n": None, "window": "5h"}}
     try:
         u = json.loads(paths.state_path("usage.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        u = None
+        u = None                                  # no readable poll: n=0, the field prints n/a
     pct = _num(u.get("session_pct")) if isinstance(u, dict) and not u.get("is_fallback") \
         and not u.get("pending") else None
     upd = _num(u.get("updated_at")) if isinstance(u, dict) else None
     if pct is not None and upd is not None and 0 <= now - upd <= QUOTA_STALE_S:
-        out["claude"]["pct"] = pct
-    since = now - 5 * 3600.0
-    n = 0
-    try:
-        with paths.state_path("quota_history.jsonl").open(encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                ts = _num(r.get("ts")) if isinstance(r, dict) else None
-                n += ts is not None and since <= ts <= now and r.get("source") == "measured"
-    except OSError:
-        pass                                      # no history file: n stays 0 (a count of rows, not a reading)
-    out["claude"]["n"] = n
+        out["claude"].update(pct=pct, n=1, age_s=now - upd)
     if paths.state_path("codex_window.json").exists():
         from llm_router import codex_window
 
@@ -191,22 +184,47 @@ def quality_field(now: float) -> dict:
     return shadow_frontier.verdict_summary(now=now, days=QUALITY_DAYS)
 
 
-def saved_field(actions: list[dict] | None, now: float):
-    """``~work-hours`` saved today: actions served off Claude today x the measured weekly pp per Claude
-    turn (``quota_burn`` measured line), over the median pp per active hour (``quota_rate``)."""
-    from llm_router import ledger_view as lv
+def turns_off_claude(actions: list[dict] | None, since: float) -> int:
+    """Human TURNS served off Claude since ``since``: the unit the burn rate below is measured in.
+
+    An action counts when it begins a human turn (``first``: a ``turn_first`` proxy row the transcript, or
+    with none the ledger, keeps as a typed prompt's answer; or a zero-Claude hook turn), came in by the
+    proxy, sub-agent or hook door, was served by a local, very-cheap or other-Frontier model, and was not
+    redone. Left out: continuation calls (about 8.5 per human turn), MCP / direct ``local_assist`` calls
+    and technical ops (Claude made the turn's first call, so its quota was spent anyway: offload_share's
+    own M0.3 rule), Haiku (a Claude call), and redone turns (Claude answered them again)."""
     from llm_router import offload_share as osh
+
+    off = {osh.SC_LOCAL, osh.SC_CHEAP, osh.SC_SPREAD}
+    doors = {osh.DOOR_PROXY, osh.DOOR_SUBAGENT, osh.DOOR_HOOK}
+    return sum(1 for a in actions or () if a["first"] and a["door"] in doors and a["served_class"] in off
+               and not a["redone"] and a["ts"] >= since)
+
+
+def saved_field(actions: list[dict] | None, now: float):
+    """``~work-hours`` saved today = (turns served off Claude today x weekly pp per Claude turn) / median
+    weekly pp per active hour.
+
+    Both factors are per human turn (rv-632 must-fix 1): :func:`turns_off_claude` counts turns, and
+    ``quota_burn``'s measured ``weekly_per_turn`` is weekly pp per Stop turn. That burn is a POOLED
+    RATIO over the last :data:`BURN_DAYS` days (sum of per-session weekly deltas / sum of their Stop
+    turns), not the plan's median per action: ``quota_samples`` records quota at session start and at
+    each Stop, never per model call, so no per-action burn can be measured from it. The rate below
+    (``quota_rate``) is a median per active hour. No turn served off Claude today is n/a, not 0."""
+    from llm_router import ledger_view as lv
     from llm_router import quota_rate, quota_samples
 
-    start = lv.resolve("today", now=now).since_ts
-    off = {osh.SC_LOCAL, osh.SC_CHEAP, osh.SC_SPREAD}
-    n = sum(1 for a in actions or () if a["served_class"] in off and a["ts"] >= start)
+    n = turns_off_claude(actions, lv.resolve("today", now=now).since_ts) if actions is not None else None
     line = quota_samples.quota_burn(now - BURN_DAYS * 86400.0, now)["measured"]
     per_turn = line["weekly_per_turn"]
-    pp = None if per_turn is None else n * per_turn
+    pp = None if per_turn is None or n is None else n * per_turn
     rate = quota_rate.median_pp_per_active_hour(now=now)
-    return quota_rate.work_hours_figure(pp, n if per_turn is not None else None, rate, window="today",
-                                        as_of=lv._iso(now), source="quota_burn x quota_history")
+    fig = quota_rate.work_hours_figure(pp, n if pp is not None else None, rate, window="today",
+                                       as_of=lv._iso(now), source="quota_burn pooled pp/turn x quota_rate median")
+    if n == 0 and fig.value is not None:          # nothing served off Claude: unmeasured, never "~0"
+        fig = lv.Figure(None, 0, "today", fig.as_of, fig.source, "estimated",
+                        "n=0 turns off Claude, today", fig.n_basis)
+    return fig
 
 
 # ── the line ───────────────────────────────────────────────────────────────────
@@ -229,7 +247,12 @@ def render_line(f: dict) -> str:
         why = f", {o['why']}" if o.get("why") else ""
         offload = f"offload n/a (n={o['n']}, {o['window']}{why})"
     q = f["quota"]
-    quota = (_pct("Claude 5h", q["claude"]["pct"], q["claude"]["n"], q["claude"]["window"]) + " / "
+    c = q["claude"]
+    if c["pct"] is not None and c.get("n") == 1 and c.get("age_s") is not None:
+        claude = f"Claude 5h {c['pct']:.0f}% (n=1 poll, age {int(c['age_s'] // 60)}m, {c['window']})"
+    else:                                         # no reading behind it: never a value with n=0
+        claude = f"Claude 5h n/a (n=0, {c['window']})"
+    quota = (claude + " / "
              + _pct("Codex", q["codex"]["pct"], q["codex"]["n"], q["codex"]["window"]))
     ql = f["quality"]
     quality = (_pct("quality", None if ql["rate"] is None else 100 * ql["rate"], ql["n"], ql["window"]))
@@ -263,7 +286,8 @@ def build(session_id: str, now: float) -> dict:
         or {"model": None, "reason": None, "ts": None},
         "offload": offload_field(actions, session_id),
         "quota": _part("CHZ-FO-SNAP-QUOTA", lambda: quota_field(now))
-        or {"claude": {"pct": None, "n": None, "window": "5h"}, "codex": {"pct": None, "n": None, "window": "5h"}},
+        or {"claude": {"pct": None, "n": 0, "age_s": None, "window": "5h"},
+            "codex": {"pct": None, "n": None, "window": "5h"}},
         "quality": quality,
         "saved": saved.to_dict() if saved is not None else None,
         "judge": _part("CHZ-FO-SNAP-JUDGE", _judge_field),

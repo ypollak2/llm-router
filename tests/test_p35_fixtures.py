@@ -220,20 +220,23 @@ async def test_work_hours_is_na_below_ten_active_hours_never_zero(home):  # noqa
 
 #: Delegations the Codex window counts in the snapshot oracle (budget = the module default, so 20%).
 CODEX_USED = 3
-#: Measured quota rows (5-minute series) inside the last 5 hours: the n behind "Claude 5h".
-CLAUDE_5H_SAMPLES = 3
-#: Per-session quota samples: weekly pp 20 -> 24 over 2 Stop turns = 2.0 pp per Claude turn.
+#: Per-session quota samples: weekly pp 20 -> 24 over 2 Stop turns = 2.0 pp per Claude turn (quota_burn's
+#: pooled ratio: sum of weekly deltas / sum of Stop turns).
 PP_PER_TURN = 2.0
-#: Actions served off Claude since local midnight (NOW is 01:30 there): session s-main's proxy rows at
-#: -1 and -5 min (local backend), its MCP rows at -10 min (local) and -20 min (spread). The MCP row at
-#: -95 min is before midnight; paid rows never count. ~work-hours = 4 x 2.0 pp / 3.0 pp per hour.
-OFF_CLAUDE_TODAY = 4
+#: HUMAN TURNS served off Claude since local midnight (NOW is 01:30 there), the unit PP_PER_TURN is in
+#: (rv-632 must-fix 1). Counted: the local turn_first proxy row at -90 s (its turn has no escalation) and
+#: the zero-Claude hook turn at -70 s. NOT counted: the local turn_first row at -4 min (redone: the
+#: escalation rows at -3 and -2 min are in its own turn), the turn_first row a paid model served at
+#: -30 min, the local proxy rows at -1 and -5 min (no step_class: not a turn), and the MCP rows
+#: (local_assist: Claude made the turn's first call). ~work-hours = 2 x 2.0 pp / 3.0 pp per hour.
+TURNS_OFF_CLAUDE_TODAY = 2
 
 
 def seed_snapshot_extras(h: Path) -> None:
     """The inputs the snapshot's other fields read, on top of the P35 home: a tagged organic session,
-    a Claude quota snapshot, three Codex delegations, per-session quota samples and 5-minute rows
-    inside the last 5 hours (flat weekly %, so the active-hour rate of the fixture is unchanged)."""
+    one Claude quota poll (1 min old), three Codex delegations, per-session quota samples, and the turns
+    behind TURNS_OFF_CLAUDE_TODAY (proxy_calls.jsonl is rewritten in time order, as the proxy appends it:
+    the router field reads the newest row from the tail)."""
     (h / f"session_kind_{SID}.json").write_text(json.dumps(
         {"session_id": SID, "kind": "organic", "cwd": "/fixture/proj", "ts": NOW - DAY}))
     (h / "usage.json").write_text(json.dumps({"session_pct": 37, "weekly_pct": 40, "updated_at": NOW - MIN}))
@@ -242,10 +245,17 @@ def seed_snapshot_extras(h: Path) -> None:
     _jl(h / "quota_samples.jsonl", [
         {"session_id": SID, "kind": kind, "ts": ts, "five_hour_pct": 10.0, "weekly_pct": wk, "updated_at": ts,
          "source": "measured", "session_kind": "organic"} for ts, kind, wk in samples])
-    last_wk = 10.0 + sum(PP_PER_ACTIVE_HOUR)
-    _jl(h / "quota_history.jsonl", [
-        {"ts": NOW - (i + 1) * 20 * MIN, "five_hour_pct": 37.0, "weekly_pct": last_wk, "updated_at": NOW,
-         "five_hour_resets_at": None, "source": "measured"} for i in range(CLAUDE_5H_SAMPLES)])
+    turn = {"session_id": SID, "step_class": "turn_first", "tier_reason": "policy_table"}
+    rows = [json.loads(ln) for ln in (h / "proxy_calls.jsonl").read_text().splitlines() if ln.strip()]
+    rows += [{**turn, "ts": NOW - 90, "decision": "served", "served_model": "fixture/local-turn", "trace_id": "T-t1"},
+             {**turn, "ts": NOW - 4 * MIN, "decision": "served", "served_model": "fixture/local-turn",
+              "trace_id": "T-t2"},
+             {**turn, "ts": NOW - 30 * MIN, "decision": "forwarded", "served_model": "fixture/frontier",
+              "upstream_status": 200, "trace_id": "T-t3"}]
+    rows.sort(key=lambda r: r["ts"] if isinstance(r.get("ts"), (int, float)) else 0.0)
+    (h / "proxy_calls.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    _jl(h / "edit_outcomes.jsonl", [{"ts": NOW - 70, "source": "zero_claude", "applied": True, "session_id": SID,
+                                     "turn_id": "z1", "session_kind": "organic"}])
 
 
 def _snapshot_shell(p35) -> list[str]:
@@ -281,12 +291,14 @@ async def test_statusline_prints_the_five_fields(p35):
     router, offload, quota, quality, saved = fields
     assert router == f"router: {SERVED} (policy_table)", router
     assert offload.startswith("offload ") and re.search(r"\(n=\d+, session", offload), offload
-    assert quota == (f"Claude 5h 37% (n={CLAUDE_5H_SAMPLES}, 5h) / Codex "
+    # one usage.json poll, 1 min old: its n is that one poll and its age (rv-632 must-fix 3)
+    assert quota == (f"Claude 5h 37% (n=1 poll, age 1m, 5h) / Codex "
                      f"{100 * CODEX_USED / 15:.0f}% (n={CODEX_USED}, 5h)"), quota
     good, bad = VERDICTS["good"], VERDICTS["bad"]
     assert quality == f"quality {good / (good + bad):.0%} (n={good + bad}, 7d)", quality
-    hours = OFF_CLAUDE_TODAY * PP_PER_TURN / MEDIAN_PP
-    assert saved == f"saved ~{hours:.1f} work-hours (n={OFF_CLAUDE_TODAY}, rate n={len(PP_PER_ACTIVE_HOUR)}, today)", saved
+    hours = TURNS_OFF_CLAUDE_TODAY * PP_PER_TURN / MEDIAN_PP          # 1.33: hand-derived above
+    assert saved == (f"saved ~{hours:.1f} work-hours (n={TURNS_OFF_CLAUDE_TODAY}, rate n={len(PP_PER_ACTIVE_HOUR)}, "
+                     "today)"), saved
     for f in fields[1:]:           # every figure names its n and its window (the router field is a name, not a figure)
         assert "(n=" in f and re.search(r"\b(session|5h|7d|today)\b", f), f
 
