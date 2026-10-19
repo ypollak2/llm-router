@@ -356,9 +356,97 @@ def test_claude_boundary(tmp_path, monkeypatch):
     assert json.loads(path.read_text()) == {"disableAllHooks": True}
     assert path.stat().st_mode & 0o777 == 0o600
     assert "--tools" not in h.claude_argv("test-sonnet", tmp_path, tools=None)
-    env = h.claude_env()
+    env = h.claude_env(h.scratch_home(tmp_path / "agent"))
     assert "ANTHROPIC_BASE_URL" not in env and "ANTHROPIC_API_KEY" not in env
     assert env["LLM_ROUTER_SESSION_KIND"] == "research"
+
+
+def plant_real_home(tmp_path, monkeypatch):
+    """A fake 'real' HOME holding the files an uninstall-shaped deletion would remove."""
+    real = tmp_path / "realhome"
+    markers = [real / ".claude/settings.json", real / ".llm-router/proxy_default.json",
+               real / "Library/LaunchAgents/com.llm_router.proxy.plist"]
+    for m in markers:
+        m.parent.mkdir(parents=True, exist_ok=True)
+        m.write_text("MARKER")
+    monkeypatch.setenv("HOME", str(real))
+    monkeypatch.setattr(h, "real_home", lambda: real.resolve())
+    return real, markers
+
+
+def test_agent_env_is_minimal_and_scratch(tmp_path, monkeypatch):
+    real, _ = plant_real_home(tmp_path, monkeypatch)
+    for k, v in {"ANTHROPIC_BASE_URL": "x", "ANTHROPIC_API_KEY": "x", "LLM_ROUTER_HOME": "x",
+                 "LLM_ROUTER_ENFORCE": "x", "OPENAI_API_KEY": "x", "PATH": "/bin", "LANG": "C",
+                 "CLAUDE_CODE_OAUTH_TOKEN": "tok"}.items():
+        monkeypatch.setenv(k, v)
+    scratch = h.scratch_home(tmp_path / "scratch")
+    pi_env = h.agent_env(scratch)
+    claude_env = h.claude_env(scratch)
+    for env in (pi_env, claude_env):
+        assert Path(env["HOME"]) != real and env["HOME"] == str(scratch)
+        assert set(env) <= h.AGENT_ENV_ALLOWED
+        assert not [k for k in env if k.startswith("LLM_ROUTER_") and k != "LLM_ROUTER_SESSION_KIND"]
+        assert "OPENAI_API_KEY" not in env and "ANTHROPIC_BASE_URL" not in env
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in pi_env and claude_env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
+    assert "LLM_ROUTER_SESSION_KIND" not in pi_env
+    assert scratch.stat().st_mode & 0o777 == 0o700
+
+
+def test_credentials_file_copied_privately(tmp_path, monkeypatch, capsys):
+    plant_real_home(tmp_path, monkeypatch)
+    source = tmp_path / "cred-source.json"
+    source.write_text("SECRET-VALUE")
+    monkeypatch.setenv(h.CLAUDE_CREDENTIALS_ENV, str(source))
+    scratch = h.scratch_home(tmp_path / "scratch")
+    h.claude_env(scratch)
+    target = scratch / ".claude/.credentials.json"
+    assert target.read_text() == "SECRET-VALUE" and target.stat().st_mode & 0o777 == 0o600
+    assert h.agent_env(h.scratch_home(tmp_path / "s2")).keys() <= h.AGENT_ENV_ALLOWED
+    assert not (tmp_path / "s2/.claude").exists()
+    monkeypatch.setenv(h.CLAUDE_CREDENTIALS_ENV, str(tmp_path / "missing-SECRET-PATH"))
+    with pytest.raises(h.Refuse) as err:
+        h.claude_env(h.scratch_home(tmp_path / "s3"))
+    assert "SECRET" not in str(err.value) and "SECRET" not in capsys.readouterr().out
+
+
+def test_agent_env_guard_refuses_real_home_and_strays(tmp_path, monkeypatch):
+    real, _ = plant_real_home(tmp_path, monkeypatch)
+    with pytest.raises(h.Refuse, match="real HOME"):
+        h.scratch_home(real)
+    with pytest.raises(h.Refuse, match="real HOME"):
+        h.assert_agent_env({"HOME": str(real), "PATH": "/bin"})
+    with pytest.raises(h.Refuse, match="real HOME"):  # caller's $HOME even if not the pw home
+        monkeypatch.setattr(h, "real_home", lambda: tmp_path / "elsewhere")
+        h.assert_agent_env({"HOME": str(real)})
+    with pytest.raises(h.Refuse, match="unexpected key"):
+        h.assert_agent_env({"HOME": str(tmp_path / "s"), "LLM_ROUTER_HOME": "x"})
+    with pytest.raises(h.Refuse, match="no HOME"):
+        h.assert_agent_env({"PATH": "/bin"})
+
+
+UNINSTALL_STUB = (
+    "import os, shutil, pathlib\n"
+    "home = pathlib.Path(os.path.expanduser('~'))\n"
+    "for rel in ('.claude/settings.json', '.llm-router/proxy_default.json',\n"
+    "            'Library/LaunchAgents/com.llm_router.proxy.plist'):\n"
+    "    (home / rel).parent.mkdir(parents=True, exist_ok=True)\n"
+    "    (home / rel).write_text('x'); (home / rel).unlink()\n"
+    "for d in ('.claude', '.llm-router', 'Library'):\n"
+    "    shutil.rmtree(home / d, ignore_errors=True)\n"
+    "(home / 'ran').write_text('1')\n"
+)
+
+
+def test_uninstall_shaped_agent_cannot_touch_real_home(tmp_path, monkeypatch):
+    real, markers = plant_real_home(tmp_path, monkeypatch)
+    scratch = h.scratch_home(tmp_path / "scratch")
+    for env in (h.claude_env(scratch), h.agent_env(scratch)):
+        out = GIT_RUN([sys.executable, "-c", UNINSTALL_STUB], env=env, check=False,
+                             capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        assert all(m.read_text() == "MARKER" for m in markers)
+        assert (scratch / "ran").is_file()  # the stub ran, against scratch
 
 
 def test_constants_and_real_freeze(factory, tmp_path):
