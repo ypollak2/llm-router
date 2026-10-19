@@ -13,8 +13,10 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 SPEC = importlib.util.spec_from_file_location(
@@ -23,7 +25,122 @@ SPEC = importlib.util.spec_from_file_location(
 h = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = h
 SPEC.loader.exec_module(h)
-_claude_run = subprocess.run
+
+
+DRAIN_SECONDS = 30.0   # how long to wait for the agent's pipes after the stop
+
+
+def run_agent_process(argv, *, input=None, text=True, capture_output=True, timeout=900,
+                      cwd=None, env=None, check=False):
+    """F117: `subprocess.run` for the coding agent, in its own session (process group).
+
+    While it runs the harness records every process below it (pid + start time, 0.25 s polls).
+    On return, success or timeout, the group is killed while its leader is still unreaped and
+    each recorded process is killed only if its start time still matches (see
+    h.stop_agent_processes), then the pipes are drained for at most DRAIN_SECONDS. Finally no
+    other process may hold `cwd` or the scratch HOME (cwd / open files): if one does, or that
+    cannot be checked, h.AgentSurvived is raised and nothing may be scanned. Same result /
+    TimeoutExpired shape as subprocess.run."""
+    import selectors
+    proc = subprocess.Popen(
+        argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+        cwd=cwd, env=env, start_new_session=True,
+    )
+    pending = (input.encode() if isinstance(input, str) else input) or b""
+    sent = 0
+    bufs = {proc.stdout: [], proc.stderr: []}
+    readers = {proc.stdout, proc.stderr}
+    sel = selectors.DefaultSelector()
+
+    def close_stdin():
+        if proc.stdin and not proc.stdin.closed:
+            with contextlib.suppress(KeyError, ValueError):
+                sel.unregister(proc.stdin)
+            with contextlib.suppress(OSError):
+                proc.stdin.close()
+
+    def pump(wait):
+        nonlocal sent
+        if not sel.get_map():
+            time.sleep(max(wait, 0))
+            return
+        for key, _ in sel.select(max(wait, 0)):
+            f = key.fileobj
+            if f is proc.stdin:
+                try:
+                    sent += os.write(f.fileno(), pending[sent:sent + 65536])
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    sent = len(pending)
+                if sent >= len(pending):
+                    close_stdin()
+                continue
+            try:
+                chunk = os.read(f.fileno(), 1 << 16)
+            except BlockingIOError:
+                continue
+            except OSError:
+                chunk = b""
+            if chunk:
+                bufs[f].append(chunk)
+            else:
+                sel.unregister(f)
+                readers.discard(f)
+
+    known: dict[int, str] = {}
+    late = stopped = False
+    try:
+        for f in (proc.stdout, proc.stderr):
+            os.set_blocking(f.fileno(), False)
+            sel.register(f, selectors.EVENT_READ)
+        if pending:
+            os.set_blocking(proc.stdin.fileno(), False)
+            sel.register(proc.stdin, selectors.EVENT_WRITE)
+        else:
+            close_stdin()
+        deadline = time.monotonic() + timeout
+        while True:
+            table = h.process_table()
+            h.track_agent_tree(known, table, proc.pid)
+            row = table.get(proc.pid)  # never waited on: an exited leader stays listed (Z)
+            if row is None or row.zombie:
+                break
+            if time.monotonic() >= deadline:
+                late = True
+                break
+            pump(min(0.25, deadline - time.monotonic()))
+        stopped = True
+        h.stop_agent_processes(proc.pid, known)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        end = time.monotonic() + DRAIN_SECONDS
+        while readers and time.monotonic() < end:
+            pump(0.2)
+    finally:
+        if not stopped:
+            with contextlib.suppress(h.Refuse):
+                h.stop_agent_processes(proc.pid, known)
+            proc.poll()
+        sel.close()
+        for f in (proc.stdin, proc.stdout, proc.stderr):
+            with contextlib.suppress(OSError, ValueError, AttributeError):
+                f.close()
+    home = (env or {}).get("HOME")
+    h.assert_dirs_unheld([Path(d) for d in (cwd, home) if d])
+    out = b"".join(bufs[proc.stdout])
+    err = b"".join(bufs[proc.stderr])
+    if text:
+        out, err = out.decode(errors="replace"), err.decode(errors="replace")
+    if late:
+        raise subprocess.TimeoutExpired(argv, timeout, output=out, stderr=err)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+_claude_run = run_agent_process
 
 
 def contract(path):
@@ -39,21 +156,21 @@ def contract(path):
     raise h.Refuse("refusing: TEST_CONTRACT literal missing")
 
 
-def git(work, *args):
-    return subprocess.run(
-        ["git", "-C", str(work), *args], stdin=subprocess.DEVNULL,
-        capture_output=True, text=True, timeout=120, check=True,
-    ).stdout.strip()
+def git(work, *args, sandbox=False):
+    """F117: text of one hardened git command (see h.run_git). `sandbox=True` for any repo the
+    agent has touched: its .git/config is then never read."""
+    return h.run_git(work, *args, sandbox=sandbox).decode(errors="replace").strip()
+
+
+def git_bytes(work, *args):
+    """Raw stdout of a git command on an agent-touched repo (non-UTF-8 safe, capped)."""
+    return h.run_git(work, *args, sandbox=True)
 
 
 def empty_patch(work, parent):
-    changed = subprocess.run(
-        ["git", "-C", str(work), "diff", "--quiet", parent],
-        stdin=subprocess.DEVNULL, capture_output=True, timeout=120, check=False,
-    ).returncode
-    if changed not in (0, 1):
-        raise RuntimeError("git diff failed")
-    return changed == 0 and not git(work, "ls-files", "--others", "--exclude-standard")
+    differs = git_bytes(work, "diff", "--name-only", parent)
+    return not differs.strip() and not git(
+        work, "ls-files", "--others", "--exclude-standard", sandbox=True)
 
 
 # Every Pi thinking level but "off" is unsupported, and "off" is sent as reasoning_effort "none":
@@ -90,18 +207,164 @@ def _text(value):
 
 
 def purge_inside(run_dir, *paths):
-    """Delete each path only if it lies strictly inside the run dir the harness created."""
+    """Delete each path only if it lies strictly inside the run dir the harness created.
+    Returns False if something could not be removed (the caller then says so)."""
     root = Path(run_dir).resolve()
+    complete = True
     for path in paths:
         target = Path(path)
         if target.is_symlink() or not target.exists():
             continue
         real = target.resolve()
         if real != root and root in real.parents:
-            shutil.rmtree(real, ignore_errors=True)
+            complete = _delete_tree(root, real) and complete
+    return complete
 
 
-def scrub_claude_artifacts(token, work, home, output, run_dir):
+def _chmod_nofollow(parent_fd, name):
+    """chmod 0700 the directory `name` under `parent_fd`, never through a symlink."""
+    try:
+        os.chmod(name, 0o700, dir_fd=parent_fd, follow_symlinks=False)
+        return True
+    except NotImplementedError:
+        pass  # Linux: no lchmod; go through an O_PATH fd instead
+    except OSError:
+        return False
+    o_path = getattr(os, "O_PATH", None)
+    if o_path is None:
+        return False
+    try:
+        pfd = os.open(name, o_path | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=parent_fd)
+    except OSError:
+        return False
+    try:
+        os.chmod(f"/proc/self/fd/{pfd}", 0o700)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(pfd)
+
+
+def _open_dir(parent_fd, name):
+    """fd of the real directory `name` under `parent_fd` (never a symlink), unlocking a
+    chmod 000 one first; None when it is not a directory or cannot be opened."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        return os.open(name, flags, dir_fd=parent_fd)
+    except PermissionError:
+        if not _chmod_nofollow(parent_fd, name):
+            return None
+    except OSError:
+        return None
+    try:
+        return os.open(name, flags, dir_fd=parent_fd)
+    except OSError:
+        return None
+
+
+def _walk_tree(root_fd, delete):
+    """F117: owner-rwx every real directory below `root_fd` (and, if `delete`, remove all of
+    it but `root_fd` itself), iteratively and holding ONE directory fd at a time, so a deep
+    chain neither recurses nor runs out of descriptors. Moves down by name with O_NOFOLLOW and
+    up through `..`, checking the parent's (dev, ino) against the one recorded on the way down.
+    Never follows a symlink. Returns False if anything could not be opened, changed or removed."""
+    ok = True
+
+    def enter(fd):
+        nonlocal ok
+        try:
+            os.fchmod(fd, 0o700)
+            return os.listdir(fd)
+        except OSError:
+            ok = False
+            return []
+
+    def ident(fd):
+        info = os.fstat(fd)
+        return info.st_dev, info.st_ino
+
+    cur = os.dup(root_fd)
+    try:
+        frames = [[ident(cur), None, enter(cur)]]  # [identity, name in parent, names left]
+        while frames:
+            if frames[-1][2]:
+                name = frames[-1][2].pop()
+                try:
+                    info = os.stat(name, dir_fd=cur, follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    child = _open_dir(cur, name)
+                    if child is None:
+                        ok = False
+                    elif ident(child) != (info.st_dev, info.st_ino):
+                        os.close(child)
+                        ok = False
+                    else:
+                        os.close(cur)
+                        cur = child
+                        frames.append([ident(cur), name, enter(cur)])
+                elif delete:
+                    try:
+                        os.unlink(name, dir_fd=cur)
+                    except OSError:
+                        ok = False
+                continue
+            _, name, _ = frames.pop()
+            if not frames:
+                break
+            try:
+                parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY, dir_fd=cur)
+            except OSError:
+                return False
+            if ident(parent) != frames[-1][0]:
+                os.close(parent)
+                return False
+            os.close(cur)
+            cur = parent
+            if delete:
+                try:
+                    os.rmdir(name, dir_fd=cur)
+                except OSError:
+                    ok = False
+    finally:
+        os.close(cur)
+    return ok
+
+
+def _delete_tree(root, target):
+    """Remove `target` (a path strictly inside `root`) through directory fds, never following a
+    symlink and unlocking chmod 000 directories. Returns True only if nothing is left."""
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        parts = Path(target).relative_to(root).parts
+        for part in parts[:-1]:
+            child = _open_dir(fd, part)
+            os.close(fd)
+            fd = child
+            if fd is None:
+                return False
+        child = _open_dir(fd, parts[-1])
+        if child is None:
+            return False
+        try:
+            ok = _walk_tree(child, True)
+        finally:
+            os.close(child)
+        os.rmdir(parts[-1], dir_fd=fd)
+        return ok
+    except (OSError, ValueError):
+        return False
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def scrub_claude_artifacts(token, work, home, output, run_dir, baseline=None):
     """F115: the Claude arm has Bash and the OAuth token in its env; refuse before anything
     it produced (output, work files, patch, scratch HOME) is stored if it carries the token.
     `output` is the call's stdout+stderr text (also on a timeout). No token to look for while
@@ -113,15 +376,24 @@ def scrub_claude_artifacts(token, work, home, output, run_dir):
         h.scan_for_token(token, "agent output", data=output)
         h.scan_for_token(token, "work files", root=work)
         h.scan_for_token(token, "agent scratch home", root=home)
-        h.scan_for_token(token, "patch", data=git(work, "diff", "HEAD"))
-        h.scan_for_token(token, "git history", data=git(work, "log", "-p", "--all"))
+        # F117: raw objects the agent added (baseline = object ids before it ran), not `log -p`
+        # over the whole shared mirror: covers merges, tags, unreachable commits, replace refs
+        h.scan_for_token(token, "patch", data=git_bytes(work, "diff", "HEAD"))
+        h.scan_new_git_objects(token, work, baseline)
     except h.Refuse as exc:
-        purge_inside(run_dir, work, home)
+        done = purge_inside(run_dir, work, home)
         raise h.Refuse(
-            f"{exc}; work and agent_home copies were deleted if inside the run dir, "
+            f"{exc}; work and agent_home copies were "
+            f"{'deleted' if done else 'NOT fully deleted'} if inside the run dir, "
             f"but the run dir {run_dir} may still hold the token (agent output, ledgers): "
             "purge it, and rotate the token (claude setup-token)"
         ) from None
+    except Exception:
+        # F117: anything unexpected from the scan must still purge, never skip it.
+        purge_inside(run_dir, work, home)
+        raise h.Refuse("refusing: artifact scan failed; work and agent_home copies were "
+                       "deleted if inside the run dir; purge the run dir and rotate the token"
+                       ) from None
 
 
 def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
@@ -146,7 +418,8 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     start = cfg.now()
     cost, served, error, timed_out = 0, "", None, False
     env = h.claude_env(home, cfg.run_dir)
-    output = ""
+    output, survived = "", False
+    baseline = h.git_object_ids(work)  # F117: what the agent adds is what gets scanned
     try:
         result = _claude_run(
             h.claude_argv(c["CLAUDE_SONNET_ID"], cfg.run_dir, tools=None)
@@ -169,11 +442,19 @@ def agent(cfg, c, arm, ident, attempt, prompt, work, pi):
     except subprocess.TimeoutExpired as exc:
         timed_out = True
         output = _text(exc.stdout) + _text(exc.stderr)
+    except h.AgentSurvived:
+        survived = True  # a live agent process: its tree is never scanned (fail closed)
+        raise h.AgentSurvived(
+            "refusing: agent process survived; nothing was scanned. Purge the run dir "
+            f"{cfg.run_dir} once the process is gone and rotate the token (claude setup-token)"
+        ) from None
     except (OSError, ValueError, TypeError, AttributeError):
         error = "claude_error"
     finally:
         # always scanned, also after a timeout or a parse failure, before grading or storing
-        scrub_claude_artifacts(env.get(h.CLAUDE_AUTH_ENV[0]), work, home, output, cfg.run_dir)
+        if not survived:
+            scrub_claude_artifacts(env.get(h.CLAUDE_AUTH_ENV[0]), work, home, output,
+                                   cfg.run_dir, baseline)
     h.append_row(cfg.run_dir / "ledger.jsonl", {
         "ts": h.utc(cfg), "stage": "code", "set": "code", "arm": arm,
         "item_id": ident, "attempt": attempt, "ok": error is None and not timed_out,
@@ -214,7 +495,7 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
         "attempt": attempt, "tc_sha256": tc_hash, "runner_sha256": runner_hash,
         "ts": start,
     }
-    work, hidden, meta = None, None, None
+    work, hidden, meta, clone = None, None, None, None
     tag = "p20_" + safe(args.arm)
     try:
         ref = item["task_ref"]
@@ -222,7 +503,7 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
             metas = {m["task_id"]: m for m in h.jsonl(args.noncloud_dir / "tasks_meta.jsonl")}
             task_id = ref["task_id"]
             meta = metas[task_id]
-            nc.ensure_clone()
+            clone = Path(nc.ensure_clone())
             work = Path(nc.make_wt(task_id, tag, meta["parent_sha"]))
             parent = meta["parent_sha"]
             prompt = nc.build_prompt(meta)
@@ -295,10 +576,12 @@ def attempt_task(cfg, c, args, item, attempt, tc, tc_hash, runner_hash, nc, pi):
         if hidden is not None and hidden.exists() and work is not None:
             remove_tests(work / "tests")
             shutil.move(str(hidden), work / "tests")
-        if meta is not None and work is not None:
+        if meta is not None and work is not None and clone is not None:
             try:
-                git(work, "worktree", "remove", "--force", str(work))
-            except (OSError, subprocess.SubprocessError):
+                # F117: from the trusted clone, never `-C work`: work/.git is a pointer file
+                # the agent can rewrite to another repo's config
+                git(clone, "worktree", "remove", "--force", str(work))
+            except (OSError, subprocess.SubprocessError, h.Refuse):
                 row["infra_class"], row["hidden_pass"] = "cleanup_error", None
         row["wall_s"] = cfg.now() - start
     return row
