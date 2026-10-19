@@ -21,6 +21,7 @@ from llm_router.paths import state_path
 from llm_router.resolver.eligibility_store import record_competence
 
 ROOT = Path(__file__).resolve().parents[1]
+_REAL_RUN = subprocess.run  # the F113 interpreter probes are local, side-effect free
 
 
 def _load_harness():
@@ -57,7 +58,12 @@ def isolate(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("real external call")
 
-    monkeypatch.setattr(h.subprocess, "run", forbidden)
+    def probe_only(argv, *args, **kwargs):
+        if list(argv[1:3]) == ["-I", "-c"]:  # python -I -c <probe>: the F113 import guard
+            return _REAL_RUN(argv, *args, **kwargs)
+        return forbidden()
+
+    monkeypatch.setattr(h.subprocess, "run", probe_only)
     monkeypatch.setattr(h, "urlopen", forbidden)
 
 
@@ -394,21 +400,102 @@ def test_agent_env_is_minimal_and_scratch(tmp_path, monkeypatch):
     assert scratch.stat().st_mode & 0o777 == 0o700
 
 
-def test_credentials_file_copied_privately(tmp_path, monkeypatch, capsys):
+def test_credentials_file_sets_token_in_claude_env_only(tmp_path, monkeypatch, capsys):
     plant_real_home(tmp_path, monkeypatch)
-    source = tmp_path / "cred-source.json"
-    source.write_text("SECRET-VALUE")
+    source = tmp_path / "cred-source"
+    source.write_text("SECRET-VALUE\n")
+    source.chmod(0o600)
     monkeypatch.setenv(h.CLAUDE_CREDENTIALS_ENV, str(source))
     scratch = h.scratch_home(tmp_path / "scratch")
-    h.claude_env(scratch)
-    target = scratch / ".claude/.credentials.json"
-    assert target.read_text() == "SECRET-VALUE" and target.stat().st_mode & 0o777 == 0o600
-    assert h.agent_env(h.scratch_home(tmp_path / "s2")).keys() <= h.AGENT_ENV_ALLOWED
+    env = h.claude_env(scratch)
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "SECRET-VALUE"
+    assert not (scratch / ".claude").exists()  # the value is never written anywhere
+    pi_env = h.agent_env(h.scratch_home(tmp_path / "s2"))
+    assert pi_env.keys() <= h.AGENT_ENV_ALLOWED and "CLAUDE_CODE_OAUTH_TOKEN" not in pi_env
     assert not (tmp_path / "s2/.claude").exists()
     monkeypatch.setenv(h.CLAUDE_CREDENTIALS_ENV, str(tmp_path / "missing-SECRET-PATH"))
     with pytest.raises(h.Refuse) as err:
         h.claude_env(h.scratch_home(tmp_path / "s3"))
     assert "SECRET" not in str(err.value) and "SECRET" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o604, 0o644, 0o660])
+def test_credentials_file_refused_when_group_or_world_accessible(tmp_path, monkeypatch, mode):
+    plant_real_home(tmp_path, monkeypatch)
+    source = tmp_path / "cred-source"
+    source.write_text("SECRET-VALUE")
+    source.chmod(mode)
+    monkeypatch.setenv(h.CLAUDE_CREDENTIALS_ENV, str(source))
+    with pytest.raises(h.Refuse, match="group/world") as err:
+        h.claude_env(h.scratch_home(tmp_path / "scratch"))
+    assert "SECRET" not in str(err.value) and str(source) not in str(err.value)
+
+
+def test_credentials_file_empty_refused(tmp_path, monkeypatch):
+    plant_real_home(tmp_path, monkeypatch)
+    source = tmp_path / "cred-source"
+    source.write_text("  \n")
+    source.chmod(0o600)
+    monkeypatch.setenv(h.CLAUDE_CREDENTIALS_ENV, str(source))
+    with pytest.raises(h.Refuse, match="empty"):
+        h.claude_env(h.scratch_home(tmp_path / "scratch"))
+
+
+def python_stub(directory: Path, name: str, importable: bool) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / name
+    exe.write_text(f"#!/bin/sh\nexit {1 if importable else 0}\n")
+    exe.chmod(0o755)
+    return directory
+
+
+def test_import_guard_refuses_python_that_imports_llm_router(tmp_path, monkeypatch):
+    plant_real_home(tmp_path, monkeypatch)
+    bad = python_stub(tmp_path / "bad", "python3", importable=True)
+    clean = python_stub(tmp_path / "clean", "python", importable=False)
+    env = {"HOME": str(tmp_path / "s"), "PATH": f"{clean}{os.pathsep}{bad}"}
+    with pytest.raises(h.Refuse, match="importable"):
+        h.assert_agent_env(env)
+    env["PATH"] = str(clean)
+    h.assert_agent_env(env)  # only the clean python: passes
+    # A real interpreter that can import llm_router (this test process's) is refused.
+    real_py = tmp_path / "real"
+    real_py.mkdir()
+    (real_py / "python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    (real_py / "python3").chmod(0o755)
+    with pytest.raises(h.Refuse, match="importable"):
+        h.assert_agent_env({"HOME": str(tmp_path / "s"), "PATH": str(real_py)})
+
+
+def test_import_guard_probe_found_a_python_to_check(tmp_path):
+    # An empty set passes everything: the stubs must actually be discovered.
+    one = python_stub(tmp_path / "one", "python3", importable=False)
+    two = python_stub(tmp_path / "two", "python", importable=False)
+    assert len(h.agent_pythons(f"{one}{os.pathsep}{two}")) == 2
+
+
+def test_agent_env_sets_pythonnousersite(tmp_path, monkeypatch):
+    plant_real_home(tmp_path, monkeypatch)
+    for env in (h.agent_env(h.scratch_home(tmp_path / "a")), h.claude_env(h.scratch_home(tmp_path / "b"))):
+        assert env["PYTHONNOUSERSITE"] == "1"
+    assert "PYTHONNOUSERSITE" in h.AGENT_ENV_ALLOWED
+
+
+def test_grader_python_requires_clean_interpreter_with_pytest(tmp_path):
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    exe = clean / "python3"
+    exe.write_text(
+        "#!/bin/sh\ncase \"$*\" in *find_spec*) exit 0;; *'import pytest'*) exit 0;; esac\nexit 0\n"
+    )
+    exe.chmod(0o755)
+    assert h.grader_python({"PATH": str(clean)}) == str(exe)
+    exe.write_text("#!/bin/sh\ncase \"$*\" in *find_spec*) exit 0;; esac\nexit 1\n")
+    with pytest.raises(h.Refuse, match="pytest"):
+        h.grader_python({"PATH": str(clean)})
+    bad = python_stub(tmp_path / "bad", "python3", importable=True)
+    with pytest.raises(h.Refuse, match="importable"):
+        h.grader_python({"PATH": str(bad)})
 
 
 def test_agent_env_guard_refuses_real_home_and_strays(tmp_path, monkeypatch):

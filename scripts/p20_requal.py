@@ -556,10 +556,13 @@ def claude_argv(model_id: str, run_dir: Path, tools: str | None) -> list[str]:
 # HOME and an allow-listed environment; nothing else from the caller's environment is passed.
 AGENT_PASS_ENV = ("PATH", "LANG", "LC_ALL", "USER", "LOGNAME")  # USER: macOS Keychain account
 CLAUDE_AUTH_ENV = ("CLAUDE_CODE_OAUTH_TOKEN",)  # subscription token; forwarded, never logged
-CLAUDE_CREDENTIALS_ENV = "P20_CLAUDE_CREDENTIALS_FILE"  # optional file copied into scratch HOME
+CLAUDE_CREDENTIALS_ENV = "P20_CLAUDE_CREDENTIALS_FILE"  # optional 0600 file holding the token
 AGENT_ENV_ALLOWED = frozenset(
-    AGENT_PASS_ENV + CLAUDE_AUTH_ENV + ("HOME", "LLM_ROUTER_SESSION_KIND")
+    AGENT_PASS_ENV + CLAUDE_AUTH_ENV
+    + ("HOME", "LLM_ROUTER_SESSION_KIND", "PYTHONNOUSERSITE")
 )
+# F113: user-site packages (where a pip --user llm_router would live) are off for agents.
+AGENT_FIXED_ENV = {"PYTHONNOUSERSITE": "1"}
 
 
 # F110 (rv-642): PATH was still the owner's, so an agent could run `llm-router uninstall`.
@@ -598,6 +601,56 @@ def agent_path(path: str) -> str:
     return os.pathsep.join(kept)
 
 
+PYTHON_NAMES = ("python", "python3")
+IMPORT_PROBE = (
+    "import importlib.util,sys; "
+    "sys.exit(0 if importlib.util.find_spec('llm_router') is None else 1)"
+)
+
+
+def agent_pythons(path: str) -> list[str]:
+    """Every distinct python/python3 executable that resolves on `path`."""
+    found: list[str] = []
+    for entry in path.split(os.pathsep):
+        for name in PYTHON_NAMES:
+            exe = shutil.which(name, path=entry) if entry else None
+            if exe and exe not in found:
+                found.append(exe)
+    return found
+
+
+def assert_no_llm_router_import(env: dict[str, str]) -> None:
+    """Refuse when any python/python3 on env's PATH can import llm_router (F113).
+
+    Fails closed: exit 1 (importable) or a probe timeout refuses. Names no path."""
+    for exe in agent_pythons(env.get("PATH", "")):
+        try:
+            result = subprocess.run(
+                [exe, "-I", "-c", IMPORT_PROBE], env=env, stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=30, check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise Refuse("refusing: python import probe timed out") from exc
+        except OSError:
+            continue  # cannot run, cannot import
+        if result.returncode == 1:
+            raise Refuse("refusing: llm_router is importable from a python on the agent PATH")
+
+
+def grader_python(env: dict[str, str]) -> str:
+    """The interpreter that runs agent-written code in the grader: first python3/python on
+    env's PATH. It must not import llm_router (guard) and must provide pytest."""
+    assert_no_llm_router_import(env)
+    for exe in agent_pythons(env.get("PATH", "")):
+        probe = subprocess.run(
+            [exe, "-I", "-c", "import pytest"], env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=30, check=False,
+        )
+        if probe.returncode == 0:
+            return exe
+    raise Refuse("refusing: no python on the agent PATH provides pytest for the grader")
+
+
 def real_home() -> Path:
     """The account's home from the user database, which an overridden $HOME cannot move."""
     return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
@@ -630,31 +683,49 @@ def assert_agent_env(env: dict[str, str], run_dir: Path | None = None) -> None:
         raise Refuse("refusing: llm-router is reachable on the agent PATH")
     if set(env) - AGENT_ENV_ALLOWED:
         raise Refuse("refusing: unexpected key in agent environment")
+    if env.get("PATH") is not None:
+        assert_no_llm_router_import(env)
+
+
+def read_oauth_token(source: str) -> str:
+    """Token from the owner's file (`claude setup-token` output). Refuses a file that is
+    group/world accessible or empty. Errors name no path and no value (F113)."""
+    try:
+        fd = os.open(source, os.O_RDONLY)
+        try:
+            if os.fstat(fd).st_mode & 0o077:
+                raise Refuse("refusing: Claude credentials file is group/world accessible")
+            with os.fdopen(fd, "r") as handle:
+                fd = -1
+                token = handle.read().strip()
+        finally:
+            if fd >= 0:
+                os.close(fd)
+    except OSError as exc:
+        raise Refuse("refusing: Claude credentials file unusable") from exc
+    if not token:
+        raise Refuse("refusing: Claude credentials file is empty")
+    return token
 
 
 def agent_env(home: Path, *, claude: bool = False, run_dir: Path | None = None) -> dict[str, str]:
     """Minimal agent environment: scratch HOME, PATH/LANG, and (Claude only) auth material.
 
-    Auth is either CLAUDE_CODE_OAUTH_TOKEN passed through, or the file named by
-    P20_CLAUDE_CREDENTIALS_FILE copied to <home>/.claude/.credentials.json (0600). Values are
-    never printed or logged; failures name no path.
+    Auth is either CLAUDE_CODE_OAUTH_TOKEN passed through, or (F113) the token read from the
+    0600 file named by P20_CLAUDE_CREDENTIALS_FILE and set as CLAUDE_CODE_OAUTH_TOKEN in the
+    Claude child env only. Values are never printed, logged or written; failures name no path.
     """
     env = {k: os.environ[k] for k in AGENT_PASS_ENV if k in os.environ}
     if "PATH" in env:
         env["PATH"] = agent_path(env["PATH"])
     env["HOME"] = str(home)
+    env.update(AGENT_FIXED_ENV)
     if claude:
         env["LLM_ROUTER_SESSION_KIND"] = "research"
         env.update({k: os.environ[k] for k in CLAUDE_AUTH_ENV if os.environ.get(k)})
         source = os.environ.get(CLAUDE_CREDENTIALS_ENV)
         if source:
-            target = home / ".claude" / ".credentials.json"
-            try:
-                private_dir(target.parent)
-                shutil.copyfile(source, target)
-                target.chmod(0o600)
-            except OSError as exc:
-                raise Refuse("refusing: Claude credentials file unusable") from exc
+            env[CLAUDE_AUTH_ENV[0]] = read_oauth_token(source)
     assert_agent_env(env, run_dir)
     return env
 
