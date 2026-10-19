@@ -31,7 +31,8 @@ import urllib.request
 from pathlib import Path
 
 #: Loaded in the main agent, in this order.
-EXTENSIONS = ("cancel.ts", "paths.ts", "context-guard.ts", "compaction.ts", "question.ts", "subagent.ts")
+EXTENSIONS = ("cancel.ts", "paths.ts", "context-guard.ts", "compaction.ts", "question.ts", "subagent.ts",
+              "summary.ts")
 #: Loaded in sub-agents: no `subagent` (no recursion) and no `question` (nobody sees it).
 CHILD_EXTENSIONS = ("cancel.ts", "paths.ts", "context-guard.ts", "compaction.ts")
 SYSTEM_RULES = "system-rules.md"
