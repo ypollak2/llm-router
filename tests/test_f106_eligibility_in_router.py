@@ -141,9 +141,9 @@ def test_only_the_failed_tier_is_acted_on(home):
     assert er.filter_chain(CHAIN, TaskType.QUERY, Complexity.MODERATE) == CHAIN
 
 
-def test_untagged_names_match_latest_and_non_ollama_is_never_matched(home):
+def test_untagged_names_match_latest_and_non_local_is_never_matched(home):
     (home / "local_eligibility.json").write_text(json.dumps({"fixture-bad": _qa(FAILED)}))
-    chain = ["ollama/fixture-bad:latest", "openai_compat/fixture-bad", GEMINI]
+    chain = ["ollama/fixture-bad:latest", "mystery/fixture-bad", GEMINI]  # F109: local non-ollama ids match too
     assert er.filter_chain(chain, TaskType.QUERY, Complexity.SIMPLE) == chain[1:]
 
 

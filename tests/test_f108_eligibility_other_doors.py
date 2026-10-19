@@ -276,3 +276,83 @@ def test_stream_failopen_keeps_chain(stream_env, monkeypatch):
     attempted, _, _ = _stream(monkeypatch)
     assert attempted == CHAIN
     assert failopen.snapshot().by_code.get("CHZ-FO-ROUTER-ELIGIBILITY-FILTER") == 1
+
+
+# ── F109 follow-ups ────────────────────────────────────────────────────────
+
+def test_f109_hook_drop_is_logged_without_a_skip_scope(hook, caplog):
+    import logging
+    _write(hook, "code", FAILED)
+    with caplog.at_level(logging.DEBUG, logger="llm_router.hooks.chain_builder"):
+        cb.build_chain("simple", "green", "code")
+    msgs = [r.getMessage() for r in caplog.records if "F109" in r.getMessage()]
+    assert len(msgs) == 1 and "ollama/fixture-bad:7b" in msgs[0]
+    assert "fixture-other" not in msgs[0]
+
+
+def test_f109_hook_no_drop_no_log(hook, caplog):
+    import logging
+    with caplog.at_level(logging.DEBUG, logger="llm_router.hooks.chain_builder"):
+        cb.build_chain("simple", "green", "code")
+    assert not [r for r in caplog.records if "F109" in r.getMessage()]
+
+
+def test_f109_stream_applies_qa_reorder(stream_env, monkeypatch):
+    # No eligibility file: local sits behind the non-local non-Claude model for Q&A.
+    chain = ["ollama/fixture-bad:7b", "ollama/fixture-other:3b", "gemini/gemini-2.5-flash",
+             "anthropic/claude-sonnet-4-6"]
+    attempted, _, _ = _stream(monkeypatch, task=TaskType.QUERY, chain=chain)
+    assert attempted == ["gemini/gemini-2.5-flash", "ollama/fixture-bad:7b",
+                         "ollama/fixture-other:3b", "anthropic/claude-sonnet-4-6"]
+
+
+def test_f109_stream_code_not_reordered(stream_env, monkeypatch):
+    attempted, _, _ = _stream(monkeypatch, task=TaskType.CODE)
+    assert attempted == CHAIN
+
+
+def test_f109_stream_reorder_then_filter(stream_env, monkeypatch):
+    _write(stream_env, "qa", FAILED)
+    chain = ["ollama/fixture-bad:7b", "ollama/fixture-other:3b", "gemini/gemini-2.5-flash"]
+    attempted, _, events = _stream(monkeypatch, task=TaskType.QUERY, chain=chain)
+    assert attempted == ["gemini/gemini-2.5-flash", "ollama/fixture-other:3b"]
+    assert next(e for e in events if e["type"] == "route.started")["eligibility_skipped"] == [
+        "ollama/fixture-bad:7b"]
+
+
+def test_f109_stream_reorder_respects_override(stream_env, monkeypatch):
+    chain = ["ollama/fixture-bad:7b", "gemini/gemini-2.5-flash"]
+    attempted, _, _ = _stream(monkeypatch, task=TaskType.QUERY, chain=chain,
+                              override="ollama/fixture-bad:7b")
+    assert attempted == chain
+
+
+@pytest.mark.parametrize("provider", ["lm_studio", "vllm", "llamacpp", "openai_compat"])
+def test_f109_non_ollama_local_provider_is_matched(home, provider):
+    _write(home, "code", FAILED)
+    mid = f"{provider}/fixture-bad:7b"
+    assert er.filter_chain([mid, "gemini/gemini-2.5-flash"], TaskType.CODE, "simple") == [
+        "gemini/gemini-2.5-flash"]
+
+
+def test_f109_non_local_provider_with_same_name_untouched(home):
+    _write(home, "code", FAILED)
+    chain = ["gemini/fixture-bad:7b", "mystery/fixture-bad:7b"]
+    assert er.filter_chain(chain, TaskType.CODE, "simple") == chain
+
+
+def test_f109_non_ollama_local_unknown_and_opt_out_unchanged(home, monkeypatch):
+    chain = ["lm_studio/fixture-bad:7b"]
+    _write(home, "code", PROBE)
+    assert er.filter_chain(chain, TaskType.CODE, "simple") == chain
+    _write(home, "code", FAILED)
+    monkeypatch.setenv("LLM_ROUTER_IGNORE_ELIGIBILITY", "1")
+    assert er.filter_chain(chain, TaskType.CODE, "simple") == chain
+
+
+def test_f109_ollama_prefixed_and_bare_file_keys_still_match(home):
+    (home / "local_eligibility.json").write_text(
+        json.dumps({"ollama/fixture-bad": {"code": {"simple": FAILED}}}))
+    er.reset_cache()
+    assert er.filter_chain(["ollama/fixture-bad:latest", "ollama/fixture-bad"],
+                           TaskType.CODE, "simple") == []

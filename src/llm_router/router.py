@@ -6317,6 +6317,9 @@ async def route_and_stream(
 
     # F108 / D-235: the F106 eligibility filter on the stream door (same function, lane tier from
     # the call's own complexity, model_override exempt, fail-open). Events carry the dropped ids.
+    # F109 / D-116: the Q&A reorder route_and_call applies, before the eligibility filter.
+    if models_to_try and not model_override:
+        models_to_try = _strip_local_for_qa(models_to_try, task_type)
     _elig_before = list(models_to_try)
     if models_to_try and not model_override:
         models_to_try = _drop_failed_eligibility(
