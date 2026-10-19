@@ -467,11 +467,8 @@ def prune_history(home: str, now: float, *, retain_s: float = HISTORY_RETAIN_S,
     are not JSON objects with a numeric ``ts`` are dropped. Raises OSError on a filesystem failure:
     the caller records it (nothing is swallowed here)."""
     prune_stamp = os.path.join(home, HISTORY_PRUNE_STAMP_NAME)
-    try:
-        if 0 <= now - os.path.getmtime(prune_stamp) < HISTORY_PRUNE_EVERY_S:
-            return False
-    except FileNotFoundError:
-        pass
+    if os.path.exists(prune_stamp) and 0 <= now - os.path.getmtime(prune_stamp) < HISTORY_PRUNE_EVERY_S:
+        return False
     hist = os.path.join(home, HISTORY_NAME)
     if not os.path.exists(hist):
         return False
@@ -510,10 +507,8 @@ def prune_history(home: str, now: float, *, retain_s: float = HISTORY_RETAIN_S,
                     os.fsync(out.fileno())
                 os.replace(tmp, hist)
             except BaseException:
-                try:
+                if os.path.exists(tmp):
                     os.unlink(tmp)
-                except FileNotFoundError:
-                    pass
                 raise
         pfd = os.open(prune_stamp, os.O_WRONLY | os.O_CREAT, 0o600)
         os.close(pfd)
