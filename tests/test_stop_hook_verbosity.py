@@ -170,16 +170,16 @@ def test_money_never_shows_a_bare_unlabelled_figure(hook, fixture_home):
     printed as a bare, unlabelled `lifetime $X` / `today $X` — that reads as
     realized money rather than an estimate.
 
-    2026-09-27: "verified"/"unverified" no longer reach this line at all —
-    every figure is a single merged estimate, always carrying the "est" /
-    "~" qualifier (Summary.compact())."""
+    F103: every figure carries the "est. saved" / "verified saved" qualifier and
+    the estimate its "~" (Summary.compact()); never "unverified" or "measured"."""
     line = hook._condense(_BOXED)
     assert "lifetime $" not in line
     assert "today $" not in line
-    assert "verified" not in line.lower(), (
-        f"'verified'/'unverified' must not reach a user-facing surface: {line!r}"
+    # F103: the verified part is "$X verified saved" (savings, never "measured" spend).
+    assert "unverified" not in line.lower() and "measured" not in line.lower(), (
+        f"'unverified'/'measured' must not reach a user-facing surface: {line!r}"
     )
-    assert "lifetime ~$" in line and "est" in line
+    assert "lifetime ~$" in line and "est. saved" in line and "verified saved" in line
     assert "today ~$" in line
 
 

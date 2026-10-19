@@ -181,13 +181,18 @@ def _saved(window: str) -> tuple[float, int]:
     return usd + 0.5 + 0.2, n
 
 
+#: D-247: the only verified row in the seed is S1 ($0.50); the line prints it apart from the estimate.
+_VERIFIED_USD, _VERIFIED_N = 0.5, 1
+
+
 def _expected_line(window: str) -> str:
     ex = EXPECTED_EXEC[window]
     loc, sub, paid = EXPECTED_MIX[window]
     usd, n = _saved(window)
     by = " ".join(f"{p} {c}" for p, c in sorted(ex.items(), key=lambda kv: (-kv[1], kv[0])))
     return (f"ledger {window}: {sum(ex.values())} executed ({by}) · mix local {loc} / "
-            f"subscription {sub} / paid {paid} · est. saved ${usd:,.2f} (n={n:,})")
+            f"subscription {sub} / paid {paid} · est. saved ${usd - _VERIFIED_USD:,.2f} "
+            f"(n={n - _VERIFIED_N:,}) · verified saved ${_VERIFIED_USD:,.2f} (n={_VERIFIED_N:,})")
 
 
 def _dashboard_line(window: str, db: Path) -> str:

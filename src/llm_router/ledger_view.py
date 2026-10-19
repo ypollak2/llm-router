@@ -679,15 +679,18 @@ def show(fig: "Figure | None", fmt: str = "{}", *, unit: str | None = None,
 
 
 def money_fragment(measured_usd: float | None, estimated_usd: float | None) -> str:
-    """The saved-money fragment with measured apart from estimated (P35-1, D-220): the estimate
-    first (``~$5.00 est``), then the measured dollars (``$2.00 measured``), joined by `` · ``.
-    A segment without money is dropped; with neither, ``~$0.00 est``. Never one summed figure."""
+    """The saved-money fragment with verified apart from estimated (P35-1, D-220; F103): the
+    estimate first (``~$5.00 est. saved``), then the verified counterfactual savings
+    (``$2.00 verified saved``), joined by `` · ``. Both are SAVINGS against a baseline, never
+    metered spend, so neither is called "measured". A segment without money is dropped; with
+    neither, ``~$0.00 est. saved``. Never one summed figure. (``measured_usd`` is the ledger's
+    ``verified_usd``.)"""
     parts = []
     if estimated_usd:
-        parts.append(f"~${estimated_usd:,.2f} est")
+        parts.append(f"~${estimated_usd:,.2f} est. saved")
     if measured_usd:
-        parts.append(f"${measured_usd:,.2f} measured")
-    return " · ".join(parts) if parts else "~$0.00 est"
+        parts.append(f"${measured_usd:,.2f} verified saved")
+    return " · ".join(parts) if parts else "~$0.00 est. saved"
 
 
 def _percentile(sorted_vals: list[float], pct: float) -> float:
@@ -1354,6 +1357,26 @@ def window_summary(since: "str | Bounds | float | datetime | None" = "24h",
         scope=bounds.scope, has_data=rows is not None, **(judge_figures(bounds) if judge else {}))
 
 
+def _saved_segments(lw: LedgerWindow) -> str:
+    """D-247: the estimate and the verified saving are two segments, never one sum. An empty
+    segment is dropped; an unknown one (None, e.g. an old cache without the split) is ``n/a``."""
+    est = (lw.unverified_usd, lw.unverified_n)
+    ver = (lw.verified_usd, lw.verified_n)
+    if any(v is None for v in est + ver):
+        known = [(k, v) for k, v in (("est.", est), ("verified", ver)) if None not in v]
+        if not known:
+            return "est. saved n/a"
+        segs = [f"{k} saved ${u:,.2f} (n={n:,})" for k, (u, n) in known if n or u]
+        missing = "est." if None in est else "verified"
+        return " · ".join(segs + [f"{missing} saved n/a"])
+    segs = []
+    if est[1] or est[0]:
+        segs.append(f"est. saved ${est[0]:,.2f} (n={est[1]:,})")
+    if ver[1] or ver[0]:
+        segs.append(f"verified saved ${ver[0]:,.2f} (n={ver[1]:,})")
+    return " · ".join(segs) or "est. saved $0.00 (n=0)"
+
+
 def format_line(lw: LedgerWindow) -> str:
     """The one printed form. Identity tests compare this string across surfaces. Unknown parts
     print ``n/a``; ``unclassified`` appears only when non-zero."""
@@ -1363,6 +1386,5 @@ def format_line(lw: LedgerWindow) -> str:
     by = " ".join(f"{p} {n}" for p, n in lw.executed) or "none"
     mix = (f"local {na(lw.local_n)} / subscription {na(lw.subscription_n)} / paid {na(lw.paid_n)}"
            + (f" / unclassified {lw.unclassified_n}" if lw.unclassified_n else ""))
-    saved = (f"est. saved ${lw.saved_usd:,.2f} (n={lw.saved_n:,})"
-             if lw.saved_usd is not None and lw.saved_n is not None else "est. saved n/a")
+    saved = _saved_segments(lw)
     return f"ledger {lw.window}: {na(lw.n)} executed ({by}) · mix {mix} · {saved}"

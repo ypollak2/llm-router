@@ -246,3 +246,21 @@ def test_ledger_view_names_no_plan_or_model():
     assert not re.search(r"\b(opus|sonnet|haiku)\b", text, re.I)
     assert not hasattr(lv, "SUBSCRIPTION_PROVIDERS")
     assert set(lv.SEAT_ALIASES) == {"anthropic", "claude", "codex", "gemini_cli"}   # the vocabulary
+
+
+def test_line_never_merges_estimate_and_verified():
+    """D-247: with both parts present the line prints two segments; the sum appears nowhere."""
+    lw = lv.LedgerWindow(as_of="x", window="24h", source="s", estimated=True, n=3,
+                         executed=(("ollama", 3),), local_n=3, subscription_n=0, paid_n=0,
+                         unclassified_n=0, saved_usd=47.5, saved_n=6, verified_usd=0.5,
+                         unverified_usd=47.0, verified_n=1, unverified_n=5)
+    line = lw.line()
+    assert "est. saved $47.00 (n=5) · verified saved $0.50 (n=1)" in line, line
+    assert "47.50" not in line and "n=6" not in line, line
+    only_est = lv.LedgerWindow(as_of="x", window="24h", source="s", estimated=True, n=1,
+                               saved_usd=2.0, saved_n=2, verified_usd=0.0, unverified_usd=2.0,
+                               verified_n=0, unverified_n=2)
+    assert "est. saved $2.00 (n=2)" in only_est.line() and "verified" not in only_est.line()
+    old_cache = lv.LedgerWindow(as_of="x", window="24h", source="s", estimated=True, n=1,
+                                saved_usd=2.5, saved_n=3)          # cache without the split
+    assert "est. saved n/a" in old_cache.line() and "2.50" not in old_cache.line()

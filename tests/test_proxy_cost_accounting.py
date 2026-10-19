@@ -413,6 +413,7 @@ def test_kpi_o1_keeps_est_when_rows_are_legacy_or_unreconciled(kpi_env, monkeypa
 
     class FakeSummary:
         estimated_n, estimated_usd = 500, 42.0
+        unverified_usd, realized_usd = 42.0, 0.0
 
         def display(self):
             return "est. saved $42.00"

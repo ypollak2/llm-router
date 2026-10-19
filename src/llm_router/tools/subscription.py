@@ -184,8 +184,10 @@ async def llm_quota_saved() -> str:
             "**Quota saved by routing**\n\n"
             f"• Weekly: {snap.weekly_current_pct:.1f}% now · saved n/a (no plan value configured)\n"
             f"•   5h:  {snap.session_current_pct:.1f}% now · saved n/a (no plan value configured)\n\n"
-            "_Set `LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV` to the dollar value of 100% weekly "
-            "quota on your plan to convert dollars saved into points of quota._"
+            "_Set one of `LLM_ROUTER_WEEKLY_QUOTA_USD_OPUS_EQUIV`, `LLM_ROUTER_WEEKLY_QUOTA_USD` "
+            "(the dollar value of 100% weekly quota on your plan) or "
+            "`LLM_ROUTER_SUBSCRIPTION_USD_PER_MONTH` (your plan's monthly price) to convert dollars "
+            "saved into points of quota._"
         )
     lines = [
         "**Quota saved by routing — cumulative this period**",

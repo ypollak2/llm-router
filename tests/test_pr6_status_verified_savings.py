@@ -299,12 +299,16 @@ def test_status_verified_line_n_is_verified_rows_not_call_volume(
     Console(file=buf, width=120, force_terminal=False).print(group)
     text = buf.getvalue()
 
+    # F103: two segments, each with its own n (10 unverified usage rows, 1 verified savings row).
     money_lines = [ln for ln in text.splitlines() if "est. saved" in ln]
     assert money_lines, f"no money line found: {text!r}"
     for ln in money_lines:
-        assert "(n=11)" in ln and "n=16" not in ln and "n=15" not in ln, (
-            f"the money line must say n=11 (the row count behind the $ "
-            f"figure), not raw call volume: {ln!r}"
+        assert "(n=10)" in ln and "verified saved (n=1)" in ln, (
+            f"the money line must say n=10 and n=1 (the row counts behind the two $ "
+            f"figures): {ln!r}"
+        )
+        assert "n=11" not in ln and "n=16" not in ln and "n=15" not in ln, (
+            f"a merged or raw-call-volume n reached the money line: {ln!r}"
         )
 
 
@@ -375,10 +379,12 @@ def test_status_panel_no_longer_shows_primary_metric(tmp_path, importing_a_submo
     Console(file=buf, width=120, force_terminal=False).print(group)
     text = buf.getvalue()
 
-    assert "verified" not in text.lower(), (
-        f"llm-router status must not print 'verified'/'Verified' anywhere any "
-        f"more (#182): {text!r}"
+    # F103: the verified savings are labelled "$X verified saved"; the North Star line
+    # ("Verified share of eligible Claude turns") stays gone.
+    assert "verified share" not in text.lower() and "unverified" not in text.lower(), (
+        f"llm-router status must not print the primary-metric line any more (#182): {text!r}"
     )
+    assert "$2.00 verified saved (n=1)" in text, text
 
 
 # ── 5. `llm-router status`'s savings panel has no bare `$` ───────────────────
@@ -424,8 +430,8 @@ def test_status_savings_panel_has_no_bare_dollar(tmp_path, importing_a_submodule
     Console(file=buf, width=120, force_terminal=False).print(group)
     text = buf.getvalue()
 
-    assert "est. saved" in text and "vs claude-opus" in text, (
-        f"the money figure must carry its 'est.'/baseline qualifier: {text!r}"
+    assert ("est. saved" in text or "verified saved" in text) and "vs claude-opus" in text, (
+        f"the money figure must carry its 'est. saved'/'verified saved' and baseline qualifier: {text!r}"
     )
     # The pre-fix line was literally f"${saved:.2f} saved" — a number
     # immediately followed by the bare word "saved" with no qualifier.
@@ -437,9 +443,10 @@ def test_status_savings_panel_has_no_bare_dollar(tmp_path, importing_a_submodule
     # "verified" — as of #182 that line is gone from the panel entirely,
     # see test_status_panel_no_longer_shows_primary_metric, so this scoping
     # is now belt-and-suspenders rather than load-bearing.)
-    money_lines = [ln for ln in text.splitlines() if "est. saved" in ln]
-    assert money_lines and not any("verified" in ln.lower() for ln in money_lines), (
-        f"'verified'/'unverified' must not reach the money line: {money_lines!r}"
+    money_lines = [ln for ln in text.splitlines() if "saved" in ln]
+    assert money_lines and not any("unverified" in ln.lower() or "measured" in ln.lower()
+                                   for ln in money_lines), (
+        f"'unverified'/'measured' must not reach the money line: {money_lines!r}"
     )
 
 
@@ -469,7 +476,7 @@ def test_status_savings_panel_labels_money_under_subscription_too(
     Console(file=buf, width=120, force_terminal=False).print(group)
     text = buf.getvalue()
 
-    assert "est. saved" in text and "vs claude-opus" in text, text
+    assert "verified saved" in text and "vs claude-opus" in text, text
     assert not re.search(r"\$\d[\d,]*\.\d{2}\s+saved\b", text), (
         f"found a bare-dollar 'saved' line with no qualifier: {text!r}"
     )

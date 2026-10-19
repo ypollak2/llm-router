@@ -456,7 +456,7 @@ fi
 # llm_router`, ~170 ms, which is why it can never sit on this path). Omitted when
 # no interpreter can import llm_router or the day is below the spend floor.
 # P3.4-B2 (D-218): the figure is printed with its window and n, or not at all.
-# P35-2 (D-220): the estimate and the measured part are two segments, each with its own n; they are
+# P35-2 (D-220): the estimate and the verified part are two segments, each with its own n; they are
 # never one summed figure.
 if [ -n "$s_money" ] && [ -n "$s_money_n" ] && [ -n "$s_money_win" ]; then
     parts+=("💰 ${_GREEN}${s_money}${_RESET}${_DIM}·${s_money_win} n=${s_money_n}${_RESET}")

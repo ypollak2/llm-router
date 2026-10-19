@@ -89,7 +89,7 @@ def _decisions_db(home: Path, rows: list[dict]) -> Path:
     return db
 
 
-# ── F94 (a): the labelled "today ~$.. est (n=" fragment, asserted ─────────────────────────
+# ── F94 (a): the labelled "today ~$.. est. saved (n=" fragment, asserted ─────────────────────────
 
 def test_condensed_stop_prints_the_labelled_today_figure_when_the_ledger_has_usage(home):
     """test_first_forty_w2's disjunction passes when "today" is absent; this one cannot."""
@@ -97,9 +97,9 @@ def test_condensed_stop_prints_the_labelled_today_figure_when_the_ledger_has_usa
                      (6, "S", "ollama", "llama-x", "simple", 400_000, 100_000, 0.0, 0)])
     mod = _load_hook("session_end_b4b_today")
     compact = mod._ledger_compact("today")
-    assert compact and re.fullmatch(r"~\$[\d,.]+ est \(n=\d+, today\)", compact), compact
+    assert compact and re.fullmatch(r"~\$[\d,.]+ est\. saved \(n=\d+, today\)", compact), compact
     line = mod._condense("  1153 decisions routed\n  5h 16%  weekly 18%\n")
-    assert re.search(r"today ~\$[\d,.]+ est \(n=[\d,]+\)", line), line
+    assert re.search(r"today ~\$[\d,.]+ est\. saved \(n=[\d,]+\)", line), line
 
 
 def test_condensed_stop_leaves_today_out_when_there_is_no_usage_database(home):
@@ -260,10 +260,10 @@ def test_new_reads_are_none_without_a_database(home):
 
 # ── the hook pair ─────────────────────────────────────────────────────────────────────────
 
-def test_hook_pair_is_byte_identical_at_version_42():
+def test_hook_pair_is_byte_identical_at_the_current_version():
     a, b = (ROOT / "hooks" / "session-end.py").read_bytes(), HOOK.read_bytes()
     assert a == b
-    assert b.splitlines()[1] == b"# llm_router-hook-version: 45"
+    assert b.splitlines()[1] == b"# llm_router-hook-version: 46"
 
 
 def test_the_hook_has_no_private_copy_of_the_decision_predicate():
