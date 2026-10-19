@@ -640,7 +640,7 @@ def test_a_real_auto_route_process_that_classifies_and_logs_names_those_phases(t
 _PHASE_NAMES = {
     # D-171 L1: engine / availability / mini_summary / trend name time that was unattributed.
     "auto-route": {"session_io", "zce", "hud", "classify", "db_write", "draft_chain",
-                   "engine", "availability", "mini_summary", "trend"},
+                   "engine", "availability", "mini_summary", "trend", "okf"},
     "status-bar": {"read_cache", "spawn"},  # P0.9-b
     # P0.9: ollama_up, pxpipe and rules_update moved into the background child.
     "session-start": {"session_io", "reset_state", "proxy_health", "usage", "hints", "bg_spawn", "banner",
