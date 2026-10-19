@@ -3,7 +3,7 @@
 
   python scripts/p20_prefreeze_smoke.py [--claude-call] [--scratch DIR]
 
-Checks: import guard on the agent PATH, node resolves on the agent PATH, the Claude token file
+Checks: import guard and grader python (pytest) on the agent PATH, node resolves on the agent PATH, the Claude token file
 is usable (mode and non-empty; the value is never shown). `--claude-call` adds one real
 `claude -p` call under the scratch HOME and is opt-in: it spends a model call, so only the
 owner runs it. Exit 0 when every check passes.
@@ -36,6 +36,15 @@ def check_import_guard(env: dict) -> bool:
     return bool(h.agent_pythons(env["PATH"]))  # an empty set passes everything
 
 
+def check_grader_python(env: dict) -> bool:
+    """A python on the agent PATH that has pytest and cannot import llm_router (F115)."""
+    try:
+        h.grader_python(env)
+    except h.Refuse:
+        return False
+    return True
+
+
 def check_node(env: dict) -> bool:
     return shutil.which("node", path=env["PATH"]) is not None
 
@@ -53,7 +62,8 @@ def check_token_file() -> bool:
 
 def check_claude_call(scratch: Path) -> bool:
     try:
-        env = h.claude_env(h.scratch_home(scratch / "claude_home"), scratch)
+        home = h.scratch_home(scratch / "claude_home")
+        env = h.claude_env(home, scratch)
         cwd = scratch / "cwd"
         h.private_dir(cwd)
         result = subprocess.run(
@@ -63,6 +73,13 @@ def check_claude_call(scratch: Path) -> bool:
             timeout=120, cwd=cwd, env=env, check=False,
         )
         value = json.loads(result.stdout)
+        # F115: does Claude Code persist the auth value under the scratch HOME? That would make
+        # every Claude-arm call refuse in the harness scrub; a hit here is a FAIL.
+        token = env.get(h.CLAUDE_AUTH_ENV[0])
+        if not token:
+            return False
+        h.scan_for_token(token, "smoke output", data=(result.stdout or "") + (result.stderr or ""))
+        h.scan_for_token(token, "smoke scratch home", root=home)
     except (h.Refuse, OSError, subprocess.SubprocessError, ValueError):
         return False
     return result.returncode == 0 and not value.get("is_error") and bool(value.get("result"))
@@ -73,10 +90,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--claude-call", action="store_true")
     ap.add_argument("--scratch", type=Path)
     args = ap.parse_args(argv)
+    own_scratch = args.scratch is None
     scratch = args.scratch or Path(tempfile.mkdtemp(prefix="p20-smoke-"))
+    try:
+        return run_checks(args, scratch)
+    finally:
+        if own_scratch:
+            shutil.rmtree(scratch, ignore_errors=True)  # F115: do not leave the mkdtemp dir
+
+
+def run_checks(args, scratch: Path) -> int:
     env = {"PATH": h.agent_path(os.environ.get("PATH", "")), **h.AGENT_FIXED_ENV}
     results = {
         "import_guard": check_import_guard(env),
+        "grader_python": check_grader_python(env),
         "node_on_agent_path": check_node(env),
         "claude_token": check_token_file(),
     }

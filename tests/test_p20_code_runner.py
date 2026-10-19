@@ -220,6 +220,8 @@ def test_hidden_tests_and_resume(setup, mode, expected, capsys):
 
 def fake_claude(setup, monkeypatch, served=None):
     cfg, c, *_ = setup
+    if not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):  # F115: the scrub needs a token to scan for
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "FAKE-OAUTH-TOKEN-default-0123456789")
 
     def call(argv, **kwargs):
         assert "--safe-mode" in argv
@@ -400,10 +402,142 @@ def test_pi_agent_runs_with_scratch_home_and_minimal_env(setup, monkeypatch):
     assert os.environ["ANTHROPIC_API_KEY"] == caller["ANTHROPIC_API_KEY"]
 
 
-def test_grader_uses_agent_path_and_python_without_llm_router():
-    # Source-level guard (F113): the hidden-test grader must not run the run venv python
-    # or the caller PATH. Behaviour is covered by the grader_python tests in test_p20_requal.
-    src = (ROOT / "scripts/p20_code_runner.py").read_text()
-    grading = src[src.index("grader_env ="):src.index("row[\"hidden_pass\"] = result.returncode")]
-    assert "h.agent_path(" in grading and "h.grader_python(grader_env)" in grading
-    assert "sys.executable" not in grading
+def test_grader_runs_on_agent_path_with_work_home(setup, monkeypatch):
+    # Behavioural (F115): record what the grader is actually given for each rx_edit task.
+    seen = []
+
+    def recording(env):
+        seen.append(dict(env))
+        return sys.executable
+
+    monkeypatch.setattr(h, "grader_python", recording)
+    assert invoke(setup) == 0
+    graded = [e for e in seen if e["HOME"] != str(setup[0].run_dir)]
+    assert len(graded) == 2  # two rx_edit tasks
+    for env in graded:
+        assert env["PATH"] == h.agent_path(os.environ["PATH"])
+        assert env["PYTHONNOUSERSITE"] == "1" and "VIRTUAL_ENV" not in env
+        assert Path(env["HOME"]).name == "work"
+
+
+def test_grader_preflight_refuses_before_any_agent_runs(setup, monkeypatch):
+    pi = setup[4]
+
+    def refuse(env):
+        raise h.Refuse("refusing: no python on the agent PATH provides pytest for the grader")
+
+    monkeypatch.setattr(h, "grader_python", refuse)
+    assert invoke(setup) == 2
+    assert pi.calls == 0 and not rows(setup)
+
+
+def test_grader_refusal_mid_run_is_not_scored_as_agent_failure(setup, monkeypatch):
+    calls = []
+
+    def flaky(env):
+        calls.append(1)
+        if len(calls) > 1:  # preflight passes, the first real grading refuses
+            raise h.Refuse("refusing: grader pytest probe timed out")
+        return sys.executable
+
+    monkeypatch.setattr(h, "grader_python", flaky)
+    assert invoke(setup) == 2
+    assert all(x["hidden_pass"] is not False for x in rows(setup) if x["task_id"] != "task-0")
+
+
+def test_claude_token_in_agent_work_files_is_refused(setup, monkeypatch, capsys):
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", token)
+    fake_claude(setup, monkeypatch)
+    inner = r._claude_run
+
+    def leaky(argv, **kwargs):
+        done = inner(argv, **kwargs)
+        (Path(kwargs["cwd"]) / "notes.txt").write_text(f"printenv: {token}\n")
+        return done
+
+    monkeypatch.setattr(r, "_claude_run", leaky)
+    assert invoke(setup, "sonnet") == 2
+    captured = capsys.readouterr()
+    assert "token found in work files" in captured.err
+    assert token not in captured.out + captured.err
+    assert not rows(setup)
+
+
+def test_claude_token_in_agent_output_is_refused(setup, monkeypatch, capsys):
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", token)
+    fake_claude(setup, monkeypatch)
+    inner = r._claude_run
+
+    def leaky(argv, **kwargs):
+        done = inner(argv, **kwargs)
+        return subprocess.CompletedProcess(argv, 0, done.stdout, f"warn {token}")
+
+    monkeypatch.setattr(r, "_claude_run", leaky)
+    assert invoke(setup, "sonnet") == 2
+    assert "token found in agent output" in capsys.readouterr().err
+    assert not rows(setup)
+
+
+def test_claude_run_without_token_leak_is_unaffected(setup, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "FAKE-OAUTH-TOKEN-abcdef0123456789")
+    fake_claude(setup, monkeypatch)
+    assert invoke(setup, "sonnet") == 0
+    assert len(rows(setup)) == 3
+
+
+def test_claude_timeout_still_scrubs_output_and_work(setup, monkeypatch, capsys):
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", token)
+    fake_claude(setup, monkeypatch)
+
+    def hang(argv, **kwargs):
+        (Path(kwargs["cwd"]) / "notes.txt").write_text(f"printenv {token}\n")
+        raise subprocess.TimeoutExpired(argv, 900, output=b"", stderr=b"partial")
+
+    monkeypatch.setattr(r, "_claude_run", hang)
+    assert invoke(setup, "sonnet") == 2
+    captured = capsys.readouterr()
+    assert "token found in work files" in captured.err
+    assert token not in captured.out + captured.err
+    assert "rotate the token" in captured.err and "claude setup-token" in captured.err
+    assert not rows(setup)
+
+
+def test_claude_timeout_output_is_scanned(setup, monkeypatch, capsys):
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", token)
+    fake_claude(setup, monkeypatch)
+
+    def hang(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 900, output=b"", stderr=f"x {token}".encode())
+
+    monkeypatch.setattr(r, "_claude_run", hang)
+    assert invoke(setup, "sonnet") == 2
+    assert "token found in agent output" in capsys.readouterr().err
+
+
+def test_scrub_hit_purges_work_and_home_inside_run_dir_only(setup, tmp_path):
+    cfg = setup[0]
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    for d in (work, home):
+        d.mkdir(parents=True)
+    subprocess.run(["git", "-C", str(work), "init", "-q"], check=True)
+    (home / "t.txt").write_text(token)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    with pytest.raises(h.Refuse, match="token found in agent scratch home"):
+        r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir)
+    assert not home.exists() and not work.exists()
+    r.purge_inside(cfg.run_dir, outside, cfg.run_dir)
+    assert (outside / "keep.txt").exists() and cfg.run_dir.exists()
+
+
+def test_scrub_without_token_fails_closed(setup):
+    cfg = setup[0]
+    with pytest.raises(h.Refuse, match="no token to scan for"):
+        r.scrub_claude_artifacts(None, cfg.run_dir, cfg.run_dir, "", cfg.run_dir)

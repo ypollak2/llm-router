@@ -82,6 +82,45 @@ isolation (`sandbox-exec` or a separate OS user) is not part of F104 or F110.
   under the scratch HOME. That leaves the owner install untouched, but the agent could then run a
   fresh copy. `uv` stays on the PATH because the agents need it for their own tasks.
 
+### F115 follow-ups (rv-647 residual)
+
+* Import guard is fail-closed: `assert_no_llm_router_import` refuses unless the probe exits 0.
+  Exit 1 (importable), any other exit (2, 126/127), a signal, a timeout or an OSError all refuse.
+  It now probes every `python*` / `pypy*` executable (`python3.13`, `pypy3`, `python3.13t`,
+  `python3.12d`, `python3m`, ...) in each agent PATH dir, not only `python` / `python3`;
+  `python3-config` is not an interpreter and is skipped. `grader_python` is cached per PATH for
+  one run (cleared at the run preflight).
+* Grader: a hung or unrunnable `import pytest` probe is a `Refuse`, never an agent failure.
+  `p20_code_runner.run` calls `grader_python` once at run start (when an `rx_edit` task is
+  pending), before any agent runs. `p20_prefreeze_smoke.py` has a `grader_python` check
+  (PASS/FAIL), so a missing pytest-capable python shows up before the run.
+* Token exposure: the Claude coding arm has Bash and `CLAUDE_CODE_OAUTH_TOKEN` in its env, so it
+  can `printenv` the token. We did not verify that Claude Code scrubs it from Bash subprocess
+  env. Instead, after every Claude agent call and before anything is stored or graded,
+  `scrub_claude_artifacts` compares the token value in memory against the call's stdout/stderr,
+  the work tree, the scratch HOME and the `git diff HEAD` patch. A hit refuses the run with
+  `refusing: token found in <agent output|work files|agent scratch home|patch>`; the value and
+  paths are never printed. The scrub also runs after a timed-out call (output, work files,
+  scratch HOME), and refuses if the Claude arm is active with no token to scan for. The tree
+  walk never follows a symlink and never opens blocking: only regular files and plain
+  directories pass; a symlink, FIFO, device or socket, a file over 64 MiB, more than 512 MiB in
+  total or more than 120 s refuses with the kind only (a FIFO or `/dev/zero` link made by the
+  agent is treated as hostile, not skipped). `git log -p --all` of the work repo is scanned as
+  well, because `.git` objects are zlib-compressed and the file walk cannot see a token the
+  agent committed. On a hit the work and scratch-HOME copies are deleted (only inside the run
+  dir the harness created), but the run dir (ledger, stored output) may still hold the token:
+  **purge that run dir and rotate the token (`claude setup-token`)**; the refusal says so.
+  The opt-in smoke `--claude-call` also scans its scratch HOME and output (PASS/FAIL), to catch
+  Claude Code persisting the auth value there, which would make every Claude-arm call refuse
+  (not run by F115). The Pi arms and the grader never receive the token. Residual: this
+  detects the literal value only (an agent that encodes it, e.g. base64, or splits it is not caught), and the
+  agent could still send it over the network; the token should be treated as exposed to the
+  coding agent and be a revocable, single-purpose token.
+* `nc.grade_all` (the `noncloud` stratum) lives in the external `run_codex` module, outside this
+  repo. Which interpreter and PATH it uses to run agent-written code is unverified; the
+  `grader_python` guard does not cover it. Check it before a `noncloud` code-arm run.
+* `read_oauth_token` errors use `from None`, so no traceback carries the credentials file path.
+
 ### Pre-freeze smoke checklist (F113; none of it was run by F104, F110 or F113's build)
 
 Helper: `python scripts/p20_prefreeze_smoke.py [--claude-call]` prints `PASS`/`FAIL` per check and
