@@ -193,7 +193,7 @@ def test_stop_setting_comes_from_the_environment_then_dotenv(stop_env):
     """The hook cannot call the package's dotenv loader (no llm_router import), so it reads its one knob itself."""
     seed(stop_env)
     env_file = Path(stop_env["LLM_ROUTER_HOME"]) / ".env"
-    env_file.write_text("# comment\nOTHER=1\nexport LLM_ROUTER_STOP_HOOK='Disabled'\n")
+    env_file.write_text("# comment\nOTHER=1\nLLM_ROUTER_STOP_HOOK='Disabled'\n")
     env = {k: v for k, v in stop_env.items() if k != "LLM_ROUTER_STOP_HOOK"}
     assert run_stop(env) is None, ".env disables the hook"
     assert run_stop({**env, "LLM_ROUTER_STOP_HOOK": "condensed"}) == LINE, "the real environment wins"
@@ -209,7 +209,7 @@ def test_home_comes_from_the_default_home_dotenv_when_the_environment_has_none(s
     configured = tmp_path / "configured-home"
     default = tmp_path / ".llm-router"                  # HOME is tmp_path (stop_env)
     env = {k: v for k, v in stop_env.items() if k != "LLM_ROUTER_HOME"}
-    (default / ".env").write_text(f"export LLM_ROUTER_HOME='{configured}'\n")
+    (default / ".env").write_text(f"LLM_ROUTER_HOME='{configured}'\n")
     configured.mkdir()
     seed({**env, "LLM_ROUTER_HOME": str(configured)})
     assert run_stop(env) == LINE, ".env home"
@@ -219,7 +219,165 @@ def test_home_comes_from_the_default_home_dotenv_when_the_environment_has_none(s
     (tmp_path / ".env").write_text(f"LLM_ROUTER_HOME={configured}\n")
     assert run_stop(env) == LINE, "~/.env is the fallback"
     (tmp_path / ".env").write_text("LLM_ROUTER_HOME=\n")
-    assert run_stop(env) == "n/a", "a blank value is unset: the default home has no snapshot"
+    assert run_stop(env) == "n/a", "a blank value means the default home, which has no snapshot"
+
+
+def test_off_switch_in_the_default_home_dotenv_survives_a_configured_home(stop_env, tmp_path):
+    """F111 review finding 1: LLM_ROUTER_STOP_HOOK is read from the files the package reads it from
+    (~/.llm-router/.env, ~/.env), not from <configured home>/.env."""
+    configured = tmp_path / "configured-home"
+    configured.mkdir()
+    default = tmp_path / ".llm-router"
+    env = {k: v for k, v in stop_env.items() if k not in ("LLM_ROUTER_HOME", "LLM_ROUTER_STOP_HOOK")}
+    (default / ".env").write_text(f"LLM_ROUTER_HOME={configured}\nLLM_ROUTER_STOP_HOOK=disabled\n")
+    seed({**env, "LLM_ROUTER_HOME": str(configured)})
+    assert run_stop(env) is None, "disabled in ~/.llm-router/.env: the hook prints nothing"
+    assert not (configured / ".codex-stop-refresh.d").exists()
+    (default / ".env").write_text(f"LLM_ROUTER_HOME={configured}\n")
+    (configured / ".env").write_text("LLM_ROUTER_STOP_HOOK=disabled\n")
+    assert run_stop(env) == LINE, "<configured home>/.env is not a source the package reads"
+    (default / ".env").unlink()
+    (tmp_path / ".env").write_text("LLM_ROUTER_STOP_HOOK=disabled\n")
+    assert run_stop({**env, "LLM_ROUTER_HOME": str(configured)}) is None, "~/.env is a source"
+    (tmp_path / ".env").unlink()
+    (configured / ".env").write_text("LLM_ROUTER_STOP_HOOK=disabled\n")
+    assert run_stop({**env, "LLM_ROUTER_HOME": str(configured)}) is None, "a real-env home's .env is a source"
+
+
+def test_export_prefix_is_not_understood_as_in_env_loader(stop_env, tmp_path):
+    """F111 review finding 2: ``export KEY=`` is a different key to env_loader, so the hook ignores it too."""
+    configured = tmp_path / "configured-home"
+    configured.mkdir()
+    env = {k: v for k, v in stop_env.items() if k != "LLM_ROUTER_HOME"}
+    (tmp_path / ".llm-router" / ".env").write_text(f"export LLM_ROUTER_HOME={configured}\n")
+    seed({**env, "LLM_ROUTER_HOME": str(configured)})
+    assert run_stop(env) == "n/a", "the default home is used, as the package does"
+
+
+def _load_hook():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("codex_stop_hook", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# (default-home .env, ~/.env): empty, quoted, spaced, export-prefixed, comment, no '=', duplicate, BOM-free.
+_PARITY = [
+    ("LLM_ROUTER_HOME=/a\n", "LLM_ROUTER_HOME=/b\n"),
+    ("LLM_ROUTER_HOME=\n", "LLM_ROUTER_HOME=/b\n"),
+    ("", "LLM_ROUTER_HOME=/b\n"),
+    ('LLM_ROUTER_HOME=" /x "\n', ""),
+    ("LLM_ROUTER_HOME='/q'\n", ""),
+    ("LLM_ROUTER_HOME=\"'/m'\"\n", ""),
+    ("  LLM_ROUTER_HOME  =  /sp  \n", ""),
+    ("export LLM_ROUTER_HOME=/e\n", "LLM_ROUTER_HOME=/b\n"),
+    ("# LLM_ROUTER_HOME=/c\nLLM_ROUTER_HOME\n", "LLM_ROUTER_HOME=/b\n"),
+    ("LLM_ROUTER_HOME=/1\nLLM_ROUTER_HOME=/2\n", ""),
+    ("LLM_ROUTER_HOME=~/h\n", ""),
+    ("LLM_ROUTER_STOP_HOOK=disabled\n", "LLM_ROUTER_STOP_HOOK=condensed\n"),
+    ("LLM_ROUTER_STOP_HOOK=\n", "LLM_ROUTER_STOP_HOOK=disabled\n"),
+    ("export LLM_ROUTER_STOP_HOOK=disabled\n", ""),
+    ('', 'LLM_ROUTER_STOP_HOOK="Disabled"\n'),
+    ("LLM_ROUTER_HOME=/a=b\r\nLLM_ROUTER_STOP_HOOK=disabled\r\n", ""),
+]
+_REAL = [None, "", "/real", "  /real2  "]
+
+
+def _package_answers(home: Path, real_home):
+    """What the package resolves with this HOME and a real LLM_ROUTER_HOME (None: unset)."""
+    from llm_router import env_loader, paths
+
+    target = {} if real_home is None else {"LLM_ROUTER_HOME": real_home}
+    env_loader.load_dotenv_files(cwd=home / "empty-cwd", target=target)
+    raw = target.get("LLM_ROUTER_HOME", "").strip()
+    resolved = os.path.expanduser(raw) if raw else str(paths.Path.home() / ".llm-router")
+    return resolved, target.get("LLM_ROUTER_STOP_HOOK", "").strip().lower()
+
+
+@pytest.mark.parametrize("real", _REAL)
+@pytest.mark.parametrize("default_env,user_env", _PARITY)
+def test_hook_parser_matches_env_loader(tmp_path, monkeypatch, default_env, user_env, real):
+    """F111 review findings 2+3: the hook's .env reading gives the same home and off-switch as env_loader."""
+    (tmp_path / "empty-cwd").mkdir()
+    (tmp_path / ".llm-router").mkdir()
+    (tmp_path / ".llm-router" / ".env").write_text(default_env)
+    (tmp_path / ".env").write_text(user_env)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_STOP_HOOK", raising=False)
+    if real is None:
+        monkeypatch.delenv("LLM_ROUTER_HOME", raising=False)
+    else:
+        monkeypatch.setenv("LLM_ROUTER_HOME", real)
+    expected = _package_answers(tmp_path, real)
+    hook = _load_hook()
+    assert (hook._home(), hook._stop_setting()) == expected
+
+
+def test_parity_fixtures_find_something_to_compare(tmp_path, monkeypatch):
+    """An empty comparison passes everything: at least some fixtures must resolve a non-default home or disable."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_HOME", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_STOP_HOOK", raising=False)
+    (tmp_path / "empty-cwd").mkdir()
+    (tmp_path / ".llm-router").mkdir()
+    seen = set()
+    for default_env, user_env in _PARITY:
+        (tmp_path / ".llm-router" / ".env").write_text(default_env)
+        (tmp_path / ".env").write_text(user_env)
+        seen.add(_package_answers(tmp_path, None))
+    assert any(h != str(tmp_path / ".llm-router") for h, _ in seen) and any(d == "disabled" for _, d in seen), seen
+
+
+def test_hook_parser_matches_env_loader_on_unreadable_files(tmp_path, monkeypatch):
+    (tmp_path / ".llm-router").mkdir()
+    (tmp_path / ".llm-router" / ".env").write_bytes(b"\xff\xfe\x00LLM_ROUTER_HOME=/bin\n")   # binary
+    (tmp_path / ".env").mkdir()                                                           # a directory
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_HOME", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_STOP_HOOK", raising=False)
+    (tmp_path / "empty-cwd").mkdir()
+    assert (_load_hook()._home(), _load_hook()._stop_setting()) == _package_answers(tmp_path, None)
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None, reason="node not installed")
+@pytest.mark.parametrize("real", _REAL)
+@pytest.mark.parametrize("default_env,user_env", [f for f in _PARITY if "STOP_HOOK" not in f[0] + f[1]])
+def test_pi_home_matches_env_loader(tmp_path, monkeypatch, default_env, user_env, real):
+    """F111 review findings 2+3, for Pi's summary.mjs (it only reads LLM_ROUTER_HOME)."""
+    (tmp_path / "empty-cwd").mkdir()
+    (tmp_path / ".llm-router").mkdir()
+    (tmp_path / ".llm-router" / ".env").write_text(default_env)
+    (tmp_path / ".env").write_text(user_env)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_ROUTER_STOP_HOOK", raising=False)
+    if real is None:
+        monkeypatch.delenv("LLM_ROUTER_HOME", raising=False)
+    else:
+        monkeypatch.setenv("LLM_ROUTER_HOME", real)
+    expected = _package_answers(tmp_path, real)[0]
+    mjs = ROOT / "integrations/pi/extensions/lib/summary.mjs"
+    env = {"HOME": str(tmp_path), "PATH": os.environ["PATH"], **({} if real is None else {"LLM_ROUTER_HOME": real})}
+    code = ("import(process.argv[1]).then(m=>{process.stdout.write(m.routerHome(process.env, process.env.HOME))})")
+    out = subprocess.run(["node", "-e", code, mjs.as_uri()], capture_output=True, text=True, env=env, timeout=20)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout == expected
+
+
+def test_mirrored_latency_constants_match_hook_latency():
+    """F111 review finding 4: the hook repeats hook_latency's constants because it cannot import it."""
+    from llm_router import hook_latency as hl
+
+    hook = _load_hook()
+    assert hook.LATENCY_MAX_BYTES == hl._DEFAULT_MAX_BYTES
+    assert hook.HOST_TIMEOUT_MS == hl.DEFAULT_TIMEOUT_MS
+    assert hook.LATENCY_NAME == hl.store_path().name
+    off = set(hl._OFF_VALUES)
+    assert off == {"0", "off", "false", "no", "disabled"}
+    src = HOOK.read_text()
+    assert all(f'"{v}"' in src.split("LLM_ROUTER_HOOK_LATENCY\"")[1].split("\n")[0] for v in off)
+    assert "LLM_ROUTER_HOOK_LATENCY_MAX_BYTES" in src
 
 
 def test_sessions_do_not_starve_each_others_refresh(stop_env):

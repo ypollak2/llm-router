@@ -12,8 +12,9 @@ line. The hook never waits for it. The budget is 300 ms (``hook_latency.HOOK_BUD
 A snapshot that is absent, unreadable or older than 15 minutes prints ``n/a``: unknown is never a number.
 
 F111. The state home is resolved the way the package does (``env_loader``: the real environment first, then
-the ``LLM_ROUTER_HOME`` key of ``~/.llm-router/.env``, then ``~/.env``); the package's loader is not imported
-(import cost), so that one key is read by hand. The refresh stamp is one small file per session. The hook
+the first of ``~/.llm-router/.env`` and ``~/.env`` that has the key, parsed as ``env_loader`` parses it);
+the package's loader is not imported (import cost), so its two keys (``LLM_ROUTER_HOME``,
+``LLM_ROUTER_STOP_HOOK``) are read by hand with a parser pinned to it by tests/test_codex_stop.py. The refresh stamp is one small file per session. The hook
 appends its own G1 row to ``hook_latency.jsonl`` (same fields as ``hook_latency.record``; the recorder is an
 ``llm_router`` import, so the one-``os.write`` append is repeated here).
 """
@@ -40,52 +41,68 @@ _PLAIN_ID = re.compile(r"[A-Za-z0-9._-]{1,128}")
 _NA = "n/a"
 
 
-def _dotenv_value(path: str, key: str) -> str:
-    """The last ``KEY=value`` (optionally ``export KEY=...``) line of a regular file, else ``""``.
-    A FIFO would block the open (F15), so only regular files are read."""
+def _parse_env(path: str) -> dict[str, str]:
+    """``env_loader._parse_env_file``, line for line: ``KEY=value`` lines (the last one of a key wins);
+    blank lines, ``#`` comments and lines with no ``=`` are skipped; the value is stripped, then stripped of
+    surrounding quote characters; ``export KEY=...`` is NOT understood (the key becomes ``export KEY``), so
+    the hook and the package never read different homes. Only a regular file is opened (a FIFO would block:
+    F15); an unreadable or binary file gives ``{}`` as in the package."""
     try:
         if not stat.S_ISREG(os.stat(path).st_mode):
-            return ""
-        with open(path, encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
+            return {}
+        with open(path) as fh:
+            text = fh.read()
     except FileNotFoundError:
-        return ""
+        return {}
     except (OSError, ValueError) as exc:
         print(f"llm-router: codex-stop could not read .env ({type(exc).__name__})", file=sys.stderr)
-        return ""
-    found = ""
-    pattern = re.compile(r"\s*(?:export\s+)?" + re.escape(key) + r"\s*=\s*(.*?)\s*$")
-    for raw in lines:
-        m = pattern.match(raw)
-        if m:
-            found = m.group(1).strip("\"'").strip()
-    return found
+        return {}
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            out[key] = value.strip().strip("\"'")
+    return out
+
+
+def _env_files() -> list[str]:
+    """The ``.env`` files ``env_loader.candidate_env_paths`` lists after the working directory's (project
+    content, not consulted here): ``paths.state_path(".env")`` -- computed from the REAL environment's
+    ``LLM_ROUTER_HOME`` before any file is loaded, so a home set inside a ``.env`` does not move this file --
+    then ``~/.env``."""
+    user = os.path.expanduser("~")
+    real = os.environ.get("LLM_ROUTER_HOME", "").strip()
+    base = os.path.expanduser(real) if real else os.path.join(user, ".llm-router")
+    return [os.path.join(base, ".env"), os.path.join(user, ".env")]
+
+
+def _setting(key: str) -> str | None:
+    """``os.environ[key]`` after ``load_dotenv_files``: the real environment (an empty value counts as set)
+    wins, else the first file that has the key (an empty value counts as set and blocks later files).
+    ``None`` when nothing sets it."""
+    if key in os.environ:
+        return os.environ[key]
+    for env_file in _env_files():
+        values = _parse_env(env_file)
+        if key in values:
+            return values[key]
+    return None
 
 
 def _home() -> str:
-    """Same answer as ``llm_router.paths`` after ``env_loader``: ``LLM_ROUTER_HOME`` from the real
-    environment, else from ``~/.llm-router/.env``, else from ``~/.env``, else ``~/.llm-router``.
-    (The working directory's ``.env`` is project content and is not consulted.)"""
-    user = os.path.expanduser("~")
-    default = os.path.join(user, ".llm-router")
-    override = os.environ.get("LLM_ROUTER_HOME", "").strip()
-    if not override:
-        for env_file in (os.path.join(default, ".env"), os.path.join(user, ".env")):
-            override = _dotenv_value(env_file, "LLM_ROUTER_HOME")
-            if override:
-                break
-    return os.path.expanduser(override) if override else default
+    """Same answer as ``paths.llm_router_home()`` after ``env_loader``: a blank value is the default home."""
+    override = (_setting("LLM_ROUTER_HOME") or "").strip()
+    return os.path.expanduser(override) if override else os.path.join(os.path.expanduser("~"), ".llm-router")
 
 
-def _stop_setting(home: str) -> str:
-    """``LLM_ROUTER_STOP_HOOK``: the real environment wins, else the last such line of ``<home>/.env``.
-    The package's dotenv loader is not imported here (this hook imports nothing from ``llm_router``), so
-    this one knob, the only one the hook has, is read by hand. A ``.env`` that is not a regular file
-    (a FIFO would block the open: F15) is ignored."""
-    value = os.environ.get("LLM_ROUTER_STOP_HOOK")
-    if value is not None:
-        return value.strip().lower()
-    return _dotenv_value(os.path.join(home, ".env"), "LLM_ROUTER_STOP_HOOK").lower()
+def _stop_setting() -> str:
+    """``LLM_ROUTER_STOP_HOOK``, read from exactly the sources the package reads it from (:func:`_setting`).
+    Not from ``<configured home>/.env``: the package does not look there either."""
+    return (_setting("LLM_ROUTER_STOP_HOOK") or "").strip().lower()
 
 
 def _session_id() -> str | None:
@@ -217,8 +234,10 @@ def _maybe_refresh(home: str, session: str | None, now: float) -> None:
 
 def _record_latency(home: str, session: str | None, elapsed_ms: float) -> None:
     """Append one G1 row, compatible with ``hook_latency.record``. One ``os.write`` on an ``O_APPEND``
-    descriptor (atomic, no lock). Rotation needs the package, so a log already over the cap is left
-    for the other hooks to rotate and this one writes nothing: the file stays bounded."""
+    descriptor (atomic, no lock). This hook does NOT rotate (rotation needs the package): a log already over
+    the cap is left for the other hooks (the writers that import ``hook_latency``) to rotate, and this one
+    writes nothing. If codex-stop is the only writer in a home, its rows stop at the cap (about 4 MiB) and
+    stay stopped: bounded, but a known loss, accepted to keep the hook import-free."""
     if os.environ.get("LLM_ROUTER_HOOK_LATENCY", "").strip().lower() in ("0", "off", "false", "no", "disabled"):
         return
     try:
@@ -249,7 +268,7 @@ def main() -> None:
     home, now = _home(), time.time()
     session = None
     try:
-        if _stop_setting(home) == "disabled":
+        if _stop_setting() == "disabled":
             return
         session = _session_id()
         message = _line(home, session, now)

@@ -20,36 +20,44 @@ export const STAMP_MAX = 64;
 export const NA = "n/a";
 const PLAIN_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
-/** The last `KEY=value` (or `export KEY=value`) line of a regular file, else "". Only regular files: a FIFO would block. */
+/**
+ * `env_loader._parse_env_file` for one key: the last `KEY=value` line of a regular file, or null when the key is absent.
+ * Same rules as the package: lines are trimmed; blanks, `#` comments and lines without `=` are skipped; the key is
+ * trimmed; the value is trimmed, then stripped of surrounding quote characters; `export KEY=...` is NOT understood
+ * (the package sees the key `export KEY`). An empty value is a value. Only regular files are read: a FIFO would block.
+ */
 export function dotenvValue(file, key) {
 	try {
-		if (!fs.statSync(file).isFile()) return "";
-		let found = "";
-		const re = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=\\s*(.*?)\\s*$`);
-		for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-			const m = re.exec(line);
-			if (m) found = m[1].replace(/^["']+|["']+$/g, "").trim();
+		if (!fs.statSync(file).isFile()) return null;
+		let found = null;
+		for (const raw of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+			const line = raw.trim();
+			if (!line || line.startsWith("#") || !line.includes("=")) continue;
+			const i = line.indexOf("=");
+			if (line.slice(0, i).trim() === key) found = line.slice(i + 1).trim().replace(/^["']+|["']+$/g, "");
 		}
 		return found;
 	} catch {
-		return "";
+		return null;
 	}
 }
 
 /**
- * The state home, resolved as the Python package does (F111): LLM_ROUTER_HOME from the real environment, else from
- * ~/.llm-router/.env, else from ~/.env, else ~/.llm-router. This module is Node and cannot call the Python
- * env loader, so it reads that one key itself.
+ * The state home, resolved as the Python package does (F111): `LLM_ROUTER_HOME` from the real environment (an empty
+ * value counts as set, and paths.py then uses the default home), else the first of `<real-env home or ~/.llm-router>/.env`
+ * and `~/.env` that has the key (an empty value counts as set and blocks the later file), else ~/.llm-router.
+ * This module is Node and cannot call the Python env loader, so it reads that one key itself.
  */
 export function routerHome(env = process.env, homedir = os.homedir()) {
 	const fallback = path.join(homedir, ".llm-router");
-	let o = (env.LLM_ROUTER_HOME ?? "").trim();
-	if (!o) {
+	let o = env.LLM_ROUTER_HOME;
+	if (o === undefined) {
 		for (const f of [path.join(fallback, ".env"), path.join(homedir, ".env")]) {
 			o = dotenvValue(f, "LLM_ROUTER_HOME");
-			if (o) break;
+			if (o !== null) break;
 		}
 	}
+	o = (o ?? "").trim();
 	if (!o) return fallback;
 	return o.startsWith("~") ? path.join(homedir, o.slice(1)) : o;
 }
