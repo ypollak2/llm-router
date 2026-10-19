@@ -7,7 +7,7 @@ pre-rendered ``line``; every reader (the shell, the Codex Stop hook, the Pi exte
 line and computes nothing, so the surfaces agree by construction::
 
     router: <model> (<reason>) | offload <x>% (n=, session)
-        | Claude 5h <p>% (n=1 poll, age <m>m, 5h) / Codex <p>% (n=, 5h)
+        | Claude 5h <p>% (n=1 poll, age <m>m, 5h) / Codex <k>/<budget> delegations (5h)
         | quality <q>% (n=, 7d) | saved ~<h> work-hours (n=, rate n=, today)
 
 Rules: an unknown field prints ``n/a`` (never 0) and still names its n and window; a snapshot older
@@ -156,10 +156,14 @@ def quota_field(now: float) -> dict:
 
     The Claude % is a single reading, so its n is that reading: ``n=1`` plus the poll's age when it is
     used, ``n=0`` and no value when there is none. The 5-minute ``quota_history.jsonl`` rows are other
-    readings and are NOT the n of this figure (rv-632 must-fix 3). Codex: n = delegations counted in
-    its 5h window."""
+    readings and are NOT the n of this figure (rv-632 must-fix 3).
+
+    Codex is a COUNT, not a %: ``used`` = delegations ``codex_window`` counted in its rolling 5h window,
+    against ``budget`` (the router's own delegation budget). 0 is a measured count of delegations, so it
+    is printed as ``0/<budget>``; a % of it would read as a value with n=0 (D-237). No
+    ``codex_window.json`` (never delegated on this machine) or no budget: both None, the field is n/a."""
     out: dict = {"claude": {"pct": None, "n": 0, "age_s": None, "window": "5h"},
-                 "codex": {"pct": None, "n": None, "window": "5h"}}
+                 "codex": {"used": None, "budget": None, "window": "5h"}}
     try:
         u = json.loads(paths.state_path("usage.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -173,8 +177,7 @@ def quota_field(now: float) -> dict:
         from llm_router import codex_window
 
         s = codex_window.snapshot(now)
-        out["codex"]["n"] = s.used
-        out["codex"]["pct"] = (100.0 * s.used / s.budget) if s.budget > 0 else None
+        out["codex"].update(used=s.used, budget=s.budget)
     return out
 
 
@@ -221,7 +224,7 @@ def saved_field(actions: list[dict] | None, now: float):
     rate = quota_rate.median_pp_per_active_hour(now=now)
     fig = quota_rate.work_hours_figure(pp, n if pp is not None else None, rate, window="today",
                                        as_of=lv._iso(now), source="quota_burn pooled pp/turn x quota_rate median")
-    if n == 0 and fig.value is not None:          # nothing served off Claude: unmeasured, never "~0"
+    if n == 0:     # nothing served off Claude: unmeasured, never "~0"; this reason before a rate's
         fig = lv.Figure(None, 0, "today", fig.as_of, fig.source, "estimated",
                         "n=0 turns off Claude, today", fig.n_basis)
     return fig
@@ -252,13 +255,19 @@ def render_line(f: dict) -> str:
         claude = f"Claude 5h {c['pct']:.0f}% (n=1 poll, age {int(c['age_s'] // 60)}m, {c['window']})"
     else:                                         # no reading behind it: never a value with n=0
         claude = f"Claude 5h n/a (n=0, {c['window']})"
-    quota = (claude + " / "
-             + _pct("Codex", q["codex"]["pct"], q["codex"]["n"], q["codex"]["window"]))
+    cx = q["codex"]
+    if cx.get("used") is not None and cx.get("budget") is not None:   # a measured count, 0 included
+        codex = f"Codex {cx['used']}/{cx['budget']} delegations ({cx['window']})"
+    else:
+        codex = f"Codex n/a (n/a, {cx['window']})"
+    quota = claude + " / " + codex
     ql = f["quality"]
     quality = (_pct("quality", None if ql["rate"] is None else 100 * ql["rate"], ql["n"], ql["window"]))
     fig = lv.Figure.from_dict(f["saved"]) if f["saved"] else None
     text = lv.show(fig, unit="subscription", quantity="work_hours", with_n=True)
-    saved = f"saved {text}" if text else f"saved n/a ({fig.na_reason if fig and fig.na_reason else 'n/a'})"
+    why = fig.na_reason if fig and fig.na_reason else "n/a"
+    # a reason that is already "n/a (...)" is printed as is, not wrapped in a second n/a
+    saved = f"saved {text}" if text else (f"saved {why}" if why.startswith("n/a (") else f"saved n/a ({why})")
     parts = [router, offload, quota, quality, saved]
     j = f.get("judge")
     if j:
@@ -287,7 +296,7 @@ def build(session_id: str, now: float) -> dict:
         "offload": offload_field(actions, session_id),
         "quota": _part("CHZ-FO-SNAP-QUOTA", lambda: quota_field(now))
         or {"claude": {"pct": None, "n": 0, "age_s": None, "window": "5h"},
-            "codex": {"pct": None, "n": None, "window": "5h"}},
+            "codex": {"used": None, "budget": None, "window": "5h"}},
         "quality": quality,
         "saved": saved.to_dict() if saved is not None else None,
         "judge": _part("CHZ-FO-SNAP-JUDGE", _judge_field),

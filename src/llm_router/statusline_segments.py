@@ -398,29 +398,51 @@ class SnapshotBudgetExceeded(BaseException):
     swallowed, the snapshot went on, and no alarm was left armed for whatever hung next."""
 
 
+def _hard_exit(*_):
+    os._exit(1)
+
+
+def _arm_hard_stop(started: float) -> None:
+    """The refresher's hard stop: handler ``os._exit(1)``, timer = what is left of :data:`RUN_TIMEOUT_S`
+    counted from ``started`` (at or past it, it fires at once)."""
+    signal.signal(signal.SIGALRM, _hard_exit)
+    signal.setitimer(signal.ITIMER_REAL, max(0.001, RUN_TIMEOUT_S - (time.time() - started)))
+
+
 def _within(seconds: float, fn, started: float):
     """``fn()`` under a SIGALRM budget of ``min(seconds, what is left of the hard stop)``: past it
     :class:`SnapshotBudgetExceeded` unwinds the whole snapshot (no ``except Exception`` stops it).
 
-    The refresher's own hard stop (:data:`RUN_TIMEOUT_S` from ``started``, handler ``os._exit``) is
-    restored and re-armed with the time it has left on every way out, so the run as a whole never
-    goes past :data:`RUN_TIMEOUT_S`."""
+    The previous handler (the refresher's hard stop, ``os._exit``) is restored and re-armed with the
+    time the hard stop has left on every way out, so the run as a whole never goes past
+    :data:`RUN_TIMEOUT_S`. SIGALRM is blocked while the handler and timer are swapped (rv-632 r2): a
+    signal that lands mid-swap waits instead of finding the wrong handler or skipping the restore, and
+    a budget signal still pending once ``fn`` has returned is discarded, not handed to ``os._exit``.
+    The one window left (the budget firing after ``fn`` returns, before the block) raises out of here
+    with no timer armed; :func:`main` re-arms the hard stop on that path."""
     if not hasattr(signal, "SIGALRM"):
         return fn()
+    alrm = {signal.SIGALRM}
     left = RUN_TIMEOUT_S - (time.time() - started)
 
     def _timeout(*_):
         raise SnapshotBudgetExceeded(f"statusline snapshot over its {min(seconds, left):.1f} s budget")
 
+    signal.pthread_sigmask(signal.SIG_BLOCK, alrm)
     hard = signal.signal(signal.SIGALRM, _timeout)
     signal.setitimer(signal.ITIMER_REAL, max(0.001, min(seconds, left)))
     try:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, alrm)   # a signal that came mid-swap fires here
         return fn()
     finally:
+        signal.pthread_sigmask(signal.SIG_BLOCK, alrm)
         signal.setitimer(signal.ITIMER_REAL, 0)
+        if signal.SIGALRM in signal.sigpending():
+            signal.sigwait(alrm)                            # the budget's own signal: fn is done, drop it
         signal.signal(signal.SIGALRM, hard)
         # what remains of the hard stop; at or past it, fire the restored handler at once
         signal.setitimer(signal.ITIMER_REAL, max(0.001, RUN_TIMEOUT_S - (time.time() - started)))
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, alrm)
 
 
 def proxy_segment(state: str) -> dict[str, str]:
@@ -604,10 +626,9 @@ def main(argv: list[str] | None = None) -> int:
         pass
     except OSError:
         return 0
-    if hasattr(signal, "SIGALRM"):
-        signal.signal(signal.SIGALRM, lambda *_: os._exit(1))
-        signal.setitimer(signal.ITIMER_REAL, RUN_TIMEOUT_S)
     now = time.time()
+    if hasattr(signal, "SIGALRM"):
+        _arm_hard_stop(now)
     maybe_refresh_usage(state, now, dict(os.environ))
     seg = compute(state, ns.transcript, ns.model, dict(os.environ), now, session)
     append_history(state, now)
@@ -615,6 +636,8 @@ def main(argv: list[str] | None = None) -> int:
         seg.update({k: _clean(v) for k, v in _within(SNAP_BUDGET_S, lambda: snap_segment(
             state, session, now, reuse_s=SNAP_REUSE_S), started=now).items()})
     except (Exception, SnapshotBudgetExceeded) as exc:  # noqa: BLE001 -- slow or broken: no row, line goes out
+        if hasattr(signal, "SIGALRM"):
+            _arm_hard_stop(now)                   # the budget may have fired mid-restore: hard stop back on
         try:
             from llm_router import failopen
 

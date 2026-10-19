@@ -218,7 +218,8 @@ async def test_work_hours_is_na_below_ten_active_hours_never_zero(home):  # noqa
 
 # -- P35-2 statusline ----------------------------------------------------------------------------
 
-#: Delegations the Codex window counts in the snapshot oracle (budget = the module default, so 20%).
+#: Delegations the Codex window counts in the snapshot oracle, printed as a count against the budget
+#: (the module default, 15): ``Codex 3/15 delegations (5h)`` (D-237: a count, never a % with its n).
 CODEX_USED = 3
 #: Per-session quota samples: weekly pp 20 -> 24 over 2 Stop turns = 2.0 pp per Claude turn (quota_burn's
 #: pooled ratio: sum of weekly deltas / sum of Stop turns).
@@ -292,8 +293,7 @@ async def test_statusline_prints_the_five_fields(p35):
     assert router == f"router: {SERVED} (policy_table)", router
     assert offload.startswith("offload ") and re.search(r"\(n=\d+, session", offload), offload
     # one usage.json poll, 1 min old: its n is that one poll and its age (rv-632 must-fix 3)
-    assert quota == (f"Claude 5h 37% (n=1 poll, age 1m, 5h) / Codex "
-                     f"{100 * CODEX_USED / 15:.0f}% (n={CODEX_USED}, 5h)"), quota
+    assert quota == f"Claude 5h 37% (n=1 poll, age 1m, 5h) / Codex {CODEX_USED}/15 delegations (5h)", quota
     good, bad = VERDICTS["good"], VERDICTS["bad"]
     assert quality == f"quality {good / (good + bad):.0%} (n={good + bad}, 7d)", quality
     hours = TURNS_OFF_CLAUDE_TODAY * PP_PER_TURN / MEDIAN_PP          # 1.33: hand-derived above

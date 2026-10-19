@@ -44,7 +44,7 @@ def _kv(state_home: Path, **fields) -> None:
 
 
 LINE = ("router: m (r) | offload n/a (n=3, session, no quality-sampled lane) | Claude 5h 37% (n=1 poll, age 1m, 5h)"
-        " / Codex 20% (n=3, 5h) | quality 80% (n=10, 7d) | saved ~1.3 work-hours (n=2, rate n=12, today)")
+        " / Codex 3/15 delegations (5h) | quality 80% (n=10, 7d) | saved ~1.3 work-hours (n=2, rate n=12, today)")
 
 
 # -- the line: unknown is n/a, never 0, and every field keeps its n and window -------------------
@@ -53,7 +53,7 @@ UNKNOWN_FIELDS = {
     "router": {"model": None, "reason": None, "ts": None},
     "offload": {"k": 0, "n": 0, "window": "session", "value": None, "why": None},
     "quota": {"claude": {"pct": None, "n": 0, "age_s": None, "window": "5h"},
-              "codex": {"pct": None, "n": None, "window": "5h"}},
+              "codex": {"used": None, "budget": None, "window": "5h"}},
     "quality": {"n": 0, "k": 0, "rate": None, "wilson": None, "window": "7d"},
     "saved": {"value": None, "n": None, "window": "today", "as_of": "", "source": "", "kind": "estimated",
               "na_reason": "n/a (3 of 10 active hours)", "n_basis": 3},
@@ -71,7 +71,8 @@ def test_every_unknown_field_prints_na_with_its_n_and_window():
     assert "0%" not in line and "~0" not in line, line   # unknown is never printed as a number
     for f in fields[1:4]:
         assert "(n=" in f or "(n/a" in f, f
-    assert fields[4] == "saved n/a (n/a (3 of 10 active hours))", fields[4]
+    assert fields[3] == "quality n/a (n=0, 7d)" and "Codex n/a (n/a, 5h)" in fields[2], line
+    assert fields[4] == "saved n/a (3 of 10 active hours)", fields[4]     # one n/a, not "n/a (n/a (...))"
 
 
 def test_offload_is_unknown_when_no_lane_is_quality_sampled_and_a_rate_when_one_is():
@@ -99,7 +100,8 @@ def test_quota_is_unknown_for_a_fallback_or_stale_snapshot(tmp_path, monkeypatch
     assert snap.quota_field(NOW)["claude"]["pct"] is None            # older than 30 min
     usage.write_text(json.dumps({"session_pct": 37, "weekly_pct": 40, "updated_at": NOW - 60}))
     assert snap.quota_field(NOW)["claude"]["pct"] == 37.0
-    assert snap.quota_field(NOW)["codex"]["pct"] is None             # never counted on this machine: n/a, not 0
+    codex = snap.quota_field(NOW)["codex"]
+    assert (codex["used"], codex["budget"]) == (None, None)          # never counted on this machine: n/a, not 0
 
 
 async def test_router_falls_back_to_the_newest_routing_decision_without_a_proxy_ledger(p35):  # noqa: F811 -- pytest fixture name
@@ -127,8 +129,12 @@ async def test_saved_is_worked_out_from_the_measured_turn_burn(p35):  # noqa: F8
     """~work-hours needs BOTH rates: no measured quota samples -> n/a, never a guess."""
     from llm_router import statusline_snapshot as snap
 
-    d = snap.refresh(host="claude_code", session_id=SID, now=NOW)    # no quota_samples.jsonl in the bare P35 home
-    assert d["fields"]["saved"]["value"] is None and d["line"].endswith("saved n/a (n/a (quota saved unknown))")
+    # no quota_samples.jsonl in the bare P35 home: a turn off Claude, but no measured burn to multiply it by
+    fig = snap.saved_field([_action()], NOW)
+    assert fig.value is None and fig.na_reason == "n/a (quota saved unknown)", fig
+    assert snap.render_line({**UNKNOWN_FIELDS, "saved": fig.to_dict()}).endswith("saved n/a (quota saved unknown)")
+    d = snap.refresh(host="claude_code", session_id=SID, now=NOW)    # and no turn off Claude today either: n=0 first
+    assert d["fields"]["saved"]["value"] is None and d["line"].endswith("saved n/a (n=0 turns off Claude, today)")
     seed_snapshot_extras(p35.home)
     # 2 turns off Claude today x 2.0 pp per turn / 3.0 pp per active hour (hand oracle in test_p35_fixtures)
     assert snap.refresh(host="claude_code", session_id=SID, now=NOW)["fields"]["saved"]["value"] == pytest.approx(4 / 3)
@@ -168,6 +174,18 @@ async def test_saved_with_no_turn_off_claude_is_na_never_zero(p35):  # noqa: F81
     assert snap.render_line(fields).endswith("saved n/a (n=0 turns off Claude, today)")
 
 
+def test_saved_with_no_turn_and_no_rate_names_the_n_0_turns(tmp_path, monkeypatch):
+    """rv-632 r2: n=0 turns AND an unknown rate (no quota history): the reason is the n=0 turns, the
+    count the figure would multiply, not the rate's own n/a."""
+    from llm_router import statusline_snapshot as snap
+
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    fig = snap.saved_field([], NOW)
+    assert (fig.value, fig.n, fig.na_reason) == (None, 0, "n=0 turns off Claude, today"), fig
+    assert snap.render_line({**UNKNOWN_FIELDS, "saved": fig.to_dict()}).endswith(
+        "saved n/a (n=0 turns off Claude, today)")
+
+
 def test_claude_5h_names_its_one_poll_and_is_never_a_value_with_n_0(tmp_path, monkeypatch):
     """rv-632 must-fix 3: the % is one usage.json poll, so its n is that poll (plus its age); with no
     poll it is n/a. History rows (only the fast tick wrote them) are not its n."""
@@ -185,8 +203,24 @@ def test_claude_5h_names_its_one_poll_and_is_never_a_value_with_n_0(tmp_path, mo
     assert (q["claude"]["pct"], q["claude"]["n"], q["claude"]["age_s"]) == (37.0, 1, 150.0)
     line = snap.render_line({**UNKNOWN_FIELDS, "quota": q})
     assert "Claude 5h 37% (n=1 poll, age 2m, 5h)" in line, line
-    for f in line.split(" | "):
-        assert not re.search(r"\d+% \(n=0\b", f), f"a value printed with n=0: {f}"
+    lines = [line]
+    # D-237: the Codex half too. One delegation 6 h ago: the file exists, nothing in its 5 h window. That is
+    # a measured count of 0 delegations against the budget, never "0% (n=0)".
+    monkeypatch.delenv("LLM_ROUTER_CODEX_WINDOW_BUDGET", raising=False)   # the module default budget, 15
+    (tmp_path / "codex_window.json").write_text(json.dumps({"delegations": [NOW - 6 * 3600]}))
+    q = snap.quota_field(NOW)
+    assert (q["codex"]["used"], q["codex"]["budget"]) == (0, 15), q["codex"]
+    line = snap.render_line({**UNKNOWN_FIELDS, "quota": q})
+    assert "Claude 5h 37% (n=1 poll, age 2m, 5h) / Codex 0/15 delegations (5h) |" in line, line
+    lines.append(line)
+    (tmp_path / "usage.json").unlink()                               # and with no Claude poll either
+    lines.append(snap.render_line({**UNKNOWN_FIELDS, "quota": snap.quota_field(NOW)}))
+    assert "Claude 5h n/a (n=0, 5h) / Codex 0/15 delegations (5h) |" in lines[-1], lines[-1]
+    for ln in lines:
+        for f in ln.split(" | "):
+            assert not re.search(r"\d+% \(n=0\b", f), f"a value printed with n=0: {f}"
+            # any "(n=0" on the row belongs to a field that prints n/a, never to a number
+            assert "(n=0" not in f or " n/a (" in f, f"a value printed with n=0: {f}"
 
 
 # -- the refreshers: one snapshot function, one CLI, the tick adds two stats ----------------------
@@ -316,7 +350,7 @@ _DRIVER = r'''
 import sys, time
 from llm_router import statusline_segments as ss, statusline_snapshot as snap
 
-state, hard, budget, mode = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
+state, hard, budget, mode = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 ss.RUN_TIMEOUT_S, ss.SNAP_BUDGET_S = hard, budget
 ss.maybe_refresh_usage = lambda *a: None
 ss.compute = lambda *a: {"health": "ok"}
@@ -341,17 +375,39 @@ snap.quality_field = hang             # a later field: hangs (it never returns)
 if mode == "after":                   # the snapshot is fine; what comes after it hangs
     ss.snap_segment = lambda *a, **k: {}
     ss.write_cache = lambda *a: hang()
+if mode == "escape":                  # the budget fired mid-restore: _within raised with its own handler
+    import signal                     # still installed and no timer armed; then the cache write hangs
+
+    def _raise(*_):
+        raise ss.SnapshotBudgetExceeded("late")
+
+    def escaped(seconds, fn, started):
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, _raise)
+        raise ss.SnapshotBudgetExceeded("budget fired after fn returned, before the restore")
+
+    ss._within = escaped
+    ss.write_cache = lambda *a: hang()
 sys.exit(ss.main(["--state", state, "--session", "s1"]))
 '''
 
 
-def _drive(tmp_path, mode: str, hard: float = 2.0, budget: float = 0.4):
+#: Past this the refresher is still running: the hard stop did not end it (the bug these tests close).
+_DRIVE_TIMEOUT_S = 15
+
+
+def _drive(tmp_path, mode: str, hard: int = 3, budget: int = 1):
+    """Integer seconds: the pre-rv-632 code armed ``signal.alarm(int)``, so on that code this driver runs
+    and HANGS (killed at :data:`_DRIVE_TIMEOUT_S`) instead of failing early on a float."""
     state = tmp_path / "router"
     state.mkdir(exist_ok=True)
     env = {**os.environ, "HOME": str(tmp_path), "LLM_ROUTER_HOME": str(state)}
     t0 = time.monotonic()
-    r = subprocess.run([sys.executable, "-c", _DRIVER, str(state), str(hard), str(budget), mode], env=env,
-                       capture_output=True, text=True, timeout=30)
+    try:
+        r = subprocess.run([sys.executable, "-c", _DRIVER, str(state), str(hard), str(budget), mode], env=env,
+                           capture_output=True, text=True, timeout=_DRIVE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"refresher still running after {_DRIVE_TIMEOUT_S} s (hard stop {hard} s): nothing ended it")
     return r, time.monotonic() - t0, state
 
 
@@ -363,7 +419,7 @@ def test_a_slow_field_then_a_hanging_field_still_ends_the_refresher(tmp_path):
     written without the row."""
     r, took, state = _drive(tmp_path, "fields")
     assert r.returncode == 0, (r.returncode, r.stderr[-2000:])
-    assert took < 2.0 + 5.0, took                                     # well inside the injected hard stop
+    assert took < 3 + 5.0, took                                     # well inside the injected hard stop
     kv = (state / "statusline_seg_s1.kv").read_text()
     assert "health=ok" in kv and "snap_line" not in kv, kv
 
@@ -371,9 +427,47 @@ def test_a_slow_field_then_a_hanging_field_still_ends_the_refresher(tmp_path):
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM watchdog is POSIX only")
 def test_the_hard_stop_is_rearmed_after_the_snapshot_block(tmp_path):
     """Whatever hangs after the snapshot is ended by the re-armed hard stop (os._exit(1))."""
-    r, took, _ = _drive(tmp_path, "after", hard=1.5)
+    r, took, _ = _drive(tmp_path, "after", hard=2)
     assert r.returncode == 1, (r.returncode, r.stderr[-2000:])        # the hard stop's own exit code
-    assert 1.0 <= took < 1.5 + 5.0, took
+    assert 1.5 <= took < 2 + 5.0, took
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM watchdog is POSIX only")
+def test_main_rearms_the_hard_stop_when_the_budget_escapes_mid_restore(tmp_path):
+    """rv-632 r2: the one window _within cannot close (the budget firing after fn returned, before the
+    restore) leaves its own handler and no timer; main's except puts the os._exit hard stop back."""
+    r, took, _ = _drive(tmp_path, "escape", hard=2)
+    assert r.returncode == 1, (r.returncode, r.stderr[-2000:])
+    assert 1.5 <= took < 2 + 5.0, took
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM watchdog is POSIX only")
+def test_a_budget_signal_still_pending_after_fn_is_not_handed_to_the_hard_stop():
+    """rv-632 r2: SIGALRM is blocked while _within swaps back, and the budget's own signal, if it is
+    still pending once fn has returned, is dropped. Before, it reached the restored hard stop
+    (os._exit) and ended a refresher that had finished in time."""
+    from llm_router import statusline_segments as ss
+
+    alrm = {signal.SIGALRM}
+    fired = []
+    old = signal.signal(signal.SIGALRM, lambda *_: fired.append(1))  # stands in for os._exit in-process
+
+    def fn():
+        signal.pthread_sigmask(signal.SIG_BLOCK, alrm)
+        time.sleep(0.3)                     # the 0.05 s budget fires while blocked: pending on return
+        assert signal.SIGALRM in signal.sigpending()
+        return "done"
+
+    try:
+        assert ss._within(0.05, fn, started=time.time()) == "done"
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, alrm)
+        time.sleep(0.01)
+        assert not fired, "the budget's signal reached the hard stop"
+        assert 0 < signal.getitimer(signal.ITIMER_REAL)[0] <= ss.RUN_TIMEOUT_S   # the hard stop is armed again
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, alrm)
+        signal.signal(signal.SIGALRM, old)
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="SIGALRM watchdog is POSIX only")
