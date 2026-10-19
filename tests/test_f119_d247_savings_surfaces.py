@@ -297,3 +297,147 @@ def test_tui_sparkline_panel_labels_verified():
     p.daily_costs, p.total_savings = [0.5, 1.5], 2.0
     body = str(p.render().renderable)
     assert "verified saved" in body and "$2.00 verified (week)" in body
+
+
+# ── F119 repair 1: empty-known window, hook matrix ─────────────────────────────
+
+def test_status_bar_known_empty_window_is_a_real_zero_not_a_crash():
+    """Regression: est 0.0/n=0 and ver 0.0/n=0 (ledger_view's COALESCE on a day with no calls)
+    left ``segs`` empty and raised IndexError, which froze the refresher on a stale line."""
+    sb = _hook("status-bar.py", "f119_status_bar_empty")
+    from llm_router import ledger_view as lv
+
+    empty = _window(verified_usd=0.0, verified_n=0, unverified_usd=0.0, unverified_n=0,
+                    saved_usd=0.0, saved_n=0)
+    text = _plain(sb._money_part(lv, "D", empty))
+    assert text == "D:~$0.00 est n=0 ·today"
+    assert "n/a" not in text
+
+
+def test_status_bar_known_unknown_matrix():
+    sb = _hook("status-bar.py", "f119_status_bar_matrix")
+    from llm_router import ledger_view as lv
+
+    def part(**kw):
+        return _plain(sb._money_part(lv, "D", _window(**kw)))
+
+    both_unknown = part(verified_usd=None, verified_n=None, unverified_usd=None, unverified_n=None)
+    assert both_unknown == "D:n/a"
+    est_unknown = part(verified_usd=2.0, verified_n=2, unverified_usd=None, unverified_n=None)
+    assert "$2.00 ver n=2" in est_unknown and "est n/a" in est_unknown
+    ver_unknown = part(verified_usd=None, verified_n=None, unverified_usd=5.0, unverified_n=4)
+    assert "~$5.00 est n=4" in ver_unknown and "ver n/a" in ver_unknown
+    both_known = part(verified_usd=2.0, verified_n=2, unverified_usd=5.0, unverified_n=4)
+    assert "~$5.00 est n=4" in both_known and "$2.00 ver n=2" in both_known
+    _no_merge(both_known)
+    both_empty = part(verified_usd=0.0, verified_n=0, unverified_usd=0.0, unverified_n=0)
+    assert both_empty == "D:~$0.00 est n=0 ·today"
+
+
+def test_status_bar_hook_pair_byte_identical():
+    assert (REPO / "hooks" / "status-bar.py").read_bytes() == (HOOKS / "status-bar.py").read_bytes()
+
+
+# ── F119 repair 1: remaining surfaces ──────────────────────────────────────────
+
+def test_surface_status_labels_verified_and_unverified_apart(tmp_path, monkeypatch):
+    from llm_router.observability import surface_status as ss
+
+    monkeypatch.setenv("LLM_ROUTER_STATE_DIR", str(tmp_path))
+    st = ss.SurfaceStatus(
+        host="h", active=True, health=ss.HEALTH_OK, health_reason="", last_model="ollama/m",
+        last_task="code/simple", last_age_s=1.0, last_tokens=100, routed_count_session=3,
+        saved_session=2.0, saved_total=2.0, tokens_session=100, unverified_session=5.0)
+    line = _plain(ss.compact_line(st, color=False))
+    assert "$2.00 verified saved" in line and "+$5.00 unverified" in line
+    _no_merge(line)
+    assert "$2.00 verified" in ss.terminal_title(st)
+    note = ss.notification(st, "route", now=1e9)
+    assert "verified saved $2.00" in note["message"]
+    none = _plain(ss.compact_line(ss.SurfaceStatus(
+        host="h", active=False, health=ss.HEALTH_OK, health_reason="", last_model=None, last_task=None,
+        last_age_s=None, last_tokens=None, routed_count_session=0, saved_session=0.0, saved_total=0.0,
+        tokens_session=0), color=False))
+    assert "saved" not in none          # nothing verified: no "$0.00 saved" claim
+
+
+def test_statusline_hud_savings_are_est(monkeypatch):
+    from llm_router import statusline_hud as hud
+
+    st = hud.StatuslineState(decision_count=2, total_cost_session=0.5, total_saved_session=2.0)
+    monkeypatch.setattr(hud, "_statusline_state", st)
+    ctx = _plain(hud.format_statusline_context(max_width=500))
+    assert "est. $2.00 saved" in ctx
+    replay = _plain(hud.format_replay_summary())
+    assert "Savings: est. $2.00" in replay
+    _no_merge(ctx + replay)
+    monkeypatch.setattr(hud, "_statusline_state", hud.StatuslineState(decision_count=2))
+    assert "saved" not in _plain(hud.format_statusline_context(max_width=500))
+
+
+def test_tools_dashboard_net_saved_is_verified_and_signed():
+    from llm_router.tools.dashboard import _render_dashboard
+
+    daily = [{"day": "2026-10-18", "tokens": 1000, "calls": 2, "saved": 2.0}]
+    brk = [{"provider": "ollama", "calls": 2, "tokens": 1000, "saved": 2.0}]
+    text = _plain(_render_dashboard(daily, brk, 0.0, "Last 7 days", "opus", False))
+    assert "$2.00 verified net saved" in text
+    _no_merge(text)
+    neg = _plain(_render_dashboard(daily, brk, 3.0, "Last 7 days", "opus", False))
+    assert "-$1.00 verified net saved" in neg and "$-" not in neg.split("verified net")[0]
+
+
+def test_dashboard_server_unknown_saved_is_na_and_labelled():
+    from llm_router.dashboard import server
+
+    html = server._html("")
+    assert "Lifetime Savings (est. vs Sonnet)" in html and "Lifetime Saved (est.)" in html
+    assert re.search(r'id="g-saved"[^>]*>n/a<', html) and re.search(r'id="p-saved"[^>]*>n/a<', html)
+    assert '>$0<' not in html.split('id="g-saved"')[1][:60]
+    assert "savedKnown ? '$' + saved.toFixed(2) : 'n/a'" in html        # JS maps null to n/a
+    import asyncio
+
+    stats = asyncio.run(server._get_stats())
+    assert stats["savings"]["total_saved_usd"] in (None,) or isinstance(stats["savings"]["total_saved_usd"], float)
+
+
+def test_digest_saved_is_est(monkeypatch):
+    import asyncio
+
+    from llm_router import digest
+
+    data = {"calls": 3, "cost": 1.0, "saved": 2.0, "total_in": 1, "total_out": 1,
+            "by_provider": {"ollama": {"calls": 3, "cost": 1.0, "saved": 2.0}}}
+
+    async def fetch(_p):
+        return data
+
+    async def spike(*a, **k):
+        return (False, 0.0, 0.0)
+
+    async def sim(_p="week"):
+        return (1.0, 3.0, 66.0)
+
+    monkeypatch.setattr(digest, "_fetch_period_data", fetch)
+    monkeypatch.setattr(digest, "detect_spend_spike", spike)
+    monkeypatch.setattr(digest, "simulate_without_routing", sim)
+    text = asyncio.run(digest.format_digest("week"))
+    assert "est. $2.0000 vs Claude baseline" in text and "est. $2.0000 saved" in text
+    assert "saved est. 66%" in text
+    _no_merge(text)
+
+
+def test_savings_report_per_model_saved_is_est(tmp_path, monkeypatch):
+    from llm_router.commands import savings_report as sr
+
+    db = tmp_path / "usage.db"
+    db.write_bytes(b"")
+    monkeypatch.setattr(sr, "_get_db_path", lambda: db)
+    monkeypatch.setattr(sr, "_canonical_headline", lambda *_a, **_k: "headline")
+    stats = {"calls": 3, "saved": 2.0, "cost": 0.5, "unverified": 0.0, "unverified_calls": 0,
+             "by_model": {"ollama/m": {"calls": 3, "saved": 2.0, "cost": 0.0, "provider": "ollama"}}}
+    monkeypatch.setattr(sr, "_query", lambda *_a, paid=False, **_k: stats if not paid else
+                        {**stats, "calls": 0, "by_model": {}})
+    text = sr.render_savings_report("all")
+    assert "saved $2.0000 (est.) vs Claude" in text and "saved $2.0000 (est.)" in text.split("ollama/m")[1]
+    _no_merge(text)

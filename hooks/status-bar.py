@@ -314,11 +314,13 @@ def _money_part(lv, label: str, lw) -> str:
         known = lv.show(fig, "{:.2f}") is not None
         if not known or fig.value != 0 or fig.n != 0:
             segs.append(_usd_seg(lv, fig, tag))
+    if not segs:                      # a known empty window is a real zero, not unknown
+        segs.append(_usd_seg(lv, est, "est"))
     if all(seg.endswith("n/a") for seg in segs):
         return f"{DIM}{label}:n/a{RST}" if len(segs) == 2 else f"{DIM}{label}:{segs[0]}{RST}"
     window = (est if lv.show(est, "{:.2f}") is not None else ver).window
     col = G if any(f.value >= 0.01 for f in (est, ver) if lv.show(f, "{:.2f}") is not None) else DIM
-    return f"{col}{label}:{' · '.join(segs) or '~$0.00 est n=0'} ·{window}{RST}"
+    return f"{col}{label}:{' · '.join(segs)} ·{window}{RST}"
 
 
 def _savings_str(lv, compact: bool) -> str:
