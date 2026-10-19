@@ -2995,6 +2995,10 @@ def cmd_kpi(args: list[str]) -> int:
                      help="with --daily: the synth-live manifest.jsonl; research sessions whose id is listed "
                           "are 'synthetic (D-167)' and count in release_clock (D-210); other research sessions are "
                           "'other' (counts only, never counted); without it release_clock = organic")
+    ap.add_argument("--maintenance", action="store_true",
+                     help="P35-5: run the due daily backfill (7 closed days) and build the last two closed ISO "
+                          "weeks into <state>/weekly/<YYYY-Www>.json+.md from the daily rows; idempotent; "
+                          "defers while the benchmark marker exists (session-start spawns it when stale)")
     ap.add_argument("--daily-streak", action="store_true",
                      help="P3.3: the run of closed UTC days whose release_clock (organic + synthetic) action AND turn "
                           "lines are measured; organic is printed beside it; exit 1 below 7 (D-210, PLAN v16 "
@@ -3017,6 +3021,9 @@ def cmd_kpi(args: list[str]) -> int:
         from llm_router import judge_ledger
         print(judge_ledger.status_text())
         return 0
+    if parsed.maintenance:
+        from llm_router import weekly_report
+        return weekly_report.run_maintenance()
     if parsed.daily_render_plist:
         from llm_router import daily_schedule
         print(daily_schedule.render_default_plist(), end="")
