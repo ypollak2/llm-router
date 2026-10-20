@@ -65,3 +65,15 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | `text_job_local` records | In `local_eligibility.json` under `<model>.text_job_local.<job>`: grade, k, n, bank version and sha256, model digest, runtime, judge backend and served model, run id, date, scope, settings hash. No text. The latest scored result for a job replaces the previous one; a stale record (model digest changed, or 30 days with no digest) stays on disk for history and reads as unknown. Delete the `text_job_local` key to forget a model. |
 | Nudge state | `local_check/nudge.json` (0600): the bank versions for which the one-line first-run tip was shown. Deleting it shows the tip again. |
 | Reads | `llm-router status`, `doctor` and the fast status line read `local_eligibility.json` and the discovery cache only. They make no HTTP call and run no model. |
+
+## `text_job_outcomes.jsonl` and `text_job_local_attempts.jsonl` (LC-8c)
+
+| Item | Value |
+|---|---|
+| Rows | Outcomes: `ts`, `session_id`, `job`, `model`, `status`, `attempts`. Local attempts: `ts`, `job`, `model`, `outcome`. No prompt text. |
+| Writers | `text_job_ledger.record_text_job_outcome` and `text_job_ledger._append_local_attempt` (via `record_local_attempts`), called by `llm_text_job`. Writes are best-effort. |
+| Kept | Two generations of 4 MiB per ledger via `capped_log` (`MAX_LEDGER_BYTES`): `<name>` and `<name>.1` (older). The oldest generation is dropped on rotation; a generation can exceed the cap by one row. |
+| Why 4 MiB | Eight times the 512 KiB demotion tail read, about 40,000 small rows per generation. |
+| Reads | Demotion reads the local-attempt ledger's `.1` tail then the live file's tail, each bounded to 512 KiB, keeping the newest 20 matching attempts across rotation. |
+| File mode | Files are created 0600, including the new live file after rotation. |
+| Concurrency | Append takes no lock: one `O_APPEND` write. Rotation uses a non-blocking lock; a writer that cannot take it skips rotation. |

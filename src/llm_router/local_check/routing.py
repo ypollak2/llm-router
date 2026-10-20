@@ -248,29 +248,31 @@ def _recent_outcomes(model: str, job: str, since: float | None, ledger: Path | N
     """
     from llm_router import text_job_ledger as L
     target = Path(ledger or paths.state_path(L.LOCAL_ATTEMPTS_FILENAME))
-    try:
-        with open(target, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            size = fh.tell()
-            fh.seek(max(0, size - _LEDGER_TAIL_BYTES))
-            raw = fh.read().decode("utf-8", errors="replace")
-    except OSError:
-        return []
     want = norm_model(model)
     rows: deque[str] = deque(maxlen=DEMOTE_WINDOW)
-    for line in raw.splitlines():
+    # Rotation can leave only a few rows (or no live file) in the new generation.
+    for candidate in (target.with_name(target.name + ".1"), target):
         try:
-            r = json.loads(line)
-        except ValueError:
-            continue  # includes the partial first line of a tail read
-        if not isinstance(r, dict) or r.get("job") != job or not isinstance(r.get("model"), str):
+            with open(candidate, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(max(0, size - _LEDGER_TAIL_BYTES))
+                raw = fh.read(_LEDGER_TAIL_BYTES).decode("utf-8", errors="replace")
+        except OSError:
             continue
-        if norm_model(r["model"]) != want:
-            continue
-        ts = r.get("ts")
-        if since is not None and isinstance(ts, (int, float)) and ts < since:
-            continue
-        rows.append(str(r.get("outcome")))
+        for line in raw.splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue  # includes the partial first line of a tail read
+            if not isinstance(r, dict) or r.get("job") != job or not isinstance(r.get("model"), str):
+                continue
+            if norm_model(r["model"]) != want:
+                continue
+            ts = r.get("ts")
+            if since is not None and isinstance(ts, (int, float)) and ts < since:
+                continue
+            rows.append(str(r.get("outcome")))
     return list(rows)
 
 

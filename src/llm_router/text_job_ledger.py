@@ -40,9 +40,11 @@ from __future__ import annotations
 import json
 import time
 
-from llm_router import paths
+from llm_router import capped_log, paths
 
 LEDGER_FILENAME = "text_job_outcomes.jsonl"
+# Eight times the demotion reader's 512 KiB tail; two generations are kept.
+MAX_LEDGER_BYTES = 4 * 1024 * 1024
 
 STATUS_ACCEPTED = "accepted"
 STATUS_REJECTED = "rejected"
@@ -70,9 +72,10 @@ def record_text_job_outcome(*, job: str, model: str, status: str, attempts: int)
     }
     try:
         path = paths.state_path(LEDGER_FILENAME)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8", opener=paths.private_opener) as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        capped_log.append(
+            path, (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"),
+            MAX_LEDGER_BYTES,
+        )
     except Exception:
         pass
 
@@ -101,9 +104,10 @@ def _append_local_attempt(job: str, model: str, outcome: str) -> None:
     row = {"ts": time.time(), "job": job, "model": model, "outcome": outcome}
     try:
         path = paths.state_path(LOCAL_ATTEMPTS_FILENAME)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8", opener=paths.private_opener) as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        capped_log.append(
+            path, (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"),
+            MAX_LEDGER_BYTES,
+        )
     except Exception:
         pass
 
