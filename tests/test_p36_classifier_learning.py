@@ -453,6 +453,7 @@ def test_prune_does_not_drop_a_concurrent_append(tmp_path, monkeypatch):
     assert box["finished_mid_rewrite"] is False  # the lock held the append back
 
 
+@pytest.mark.timing
 def test_hot_path_example_write_gives_up_fast_when_the_lock_is_held(tmp_path, monkeypatch):
     """The hook and the proxy/MCP loop write inline: a held lock must cost <= ~0.25 s and leave
     a failopen record, not a 5 s stall."""
