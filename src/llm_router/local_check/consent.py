@@ -28,13 +28,16 @@ def build_consent_text(route: str, judge_model: str, n_plants: int = _budget.PLA
     ]
     if route == ROUTE_API:
         if estimate_usd is None:
-            lines.append(f"Cost: up to ~{n_calls} requests ({n_plants} validity checks + up to {n_answers} answers); the price of this model is not in the price table, so the dollar cost cannot be estimated.")
+            # No price: the dollar cost cannot be estimated or capped (the API route refuses such a model; this wording keeps the text true if it is shown anyway).
+            lines.append(f"Cost: up to ~{n_calls} requests ({n_plants} validity checks + up to {n_answers} answers), billed to your Anthropic API account; the price of this model is not in the price table, so the dollar cost cannot be estimated.")
+            lines.append(f"Cap: the run stops at {cap_calls} requests. There is NO dollar cap for this model.")
         else:
             lines.append(f"Cost: ~${estimate_usd:.2f} estimated for ~{n_calls} requests ({n_plants} validity checks + up to {n_answers} answers), billed to your Anthropic API account.")
-        lines.append(f"Cap: the run stops at ${cap_usd:.2f} or {cap_calls} requests, whichever comes first, and can be resumed.")
+            lines.append(f"Cap: the run stops at ${cap_usd:.2f} or {cap_calls} requests, whichever comes first.")
     else:
-        lines.append(f"Cost: ~{n_calls} requests ({n_plants} validity checks + up to {n_answers} answers); this counts toward your plan limit. No API charges.")
-        lines.append(f"Cap: the run stops at {cap_calls} requests and can be resumed.")
+        lines.append(f"Cost: ~{n_calls} requests ({n_plants} validity checks + up to {n_answers} answers); this uses your Claude subscription and counts toward your plan limit. "
+                     "If your claude CLI is logged in with an API key, it is billed to that key.")
+        lines.append(f"Cap: the run stops at {cap_calls} requests.")
     if quota_note:
         lines.append(quota_note)
     lines.append("Proceed? [y/N]")
