@@ -94,6 +94,7 @@ NON_NETWORK = {
     "hooks.slack.com": "Slack webhook example or recognition of a user-configured webhook",
     "llm_router.dev": "Pro upgrade link shown to the user",
     "nodejs.org": "Node.js install hint printed by the hook",
+    "huggingface.co": "model-card citation URLs in local_check/data/recommendations.json, shown to the user, never fetched",
     "ollama.com": "Ollama install hint",
     "openai.com": "Codex CLI install hint",
     "platform.deepseek.com": "DeepSeek key signup link printed by setup",
