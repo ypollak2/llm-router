@@ -9,7 +9,7 @@ Fit rule (documented, tunable only here): an entry fits when
 the machine's CAPACITY ``total_gb - max(4 GiB, 20% of total)`` (the probe's own reserve, applied to total, not to free
 memory, so a busy machine is not told its model is too big; on Apple unified memory vram == total, same rule), or
 ``vram_gb`` (total VRAM) when a discrete GPU is present with a known VRAM and the entry gives ``min_vram_gb``. No shipped
-entry has ``min_vram_gb`` yet: the cited pages (ollama.com, Hugging Face cards) state no VRAM figure, so GPU boxes fall
+entry has ``min_vram_gb`` yet: the cited pages (library pages and model cards) state no VRAM figure, so GPU boxes fall
 back to the RAM rule above rather than to an invented number. HEADROOM is 20%; KV_ALLOWANCE_GB is a flat allowance for
 the KV cache at the default context. Unknown total memory is never read as zero: the entry is kept, marked
 ``fit == "unknown"``.
