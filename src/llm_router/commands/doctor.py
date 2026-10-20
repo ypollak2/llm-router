@@ -1434,6 +1434,17 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     for line in _floor_report():
         print(f"  {line}")
 
+    # F124: text jobs a pre-registered run qualified (visibility only; grants no routing).
+    try:
+        from llm_router.resolver.eligibility_store import text_job_lines
+        _tj = text_job_lines()
+    except Exception as e:  # noqa: BLE001 -- doctor must never crash on a read
+        _tj = [f"unavailable: {type(e).__name__}"]
+    if _tj:
+        print(f"\n{_bold('  Local text-job qualification')}")
+        for line in _tj:
+            print(f"  {_ok(line)}")
+
     print(f"\n{_bold('  Provider API keys')}")
     for line in check_api_keys():
         print(f"  {line}")

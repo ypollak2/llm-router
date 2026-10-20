@@ -37,6 +37,7 @@ Usage:
     llm-router map [--json]           — the one resource map: seats, local models, keys, quota, priority
     llm-router mode [advise|route]    — routing authority: route (default) or advise (the proxy forwards the model you asked for and only logs its proposal)
     llm-router calibrate [--models M] [--allow-paid] — measure per-model capability (local-only by default)
+    llm-router eligibility record --prereg DIR [--apply] — record a pre-registered text-job verdict (dry run unless --apply)
     llm-router resolve --tier T [--needs tools,vision] — what the resolver would pick (inspection only)
     llm-router semantic status  — project scope, derived index, and selected arm
     llm-router semantic explain — what a prompt would retrieve, without sending it
@@ -932,7 +933,7 @@ _HELP_FLAGS = ("-h", "--help")
 # CLI-HELP-1: subcommands that print their own help for -h/--help in any
 # position (argparse, or an explicit check over all args).
 _OWN_HELP_ANYWHERE = frozenset({
-    "audit", "calibrate", "cp", "dev-refresh", "discover", "gc", "install", "inventory", "invoice",
+    "audit", "calibrate", "cp", "dev-refresh", "discover", "eligibility", "gc", "install", "inventory", "invoice",
     "judge", "kpi", "last", "learn", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
     "proxy",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
@@ -1170,6 +1171,10 @@ def main() -> None:
         # Short per-model capability probes; local-only unless --allow-paid.
         from llm_router.commands.calibrate import cmd_calibrate
         sys.exit(cmd_calibrate(args[1:]))
+    elif args and args[0] == "eligibility":
+        # Record a pre-registered text-job qualification (F124); dry run unless --apply.
+        from llm_router.commands.eligibility import cmd_eligibility
+        sys.exit(cmd_eligibility(args[1:]))
     elif args and args[0] == "resolve":
         # Inspect the resolver's decision for a tier + needs. Not live routing.
         from llm_router.commands.resolve import cmd_resolve
