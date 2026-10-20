@@ -210,3 +210,5 @@ results/
 /release_evals/*.json
 !/release_evals/baseline.json
 !/release_evals/PIN.json
+# LC-8: local-check routing (referenced by changelog.d/LC8.added.md).
+!/docs/local-check-routing.md

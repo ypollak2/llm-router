@@ -293,6 +293,12 @@ def _local_text_jobs_section() -> None:
         for _ln in _tj:
             # passed is green; not passed / stale / not measured are neutral, never a failure colour.
             print(f"  {_ok(_ln.text) if _ln.kind in ('passed', 'prereg') else _dim(_ln.text)}")
+    try:  # LC-8: lanes the demotion monitor switched off (never re-enabled automatically)
+        from llm_router.local_check import routing as _lc_routing
+        for _ln in _lc_routing.doctor_lines():
+            print(f"  {_warn(_ln)}")
+    except Exception:  # noqa: BLE001 -- doctor must never crash on a read
+        pass
     try:
         from llm_router.local_check import display as _lc_display, retention as _lc_retention
         _lc_retention.prune()
