@@ -16,16 +16,20 @@ Gates G2 (Sonnet floor), G3c (spread) and G4 (human-style audit) of Q37 moved to
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Iterable, Mapping, Sequence
 
 from llm_router.local_check import grader, stats
+from llm_router.local_check.judge import served_model_matches
 
 BAR_POINT = 0.80
 BAR_LB = 0.60
 LANE_GUARD_MIN = 0.70            # a lane below this own rate is excluded from the PASS action
 G1_MIN_VALID = 0.85
 G1_MAX_BAD_PER_70 = 3            # timeouts + errors + empties, each row once: at most 3 per 70 items
+MIN_N = 50                       # no PASS / FAIL below this many cumulative assigned items (scope too narrow)
+MIN_LANE_N = 20                  # nor when a recorded lane has fewer scored items than this
+JUDGE_ERROR_TOLERANCE = 0.05     # answers still unjudged after the re-judge passes: at most max(1, floor(5% of judged calls)), excluded from n
 CONCENTRATION_MIN = 0.40         # one grader rule explains at least this share of failures -> record it
 
 PASS, FAIL, INCONCLUSIVE, INVALID, NOT_PASSED, PROBE = "PASS", "FAIL", "INCONCLUSIVE", "INVALID", "NOT_PASSED", "PROBE"
@@ -137,6 +141,7 @@ class Result:
     rule_concentration: dict[str, Any] | None
     incomplete: bool
     k_prog: int = 0
+    excluded_unjudged: int = 0         # answers the judge could not rate (within the 5% tolerance): excluded from n
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -146,11 +151,18 @@ def _gate(status: bool | None, **detail: Any) -> dict[str, Any]:
     return {"status": "NOT_MEASURED" if status is None else ("PASS" if status else "FAIL"), **detail}
 
 
+def judge_error_tolerance(rows: Iterable[Row]) -> int:
+    """How many answers may stay unjudged (judge_error): max(1, floor(5% of the judge calls = programmatically ok answers))."""
+    judged = sum(1 for r in rows if r.prog)
+    return max(1, int(judged * JUDGE_ERROR_TOLERANCE))
+
+
 def gates(rows: Sequence[Row], assigned: Sequence[str], abandoned: Sequence[str], early_stop: bool, g: GateInputs, mode: str, k_min_reach: bool) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     # G0 integrity: bank hash, judge id as pinned, model digest unchanged start -> score.
+    # Every served id (a comma list from the CLI route counts each model) must match the pin; the dated-snapshot rule is judge.served_model_matches.
     served = sorted(set(g.judge_served))
-    judge_ok = True if mode == NO_JUDGE else bool(served) and g.judge_pinned is not None and served == [g.judge_pinned]
+    judge_ok = True if mode == NO_JUDGE else bool(served) and g.judge_pinned is not None and all(served_model_matches(x, g.judge_pinned)[0] for x in served)
     digest_ok = g.digest_start == g.digest_end
     g0_ok = None if g.bank_sha_ok is None else bool(g.bank_sha_ok and judge_ok and digest_ok)
     out["G0_integrity"] = _gate(g0_ok, bank_sha_ok=g.bank_sha_ok, judge_pinned=g.judge_pinned, judge_served=served, judge_ok=judge_ok,
@@ -176,8 +188,13 @@ def gates(rows: Sequence[Row], assigned: Sequence[str], abandoned: Sequence[str]
     have = {r.item_id for r in rows if r.present}
     unrun = [i for i in assigned if i not in have and i not in set(abandoned)]
     missing_items = [] if (early_stop and k_min_reach) else unrun
-    unjudged = [r.item_id for r in rows if mode == JUDGE and r.prog and r.judge not in ("pass", "fail")]
-    out["G5_complete"] = _gate(not missing_items and not unjudged, missing_items=len(missing_items), unjudged=len(unjudged),
+    # A judge_error (after the in-call retry and the re-judge passes) is tolerated up to 5% of judged calls and excluded from n by ``score``;
+    # an answer that was never judged at all is never tolerated.
+    unjudged = [r.item_id for r in rows if mode == JUDGE and r.prog and r.judge not in ("pass", "fail", "judge_error")]
+    errored = [r.item_id for r in rows if mode == JUDGE and r.prog and r.judge == "judge_error"]
+    tol = judge_error_tolerance(rows) if mode == JUDGE else 0
+    out["G5_complete"] = _gate(not missing_items and not unjudged and len(errored) <= tol, missing_items=len(missing_items), unjudged=len(unjudged),
+                               judge_errors=len(errored), judge_error_tolerance=tol,
                                unrun_by_early_stop=len(unrun) if (early_stop and k_min_reach) else 0)
     return out
 
@@ -188,6 +205,12 @@ def score(rows: Sequence[Row], assigned: Sequence[str], g: GateInputs, *, mode: 
     ``early_stop`` says the latest run stopped before running every item; it is believed only if the failures really made kmin unreachable."""
     if mode not in (JUDGE, NO_JUDGE):
         raise ValueError("mode must be 'judge' or 'none'")
+    # Judge errors within the tolerance are EXCLUDED from n (not counted as passes or fails); beyond it G5 fails below.
+    errored = {r.item_id for r in rows if r.present and r.prog and r.judge == "judge_error"} if mode == JUDGE else set()
+    excluded = errored if 0 < len(errored) <= judge_error_tolerance([r for r in rows if r.present]) else set()
+    if excluded:
+        rows = [r for r in rows if r.item_id not in excluded]
+        assigned = [i for i in assigned if i not in excluded]
     n = len(assigned)
     kmin = stats.kmin(n, BAR_POINT, BAR_LB) if n else None
     kfail = stats.kfail(n, BAR_POINT) if n else None
@@ -198,11 +221,19 @@ def score(rows: Sequence[Row], assigned: Sequence[str], g: GateInputs, *, mode: 
     have = {r.item_id for r in present} | set(abandoned)
     incomplete = any(i not in have for i in assigned)
     gt = gates(present, assigned, abandoned, early_stop, g, mode, unreachable)
+    narrow = ""
+    if n < MIN_N:
+        narrow = f"scope too narrow (n={n} < {MIN_N})"
+    else:
+        small = {j: sum(1 for r in present if r.job == j) for j in sorted({r.job for r in present})}
+        small = {j: c for j, c in small.items() if c < MIN_LANE_N}
+        if small:
+            narrow = "scope too narrow (lane " + ", ".join(f"{j} n={c}" for j, c in small.items()) + f" < {MIN_LANE_N})"
     pooled = rate(present)
     lanes = {job: rate(present, lambda r, job=job: r.job == job) for job in sorted({r.job for r in present})}
     conc = rule_concentration(present)
     base = dict(mode=mode, n_assigned=n, n_scored=len(present), k=k, kmin=kmin, kfail=kfail, pooled=pooled, lanes=lanes, gates=gt,
-                rule_concentration=conc, incomplete=incomplete, k_prog=sum(1 for r in present if r.prog))
+                rule_concentration=conc, incomplete=incomplete, k_prog=sum(1 for r in present if r.prog), excluded_unjudged=len(excluded))
     failed_gates = [name for name, v in gt.items() if v["status"] in ("FAIL", "NOT_MEASURED")]
     if failed_gates:
         return Result(INVALID, "validity gate(s) failed or not measured: " + ", ".join(failed_gates), guard_excluded=[], **base)
@@ -212,8 +243,13 @@ def score(rows: Sequence[Row], assigned: Sequence[str], g: GateInputs, *, mode: 
                       guard_excluded=[], **base)
     if mode == NO_JUDGE:
         if kfail is not None and k <= kfail:
+            if narrow:
+                return Result(INCONCLUSIVE, narrow, guard_excluded=[], **base)
             return Result(FAIL, f"programmatic rate {k}/{n} <= kfail {kfail} (Wilson UB < 0.80 even before the judge)", guard_excluded=[], **base)
         return Result(PROBE, f"programmatic only: {k}/{n}; a judge-less run cannot pass", guard_excluded=[], **base)
+    if narrow:
+        # Never a PASS or a powered FAIL on a tiny scope; nothing is recorded.
+        return Result(INCONCLUSIVE, narrow, guard_excluded=[], **base)
     if kmin is not None and k >= kmin:
         excluded = [j for j, v in lanes.items() if v["rate"] < LANE_GUARD_MIN]
         return Result(PASS, f"k={k}/{n} >= kmin {kmin}" + (f"; lane guard excludes {', '.join(excluded)}" if excluded else ""), guard_excluded=excluded, **base)
@@ -222,16 +258,25 @@ def score(rows: Sequence[Row], assigned: Sequence[str], g: GateInputs, *, mode: 
     return Result(INCONCLUSIVE, f"k={k}/{n}; kmin={kmin}, kfail={kfail}", guard_excluded=[], **base)
 
 
-def record_plan(res: Result, *, demote_prior_pass: bool = False) -> dict[str, dict[str, Any]]:
+def redact_invalid(res: Result) -> Result:
+    """An INVALID outcome shows the gates only: no k, no lane or pooled rates (a rerun must not be steerable by what an invalid run revealed)."""
+    if res.verdict != INVALID:
+        return res
+    return replace(res, k=0, kmin=None, kfail=None, pooled={}, lanes={}, rule_concentration=None, k_prog=0, n_scored=0, excluded_unjudged=0,
+                   incomplete=False)
+
+
+def record_plan(res: Result, *, cumulative: bool = False) -> dict[str, dict[str, Any]]:
     """The ``jobs_result`` for ``eligibility_store.record_local_check``; empty when nothing is to be recorded.
 
+    Counts are k over ``n_assigned`` (items an earlier early-stopped attempt abandoned count as not passed), never over the scored rows only.
     PASS: every lane that clears the guard gets the pooled counts; an excluded lane gets its OWN counts as FAIL (so an older pass for it is replaced).
-    FAIL / NOT_PASSED: every lane gets the pooled (or partial) counts. INCONCLUSIVE records nothing, except that it supersedes an earlier recorded
-    PASS of the same configuration (``demote_prior_pass``): the cumulative evidence no longer supports that pass, so it is recorded as not passed.
-    INVALID and PROBE record nothing (a probe is kept in the attempt log only; the lane store knows passed/failed)."""
+    FAIL: every lane gets the pooled counts. NOT_PASSED: the first attempt records the partial counts it has (k of the items scored); a
+    cumulative one (``cumulative``: an earlier attempt exists) records k over n_assigned. INCONCLUSIVE writes nothing: a PASS recorded earlier for
+    the same configuration is kept and the rerun is only logged (D-263). INVALID and PROBE record nothing."""
     jobs = sorted(res.lanes)
     extra = {"rule_concentration": res.rule_concentration} if res.rule_concentration else {}
-    pooled = {"k": res.pooled["k"], "n": res.pooled["n"]}
+    pooled = {"k": res.k, "n": res.n_assigned}
     if res.verdict == PASS:
         out: dict[str, dict[str, Any]] = {}
         for j in jobs:
@@ -242,6 +287,7 @@ def record_plan(res: Result, *, demote_prior_pass: bool = False) -> dict[str, di
         return out
     if res.verdict == FAIL:
         return {j: {**pooled, "verdict": FAIL, **extra} for j in jobs}
-    if res.verdict == NOT_PASSED or (res.verdict == INCONCLUSIVE and demote_prior_pass):
-        return {j: {**pooled, "verdict": NOT_PASSED, **extra} for j in jobs}
+    if res.verdict == NOT_PASSED:
+        counts = pooled if cumulative else {"k": res.pooled["k"], "n": res.pooled["n"]}
+        return {j: {**counts, "verdict": NOT_PASSED, **extra} for j in jobs}
     return {}

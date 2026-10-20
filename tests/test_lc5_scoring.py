@@ -143,9 +143,7 @@ def test_g5_missing_item_and_unjudged_answer() -> None:
     rows2[0] = mkrow(0, rows2[0].job, False, prog=True, judge=None)    # programmatically fine but never judged
     r2 = verdict(rows2)
     assert r2.verdict == S.INVALID and r2.gates["G5_complete"]["unjudged"] == 1
-    rows3 = rows_n(60, 70)
-    rows3[0] = mkrow(0, rows3[0].job, False, prog=True, judge="judge_error")
-    assert verdict(rows3).verdict == S.INVALID
+
 
 
 def test_empty_row_set_cannot_pass_a_gate() -> None:
@@ -280,7 +278,8 @@ class FakeAdapter:
             return GenResult("error", error="boom", elapsed_s=0.1)
         if how == "empty":
             return GenResult("empty", text="", elapsed_s=0.1)
-        text = "Here is the commit message you asked for" if how == "progfail" else answer(item, "JUDGEFAIL" if how == "judgefail" else "zq")
+        tag = {"judgefail": "JUDGEFAIL", "judgeerr": "JUDGEERR"}.get(how, "zq")
+        text = "Here is the commit message you asked for" if how == "progfail" else answer(item, tag)
         return GenResult("ok", text=text, raw_chars=len(text), elapsed_s=0.1, first_token_s=0.05, completion_tokens=40)
 
 
@@ -289,6 +288,9 @@ class FakeJudge:
 
     def __init__(self, served: str = PINNED, plant_wrong: set[str] | None = None, fail_all_answers: bool = False):
         self.served, self.plant_wrong, self.fail_all, self.calls = served, plant_wrong or set(), fail_all_answers, 0
+        self.err_marker = True          # answers tagged JUDGEERR get a backend error while this is set
+        self.answer_calls = 0
+        self.heal_after: int | None = None      # once this many answer calls were made, JUDGEERR answers are judged normally
         self.plants = {(p.task, p.text): p for p in BANK.plants()}       # the same text can be both a good and a swapped plant: key by task too
 
     def complete(self, prompt: str) -> RawReply:
@@ -300,6 +302,9 @@ class FakeJudge:
                 verdict = ("fail" if right == "pass" else "pass") if p.id in self.plant_wrong else right
                 break
         else:
+            self.answer_calls += 1
+            if self.err_marker and (self.heal_after is None or self.answer_calls <= self.heal_after) and "JUDGEERR" in prompt.split("=== CANDIDATE ANSWER ===")[-1]:
+                return RawReply(error="http 529", served_model=self.served)
             if "JUDGEFAIL" in prompt.split("=== CANDIDATE ANSWER ===")[-1] or self.fail_all:
                 verdict = "fail"
         body = {"verdict": "pass", "defect": None, "quote": "", "reason": "ok"} if verdict == "pass" else {"verdict": "fail", "defect": "A", "quote": "x", "reason": "wrong"}
@@ -433,7 +438,8 @@ def test_session_budget_stop_is_inconclusive_and_records_nothing(tmp_path: Path)
     c.budget = Budget(metered=False, cap_calls=45)                     # 30 plants + 15 answers, then stop
     out = SE.run_check(c)
     assert out.status == "budget_stop" and out.result is None and not (tmp_path / "elig.json").exists()
-    assert A.AttemptLog(tmp_path / "runs").entries() == []
+    held = A.AttemptLog(tmp_path / "runs").entries()                  # the run dir is reserved (open), nothing consumed, no strike
+    assert len(held) == 1 and held[0]["state"] == "open" and not held[0]["consumed"] and not held[0]["strike"]
     c2 = check(tmp_path, run_id=out.run_id)                           # resume: local results are on disk, only the judge calls remain
     ad2 = c2.adapter
     out2 = SE.run_check(c2)
@@ -480,15 +486,27 @@ def test_force_lifts_the_cooldown_but_not_the_cumulative_rule(tmp_path: Path) ->
     assert forced.status == "scored" and forced.draw == 2 and forced.result.n_assigned == 140
 
 
-def test_latest_cumulative_replaces_never_best_of(tmp_path: Path) -> None:
+def test_inconclusive_rerun_writes_nothing_and_keeps_the_earlier_pass(tmp_path: Path) -> None:
     clock = Clock()
     first = SE.run_check(check(tmp_path, FakeAdapter(fails(10)), clock=clock))      # 60/70 PASS, recorded
     assert first.result.verdict == S.PASS and lanes(tmp_path)["commit_message"]["grade"] == "passed"
     clock.t += A.COOLDOWN_S + 1
     second = SE.run_check(check(tmp_path, FakeAdapter({**fails(10), **fails(25, draw=2)}), clock=clock))     # draw 2: 45/70 -> 105/140
+    assert second.result.verdict == S.INCONCLUSIVE and second.record_report == {}
+    lane = lanes(tmp_path)["commit_message"]           # owner D-263(a): the earlier PASS is kept, the rerun is only logged
+    assert lane["grade"] == "passed" and (lane["k"], lane["n"], lane["attempts"]) == (60, 70, 1)
+    log = A.AttemptLog(tmp_path / "runs").entries()
+    assert [e["verdict"] for e in log] == ["PASS", "INCONCLUSIVE"] and log[1]["consumed"] and log[1]["draw"] == 2
+
+
+def test_inconclusive_rerun_does_not_touch_an_earlier_recorded_fail_either(tmp_path: Path) -> None:
+    clock = Clock()
+    first = SE.run_check(check(tmp_path, FakeAdapter(fails(21)), clock=clock))      # 49/70 FAIL recorded
+    assert first.result.verdict == S.FAIL
+    clock.t += A.COOLDOWN_S + 1
+    second = SE.run_check(check(tmp_path, FakeAdapter({**fails(21), **fails(10, draw=2)}), clock=clock))      # draw 2: 60/70 -> 109/140 inconclusive
     assert second.result.verdict == S.INCONCLUSIVE
-    lane = lanes(tmp_path)["commit_message"]           # the earlier PASS must not survive a contradicting cumulative result
-    assert lane["grade"] == "failed" and lane["status"] == "not_passed" and (lane["k"], lane["n"], lane["attempts"]) == (105, 140, 2)
+    assert lanes(tmp_path)["commit_message"]["grade"] == "failed" and lanes(tmp_path)["commit_message"]["k"] == 49
 
 
 def test_changed_digest_or_settings_is_a_new_configuration(tmp_path: Path) -> None:
@@ -498,7 +516,7 @@ def test_changed_digest_or_settings_is_a_new_configuration(tmp_path: Path) -> No
     assert other.status == "scored" and other.draw == 1 and other.result.n_assigned == 70
 
 
-def test_early_stopped_attempt_makes_the_cumulative_bar_unreachable_so_a_rerun_is_refused(tmp_path: Path) -> None:
+def test_rerun_after_early_stop_is_refused_only_when_the_cumulative_bar_is_unreachable(tmp_path: Path) -> None:
     clock = Clock()
     first = SE.run_check(check(tmp_path, FakeAdapter(fails(70, "progfail")), clock=clock))
     assert first.result.verdict == S.NOT_PASSED
@@ -530,6 +548,210 @@ def test_judged_run_requires_backend_and_budget(tmp_path: Path) -> None:
     c.backend = None
     with pytest.raises(ValueError):
         SE.run_check(c)
+
+
+# ---------------------------------------------------------------- D-263 repair round 1 (review of cf04709)
+@pytest.mark.parametrize("served,ok", [(["claude-sonnet-5-5-20260101"], True), ([PINNED, "claude-sonnet-5-5-20260101"], True),
+                                       ([f"{PINNED},{PINNED}-20260101"], True), ([f"{PINNED},other-model"], False), (["other-model"], False), ([""], False)])
+def test_g0_judge_id_goes_through_served_model_matches(served: list[str], ok: bool) -> None:
+    r = verdict(rows_n(66, 70), gates=good_gates(judge_served=served))
+    assert (r.verdict == S.PASS) is ok, r.gates["G0_integrity"]
+    assert r.gates["G0_integrity"]["judge_ok"] is ok
+
+
+@pytest.mark.parametrize("n", [8, 20, 49])
+def test_small_scope_gets_neither_pass_nor_powered_fail(n: int) -> None:
+    for k in (n, 0):
+        r = verdict(rows_n(k, n))
+        assert r.verdict == S.INCONCLUSIVE and "scope too narrow" in r.why and S.record_plan(r) == {}, (n, k, r.why)
+
+
+def test_n50_is_enough_and_a_thin_lane_is_not() -> None:
+    assert verdict(rows_n(50, 50)).verdict == S.PASS                           # kmin(50) = 40
+    rows = [mkrow(i, "commit_message" if i < 55 else "pr_description", True) for i in range(70)]       # pr lane has 15 items
+    r = verdict(rows)
+    assert r.verdict == S.INCONCLUSIVE and "pr_description" in r.why and S.record_plan(r) == {}
+    probe = [mkrow(i, "commit_message" if i < 55 else "pr_description", False, judge=None, prog=False, reasons=("x",)) for i in range(70)]
+    assert verdict(probe, mode=S.NO_JUDGE, gates=good_gates(g3b=None, judge_served=[])).verdict == S.INCONCLUSIVE     # no powered no-judge FAIL either
+
+
+def test_judge_errors_within_5_percent_are_excluded_from_n_beyond_it_invalid() -> None:
+    rows = rows_n(60, 70)
+    rows[0] = mkrow(0, rows[0].job, False, prog=True, judge="judge_error")
+    r = verdict(rows)
+    assert r.verdict == S.PASS and r.n_assigned == 69 and r.excluded_unjudged == 1 and r.k == 59
+    assert S.record_plan(r)["commit_message"]["n"] == 69
+    four = rows_n(60, 70)
+    for i in range(4):
+        four[i] = mkrow(i, four[i].job, False, prog=True, judge="judge_error")
+    r4 = verdict(four)
+    assert r4.verdict == S.INVALID and r4.gates["G5_complete"]["judge_errors"] == 4 and r4.gates["G5_complete"]["judge_error_tolerance"] == 3
+    shown = S.redact_invalid(r4)
+    assert (shown.k, shown.pooled, shown.lanes, shown.kmin) == (0, {}, {}, None) and "G5_complete" in shown.gates
+
+
+def test_record_counts_are_over_n_assigned_not_scored_rows() -> None:
+    rows = rows_n(117, 132)                                    # 132 scored rows; 8 items were abandoned by an earlier early-stopped attempt
+    assigned = ids(rows) + [f"x{i}" for i in range(8)]
+    r = S.score(rows, assigned, good_gates(), abandoned=assigned[-8:])
+    assert r.verdict == S.PASS and r.n_assigned == 140 and r.n_scored == 132
+    assert all((v["k"], v["n"]) == (117, 140) for v in S.record_plan(r).values())
+    assigned70 = [f"i{i}" for i in range(70)]
+    part = [mkrow(i, "commit_message" if i < 35 else "pr_description", i >= 15) for i in range(45)]
+    np_ = S.score(part, assigned70, good_gates(), early_stop=True)
+    assert np_.verdict == S.NOT_PASSED
+    assert {(v["k"], v["n"]) for v in S.record_plan(np_).values()} == {(30, 45)}                  # first attempt: partial counts
+    assert {(v["k"], v["n"]) for v in S.record_plan(np_, cumulative=True).values()} == {(30, 70)}  # later attempt: over n_assigned
+
+
+def test_config_key_is_keyed_on_the_digest_when_known() -> None:
+    assert A.config_key("m", "sha256:a", 1, "s", "h") == A.config_key("m-alias", "sha256:a", 1, "s", "h")      # `ollama cp m m-alias`
+    assert A.config_key("m", "sha256:a", 1, "s", "h") != A.config_key("m", "sha256:b", 1, "s", "h")
+    assert A.config_key("m", None, 1, "s", "h") != A.config_key("m2", None, 1, "s", "h")                       # no digest: the name
+
+
+def go(tmp_path: Path, adapter=None, judge=None, clock=None, **kw) -> SE.Outcome:
+    return SE.run_check(check(tmp_path, adapter, judge, clock, **kw))
+
+
+def test_session_accepts_a_dated_snapshot_and_a_comma_list_of_the_pinned_judge(tmp_path: Path) -> None:
+    dated = go(tmp_path / "a", judge=FakeJudge(served="claude-sonnet-5-5-20260101"))
+    assert dated.result.verdict == S.PASS and dated.result.gates["G0_integrity"]["judge_ok"]
+    both = f"{PINNED},{PINNED}-20260101"
+    listed = go(tmp_path / "b", judge=FakeJudge(served=both))
+    assert listed.result.verdict == S.PASS
+    assert lanes(tmp_path / "b")["commit_message"]["judge"]["model_served"] == both          # the served string is recorded, not null
+    other = go(tmp_path / "c", judge=FakeJudge(served=f"{PINNED},some-other-model"))
+    assert other.result.verdict == S.INVALID
+
+
+def test_early_stop_then_clean_draw_records_the_102_of_140_fail(tmp_path: Path) -> None:
+    clock = Clock()
+    items = BANK.draw(1)
+    ad1 = FakeAdapter({i.id: "progfail" for i in items[42:57]})          # 42 ok, then 15 programmatic failures: stop on the 57th item
+    first = go(tmp_path, ad1, clock=clock)
+    assert first.result.verdict == S.NOT_PASSED and ad1.calls == 57 and first.result.k == 42
+    clock.t += A.COOLDOWN_S + 1
+    second = go(tmp_path, FakeAdapter(fails(10, draw=2)), clock=clock)    # draw 2: 60/70 -> 102/140 = kfail(140)
+    assert second.status == "scored" and second.result.verdict == S.FAIL, (second.status, second.reason)
+    assert (second.result.k, second.result.n_assigned, second.result.kfail) == (102, 140, 102)
+    assert all(v["status"] == "written" for v in second.record_report.values()) and second.record_report
+    for lane in lanes(tmp_path).values():
+        assert lane["grade"] == "failed" and (lane["k"], lane["n"], lane["attempts"]) == (102, 140, 2) and "status" not in lane
+
+
+def test_store_refusal_is_an_error_consumes_no_draw_and_reruns_resume(tmp_path: Path, monkeypatch) -> None:
+    ad = FakeAdapter()
+    with monkeypatch.context() as m:
+        m.setattr(SE.eligibility_store, "record_local_check",
+                  lambda model, jobs, prov, path=None: {j: {"status": "refused", "reason": "grade does not match counts"} for j in jobs})
+        out = go(tmp_path, ad)
+    assert out.status == "record_refused" and "grade does not match counts" in out.reason
+    log = A.AttemptLog(tmp_path / "runs").entries()
+    assert len(log) == 1 and log[0]["state"] == "open" and log[0]["consumed"] is False
+    calls = ad.calls
+    again = go(tmp_path, ad)
+    assert again.status == "scored" and again.draw == 1 and again.run_id == out.run_id and ad.calls == calls     # no new draw, no new local calls
+    assert A.AttemptLog(tmp_path / "runs").entries()[-1]["consumed"] is True
+
+
+def invalid_adapter() -> FakeAdapter:
+    return FakeAdapter({i.id: "error" for i in BANK.draw(1)[:4]})         # 4 bad rows: G1 fails after the local arm
+
+
+def test_invalid_after_the_local_arm_reserves_the_run_hides_counts_and_the_third_burns_the_draw(tmp_path: Path) -> None:
+    clock, ad, judge = Clock(), invalid_adapter(), FakeJudge()
+    o1 = go(tmp_path, ad, judge, clock)
+    assert o1.result.verdict == S.INVALID and (o1.result.k, o1.result.pooled, o1.result.lanes) == (0, {}, {})
+    e = A.AttemptLog(tmp_path / "runs").entries()
+    assert len(e) == 1 and e[0]["state"] == "open" and e[0]["strike"] and not e[0]["consumed"] and e[0]["k"] is None and e[0]["rows"] == []
+    calls, jcalls = ad.calls, judge.calls
+    o2 = go(tmp_path, ad, judge, clock)                                   # strike 2: same run id, cached answers, cached plants, cached judgements
+    assert o2.run_id == o1.run_id and o2.result.verdict == S.INVALID and ad.calls == calls and judge.calls == jcalls
+    o3 = go(tmp_path, ad, judge, clock)                                   # strike 3: the draw is burnt
+    assert o3.result.verdict == S.INVALID and ad.calls == calls
+    last = A.AttemptLog(tmp_path / "runs").entries()[-1]
+    assert last["state"] == "burnt" and last["consumed"] is True and last["draw"] == 1
+    assert go(tmp_path, FakeAdapter(), clock=clock).status == "refused"    # cooldown after a consumed draw
+    clock.t += A.COOLDOWN_S + 1
+    nxt = go(tmp_path, FakeAdapter(), clock=clock)
+    assert nxt.draw == 2 and nxt.result.verdict == S.PASS and nxt.run_id != o1.run_id
+
+
+def test_open_run_must_be_resumed_unless_discarded_or_expired(tmp_path: Path) -> None:
+    clock = Clock()
+    o1 = go(tmp_path, invalid_adapter(), clock=clock)
+    refused = go(tmp_path, FakeAdapter(), clock=clock, run_id="some-other-run")
+    assert refused.status == "refused" and o1.run_id in refused.reason
+    fresh = go(tmp_path, FakeAdapter(), clock=clock, fresh=True)
+    assert fresh.run_id != o1.run_id and fresh.result.verdict == S.PASS and fresh.draw == 1
+    entries = A.AttemptLog(tmp_path / "runs").entries()
+    assert [e["state"] for e in entries if e["run_id"] == o1.run_id] == ["open", "discarded"] and entries[1]["strike"]
+    # a reservation older than 7 days no longer binds
+    t2 = tmp_path / "t2"
+    c2 = Clock()
+    p1 = go(t2, invalid_adapter(), clock=c2)
+    c2.t += A.RESERVATION_TTL_S + 1
+    p2 = go(t2, FakeAdapter(), clock=c2)
+    assert p2.run_id != p1.run_id and p2.result.verdict == S.PASS
+
+
+def test_budget_stop_and_g3b_failure_follow_the_reservation_rule(tmp_path: Path) -> None:
+    wrong = {p.id for p in BANK.plants("good")[:5]}
+    go(tmp_path / "g", FakeAdapter(), FakeJudge(plant_wrong=wrong))
+    assert A.AttemptLog(tmp_path / "g" / "runs").entries() == []                 # INVALID before the local arm: nothing consumed, nothing reserved
+    c = check(tmp_path / "b")
+    c.budget = Budget(metered=False, cap_calls=45)
+    stopped = SE.run_check(c)
+    assert stopped.status == "budget_stop"
+    refused = go(tmp_path / "b", FakeAdapter(), run_id="elsewhere")
+    assert refused.status == "refused" and stopped.run_id in refused.reason
+
+
+def test_judge_error_is_not_cached_retried_and_excluded_up_to_5_percent(tmp_path: Path) -> None:
+    first_id = BANK.draw(1)[0].id
+    judge = FakeJudge()
+    out = go(tmp_path, FakeAdapter({first_id: "judgeerr"}), judge)
+    assert out.result.verdict == S.PASS and out.result.n_assigned == 69 and out.result.excluded_unjudged == 1
+    assert judge.answer_calls == 69 + 3 * 2                                    # 1 call per good answer; the errored one: 3 passes x 2 attempts
+    cached = (tmp_path / "runs" / out.run_id / "judge.jsonl").read_text().splitlines()
+    assert len(cached) == 69 and "judge_error" not in "".join(cached)
+    assert lanes(tmp_path)["commit_message"]["n"] == 69
+    healed = FakeJudge()
+    healed.heal_after = 71                                                     # the errored item is judged properly on the 2nd pass
+    ok = go(tmp_path / "h", FakeAdapter({first_id: "judgeerr"}), healed)
+    assert ok.result.verdict == S.PASS and ok.result.n_assigned == 70 and ok.result.excluded_unjudged == 0
+
+
+def test_too_many_judge_errors_is_invalid_but_keeps_answers_and_judgements_for_resume(tmp_path: Path) -> None:
+    ad, judge = FakeAdapter({i.id: "judgeerr" for i in BANK.draw(1)[:4]}), FakeJudge()
+    bad = go(tmp_path, ad, judge)
+    assert bad.result.verdict == S.INVALID and bad.result.gates["G5_complete"]["judge_errors"] == 4 and bad.result.k == 0
+    calls, jcalls = ad.calls, judge.calls
+    judge.err_marker = False                                                   # the judge recovers
+    good = go(tmp_path, ad, judge)
+    assert good.run_id == bad.run_id and good.result.verdict == S.PASS and good.result.n_assigned == 70
+    assert ad.calls == calls and judge.calls - jcalls == 4                     # only the four errored answers were judged again; no plants, no local calls
+
+
+def test_a_context_that_fits_fewer_than_50_items_is_refused_before_any_spend(tmp_path: Path) -> None:
+    sizes = sorted(len(i.task) for i in BANK.draw(1))
+    cap = sizes[30]
+    assert sum(1 for x in sizes if x <= cap) < 50
+    ad, judge = FakeAdapter(max_chars=cap), FakeJudge()
+    out = go(tmp_path, ad, judge)
+    assert out.status == "refused" and "scope too narrow" in out.reason and "num_ctx" in out.reason
+    assert ad.calls == 0 and judge.calls == 0 and A.AttemptLog(tmp_path / "runs").entries() == []
+
+
+def test_text_job_lines_show_not_passed_apart_from_failed(tmp_path: Path) -> None:
+    from llm_router.resolver import eligibility_store as ES
+    go(tmp_path / "np", FakeAdapter(fails(70, "progfail")))
+    go(tmp_path / "f", FakeAdapter(fails(30)))
+    np_line = "\n".join(ES.text_job_lines(path=tmp_path / "np" / "elig.json"))
+    f_line = "\n".join(ES.text_job_lines(path=tmp_path / "f" / "elig.json"))
+    assert "not passed 0/15" in np_line and "failed" not in np_line
+    assert "failed 40/70" in f_line and "not passed" not in f_line
 
 
 # ---------------------------------------------------------------- port-equivalence with the stored Q37 run

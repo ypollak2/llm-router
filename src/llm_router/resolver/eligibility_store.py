@@ -176,7 +176,7 @@ def text_job_lines(*, path: Path | None = None,
                         stored = lane.get("model_digest")
                         stale = "model changed" if isinstance(stored, str) and stored else "expired"
                     lc_key = (model, lane["grade"], lane["k"], lane["n"], lane["bank_version"],
-                              lane.get("date") or lane.get("recorded_at") or "", stale)
+                              lane.get("date") or lane.get("recorded_at") or "", stale, lane.get("status"))
                     lc_groups.setdefault(lc_key, []).append(job)
                     continue
                 key = (model, lane["prereg"], lane["grade"], lane["k"], lane["n"])
@@ -184,13 +184,14 @@ def text_job_lines(*, path: Path | None = None,
     word = {"passed": "qualified", "failed": "failed"}
     lines = [f"text_job: {', '.join(jobs)} \u2014 {word[g]} ({prereg}, {k}/{n}) [{model}]"
              for (model, prereg, g, k, n), jobs in groups.items()]
-    for (model, g, k, n, bank, date, stale), jobs in lc_groups.items():
+    for (model, g, k, n, bank, date, stale, st), jobs in lc_groups.items():
         names = ", ".join(jobs)
         if stale:
             lines.append(f"{model} \u2014 {names} stale \u2014 {stale}")
         else:
             when = f", {date}" if date else ""
-            lines.append(f"{model} \u2014 {names} {'passed' if g == 'passed' else 'failed'} "
+            word_g = "passed" if g == "passed" else {"not_passed": "not passed", "inconclusive": "inconclusive"}.get(st, "failed")
+            lines.append(f"{model} \u2014 {names} {word_g} "
                          f"{k}/{n} ({_bank_label(bank)}{when})")
     return lines
 

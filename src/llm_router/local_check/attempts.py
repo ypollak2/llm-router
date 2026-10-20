@@ -9,7 +9,13 @@ Attempts are tracked per configuration = (model, model digest, bank version + sh
 * A rerun within 24 h of the last scored attempt is refused unless ``force``.
 * Only scored attempts (a judged run that reached a PASS / FAIL / NOT_PASSED / INCONCLUSIVE verdict) consume a draw. INVALID runs, ``--no-judge``
   runs and PROBE results are logged but consume nothing and do not enter the union.
-* The cumulative verdict replaces the recorded lane (latest wins); it is never the better of two runs.
+* The cumulative verdict replaces a recorded PASS/FAIL lane (latest wins) except that an INCONCLUSIVE rerun writes nothing: an earlier recorded
+  PASS is kept and the rerun is only logged (D-263 revised; the owner accepts the best-of-two risk).
+* No reroll. A run that ended without a verdict AFTER a local item ran (INVALID, budget stop, interrupt, store refusal) leaves an ``open``
+  entry: the run directory is a RESERVATION for (configuration, draw). The next run of that configuration must resume the same run id
+  (cached answers and judgements are reused) unless it is discarded (``fresh``, a strike) or older than 7 days. INVALID outcomes and discards are
+  strikes: the first ``FREE_STRIKES`` per configuration are free, the third and later also consume the draw (the draw is burnt, empty).
+  An INVALID before the local arm (G3a, G3b) logs and consumes nothing.
 """
 from __future__ import annotations
 
@@ -22,11 +28,15 @@ from typing import Any, Iterable, Sequence
 
 COOLDOWN_S = 24 * 3600
 MAX_DRAWS = 2
+RESERVATION_TTL_S = 7 * 24 * 3600
+FREE_STRIKES = 2
 LOG_NAME = "attempts.jsonl"
 
 
 def config_key(model: str, digest: str | None, bank_version: Any, bank_sha256: str, settings_hash: str) -> str:
-    raw = json.dumps([model, digest, str(bank_version), bank_sha256, settings_hash], sort_keys=True)
+    # The digest identifies the weights: `ollama cp m m2` is the same configuration. The name is only the fallback when no digest is known.
+    ident = ["digest", digest] if digest else ["name", model]
+    raw = json.dumps([ident, str(bank_version), bank_sha256, settings_hash], sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
@@ -36,6 +46,8 @@ class Plan:
     refused: str | None = None           # reason when refused
     prior: list[dict[str, Any]] = field(default_factory=list)      # consumed attempts of this configuration, oldest first
     next_allowed_ts: float | None = None
+    reservation: dict[str, Any] | None = None    # an open, unexpired run of this configuration and draw: it must be resumed
+    strikes: int = 0                             # INVALID-after-local-arm outcomes and discards so far for this configuration
 
     @property
     def prior_rows(self) -> list[dict[str, Any]]:
@@ -54,9 +66,6 @@ class Plan:
     def prior_served(self) -> list[str]:
         return sorted({s for e in self.prior for s in e.get("judge_served", [])})
 
-    @property
-    def recorded_pass(self) -> bool:
-        return any(e.get("verdict") == "PASS" and e.get("recorded") for e in self.prior)
 
 
 class AttemptLog:
@@ -89,7 +98,20 @@ class AttemptLog:
         nxt = None if last is None else last + COOLDOWN_S
         if nxt is not None and now < nxt and not force:
             return Plan(None, "cooldown: the previous scored run of this configuration was less than 24 h ago (use --force to override)", prior, nxt)
-        return Plan(draw, None, prior, nxt)
+        return Plan(draw, None, prior, nxt, self.reservation(key, draw, now), self.strikes(key))
+
+    def reservation(self, key: str, draw: int, now: float) -> dict[str, Any] | None:
+        """The newest ``open`` run of this configuration and draw (the latest entry of its run id says ``open``), if younger than 7 days."""
+        latest: dict[str, dict[str, Any]] = {}
+        for e in self.entries():
+            if e["config_key"] == key and e.get("run_id"):
+                latest[e["run_id"]] = e
+        live = [e for e in latest.values() if e.get("state") == "open" and e.get("draw") == draw
+                and isinstance(e.get("ts"), (int, float)) and now - e["ts"] <= RESERVATION_TTL_S]
+        return max(live, key=lambda e: e["ts"]) if live else None
+
+    def strikes(self, key: str) -> int:
+        return sum(1 for e in self.entries() if e["config_key"] == key and e.get("strike"))
 
     def append(self, entry: dict[str, Any]) -> None:
         """Append one attempt (fsynced, 0600). ``entry`` must carry ``config_key``; it must not carry answer or prompt text."""
