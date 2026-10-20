@@ -542,6 +542,90 @@ def test_served_model_matches_exact_alias_and_mismatch():
     ok, why = J.served_model_matches("some-other-model", m)
     assert not ok and "does not match" in why
     assert not J.served_model_matches("", m)[0] and not J.served_model_matches(m, "")[0]
-    # alias: any other spelling the price table resolves to the same canonical id
-    canon = pricing.resolve(m)
-    assert J.served_model_matches("anthropic/" + m, m)[0] == (pricing.resolve("anthropic/" + m) == canon)
+
+
+def test_served_model_matches_concrete_cases():
+    f = J.served_model_matches
+    assert f("claude-opus-5-5-20260101", "claude-opus-5-5")[0] and f("claude-opus-5-5", "claude-opus-5-5-20260101")[0]   # dated == undated
+    assert f("claude-opus-5-5[1m]", "claude-opus-5-5")[0]
+    assert f("anthropic/claude-opus-5-5", "claude-opus-5-5")[0]
+    assert not f("claude-opus-5", "claude-opus-5-5")[0]
+    assert not f("qwen:7b", "llama:8b")[0] and not f("ollama/qwen", "ollama/llama")[0]
+    assert not f("openai/claude-opus-5-5", "claude-opus-5-5")[0]
+    assert not f("claude-opus-5-5-2026", "claude-opus-5-5")[0]          # not a YYYYMMDD suffix
+    assert f("claude-opus-5-5,anthropic/claude-opus-5-5-20260101", "claude-opus-5-5")[0]
+    assert not f("claude-opus-5-5,claude-haiku-4-5", "claude-opus-5-5")[0]
+
+
+# ---- LC-4c -------------------------------------------------------------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _no_provider_url_env(monkeypatch):
+    for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_BASE"):
+        monkeypatch.delenv(k, raising=False)
+
+
+def _served_backend(script):
+    m = _priced_model()
+    return api_backend(script, model=m, model_served=m)
+
+
+def test_transient_timeout_is_retried_not_budget_exhausted():
+    be, fake = _served_backend([TimeoutError("t"), PASS])
+    bud = B.Budget(est_call_usd=0.01)
+    o = J.judge_answer(be, bud, "p")
+    assert o.verdict == "pass" and o.attempts == 2 and len(fake.calls) == 2
+    assert bud.calls == 2 and bud.failed_calls == 1 and bud.unpriced_calls == 0
+    assert bud.estimated_usd == pytest.approx(0.01) and bud.spent_usd > 0.01     # estimate for the failed call + exact cost of the success
+    bud.check()                                                                    # no BudgetExhausted
+
+
+def test_persistent_errors_record_judge_error_and_run_reaches_g3b_gate():
+    ps = plants()
+    be, _ = _served_backend([ConnectionError("x")] * (2 * len(ps)))
+    bud = B.Budget(est_call_usd=0.0001, cap_calls=1000)
+    res = J.run_g3b(be, bud, ps)
+    assert res.status == "FAIL" and res.n_judged == len(ps) and res.errors == len(ps)
+    assert any("judge errors" in r for r in res.reasons) and not res.stop_reason
+    assert bud.calls == 2 * len(ps) and bud.failed_calls == bud.calls and bud.unpriced_calls == 0
+
+
+def test_failed_calls_count_toward_call_cap_and_usd_cap():
+    be, _ = _served_backend([TimeoutError("t")] * 10)
+    with pytest.raises(B.BudgetExhausted, match="call cap"):
+        J.judge_answer(be, B.Budget(cap_calls=1), "p")
+    be, _ = _served_backend([TimeoutError("t")] * 10)
+    bud = B.Budget(cap_usd=0.05, est_call_usd=0.03)
+    with pytest.raises(B.BudgetExhausted, match="USD cap|could exceed"):
+        J.judge_answer(be, bud, "p")
+    assert bud.calls == 1 and bud.spent_usd == pytest.approx(0.03)
+
+
+def test_client_side_failure_before_send_charges_nothing():
+    def boom(key):
+        raise RuntimeError("no client")
+    be = J.ApiBackend(_priced_model(), KEY, client_factory=boom)
+    bud = B.Budget(est_call_usd=0.5)
+    o = J.judge_answer(be, bud, "p")
+    assert o.verdict == "judge_error" and bud.calls == 2 and bud.failed_calls == 2 and bud.spent_usd == 0.0 and o.cost_usd == 0.0
+
+
+def test_successful_unpriced_served_id_still_stops():
+    be, _ = api_backend([PASS], model=_priced_model(), model_served="unpriced-served-id")
+    bud = B.Budget(est_call_usd=0.01)
+    o = J.judge_answer(be, bud, "p")
+    assert o.verdict == "pass" and bud.unpriced_calls == 1 and bud.failed_calls == 0
+    with pytest.raises(B.BudgetExhausted, match="could not be priced"):
+        bud.check()
+
+
+def test_api_backend_refuses_configured_custom_base_url_without_caller_passing_it(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:47821")
+    with pytest.raises(J.JudgeSetupError, match="custom base URL"):
+        J.ApiBackend(_priced_model(), KEY, client_factory=lambda k: None)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL")
+    monkeypatch.setenv("ANTHROPIC_API_BASE", "https://evil.example")
+    with pytest.raises(J.JudgeSetupError, match="custom base URL"):
+        J.ApiBackend(_priced_model(), KEY, client_factory=lambda k: None)
+    monkeypatch.setenv("ANTHROPIC_API_BASE", "https://api.anthropic.com")
+    J.ApiBackend(_priced_model(), KEY, client_factory=lambda k: None)
+    J.ApiBackend(_priced_model(), KEY, client_factory=lambda k: None, configured_base_url="")   # explicit "none" is honoured
