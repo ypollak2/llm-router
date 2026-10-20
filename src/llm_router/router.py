@@ -1137,7 +1137,10 @@ def _drop_failed_eligibility(
     try:
         from llm_router import eligibility_routing
         if exempt_reason:
-            return eligibility_routing.note_bypass(models, task_type, c, exempt_reason)
+            kept = eligibility_routing.note_bypass(models, task_type, c, exempt_reason)
+            # LC-8 / D-260: the verified text-job path alone may put a passed local lane first.
+            tj = eligibility_routing._text_job_ctx.get() if exempt_reason == eligibility_routing.TEXT_JOB_REASON else None
+            return eligibility_routing.prefer_passed(kept, tj[0], tj[1], time.time()) if tj else kept
         return eligibility_routing.filter_chain(models, task_type, c)
     except Exception as exc:  # noqa: BLE001 - fail-open: the chain stays as built
         from llm_router import failopen
