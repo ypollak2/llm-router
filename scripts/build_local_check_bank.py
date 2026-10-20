@@ -51,6 +51,9 @@ RESULTS_DIR = {"frozen": "run", "calib1": "calib1", "calib2": "calib2", "calib3"
 PLANT_SETS = {"frozen": ("poolf", "run"), "calib1": ("calib1", "calib2")}
 # diffs touching vendored third-party code carry that code's own licence, which is not checked here
 VENDORED = re.compile(r"(^|/)(_vendor|vendor|third_party|node_modules)/")
+# a licence file may put part of the tree under another licence ('the "docs" directory ... CC BY-SA 4.0')
+SPLIT_GRANT = re.compile(r"creative commons|\bCC[ -]BY\b|\bCC0\b", re.I)
+SPLIT_DIR = re.compile(r"""["'`]([A-Za-z0-9_.-]+)["'`]\s+(?:directory|folder)""", re.I)
 LICENCE_FILE = re.compile(r"^(LICENSE(\.txt|\.md)?|LICENSE-[A-Z]+|UNLICENSE)$")
 
 # (SPDX id, regexes that must all match the normalised licence text)
@@ -81,6 +84,26 @@ def classify_text(text: str) -> str:
             if best is None or cand < best:
                 best = cand
     return best[2] if best else "UNKNOWN"
+
+
+def split_paths(text: str) -> list[str]:
+    """Path prefixes a licence text puts under a different licence than the code.
+
+    Derived from the text, not from a list of repos: a paragraph that names a quoted directory
+    ("docs" directory) and a Creative Commons grant makes that directory a licence-split path.
+    """
+    out: list[str] = []
+    for para in re.split(r"\n\s*\n", text):
+        flat = re.sub(r"\s+", " ", para)
+        if SPLIT_GRANT.search(flat):
+            out += [m.group(1).strip("/") + "/" for m in SPLIT_DIR.finditer(flat)]
+    return sorted(set(out))
+
+
+def touches_split(rec: dict) -> bool:
+    """True if the record's diff or file list touches a path its repo's LICENSE puts under another licence."""
+    paths = list(rec["files"]) + re.findall(r"^diff --git a/(\S+)", rec["diff"], flags=re.M)
+    return any(x.startswith(pre) for pre in rec.get("_split", ()) for x in paths)
 
 
 def vendored(rec: dict) -> bool:
@@ -127,6 +150,7 @@ class Resolver:
         self.repos = repos
         self.slug: dict[str, str] = {}
         self.cache: dict[tuple[str, str], tuple[str, list[str]]] = {}
+        self.split_cache: dict[tuple[str, str], list[str]] = {}
 
     def repo_slug(self, short: str) -> str:
         if short not in self.slug:
@@ -137,12 +161,21 @@ class Resolver:
             self.slug[short] = m.group(1)
         return self.slug[short]
 
-    def meta(self, short: str, sha: str) -> dict:
+    def split(self, short: str, sha: str) -> list[str]:
+        if (short, sha) not in self.split_cache:
+            _, files = self.cache_meta(short, sha)
+            self.split_cache[(short, sha)] = sorted({p for n in files for p in split_paths(git(self.repos / short, "show", f"{sha}:{n}"))})
+        return self.split_cache[(short, sha)]
+
+    def cache_meta(self, short: str, sha: str) -> tuple[str, list[str]]:
         if (short, sha) not in self.cache:
             self.cache[(short, sha)] = licence_at(self.repos / short, sha)
-        lic, files = self.cache[(short, sha)]
+        return self.cache[(short, sha)]
+
+    def meta(self, short: str, sha: str) -> dict:
+        lic, files = self.cache_meta(short, sha)
         slug = self.repo_slug(short)
-        return {"repo": slug, "sha": sha, "licence": lic, "licence_files": files,
+        return {"_split": self.split(short, sha), "repo": slug, "sha": sha, "licence": lic, "licence_files": files,
                 "url": f"https://github.com/{slug}/commit/{sha}"}
 
 
@@ -219,6 +252,8 @@ def build(q37: Path, repos: Path) -> tuple[list[dict], dict]:
     res = Resolver(repos)
     excluded: Counter = Counter()
     excluded_vendored: Counter = Counter()
+    excluded_split: Counter = Counter()
+    excluded_split_ids: list[str] = []
     audited_ids = audited_item_ids(q37)
 
     def keep(rec: dict) -> bool:
@@ -227,6 +262,10 @@ def build(q37: Path, repos: Path) -> tuple[list[dict], dict]:
             return False
         if vendored(rec):
             excluded_vendored[rec["job"]] += 1
+            return False
+        if touches_split(rec):
+            excluded_split[rec["repo"]] += 1
+            excluded_split_ids.append(rec["id"])
             return False
         return True
 
@@ -284,7 +323,7 @@ def build(q37: Path, repos: Path) -> tuple[list[dict], dict]:
                 if not allowed(x):
                     plant_excluded[x] += 1
             return None
-        if vendored(rec):
+        if vendored(rec) or touches_split(rec):
             plant_vendored += 1
             return None
         if rec["sha"] in shas or h(rec["diff"]) in diffs or p["id"] in seen:
@@ -326,7 +365,12 @@ def build(q37: Path, repos: Path) -> tuple[list[dict], dict]:
     assert len({(p["id"], p["kind"]) for p in plants}) == len(plants), "plant (id, kind) must be unique"
     assert len({p["id"] for p in plants if p["provenance"] == "lc1-rebuilt"}) == sum(p["provenance"] == "lc1-rebuilt" for p in plants)
     plants.sort(key=lambda p: (p["kind"], p["job"], p["id"]))
-    rebuilt = len(plants) - kept_q37
+    rebuilt = sum(p["provenance"] == "lc1-rebuilt" for p in plants)
+    split_table = {r["repo"]: r["_split"] for r in items + plants if r["_split"]}
+    for r in items + plants:                       # internal only: not part of the shipped record
+        r.pop("_split")
+        if "source" in r:
+            r["source"].pop("_split")
 
     by_job = lambda rs, a: dict(sorted(Counter(r["job"] for r in rs if r["audited"] is a).items()))  # noqa: E731
     manifest = {
@@ -347,11 +391,15 @@ def build(q37: Path, repos: Path) -> tuple[list[dict], dict]:
             "plants_by_kind": dict(Counter(p["kind"] for p in plants)),
             "plants_by_provenance": dict(sorted(Counter(p["provenance"] for p in plants).items())),
             "plants_audited_kept": kept_q37,
-            "plants_topped_up": rebuilt,
+            "plants_topped_up": rebuilt,                       # mechanically rebuilt here (new lc1p- ids)
+            "plants_reused_q37_calib": sum(p["provenance"] == "q37-calib1" for p in plants),  # byte-identical Q37 calib plants
         },
         "licences": dict(sorted(Counter(r["licence"] for r in items + plants).items())),
         "repo_licences": dict(sorted({r["repo"]: r["licence"] for r in items + plants}.items())),
         "excluded_items_by_licence": dict(sorted(excluded.items())),
+        "licence_split_paths": split_table,                    # read from each LICENSE text; diffs touching them are dropped
+        "excluded_items_licence_split": dict(sorted(excluded_split.items())),
+        "excluded_items_licence_split_ids": sorted(excluded_split_ids),
         "excluded_items_vendored_by_job": dict(sorted(excluded_vendored.items())),
         "excluded_plant_candidates_by_licence": dict(sorted(plant_excluded.items())),
         "excluded_plant_candidates_vendored": plant_vendored,

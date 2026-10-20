@@ -271,17 +271,23 @@ def test_draws_are_stratified_job_size_language(bank):
         assert sum(n for (j, *_), n in c1.items() if j == job) == sum(n for (j, *_), n in c2.items() if j == job) == 35
 
 
-def test_draws_split_audited_items_evenly_and_use_audited_first(bank):
-    a1, a2 = sum(i.audited for i in bank.draw(1)), sum(i.audited for i in bank.draw(2))
-    assert abs(a1 - a2) <= 6 and a1 + a2 == bank.manifest["counts"]["items_audited"]
+def test_draw_1_is_fully_audited_and_balanced(bank):
+    d1, d2 = bank.draw(1), bank.draw(2)
+    assert sum(not i.audited for i in d1) == 0                                # membership, not ordering
+    assert sum(not i.audited for i in d2) == bank.manifest["counts"]["items_unaudited"]   # every unaudited item is in draw 2
+    assert sum(i.audited for i in d1) + sum(i.audited for i in d2) == bank.manifest["counts"]["items_audited"]
+    for job in B.JOBS:
+        assert sum(i.job == job for i in d1) == sum(i.job == job for i in d2) == 35
 
 
-def test_allocate_is_proportional_and_capped():
-    sizes = {"a": 50, "b": 30, "c": 20}
-    assert B._allocate(sizes, 70, lambda s: s) == {"a": 35, "b": 21, "c": 14}
-    assert B._allocate({"a": 3, "b": 3}, 6, lambda s: s) == {"a": 3, "b": 3}
-    out = B._allocate({"a": 7, "b": 5, "c": 1}, 6, lambda s: s)
-    assert sum(out.values()) == 6 and all(out[k] <= {"a": 7, "b": 5, "c": 1}[k] for k in out)
+def test_draw_falls_back_to_unaudited_only_when_a_stratum_is_short(bank):
+    # strip the audited flag from one whole stratum: draw 1 must still be a valid 35/35 split
+    import dataclasses
+    items = tuple(dataclasses.replace(i, audited=False) if (i.job, i.stratum) == ("commit_message", "small/py") else i for i in bank.items())
+    b2 = B.Bank(bank.manifest, items, ())
+    assert len(b2.draw(1)) == len(b2.draw(2)) == 70
+    assert {i.id for i in b2.draw(1)}.isdisjoint(i.id for i in b2.draw(2))
+    assert sum(not i.audited for i in b2.draw(1)) == len(bank.items("commit_message", "small/py")) // 2
 
 
 def test_draws_depend_on_the_bank_sha(bank, copy):
@@ -369,3 +375,46 @@ def test_built_wheel_contains_the_data(tmp_path):
         assert f"llm_router/local_check/data/{n}" in names
     assert "llm_router/local_check/bank.py" in names
     assert not any(n.startswith("scripts/") or "build_local_check_bank" in n for n in names)
+
+
+def test_no_item_touches_a_licence_split_path(bank):
+    m = bank.manifest
+    assert m["licence_split_paths"] == {"celery/celery": ["docs/"]}
+    for r in _raw_records():
+        for pre in m["licence_split_paths"].get(r["repo"], ()):
+            assert not any(f.startswith(pre) for f in r["files"]), r["id"]
+            assert "diff --git a/" + pre not in r["diff"], r["id"]
+    assert m["excluded_items_licence_split"] == {"celery/celery": len(m["excluded_items_licence_split_ids"])} and m["excluded_items_licence_split_ids"]
+
+
+def test_split_paths_are_read_from_licence_text():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("lcb", Path(__file__).resolve().parents[1] / "scripts" / "build_local_check_bank.py")
+    lcb = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lcb)
+    celery = 'BSD text.\n\nDocumentation License\n=====\n\nThe documentation portion (the rendered contents of the\n"docs" directory of a checkout) is supplied\nunder the "Creative Commons Attribution-ShareAlike 4.0" (CC BY-SA 4.0) License\n'
+    assert lcb.split_paths(celery) == ["docs/"]
+    assert lcb.split_paths("MIT text. The \"docs\" directory is mentioned alone.") == []
+    assert lcb.split_paths("Creative Commons grant for the whole project.") == []
+    assert lcb.touches_split({"_split": ["docs/"], "files": ["docs/a.rst"], "diff": ""})
+    assert not lcb.touches_split({"_split": ["docs/"], "files": ["src/docs/a.rst"], "diff": "diff --git a/src/x b/src/x"})
+
+
+def test_loader_enforces_every_manifest_count(copy):
+    for name in ("items_by_job", "plants_by_kind", "items_by_stratum", "plants_by_provenance", "items_by_repo"):
+        mp = copy / "manifest.json"
+        m = json.loads(mp.read_text())
+        first = next(iter(m["counts"][name]))
+        m["counts"][name][first] += 1
+        mp.write_text(json.dumps(m))
+        with pytest.raises(B.BankError, match=name):
+            B.load_bank(copy)
+        m["counts"][name][first] -= 1
+        mp.write_text(json.dumps(m))
+    B.load_bank(copy)
+
+
+def test_rebuilt_and_reused_plant_counts_are_separate(bank):
+    c = bank.manifest["counts"]
+    assert c["plants_topped_up"] == c["plants_by_provenance"]["lc1-rebuilt"]
+    assert c["plants_reused_q37_calib"] == c["plants_by_provenance"]["q37-calib1"]

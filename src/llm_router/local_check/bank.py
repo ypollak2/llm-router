@@ -9,14 +9,15 @@ Records are ``{"type": "item" | "plant", ...}``. Items are the tasks a local mod
 asked to do (``job`` = commit_message | pr_description). Plants are judge-validity
 cases (good / swapped / mutated message texts) drawn from a pool disjoint from every
 item. ``Bank.draw(1)`` and ``Bank.draw(2)`` are the two disjoint 70-item draws,
-35 per job. Each job's items are allocated to the two draws stratum by stratum
-(job x size x language) as evenly as possible (per-stratum counts differ by at most 1),
-audited items first within a stratum; the order inside a stratum is a hash seeded with
-the bank sha, so draws are reproducible.
+35 per job, split stratum by stratum (job x size x language; per-stratum counts differ by
+at most 1). Draw 1 is the audited draw (membership, not ordering: it holds audited items
+only); draw 2 takes the rest. Picks inside a stratum are a hash seeded with the bank sha,
+so draws are reproducible.
 
 ``Item.audited`` is True when both arms (qwen3.6 and Sonnet) answered the item in Q37
 (frozen run or calibration slices 1-3) with grader and judge results behind it, and any
-failure was in the G4 audit set. Unaudited items (from the poolc pool) fill the bank to
+failure was in the G4 audit set. "Audited" is not "clean": it means the item has verdicts behind it,
+and a grader-defect item (the G4 audit found the grader, not the model, wrong) may be audited. Unaudited items (from the poolc pool) fill the bank to
 70 per job; a verdict that depends on them should say so.
 """
 from __future__ import annotations
@@ -24,7 +25,6 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,16 +43,6 @@ class BankError(Exception):
 
 class BankIntegrityError(BankError):
     """The bank bytes do not hash to the sha256 recorded in the manifest."""
-
-
-def _allocate(sizes: dict[str, int], total: int, tie: Callable[[str], str]) -> dict[str, int]:
-    """Largest-remainder allocation of ``total`` over strata in proportion to ``sizes`` (never above a stratum's size)."""
-    n = sum(sizes.values())
-    alloc = {s: total * k // n for s, k in sizes.items()}
-    rest = total - sum(alloc.values())
-    for s in sorted(sizes, key=lambda s: (-(total * sizes[s] % n), tie(s)))[:rest]:
-        alloc[s] += 1
-    return alloc
 
 
 def licence_allowed(expr: str) -> bool:
@@ -149,10 +139,12 @@ class Bank:
     def draw(self, n: int) -> list[Item]:
         """Draw ``n`` (1 or 2): 35 items per job, disjoint from the other draw, same every time for this bank.
 
-        Per job, strata (size/lang) are allocated between the two draws as evenly as possible: a stratum of
-        k items puts k//2 in each draw and its odd item goes to one draw (the odd strata alternate between
-        the draws, in hash order). Inside a stratum audited items come first, then unaudited; items are
-        dealt alternately so both draws get a similar share of each.
+        Draw 1 is the audited draw: per job and stratum (size/lang) of k items it takes ceil(k/2) or
+        floor(k/2) audited items (the odd strata split their extra item half to each draw, preferring
+        draw 1 where the stratum has enough audited items), so draw 1 holds no unaudited item whenever
+        every stratum has at least that many audited items. Draw 2 is everything else (all unaudited
+        items plus the remaining audited ones). Per-stratum counts differ by at most 1 between the
+        draws and each job has 35 per draw. Picks inside a stratum are by a hash seeded with the bank sha.
         """
         if n not in range(1, DRAWS + 1):
             raise ValueError(f"draw must be 1..{DRAWS}, got {n}")
@@ -163,18 +155,18 @@ class Bank:
         out: list[Item] = []
         for job in JOBS:
             pool = self.items(job)
-            if len(pool) < DRAW_PER_JOB * DRAWS:
-                raise BankError(f"bank has {len(pool)} {job} items, need {DRAW_PER_JOB * DRAWS}")
+            if len(pool) != DRAW_PER_JOB * DRAWS:
+                raise BankError(f"bank has {len(pool)} {job} items, need exactly {DRAW_PER_JOB * DRAWS}")
             by_stratum: dict[str, list[Item]] = {}
             for i in pool:
                 by_stratum.setdefault(i.stratum, []).append(i)
-            alloc = _allocate({s: len(v) for s, v in by_stratum.items()}, DRAW_PER_JOB * DRAWS, lambda s: key(job, "alloc|" + s))
-            odd = sorted((s for s, k in alloc.items() if k % 2), key=lambda s: key(job, "odd|" + s))
-            first = {s: (0 if j % 2 == 0 else 1) for j, s in enumerate(odd)}   # draw index that gets the odd item
-            for s, k in alloc.items():
-                ordered = sorted(by_stratum[s], key=lambda i: (not i.audited, key(job, i.id)))[:k]
-                lead = first.get(s, 0)
-                out.extend(i for j, i in enumerate(ordered) if (j + lead) % 2 == n - 1)
+            odd = sorted((s for s, v in by_stratum.items() if len(v) % 2),
+                         key=lambda s: (sum(i.audited for i in by_stratum[s]) < (len(by_stratum[s]) + 1) // 2, key(job, "odd|" + s)))
+            big = set(odd[: len(odd) // 2])                      # odd strata whose extra item goes to draw 1
+            for s, v in by_stratum.items():
+                c1 = len(v) // 2 + (1 if s in big else 0)
+                ordered = sorted(v, key=lambda i: (not i.audited, key(job, i.id)))
+                out.extend(ordered[:c1] if n == 1 else ordered[c1:])
         return out
 
     # ---- plants
@@ -211,4 +203,15 @@ def load_bank(data_dir: Path | str | None = None) -> Bank:
     n_aud = sum(i.audited for i in items)
     if counts.get("items_audited") != n_aud or counts.get("items_unaudited") != len(items) - n_aud:
         raise BankError("manifest audited counts do not match the bank")
+    from collections import Counter
+    checks = {
+        "items_by_job": Counter(i.job for i in items),
+        "plants_by_kind": Counter(p.kind for p in plants),
+        "plants_by_provenance": Counter(p.provenance for p in plants),
+        "items_by_stratum": Counter(f"{i.job}/{i.stratum}" for i in items),
+        "items_by_repo": Counter(i.repo for i in items),
+    }
+    for name, actual_counts in checks.items():
+        if counts.get(name) != dict(actual_counts):
+            raise BankError(f"manifest counts.{name} do not match the bank")
     return Bank(manifest, items, plants)
