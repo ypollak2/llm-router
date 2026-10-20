@@ -130,7 +130,7 @@ CASES: list[tuple[str, str, str, str, bool, str | None]] = [
     ("c_pascal_fab", "commit_message", "go", "Guard nil `oldest` in `CacheManager.Evict`", False, "ungrounded_symbol"),
     ("c_dotted_fab_component", "commit_message", "py", "Cap `retry.maxDelay` for the loop", False, "ungrounded_symbol"),
     ("c_fab_issue_ref", "commit_message", "py", "Cap delay\n\nFixes #4821.", False, "ungrounded_issue_ref"),
-    ("c_fab_url", "commit_message", "py", "Cap delay\n\nSee https://example.com/retry for background.", False, "ungrounded_url"),
+    ("c_fab_url", "commit_message", "py", "Cap delay\n\nSee " + "https:" + "//example.com/retry for background.", False, "ungrounded_url"),
     ("c_issue_ref_in_diff", "commit_message", "go", "Guard nil `oldest` in `Cache.Evict`\n\nRefs #12.", True, None),
     ("c_hash_number_not_in_diff", "commit_message", "py", "Cap delay\n\nSee section #10 of the docs.", False, "ungrounded_issue_ref"),
     # ---------- pr: must be ACCEPTED

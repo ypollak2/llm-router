@@ -5,6 +5,8 @@ import math
 from math import comb
 
 Z = 1.96
+POWER_GRID: tuple[float, ...] = (0.90, 0.85, 0.80, 0.75, 0.70, 0.65, 0.60)
+_DIGITS = 4
 
 
 def wilson(k: int, n: int, z: float = Z) -> tuple[float, float, float]:
@@ -68,6 +70,6 @@ def p_powered_fail(n: int, p: float, point: float = 0.80) -> float:
     return 1.0 - binom_sf(n, p, kf + 1)
 
 
-def power_table(n: int, ps: tuple[float, ...] = (0.90, 0.85, 0.80, 0.75, 0.70, 0.65, 0.60)) -> list[dict[str, float]]:
-    return [{"true": p, "P_pass": round(p_pass(n, p), 4), "P_powered_fail": round(p_powered_fail(n, p), 4),
-             "P_inconclusive": round(1 - p_pass(n, p) - p_powered_fail(n, p), 4)} for p in ps]
+def power_table(n: int, ps: tuple[float, ...] = POWER_GRID) -> list[dict[str, float]]:
+    return [{"true": p, "P_pass": round(p_pass(n, p), _DIGITS), "P_powered_fail": round(p_powered_fail(n, p), _DIGITS),
+             "P_inconclusive": round(1 - p_pass(n, p) - p_powered_fail(n, p), _DIGITS)} for p in ps]
