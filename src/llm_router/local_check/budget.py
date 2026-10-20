@@ -38,7 +38,9 @@ class Budget:
     est_call_usd: float | None = None  # per-call estimate used to look ahead; None = unknown price
     calls: int = 0
     spent_usd: float = 0.0
-    unpriced_calls: int = 0            # metered calls whose cost could not be priced (spent_usd is then a lower bound)
+    unpriced_calls: int = 0            # SUCCESSFUL metered calls whose cost could not be priced (spent_usd is then a lower bound)
+    failed_calls: int = 0              # attempted calls that returned no usage (timeout, network error, 4xx/5xx); they count toward the call cap
+    estimated_usd: float = 0.0         # part of spent_usd that is the conservative per-call estimate charged for failed, sent calls
     log: list[dict] = field(default_factory=list)
 
     def check(self) -> None:
@@ -53,20 +55,41 @@ class Budget:
             if self.est_call_usd is not None and self.spent_usd + self.est_call_usd > self.cap_usd:
                 raise BudgetExhausted(f"next call could exceed the USD cap (${self.spent_usd:.2f} spent, ~${self.est_call_usd:.3f}/call, cap ${self.cap_usd:.2f})")
 
-    def record(self, cost_usd: float | None) -> None:
-        """Count one attempted call (successful or not: a failed attempt may still be billed or counted against a plan)."""
+    def record(self, cost_usd: float | None, *, failed: bool = False, sent: bool = True) -> float | None:
+        """Count one attempted call (it always counts toward the call cap). Returns the USD charged for it (None = unknown).
+
+        * ``failed=False``: a response was received. ``cost_usd`` is the exact metered cost from its usage; ``None`` means the served model could
+          not be priced, which stops the metered budget (``check``).
+        * ``failed=True``: no response/usage was received (timeout, network error, 4xx/5xx). That is NOT "unpriceable": the call is counted and,
+          if the request may have been sent (``sent=True``), a failed call may still have been billed, so the conservative ``est_call_usd`` is
+          charged against the USD cap. ``sent=False`` (client-side failure before the request left) charges nothing. Without an ``est_call_usd``
+          nothing can be charged; the call cap still bounds the run.
+        """
         self.calls += 1
-        if self.metered:
+        charged: float | None = cost_usd
+        if failed:
+            self.failed_calls += 1
+            charged = 0.0
+            if self.metered and sent:
+                if self.est_call_usd is None:
+                    charged = None
+                else:
+                    charged = self.est_call_usd
+                    self.spent_usd += charged
+                    self.estimated_usd += charged
+        elif self.metered:
             if cost_usd is None:
                 self.unpriced_calls += 1
             else:
                 self.spent_usd += cost_usd
-        self.log.append({"call": self.calls, "cost_usd": cost_usd})
+        self.log.append({"call": self.calls, "cost_usd": charged, "failed": failed})
+        return charged
 
     def summary(self) -> dict:
         return {"calls": self.calls, "cap_calls": self.cap_calls, "metered": self.metered,
                 "spent_usd": round(self.spent_usd, 6) if self.metered else None,
-                "cap_usd": self.cap_usd if self.metered else None, "unpriced_calls": self.unpriced_calls}
+                "cap_usd": self.cap_usd if self.metered else None, "unpriced_calls": self.unpriced_calls,
+                "failed_calls": self.failed_calls, "estimated_usd": round(self.estimated_usd, 6) if self.metered else None}
 
 
 def planned_calls(n_answers: int = MAX_ANSWER_CALLS, n_plants: int = PLANT_CALLS) -> int:
