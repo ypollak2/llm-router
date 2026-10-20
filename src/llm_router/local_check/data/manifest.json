@@ -1,0 +1,77 @@
+{
+  "bank_bytes_gz": 393814,
+  "bank_file": "bank-v1.jsonl.gz",
+  "bank_sha256": "54b0ef2405de57cb07b500410b0c198243c7e844c83ac136353e2e7f38ad29b4",
+  "bank_version": 1,
+  "counts": {
+    "items": 140,
+    "items_by_job": {
+      "commit_message": 70,
+      "pr_description": 70
+    },
+    "items_by_repo": {
+      "BurntSushi/ripgrep": 3,
+      "aio-libs/aiohttp": 13,
+      "astral-sh/uv": 18,
+      "celery/celery": 15,
+      "clap-rs/clap": 8,
+      "colinhacks/zod": 11,
+      "django/django": 11,
+      "gin-gonic/gin": 3,
+      "prettier/prettier": 4,
+      "pydantic/pydantic": 7,
+      "pypa/pip": 4,
+      "python-poetry/poetry": 1,
+      "scrapy/scrapy": 17,
+      "sqlalchemy/sqlalchemy": 13,
+      "tokio-rs/axum": 2,
+      "vitejs/vite": 10
+    },
+    "items_by_stratum": {
+      "commit_message/large/other": 7,
+      "commit_message/large/py": 7,
+      "commit_message/medium/other": 11,
+      "commit_message/medium/py": 18,
+      "commit_message/small/other": 10,
+      "commit_message/small/py": 17,
+      "pr_description/large/other": 7,
+      "pr_description/large/py": 5,
+      "pr_description/medium/other": 12,
+      "pr_description/medium/py": 22,
+      "pr_description/small/other": 12,
+      "pr_description/small/py": 12
+    },
+    "plants": 30,
+    "plants_audited_kept": 21,
+    "plants_by_kind": {
+      "good": 12,
+      "mutated": 6,
+      "swapped": 12
+    },
+    "plants_topped_up": 9
+  },
+  "excluded_items_by_licence": {
+    "GPL-2.0": 26
+  },
+  "excluded_plant_candidates_by_licence": {
+    "GPL-2.0": 9
+  },
+  "judge_id": "claude-sonnet-5-5",
+  "licence_allow_list": [
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Apache-2.0",
+    "ISC",
+    "Unlicense"
+  ],
+  "licences": {
+    "Apache-2.0": 13,
+    "Apache-2.0 OR MIT": 33,
+    "BSD-3-Clause": 50,
+    "MIT": 71,
+    "MIT OR Unlicense": 3
+  },
+  "records": 170,
+  "source": "prereg-q37 (frozen, calib1-3, poolc additions; plants from poolf)"
+}
