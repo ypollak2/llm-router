@@ -23,7 +23,7 @@ call. Held-out stays held out: an example whose ``text_sha`` is in the replay se
 added to the index, so ``text_sha`` is REQUIRED on every replay row: a replay file with a row
 that lacks it is rejected whole (an unhashed row could be trained on and scored on).
 
-One ``learn`` at a time: a lock file (``complexity_knn.json.lock``, ``flock``) serialises
+One ``learn`` at a time: a lock file (``complexity_knn.json.lock``, ``file_lock``, bounded wait) serialises
 runs, the base artifact is re-checked before the swap and ``.prev`` is written only for a base
 that is still the one this run read, so a concurrent run's ``applied_shas`` are never dropped.
 
@@ -211,18 +211,31 @@ def _file_id(path: Path) -> str | None:
         return None
 
 
-@contextlib.contextmanager
-def _lock(target: Path):
-    """Exclusive ``flock`` on ``<artifact>.lock`` for the whole run (blocks until free)."""
-    import fcntl
+LOCK_TIMEOUT_S = 60.0  # how long a second `learn` waits for the first before giving up
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(target) + ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+
+class LockTimeout(RuntimeError):
+    """Another ``learn`` (or the lock primitive) did not release ``<artifact>.lock`` in time."""
+
+
+@contextlib.contextmanager
+def _lock(target: Path, timeout: float | None = None):
+    """Exclusive lock on ``<artifact>.lock`` for the whole run. Waits at most ``timeout``
+    (default ``LOCK_TIMEOUT_S``), then raises ``LockTimeout``. Uses ``file_lock``
+    (``fcntl.flock``; ``msvcrt.locking`` on Windows), so ``learn`` runs there too."""
+    from llm_router import file_lock
+
+    status: dict = {}
+    wait = LOCK_TIMEOUT_S if timeout is None else timeout
+    with file_lock.exclusive_lock(Path(str(target) + ".lock"), wait, status) as got:
+        if not got:
+            if status.get("state") == "unavailable":
+                raise LockTimeout(f"cannot lock {target.name}.lock (lock primitive or permission failure); "
+                                  "check the directory permissions")
+            raise LockTimeout(
+                f"another 'llm-router learn' holds {target.name}.lock (waited {wait:g}s, lock {status.get('state')}); "
+                "try again when it finishes")
         yield
-    finally:
-        os.close(fd)  # closing releases the lock
 
 
 def _write_prev(target: Path) -> None:
@@ -267,8 +280,10 @@ def _apply_locked(*, dry_run, replay, examples_path, now) -> Verdict:
     stamp = time.time() if now is None else now
     try:
         examples.prune(examples_path, now=stamp)
-    except OSError:
-        pass  # retention housekeeping must not stop a learning run
+    except OSError as exc:  # retention housekeeping must not stop a learning run
+        from llm_router import failopen
+
+        failopen.record("LR-FO-EXAMPLE", exc)
     complexity_knn.clear_cache()
     target = complexity_knn.artifact_path()
     base_id = _file_id(target)
@@ -308,7 +323,8 @@ def purge_user_examples() -> Verdict:
 
     ``learn`` only ever appends, so those rows are the LAST ``examples_added_total`` rows of the
     artifact (``build_complexity_knn.py`` writes a fresh artifact with no ``learning`` provenance).
-    The previous artifact is kept as ``.prev``. ``applied_shas`` is cleared, so a later
+    ``.prev`` is replaced by a copy of the purged artifact (the pre-purge one holds the user
+    embeddings, so it is not kept). ``applied_shas`` is cleared, so a later
     ``learn`` would apply the still-stored examples again: delete ``examples.jsonl`` too."""
     stamp = time.time()
     with _lock(complexity_knn.artifact_path()):
@@ -334,6 +350,17 @@ def purge_user_examples() -> Verdict:
             return Verdict(REJECTED, "base_changed_during_run: nothing written")
         except OSError as exc:
             return Verdict(REJECTED, f"write_failed: {type(exc).__name__}")
+        # _install left the pre-purge artifact as .prev: it still holds every user-derived
+        # embedding. Replace it with a copy of the purged artifact (or remove it).
+        prev = target.with_suffix(target.suffix + ".prev")
+        try:
+            _write_prev(target)
+        except OSError:
+            try:
+                prev.unlink(missing_ok=True)
+            except OSError as exc:
+                return Verdict(REJECTED, f"purged_but_prev_not_removed: {type(exc).__name__}; delete {prev}",
+                               added=-n)
         v = Verdict(ACCEPTED, "user_derived_rows_removed", added=-n)
         _log(v, dry_run=False, now=stamp)
         return v

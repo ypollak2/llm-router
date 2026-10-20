@@ -231,14 +231,17 @@ async def test_proxy_embeds_in_a_worker_thread_never_on_the_loop(world, monkeypa
 
     monkeypatch.setenv("LLM_ROUTER_COMPLEXITY_KNN", "on")
     seen = []
+    release = threading.Event()  # the worker waits here, so "returned first" is not a race
 
     def embed(text, model):
+        release.wait(5)
         seen.append(threading.current_thread() is threading.main_thread())
         return [1.0] + [0.0] * (DIM - 1)
 
     monkeypatch.setattr(ck, "_embed", embed)
     assert prefixes.record_example("p", forced="claude", decided="x", door="proxy", path=world["ex"], embed=True)
     assert seen == []  # the handler returned before any embedding ran
+    release.set()
     for _ in range(200):
         if world["ex"].exists() and "vec" in world["ex"].read_text():
             break
@@ -348,3 +351,182 @@ def test_write_artifact_uses_a_unique_temp_name(tmp_path, monkeypatch):
     for _ in range(2):
         ck.write_artifact(tmp_path / "k.json", [[1.0, 0.0]], [1.0], embedding_model=MODEL)
     assert len(set(seen)) == 2 and all(x != str(tmp_path / "k.json.tmp") for x in seen)
+
+
+def test_purge_leaves_no_user_embedding_in_prev(world):
+    add_examples(world, 10, 0, 1.0)
+    assert run(world).status == cl.ACCEPTED
+    art_path = ck.artifact_path()
+    prev = art_path.with_suffix(art_path.suffix + ".prev")
+    ck.clear_cache()
+    shipped = ck.load_artifact().n - 10
+    assert cl.purge_user_examples().status == cl.ACCEPTED
+    assert prev.exists() and prev.read_bytes() == art_path.read_bytes()
+    assert "learning" not in json.loads(prev.read_text()).get("provenance", {})
+    ck.clear_cache()
+    assert ck.load_artifact().n == shipped  # .prev is byte-equal to this purged artifact
+
+
+def test_lock_times_out_with_a_clear_message_and_exit_2(world, capsys):
+    import threading
+
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with cl._lock(ck.artifact_path()):
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert held.wait(5)
+    try:
+        with pytest.raises(cl.LockTimeout):
+            with cl._lock(ck.artifact_path(), timeout=0.2):
+                pass
+        cl.LOCK_TIMEOUT_S, old = 0.2, cl.LOCK_TIMEOUT_S
+        try:
+            assert learn.main(["--dry-run"]) == 2
+        finally:
+            cl.LOCK_TIMEOUT_S = old
+        assert "holds" in capsys.readouterr().err
+    finally:
+        release.set()
+        t.join(5)
+
+
+def test_lock_degrades_without_fcntl(world, monkeypatch):
+    import sys
+
+    from llm_router import file_lock
+
+    monkeypatch.setattr(file_lock, "_IS_WINDOWS", True)
+    fake = type(sys)("msvcrt")
+    fake.LK_NBLCK, fake.LK_UNLCK = 1, 0
+    calls = []
+    fake.locking = lambda fd, mode, n: calls.append(mode)
+    monkeypatch.setattr(file_lock, "msvcrt", fake, raising=False)
+    with cl._lock(ck.artifact_path()):
+        pass
+    assert calls == [1, 0]
+
+
+def test_prune_does_not_drop_a_concurrent_append(tmp_path, monkeypatch):
+    """Deterministic: a second thread appends in the middle of prune's rewrite (after the read,
+    before the replace). With the lock the append waits and lands after the replace; with no
+    lock it lands before the replace and is lost."""
+    import threading
+
+    path = tmp_path / "ex.jsonl"
+    old = time.time() - examples.MAX_AGE_S - 1000
+    path.write_text("".join(
+        json.dumps({"text_sha": f"old{i:013d}", "source": "redo", "label": 1.0, "ts": old}) + "\n"
+        for i in range(5)))
+    fresh = {"text_sha": "fresh0000000000a", "source": "redo", "label": 1.0, "ts": time.time()}
+    errs: list = []
+    started = threading.Event()
+    box: dict = {}
+    real_rewrite = examples._rewrite
+
+    def appender():
+        started.set()
+        try:
+            examples.append_row(fresh, path=path)
+        except Exception as exc:  # noqa: BLE001
+            errs.append(exc)
+
+    def rewrite_with_concurrent_append(target, lines):
+        if "t" in box:  # the appender's own prune (only when unlocked) must not recurse
+            return real_rewrite(target, lines)
+        box["t"] = t = threading.Thread(target=appender)
+        t.start()
+        assert started.wait(2)
+        t.join(0.5)  # unlocked: the append finishes here, before the replace
+        box["finished_mid_rewrite"] = not t.is_alive()
+        real_rewrite(target, lines)
+
+    monkeypatch.setattr(examples, "_rewrite", rewrite_with_concurrent_append)
+    assert examples.prune(path) == 5, "the check found nothing to check"
+    box["t"].join(10)
+    assert not errs
+    assert fresh["text_sha"] in {r["text_sha"] for r in examples.read_examples(path)}
+    assert box["finished_mid_rewrite"] is False  # the lock held the append back
+
+
+@pytest.mark.timing
+def test_hot_path_example_write_gives_up_fast_when_the_lock_is_held(tmp_path, monkeypatch):
+    """The hook and the proxy/MCP loop write inline: a held lock must cost <= ~0.25 s and leave
+    a failopen record, not a 5 s stall."""
+    import threading
+
+    from llm_router import failopen, file_lock, prefixes
+
+    recorded = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: recorded.append(code))
+    path = tmp_path / "ex.jsonl"
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with file_lock.exclusive_lock(path.with_name(path.name + ".lock"), 5.0) as got:
+            assert got
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=holder)
+    t.start()
+    assert held.wait(5)
+    try:
+        for door, embed in (("hook", False), ("proxy", True), ("mcp", True)):
+            monkeypatch.setattr(examples, "embedding_wanted", lambda: False)
+            t0 = time.monotonic()
+            ok = prefixes.record_example("p", "local", "x", door, path=path, embed=embed)
+            took = time.monotonic() - t0
+            assert ok is False and took < 0.3, (door, took)
+    finally:
+        release.set()
+        t.join(10)
+    assert recorded == ["LR-FO-PREFIX-EXAMPLE"] * 3
+    assert not path.exists() or path.read_text() == ""
+
+
+def test_apply_locked_records_failopen_when_prune_is_busy(monkeypatch):
+    from llm_router import classifier_learning as cl
+    from llm_router import failopen
+
+    recorded = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: recorded.append(code))
+
+    def busy(*a, **k):
+        raise examples.LockBusy("held")
+
+    monkeypatch.setattr(examples, "prune", busy)
+    monkeypatch.setattr(cl.complexity_knn, "load_artifact", lambda: None)
+    monkeypatch.setattr(cl, "_log", lambda *a, **k: None)
+    v = cl._apply_locked(dry_run=True, replay=None, examples_path=None, now=1.0)
+    assert v.status == cl.REJECTED and recorded == ["LR-FO-EXAMPLE"]
+
+
+def test_embed_queue_is_bounded_and_drops_with_failopen(monkeypatch):
+    import asyncio
+    import threading
+
+    from llm_router import failopen
+
+    recorded = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: recorded.append(code))
+    monkeypatch.setattr(examples, "MAX_PENDING_EMBEDS", 3)
+    gate_ = threading.Event()
+    ran = []
+
+    async def go():
+        results = [examples.run_off_loop(lambda i=i: (gate_.wait(5), ran.append(i))) for i in range(6)]
+        gate_.set()
+        for _ in range(100):
+            if examples._pending == 0:
+                break
+            await asyncio.sleep(0.02)
+        return results
+
+    results = asyncio.run(go())
+    assert results == [True] * 3 + [False] * 3
+    assert recorded == ["LR-FO-EXAMPLE-QUEUE"] * 3 and sorted(ran) == [0, 1, 2]

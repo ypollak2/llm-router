@@ -8,7 +8,8 @@ builds a candidate kNN index and re-scores it against the held-out replay set
 and under-route each worsen by at most 2 points; otherwise it is left as it was. Exit 0 for
 accepted or nothing new, 1 for rejected. ``--dry-run`` gates and reports without installing.
 ``--purge-user-examples`` rebuilds the index without the user-derived embeddings earlier runs
-added (the previous index stays as ``.prev``); delete ``examples.jsonl`` as well.
+added (``.prev`` is replaced by a copy of the purged index, so no user embedding survives in it);
+delete ``examples.jsonl`` as well. A second ``learn`` waits up to 60 s for the first, then exits 2.
 """
 from __future__ import annotations
 
@@ -18,7 +19,9 @@ import sys
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="llm-router learn", description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(prog="llm-router learn", description=__doc__.splitlines()[0],
+                                 epilog="--purge-user-examples also replaces complexity_knn.json.prev with a copy "
+                                        "of the purged index (the old .prev held the user embeddings).")
     ap.add_argument("--dry-run", action="store_true", help="gate the update, install nothing")
     ap.add_argument("--replay", default=None, help="held-out replay JSONL (default: LLM_ROUTER_LEARNING_REPLAY)")
     ap.add_argument("--purge-user-examples", action="store_true",
@@ -27,7 +30,11 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv)
     from llm_router import classifier_learning as cl
 
-    v = cl.purge_user_examples() if args.purge_user_examples else cl.apply(dry_run=args.dry_run, replay=args.replay)
+    try:
+        v = cl.purge_user_examples() if args.purge_user_examples else cl.apply(dry_run=args.dry_run, replay=args.replay)
+    except cl.LockTimeout as exc:
+        print(f"learn: {exc}", file=sys.stderr)
+        return 2
     if args.json:
         def m(x):
             return None if x is None else {"n": x.n, "exact": x.exact, "under_route": x.under_route}
