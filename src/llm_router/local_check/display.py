@@ -12,7 +12,7 @@ import os
 import time
 from pathlib import Path
 
-from llm_router import paths
+from llm_router import failopen, paths
 from llm_router.resolver import eligibility_store as ES
 from llm_router.resolver.eligibility_store import LCLine
 
@@ -149,11 +149,12 @@ def maybe_nudge(*, path: Path | None = None, now: float | None = None) -> str | 
         with open(tmp, "w", encoding="utf-8", opener=paths.private_opener) as fh:
             json.dump({"bank_versions": [*_nudged(), version]}, fh)
         os.replace(tmp, target)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        failopen.record("CHZ-FO-LOCALCHECK-NUDGE-WRITE", exc)
         try:
             tmp.unlink()
-        except OSError:
-            pass
+        except OSError as unlink_exc:
+            failopen.record("CHZ-FO-LOCALCHECK-NUDGE-TMP", unlink_exc)
         return None
     return (f"tip: local model found ({names[0]}) but not measured. "
             f"`{ES._NOT_MEASURED}` checks which text jobs it can do (optional; nothing runs until you do).")
