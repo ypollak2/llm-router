@@ -35,7 +35,9 @@ PROBE_N = 3
 MAX_TIMEOUT_SCALE = 4.0
 SLOW_ITEM_S = 60.0                      # mean probe time at which the timeout starts scaling
 DEFAULT_EXPECTED_OUT_TOKENS = 200
-_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)   # 0 on Windows, where symlink checks above still apply
+# O_NOFOLLOW is 0 where the OS lacks it (Windows); _refuse_symlink() is then the only guard on
+# the append()/load() paths (open() always checks too).
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
 class Item(Protocol):
@@ -52,6 +54,10 @@ class SimpleItem:
 
 
 class Adapter(Protocol):
+    """What the runner needs from a runtime. ``digest``, ``settings_hash`` and
+    ``max_prompt_chars`` reach the runtime and may raise ``ProbeFailed`` (runtimes.py) when the
+    probe failed in transit; that is not "unknown" (``None``). ``Runner()`` turns it into
+    ``RunStartError``; a caller computing ``max_prompt_chars`` itself (LC-6 scope) must catch it."""
     def generate(self, model: str, prompt: str, *, system: str | None = ...,
                  timeout_s: float = ...): ...
     def digest(self, model: str) -> str | None: ...
@@ -73,7 +79,8 @@ class RunDirError(RunMismatch):
 
 class RunStartError(Exception):
     """The run could not start: the runtime's digest/settings (context window) could not be
-    confirmed, e.g. the runtime was unreachable. Nothing was written; retry when it answers."""
+    confirmed (``ProbeFailed``: runtime unreachable, timed out, 5xx). Raised by ``Runner()``
+    before anything is written; retry when the runtime answers."""
 
 
 # ------------------------------------------------------------------ scope / early stop
@@ -165,8 +172,17 @@ class RunStore:
         self.results_path = self.dir / "results.jsonl"
         self.meta_path = self.dir / "meta.json"
 
+    def _refuse_symlink(self, path: Path) -> None:
+        if not _NOFOLLOW and path.is_symlink():
+            raise RunDirError(f"refusing symlinked run file {path}")
+
     def _read(self, path: Path) -> str:
-        fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
+        try:
+            fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
+        except OSError as exc:
+            if path.is_symlink():
+                raise RunDirError(f"refusing symlinked run file {path}") from exc
+            raise
         with os.fdopen(fd, "r") as f:
             return f.read()
 
@@ -226,6 +242,7 @@ class RunStore:
     def load(self) -> list[dict]:
         """Intact records, last write per id wins; a torn trailing line is dropped."""
         out: dict[str, dict] = {}
+        self._refuse_symlink(self.results_path)
         if not self.results_path.exists():
             return []
         for line in self._read(self.results_path).splitlines():
@@ -238,8 +255,15 @@ class RunStore:
         return list(out.values())
 
     def append(self, rec: dict) -> None:
+        self._refuse_symlink(self.results_path)
         # Start on a fresh line even if the previous write was torn mid-line.
-        fd = os.open(self.results_path, os.O_RDWR | os.O_APPEND | os.O_CREAT | _NOFOLLOW, 0o600)
+        try:
+            fd = os.open(self.results_path, os.O_RDWR | os.O_APPEND | os.O_CREAT | _NOFOLLOW,
+                         0o600)
+        except OSError as exc:
+            if self.results_path.is_symlink():
+                raise RunDirError(f"refusing symlinked run file {self.results_path}") from exc
+            raise
         with os.fdopen(fd, "ab+") as f:
             f.seek(0, os.SEEK_END)
             if f.tell():
@@ -294,6 +318,9 @@ def _record(item: Item, res, timeout_s: float) -> dict:
 
 
 class Runner:
+    """One resumable run. Construction reaches the runtime (digest, settings hash) and raises
+    ``RunStartError`` (nothing written) when a probe fails in transit (``ProbeFailed``)."""
+
     def __init__(self, adapter: Adapter, model: str, items: Sequence[Item],
                  run_dir: str | os.PathLike, *, runtime: str | None = None,
                  lock_path: str | os.PathLike | None = None,

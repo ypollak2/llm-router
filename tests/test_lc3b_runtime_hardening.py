@@ -337,9 +337,24 @@ def test_symlinked_run_files_refused(tmp_path):
     st.open({"a": 1})
     os.unlink(d2 / "results.jsonl")
     (d2 / "results.jsonl").symlink_to(target)
-    with pytest.raises(OSError):
+    with pytest.raises(R.RunDirError, match="symlink"):
         st.append({"item_id": "x"})                            # O_NOFOLLOW on the append path
-    with pytest.raises(OSError):
+    with pytest.raises(R.RunDirError, match="symlink"):
+        st.load()
+    assert target.read_text() == "keep"
+
+
+def test_symlink_refused_without_o_nofollow(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "_NOFOLLOW", 0)                     # e.g. Windows
+    target = tmp_path / "victim"
+    target.write_text("keep")
+    st = R.RunStore(tmp_path / "run")
+    st.open({"a": 1})
+    os.unlink(tmp_path / "run" / "results.jsonl")
+    (tmp_path / "run" / "results.jsonl").symlink_to(target)
+    with pytest.raises(R.RunDirError, match="symlink"):
+        st.append({"item_id": "x"})
+    with pytest.raises(R.RunDirError, match="symlink"):
         st.load()
     assert target.read_text() == "keep"
 
@@ -360,3 +375,99 @@ def test_resume_past_early_stop_runs_no_more_items(srv, tmp_path):
     R.Runner(T.OllamaAdapter(s.url), "m:1b", items(5), tmp_path / "run", min_pass=4,
              probe_n=9).probe_rate()
     assert s.count("/api/chat") == 0
+
+
+# ------------------------------------------------------------ wrong-shape 200 bodies
+
+BAD_BODIES = [[1], {"models": [1]}, {"models": "x"}, {"data": [1]}, {"data": "x"},
+              {"data": [{"id": 5}]}, {"models": [{"name": 5, "digest": 5}]}, "str", b"null", 7,
+              {"models": {"a": []}, "data": {"b": 1}, "model_info": [1], "parameters": [1],
+               "default_generation_settings": 3},
+              {"model_info": {"x": [1]}, "parameters": 5, "meta": 4},
+              {"data": [{"id": "m", "meta": 5, "loaded_context_length": "x"}],
+               "default_generation_settings": [1]},
+              {"data": [{"id": "m", "max_model_len": [1], "size": {"a": []}}]}]
+
+
+@pytest.mark.parametrize("body", BAD_BODIES, ids=lambda b: str(b)[:40])
+def test_wrong_shape_200_never_raises(srv, body):
+    s = srv(lambda m, p, b: (200, body))
+    T.identify(s.url)
+    for rt in ("ollama", "lmstudio", "vllm", "llamacpp", "openai"):
+        assert isinstance(T.list_models(s.url, rt), list)
+    a = T.OllamaAdapter(s.url)
+    a.context_length("m")
+    a.digest("m")
+    for rt in ("lmstudio", "vllm", "llamacpp", "openai"):
+        o = T.OpenAICompatAdapter(s.url, runtime=rt)
+        o.context_length("m")
+        o.digest("m")
+        o.settings_hash("m")
+    a.settings_hash("m")
+    a.max_prompt_chars("m")
+    found = T.discover(s.url)
+    assert isinstance(found, list)
+
+
+@pytest.mark.parametrize("body", [[1], "str", b"null", 7, {"models": "x"}, {"data": "x"},
+                                  {"data": {"id": "m"}}, {"x": 1}])
+def test_wrong_shape_is_not_a_runtime(srv, body):
+    s = srv(lambda m, p, b: (200, body))
+    assert T.identify(s.url) is None
+    assert T.discover(s.url) == []
+
+
+def test_wrong_shape_values_are_none_or_empty(srv):
+    s = srv(lambda m, p, b: (200, {"models": [1], "data": [1]}))
+    assert T.list_models(s.url, "ollama") == [] and T.list_models(s.url, "openai") == []
+    assert T.OllamaAdapter(s.url).digest("m") is None
+    assert T.OllamaAdapter(s.url).context_length("m") is None
+    for rt in ("lmstudio", "vllm", "llamacpp"):
+        o = T.OpenAICompatAdapter(s.url, runtime=rt)
+        assert o.context_length("m") is None and o.digest("m") is None
+
+
+# ------------------------------------------------------------ status codes
+
+@pytest.mark.parametrize("code", [500, 503, 429, 408])
+def test_transient_status_is_probe_failed_not_cached(srv, code):
+    state = {"n": 0}
+
+    def fn(m, p, b):
+        if p == "/api/show":
+            state["n"] += 1
+            if state["n"] <= 2:
+                return code, {}
+            return 200, {"model_info": {"x.context_length": 2048}, "parameters": ""}
+        return 404, {}
+    s = srv(fn)
+    a = T.OllamaAdapter(s.url)
+    with pytest.raises(T.ProbeFailed):
+        a.context_length("m")                      # first call: both attempts hit the status
+    assert a._show == {}                           # nothing cached
+    assert a.context_length("m") == 2048
+    assert s.count("/api/show") == 3
+
+
+def test_503_on_show_makes_settings_hash_raise(srv):
+    a = T.OllamaAdapter(srv(lambda m, p, b: (503, {})).url)
+    with pytest.raises(T.ProbeFailed):
+        a.settings_hash("m")
+    with pytest.raises(T.ProbeFailed):
+        a.max_prompt_chars("m")
+
+
+@pytest.mark.parametrize("code", [400, 401, 403, 404, 405])
+def test_4xx_is_a_real_none_and_cached(srv, code):
+    s = srv(lambda m, p, b: (code, {}))
+    a = T.OllamaAdapter(s.url)
+    assert a.context_length("m") is None
+    assert a.context_length("m") is None
+    assert s.count("/api/show") == 1               # cached: an answer, not a failure
+
+
+def test_runner_refuses_start_on_503(srv, tmp_path):
+    a = T.OllamaAdapter(srv(lambda m, p, b: (503, {})).url)
+    with pytest.raises(R.RunStartError):
+        R.Runner(a, "m", items(1), tmp_path / "run")
+    assert not (tmp_path / "run").exists()

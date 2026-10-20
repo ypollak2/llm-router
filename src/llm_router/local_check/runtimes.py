@@ -10,8 +10,15 @@ Rules this module holds to:
 * Loopback only. Every request goes through ``http.client`` straight to the host (no
   proxy env), and a non-loopback host is refused unless the caller passes
   ``allow_remote=True``. Nothing here reaches the internet.
-* Unknown stays ``None``: an unreadable context window or digest is ``None``, never 0 or
-  a guess. ``digest is None`` means "digest_unverified".
+* Unknown stays ``None``: a context window or digest the runtime *answered* without (or
+  with a body of the wrong shape) is ``None``, never 0 or a guess. ``digest is None`` means
+  "digest_unverified".
+* A probe that *failed in transit* (unreachable, timed out, unreadable body, HTTP 5xx/429/408)
+  is NOT ``None``: ``ctx``/``settings_hash``/``max_prompt_chars``/``digest`` raise
+  ``ProbeFailed`` after one retry and cache nothing. Callers (LC-6) must catch it; ``Runner()``
+  turns it into ``RunStartError``. 404 and other 4xx are real answers (``None``, cached).
+* Probes never raise on a 200 JSON body of the wrong shape (an unrelated service on 8000/8080):
+  that reads as "not this runtime" (identify None, list_models [], value None).
 * Generation is streamed so one wall-clock deadline covers the whole call, and closing
   the connection on a timeout lets the runtime stop generating.
 """
@@ -46,9 +53,11 @@ class RuntimeError_(Exception):
 
 
 class ProbeFailed(RuntimeError_):
-    """A runtime probe (context window, digest) failed in transit: unreachable, timed out or an
-    unreadable body. Distinct from "the runtime answered and has no such field" (that is
-    ``None``). Never cached, so a transient failure cannot freeze a wrong value."""
+    """A runtime probe (context window, digest) failed in transit: unreachable, timed out, an
+    unreadable body, or a transient HTTP status (5xx, 429, 408). Distinct from "the runtime answered and has no such field" (that is
+    ``None``). Never cached, so a transient failure cannot freeze a wrong value. Raised by
+    ``context_length``/``digest``/``ctx``/``settings_hash``/``max_prompt_chars``; ``Runner()``
+    converts it to ``RunStartError``."""
 
 
 # --------------------------------------------------------------------------- helpers
@@ -92,9 +101,10 @@ def _conn(base_url: str, timeout: float, allow_remote: bool = False) -> http.cli
 
 def _fetch(base_url: str, method: str, path: str, body: dict | None = None,
            timeout: float = PROBE_TIMEOUT_S, allow_remote: bool = False) -> tuple[bool, Any | None]:
-    """``(True, data)`` for a 200 JSON body, ``(True, None)`` when the server answered with
-    another status, ``(False, None)`` when the request failed in transit (or the endpoint is
-    malformed). Raises only RuntimeError_ for a refused host."""
+    """``(True, data)`` for a 200 JSON body, ``(True, None)`` when the server answered with a
+    definitive non-200 (404 and other 4xx), ``(False, None)`` when the request failed in transit:
+    connection error, malformed endpoint, unreadable body, or a transient status
+    (``TRANSIENT_STATUS``: 5xx, 429, 408). Raises only RuntimeError_ for a refused host."""
     conn = None
     try:
         conn = _conn(base_url, timeout, allow_remote)
@@ -103,6 +113,8 @@ def _fetch(base_url: str, method: str, path: str, body: dict | None = None,
                      headers={"Content-Type": "application/json"} if payload else {})
         resp = conn.getresponse()
         data = resp.read()
+        if resp.status in TRANSIENT_STATUS or resp.status >= 500:
+            return False, None
         if resp.status != 200:
             return True, None
         return True, json.loads(data)
@@ -122,13 +134,15 @@ def _json_request(base_url: str, method: str, path: str, body: dict | None = Non
 
 
 PROBE_RETRIES = 1
+TRANSIENT_STATUS = frozenset({408, 429})   # plus every 5xx: "try again", never a real answer
 PROBE_RETRY_DELAY_S = 0.2
 
 
 def _strict_json(base_url: str, method: str, path: str, body: dict | None = None,
                  allow_remote: bool = False) -> Any | None:
     """Like ``_json_request`` but a transit failure raises ProbeFailed (after one retry) instead
-    of looking like "the runtime has no such field". A non-200 answer is a real answer (None)."""
+    of looking like "the runtime has no such field". A 404/other 4xx answer is a real answer (None);
+    5xx/429/408 count as transit failures."""
     for attempt in range(PROBE_RETRIES + 1):
         ok, data = _fetch(base_url, method, path, body, PROBE_TIMEOUT_S, allow_remote)
         if ok:
@@ -136,6 +150,18 @@ def _strict_json(base_url: str, method: str, path: str, body: dict | None = None
         if attempt < PROBE_RETRIES:
             time.sleep(PROBE_RETRY_DELAY_S)
     raise ProbeFailed(f"{method} {path} on {base_url} failed (unreachable, timed out or unreadable)")
+
+
+def _entries(data: Any, key: str) -> list[dict]:
+    """The dict entries of ``data[key]``; anything of the wrong shape (non-dict body, non-list
+    value, non-dict entries) yields ``[]``. Probes call this, never ``.get`` on raw JSON."""
+    if not isinstance(data, dict) or not isinstance(data.get(key), list):
+        return []
+    return [m for m in data[key] if isinstance(m, dict)]
+
+
+def _dict(v: Any) -> dict:
+    return v if isinstance(v, dict) else {}
 
 
 def strip_think(text: str) -> str:
@@ -153,7 +179,9 @@ def strip_think(text: str) -> str:
 
 
 def settings_hash(*, temperature: float, ctx: int | None, max_tokens: int, think: bool | None) -> str:
-    """Stable id of the generation settings (design §2). Same settings -> same hash."""
+    """Stable id of the generation settings (design §2). Same settings -> same hash.
+    ``ctx`` must be a confirmed value; an adapter's ``settings_hash`` raises ``ProbeFailed``
+    rather than hash an unconfirmed ``None``."""
     blob = json.dumps({"temperature": temperature, "ctx": ctx, "max_tokens": max_tokens,
                        "think": think}, sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(blob.encode()).hexdigest()[:16]
@@ -161,7 +189,9 @@ def settings_hash(*, temperature: float, ctx: int | None, max_tokens: int, think
 
 def max_prompt_chars(ctx: int | None, max_tokens: int = MAX_TOKENS) -> int | None:
     """Largest prompt (chars) that fits the runtime window with room for the answer.
-    ``None`` when the window is unknown (the lane scope then records ctx_unverified)."""
+    ``None`` when the window is unknown (the lane scope then records ctx_unverified).
+    The adapter method of the same name raises ``ProbeFailed`` when the probe failed in transit
+    (distinct from the runtime answering without a window, which is ``None``)."""
     if not ctx or ctx <= 0:
         return None
     room = ctx - max_tokens - PROMPT_RESERVE_TOKENS
@@ -229,16 +259,24 @@ class _Adapter:
         raise NotImplementedError
 
     def digest(self, model: str) -> str | None:
+        """Model digest, ``None`` if the runtime reports none ("digest_unverified"). Raises
+        ``ProbeFailed`` when the probe failed in transit (LC-6 must catch it)."""
         raise NotImplementedError
 
     def ctx(self, model: str) -> int | None:
+        """Context window, ``None`` if the runtime answered without one. Raises ``ProbeFailed``
+        when the probe failed in transit (never cached; LC-6 must catch it)."""
         return self.context_length(model)
 
     def settings_hash(self, model: str) -> str:
+        """Hash of the settings incl. the confirmed ctx. Raises ``ProbeFailed`` (never a hash
+        over an unconfirmed ctx) when the context probe failed in transit."""
         return settings_hash(temperature=self.temperature, ctx=self.ctx(model),
                              max_tokens=self.max_tokens, think=self.think)
 
     def max_prompt_chars(self, model: str) -> int | None:
+        """Prompt budget in chars, ``None`` if the window is unknown. Raises ``ProbeFailed`` when
+        the context probe failed in transit (LC-6 scope partition must catch it)."""
         return max_prompt_chars(self.ctx(model), self.max_tokens)
 
     def generate(self, model: str, prompt: str, *, system: str | None = None,
@@ -313,19 +351,20 @@ class OllamaAdapter(_Adapter):
         return self._show[model]
 
     def context_length(self, model: str) -> int | None:
-        info = self._show_info(model) or {}
-        for line in str(info.get("parameters") or "").splitlines():
+        info = _dict(self._show_info(model))
+        params = info.get("parameters")
+        for line in (params if isinstance(params, str) else "").splitlines():
             m = re.match(r"\s*num_ctx\s+(\d+)", line)
             if m:
                 return int(m.group(1))
-        for k, v in (info.get("model_info") or {}).items():
+        for k, v in _dict(info.get("model_info")).items():
             if k.endswith(".context_length") and isinstance(v, int) and v > 0:
                 return min(v, OLLAMA_CTX_CAP)
         return None
 
     def digest(self, model: str) -> str | None:
         data = _strict_json(self.base_url, "GET", "/api/tags", allow_remote=self.allow_remote)
-        for m in (data or {}).get("models", []):
+        for m in _entries(data, "models"):
             if model in (m.get("name"), m.get("model")) and m.get("digest"):
                 d = str(m["digest"])
                 return d if d.startswith("sha256:") else "sha256:" + d
@@ -377,7 +416,7 @@ class OpenAICompatAdapter(_Adapter):
         return self._cache[path]
 
     def _v1_entry(self, model: str) -> dict:
-        for m in (self._get("/v1/models") or {}).get("data", []):
+        for m in _entries(self._get("/v1/models"), "data"):
             if m.get("id") == model:
                 return m
         return {}
@@ -386,12 +425,12 @@ class OpenAICompatAdapter(_Adapter):
         def pos(v):
             return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
         if self.runtime == "lmstudio":
-            for m in (self._get("/api/v0/models") or {}).get("data", []):
+            for m in _entries(self._get("/api/v0/models"), "data"):
                 if m.get("id") == model:
                     return pos(m.get("loaded_context_length")) or pos(m.get("max_context_length"))
         if self.runtime == "llamacpp":
-            props = self._get("/props") or {}
-            return pos((props.get("default_generation_settings") or {}).get("n_ctx"))
+            props = _dict(self._get("/props"))
+            return pos(_dict(props.get("default_generation_settings")).get("n_ctx"))
         return pos(self._v1_entry(model).get("max_model_len"))   # vLLM
 
     def digest(self, model: str) -> str | None:
@@ -400,7 +439,7 @@ class OpenAICompatAdapter(_Adapter):
         entry = self._v1_entry(model)
         extra: list[Any] = []
         if self.runtime == "lmstudio":
-            for m in (self._get("/api/v0/models") or {}).get("data", []):
+            for m in _entries(self._get("/api/v0/models"), "data"):
                 if m.get("id") == model:
                     entry = {**entry, **m}
         meta = entry.get("meta") if isinstance(entry.get("meta"), dict) else {}
@@ -410,7 +449,7 @@ class OpenAICompatAdapter(_Adapter):
             if v is not None:
                 extra.append((k, v))
         if self.runtime == "llamacpp":
-            props = self._get("/props") or {}
+            props = _dict(self._get("/props"))
             for k in ("model_path", "build_info"):
                 if props.get(k):
                     extra.append((k, props[k]))
@@ -461,16 +500,17 @@ def identify(base_url: str, *, allow_remote: bool = False) -> str | None:
     t = PROBE_TIMEOUT_S
     kw = {"timeout": t, "allow_remote": allow_remote}
     tags = _json_request(base_url, "GET", "/api/tags", **kw)
-    if isinstance(tags, dict) and "models" in tags:
+    if isinstance(tags, dict) and isinstance(tags.get("models"), list):
         return "ollama"
-    if _json_request(base_url, "GET", "/api/v0/models", **kw) is not None:
+    lm = _json_request(base_url, "GET", "/api/v0/models", **kw)
+    if isinstance(lm, dict) and isinstance(lm.get("data"), list):
         return "lmstudio"
     v1 = _json_request(base_url, "GET", "/v1/models", **kw)
-    if v1 is None:
-        return None
-    if _json_request(base_url, "GET", "/props", **kw) is not None:
+    if not (isinstance(v1, dict) and isinstance(v1.get("data"), list)):
+        return None                   # not an OpenAI-compatible model list: not a runtime
+    if isinstance(_json_request(base_url, "GET", "/props", **kw), dict):
         return "llamacpp"
-    if any(isinstance(m, dict) and "max_model_len" in m for m in v1.get("data", [])):
+    if any("max_model_len" in m for m in _entries(v1, "data")):
         return "vllm"
     return "openai"
 
@@ -483,11 +523,11 @@ def drop_embeddings(names: list[str]) -> list[str]:
 
 def list_models(base_url: str, runtime: str, *, allow_remote: bool = False) -> list[str]:
     if runtime == "ollama":
-        data = _json_request(base_url, "GET", "/api/tags", allow_remote=allow_remote) or {}
-        names = [m.get("name") for m in data.get("models", []) if m.get("name")]
+        data = _json_request(base_url, "GET", "/api/tags", allow_remote=allow_remote)
+        names = [m.get("name") for m in _entries(data, "models") if m.get("name")]
     else:
-        data = _json_request(base_url, "GET", "/v1/models", allow_remote=allow_remote) or {}
-        names = [m.get("id") for m in data.get("data", []) if m.get("id")]
+        data = _json_request(base_url, "GET", "/v1/models", allow_remote=allow_remote)
+        names = [m.get("id") for m in _entries(data, "data") if m.get("id")]
     return drop_embeddings(names)
 
 
