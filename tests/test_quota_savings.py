@@ -75,7 +75,7 @@ def _snap(weekly_pp: float, session_pp: float) -> QuotaSavingsSnapshot:
 
 def test_short_form_uses_one_decimal_pp() -> None:
     s = _snap(weekly_pp=7.2, session_pp=3.41)
-    assert s.short_form() == "saved 7.2pp wk / 3.4pp 5h"
+    assert s.short_form() == "est. saved 7.2pp wk / 3.4pp 5h"
 
 
 def test_is_meaningful_above_threshold() -> None:
@@ -145,17 +145,18 @@ def test_compute_returns_none_when_no_cached_usage() -> None:
 def test_compute_handles_missing_db_gracefully(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No DB file → savings = 0.0, snapshot still returned (so the
+    """No DB file → savings UNKNOWN (None, never $0; F121), snapshot still returned (so the
     routing notice can show the *current* % without breaking)."""
     monkeypatch.setenv("LLM_ROUTER_USAGE_DB_PATH", str(tmp_path / "missing.db"))
+    monkeypatch.setenv("LLM_ROUTER_WEEKLY_QUOTA_USD", "100")     # a plan is configured: the gap is the ledger
     with patch(
         "llm_router.state.get_last_usage",
         return_value=_FakeCachedUsage(weekly=0.4, session=0.01),
     ):
         snap = compute_quota_savings()
     assert snap is not None
-    assert snap.weekly_saved_usd == pytest.approx(0.0)
-    assert snap.session_saved_usd == pytest.approx(0.0)
+    assert snap.weekly_saved_usd is None and snap.session_saved_usd is None
+    assert snap.short_form() == "est. saved n/a (ledger unreadable)"
     assert snap.weekly_current_pct == pytest.approx(40.0)
     assert snap.session_current_pct == pytest.approx(1.0)
 
@@ -225,7 +226,7 @@ def test_calibration_without_config_is_unconfigured_not_a_default_price(
     assert snap.calibration_usd_per_pp is None and snap.calibration_source == "unconfigured"
     assert snap.weekly_pp_saved is None and snap.session_pp_saved is None
     assert snap.weekly_counterfactual_pct is None and not snap.is_meaningful()
-    assert snap.short_form() == "saved n/a (no plan configured)"
+    assert snap.short_form() == "est. saved n/a (no plan configured)"
 
 
 def test_calibration_follows_the_users_monthly_plan_price(

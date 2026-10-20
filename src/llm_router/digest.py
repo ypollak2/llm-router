@@ -70,22 +70,39 @@ async def _fetch_period_data(period: str) -> dict[str, Any]:
                    COUNT(*) as calls,
                    COALESCE(SUM(input_tokens),  0) as in_tok,
                    COALESCE(SUM(output_tokens), 0) as out_tok,
-                   COALESCE(SUM(cost_usd),      0) as cost
+                   SUM(cost_usd) as cost,
+                   (cost_usd IS NULL) as cost_unknown
             FROM usage
             WHERE success = 1 AND {where}
-            GROUP BY provider
+            GROUP BY provider, (cost_usd IS NULL)
             """
         )).fetchall()
     finally:
         await db.close()
 
-    total_calls = total_cost = total_saved = 0
+    total_calls = total_saved = 0
+    total_cost = 0.0
     total_in = total_out = 0
+    paid_calls = paid_cost_n = 0   # F121: n behind the cost -- paid rows only (free/subscription are $0 by definition)
     by_provider: dict[str, dict] = {}
 
-    for provider, calls, in_tok, out_tok, cost in rows:
+    for provider, calls, in_tok, out_tok, cost, cost_unknown in rows:
         if provider == "cache":  # cache-served calls are not paid/free/subscription calls
             continue
+        is_paid = provider not in _FREE_PROVIDERS and provider != "subscription"
+        total_calls += calls
+        entry = by_provider.setdefault(
+            provider, {"calls": 0, "cost": 0.0, "saved": 0.0, "cost_n": 0, "paid": is_paid})
+        entry["calls"] += calls
+        if is_paid:
+            paid_calls += calls
+        if is_paid and cost_unknown:
+            # F121 / D-247: a paid row with no recorded cost is UNKNOWN, not $0. It is out of the
+            # cost, the baseline and the saving (it would otherwise read as a full-baseline saving).
+            continue
+        if is_paid:
+            paid_cost_n += calls
+            entry["cost_n"] += calls
         baseline = _host_baseline(in_tok, out_tok)
         if provider in _FREE_PROVIDERS:
             saved = baseline
@@ -93,21 +110,32 @@ async def _fetch_period_data(period: str) -> dict[str, Any]:
             saved = 0.0
         else:
             saved = net_saved(baseline, cost)
-        total_calls += calls
-        total_cost  += cost
+        known_cost = float(cost) if cost is not None else 0.0   # free/subscription rows: $0 by definition
+        total_cost  += known_cost
         total_saved += saved
         total_in    += in_tok
         total_out   += out_tok
-        by_provider[provider] = {"calls": calls, "cost": cost, "saved": saved}
+        entry["cost"] += known_cost
+        entry["saved"] += saved
 
     return {
         "calls":       total_calls,
-        "cost":        total_cost,
+        "cost":        total_cost,        # known sum; read with paid_cost_n / paid_calls
+        "paid_calls":  paid_calls,
+        "paid_cost_n": paid_cost_n,
         "saved":       total_saved,
         "total_in":    total_in,
         "total_out":   total_out,
         "by_provider": by_provider,
     }
+
+
+def _cost_text(cost: float, known: int, of: int) -> str:
+    """Cost as printed: ``n/a`` when none of the ``of`` paid rows recorded one, ``(k of n recorded)``
+    when only some did, never ``$0`` for an unknown (F121 / D-247)."""
+    if of > 0 and known == 0:
+        return "n/a"
+    return f"${cost:.4f}" + (f" ({known} of {of} paid recorded)" if known < of else "")
 
 
 async def detect_spend_spike(
@@ -124,18 +152,20 @@ async def detect_spend_spike(
     db = await _get_db()
     try:
         today_row = await (await db.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
+            "SELECT SUM(cost_usd) FROM usage "
             "WHERE success=1 AND date(timestamp,'localtime') = date('now','localtime')"
         )).fetchone()
         week_row = await (await db.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM usage "
+            "SELECT SUM(cost_usd) FROM usage "
             "WHERE success=1 AND timestamp >= datetime('now', '-7 days')"
         )).fetchone()
     finally:
         await db.close()
 
-    today_usd    = float(today_row[0]) if today_row else 0.0
-    week_total   = float(week_row[0])  if week_row  else 0.0
+    # SUM over no recorded cost is NULL = unknown. Unknown spend cannot be called a spike, so it
+    # contributes nothing to the comparison (F121); it is never printed as a figure.
+    today_usd    = float(today_row[0]) if today_row and today_row[0] is not None else 0.0
+    week_total   = float(week_row[0])  if week_row and week_row[0] is not None else 0.0
     avg_7day_usd = week_total / 7.0
 
     is_spike = avg_7day_usd > 0.001 and today_usd >= threshold_multiplier * avg_7day_usd
@@ -185,17 +215,22 @@ async def format_digest(period: str = "week") -> str:
         f"  LLM Router — Savings Digest  ({period})",
         "",
         f"  Calls:      {data['calls']:>6}",
-        f"  Actual cost: ${data['cost']:.4f}",
+        f"  Actual cost: {_cost_text(data['cost'], data['paid_cost_n'], data['paid_calls'])}",
         f"  Saved:       est. ${data['saved']:.4f} vs Claude baseline",
     ]
+    if data["paid_cost_n"] < data["paid_calls"]:
+        lines.append(f"               (excludes {data['paid_calls'] - data['paid_cost_n']} paid call(s) "
+                     f"with no recorded cost)")
 
     if data["by_provider"]:
         lines.append("")
         lines.append("  By provider:")
         for provider, pd in sorted(data["by_provider"].items(), key=lambda x: -x[1]["calls"]):
+            p_cost = _cost_text(pd["cost"], pd["cost_n"], pd["calls"] if pd["paid"] else 0)
+            p_saved = "est. n/a" if pd["paid"] and pd["cost_n"] == 0 else f"est. ${pd['saved']:.4f}"
             lines.append(
                 f"    {provider:<12}  {pd['calls']:>4} calls  "
-                f"${pd['cost']:.4f} cost  est. ${pd['saved']:.4f} saved"
+                f"{p_cost} cost  {p_saved} saved"
             )
 
     # What if router was off?

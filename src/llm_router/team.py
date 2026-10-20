@@ -119,8 +119,8 @@ def _savings_label(report: dict[str, Any]) -> str:
                           report.get("saved_usd", 0.0))
     real = report.get("real_dollars_avoided_usd", 0.0)
     if real > 0:
-        return f"${real:.4f} real · ${baseline:.4f} vs baseline"
-    return f"${baseline:.4f} vs baseline (≈$0 cash on subscription)"
+        return f"${real:.4f} real · est. ${baseline:.4f} vs baseline"
+    return f"est. ${baseline:.4f} vs baseline (≈$0 cash on subscription)"
 
 
 def _slack_payload(report: dict[str, Any]) -> dict:
@@ -203,7 +203,8 @@ def _telegram_message(report: dict[str, Any], chat_id: str) -> dict:
     calls = report.get("total_calls", 0)
     # baseline/real are no longer read here: #24 routed this through
     # _savings_label so all four channels share one renderer.
-    actual = report.get("actual_usd", 0.0)
+    # F121 / D-247: an unreadable ledger leaves actual_usd at its 0.0 default; never print it as $0.
+    paid_text = "n/a" if report.get("provenance") == "unknown" else f"\\${report.get('actual_usd', 0.0):.4f}"
     free_pct = report.get("free_pct", 0.0)
     top_models = report.get("top_models", [])
 
@@ -223,7 +224,7 @@ def _telegram_message(report: dict[str, Any], chat_id: str) -> dict:
         # to one and not the other -- the same "fixed some surfaces, assumed
         # global" shape as AUD-06 itself. One renderer, escaped for MarkdownV2.
         f"💰 *Avoided:* {_esc(_savings_label(report))}"
-        + f"  ·  paid \\${actual:.4f}\n"
+        + f"  ·  paid {paid_text}\n"
         f"🆓 *Free tier:* {free_pct:.0%}  {_esc(_bar(free_pct))}\n\n"
         f"🏆 *Top models:*\n{model_lines}\n\n"
         f"_Powered by [llm\\-router](https://github\\.com/ypollak2/llm\\-router)_"

@@ -306,6 +306,8 @@ def test_explain_dashboard_prints_sources(fake_state_dir, monkeypatch, capsys):
     assert "model_tracking.jsonl" in out
     assert "claude_usage" in out
     assert "savings_stats" in out
-    # Today's totals (1000 tokens, ~$0.52 combined).
+    # Today's totals (1000 tokens). F121 / D-247: the estimate (platform tables, $0.50) and the
+    # verified figure (savings_stats) are printed apart; their sum, $0.5234, appears nowhere.
     assert "1,000" in out
-    assert "$0.5234" in out or "$0.52" in out
+    assert "est. $0.5000" in out and "verified saved (savings_stats)" in out
+    assert "$0.5234" not in out and "$0.52" not in out

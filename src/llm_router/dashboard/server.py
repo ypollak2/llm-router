@@ -1176,6 +1176,64 @@ document.querySelector('[data-tab="budget"]').addEventListener('click', () => lo
     )
 
 
+async def _metrics_text() -> str:
+    """Prometheus exposition text for ``/metrics``. An unreadable ledger omits the savings and
+    external samples (Prometheus convention for unknown); it never emits 0 (F121 / D-247)."""
+    from llm_router.budget import get_all_budget_states
+    from llm_router.cost import get_savings_by_period
+    states = await get_all_budget_states()
+    try:
+        savings = await get_savings_by_period()
+        all_time = savings.get("all_time", {})
+        if all_time.get("unreadable"):
+            raise RuntimeError("usage ledger unreadable")
+        total_saved = all_time.get("saved_usd")
+        total_external = all_time.get("actual_usd")   # the key "external_usd" never existed: this metric was a constant 0
+    except Exception as exc:
+        # F121 / D-247: an unreadable ledger is unknown, not $0. Prometheus
+        # convention: omit the sample (HELP/TYPE stay), never print 0.
+        total_saved = total_external = None
+        from llm_router import failopen
+        failopen.record("CHZ-FO-METRICS-LEDGER", exc)   # never raises
+
+    lines = [
+        "# HELP llm_router_spend_usd Monthly spend per provider",
+        "# TYPE llm_router_spend_usd gauge",
+    ]
+    for p, s in sorted(states.items()):
+        lines.append(f'llm_router_spend_usd{{provider="{p}"}} {s.spend_usd:.4f}')
+
+    lines += [
+        "# HELP llm_router_budget_pressure Budget pressure per provider (0=free 1=exhausted)",
+        "# TYPE llm_router_budget_pressure gauge",
+    ]
+    for p, s in sorted(states.items()):
+        lines.append(f'llm_router_budget_pressure{{provider="{p}"}} {s.pressure:.4f}')
+
+    lines += [
+        "# HELP llm_router_cap_usd Configured monthly cap per provider (0=unlimited)",
+        "# TYPE llm_router_cap_usd gauge",
+    ]
+    for p, s in sorted(states.items()):
+        lines.append(f'llm_router_cap_usd{{provider="{p}"}} {s.cap_usd:.2f}')
+
+    lines += [
+        "# HELP llm_router_savings_usd_total Lifetime estimated savings vs Sonnet baseline (sample omitted when the ledger is unreadable)",
+        "# TYPE llm_router_savings_usd_total counter",
+    ]
+    if total_saved is not None:
+        lines.append(f"llm_router_savings_usd_total {float(total_saved):.4f}")
+    lines += [
+        "# HELP llm_router_external_usd_total Lifetime external API spend",
+        "# TYPE llm_router_external_usd_total counter",
+    ]
+    if total_external is not None:
+        lines.append(f"llm_router_external_usd_total {float(total_external):.4f}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+
 async def run(port: int = DEFAULT_PORT) -> None:
     """Start the dashboard HTTP server.
 
@@ -1260,47 +1318,7 @@ async def run(port: int = DEFAULT_PORT) -> None:
         )
 
     async def handle_metrics(request: "web.Request") -> "web.Response":
-        from llm_router.budget import get_all_budget_states
-        from llm_router.cost import get_savings_by_period
-        states = await get_all_budget_states()
-        try:
-            savings = await get_savings_by_period()
-            total_saved = savings.get("all_time", {}).get("saved_usd", 0.0)
-            total_external = savings.get("all_time", {}).get("external_usd", 0.0)
-        except Exception:
-            total_saved = total_external = 0.0
-
-        lines = [
-            "# HELP llm_router_spend_usd Monthly spend per provider",
-            "# TYPE llm_router_spend_usd gauge",
-        ]
-        for p, s in sorted(states.items()):
-            lines.append(f'llm_router_spend_usd{{provider="{p}"}} {s.spend_usd:.4f}')
-
-        lines += [
-            "# HELP llm_router_budget_pressure Budget pressure per provider (0=free 1=exhausted)",
-            "# TYPE llm_router_budget_pressure gauge",
-        ]
-        for p, s in sorted(states.items()):
-            lines.append(f'llm_router_budget_pressure{{provider="{p}"}} {s.pressure:.4f}')
-
-        lines += [
-            "# HELP llm_router_cap_usd Configured monthly cap per provider (0=unlimited)",
-            "# TYPE llm_router_cap_usd gauge",
-        ]
-        for p, s in sorted(states.items()):
-            lines.append(f'llm_router_cap_usd{{provider="{p}"}} {s.cap_usd:.2f}')
-
-        lines += [
-            "# HELP llm_router_savings_usd_total Lifetime savings vs Sonnet baseline",
-            "# TYPE llm_router_savings_usd_total counter",
-            f"llm_router_savings_usd_total {total_saved:.4f}",
-            "# HELP llm_router_external_usd_total Lifetime external API spend",
-            "# TYPE llm_router_external_usd_total counter",
-            f"llm_router_external_usd_total {total_external:.4f}",
-            "",
-        ]
-        return web.Response(text="\n".join(lines), content_type="text/plain")
+        return web.Response(text=await _metrics_text(), content_type="text/plain")
 
     app = web.Application(middlewares=[auth_middleware])
     app.router.add_get("/", handle_index)

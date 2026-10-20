@@ -26,8 +26,7 @@ The headline now comes from ``dashboard_data.summary()`` — the SAME function
 report can no longer print a different verified/unverified figure or a
 different baseline model than any other surface reading the same database.
 (2026-09-27: the headline itself calls ``Summary.display()``, which shows
-ONE labelled estimate — "verified"/"unverified" no longer reaches the user;
-see ``Summary.estimated_usd``'s docstring.)
+the estimated and the verified saving as two labelled segments, never one sum.)
 
 The per-model free/paid breakdown below still comes from `savings_stats` (the
 only table carrying it), via ``dashboard_data.query_model_savings`` — the

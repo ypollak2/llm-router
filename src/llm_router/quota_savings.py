@@ -93,12 +93,12 @@ class QuotaSavingsSnapshot:
     weekly_current_pct: float
     weekly_pp_saved: float | None          # None = no plan configured (n/a, never 0)
     weekly_counterfactual_pct: float | None
-    weekly_saved_usd: float
+    weekly_saved_usd: float | None         # None = ledger unreadable (n/a, never 0)
 
     session_current_pct: float
     session_pp_saved: float | None
     session_counterfactual_pct: float | None
-    session_saved_usd: float
+    session_saved_usd: float | None
 
     calibration_usd_per_pp: float | None
     calibration_source: str  # "configured" | "unconfigured"
@@ -114,11 +114,14 @@ class QuotaSavingsSnapshot:
 
     def short_form(self) -> str:
         """Compact suffix for the routing notice line, e.g.
-        ``"saved 7pp wk / 3pp 5h"``; ``n/a`` when no plan is configured."""
+        ``"est. saved 7pp wk / 3pp 5h"`` (an estimate, D-247); ``n/a`` when no plan is configured
+        or the ledger could not be read."""
+        if self.calibration_usd_per_pp is None:
+            return "est. saved n/a (no plan configured)"
         if self.weekly_pp_saved is None or self.session_pp_saved is None:
-            return "saved n/a (no plan configured)"
+            return "est. saved n/a (ledger unreadable)"
         return (
-            f"saved {self.weekly_pp_saved:.1f}pp wk / "
+            f"est. saved {self.weekly_pp_saved:.1f}pp wk / "
             f"{self.session_pp_saved:.1f}pp 5h"
         )
 
@@ -181,35 +184,37 @@ def _default_db_path() -> Path:
     return paths.state_path("usage.db")
 
 
-def _sum_saved_usd_since(db_path: Path, since: datetime) -> float:
+def _sum_saved_usd_since(db_path: Path, since: datetime) -> float | None:
     """Sum ``saved_usd`` from the ``usage`` table since ``since`` (UTC).
 
-    Returns ``0.0`` when the DB is missing or the column is absent — the
-    metric is purely additive and a missing DB should never break the
-    routing notice. The ``usage.saved_usd`` column was added by an
-    idempotent ALTER migration, so its presence isn't guaranteed on
-    older deployments."""
+    Returns ``None`` (unknown, printed n/a -- never ``$0``, F121 / D-247) when the DB is missing,
+    unreadable, or the column is absent: the ``usage.saved_usd`` column was added by an
+    idempotent ALTER migration, so its presence isn't guaranteed on older deployments. A
+    readable ledger with no row in the window is a real ``0.0`` (n=0). The metric is purely
+    additive, so a gap never breaks the routing notice."""
     if not db_path.exists():
-        return 0.0
+        return None
     try:
         conn = sqlite3.connect(str(db_path))
         try:
             since_iso = since.strftime("%Y-%m-%d %H:%M:%S")
             cur = conn.execute(
-                "SELECT COALESCE(SUM(saved_usd), 0.0) FROM usage WHERE timestamp >= ?",
+                "SELECT COUNT(*), SUM(saved_usd) FROM usage WHERE timestamp >= ?",
                 (since_iso,),
             )
-            row = cur.fetchone()
-            return float(row[0]) if row and row[0] is not None else 0.0
+            n, total = cur.fetchone()
+            if n == 0:
+                return 0.0           # readable ledger, nothing routed in the window
+            return None if total is None else float(total)
         finally:
             conn.close()
     except sqlite3.OperationalError as err:
         # Most common: ``no such column: saved_usd`` on pre-migration DBs.
         log.debug("quota_savings_query_failed", error=str(err))
-        return 0.0
+        return None
     except Exception as err:
         log.warning("quota_savings_query_unexpected", error=str(err))
-        return 0.0
+        return None
 
 
 # ── Public API ─────────────────────────────────────────────────────────────
@@ -241,11 +246,12 @@ def compute_quota_savings(
     session_saved = _sum_saved_usd_since(db, _start_of_5h_window_utc(now))
 
     usd_per_pp, source = _calibration_usd_per_pp()
-    if usd_per_pp is None:
-        weekly_pp = session_pp = None
-    else:
-        weekly_pp = weekly_saved / usd_per_pp if weekly_saved > 0 else 0.0
-        session_pp = session_saved / usd_per_pp if session_saved > 0 else 0.0
+    weekly_pp = session_pp = None
+    if usd_per_pp is not None:
+        if weekly_saved is not None:
+            weekly_pp = weekly_saved / usd_per_pp if weekly_saved > 0 else 0.0
+        if session_saved is not None:
+            session_pp = session_saved / usd_per_pp if session_saved > 0 else 0.0
 
     return QuotaSavingsSnapshot(
         weekly_current_pct=weekly_current_pct,

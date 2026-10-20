@@ -172,7 +172,7 @@ def test_analyze_facts_empty_session():
     facts = analyze_facts([], [])
 
     assert facts["total_calls"] == 0
-    assert facts["total_cost"] == 0.0
+    assert facts["total_cost"] is None          # F121: no decisions -> cost unknown, printed n/a
     assert facts["total_saved"] is None
     assert facts["classification_accuracy"] is None
     assert facts["measured"] is False

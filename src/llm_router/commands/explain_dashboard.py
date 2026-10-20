@@ -189,7 +189,20 @@ def _savings_panel_block() -> list[str]:
             out.append(_note("usage  (success=1):"))
             out.append(_kv("  rows:", str(usage_calls)))
             out.append(_kv("  tokens (in+out):", f"{usage_tokens:,}"))
-            out.append(_kv("  cost_usd:", f"${usage_cost:.4f}"))
+            # F121 / D-247: the COALESCE'd sum cannot tell $0 from unknown. COUNT(cost_usd)
+            # is the n of rows that recorded a cost; the sum is of those rows only.
+            try:
+                cost_n = int(conn.execute(
+                    f"SELECT COUNT(cost_usd) FROM usage WHERE success=1 AND {where}"
+                ).fetchone()[0])
+            except sqlite3.OperationalError:
+                cost_n = None
+            if cost_n is None or (cost_n == 0 and usage_calls > 0):
+                cost_text = "n/a (no row recorded a cost)"
+            else:
+                cost_text = f"${usage_cost:.4f}" + (
+                    f" ({cost_n} of {usage_calls} recorded)" if cost_n < usage_calls else "")
+            out.append(_kv("  cost_usd:", cost_text))
             out.append(_blank())
         else:
             usage_calls = 0
@@ -215,7 +228,7 @@ def _savings_panel_block() -> list[str]:
                 out.append(_note(f"{table}:"))
                 out.append(_kv("  rows:", str(c)))
                 out.append(_kv("  tokens_used:", f"{tokens:,}"))
-                out.append(_kv("  cost_saved_usd:", f"${saved:.4f}"))
+                out.append(_kv("  cost_saved_usd (est.):", f"est. ${saved:.4f}"))
                 out.append(_blank())
 
         # savings_stats — no token columns
@@ -231,22 +244,19 @@ def _savings_panel_block() -> list[str]:
             if ss_calls > 0:
                 out.append(_note("savings_stats (no token column):"))
                 out.append(_kv("  rows:", str(ss_calls)))
-                out.append(_kv("  estimated_saved (verified):", f"${ss_saved:.4f}"))
-                out.append(_kv("  unverified (not in total):", f"${sums[1]:.4f}"))
+                out.append(_kv("  verified saved:", f"${ss_saved:.4f} verified"))
+                out.append(_kv("  unverified (est.):", f"est. ${sums[1]:.4f}"))
                 out.append(_blank())
 
         total_calls = usage_calls + plat_calls + ss_calls
         total_tokens = usage_tokens + plat_tokens  # savings_stats has none
-        total_saved = (usage_cost if usage_result else 0) * 0  # cost not saving
-        # Savings rollup mirrors session-end.py logic: free providers' baseline +
-        # per-platform cost_saved_usd + savings_stats estimated_claude_cost_saved.
-        # We display the per-platform + savings_stats sum (the parts that hit the
-        # statusline and cyber_grid SAVINGS column for today).
-        total_saved = plat_saved + ss_saved
-        out.append(_note("TOTAL (what the SAVINGS today row should show):"))
+        # F121 / D-247: the per-platform cost_saved_usd (an estimate) and the savings_stats
+        # verified saving are two figures. They are printed apart, never added into one.
+        out.append(_note("TOTAL (the SAVINGS today row shows these two, not their sum):"))
         out.append(_kv("  calls:", str(total_calls)))
         out.append(_kv("  tokens:", f"{total_tokens:,}"))
-        out.append(_kv("  saved:", f"${total_saved:.4f}"))
+        out.append(_kv("  est. saved (platform tables):", f"est. ${plat_saved:.4f}"))
+        out.append(_kv("  verified saved (savings_stats):", f"${ss_saved:.4f} verified"))
     finally:
         conn.close()
 

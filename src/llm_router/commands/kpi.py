@@ -1518,7 +1518,10 @@ def _o1_quota_avoided(days: int, win: "_Window | None" = None) -> dict:
 
         period = _period_for_days(days)
         s = summary(_ledger_window_for_days(days))
-        n = s.estimated_n
+        # F121 / D-247: the estimated and the verified saving are never summed, so there is no
+        # merged n. The gate asks whether the better-evidenced segment clears MIN_N; display()
+        # prints each segment with its own n, so a thin segment is never hidden behind a thick one.
+        n = max(s.unverified_n, s.realized_n)
         newest = newest_timestamp()
     except Exception as exc:  # noqa: BLE001
         # This command is read-only: a failure here is reported, not recorded via

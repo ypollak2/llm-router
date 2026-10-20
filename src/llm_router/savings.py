@@ -367,7 +367,7 @@ class CanonicalSavings:
             # what routing bought was quota headroom, not cash.
             return (
                 f"$0.00 real dollars avoided (subscription: the plan is paid "
-                f"either way) · ${self.net_avoided_usd:.2f} baseline-equivalent "
+                f"either way) · est. ${self.net_avoided_usd:.2f} baseline-equivalent "
                 f"vs {self.baseline_model}, n={self.n_rows}"
             )
         return (

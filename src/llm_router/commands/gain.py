@@ -69,6 +69,18 @@ def _bucket_unpriced(stats: dict) -> int:
     return 0 if unpriced is None else unpriced
 
 
+def _fmt_cost(stats: dict) -> str:
+    """Bucket cost cell: the known sum, ``(k of n)`` when only some rows recorded a cost,
+    ``n/a`` when none did -- never ``$0.0000`` for an unknown (F121 / D-247). A hand-built
+    bucket without ``cost_n`` is read as fully recorded."""
+    n = stats["count"]
+    k = stats.get("cost_n")
+    k = n if k is None else k
+    if k == 0 and n > 0:
+        return "n/a"
+    return f"${stats['cost']:.4f}" + (f" ({k} of {n})" if k < n else "")
+
+
 def _fmt_opus_saved(stats: dict) -> tuple[str, str]:
     """(opus_cost, saved) cells for a bucket — "n/a" when every decision in
     it was unpriced (no tokens, no cost), never a fabricated ``$0.0000`` that
@@ -236,6 +248,7 @@ class SavingsAnalytics:
                 "total_saved_usd": 0.0,
                 "efficiency_multiplier": 1.0,
                 "unpriced_decisions": 0,
+                "cost_n": 0,
                 "by_tool": {},
                 "by_model": {},
                 "by_complexity": {},
@@ -245,6 +258,7 @@ class SavingsAnalytics:
         total_cost = 0.0
         total_opus_cost = 0.0
         total_unpriced = 0
+        total_cost_n = 0
         by_tool = {}
         by_model = {}
         by_complexity = {}
@@ -252,15 +266,22 @@ class SavingsAnalytics:
 
         def _bucket(store: dict, key) -> dict:
             if key not in store:
-                store[key] = {"count": 0, "cost": 0.0, "opus_cost": 0.0, "unpriced": 0}
+                store[key] = {"count": 0, "cost": 0.0, "opus_cost": 0.0, "unpriced": 0,
+                              "cost_n": 0}
             return store[key]
 
         for decision in decisions:
-            cost = decision.get("estimated_cost_usd", 0.0) or 0.0
+            # F121 / D-247: NULL cost is UNKNOWN, not $0. Such a row is unpriced
+            # (out of cost AND baseline, so the net stays consistent) and is
+            # not counted in cost_n, the n behind the printed cost.
+            raw_cost = decision.get("estimated_cost_usd")
+            cost_known = raw_cost is not None
+            cost = float(raw_cost) if cost_known else 0.0
             in_tok = decision.get("input_tokens", 0) or 0
             out_tok = decision.get("output_tokens", 0) or 0
-            opus_cost_priced = self.estimate_opus_cost(
-                decision["selected_model"], cost, in_tok, out_tok
+            opus_cost_priced = (
+                self.estimate_opus_cost(decision["selected_model"], cost, in_tok, out_tok)
+                if cost_known else None
             )
             # Not `opus_cost_priced or 0.0`: that coerces None (unpriceable)
             # and a real $0.00 baseline identically, which is exactly the
@@ -277,6 +298,7 @@ class SavingsAnalytics:
             total_cost += cost
             total_opus_cost += opus_cost
             total_unpriced += int(unpriced)
+            total_cost_n += int(cost_known)
 
             for store, key in (
                 (by_tool, tool), (by_model, model),
@@ -287,6 +309,7 @@ class SavingsAnalytics:
                 b["cost"] += cost
                 b["opus_cost"] += opus_cost
                 b["unpriced"] += int(unpriced)
+                b["cost_n"] += int(cost_known)
 
         total_saved = total_opus_cost - total_cost
         efficiency = total_opus_cost / total_cost if total_cost > 0 else 1.0
@@ -299,6 +322,8 @@ class SavingsAnalytics:
             "total_saved_usd": round(total_saved, 4),
             "efficiency_multiplier": round(efficiency, 2),
             "unpriced_decisions": total_unpriced,
+            # F121: decisions that recorded a cost -- the n behind total_cost_usd.
+            "cost_n": total_cost_n,
             "by_tool": by_tool,
             "by_model": by_model,
             "by_complexity": by_complexity,
@@ -355,26 +380,42 @@ class SavingsAnalytics:
         if decisions > 0:
             output.append(bold("COST BREAKDOWN  (routing_decisions ledger — every routed "
                                 "decision, priced token-for-token against the baseline)"))
-            output.append(f"  {cyan('Actual cost')}           ${cost:.4f}")
-            output.append(f"  {yellow('Opus baseline')}        ${opus_cost:.4f}")
-            output.append(f"  {green('Total saved (est.)')}   ${saved:.4f}")
+            cost_n = savings.get("cost_n")
+            if cost_n is None:
+                cost_n = decisions        # hand-built dict: no per-decision cost tracking
+            if cost_n == 0:
+                output.append(f"  {cyan('Actual cost')}           n/a (no decision recorded a cost)")
+                output.append(f"  {yellow('Opus baseline')}        n/a")
+                output.append(f"  {green('Total saved (est.)')}   est. n/a")
+            else:
+                of_n = f"  ({cost_n} of {decisions} recorded)" if cost_n < decisions else ""
+                output.append(f"  {cyan('Actual cost')}           ${cost:.4f}{of_n}")
+                output.append(f"  {yellow('Opus baseline')}        ${opus_cost:.4f}")
+                output.append(f"  {green('Total saved (est.)')}   est. ${saved:.4f}")
             output.append(f"  {gold(f'Efficiency: {multiplier}x')} (Opus cost per actual $)")
             if unpriced:
                 output.append(dim(
                     f"  {unpriced} of {decisions} decision(s) have no token count and no "
-                    f"cost — excluded from the baseline above, not counted as $0 saved"
+                    f"cost, or no recorded cost — excluded from the baseline above, not counted as $0 saved"
                 ))
             output.append("")
 
             # Savings percentage
             savings_pct = ((opus_cost - cost) / opus_cost * 100) if opus_cost > 0 else 0
-            if savings_pct >= 80:
+            if cost_n == 0:
+                savings_bar = dim("░" * 10)
+                savings_pct_text = "est. n/a"
+            else:
+                savings_pct_text = f"est. {savings_pct:.1f}%"
+            if cost_n == 0:
+                pass
+            elif savings_pct >= 80:
                 savings_bar = green("█" * 8) + dim("█" * 2)
             elif savings_pct >= 60:
                 savings_bar = yellow("█" * 7) + dim("█" * 3)
             else:
                 savings_bar = red("█" * 6) + dim("█" * 4)
-            output.append(f"Savings: {savings_bar} {savings_pct:.1f}%")
+            output.append(f"Savings: {savings_bar} {savings_pct_text}")
             output.append("")
 
             # By model
@@ -391,7 +432,7 @@ class SavingsAnalytics:
                     rows.append([
                         model,
                         str(stats["count"]),
-                        f"${stats['cost']:.4f}",
+                        _fmt_cost(stats),
                         opus_cell,
                         saved_cell,
                     ])
@@ -415,7 +456,7 @@ class SavingsAnalytics:
                     rows.append([
                         complexity.upper(),
                         str(stats["count"]),
-                        f"${stats['cost']:.4f}",
+                        _fmt_cost(stats),
                         opus_cell,
                         saved_cell,
                     ])
@@ -439,7 +480,7 @@ class SavingsAnalytics:
                     rows.append([
                         tool,
                         str(stats["count"]),
-                        f"${stats['cost']:.4f}",
+                        _fmt_cost(stats),
                         saved_cell,
                     ])
                 output.append(table(
@@ -470,7 +511,7 @@ class SavingsAnalytics:
                     rows.append([
                         date,
                         str(stats["count"]),
-                        f"${stats['cost']:.4f}",
+                        _fmt_cost(stats),
                         saved_str,
                         pct_str,
                     ])

@@ -135,7 +135,9 @@ def test_the_fixed_source_is_clean() -> None:
 # 110 -> 104 (F119 / D-247): the savings surfaces keep an unknown cost / saving as None (printed n/a)
 # instead of coercing it to 0 (ui/session_summary MODELS panel + savings entries, replay summary,
 # claw-code free panel).
-BASELINE = 104
+# 104 -> 103 (F121 / D-247): digest/gain/retrospective/quota_savings/demo/cost keep an unknown cost
+# as None (printed n/a) instead of coercing it to 0.
+BASELINE = 103
 
 
 def _current_count() -> int:
