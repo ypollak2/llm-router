@@ -1,0 +1,572 @@
+"""LC-5: local-check scoring, gates, early stop, anti-retry, record. Fakes only (fake runtime adapter, fake judge backend); the real bank; no model call."""
+from __future__ import annotations
+
+import gzip
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from llm_router.local_check import attempts as A
+from llm_router.local_check import grader_cases, score as S, session as SE, stats
+from llm_router.local_check.bank import load_bank
+from llm_router.local_check.budget import Budget
+from llm_router.local_check.judge import RawReply
+from llm_router.local_check.runtimes import GenResult
+
+FIX = Path(__file__).parent / "fixtures"
+PINNED = "claude-sonnet-5-5"
+BANK = load_bank()
+
+
+# ---------------------------------------------------------------- pure scorer helpers
+def mkrow(i: int, job: str, ok: bool, *, reasons: tuple = (), valid: bool = True, error: bool = False, empty: bool = False,
+          prog: bool | None = None, judge: str | None = "x") -> S.Row:
+    prog = (ok or not reasons) if prog is None else prog
+    judge = ("pass" if ok else ("fail" if prog else None)) if judge == "x" else judge
+    return S.Row(f"i{i}", job, "small", "py", True, valid, error, empty, prog, judge, ok, reasons)
+
+
+def rows_n(k: int, n: int, *, commit_ok: int | None = None) -> list[S.Row]:
+    """n rows (half commit, half pr), k ok. Failures are judge-fails (programmatically fine) unless stated."""
+    half = n // 2
+    jobs = ["commit_message"] * half + ["pr_description"] * (n - half)
+    if commit_ok is None:
+        oks = [True] * k + [False] * (n - k)
+    else:
+        oks = [True] * commit_ok + [False] * (half - commit_ok) + [True] * (k - commit_ok) + [False] * (n - half - (k - commit_ok))
+    return [mkrow(i, jobs[i], oks[i]) for i in range(n)]
+
+
+def good_gates(**kw) -> S.GateInputs:
+    g = S.GateInputs(bank_sha_ok=True, judge_pinned=PINNED, judge_served=[PINNED], digest_start="d1", digest_end="d1",
+                     g3a={"n": 103, "unexpected": []}, g3b=SimpleNamespace(status="PASS", reasons=[]))
+    for k, v in kw.items():
+        setattr(g, k, v)
+    return g
+
+
+def ids(rows) -> list[str]:
+    return [r.item_id for r in rows]
+
+
+def verdict(rows, **kw) -> S.Result:
+    return S.score(rows, ids(rows), kw.pop("gates", None) or good_gates(), **kw)
+
+
+@pytest.mark.parametrize("k,n,expect", [(56, 70, S.PASS), (55, 70, S.INCONCLUSIVE), (50, 70, S.INCONCLUSIVE), (49, 70, S.FAIL), (0, 70, S.FAIL),
+                                        (70, 70, S.PASS), (112, 140, S.PASS), (111, 140, S.INCONCLUSIVE), (103, 140, S.INCONCLUSIVE),
+                                        (102, 140, S.FAIL)])
+def test_verdict_table(k: int, n: int, expect: str) -> None:
+    r = verdict(rows_n(k, n))
+    assert r.verdict == expect, r.why
+    assert (r.kmin, r.kfail) == (stats.kmin(n), stats.kfail(n))
+    assert r.k == k and r.n_assigned == n
+
+
+def test_boundaries_come_from_the_stats_not_from_this_file() -> None:
+    assert (stats.kmin(70), stats.kfail(70), stats.kmin(140)) == (56, 49, 112)
+
+
+def test_programmatic_failure_means_not_judged_and_not_ok() -> None:
+    bank_item = BANK.draw(1)[0]
+    rec = {"status": "ok", "text": "Here is the commit message: Fix things"}
+    row = S.grade_row(bank_item, rec, "pass")
+    assert not row.prog and not row.ok            # a judge pass cannot rescue a grader fail
+
+
+# ---------------------------------------------------------------- lane guard
+def test_lane_guard_excludes_a_weak_lane_from_the_pass() -> None:
+    r = verdict(rows_n(56, 70, commit_ok=35))      # commit 35/35, pr 21/35 = 0.60
+    assert r.verdict == S.PASS and r.guard_excluded == ["pr_description"]
+    plan = S.record_plan(r)
+    assert plan["commit_message"] == {"k": 56, "n": 70, "verdict": "PASS"}
+    assert plan["pr_description"] == {"k": 21, "n": 35, "verdict": "FAIL", "status": "lane_guard"}
+
+
+def test_lane_exactly_at_the_guard_is_kept() -> None:
+    r = verdict(rows_n(60, 70, commit_ok=35))      # pr 25/35 = 0.714
+    assert r.guard_excluded == []
+    r2 = verdict(rows_n(56, 70, commit_ok=31))     # commit 31/35 = .886, pr 25/35 = .714
+    assert r2.verdict == S.PASS and r2.guard_excluded == []
+
+
+# ---------------------------------------------------------------- gates -> INVALID, nothing recorded
+GATE_CASES = {
+    "G0_integrity": [dict(bank_sha_ok=False), dict(judge_served=["other-model"]), dict(judge_served=[PINNED, "other-model"]), dict(judge_served=[]),
+                     dict(digest_end="d2"), dict(bank_sha_ok=None)],
+    "G3a_grader_selftest": [dict(g3a={"n": 103, "unexpected": ["x"]}), dict(g3a=None), dict(g3a={"n": 0, "unexpected": []})],
+    "G3b_plants": [dict(g3b=SimpleNamespace(status="FAIL", reasons=["good: 9/12"])), dict(g3b=SimpleNamespace(status="INCONCLUSIVE", reasons=[])), dict(g3b=None)],
+}
+
+
+@pytest.mark.parametrize("gate,kw", [(g, kw) for g, cases in GATE_CASES.items() for kw in cases])
+def test_each_gate_failure_is_invalid_and_records_nothing(gate: str, kw: dict) -> None:
+    r = verdict(rows_n(66, 70), gates=good_gates(**kw))     # 66/70 would be a clear PASS
+    assert r.verdict == S.INVALID and r.gates[gate]["status"] in ("FAIL", "NOT_MEASURED"), r.gates[gate]
+    assert S.record_plan(r) == {}
+
+
+def test_g1_valid_fraction() -> None:
+    rows = rows_n(60, 70)
+    rows[:11] = [mkrow(i, rows[i].job, False, valid=False, empty=True, reasons=("empty",), prog=False) for i in range(11)]   # 11 empties: also > 3 bad
+    r = verdict(rows)
+    assert r.verdict == S.INVALID and r.gates["G1_serves"]["status"] == "FAIL"
+
+
+def test_g1_counts_each_row_once() -> None:
+    def bad_rows(n_bad: int, flags: dict) -> list[S.Row]:
+        rows = rows_n(60, 70)
+        for i in range(n_bad):
+            rows[i] = mkrow(i, rows[i].job, False, valid=False, prog=False, reasons=("empty",), **flags)
+        return rows
+    # 3 rows that are at once error AND timeout AND empty are 3 bad rows (not 9): at the limit, G1 passes.
+    three = verdict(bad_rows(3, dict(error=True, empty=True)))
+    assert three.gates["G1_serves"]["error_empty_timeout"] == 3 and three.gates["G1_serves"]["status"] == "PASS"
+    four = verdict(bad_rows(4, dict(error=True, empty=True)))
+    assert four.gates["G1_serves"]["error_empty_timeout"] == 4 and four.verdict == S.INVALID
+    # the limit scales with n: 6 bad of 140 is fine, 7 is not
+    rows = rows_n(130, 140)
+    for i in range(6):
+        rows[i] = mkrow(i, rows[i].job, False, valid=False, prog=False, error=True, empty=True, reasons=("empty",))
+    assert verdict(rows).gates["G1_serves"]["status"] == "PASS"
+    rows[6] = mkrow(6, rows[6].job, False, valid=False, prog=False, error=True, reasons=("empty",))
+    assert verdict(rows).gates["G1_serves"]["status"] == "FAIL"
+
+
+def test_g5_missing_item_and_unjudged_answer() -> None:
+    rows = rows_n(60, 70)
+    r = S.score(rows[:-1], ids(rows), good_gates())
+    assert r.verdict == S.INVALID and r.gates["G5_complete"]["missing_items"] == 1
+    rows2 = rows_n(60, 70)
+    rows2[0] = mkrow(0, rows2[0].job, False, prog=True, judge=None)    # programmatically fine but never judged
+    r2 = verdict(rows2)
+    assert r2.verdict == S.INVALID and r2.gates["G5_complete"]["unjudged"] == 1
+    rows3 = rows_n(60, 70)
+    rows3[0] = mkrow(0, rows3[0].job, False, prog=True, judge="judge_error")
+    assert verdict(rows3).verdict == S.INVALID
+
+
+def test_empty_row_set_cannot_pass_a_gate() -> None:
+    r = S.score([], [], good_gates())
+    assert r.verdict == S.INVALID and r.gates["G1_serves"]["status"] == "FAIL"
+
+
+# ---------------------------------------------------------------- early stop -> NOT_PASSED
+def test_early_stop_is_not_passed_with_partial_counts_not_a_powered_fail() -> None:
+    assigned = [f"i{i}" for i in range(70)]
+    rows = [mkrow(i, "commit_message" if i < 35 else "pr_description", i >= 15) for i in range(45)]   # items 0..14 fail, 15..44 pass -> 15 failures
+    r = S.score(rows, assigned, good_gates(), early_stop=True)
+    assert r.verdict == S.NOT_PASSED and r.incomplete
+    assert (r.k, r.n_scored, r.n_assigned) == (30, 45, 70)
+    plan = S.record_plan(r)
+    assert set(plan) == {"commit_message", "pr_description"} and all(v["verdict"] == "NOT_PASSED" and v["n"] == 45 and v["k"] == 30 for v in plan.values())
+
+
+def test_early_stop_is_believed_only_when_the_bar_is_really_unreachable() -> None:
+    assigned = [f"i{i}" for i in range(70)]
+    rows = [mkrow(i, "commit_message" if i < 35 else "pr_description", i >= 14) for i in range(45)]    # 14 failures: 56 still reachable
+    r = S.score(rows, assigned, good_gates(), early_stop=True)
+    assert r.verdict == S.INVALID and r.gates["G5_complete"]["missing_items"] == 25
+
+
+def test_a_complete_run_with_55_is_inconclusive_not_not_passed() -> None:
+    r = verdict(rows_n(55, 70), early_stop=True)           # the runner reports early_stop on the last item; nothing is unrun
+    assert r.verdict == S.INCONCLUSIVE and not r.incomplete
+
+
+# ---------------------------------------------------------------- --no-judge
+def test_no_judge_never_passes() -> None:
+    allgood = [mkrow(i, "commit_message" if i < 35 else "pr_description", True, judge=None) for i in range(70)]
+    r = verdict(allgood, mode=S.NO_JUDGE, gates=good_gates(g3b=None, judge_served=[]))
+    assert r.verdict == S.PROBE and r.gates["G3b_plants"]["status"] == "N/A"
+    assert S.record_plan(r) == {}
+    for k in range(0, 71):
+        rr = verdict([mkrow(i, "commit_message" if i < 35 else "pr_description", i < k, judge=None, prog=i < k) for i in range(70)],
+                     mode=S.NO_JUDGE, gates=good_gates(g3b=None, judge_served=[]))
+        assert rr.verdict != S.PASS
+        assert rr.verdict == (S.FAIL if k <= 49 else S.PROBE), (k, rr.why)
+
+
+def test_no_judge_fail_is_recorded_as_failed_lane_counts() -> None:
+    rows = [mkrow(i, "commit_message" if i < 35 else "pr_description", i < 40, judge=None, prog=i < 40) for i in range(70)]
+    r = verdict(rows, mode=S.NO_JUDGE, gates=good_gates(g3b=None, judge_served=[]))
+    assert r.verdict == S.FAIL and S.record_plan(r)["commit_message"] == {"k": 40, "n": 70, "verdict": "FAIL"}
+
+
+# ---------------------------------------------------------------- rule concentration
+def test_rule_concentration() -> None:
+    rows = rows_n(56, 70)
+    for i in range(56, 70):
+        rows[i] = mkrow(i, rows[i].job, False, reasons=("ungrounded_symbol",) if i < 56 + 6 else ("subject_too_long",), prog=False)
+    c = S.rule_concentration(rows)
+    assert c and c["rule"] == "subject_too_long" and c["failures"] == 14 and c["with_rule"] == 8 and c["share"] == round(8 / 14, 4)
+    rows = rows_n(56, 70)
+    for i in range(56, 70):
+        rows[i] = mkrow(i, rows[i].job, False, reasons=("r%d" % (i % 4),), prog=False)       # 4 rules: max share 4/14 = 0.286 < 0.40
+    assert S.rule_concentration(rows) is None
+    assert S.rule_concentration(rows_n(70, 70)) is None
+    boundary = rows_n(60, 70)
+    for i in range(60, 70):
+        boundary[i] = mkrow(i, boundary[i].job, False, reasons=("a",) if i < 64 else (("b",) if i < 67 else ("c",)), prog=False)
+    assert S.rule_concentration(boundary)["share"] == 0.4          # 4 of 10 is exactly the threshold
+    judge_only = rows_n(60, 70)
+    assert S.rule_concentration(judge_only) is None                # judge fails have no grader rule
+
+
+# ---------------------------------------------------------------- anti-retry log (pure)
+def test_attempt_log_draws_cooldown_and_exhaustion(tmp_path: Path) -> None:
+    log = A.AttemptLog(tmp_path)
+    key = A.config_key("m", "d", 1, "s" * 64, "h")
+    assert log.plan(key, 1000.0).draw == 1
+    log.append({"config_key": key, "draw": 1, "consumed": True, "ts": 1000.0})
+    p = log.plan(key, 1000.0 + 3600)
+    assert p.draw is None and "cooldown" in p.refused
+    assert log.plan(key, 1000.0 + 3600, force=True).draw == 2
+    assert log.plan(key, 1000.0 + A.COOLDOWN_S).draw == 2
+    log.append({"config_key": key, "draw": 2, "consumed": True, "ts": 1000.0 + A.COOLDOWN_S})
+    for force in (False, True):
+        third = log.plan(key, 9e9, force=force)
+        assert third.draw is None and "exhausted" in third.refused        # force does not lift the exhaustion
+    other = A.config_key("m", "d2", 1, "s" * 64, "h")                      # new digest: fresh configuration
+    assert log.plan(other, 1000.0).draw == 1
+    assert A.config_key("m", "d", 1, "s" * 64, "h2") != key and A.config_key("m", "d", 2, "s" * 64, "h") != key
+
+
+def test_unconsumed_attempts_do_not_count(tmp_path: Path) -> None:
+    log = A.AttemptLog(tmp_path)
+    key = A.config_key("m", "d", 1, "s" * 64, "h")
+    for _ in range(3):
+        log.append({"config_key": key, "draw": 1, "consumed": False, "ts": 1.0, "verdict": "INVALID"})
+    assert log.plan(key, 2.0).draw == 1
+    assert (tmp_path / A.LOG_NAME).stat().st_mode & 0o777 == 0o600
+
+
+# ---------------------------------------------------------------- session with fakes
+def answer(item, tag: str = "zq") -> str:
+    base = item.files[0].rsplit("/", 1)[-1] if item.files else "file"
+    if item.job == "commit_message":
+        return f"Update {base} handling\n\nAdjust the code so behaviour matches expectations {tag}."
+    return (f"## Summary\nThis change updates {base} so that the behaviour matches what the surrounding code expects now {tag}.\n\n"
+            f"## Test plan\n- Run the existing test suite {tag}")
+
+
+class FakeAdapter:
+    runtime = "fake"
+
+    def __init__(self, behaviour: dict[str, str] | None = None, digest: str | None = "sha256:aaa", max_chars: int | None = None):
+        self.behaviour, self.digest_value, self.max_chars = behaviour or {}, digest, max_chars
+        self.by_prompt = {i.task: i for d in (1, 2) for i in BANK.draw(d)}
+        self.calls = 0
+        self.change_digest_after: int | None = None
+
+    def digest(self, model):
+        return self.digest_value
+
+    def settings_hash(self, model):
+        return "meta:sha256:fake"
+
+    def max_prompt_chars(self, model):
+        return self.max_chars
+
+    def generate(self, model, prompt, *, system=None, timeout_s=240.0):
+        self.calls += 1
+        if self.change_digest_after is not None and self.calls > self.change_digest_after:
+            self.digest_value = "sha256:bbb"
+        item = self.by_prompt[prompt]
+        how = self.behaviour.get(item.id, "ok")
+        if how == "error":
+            return GenResult("error", error="boom", elapsed_s=0.1)
+        if how == "empty":
+            return GenResult("empty", text="", elapsed_s=0.1)
+        text = "Here is the commit message you asked for" if how == "progfail" else answer(item, "JUDGEFAIL" if how == "judgefail" else "zq")
+        return GenResult("ok", text=text, raw_chars=len(text), elapsed_s=0.1, first_token_s=0.05, completion_tokens=40)
+
+
+class FakeJudge:
+    name, metered, model = "fake", False, PINNED
+
+    def __init__(self, served: str = PINNED, plant_wrong: set[str] | None = None, fail_all_answers: bool = False):
+        self.served, self.plant_wrong, self.fail_all, self.calls = served, plant_wrong or set(), fail_all_answers, 0
+        self.plants = {(p.task, p.text): p for p in BANK.plants()}       # the same text can be both a good and a swapped plant: key by task too
+
+    def complete(self, prompt: str) -> RawReply:
+        self.calls += 1
+        verdict = "pass"
+        for (task, text), p in self.plants.items():
+            if f"=== TASK INPUT (verbatim) ===\n{task}\n=== END TASK INPUT ===" in prompt and f"=== CANDIDATE ANSWER ===\n{text[:4000]}\n=== END CANDIDATE" in prompt:
+                right = "pass" if p.kind == "good" else "fail"
+                verdict = ("fail" if right == "pass" else "pass") if p.id in self.plant_wrong else right
+                break
+        else:
+            if "JUDGEFAIL" in prompt.split("=== CANDIDATE ANSWER ===")[-1] or self.fail_all:
+                verdict = "fail"
+        body = {"verdict": "pass", "defect": None, "quote": "", "reason": "ok"} if verdict == "pass" else {"verdict": "fail", "defect": "A", "quote": "x", "reason": "wrong"}
+        return RawReply(text=json.dumps(body), served_model=self.served, cost_usd=0.01)
+
+
+class Clock:
+    def __init__(self, t: float = 1_800_000_000.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def check(tmp_path: Path, adapter: FakeAdapter | None = None, judge: FakeJudge | None = None, clock: Clock | None = None, **kw) -> SE.Check:
+    no_judge = kw.get("no_judge", False)
+    return SE.Check(model="fake-model:1b", runtime="fake", bank=BANK, adapter=adapter or FakeAdapter(), runs_root=tmp_path / "runs",
+                    backend=None if no_judge else (judge or FakeJudge()), budget=None if no_judge else Budget(metered=False, cap_calls=500),
+                    now=clock or Clock(), eligibility_path=tmp_path / "elig.json", **kw)
+
+
+def lanes(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "elig.json").read_text())["fake-model:1b"]["text_job_local"]
+
+
+def fails(n: int, how: str = "judgefail", draw: int = 1) -> dict[str, str]:
+    """The first n items of the draw, taken alternately from the two jobs (so no lane is wiped out by the lane guard)."""
+    items = BANK.draw(draw)
+    a = [i for i in items if i.job == "commit_message"]
+    b = [i for i in items if i.job == "pr_description"]
+    mixed = [x for pair in zip(a, b) for x in pair]
+    return {i.id: how for i in mixed[:n]}
+
+
+def test_session_pass_writes_full_provenance(tmp_path: Path) -> None:
+    out = SE.run_check(check(tmp_path, FakeAdapter(fails(10))))          # 60/70
+    assert out.status == "scored" and out.result.verdict == S.PASS and (out.result.k, out.result.n_assigned) == (60, 70), out.result and out.result.why
+    assert all(v["status"] == "written" for v in out.record_report.values())
+    for job, lane in lanes(tmp_path).items():
+        assert lane["grade"] == "passed" and (lane["k"], lane["n"]) == (60, 70) and lane["source"] == "local_check"
+        assert lane["bank_version"] == "v1" and lane["bank_sha256"] == BANK.sha256 and lane["manifest_sha256"] == BANK.sha256
+        assert lane["model_digest"] == "sha256:aaa" and lane["runtime"] == "fake" and lane["settings_hash"] == "meta:sha256:fake"
+        assert lane["judge"] == {"backend": "fake", "model_served": PINNED, "mode": "judge"}
+        assert lane["run_id"] == out.run_id and lane["date"] == "2027-01-15" and lane["attempts"] == 1
+        assert lane["scope"] == {"max_prompt_chars": None, "items_excluded_by_context": 0, "draws": [1]}
+        assert "task" not in json.dumps(lane) and "diff" not in lane
+    log = A.AttemptLog(tmp_path / "runs").entries()
+    assert len(log) == 1 and log[0]["consumed"] and log[0]["recorded"] and log[0]["verdict"] == "PASS" and "text" not in json.dumps(log[0])
+
+
+def test_session_programmatic_failures_are_never_judged(tmp_path: Path) -> None:
+    judge = FakeJudge()
+    SE.run_check(check(tmp_path, FakeAdapter(fails(10, "progfail")), judge))
+    assert judge.calls == 30 + 60                                         # 30 plants + only the 60 programmatically ok answers
+
+
+def test_session_powered_fail_is_recorded(tmp_path: Path) -> None:
+    # judge-only failures are not seen by the runner, so the run completes and the verdict is a powered FAIL
+    out2 = SE.run_check(check(tmp_path / "b", FakeAdapter(fails(30, "judgefail"))))
+    assert out2.result.verdict == S.FAIL and (out2.result.k, out2.result.n_assigned) == (40, 70)
+    lane = lanes(tmp_path / "b")["commit_message"]
+    assert lane["grade"] == "failed" and (lane["k"], lane["n"]) == (40, 70) and "status" not in lane
+
+
+def test_session_early_stop_records_not_passed_with_partial_counts(tmp_path: Path) -> None:
+    ad = FakeAdapter(fails(70, "progfail"))
+    out = SE.run_check(check(tmp_path, ad))
+    assert out.result.verdict == S.NOT_PASSED
+    assert ad.calls == 15                                              # the 15th failure makes 56/70 unreachable: the runner stops there
+    lane = lanes(tmp_path)["commit_message"]
+    assert lane["grade"] == "failed" and lane["status"] == "not_passed" and lane["verdict"] == "failed" and (lane["k"], lane["n"]) == (0, 15)
+
+
+def test_session_inconclusive_writes_nothing(tmp_path: Path) -> None:
+    out = SE.run_check(check(tmp_path, FakeAdapter(fails(18))))          # 52/70
+    assert out.result.verdict == S.INCONCLUSIVE and out.record_report == {}
+    assert not (tmp_path / "elig.json").exists()
+    assert A.AttemptLog(tmp_path / "runs").entries()[0]["consumed"] is True       # an inconclusive run still consumed draw 1
+
+
+def test_session_g3a_runs_before_any_model_call(tmp_path: Path, monkeypatch) -> None:
+    ad = FakeAdapter()
+    monkeypatch.setattr(grader_cases, "run", lambda: {"n": 103, "unexpected": ["case-x"]})
+    out = SE.run_check(check(tmp_path, ad))
+    assert out.result.verdict == S.INVALID and ad.calls == 0 and not (tmp_path / "elig.json").exists()
+
+
+def test_session_g3b_failure_stops_before_the_local_arm(tmp_path: Path) -> None:
+    ad = FakeAdapter()
+    wrong = {p.id for p in BANK.plants("good")[:5]}
+    out = SE.run_check(check(tmp_path, ad, FakeJudge(plant_wrong=wrong)))
+    assert out.result.verdict == S.INVALID and out.result.gates["G3b_plants"]["status"] == "FAIL"
+    assert ad.calls == 0 and not (tmp_path / "elig.json").exists() and A.AttemptLog(tmp_path / "runs").entries() == []
+
+
+def test_session_g0_judge_served_id_differs_from_pinned(tmp_path: Path) -> None:
+    out = SE.run_check(check(tmp_path, judge=FakeJudge(served="some-other-model")))
+    assert out.result.verdict == S.INVALID and out.result.gates["G0_integrity"]["status"] == "FAIL"
+    assert not (tmp_path / "elig.json").exists()
+    e = A.AttemptLog(tmp_path / "runs").entries()[0]
+    assert e["consumed"] is False and e["verdict"] == "INVALID"
+
+
+def test_session_g0_digest_changes_during_the_run(tmp_path: Path) -> None:
+    ad = FakeAdapter()
+    ad.change_digest_after = 10
+    out = SE.run_check(check(tmp_path, ad))
+    assert out.result.verdict == S.INVALID and out.result.gates["G0_integrity"]["digest_unchanged"] is False
+    assert not (tmp_path / "elig.json").exists()
+
+
+def test_session_g0_bank_changed_since_load(tmp_path: Path) -> None:
+    def tampered():
+        return SimpleNamespace(sha256="0" * 64)
+    out = SE.run_check(check(tmp_path, bank_loader=tampered))
+    assert out.result.verdict == S.INVALID and out.result.gates["G0_integrity"]["bank_sha_ok"] is False
+
+
+def test_session_g1_errors_counted_once_per_row(tmp_path: Path) -> None:
+    items = BANK.draw(1)
+    beh = {items[0].id: "error", items[1].id: "empty", items[2].id: "error", items[3].id: "empty"}      # 4 rows -> over 3/70
+    out = SE.run_check(check(tmp_path, FakeAdapter(beh)))
+    g1 = out.result.gates["G1_serves"]
+    assert out.result.verdict == S.INVALID and g1["error_empty_timeout"] == 4 and g1["n"] == 70
+    ok = SE.run_check(check(tmp_path / "ok", FakeAdapter({items[0].id: "error", items[1].id: "empty", items[2].id: "error"})))
+    assert ok.result.gates["G1_serves"]["status"] == "PASS" and ok.result.gates["G1_serves"]["error_empty_timeout"] == 3
+
+
+def test_session_budget_stop_is_inconclusive_and_records_nothing(tmp_path: Path) -> None:
+    c = check(tmp_path)
+    c.budget = Budget(metered=False, cap_calls=45)                     # 30 plants + 15 answers, then stop
+    out = SE.run_check(c)
+    assert out.status == "budget_stop" and out.result is None and not (tmp_path / "elig.json").exists()
+    assert A.AttemptLog(tmp_path / "runs").entries() == []
+    c2 = check(tmp_path, run_id=out.run_id)                           # resume: local results are on disk, only the judge calls remain
+    ad2 = c2.adapter
+    out2 = SE.run_check(c2)
+    assert out2.status == "scored" and out2.result.verdict == S.PASS and ad2.calls == 0
+
+
+def test_session_scope_excludes_items_that_do_not_fit(tmp_path: Path) -> None:
+    sizes = sorted(len(i.task) for i in BANK.draw(1))
+    cap = sizes[-1] - 1
+    out = SE.run_check(check(tmp_path, FakeAdapter(max_chars=cap)))
+    n_fit = sum(1 for s in sizes if s <= cap)
+    assert out.result.n_assigned == n_fit < 70
+    lane = lanes(tmp_path)["commit_message"]
+    assert lane["scope"]["max_prompt_chars"] == cap and lane["scope"]["items_excluded_by_context"] == 70 - n_fit
+
+
+# ---- cumulative draws -------------------------------------------------------------------------------------------------------------------
+def test_second_run_uses_draw_2_and_the_cumulative_union(tmp_path: Path) -> None:
+    clock = Clock()
+    ad = FakeAdapter({**fails(18, draw=1)})                            # draw 1: 52/70 inconclusive
+    first = SE.run_check(check(tmp_path, ad, clock=clock))
+    assert first.result.verdict == S.INCONCLUSIVE and first.draw == 1
+    assert SE.run_check(check(tmp_path, FakeAdapter(), clock=clock)).status == "refused"       # cooldown
+    clock.t += A.COOLDOWN_S + 1
+    ad2 = FakeAdapter({**fails(18, draw=1), **fails(5, draw=2)})        # draw 2: 65/70
+    second = SE.run_check(check(tmp_path, ad2, clock=clock))
+    assert second.draw == 2 and second.result.n_assigned == 140
+    assert (second.result.k, second.result.kmin) == (52 + 65, 112) and second.result.verdict == S.PASS
+    assert second.attempts == 2
+    for lane in lanes(tmp_path).values():
+        assert (lane["k"], lane["n"], lane["attempts"]) == (117, 140, 2) and lane["scope"]["draws"] == [1, 2]
+    assert ad2.calls == 70                                              # only the unused draw ran
+    # a third same-configuration run is refused, forced or not
+    clock.t += 10 * A.COOLDOWN_S
+    for force in (False, True):
+        third = SE.run_check(check(tmp_path, FakeAdapter(), clock=clock, force=force))
+        assert third.status == "refused" and "exhausted" in third.reason
+
+
+def test_force_lifts_the_cooldown_but_not_the_cumulative_rule(tmp_path: Path) -> None:
+    clock = Clock()
+    SE.run_check(check(tmp_path, FakeAdapter(fails(18)), clock=clock))
+    forced = SE.run_check(check(tmp_path, FakeAdapter(fails(18)), clock=clock, force=True))
+    assert forced.status == "scored" and forced.draw == 2 and forced.result.n_assigned == 140
+
+
+def test_latest_cumulative_replaces_never_best_of(tmp_path: Path) -> None:
+    clock = Clock()
+    first = SE.run_check(check(tmp_path, FakeAdapter(fails(10)), clock=clock))      # 60/70 PASS, recorded
+    assert first.result.verdict == S.PASS and lanes(tmp_path)["commit_message"]["grade"] == "passed"
+    clock.t += A.COOLDOWN_S + 1
+    second = SE.run_check(check(tmp_path, FakeAdapter({**fails(10), **fails(25, draw=2)}), clock=clock))     # draw 2: 45/70 -> 105/140
+    assert second.result.verdict == S.INCONCLUSIVE
+    lane = lanes(tmp_path)["commit_message"]           # the earlier PASS must not survive a contradicting cumulative result
+    assert lane["grade"] == "failed" and lane["status"] == "not_passed" and (lane["k"], lane["n"], lane["attempts"]) == (105, 140, 2)
+
+
+def test_changed_digest_or_settings_is_a_new_configuration(tmp_path: Path) -> None:
+    clock = Clock()
+    SE.run_check(check(tmp_path, FakeAdapter(fails(18)), clock=clock))
+    other = SE.run_check(check(tmp_path, FakeAdapter(fails(18), digest="sha256:ccc"), clock=clock))
+    assert other.status == "scored" and other.draw == 1 and other.result.n_assigned == 70
+
+
+def test_early_stopped_attempt_makes_the_cumulative_bar_unreachable_so_a_rerun_is_refused(tmp_path: Path) -> None:
+    clock = Clock()
+    first = SE.run_check(check(tmp_path, FakeAdapter(fails(70, "progfail")), clock=clock))
+    assert first.result.verdict == S.NOT_PASSED
+    clock.t += A.COOLDOWN_S + 1
+    ad = FakeAdapter()
+    second = SE.run_check(check(tmp_path, ad, clock=clock))
+    assert second.status == "refused" and "can no longer be reached" in second.reason and ad.calls == 0
+
+
+# ---- no-judge ---------------------------------------------------------------------------------------------------------------------------
+def test_session_no_judge_cannot_pass_and_consumes_nothing(tmp_path: Path) -> None:
+    out = SE.run_check(check(tmp_path, FakeAdapter(), no_judge=True))
+    assert out.result.verdict == S.PROBE and out.record_report == {} and not (tmp_path / "elig.json").exists()
+    e = A.AttemptLog(tmp_path / "runs").entries()[0]
+    assert e["consumed"] is False and e["mode"] == "none"
+    again = SE.run_check(check(tmp_path, FakeAdapter(), no_judge=True))                  # not blocked by cooldown or draws
+    assert again.status == "scored"
+
+
+def test_session_no_judge_early_stop_is_recorded_with_judge_mode_none(tmp_path: Path) -> None:
+    out2 = SE.run_check(check(tmp_path, FakeAdapter(fails(21, "progfail")), no_judge=True))
+    assert out2.result.verdict == S.NOT_PASSED       # the runner stops at the 15th programmatic failure: partial counts
+    lane = lanes(tmp_path)["commit_message"]
+    assert lane["judge"] == {"backend": "none", "model_served": None, "mode": "none"} and lane["grade"] == "failed" and lane["status"] == "not_passed"
+
+
+def test_judged_run_requires_backend_and_budget(tmp_path: Path) -> None:
+    c = check(tmp_path)
+    c.backend = None
+    with pytest.raises(ValueError):
+        SE.run_check(c)
+
+
+# ---------------------------------------------------------------- port-equivalence with the stored Q37 run
+def test_port_equivalence_q37_rescored_is_pass_60_of_70() -> None:
+    """Re-score the stored Q37 qwen run (answers + recorded judge verdicts) with the ported scorer -> PASS 60/70 (32/35 commit, 28/35 PR).
+
+    64 of the 70 frozen items are re-graded from their stored answer text (tests/fixtures/lc2). The other 6 are copyleft items whose diffs the
+    repo does not ship; their recorded Q37 outcome is used as is (all six: grader ok, judge pass)."""
+    cases = json.loads((FIX / "lc5" / "q37_cases.json").read_text())["cases"]
+    with gzip.open(FIX / "lc2" / "q37_items.jsonl.gz", "rt", encoding="utf-8") as f:
+        shipped = {d["id"]: d for d in (json.loads(x) for x in f if x.strip())}
+    rows, regraded = [], 0
+    for iid, c in sorted(cases.items()):
+        if iid in shipped:
+            it = shipped[iid]
+            item = SimpleNamespace(id=iid, job=it["stratum"], size=c["size"], lang=c["lang"], task=it["context"], diff=it["diff"], files=it["files"])
+            rec = {"status": "truncated" if c["done_reason"] == "length" else "ok", "text": it["answers"]["qwen"], "error": c["err"]}
+            row = S.grade_row(item, rec, c["judge"])
+            assert row.ok == c["ok"], (iid, row.reasons, c["reason"])
+            assert (",".join(row.reasons) or ("judge:" + str(c["judge"]) if not row.ok else "accepted")) == c["reason"], iid
+            regraded += 1
+        else:
+            assert c["reason"] == "accepted" and c["judge"] == "pass"
+            row = S.Row(iid, c["job"], c["size"], c["lang"], True, True, False, False, True, "pass", True, ())
+        rows.append(row)
+    assert regraded == 64 and len(rows) == 70
+    res = S.score(rows, ids(rows), good_gates())
+    assert res.verdict == S.PASS and (res.k, res.n_assigned, res.kmin, res.kfail) == (60, 70, 56, 49)
+    assert (res.lanes["commit_message"]["k"], res.lanes["commit_message"]["n"]) == (32, 35)
+    assert (res.lanes["pr_description"]["k"], res.lanes["pr_description"]["n"]) == (28, 35)
+    assert res.guard_excluded == [] and res.gates["G1_serves"]["error_empty_timeout"] == 0
+    assert res.rule_concentration is None                           # 10 failures: the top rule (too_many_plan_bullets) explains 3 of 10
+    # the stored per-case CSV is not in the repo; the fixture's recorded ok flags are its qwen_ok column
+    assert sum(1 for c in cases.values() if c["ok"]) == 60
+
+
+def test_fixture_is_small_and_public() -> None:
+    p = FIX / "lc5" / "q37_cases.json"
+    assert p.stat().st_size < 20_000
+    assert "text" not in p.read_text()[:200]

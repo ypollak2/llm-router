@@ -309,7 +309,8 @@ def record_competence(
 
 _PROVENANCE_KEYS = ("bank_version", "bank_sha256", "settings_hash", "model_digest", "runtime",
                     "judge", "run_id", "date", "scope", "attempts")
-_RECORDABLE = {"PASS": "passed", "FAIL": "failed"}
+_RECORDABLE = {"PASS": "passed", "FAIL": "failed", "NOT_PASSED": "failed"}
+_LANE_STATUS = ("not_passed", "lane_guard")
 
 
 def record_local_check(
@@ -321,8 +322,10 @@ def record_local_check(
     Local-check lanes live beside, never inside, the pre-registered ``text_job`` lanes: those are
     never modified or downgraded. A new result replaces only the previous local-check lane for the
     same model and job (latest wins; ``attempts`` = previous + 1 unless ``provenance`` gives one).
-    ``jobs_result`` maps job -> ``{"k", "n", "verdict": "PASS"|"FAIL"|"INCONCLUSIVE"|"INVALID"}``
-    (optional ``rule_concentration``). Returns ``{job: {"status": ..., "reason": ...}}`` with
+    ``jobs_result`` maps job -> ``{"k", "n", "verdict": "PASS"|"FAIL"|"NOT_PASSED"|"INCONCLUSIVE"|"INVALID"}``
+    (optional ``rule_concentration``, ``status``). ``NOT_PASSED`` (LC-5: early stop or a superseded pass, partial
+    counts) is stored as a ``failed`` lane with ``status: "not_passed"``; ``status: "lane_guard"`` marks a lane
+    excluded from a pooled pass by the 0.70 guard (its own counts, a ``failed`` lane). Returns ``{job: {"status": ..., "reason": ...}}`` with
     status ``written``, ``skipped_inconclusive``, ``skipped_invalid`` or ``refused`` (unknown
     verdict, or counts that grade differently under D-241; that job only, the others are still
     written). An unknown job, bad ``provenance`` or non-mapping arguments raise ValueError and
@@ -365,6 +368,9 @@ def record_local_check(
         lane.setdefault("date", time.strftime("%Y-%m-%d", time.gmtime()))
         if isinstance(res.get("rule_concentration"), (dict, list, int, float, str)):
             lane["rule_concentration"] = res["rule_concentration"]
+        status = "not_passed" if verdict == "NOT_PASSED" else res.get("status")
+        if status in _LANE_STATUS and grade_ == "failed":
+            lane["status"] = status
         lanes[job] = lane
     for job, lane in lanes.items():
         _check_text_job_lane(job, lane)
