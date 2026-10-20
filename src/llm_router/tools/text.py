@@ -1124,30 +1124,41 @@ async def llm_text_job(
     accepted = False
     attempt = 0
 
-    for attempt in range(1, MAX_JOB_ATTEMPTS + 1):
-        feedback = history[-1] if history else None
-        system_prompt, prompt = build_prompt(job, truncated_input, hint=hint, feedback=feedback)
+    from llm_router import eligibility_routing
 
-        resp = await route_and_call(
-            TaskType.GENERATE,
-            prompt,
-            system_prompt=system_prompt,
-            temperature=0.2,
-            ctx=ctx,
-            route_directive_id=_read_hook_route_directive(),
-            eligibility_exempt_reason="verified_text_job",  # F112 / D-242
-        )
+    _tj_token = eligibility_routing.set_text_job_context(job, len(truncated_input) + len(hint or ""))  # LC-8
+    try:
+        for attempt in range(1, MAX_JOB_ATTEMPTS + 1):
+            feedback = history[-1] if history else None
+            system_prompt, prompt = build_prompt(job, truncated_input, hint=hint, feedback=feedback)
 
-        check = check_output(job, truncated_input, resp.content)
-        result_text = check.text
-        if check.ok:
-            accepted = True
-            break
-        history.append(check.reason or "acceptance check failed")
+            resp = await route_and_call(
+                TaskType.GENERATE,
+                prompt,
+                system_prompt=system_prompt,
+                temperature=0.2,
+                ctx=ctx,
+                route_directive_id=_read_hook_route_directive(),
+                eligibility_exempt_reason=eligibility_routing.TEXT_JOB_REASON,  # F112 / D-242
+            )
+
+            check = check_output(job, truncated_input, resp.content)
+            result_text = check.text
+            if check.ok:
+                accepted = True
+                break
+            history.append(check.reason or "acceptance check failed")
+    finally:
+        eligibility_routing.reset_text_job_context(_tj_token)
 
     model_name = resp.model if resp else "unknown"
     status = STATUS_ACCEPTED if accepted else STATUS_REJECTED
     record_text_job_outcome(job=job, model=model_name, status=status, attempts=attempt)
+    try:  # LC-8: demotion monitor (never re-enables; never breaks the call)
+        from llm_router.local_check import routing as _lc_routing
+        _lc_routing.demotion_check(model_name, job)
+    except Exception:  # noqa: BLE001
+        pass
 
     lines = [resp.header() if resp else "no response", ""]
     lines.append(f"_Structured: status={status}, attempts={attempt}_")

@@ -146,6 +146,7 @@ def maybe_nudge(*, path: Path | None = None, now: float | None = None) -> str | 
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(target.parent, 0o700)  # umask-proof; also tightens a pre-existing dir
         with open(tmp, "w", encoding="utf-8", opener=paths.private_opener) as fh:
             json.dump({"bank_versions": [*_nudged(), version]}, fh)
         os.replace(tmp, target)

@@ -46,6 +46,7 @@ OPT-OUT. ``LLM_ROUTER_IGNORE_ELIGIBILITY=1`` turns the filter off (byte-identica
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 from pathlib import Path
@@ -210,4 +211,98 @@ def note_bypass(models: list[str], task_type: Any, complexity: Any, reason: str)
         if failed_lane(index, m, lane, tier) is not None:
             skip_causes.note(m, skip_causes.ELIGIBILITY_BYPASSED, lane=f"{lane}/{tier}",
                              source=reason[:SOURCE_MAX])
+    return models
+
+
+# ---- LC-8 / D-260: a passed local-check lane routes local-first, verified text-job path only ----------
+
+_text_job_ctx: contextvars.ContextVar[tuple[str, int] | None] = contextvars.ContextVar(
+    "llm_router_text_job_ctx", default=None)
+#: The ``eligibility_exempt_reason`` ``llm_text_job`` already passes (F112); only it may be preferred.
+TEXT_JOB_REASON = "verified_text_job"
+
+
+def set_text_job_context(job: str, input_len: int) -> contextvars.Token:
+    """``llm_text_job`` names its job and input size for the router's chain step; reset with the token."""
+    return _text_job_ctx.set((job, int(input_len)))
+
+
+def reset_text_job_context(token: contextvars.Token) -> None:
+    _text_job_ctx.reset(token)
+
+
+def _route_time_ctx(model: str) -> int | None:
+    from llm_router import providers
+    return providers._ollama_num_ctx(model)
+
+
+def _route_time_think() -> bool:
+    from llm_router import providers
+    return providers._ollama_think_enabled()
+
+
+def prefer_passed(
+    models: list[str], job: str, input_len: int, now: float, *,
+    digests: dict[str, str] | None = None, ctx_for: Any = None, think: bool | None = None,
+    eligibility: Path | None = None, routing: Path | None = None,
+) -> list[str]:
+    """Move the first local model with a routable passed lane to the front; else the chain unchanged.
+
+    Only models ALREADY in ``models`` are considered (D-116 / F106 / F112 have run; nothing is added).
+    A model is preferred iff ALL hold: ``local_routing.json`` enables (model, job); the effective lane
+    (user's fresh local-check lane, else pre-registered, D-262) is ``passed``; the lane is fresh against
+    the inventory-cache digest (``local_check.display.inventory``; no HTTP); ``input_len`` fits the lane's
+    ``scope.max_prompt_chars``; and the route-time Ollama settings (``think``, ``num_ctx``) hash to the
+    lane's ``settings_hash``. Any unknown input means no preference. A pre-registered lane carries no
+    scope or settings hash, so it is checked against the window the router will request instead
+    (``input_len`` must fit it and thinking must be off). Never raises; the chain is returned as given
+    on any error. The acceptance check and the Claude fallback in ``llm_text_job`` are unchanged.
+    """
+    try:
+        return _prefer_passed(models, job, input_len, now, digests, ctx_for, think, eligibility, routing)
+    except Exception as exc:  # noqa: BLE001 -- fail-open: the chain stays as built
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ELIGIBILITY-PREFER-PASSED", exc)
+        return models
+
+
+def _prefer_passed(models, job, input_len, now, digests, ctx_for, think, eligibility, routing):
+    from llm_router.local_check import routing as lr
+    from llm_router.local_check import runtimes as rt
+    from llm_router.resolver import eligibility_store as ES
+
+    if not models or _opted_out() or not isinstance(input_len, int) or input_len < 0:
+        return models
+    if digests is None:
+        from llm_router.local_check import display
+        digests = display.inventory()[1]
+    for idx, m in enumerate(models):
+        head, sep, bare = m.partition("/")
+        if not sep or head != "ollama" or not lr.is_enabled(bare, job, path=routing):
+            continue
+        lane, source = None, "unknown"
+        for key in lr.candidates(bare):
+            found = ES.effective_text_job_lane(key, job, digests.get(key), now, path=eligibility)
+            if found.lane is not None:
+                lane, source = found.lane, found.source
+                break
+        if lane is None or lane.get("grade") != "passed":
+            continue
+        use_think = _route_time_think() if think is None else think
+        ctx = (ctx_for or _route_time_ctx)(m)
+        if use_think or not ctx:
+            continue
+        if source == "local_check":
+            scope = lane.get("scope")
+            limit = scope.get("max_prompt_chars") if isinstance(scope, dict) else None
+            want = lane.get("settings_hash")
+            if not isinstance(limit, int) or isinstance(limit, bool) or not isinstance(want, str):
+                continue
+            if rt.settings_hash(temperature=rt.TEMPERATURE, ctx=ctx, max_tokens=rt.MAX_TOKENS, think=False) != want:
+                continue
+        else:
+            limit = rt.max_prompt_chars(ctx)
+        if limit is None or input_len > limit:
+            continue
+        return [m] + models[:idx] + models[idx + 1:]
     return models

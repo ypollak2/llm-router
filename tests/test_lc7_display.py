@@ -272,6 +272,15 @@ def test_nudge_creates_parent_0700_and_leaves_no_temp_on_failure(home, monkeypat
     assert [p.name for p in (home / "local_check").iterdir()] == []
 
 
+def test_nudge_dir_forced_0700_even_if_preexisting_loose(home):
+    write_inventory(home, {MODEL: DIGEST})
+    d = home / "local_check"
+    d.mkdir()
+    d.chmod(0o755)
+    assert display.maybe_nudge(path=home / "x.json", now=NOW) is not None
+    assert stat.S_IMODE(d.stat().st_mode) == 0o700
+
+
 def test_install_nudge_prints_one_dim_line_and_never_prompts(home, capsys, monkeypatch):
     write_inventory(home, {MODEL: DIGEST})
     monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(AssertionError("prompted")))
