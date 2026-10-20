@@ -51,3 +51,17 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | `classifier_learning.jsonl` | One row per `llm-router learn` run: `ts`, `status`, `reason`, number of examples, and the replay `n`, exact-match and under-route of the current and candidate index. No text, no hashes. Two generations of 256 KiB (`capped_log`). |
 | `classifier_conservative.json` | The conservative-mode switch: `active`, `checked_at`, `since`, `drop_pts`, window sizes. Written by the status and `kpi` checks; ignored once `checked_at` is 7 days old. |
 | Replay set | Named by `LLM_ROUTER_LEARNING_REPLAY`; owned by the person, never copied or logged by the router. Every row needs a `text_sha` (the held-out guard); a file with a row that lacks one is rejected whole. |
+
+## `local_check/runs/`, `attempts.jsonl` and `text_job_local` records (LC-7, D-259, design section 5)
+
+| Item | Value |
+|---|---|
+| What | `llm-router local-check` measures the user's own local model on the shipped, public bank. Nothing here is user prompt text: the items are public commit and PR diffs from the bank. The model's **answers** to those items are the only generated text kept. No telemetry; nothing is sent anywhere by these files. |
+| Run directory | `~/.llm-router/local_check/runs/<run_id>/` (directory 0700): `results.jsonl` (one line per item: status, timings, the model's answer in `text`), `judge.jsonl` (verdict, defect label, served judge model, cost), `meta.json`, `g3b.json` (plants gate). Files 0600. |
+| Kept | The newest 3 run directories (`local_check.retention.KEEP_RUNS`), by the newest file mtime in the directory. A run that is an unexpired `open` reservation in `attempts.jsonl` (7 days, `attempts.RESERVATION_TTL_S`) is also kept, because the next run of that configuration must resume it. Older runs are deleted. A symlinked entry is skipped, never followed. |
+| Answers | Once a kept run's `results.jsonl` is older than 30 days (`retention.ANSWER_DAYS`), the `text` of every record is blanked and `answer_pruned: true` is set; counts, statuses and timings stay. Atomic rewrite, 0600, mtime preserved. |
+| Prune runs | `retention.prune()`, called by `llm-router doctor` (and available to the CLI after a run). It never raises; a failure leaves the files as they were. A machine on which neither is run keeps its files until it is. |
+| `attempts.jsonl` | `local_check/runs/attempts.jsonl` (0600): one line per attempt with configuration key, draw, verdict, per-item ok flags and counts. **No prompt or answer text.** It is the anti-retry log (draws used, 24 h cooldown, reservations), so it is not pruned; deleting it resets those limits for every model. |
+| `text_job_local` records | In `local_eligibility.json` under `<model>.text_job_local.<job>`: grade, k, n, bank version and sha256, model digest, runtime, judge backend and served model, run id, date, scope, settings hash. No text. The latest scored result for a job replaces the previous one; a stale record (model digest changed, or 30 days with no digest) stays on disk for history and reads as unknown. Delete the `text_job_local` key to forget a model. |
+| Nudge state | `local_check/nudge.json` (0600): the bank versions for which the one-line first-run tip was shown. Deleting it shows the tip again. |
+| Reads | `llm-router status`, `doctor` and the fast status line read `local_eligibility.json` and the discovery cache only. They make no HTTP call and run no model. |

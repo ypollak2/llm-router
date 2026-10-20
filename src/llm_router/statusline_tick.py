@@ -62,6 +62,8 @@ _SESSION_RE = re.compile(r'"session_id"\s*:\s*"([A-Za-z0-9._-]{1,128})"')
 #: Past this age the cached values are not shown at all ("n/a").
 STALE_AFTER_S = 15 * 60.0
 MAX_CHARS = 200
+#: The only ``local_check`` cache values the line will print (``local_check.display``).
+LOCAL_CHECK_SEGMENTS = ("local ok", "local n/p")
 #: GE6 / S3: the 5-minute quota series (``llm_router.quota_samples`` reads it).
 HISTORY_NAME = "quota_history.jsonl"
 HISTORY_STAMP_NAME = ".quota_history.last"
@@ -223,6 +225,11 @@ def render(cache: dict | None, *, now: float, env_mode: str | None = None, color
         parts.append(seg)
     else:
         parts.append("Codex n/a")
+
+    # LC-7: only when the user's own local-check measured something; a closed set, never cache text.
+    lc = (fresh or {}).get("local_check") if fresh else None
+    if lc in LOCAL_CHECK_SEGMENTS:
+        parts.append(lc)
 
     slow = (fresh or {}).get("hooks_slow") if fresh else None
     if isinstance(slow, dict):

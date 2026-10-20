@@ -278,6 +278,31 @@ def _codex_report(issues: list[str]) -> list[str]:
     return lines
 
 
+def _local_text_jobs_section() -> None:
+    """F124 + LC-7: text jobs a pre-registered run or the user's own local-check measured (visibility only),
+    then local-check run retention and the once-per-bank nudge. Reads files only; never raises."""
+    try:
+        from llm_router.local_check import display as _lc_display
+        _tj, _tj_err = _lc_display.lines(), ""
+    except Exception as e:  # noqa: BLE001 -- doctor must never crash on a read
+        _tj, _tj_err = [], f"unavailable: {type(e).__name__}"
+    if _tj or _tj_err:
+        print(f"\n{_bold('  Local text jobs')}")
+        if _tj_err:
+            print(f"  {_dim(_tj_err)}")
+        for _ln in _tj:
+            # passed is green; not passed / stale / not measured are neutral, never a failure colour.
+            print(f"  {_ok(_ln.text) if _ln.kind in ('passed', 'prereg') else _dim(_ln.text)}")
+    try:
+        from llm_router.local_check import display as _lc_display, retention as _lc_retention
+        _lc_retention.prune()
+        _nudge = _lc_display.maybe_nudge()
+        if _nudge:
+            print(f"  {_dim(_nudge)}")
+    except Exception:  # noqa: BLE001 -- doctor must never crash on a nudge or a prune
+        pass
+
+
 def _run_doctor_host(host: str) -> None:
     """Run host-specific installation checks."""
     valid_hosts = {"claude", "vscode", "cursor", "codex", "all"}
@@ -1434,16 +1459,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     for line in _floor_report():
         print(f"  {line}")
 
-    # F124: text jobs a pre-registered run qualified (visibility only; grants no routing).
-    try:
-        from llm_router.resolver.eligibility_store import text_job_lines
-        _tj = text_job_lines()
-    except Exception as e:  # noqa: BLE001 -- doctor must never crash on a read
-        _tj = [f"unavailable: {type(e).__name__}"]
-    if _tj:
-        print(f"\n{_bold('  Local text-job qualification')}")
-        for line in _tj:
-            print(f"  {_ok(line)}")
+    _local_text_jobs_section()
 
     print(f"\n{_bold('  Provider API keys')}")
     for line in check_api_keys():

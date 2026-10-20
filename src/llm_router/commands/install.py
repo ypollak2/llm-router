@@ -244,7 +244,22 @@ def cmd_install(args: list[str]) -> int:
             return 2
         return _install_authority(value)
     _run_install(args)
-    return _after_plain_install(args)
+    rc = _after_plain_install(args)
+    if "--check" not in args and "--project" not in args:
+        _local_check_nudge()
+    return rc
+
+
+def _local_check_nudge() -> None:
+    """LC-7: one dim line when a local model is installed and nothing is measured (once per bank version)."""
+    try:
+        from llm_router.local_check.display import maybe_nudge
+
+        line = maybe_nudge()
+        if line:
+            print(_dim(f"  {line}"))
+    except Exception:  # noqa: BLE001 -- a nudge must never fail an install
+        pass
 
 
 def _after_plain_install(args: list[str]) -> int:

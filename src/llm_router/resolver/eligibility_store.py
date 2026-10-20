@@ -133,7 +133,7 @@ def _bank_label(version: str) -> str:
 
 def text_job_lines(*, path: Path | None = None,
                    current_digests: Mapping[str, str] | None = None,
-                   now: float | None = None) -> list[str]:
+                   now: float | None = None, include_local: bool = True) -> list[str]:
     """One line per (model, prereg, verdict): the text jobs a pre-registered run qualified.
 
     Visibility only; nothing here grants routing. Lanes whose stored grade disagrees with
@@ -143,6 +143,7 @@ def text_job_lines(*, path: Path | None = None,
     ``current_digests`` has the model's digest and ``lane_is_fresh`` says stale, the line reads
     ``stale \u2014 model changed`` (digest mismatch) or ``stale \u2014 expired`` (no stored digest,
     30-day window lapsed). Without the model's current digest no staleness is shown.
+    ``include_local=False`` leaves the ``text_job_local`` lines to :func:`local_check_lines` (LC-7).
     """
     try:
         data = json.loads(Path(path or eligibility_path()).read_text(encoding="utf-8"))
@@ -169,6 +170,8 @@ def text_job_lines(*, path: Path | None = None,
                 is_local = lane.get("source") == "local_check"
                 if key_name == _LOCAL_KEY and not is_local:
                     continue
+                if is_local and not include_local:
+                    continue
                 if is_local:
                     cur = current_digests.get(model) if current_digests else None
                     stale = ""
@@ -194,6 +197,91 @@ def text_job_lines(*, path: Path | None = None,
             lines.append(f"{model} \u2014 {names} {word_g} "
                          f"{k}/{n} ({_bank_label(bank)}{when})")
     return lines
+
+
+class LCLine(NamedTuple):
+    """One display line of :func:`local_check_lines`. ``kind``: passed | not_passed | stale | not_measured."""
+    text: str
+    kind: str
+
+
+#: Fewer items than the bank's pooled draw (70): a verdict on a small n is weaker evidence (D-263).
+FULL_DRAW_N = 70
+_NOT_MEASURED = "llm-router local-check"
+_TRY = "llm-router local-check recommend"
+
+
+def _routing_word(routing: Mapping[tuple[str, str], bool] | None, model: str, job: str, grade: str) -> str:
+    if grade != "passed":
+        return ""
+    state = routing.get((model, job)) if routing else None
+    return "n/a" if state is None else ("on" if state else "off")
+
+
+def local_check_lines(*, path: Path | None = None,
+                      current_digests: Mapping[str, str] | None = None,
+                      now: float | None = None,
+                      routing: Mapping[tuple[str, str], bool] | None = None,
+                      unmeasured: tuple[str, ...] = ()) -> list[LCLine]:
+    """User-run local-check lines (``text_job_local``), one per (model, outcome), plus a
+    ``not measured`` line for each name in ``unmeasured`` that has no valid local-check lane (LC-7).
+
+    Reads one JSON file and does no I/O of its own beyond that: ``current_digests`` (model ->
+    digest, from the runtime inventory cache) and ``routing`` ((model, job) -> enabled; None
+    means LC-8's routing store has no entry, shown ``n/a``) are passed in. A lane is stale when
+    ``lane_is_fresh`` says so (digest mismatch -> ``model changed``; a lane without a usable
+    digest older than 30 days -> ``expired``). A stale or unmeasured model is information, not a
+    failure (``kind`` is never ``fail``). The count ``k/n`` is always printed; n below 70 adds
+    ``small n`` because a small-n verdict is weaker evidence.
+    """
+    try:
+        data = json.loads(Path(path or eligibility_path()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    clock = time.time() if now is None else now
+    digests = current_digests or {}
+    groups: dict[tuple, list[str]] = {}
+    seen: set[str] = set()
+    for model, entry in sorted(data.items() if isinstance(data, dict) else []):
+        task = entry.get(_LOCAL_KEY) if isinstance(entry, dict) else None
+        if not isinstance(task, dict):
+            continue
+        for job in TEXT_JOBS:
+            lane = task.get(job)
+            try:
+                _check_text_job_lane(job, lane)
+            except ValueError:
+                continue
+            if lane.get("source") != "local_check":
+                continue
+            seen.add(model)
+            stale = ""
+            if not lane_is_fresh(lane, digests.get(model), clock):
+                stored, cur = lane.get("model_digest"), digests.get(model)
+                stale = "model changed" if isinstance(stored, str) and stored and cur else "expired"
+            key = (model, lane["grade"], lane["k"], lane["n"], lane["bank_version"],
+                   lane.get("date") or lane.get("recorded_at") or "", stale,
+                   _routing_word(routing, model, job, lane["grade"]))
+            groups.setdefault(key, []).append(job)
+    out: list[LCLine] = []
+    for (model, verdict, k, n, bank, date, stale, route), jobs in groups.items():
+        names = ", ".join(jobs)
+        detail = f"{k}/{n}" + (", small n" if n < FULL_DRAW_N else "")
+        if stale:
+            out.append(LCLine(f"local-check: {model} \u2014 {names} stale \u2014 {stale} (was {detail}); "
+                              f"re-run: {_NOT_MEASURED}", "stale"))
+            continue
+        when = f", {date}" if date else ""
+        if verdict == "passed":
+            out.append(LCLine(f"local-check: {model} \u2014 {names} passed {detail} "
+                              f"({_bank_label(bank)}{when}) [routing: {route}]", "passed"))
+        else:
+            out.append(LCLine(f"local-check: {model} \u2014 {names} not passed ({detail}, "
+                              f"{_bank_label(bank)}{when}); try: {_TRY}", "not_passed"))
+    for model in unmeasured:
+        if model not in seen:
+            out.append(LCLine(f"local-check: {model} \u2014 not measured ({_NOT_MEASURED})", "not_measured"))
+    return out
 
 
 class EffectiveLane(NamedTuple):
