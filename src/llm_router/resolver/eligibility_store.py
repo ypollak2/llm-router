@@ -190,7 +190,7 @@ def text_job_lines(*, path: Path | None = None,
             lines.append(f"{model} \u2014 {names} stale \u2014 {stale}")
         else:
             when = f", {date}" if date else ""
-            word_g = "passed" if g == "passed" else {"not_passed": "not passed", "inconclusive": "inconclusive"}.get(st, "failed")
+            word_g = "passed" if g == "passed" else {"not_passed": "not passed"}.get(st, "failed")
             lines.append(f"{model} \u2014 {names} {word_g} "
                          f"{k}/{n} ({_bank_label(bank)}{when})")
     return lines
