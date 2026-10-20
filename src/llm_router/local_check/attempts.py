@@ -16,6 +16,12 @@ Attempts are tracked per configuration = (model, model digest, bank version + sh
   (cached answers and judgements are reused) unless it is discarded (``fresh``, a strike) or older than 7 days. INVALID outcomes and discards are
   strikes: the first ``FREE_STRIKES`` per configuration are free, the third and later also consume the draw (the draw is burnt, empty).
   An INVALID before the local arm (G3a, G3b) logs and consumes nothing.
+* A reservation is keyed on the run id, so deleting its run directory (or emptying it) does not buy a reroll: a missing or empty run dir of an
+  open reservation is discarded as a strike (same count as ``fresh``). An unexpected exception or a Ctrl-C after the local arm leaves the
+  run as an open reservation without a strike.
+* A reservation older than 7 days simply lapses: no strike, the next run starts a new run id (cached answers of the old run are not reused).
+* The configuration key includes the model digest and the settings hash. A model update (new digest) or changed settings (num_ctx, think)
+  is a different configuration: an open reservation of the old one is orphaned, never resumed, and the new configuration starts at draw 1.
 """
 from __future__ import annotations
 

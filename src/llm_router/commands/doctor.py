@@ -299,14 +299,21 @@ def _local_text_jobs_section() -> None:
             print(f"  {_warn(_ln)}")
     except Exception:  # noqa: BLE001 -- doctor must never crash on a read
         pass
+    from llm_router import failopen as _failopen
     try:
-        from llm_router.local_check import display as _lc_display, retention as _lc_retention
-        _lc_retention.prune()
+        from llm_router.local_check import retention as _lc_retention
+        _rep = _lc_retention.prune()
+        for _err in _rep.errors:
+            _failopen.record("CHZ-FO-LOCALCHECK-PRUNE", detail=_err)
+    except Exception as e:  # noqa: BLE001 -- doctor must never crash on a prune
+        _failopen.record("CHZ-FO-LOCALCHECK-PRUNE", e)
+    try:
+        from llm_router.local_check import display as _lc_display
         _nudge = _lc_display.maybe_nudge()
         if _nudge:
             print(f"  {_dim(_nudge)}")
-    except Exception:  # noqa: BLE001 -- doctor must never crash on a nudge or a prune
-        pass
+    except Exception as e:  # noqa: BLE001 -- doctor must never crash on a nudge
+        _failopen.record("CHZ-FO-LOCALCHECK-NUDGE", e)
 
 
 def _run_doctor_host(host: str) -> None:

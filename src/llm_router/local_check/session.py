@@ -11,6 +11,7 @@ without a verdict leaves a reservation (see ``attempts``): the next run of the c
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -56,6 +57,7 @@ class Outcome:
     run_id: str | None = None
     record_report: dict[str, dict[str, str]] = field(default_factory=dict)
     attempts: int = 0
+    notes: list[str] = field(default_factory=list)   # things the caller should tell the user (e.g. a discarded reservation)
 
 
 def _append_line(path: Path, rec: dict) -> None:
@@ -109,6 +111,16 @@ def _date(ts: float) -> str:
     return time.strftime("%Y-%m-%d", time.gmtime(ts))
 
 
+def _run_has_results(run_dir: Path) -> bool:
+    """True when the run directory holds at least one local result (an untrustworthy dir counts as present: the runner reports it)."""
+    try:
+        return bool(R.RunStore(run_dir).load())
+    except R.RunMismatch:
+        return True
+    except OSError:
+        return False
+
+
 def _hold(log: A.AttemptLog, base: dict, plan: A.Plan, *, reason: str, strike: bool, state: str = "open") -> bool:
     """A judged run stopped after a local item ran without a verdict: log the run dir as a reservation (``open``) so the next run of this
     configuration and draw resumes it. An INVALID (``strike``) is free for the first FREE_STRIKES per configuration; later ones also burn the
@@ -121,6 +133,13 @@ def _hold(log: A.AttemptLog, base: dict, plan: A.Plan, *, reason: str, strike: b
 
 
 def run_check(c: Check) -> Outcome:
+    notes: list[str] = []
+    out = _run_check(c, notes)
+    out.notes = notes
+    return out
+
+
+def _run_check(c: Check, notes: list[str]) -> Outcome:
     mode = S.NO_JUDGE if c.no_judge else S.JUDGE
     if mode == S.JUDGE and (c.backend is None or c.budget is None):
         raise ValueError("a judged check needs a judge backend and a budget (use no_judge=True for a programmatic-only probe)")
@@ -144,10 +163,18 @@ def run_check(c: Check) -> Outcome:
         return Outcome("refused", plan.refused or "")
     resv = plan.reservation
     fresh_suffix = ""
+    discard_reason = None
     if resv and c.fresh:
+        discard_reason = "discarded by --fresh"
+    elif resv and not _run_has_results(Path(c.runs_root) / resv["run_id"]):
+        # The reservation is keyed on the run id only: deleting its directory and rerunning would be a free --fresh. A missing or empty run
+        # directory of an open reservation is therefore a discard, and a strike.
+        discard_reason = "the run directory of the open reservation is missing or empty"
+    if discard_reason:
         # Discarding a reservation is a strike; the third and later also burn the draw.
         burn = _hold(log, {"config_key": key, "config": config, "draw": plan.draw, "run_id": resv["run_id"], "ts": ts, "date": _date(ts), "mode": mode,
-                           "verdict": "DISCARDED"}, plan, reason="discarded by --fresh", strike=True, state="discarded")
+                           "verdict": "DISCARDED"}, plan, reason=discard_reason, strike=True, state="discarded")
+        notes.append(f"reservation {resv['run_id']} discarded ({discard_reason}): a strike" + ("; the draw is burnt" if burn else ""))
         fresh_suffix = f"-f{plan.strikes + 1}"
         resv = None
         if burn:
@@ -212,102 +239,110 @@ def run_check(c: Check) -> Outcome:
             res = S.redact_invalid(S.score([], [], g, mode=mode))
             return Outcome("scored", "plants gate failed", res, draw, None)
 
-    # 5. Serial local run, early stop when the bar is unreachable.
-    try:
-        rn = R.Runner(c.adapter, c.model, [R.SimpleItem(i.id, i.task) for i in items], run_dir, runtime=c.runtime, lock_path=c.lock_path,
-                      base_timeout_s=c.base_timeout_s, probe_n=c.probe_n, min_pass=min_pass,
-                      is_failure=lambda rec: not S.prog_ok(by_id[rec["item_id"]], rec))
-        out = rn.run()
-    except R.LockHeld as e:
-        return Outcome("lock_held", str(e), None, draw, run_id)
-    except (R.RunMismatch, R.RunDirError) as e:
-        return Outcome("refused", f"cannot resume run {run_id}: {e}; discard it with fresh (a strike)", None, draw, run_id)
     holds = mode == S.JUDGE
-    if out.status == "interrupted":
-        if holds and out.records:
-            _hold(log, {**base_log, "verdict": "INTERRUPTED"}, plan, reason="interrupted", strike=False)
-        return Outcome("interrupted", "interrupted; resume with the same run id", None, draw, run_id)
-    recs = {r["item_id"]: r for r in out.records if r["item_id"] in by_id}
-    digest1 = c.adapter.digest(c.model)
-
-    # 6. Judge every programmatically ok answer (persisted, so a resume or a budget stop loses nothing). A judge_error is never cached: errored
-    # answers are re-judged at the end of the run (up to 2 more passes); what stays unjudged is tolerated by ``score`` up to 5% (excluded from n).
-    judged = _load_judgements(run_dir / "judge.jsonl")
-    errored: set[str] = set()
-    if mode == S.JUDGE:
-        pending = [iid for iid, rec in recs.items() if iid not in judged and S.prog_ok(by_id[iid], rec)]
-        for _pass in range(3):
-            again: list[str] = []
-            for iid in pending:
-                rec = recs[iid]
-                prompt = J.judge_prompt(by_id[iid].task, grader.strip_think(rec.get("text") or "").strip())
-                try:
-                    o = J.judge_answer(c.backend, c.budget, prompt)
-                except BudgetExhausted as e:
-                    _hold(log, {**base_log, "verdict": "BUDGET_STOP"}, plan, reason=e.reason, strike=False)
-                    return Outcome("budget_stop", e.reason, None, draw, run_id)
-                if o.verdict == "judge_error":
-                    again.append(iid)
-                    continue
-                judged[iid] = {"item_id": iid, "verdict": o.verdict, "defect": o.defect, "served_model": o.served_model, "cost_usd": o.cost_usd}
-                _append_line(run_dir / "judge.jsonl", judged[iid])
-            pending = again
-            if not pending:
-                break
-        errored = set(pending)
-        served += [r["served_model"] for r in judged.values() if r.get("served_model") and r["served_model"] not in served]
-
-    # 7. Score the cumulative union.
     try:
-        reloaded = c.bank_loader()
-        g.bank_sha_ok = reloaded.sha256 == bank.sha256
-    except Exception:                                  # noqa: BLE001 - any load failure means the bank is not verified
-        g.bank_sha_ok = False
-    g.judge_served, g.digest_end = served, digest1
-    rows_now = [S.grade_row(by_id[i], recs.get(i), "judge_error" if i in errored else (judged.get(i) or {}).get("verdict"), judge_mode=mode)
-                for i in assigned_now if i in recs]
-    unrun = [i for i in assigned_now if i not in recs]
-    res = S.score(prior_rows + rows_now, assigned_all, g, mode=mode, early_stop=out.status == "early_stop", abandoned=plan.prior_abandoned)
+        # 5. Serial local run, early stop when the bar is unreachable.
+        try:
+            rn = R.Runner(c.adapter, c.model, [R.SimpleItem(i.id, i.task) for i in items], run_dir, runtime=c.runtime, lock_path=c.lock_path,
+                          base_timeout_s=c.base_timeout_s, probe_n=c.probe_n, min_pass=min_pass,
+                          is_failure=lambda rec: not S.prog_ok(by_id[rec["item_id"]], rec))
+            out = rn.run()
+        except R.LockHeld as e:
+            return Outcome("lock_held", str(e), None, draw, run_id)
+        except (R.RunMismatch, R.RunDirError) as e:
+            return Outcome("refused", f"cannot resume run {run_id}: {e}; discard it with fresh (a strike)", None, draw, run_id)
+        if out.status == "interrupted":
+            if holds and out.records:
+                _hold(log, {**base_log, "verdict": "INTERRUPTED"}, plan, reason="interrupted", strike=False)
+            return Outcome("interrupted", "interrupted; resume with the same run id", None, draw, run_id)
+        recs = {r["item_id"]: r for r in out.records if r["item_id"] in by_id}
+        digest1 = c.adapter.digest(c.model)
 
-    # 8a. INVALID after the local arm: a strike and a reservation; the outcome shows the gates only (no k, no rates).
-    if res.verdict == S.INVALID:
-        res = S.redact_invalid(res)
-        if holds:
-            _hold(log, {**base_log, "verdict": S.INVALID}, plan, reason=res.why, strike=True)
-        else:
-            log.append({**base_log, "verdict": S.INVALID, "k": None, "n": res.n_assigned, "consumed": False, "recorded": False, "rows": [],
-                        "assigned": assigned_now, "unrun": unrun, "judge_served": served})
-        return Outcome("scored", res.why, res, draw, run_id, {}, len(plan.prior))
+        # 6. Judge every programmatically ok answer (persisted, so a resume or a budget stop loses nothing). A judge_error is never cached: errored
+        # answers are re-judged at the end of the run (up to 2 more passes); what stays unjudged is tolerated by ``score`` up to 5% (excluded from n).
+        judged = _load_judgements(run_dir / "judge.jsonl")
+        errored: set[str] = set()
+        if mode == S.JUDGE:
+            pending = [iid for iid, rec in recs.items() if iid not in judged and S.prog_ok(by_id[iid], rec)]
+            for _pass in range(3):
+                again: list[str] = []
+                for iid in pending:
+                    rec = recs[iid]
+                    prompt = J.judge_prompt(by_id[iid].task, grader.strip_think(rec.get("text") or "").strip())
+                    try:
+                        o = J.judge_answer(c.backend, c.budget, prompt)
+                    except BudgetExhausted as e:
+                        _hold(log, {**base_log, "verdict": "BUDGET_STOP"}, plan, reason=e.reason, strike=False)
+                        return Outcome("budget_stop", e.reason, None, draw, run_id)
+                    if o.verdict == "judge_error":
+                        again.append(iid)
+                        continue
+                    judged[iid] = {"item_id": iid, "verdict": o.verdict, "defect": o.defect, "served_model": o.served_model, "cost_usd": o.cost_usd}
+                    _append_line(run_dir / "judge.jsonl", judged[iid])
+                pending = again
+                if not pending:
+                    break
+            errored = set(pending)
+            served += [r["served_model"] for r in judged.values() if r.get("served_model") and r["served_model"] not in served]
 
-    # 8b. The record, then the attempt log.
-    jobs = S.record_plan(res, cumulative=bool(plan.prior))
-    report: dict[str, dict[str, str]] = {}
-    max_n = len(plan.prior) + 1
-    if jobs:
-        provenance = {
-            "bank_version": f"v{bank.version}", "bank_sha256": bank.sha256, "settings_hash": settings, "model_digest": digest0, "runtime": c.runtime,
-            "judge": {"backend": getattr(c.backend, "name", None) if mode == S.JUDGE else "none",
-                      "model_served": (", ".join(served) or None) if mode == S.JUDGE else None, "mode": mode},
-            "run_id": run_id, "date": _date(ts),
-            "scope": {"max_prompt_chars": max_chars, "items_excluded_by_context": n_drawn - len(items), "draws": sorted({e["draw"] for e in plan.prior} | {draw})},
-            "attempts": max_n,
-            "ctx": ctx0, "think": getattr(c.adapter, "think", None),      # LC-8b: what routing's parity test compares
-        }
-        report = eligibility_store.record_local_check(c.model, jobs, provenance, path=c.eligibility_path)
-    refused = {j: v for j, v in report.items() if v["status"] != "written"}
-    if refused:
-        # A store refusal is an error, not a "scored" result, and it consumes no draw: the run stays reserved and a rerun resumes it.
-        why = "eligibility store refused: " + "; ".join(f"{j}: {v['reason']}" for j, v in sorted(refused.items()))
-        if holds:
-            _hold(log, {**base_log, "verdict": res.verdict}, plan, reason=why, strike=False)
-        else:
-            log.append({**base_log, "verdict": res.verdict, "k": res.k, "n": res.n_assigned, "consumed": False, "recorded": False, "rows": [],
-                        "assigned": assigned_now, "unrun": unrun, "judge_served": served, "reason": why})
-        return Outcome("record_refused", why, res, draw, run_id, report, len(plan.prior))
-    consumed = mode == S.JUDGE and res.verdict in (S.PASS, S.FAIL, S.NOT_PASSED, S.INCONCLUSIVE)
-    n_attempts = len(plan.prior) + (1 if consumed else 0)
-    recorded = res.verdict == S.PASS and any(v["status"] == "written" for v in report.values())
-    log.append({**base_log, "state": "scored", "verdict": res.verdict, "k": res.k, "n": res.n_assigned, "consumed": consumed, "recorded": recorded,
-                "rows": [r.to_dict() for r in rows_now], "assigned": assigned_now, "unrun": unrun, "judge_served": served,
-                "excluded_unjudged": res.excluded_unjudged})
-    return Outcome("scored", res.why, res, draw, run_id, report, n_attempts)
+        # 7. Score the cumulative union.
+        try:
+            reloaded = c.bank_loader()
+            g.bank_sha_ok = reloaded.sha256 == bank.sha256
+        except Exception:                                  # noqa: BLE001 - any load failure means the bank is not verified
+            g.bank_sha_ok = False
+        g.judge_served, g.digest_end = served, digest1
+        rows_now = [S.grade_row(by_id[i], recs.get(i), "judge_error" if i in errored else (judged.get(i) or {}).get("verdict"), judge_mode=mode)
+                    for i in assigned_now if i in recs]
+        unrun = [i for i in assigned_now if i not in recs]
+        res = S.score(prior_rows + rows_now, assigned_all, g, mode=mode, early_stop=out.status == "early_stop", abandoned=plan.prior_abandoned)
+
+        # 8a. INVALID after the local arm: a strike and a reservation; the outcome shows the gates only (no k, no rates).
+        if res.verdict == S.INVALID:
+            res = S.redact_invalid(res)
+            if holds:
+                _hold(log, {**base_log, "verdict": S.INVALID}, plan, reason=res.why, strike=True)
+            else:
+                log.append({**base_log, "verdict": S.INVALID, "k": None, "n": res.n_assigned, "consumed": False, "recorded": False, "rows": [],
+                            "assigned": assigned_now, "unrun": unrun, "judge_served": served})
+            return Outcome("scored", res.why, res, draw, run_id, {}, len(plan.prior))
+
+        # 8b. The record, then the attempt log.
+        jobs = S.record_plan(res, cumulative=bool(plan.prior))
+        report: dict[str, dict[str, str]] = {}
+        max_n = len(plan.prior) + 1
+        if jobs:
+            provenance = {
+                "bank_version": f"v{bank.version}", "bank_sha256": bank.sha256, "settings_hash": settings, "model_digest": digest0, "runtime": c.runtime,
+                "judge": {"backend": getattr(c.backend, "name", None) if mode == S.JUDGE else "none",
+                          "model_served": (", ".join(served) or None) if mode == S.JUDGE else None, "mode": mode},
+                "run_id": run_id, "date": _date(ts),
+                "scope": {"max_prompt_chars": max_chars, "items_excluded_by_context": n_drawn - len(items), "draws": sorted({e["draw"] for e in plan.prior} | {draw})},
+                "attempts": max_n,
+                "ctx": ctx0, "think": getattr(c.adapter, "think", None),      # LC-8b: what routing's parity test compares
+            }
+            report = eligibility_store.record_local_check(c.model, jobs, provenance, path=c.eligibility_path)
+        refused = {j: v for j, v in report.items() if v["status"] != "written"}
+        if refused:
+            # A store refusal is an error, not a "scored" result, and it consumes no draw: the run stays reserved and a rerun resumes it.
+            why = "eligibility store refused: " + "; ".join(f"{j}: {v['reason']}" for j, v in sorted(refused.items()))
+            if holds:
+                _hold(log, {**base_log, "verdict": res.verdict}, plan, reason=why, strike=False)
+            else:
+                log.append({**base_log, "verdict": res.verdict, "k": res.k, "n": res.n_assigned, "consumed": False, "recorded": False, "rows": [],
+                            "assigned": assigned_now, "unrun": unrun, "judge_served": served, "reason": why})
+            return Outcome("record_refused", why, res, draw, run_id, report, len(plan.prior))
+        consumed = mode == S.JUDGE and res.verdict in (S.PASS, S.FAIL, S.NOT_PASSED, S.INCONCLUSIVE)
+        n_attempts = len(plan.prior) + (1 if consumed else 0)
+        recorded = res.verdict == S.PASS and any(v["status"] == "written" for v in report.values())
+        log.append({**base_log, "state": "scored", "verdict": res.verdict, "k": res.k, "n": res.n_assigned, "consumed": consumed, "recorded": recorded,
+                    "rows": [r.to_dict() for r in rows_now], "assigned": assigned_now, "unrun": unrun, "judge_served": served,
+                    "excluded_unjudged": res.excluded_unjudged})
+        return Outcome("scored", res.why, res, draw, run_id, report, n_attempts)
+    except BaseException as exc:
+        # An unexpected exception (or a Ctrl-C outside the local loop) after the local arm ran leaves the run dir as a reservation, not a free reroll.
+        if holds and _run_has_results(run_dir):
+            with contextlib.suppress(Exception):
+                _hold(log, {**base_log, "verdict": "INTERRUPTED" if isinstance(exc, KeyboardInterrupt) else "ERROR"}, plan,
+                      reason="interrupted" if isinstance(exc, KeyboardInterrupt) else f"unexpected {type(exc).__name__}", strike=False)
+        raise

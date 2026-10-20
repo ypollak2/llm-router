@@ -6,9 +6,12 @@ anything; ``pull_command`` is text for the user to run.
 
 Fit rule (documented, tunable only here): an entry fits when
 ``need_gb = max(min_ram_gb, download_size_gb) * HEADROOM + KV_ALLOWANCE_GB`` is at most the memory offered to the model:
-the probe's ``usable_gb`` (free memory minus its own reserve) for CPU and Apple unified memory, or ``vram_gb`` (total
-VRAM) when a discrete GPU is present and the entry gives ``min_vram_gb``. HEADROOM is 20%; KV_ALLOWANCE_GB is a flat
-allowance for the KV cache at the default context. Unknown hardware is never read as zero: the entry is kept, marked
+the machine's CAPACITY ``total_gb - max(4 GiB, 20% of total)`` (the probe's own reserve, applied to total, not to free
+memory, so a busy machine is not told its model is too big; on Apple unified memory vram == total, same rule), or
+``vram_gb`` (total VRAM) when a discrete GPU is present with a known VRAM and the entry gives ``min_vram_gb``. No shipped
+entry has ``min_vram_gb`` yet: the cited pages (library pages and model cards) state no VRAM figure, so GPU boxes fall
+back to the RAM rule above rather than to an invented number. HEADROOM is 20%; KV_ALLOWANCE_GB is a flat allowance for
+the KV cache at the default context. Unknown total memory is never read as zero: the entry is kept, marked
 ``fit == "unknown"``.
 
 Order: measured passes (pooled rate desc, then smaller footprint), then untested (smaller footprint). A list older than
@@ -69,12 +72,25 @@ def need_gb(entry: Mapping[str, Any]) -> float:
     return round(base * HEADROOM + KV_ALLOWANCE_GB, 2)
 
 
+def capacity_gb(hardware: Mapping[str, Any]) -> float | None:
+    """Memory the machine can give a model: total minus max(4 GiB, 20% of total); None when total is unknown."""
+    total = hardware.get("total_gb")
+    if isinstance(total, bool) or not isinstance(total, (int, float)) or total <= 0:
+        return None
+    return round(max(0.0, total - max(4.0, 0.20 * total)), 2)
+
+
 def _offered(hardware: Mapping[str, Any], entry: Mapping[str, Any]) -> float | None:
     gpu, vram = hardware.get("gpu"), hardware.get("vram_gb")
-    if gpu not in (None, "none", "apple_unified") and isinstance(vram, (int, float)) and entry.get("min_vram_gb") is not None:
+    if (gpu not in (None, "none", "apple_unified") and isinstance(vram, (int, float)) and not isinstance(vram, bool)
+            and vram > 0 and entry.get("min_vram_gb") is not None):
         return float(vram)
-    usable = hardware.get("usable_gb")
-    return float(usable) if isinstance(usable, (int, float)) else None
+    return capacity_gb(hardware)
+
+
+def empty_reason(runtime: str | None) -> str:
+    """Text for the CLI when ``recommend`` returns an empty list for ``runtime``."""
+    return f"no verified recommendation for {runtime or 'this runtime'}"
 
 
 def _pooled(entry: Mapping[str, Any]) -> float | None:
