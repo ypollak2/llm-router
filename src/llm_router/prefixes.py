@@ -157,7 +157,9 @@ def record_example(stripped_text, forced, decided, door, *, now=None, path=None,
         }
 
         if not (embed and examples.embedding_wanted()):
-            examples.append_row(row, path=target, max_bytes=_MAX_BYTES)
+            # hook / event loop: never wait long on the file lock; LockBusy -> failopen below
+            examples.append_row(row, path=target, max_bytes=_MAX_BYTES,
+                                lock_timeout=examples.HOT_LOCK_TIMEOUT_S)
             return True
 
         def write_deferred() -> None:
