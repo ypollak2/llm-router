@@ -194,11 +194,27 @@ def test_refresher_cache_carries_segment(home):
 
 def test_tick_adds_no_io(monkeypatch):
     import builtins
+    import io
     calls = []
-    real = builtins.open
-    monkeypatch.setattr(builtins, "open", lambda *a, **k: calls.append(a) or real(*a, **k))
+
+    def spy(real, name):
+        def wrapped(*a, **k):
+            calls.append(name)
+            return real(*a, **k)
+        return wrapped
+
+    monkeypatch.setattr(builtins, "open", spy(builtins.open, "builtins.open"))
+    monkeypatch.setattr(io, "open", spy(io.open, "io.open"))
+    monkeypatch.setattr(os, "stat", spy(os.stat, "os.stat"))
+    monkeypatch.setattr(Path, "read_text", spy(Path.read_text, "Path.read_text"))
+    monkeypatch.setattr(Path, "open", spy(Path.open, "Path.open"))
+    monkeypatch.setattr(Path, "stat", spy(Path.stat, "Path.stat"))
     tick.render({"written_at": NOW, "mode": "smart", "local_check": "local ok"}, now=NOW)
     assert calls == []
+    Path(__file__).read_text()                              # the spies are live: a Path read WOULD be seen
+    assert "Path.read_text" in calls
+
+
 
 
 @pytest.mark.timing
@@ -243,6 +259,17 @@ def test_nudge_unwritable_state_stays_silent(home, monkeypatch):
     write_inventory(home, {MODEL: DIGEST})
     (home / "local_check").write_text("a file where the directory should be")
     assert display.maybe_nudge(path=home / "x.json", now=NOW) is None
+
+
+def test_nudge_creates_parent_0700_and_leaves_no_temp_on_failure(home, monkeypatch):
+    write_inventory(home, {MODEL: DIGEST})
+    assert not (home / "local_check").exists()
+    assert display.maybe_nudge(path=home / "x.json", now=NOW) is not None
+    assert stat.S_IMODE((home / "local_check").stat().st_mode) == 0o700
+    (home / "local_check" / "nudge.json").unlink()
+    monkeypatch.setattr(os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+    assert display.maybe_nudge(path=home / "x.json", now=NOW) is None
+    assert [p.name for p in (home / "local_check").iterdir()] == []
 
 
 def test_install_nudge_prints_one_dim_line_and_never_prompts(home, capsys, monkeypatch):
@@ -337,6 +364,61 @@ def test_prune_is_safe_on_missing_root_and_symlinks(home, tmp_path):
     (root / "link").symlink_to(outside, target_is_directory=True)
     retention.prune(root, now=NOW)
     assert (outside / "keep.txt").exists() and (root / "link").is_symlink()
+
+
+def test_non_utf8_attempts_log_fails_closed_without_raising(home):
+    root = home / "local_check" / "runs"
+    root.mkdir(parents=True)
+    for i, age in enumerate((9, 8, 7, 3, 2, 1)):
+        mkrun(root, f"run{i}", age)
+    (root / A.LOG_NAME).write_bytes(b"\xff\xfe{not utf8}\n")
+    rep = retention.prune(root, now=NOW)
+    assert rep.deleted == [] and len(rep.kept) == 6
+    assert any(A.LOG_NAME in e and "UnicodeDecodeError" in e for e in rep.errors)
+    assert len([p for p in root.iterdir() if p.is_dir()]) == 6
+
+
+def test_non_utf8_results_in_one_run_is_collected_and_others_continue(home):
+    root = home / "local_check" / "runs"
+    root.mkdir(parents=True)
+    bad, good = mkrun(root, "bad", 45), mkrun(root, "good", 44)
+    (bad / "results.jsonl").write_bytes(b"\xff\xfe\x00 not utf8\n")
+    os.utime(bad / "results.jsonl", (NOW - 45 * 86400,) * 2)
+    rep = retention.prune(root, now=NOW)
+    assert any(e.startswith("bad:") and "UnicodeDecodeError" in e for e in rep.errors)
+    assert rep.answers_pruned == ["good"]
+    assert "an answer" not in (good / "results.jsonl").read_text()
+
+
+def test_symlinked_runs_root_is_refused(home, tmp_path):
+    real = tmp_path / "real_runs"
+    real.mkdir()
+    for i in range(5):
+        mkrun(real, f"r{i}", 40 - i)
+    link = home / "runs_link"
+    link.symlink_to(real, target_is_directory=True)
+    rep = retention.prune(link, now=NOW)
+    assert rep.deleted == [] and rep.answers_pruned == [] and any("symlink" in e for e in rep.errors)
+    assert len(list(real.iterdir())) == 5 and "an answer" in (real / "r0" / "results.jsonl").read_text()
+
+
+def test_doctor_prune_failure_does_not_block_nudge_and_is_recorded(home, capsys, monkeypatch):
+    from llm_router import failopen
+    from llm_router.commands import doctor
+    write_inventory(home, {MODEL: DIGEST})
+    codes = []
+    monkeypatch.setattr(failopen, "record", lambda code, *a, **k: codes.append(code))
+    real_prune = retention.prune
+    monkeypatch.setattr(retention, "prune", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    doctor._local_text_jobs_section()
+    assert "tip: local model found" in capsys.readouterr().out
+    assert codes == ["CHZ-FO-LOCALCHECK-PRUNE"]
+    codes.clear()
+    monkeypatch.setattr(retention, "prune", real_prune)
+    (home / "local_check" / "nudge.json").unlink()
+    monkeypatch.setattr(display, "maybe_nudge", lambda: (_ for _ in ()).throw(RuntimeError("y")))
+    doctor._local_text_jobs_section()
+    assert codes == ["CHZ-FO-LOCALCHECK-NUDGE"]
 
 
 def test_retention_doc_lists_the_stores():

@@ -143,13 +143,17 @@ def maybe_nudge(*, path: Path | None = None, now: float | None = None) -> str | 
     if any(ln.kind != "not_measured" for ln in ES.local_check_lines(path=path, current_digests=digests, now=now)):
         return None
     target = _nudge_path()
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(tmp, "w", encoding="utf-8", opener=paths.private_opener) as fh:
             json.dump({"bank_versions": [*_nudged(), version]}, fh)
         os.replace(tmp, target)
-    except OSError:
+    except (OSError, ValueError):
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
         return None
     return (f"tip: local model found ({names[0]}) but not measured. "
             f"`{ES._NOT_MEASURED}` checks which text jobs it can do (optional; nothing runs until you do).")
