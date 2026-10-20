@@ -8,7 +8,12 @@ llm-router local-check [run] [--dry-run] [--no-judge] [--yes] [--model M] [--end
                        [--profile quick|standard] [--fresh] [--force] [--judge-route auto|api|subscription]
 llm-router local-check status [--model M]
 llm-router local-check explain [--model M]
+llm-router local-check enable <lane> [--model M]
+llm-router local-check disable <lane> [--model M]
 ```
+
+`<lane>` is `commit_message` or `pr_description`. Model names carry their tag as the runtime lists them (`qwen3.5:latest`); without `--model`,
+`enable` / `disable` use the only local model in the inventory and ask for `--model` when there are several.
 
 | Flag | Effect |
 |---|---|
@@ -30,7 +35,12 @@ llm-router local-check explain [--model M]
 * **To your local runtime:** the same public benchmark prompts. Nothing leaves your machine for that arm (unless you pass a remote `--endpoint --allow-remote`).
 * **Judge route (D-260):** `ANTHROPIC_API_KEY` (or the configured Anthropic provider key) -> metered API route, pinned model, temperature 0, exact cost,
   default cap **$3 or 120 requests**. Otherwise the `claude` CLI on `PATH` -> your subscription (`claude -p`, no tools, hooks off); the plan screen
-  warns above 80 % of your plan limit and the run refuses above 95 % unless `--force`. Otherwise only `--no-judge`.
+  warns above 80 % of your plan limit and the run refuses above 95 % unless `--force`; the quota is **re-read every 10 judge requests** and a run
+  that crosses 95 % stops there (resumable, nothing recorded) unless `--force`. Otherwise only `--no-judge`.
+* **Billing:** on the **subscription route the judge requests count against your Claude plan limit, not a dollar bill, but only when the
+  `claude` CLI is logged in with your plan.** If that CLI is configured with an **API key** (for example `ANTHROPIC_API_KEY` in its environment or
+  `claude` set up for the Console), those requests are billed to that key like any API call; the run then shows no dollar figure because the
+  `claude` CLI does not report one. The metered API route (above) is the one with an exact cost and a hard cap.
 * **`ANTHROPIC_BASE_URL` (D-264):** if it points at llm-router's own local proxy (the sentinel port, `LLM_ROUTER_PROXY_PORT`, or the default
   8787/8797), the judge goes **direct to api.anthropic.com** and does not pass through the proxy. Any other custom base URL refuses the API route
   (your key and prompts would go to another host); use `--judge-route subscription` or `--no-judge`.
@@ -38,7 +48,8 @@ llm-router local-check explain [--model M]
 
 ## Plan screen
 
-Model and digest, hardware, items in scope (how many of the draw's 70 fit the model's context window), time, judge route, cost estimate and cap,
+Model and digest, hardware (RAM and the memory a model can use: total minus a reserve of max(4 GB, 20 %), not the momentary free memory),
+items in scope (how many of the draw's 70 fit the model's context window), time, judge route, cost estimate and cap,
 then the consent wording (`Proceed? [y/N]`). The time is measured by a 3-item rate probe at the start of the run; it is shown on the plan screen
 only when a run is being resumed. **Below 50 items in scope the run is refused** (a verdict needs n >= 50 and >= 20 per lane): raise `num_ctx`
 (Ollama: a Modelfile `PARAMETER num_ctx`, or `OLLAMA_CONTEXT_LENGTH`) or use a longer-context model.
@@ -49,8 +60,25 @@ PASS needs the point estimate >= 0.80 and the Wilson 95 % lower bound >= 0.60 (n
 failure (upper bound < 0.80). Anything between is INCONCLUSIVE and writes nothing. A lane whose own rate is below 0.70 is excluded from a pooled pass.
 Answers the judge could not rate (after retries) are excluded from n, up to 5 % of judged calls (at least 1); beyond that the run is INVALID.
 The screen shows `k/n` and **n first**, the lane table, the validity gates (G0 integrity, G1 serves, G3a grader self-test, G3b judge plants, G5 completeness),
-a rule-concentration warning (one grader rule behind >= 40 % of failures), what was recorded, and the routing line. Routing activation itself
-is a later update; until it ships the screen says so.
+a rule-concentration warning (one grader rule behind >= 40 % of failures), what was recorded, and one routing line per passed lane.
+
+### After the verdict
+
+* **Routing is live (D-260).** A recorded PASS switches the passed lanes on, per lane: `routing: on for <lane> -- disable with ...`,
+  `routing: already on for <lane>`, or `routing: kept off for <lane> -- it was disabled; run ...` (a lane you or the demotion monitor disabled stays
+  off after a new pass). A pre-registered lane is never switched on by a run; only an explicit `enable` does that. See
+  [local-check-routing.md](local-check-routing.md) for what routing does and the demotion monitor.
+* **Retention.** Any completed run (whatever the verdict) is followed by a prune: the last 3 runs are kept, answers older than 30 days are stripped.
+  It prints only when it hit an error.
+* **Recommendations.** After a FAIL, NOT_PASSED or an INCONCLUSIVE on fewer than 70 items, the screen lists models that fit this machine from a
+  data file, measured ones first (with their k/n), untested ones labelled as such, each with the pull command as text for you to run. Nothing is
+  pulled or routed for you. With no entry for your runtime it says `no verified recommendation for <runtime>`.
+
+`status` shows the recorded lanes (the same lines `doctor` shows, including `[routing: on]`), the routing switches in `local_routing.json`
+with the command that flips each, any lane the demotion monitor switched off, and the attempt log.
+
+`enable <lane>` switches routing on for a lane by hand (source `manual`); it still applies only while the lane is passed and fresh.
+`disable <lane>` switches it off; a later PASS keeps it off.
 
 `explain` prints, for the last finished run, a histogram of failed grader rules with the **public item ids** behind each. It shows no item text and no answer.
 

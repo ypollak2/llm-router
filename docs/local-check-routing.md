@@ -1,5 +1,7 @@
 # Local-check routing (LC-8)
 
+The command that measures a model and switches lanes on or off is described in [local-check.md](local-check.md).
+
 Owner decisions: D-260 (a passed lane routes local-first by default, on the verified text-job path only), D-262 (effective lane: the user's own fresh local-check result, else pre-registered, else unknown), D-258 (the proxy authority stays off; pre-registered lanes are record-only).
 
 ## What routes, and when
@@ -33,7 +35,7 @@ A disabled entry also holds `reason` and `disabled_at`. Python API (`llm_router.
 - `is_enabled(model, job)`.
 - `on_pass(model, jobs)` is called after a recorded local-check PASS: enables each lane that has no entry, returns `{job: "enabled" | "already_on" | "kept_off"}`. A lane disabled earlier (by the user or by the monitor) stays off.
 
-`llm-router local-check enable|disable <lane>` call `enable` / `disable`; the CLI lives in `commands/local_check.py`.
+`llm-router local-check enable|disable <lane> [--model M]` call `enable` (source `manual`) / `disable`; a passing run calls `on_pass` and prints one line per lane. The CLI lives in `commands/local_check.py`.
 Model names are compared with `:latest` normalised.
 
 ## Demotion monitor

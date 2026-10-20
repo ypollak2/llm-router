@@ -37,7 +37,7 @@ Usage:
     llm-router map [--json]           — the one resource map: seats, local models, keys, quota, priority
     llm-router mode [advise|route]    — routing authority: route (default) or advise (the proxy forwards the model you asked for and only logs its proposal)
     llm-router calibrate [--models M] [--allow-paid] — measure per-model capability (local-only by default)
-    llm-router local-check [run|status|explain] [--dry-run] [--no-judge] [--yes] [--model M] — measure YOUR local model on a public benchmark (plan screen first; --dry-run makes no model call)
+    llm-router local-check [run|status|explain|enable <lane>|disable <lane>] [--dry-run] [--no-judge] [--yes] [--model M] — measure YOUR local model on a public benchmark (plan screen first; --dry-run makes no model call)
     llm-router eligibility record --prereg DIR [--apply] — record a pre-registered text-job verdict (dry run unless --apply)
     llm-router resolve --tier T [--needs tools,vision] — what the resolver would pick (inspection only)
     llm-router semantic status  — project scope, derived index, and selected arm

@@ -16,6 +16,12 @@ from tests.test_lc5_scoring import BANK, Clock, FakeAdapter, FakeJudge, invalid_
 MODEL = "fake-model:1b"
 
 
+@pytest.fixture(autouse=True)
+def _scratch_home(tmp_path, monkeypatch):
+    """LC-10i: the CLI writes local_routing.json and reads the model inventory under the llm-router home; keep both in the test dir."""
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+
+
 class Sink:
     def __init__(self):
         self.out: list[str] = []
@@ -32,7 +38,7 @@ class Sink:
 
 def deps(tmp_path: Path, adapter: FakeAdapter | None = None, judge: FakeJudge | None = None, *, env: dict | None = None, claude: bool = True,
          interactive: bool = False, answers: list[str] | None = None, endpoints: list | None = None, clock: Clock | None = None,
-         quota: tuple = (0.10, "ok", 0.0), routing: bool = False, **kw) -> tuple[LCC.Deps, Sink, SimpleNamespace]:
+         quota: tuple = (0.10, "ok", 0.0), **kw) -> tuple[LCC.Deps, Sink, SimpleNamespace]:
     sink = Sink()
     adapter = adapter or FakeAdapter()
     judge = judge or FakeJudge()
@@ -62,7 +68,7 @@ def deps(tmp_path: Path, adapter: FakeAdapter | None = None, judge: FakeJudge | 
                  config_key=lambda: "", interactive=interactive, input_fn=lambda p: ans.pop(0), out=sink.out.append, err=sink.err.append,
                  discover=discover, make_adapter=make_adapter, load_bank=lambda: BANK, hardware=lambda: {"total_gb": 32, "usable_gb": 20, "gpu": None, "arch": "arm64"},
                  quota_reader=lambda: quota, proxy_ports=lambda: {8787, 8797}, api_backend=api_backend, cli_backend=cli_backend,
-                 now=clock or Clock(), runs_root=tmp_path / "runs", eligibility_path=tmp_path / "elig.json", routing_api=lambda: routing, **kw)
+                 now=clock or Clock(), runs_root=tmp_path / "runs", eligibility_path=tmp_path / "elig.json", **kw)
     return d, sink, seen
 
 
@@ -81,7 +87,7 @@ def test_dry_run_makes_zero_model_calls_and_writes_nothing(tmp_path: Path) -> No
     assert seen.adapter.calls == 0 and seen.judge.calls == 0
     assert not (tmp_path / "runs").exists() and not (tmp_path / "elig.json").exists()
     t = sink.text
-    for needle in (f"Model:      {MODEL}", "sha256:aaa", "Hardware:   RAM 32 GB, 20 GB usable", "70 of 70", "Judge: your Claude subscription", "Cap: the run stops at 120 requests",
+    for needle in (f"Model:      {MODEL}", "sha256:aaa", "Hardware:   RAM 32 GB, 25.6 GB usable for a model", "70 of 70", "Judge: your Claude subscription", "Cap: the run stops at 120 requests",
                    "Proceed", "Dry run: no model call was made"):
         assert needle in t or needle.replace("Proceed", "What is sent to Anthropic") in t, needle
     assert "Proceed? [y/N]" not in t              # a dry run never asks
@@ -117,18 +123,11 @@ def test_pass_run_prints_verdict_lane_table_gates_and_records(tmp_path: Path) ->
     assert "commit_message" in t and "pr_description" in t and "pooled" in t and "Wilson LB" in t
     assert "gates: G0 PASS" in t and "G3b PASS" in t
     assert "recorded: commit_message, pr_description" in t
-    assert "routing activation arrives in a later update" in t and "routing: on for" not in t
+    assert "later update" not in t and "routing: on for commit_message -- disable with `llm-router local-check disable commit_message`" in t
     assert "judge: " in t and "calls" in t
     for lane in lanes(tmp_path).values():
         assert lane["grade"] == "passed" and lane["source"] == "local_check"
     assert seen.cli_calls == [(BANK.manifest["judge_id"], "/usr/bin/claude")]
-
-
-def test_routing_line_only_when_the_routing_api_exists(tmp_path: Path) -> None:
-    d, sink, _ = deps(tmp_path, FakeAdapter({i.id: "judgefail" for i in BANK.draw(1)[:10]}), routing=True)
-    assert run(["--yes", "--model", MODEL], d) == 0
-    assert "routing: on for commit_message, pr_description -- disable with `llm-router local-check disable <lane>`" in sink.text
-    assert "later update" not in sink.text
 
 
 def test_fail_run_exit_code_and_explain_histogram(tmp_path: Path) -> None:
