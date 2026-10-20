@@ -171,6 +171,7 @@ def test_truncation_status_keeps_text(mk):
         assert r.status == "truncated" and r.text == "cut off mid sen", kind
 
 
+@pytest.mark.timing
 def test_timeout_is_a_result_not_a_retry(mk):
     f = mk("openai", delay=1.5)
     a = T.OpenAICompatAdapter(f.url)
