@@ -205,6 +205,9 @@ results/
 # Resolver design + calibration reference (inventory/calibrate/resolve)
 !/docs/model-resolver.md
 
+# LC-6 user-facing guide (exit codes, privacy, judge routes)
+!/docs/local-check.md
+
 # P3.2 release eval files are per-sha artifacts attached to the GitHub Release,
 # not committed (the tag commit cannot contain a file named after its own sha).
 /release_evals/*.json
