@@ -16,8 +16,12 @@ whose licence is not on ALLOW are dropped (and counted in the manifest).
 Usage:
     python scripts/build_local_check_bank.py --q37 DIR --repos DIR [--out DIR]
 
---q37    the prereg-q37 directory (frozen/, calib1-3/, poolc/, poolf/, plants_q37.py)
---repos  directory holding one git clone per repo short name (as the Q37 generator made)
+--q37    the prereg-q37 directory (frozen/, run/, calib1-3/, poolc/, poolf/, plants_q37.py)
+--repos  directory holding one git clone per repo short name (as the Q37 generator made).
+         It must hold every clone the items AND the plant pool draw on: the 16 allow-listed repos
+         (aiohttp, axum, celery, clap, django, gin, pip, poetry, prettier, pydantic, ripgrep, scrapy,
+         sqlalchemy, uv, vite, zod) plus the plant-pool clones express, mypy and pylint (mypy is
+         MIT and enters the bank; pylint is GPL-2.0 and is excluded, but its LICENSE is still read).
 Deterministic: same inputs -> byte-identical outputs (gzip mtime fixed to 0).
 """
 from __future__ import annotations
@@ -41,6 +45,12 @@ PLANT_TARGET = {"good": 12, "swapped": 12, "mutated": 6}
 ITEM_DIRS = ("frozen", "calib1", "calib2", "calib3")     # audited Q37 items
 EXTRA_ITEM_DIR = "poolc"                                 # additions to reach 70 per job
 PLANT_POOL_DIR = "poolf"                                 # plants come only from here
+# item dir -> the Q37 results dir holding its two arms' answers, grader and judge verdicts
+RESULTS_DIR = {"frozen": "run", "calib1": "calib1", "calib2": "calib2", "calib3": "calib3"}
+# plant set (a dir with plants.jsonl) -> results dirs whose judge*.jsonl judged exactly those plants
+PLANT_SETS = {"frozen": ("poolf", "run"), "calib1": ("calib1", "calib2")}
+# diffs touching vendored third-party code carry that code's own licence, which is not checked here
+VENDORED = re.compile(r"(^|/)(_vendor|vendor|third_party|node_modules)/")
 LICENCE_FILE = re.compile(r"^(LICENSE(\.txt|\.md)?|LICENSE-[A-Z]+|UNLICENSE)$")
 
 # (SPDX id, regexes that must all match the normalised licence text)
@@ -57,11 +67,26 @@ SIGNATURES = (
 
 
 def classify_text(text: str) -> str:
+    """SPDX id of the primary grant in a licence text.
+
+    A LICENSE may quote other licences for bundled parts (mypy: MIT, then PSF text that mentions the
+    GPL). The primary licence is the one whose header comes first in the text; ties (BSD-3 contains
+    BSD-2) go to the earlier, more specific SIGNATURES entry.
+    """
     t = re.sub(r"\s+", " ", text.lower())
-    for spdx, pats in SIGNATURES:
+    best: tuple[int, int, str] | None = None
+    for rank, (spdx, pats) in enumerate(SIGNATURES):
         if all(re.search(p, t) for p in pats):
-            return spdx
-    return "UNKNOWN"
+            cand = (re.search(pats[0], t).start(), rank, spdx)  # type: ignore[union-attr]
+            if best is None or cand < best:
+                best = cand
+    return best[2] if best else "UNKNOWN"
+
+
+def vendored(rec: dict) -> bool:
+    """True if the record's diff or file list touches a vendored third-party path."""
+    paths = list(rec["files"]) + re.findall(r"^diff --git a/(\S+)", rec["diff"], flags=re.M)
+    return any(VENDORED.search(x) for x in paths)
 
 
 def git(repo: Path, *args: str) -> str:
@@ -121,10 +146,10 @@ class Resolver:
                 "url": f"https://github.com/{slug}/commit/{sha}"}
 
 
-def item_record(it: dict, res: Resolver) -> dict:
+def item_record(it: dict, res: Resolver, audited: bool) -> dict:
     return {"type": "item", "id": it["id"], "job": it["stratum"], **res.meta(it["repo"], it["commit"]),
             "date": it["commit_date"], "task": it["messages"][0]["content"], "diff": it["diff"],
-            "files": it["files"], "strata": {"size": it["size_stratum"], "lang": it["lang"]}}
+            "files": it["files"], "strata": {"size": it["size_stratum"], "lang": it["lang"]}, "audited": audited}
 
 
 def plant_record(p: dict, pool: dict[str, dict], res: Resolver) -> dict:
@@ -139,40 +164,92 @@ def plant_record(p: dict, pool: dict[str, dict], res: Resolver) -> dict:
     return rec
 
 
+def audited_item_ids(q37: Path) -> set[str]:
+    """Items answered by BOTH arms in a Q37 run/calibration slice with grader+judge results behind them.
+
+    Per arm: a judge verdict exists, or the answer failed the programmatic grader and the item is in the
+    G4 audit set (run/audit_set.jsonl). Every calibration failure was hand-audited (PREREG-Q37.md s11).
+    """
+    in_audit_set = {x["item_id"] for x in read_jsonl(q37 / "run" / "audit_set.jsonl")}
+    out: set[str] = set()
+    for item_dir, rdir in RESULTS_DIR.items():
+        res = q37 / rdir / "results"
+        arms = {"qwen": {x["item_id"]: x for x in read_jsonl(res / "qwen3.6_35b-a3b-coding.jsonl")},
+                "sonnet": {x["item_id"]: x for x in read_jsonl(res / "sonnet.jsonl")}}
+        judged = {a: {x["item_id"] for x in read_jsonl(res / "judge.jsonl") if x["arm"] == a} for a in arms}
+        for it in read_jsonl(q37 / item_dir / "items.jsonl"):
+            i = it["id"]
+            ok = all(i in arms[a] and not arms[a][i].get("err") and (i in judged[a] or i in in_audit_set) for a in arms)
+            if ok:
+                out.add(i)
+    return out
+
+
+def plant_verdicts(q37: Path) -> tuple[dict[tuple[str, str, str], Counter], dict[tuple[str, str], str]]:
+    """Judge verdicts per (id, kind, sha256(text)), and which Q37 plant set each (id, kind, text) came from.
+
+    A verdict only counts for the exact text it judged: Q37 reused ids across plant sets with different text.
+    """
+    verdicts: dict[tuple[str, str, str], Counter] = {}
+    origin: dict[tuple[str, str], str] = {}
+    for pdir, rdirs in PLANT_SETS.items():
+        texts = {(x["id"], x["kind"]): h(x["text"]) for x in read_jsonl(q37 / pdir / "plants.jsonl")}
+        for (i, k), th in texts.items():
+            origin.setdefault((i, k, th), pdir)
+        for rdir in rdirs:
+            for f in sorted((q37 / rdir / "results").glob("judge*.jsonl")):
+                for x in read_jsonl(f):
+                    if x["arm"] != "plant":
+                        continue
+                    i, k = x["item_id"].split("#")
+                    if (i, k) in texts:
+                        verdicts.setdefault((i, k, texts[(i, k)]), Counter())[x["verdict"]] += 1
+    return verdicts, origin  # type: ignore[return-value]
+
+
+def contradicts(kind: str, v: Counter | None) -> bool:
+    """A good plant must be judged pass; a swapped or mutated plant must be judged fail."""
+    return bool(v) and v["fail" if kind == "good" else "pass"] > 0  # type: ignore[index]
+
+
 def build(q37: Path, repos: Path) -> tuple[list[dict], dict]:
     sys.path.insert(0, str(q37))
     import plants_q37  # the Q37 plant tooling (mechanical, no model call)
 
     res = Resolver(repos)
     excluded: Counter = Counter()
+    excluded_vendored: Counter = Counter()
+    audited_ids = audited_item_ids(q37)
 
-    def keep(rec_licence: str, key: str) -> bool:
-        if allowed(rec_licence):
-            return True
-        excluded[rec_licence] += 1
-        return False
+    def keep(rec: dict) -> bool:
+        if not allowed(rec["licence"]):
+            excluded[rec["licence"]] += 1
+            return False
+        if vendored(rec):
+            excluded_vendored[rec["job"]] += 1
+            return False
+        return True
 
-    # ---- items: audited Q37 material first, then deterministic additions from poolc
-    audited, seen = [], set()
-    for d in ITEM_DIRS:
-        for it in read_jsonl(q37 / d / "items.jsonl"):
-            audited.append(it)
-    extra = read_jsonl(q37 / EXTRA_ITEM_DIR / "items.jsonl")
+    # ---- items: Q37 items answered by both arms first (audited), then unaudited poolc fill up to 70 per job
     items: list[dict] = []
-    for it in audited:
-        r = item_record(it, res)
-        if keep(r["licence"], it["id"]) and r["id"] not in seen:
-            items.append(r)
-            seen.add(r["id"])
+    seen: set[str] = set()
+    for d in RESULTS_DIR:
+        for it in read_jsonl(q37 / d / "items.jsonl"):
+            r = item_record(it, res, it["id"] in audited_ids)
+            if r["id"] not in seen and keep(r):
+                items.append(r)
+                seen.add(r["id"])
+    assert all(r["audited"] for r in items), "an item dir holds an item never answered by both arms"
+    extra = read_jsonl(q37 / "poolc" / "items.jsonl")
     per = Counter(r["job"] for r in items)
     for job in ("commit_message", "pr_description"):
+        assert per[job] <= TARGET_PER_JOB, f"{per[job]} audited {job} items exceed {TARGET_PER_JOB}"
         need = TARGET_PER_JOB - per[job]
-        pool = sorted((x for x in extra if x["stratum"] == job), key=lambda x: h("lc1-extra" + x["id"]))
-        for it in pool:
+        for it in sorted((x for x in extra if x["stratum"] == job), key=lambda x: h("lc1-extra" + x["id"])):
             if need <= 0:
                 break
-            r = item_record(it, res)
-            if r["id"] in seen or not keep(r["licence"], it["id"]):
+            r = item_record(it, res, False)
+            if r["id"] in seen or not keep(r):
                 continue
             items.append(r)
             seen.add(r["id"])
@@ -184,18 +261,22 @@ def build(q37: Path, repos: Path) -> tuple[list[dict], dict]:
         shas.add(r["sha"])
         diffs.add(h(r["diff"]))
 
-    # ---- plants: audited Q37 plants, minus any with a disallowed repo/source licence, topped up from poolf
+    # ---- plants: Q37 plants first, then mechanical rebuilds from the plant pool.
     # pool = poolf (the audited plant pool) plus whatever of poolc was NOT selected as an item
-    pool_items = {x["id"]: x for x in read_jsonl(q37 / PLANT_POOL_DIR / "items.jsonl")}
-    pool_src = read_jsonl(q37 / PLANT_POOL_DIR / "plants_src.jsonl")
-    for x, s in zip(extra, read_jsonl(q37 / EXTRA_ITEM_DIR / "plants_src.jsonl")):
+    pool_items = {x["id"]: x for x in read_jsonl(q37 / "poolf" / "items.jsonl")}
+    pool_src = read_jsonl(q37 / "poolf" / "plants_src.jsonl")
+    for x, s in zip(extra, read_jsonl(q37 / "poolc" / "plants_src.jsonl")):
         assert x["id"] == s["id"]
         if x["id"] not in seen and x["commit"] not in shas:
             pool_items[x["id"]] = x
             pool_src.append(s)
+    verdicts, origin = plant_verdicts(q37)
     plant_excluded: Counter = Counter()
+    plant_vendored = 0
+    plant_contradicted: list[str] = []
 
     def plant_ok(p: dict) -> dict | None:
+        nonlocal plant_vendored
         rec = plant_record(p, pool_items, res)
         lics = [rec["licence"]] + ([rec["source"]["licence"]] if "source" in rec else [])
         if not all(allowed(x) for x in lics):
@@ -203,48 +284,78 @@ def build(q37: Path, repos: Path) -> tuple[list[dict], dict]:
                 if not allowed(x):
                     plant_excluded[x] += 1
             return None
-        if rec["sha"] in shas or h(rec["diff"]) in diffs or rec["id"] in seen:
+        if vendored(rec):
+            plant_vendored += 1
+            return None
+        if rec["sha"] in shas or h(rec["diff"]) in diffs or p["id"] in seen:
             return None                                            # plants stay disjoint from every item
+        th = h(rec["text"])
+        v = verdicts.get((p["id"], p["kind"], th))
+        if contradicts(p["kind"], v):
+            plant_contradicted.append(f'{p["id"]}#{p["kind"]}')    # the calibration judge read it differently from its label
+            return None
+        if (p["id"], p["kind"], th) in origin:                     # byte-identical to a Q37 plant: keep its id
+            rec["provenance"] = f"q37-{origin[(p['id'], p['kind'], th)]}"
+        else:                                                      # rebuilt here: a new, content-derived id
+            rec["pool_item_id"] = p["id"]
+            rec["id"] = "lc1p-" + h("|".join([p["kind"], p["job"], rec["sha"], rec.get("source", {}).get("sha", ""), rec["text"], h(rec["diff"])]))[:12]
+            rec["provenance"] = "lc1-rebuilt"
+        if v:
+            rec["calibration_verdicts"] = {k: v[k] for k in sorted(v)}
         return rec
 
-    plants = [r for r in (plant_ok(p) for p in read_jsonl(q37 / "frozen" / "plants.jsonl")) if r]
-    audited_plant_count = len(plants)
+    frozen_plants = read_jsonl(q37 / "frozen" / "plants.jsonl")
+    plants = [r for r in (plant_ok(p) for p in frozen_plants) if r]
+    kept_q37 = len(plants)
     have = Counter((p["kind"], p["job"]) for p in plants)
-    want = Counter((p["kind"], p["job"]) for p in read_jsonl(q37 / "frozen" / "plants.jsonl"))
+    want = Counter((p["kind"], p["job"]) for p in frozen_plants)
     clean_pool = [x for x in pool_items.values() if allowed(res.meta(x["repo"], x["commit"])["licence"])]
     clean_ids = {x["id"] for x in clean_pool}
     cand = plants_q37.build(clean_pool, [s for s in pool_src if s["id"] in clean_ids], n_good=60, n_swapped=60, n_mut=30)
-    used = {p["id"] for p in plants}
+    used = {(p["id"], p["kind"]) for p in plants}                  # kept Q37 plants keep their Q37 id
     for c in cand:
         key = (c["kind"], c["job"])
-        if have[key] >= want[key] or c["id"] in used:
+        if have[key] >= want[key] or (c["id"], c["kind"]) in used:
             continue
         rec = plant_ok(c)
         if rec:
             plants.append(rec)
-            used.add(c["id"])
+            used.add((c["id"], c["kind"]))
             have[key] += 1
+    # Q37 keys its plants by (id, kind), so one pool item may carry a good and a swapped plant; rebuilt ids are unique outright
+    assert len({(p["id"], p["kind"]) for p in plants}) == len(plants), "plant (id, kind) must be unique"
+    assert len({p["id"] for p in plants if p["provenance"] == "lc1-rebuilt"}) == sum(p["provenance"] == "lc1-rebuilt" for p in plants)
     plants.sort(key=lambda p: (p["kind"], p["job"], p["id"]))
-    topped = len(plants) - audited_plant_count
+    rebuilt = len(plants) - kept_q37
 
+    by_job = lambda rs, a: dict(sorted(Counter(r["job"] for r in rs if r["audited"] is a).items()))  # noqa: E731
     manifest = {
         "bank_version": BANK_VERSION,
         "judge_id": JUDGE_ID,
         "licence_allow_list": list(ALLOW),
-        "source": "prereg-q37 (frozen, calib1-3, poolc additions; plants from poolf)",
+        "source": "prereg-q37 (frozen/run, calib1-3: audited; poolc: unaudited fill; plants: Q37 plants, then mechanical rebuilds from poolf+poolc)",
         "counts": {
             "items": len(items),
             "items_by_job": dict(Counter(r["job"] for r in items)),
+            "items_audited": sum(r["audited"] for r in items),
+            "items_unaudited": sum(not r["audited"] for r in items),
+            "items_audited_by_job": by_job(items, True),
+            "items_unaudited_by_job": by_job(items, False),
             "items_by_stratum": dict(sorted(Counter(f'{r["job"]}/{r["strata"]["size"]}/{r["strata"]["lang"]}' for r in items).items())),
             "items_by_repo": dict(sorted(Counter(r["repo"] for r in items).items())),
             "plants": len(plants),
             "plants_by_kind": dict(Counter(p["kind"] for p in plants)),
-            "plants_audited_kept": audited_plant_count,
-            "plants_topped_up": topped,
+            "plants_by_provenance": dict(sorted(Counter(p["provenance"] for p in plants).items())),
+            "plants_audited_kept": kept_q37,
+            "plants_topped_up": rebuilt,
         },
         "licences": dict(sorted(Counter(r["licence"] for r in items + plants).items())),
+        "repo_licences": dict(sorted({r["repo"]: r["licence"] for r in items + plants}.items())),
         "excluded_items_by_licence": dict(sorted(excluded.items())),
+        "excluded_items_vendored_by_job": dict(sorted(excluded_vendored.items())),
         "excluded_plant_candidates_by_licence": dict(sorted(plant_excluded.items())),
+        "excluded_plant_candidates_vendored": plant_vendored,
+        "excluded_plants_contradicting_calibration": sorted(plant_contradicted),
     }
     return items + plants, manifest
 

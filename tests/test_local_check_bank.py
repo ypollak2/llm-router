@@ -84,6 +84,24 @@ def test_bank_has_the_target_population(bank):
     assert bank.version == 1 and bank.manifest["counts"]["items"] == 140
 
 
+def test_audited_flag_and_manifest_counts_are_true(bank):
+    c = bank.manifest["counts"]
+    for job in B.JOBS:
+        aud = sum(i.audited for i in bank.items(job))
+        assert c["items_audited_by_job"][job] == aud and c["items_unaudited_by_job"][job] == 70 - aud
+    assert c["items_audited"] + c["items_unaudited"] == 140 == sum(c["items_audited_by_job"].values()) + sum(c["items_unaudited_by_job"].values())
+    assert c["items_audited"] == sum(i.audited for i in bank.items()) and 0 < c["items_unaudited"] < 70
+
+
+def test_audited_count_mismatch_is_refused(copy):
+    m = json.loads((copy / "manifest.json").read_text())
+    m["counts"]["items_audited"] += 1
+    m["counts"]["items_unaudited"] -= 1
+    (copy / "manifest.json").write_text(json.dumps(m))
+    with pytest.raises(B.BankError):
+        B.load_bank(copy)
+
+
 def test_item_schema(bank):
     ids = set()
     for i in bank.items():
@@ -145,6 +163,62 @@ def test_builder_allow_list_matches_loader_and_classifies_licences():
     assert b.classify_text("something proprietary") == "UNKNOWN"
 
 
+MYPY_LIKE = """Mypy is licensed under the terms of the MIT license, reproduced below.
+
+= = = = =
+
+The MIT License
+
+Copyright (c) 2012-2023 Jukka Lehtosalo and contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software
+
+= = = = =
+
+Portions of mypy and mypyc are licensed under different licenses.
+The files under stdlib-samples are licensed under the PSF 2 License, reproduced below.
+
+PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2
+
+Python was previously distributed under the GNU General Public License (GPL),
+the more recent versions of Python are GPL-compatible, version 2.
+"""
+
+
+def test_classify_text_uses_the_primary_grant_not_a_later_mention():
+    b = _builder()
+    assert b.classify_text(MYPY_LIKE) == "MIT"
+    # a real GPL text that later mentions the MIT grant stays GPL
+    assert b.classify_text("GNU GENERAL PUBLIC LICENSE Version 2\n... see also: Permission is hereby granted, free of charge") == "GPL-2.0"
+    assert b.classify_text("Redistribution and use in source and binary forms ... Neither the name of ... GNU General Public License version 2") == "BSD-3-Clause"
+    assert not b.allowed(b.classify_text("GNU GENERAL PUBLIC LICENSE Version 2 ... Permission is hereby granted, free of charge"))
+
+
+def test_builder_vendored_filter():
+    b = _builder()
+    def rec(*files):
+        return {"files": list(files), "diff": "".join(f"diff --git a/{f} b/{f}\n+x\n" for f in files)}
+    for f in ("src/pip/_vendor/certifi/cacert.pem", "vendor/x.go", "a/third_party/b.c", "web/node_modules/p/i.js", "_vendor/z.py"):
+        assert b.vendored(rec("src/ok.py", f)), f
+    for f in ("src/vendorize.py", "docs/vendors.md", "src/pip/_internal/x.py"):
+        assert not b.vendored(rec(f)), f
+    assert b.vendored({"files": ["ok.py"], "diff": "diff --git a/pkg/_vendor/q.py b/pkg/_vendor/q.py\n"})
+
+
+def test_no_vendored_paths_in_the_bank(bank):
+    b = _builder()
+    for r in (*bank.items(), *bank.plants()):
+        assert not b.vendored({"files": list(r.files), "diff": r.diff}), r.id
+
+
+def test_plant_calibration_guard():
+    b = _builder()
+    from collections import Counter
+    assert b.contradicts("good", Counter(fail=1, **{"pass": 2})) and not b.contradicts("good", Counter(**{"pass": 3}))
+    assert b.contradicts("swapped", Counter(**{"pass": 1})) and b.contradicts("mutated", Counter(**{"pass": 1, "fail": 2}))
+    assert not b.contradicts("swapped", Counter(fail=3)) and not b.contradicts("good", None)
+
+
 def test_builder_drops_disallowed_licences(tmp_path):
     b = _builder()
     repo = tmp_path / "r"
@@ -183,11 +257,68 @@ def test_draws_are_disjoint_balanced_and_deterministic(bank):
         bank.draw(3)
 
 
+def test_draws_are_stratified_job_size_language(bank):
+    from collections import Counter
+    c1 = Counter((i.job, i.size, i.lang) for i in bank.draw(1))
+    c2 = Counter((i.job, i.size, i.lang) for i in bank.draw(2))
+    strata = {(i.job, i.size, i.lang) for i in bank.items()}
+    assert len(strata) == 12
+    assert max(abs(c1[s] - c2[s]) for s in strata) <= 1
+    for s in strata:
+        assert c1[s] + c2[s] == len(bank.items(s[0], f"{s[1]}/{s[2]}"))      # the two draws use the whole bank
+    assert sum(c1.values()) == sum(c2.values()) == 70
+    for job in B.JOBS:
+        assert sum(n for (j, *_), n in c1.items() if j == job) == sum(n for (j, *_), n in c2.items() if j == job) == 35
+
+
+def test_draws_split_audited_items_evenly_and_use_audited_first(bank):
+    a1, a2 = sum(i.audited for i in bank.draw(1)), sum(i.audited for i in bank.draw(2))
+    assert abs(a1 - a2) <= 6 and a1 + a2 == bank.manifest["counts"]["items_audited"]
+
+
+def test_allocate_is_proportional_and_capped():
+    sizes = {"a": 50, "b": 30, "c": 20}
+    assert B._allocate(sizes, 70, lambda s: s) == {"a": 35, "b": 21, "c": 14}
+    assert B._allocate({"a": 3, "b": 3}, 6, lambda s: s) == {"a": 3, "b": 3}
+    out = B._allocate({"a": 7, "b": 5, "c": 1}, 6, lambda s: s)
+    assert sum(out.values()) == 6 and all(out[k] <= {"a": 7, "b": 5, "c": 1}[k] for k in out)
+
+
 def test_draws_depend_on_the_bank_sha(bank, copy):
     other = B.load_bank(copy)
     assert [i.id for i in other.draw(1)] == [i.id for i in bank.draw(1)]       # same sha, same draw
     other.sha256 = "f" * 64
     assert [i.id for i in other.draw(1)] != [i.id for i in bank.draw(1)]       # seeded by the sha
+
+
+def _raw_records():
+    return [json.loads(x) for x in gzip.decompress((DATA / "bank-v1.jsonl.gz").read_bytes()).decode().splitlines()]
+
+
+def test_known_defective_plant_is_gone_and_no_plant_contradicts_calibration(bank):
+    plants = _raw_records()
+    plants = [r for r in plants if r["type"] == "plant"]
+    # q37-98983aade6f1 (good) was judged fail by Sonnet and Haiku in calibration: a plant defect (PREREG-Q37.md s7)
+    assert not any(r["id"] == "q37-98983aade6f1" for r in plants)
+    for r in plants:
+        v = r.get("calibration_verdicts")
+        if v:
+            assert v.get("fail" if r["kind"] == "good" else "pass", 0) == 0, r["id"]
+    assert bank.manifest["excluded_plants_contradicting_calibration"] == ["q37-98983aade6f1#good"]
+
+
+def test_plant_ids_are_content_derived_and_not_reused_with_other_content(bank):
+    plants = [r for r in _raw_records() if r["type"] == "plant"]
+    assert {r["provenance"] for r in plants} <= {"q37-frozen", "q37-calib1", "lc1-rebuilt"}
+    assert len({(r["id"], r["kind"]) for r in plants}) == len(plants)
+    rebuilt = [r for r in plants if r["provenance"] == "lc1-rebuilt"]
+    assert rebuilt and len({r["id"] for r in rebuilt}) == len(rebuilt)
+    for r in rebuilt:
+        expect = "lc1p-" + hashlib.sha256("|".join([r["kind"], r["job"], r["sha"], r.get("source", {}).get("sha", ""), r["text"], hashlib.sha256(r["diff"].encode()).hexdigest()]).encode()).hexdigest()[:12]
+        assert r["id"] == expect and r["pool_item_id"] != r["id"]
+    # the plant that reused id q37-de34cc297997 with new content is no longer a q37 id
+    assert all(r["provenance"] != "lc1-rebuilt" or not r["id"].startswith("q37-") for r in plants)
+    assert {p.provenance for p in bank.plants()} == {r["provenance"] for r in plants}
 
 
 # ---- plants vs items

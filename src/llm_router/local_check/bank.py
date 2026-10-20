@@ -9,13 +9,22 @@ Records are ``{"type": "item" | "plant", ...}``. Items are the tasks a local mod
 asked to do (``job`` = commit_message | pr_description). Plants are judge-validity
 cases (good / swapped / mutated message texts) drawn from a pool disjoint from every
 item. ``Bank.draw(1)`` and ``Bank.draw(2)`` are the two disjoint 70-item draws,
-35 per job, ordered by a hash seeded with the bank sha so they are reproducible.
+35 per job. Each job's items are allocated to the two draws stratum by stratum
+(job x size x language) as evenly as possible (per-stratum counts differ by at most 1),
+audited items first within a stratum; the order inside a stratum is a hash seeded with
+the bank sha, so draws are reproducible.
+
+``Item.audited`` is True when both arms (qwen3.6 and Sonnet) answered the item in Q37
+(frozen run or calibration slices 1-3) with grader and judge results behind it, and any
+failure was in the G4 audit set. Unaudited items (from the poolc pool) fill the bank to
+70 per job; a verdict that depends on them should say so.
 """
 from __future__ import annotations
 
 import gzip
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +43,16 @@ class BankError(Exception):
 
 class BankIntegrityError(BankError):
     """The bank bytes do not hash to the sha256 recorded in the manifest."""
+
+
+def _allocate(sizes: dict[str, int], total: int, tie: Callable[[str], str]) -> dict[str, int]:
+    """Largest-remainder allocation of ``total`` over strata in proportion to ``sizes`` (never above a stratum's size)."""
+    n = sum(sizes.values())
+    alloc = {s: total * k // n for s, k in sizes.items()}
+    rest = total - sum(alloc.values())
+    for s in sorted(sizes, key=lambda s: (-(total * sizes[s] % n), tie(s)))[:rest]:
+        alloc[s] += 1
+    return alloc
 
 
 def licence_allowed(expr: str) -> bool:
@@ -55,6 +74,7 @@ class Item:
     files: tuple[str, ...]
     size: str            # strata: small | medium | large
     lang: str            # strata: py | other
+    audited: bool        # answered by both arms in Q37 with grader+judge results (see module doc)
 
     @property
     def stratum(self) -> str:
@@ -75,10 +95,11 @@ class Plant:
     files: tuple[str, ...]
     text: str            # the candidate message the judge must accept (good) or reject
     source: dict | None  # swapped: repo/sha/licence/url of the message's real commit
+    provenance: str      # q37-frozen | q37-calib1 (as judged in Q37) | lc1-rebuilt (mechanical rebuild, new id)
 
 
-_ITEM_KEYS = ("id", "job", "repo", "sha", "licence", "url", "date", "task", "diff", "files", "strata")
-_PLANT_KEYS = ("id", "kind", "job", "repo", "sha", "licence", "url", "task", "diff", "files", "text")
+_ITEM_KEYS = ("id", "job", "repo", "sha", "licence", "url", "date", "task", "diff", "files", "strata", "audited")
+_PLANT_KEYS = ("id", "kind", "job", "repo", "sha", "licence", "url", "task", "diff", "files", "text", "provenance")
 
 
 def _need(rec: dict, keys: tuple[str, ...]) -> None:
@@ -93,7 +114,7 @@ def _item(rec: dict) -> Item:
         raise BankError(f"item {rec['id']}: unknown job {rec['job']!r}")
     st = rec["strata"]
     return Item(rec["id"], rec["job"], rec["repo"], rec["sha"], rec["licence"], rec["url"], rec["date"],
-                rec["task"], rec["diff"], tuple(rec["files"]), st["size"], st["lang"])
+                rec["task"], rec["diff"], tuple(rec["files"]), st["size"], st["lang"], rec["audited"])
 
 
 def _plant(rec: dict) -> Plant:
@@ -103,7 +124,7 @@ def _plant(rec: dict) -> Plant:
     if rec["kind"] == "swapped" and "source" not in rec:
         raise BankError(f"plant {rec['id']}: swapped plant has no source")
     return Plant(rec["id"], rec["kind"], rec["job"], rec["repo"], rec["sha"], rec["licence"], rec["url"],
-                 rec["task"], rec["diff"], tuple(rec["files"]), rec["text"], rec.get("source"))
+                 rec["task"], rec["diff"], tuple(rec["files"]), rec["text"], rec.get("source"), rec["provenance"])
 
 
 class Bank:
@@ -126,15 +147,34 @@ class Bank:
         return dict(sorted(out.items()))
 
     def draw(self, n: int) -> list[Item]:
-        """Draw ``n`` (1 or 2): 35 items per job, disjoint from the other draw, same every time for this bank."""
+        """Draw ``n`` (1 or 2): 35 items per job, disjoint from the other draw, same every time for this bank.
+
+        Per job, strata (size/lang) are allocated between the two draws as evenly as possible: a stratum of
+        k items puts k//2 in each draw and its odd item goes to one draw (the odd strata alternate between
+        the draws, in hash order). Inside a stratum audited items come first, then unaudited; items are
+        dealt alternately so both draws get a similar share of each.
+        """
         if n not in range(1, DRAWS + 1):
             raise ValueError(f"draw must be 1..{DRAWS}, got {n}")
+
+        def key(job: str, what: str) -> str:
+            return hashlib.sha256(f"{self.sha256}|{job}|{what}".encode()).hexdigest()
+
         out: list[Item] = []
         for job in JOBS:
-            ordered = sorted(self.items(job), key=lambda i: hashlib.sha256(f"{self.sha256}|{job}|{i.id}".encode()).hexdigest())
-            if len(ordered) < DRAW_PER_JOB * DRAWS:
-                raise BankError(f"bank has {len(ordered)} {job} items, need {DRAW_PER_JOB * DRAWS}")
-            out.extend(ordered[(n - 1) * DRAW_PER_JOB:n * DRAW_PER_JOB])
+            pool = self.items(job)
+            if len(pool) < DRAW_PER_JOB * DRAWS:
+                raise BankError(f"bank has {len(pool)} {job} items, need {DRAW_PER_JOB * DRAWS}")
+            by_stratum: dict[str, list[Item]] = {}
+            for i in pool:
+                by_stratum.setdefault(i.stratum, []).append(i)
+            alloc = _allocate({s: len(v) for s, v in by_stratum.items()}, DRAW_PER_JOB * DRAWS, lambda s: key(job, "alloc|" + s))
+            odd = sorted((s for s, k in alloc.items() if k % 2), key=lambda s: key(job, "odd|" + s))
+            first = {s: (0 if j % 2 == 0 else 1) for j, s in enumerate(odd)}   # draw index that gets the odd item
+            for s, k in alloc.items():
+                ordered = sorted(by_stratum[s], key=lambda i: (not i.audited, key(job, i.id)))[:k]
+                lead = first.get(s, 0)
+                out.extend(i for j, i in enumerate(ordered) if (j + lead) % 2 == n - 1)
         return out
 
     # ---- plants
@@ -168,4 +208,7 @@ def load_bank(data_dir: Path | str | None = None) -> Bank:
     counts = manifest.get("counts", {})
     if counts.get("items") != len(items) or counts.get("plants") != len(plants):
         raise BankError("manifest counts do not match the bank")
+    n_aud = sum(i.audited for i in items)
+    if counts.get("items_audited") != n_aud or counts.get("items_unaudited") != len(items) - n_aud:
+        raise BankError("manifest audited counts do not match the bank")
     return Bank(manifest, items, plants)

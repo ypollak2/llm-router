@@ -1,61 +1,84 @@
 {
-  "bank_bytes_gz": 393814,
+  "bank_bytes_gz": 422558,
   "bank_file": "bank-v1.jsonl.gz",
-  "bank_sha256": "54b0ef2405de57cb07b500410b0c198243c7e844c83ac136353e2e7f38ad29b4",
+  "bank_sha256": "d3bba94aa368997495cb91129bb5b0ebe3bb7f36de1305ef1e0a53ff64019868",
   "bank_version": 1,
   "counts": {
     "items": 140,
+    "items_audited": 120,
+    "items_audited_by_job": {
+      "commit_message": 63,
+      "pr_description": 57
+    },
     "items_by_job": {
       "commit_message": 70,
       "pr_description": 70
     },
     "items_by_repo": {
-      "BurntSushi/ripgrep": 3,
+      "BurntSushi/ripgrep": 2,
       "aio-libs/aiohttp": 13,
-      "astral-sh/uv": 18,
-      "celery/celery": 15,
+      "astral-sh/uv": 17,
+      "celery/celery": 12,
       "clap-rs/clap": 8,
-      "colinhacks/zod": 11,
-      "django/django": 11,
+      "colinhacks/zod": 10,
+      "django/django": 9,
       "gin-gonic/gin": 3,
       "prettier/prettier": 4,
       "pydantic/pydantic": 7,
-      "pypa/pip": 4,
+      "pypa/pip": 2,
       "python-poetry/poetry": 1,
-      "scrapy/scrapy": 17,
-      "sqlalchemy/sqlalchemy": 13,
+      "python/mypy": 12,
+      "scrapy/scrapy": 16,
+      "sqlalchemy/sqlalchemy": 12,
       "tokio-rs/axum": 2,
       "vitejs/vite": 10
     },
     "items_by_stratum": {
       "commit_message/large/other": 7,
-      "commit_message/large/py": 7,
-      "commit_message/medium/other": 11,
-      "commit_message/medium/py": 18,
+      "commit_message/large/py": 9,
+      "commit_message/medium/other": 10,
+      "commit_message/medium/py": 20,
       "commit_message/small/other": 10,
-      "commit_message/small/py": 17,
+      "commit_message/small/py": 14,
       "pr_description/large/other": 7,
-      "pr_description/large/py": 5,
-      "pr_description/medium/other": 12,
-      "pr_description/medium/py": 22,
-      "pr_description/small/other": 12,
-      "pr_description/small/py": 12
+      "pr_description/large/py": 9,
+      "pr_description/medium/other": 11,
+      "pr_description/medium/py": 19,
+      "pr_description/small/other": 11,
+      "pr_description/small/py": 13
+    },
+    "items_unaudited": 20,
+    "items_unaudited_by_job": {
+      "commit_message": 7,
+      "pr_description": 13
     },
     "plants": 30,
-    "plants_audited_kept": 21,
+    "plants_audited_kept": 24,
     "plants_by_kind": {
       "good": 12,
       "mutated": 6,
       "swapped": 12
     },
-    "plants_topped_up": 9
+    "plants_by_provenance": {
+      "lc1-rebuilt": 2,
+      "q37-calib1": 4,
+      "q37-frozen": 24
+    },
+    "plants_topped_up": 6
   },
   "excluded_items_by_licence": {
-    "GPL-2.0": 26
+    "GPL-2.0": 11
+  },
+  "excluded_items_vendored_by_job": {
+    "pr_description": 1
   },
   "excluded_plant_candidates_by_licence": {
-    "GPL-2.0": 9
+    "GPL-2.0": 6
   },
+  "excluded_plant_candidates_vendored": 0,
+  "excluded_plants_contradicting_calibration": [
+    "q37-98983aade6f1#good"
+  ],
   "judge_id": "claude-sonnet-5-5",
   "licence_allow_list": [
     "MIT",
@@ -67,11 +90,30 @@
   ],
   "licences": {
     "Apache-2.0": 13,
-    "Apache-2.0 OR MIT": 33,
-    "BSD-3-Clause": 50,
-    "MIT": 71,
-    "MIT OR Unlicense": 3
+    "Apache-2.0 OR MIT": 32,
+    "BSD-3-Clause": 43,
+    "MIT": 80,
+    "MIT OR Unlicense": 2
   },
   "records": 170,
-  "source": "prereg-q37 (frozen, calib1-3, poolc additions; plants from poolf)"
+  "repo_licences": {
+    "BurntSushi/ripgrep": "MIT OR Unlicense",
+    "aio-libs/aiohttp": "Apache-2.0",
+    "astral-sh/uv": "Apache-2.0 OR MIT",
+    "celery/celery": "BSD-3-Clause",
+    "clap-rs/clap": "Apache-2.0 OR MIT",
+    "colinhacks/zod": "MIT",
+    "django/django": "BSD-3-Clause",
+    "gin-gonic/gin": "MIT",
+    "prettier/prettier": "MIT",
+    "pydantic/pydantic": "MIT",
+    "pypa/pip": "MIT",
+    "python-poetry/poetry": "MIT",
+    "python/mypy": "MIT",
+    "scrapy/scrapy": "BSD-3-Clause",
+    "sqlalchemy/sqlalchemy": "MIT",
+    "tokio-rs/axum": "MIT",
+    "vitejs/vite": "MIT"
+  },
+  "source": "prereg-q37 (frozen/run, calib1-3: audited; poolc: unaudited fill; plants: Q37 plants, then mechanical rebuilds from poolf+poolc)"
 }
