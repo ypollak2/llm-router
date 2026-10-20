@@ -362,17 +362,17 @@ class PremiumStatusCommand:
             return Text()
 
     def render_text_job_qualification(self) -> Text:
-        """Text jobs a pre-registered run qualified for a local model. Empty when none."""
+        """Text jobs a pre-registered run or the user's own local-check measured for a local model. Empty when none."""
         out = Text()
         try:
-            from llm_router.resolver.eligibility_store import text_job_lines
+            from llm_router.local_check import display
 
-            lines = text_job_lines()
+            lines = display.lines()
             if lines:
-                out.append("🧪  Local text jobs (qualified, grants no routing)\n",
-                           style=f"bold {PALETTE.accent}")
-                for line in lines:
-                    out.append(f"  {line}\n", style=PALETTE.text_dim)
+                out.append("🧪  Local text jobs\n", style=f"bold {PALETTE.accent}")
+                for ln in lines:
+                    # No failure colour anywhere here: not passed / stale / not measured are information.
+                    out.append(f"  {ln.text}\n", style=PALETTE.text_dim)
         except Exception:  # noqa: BLE001 — status must still render
             return Text()
         return out

@@ -125,6 +125,12 @@ def _hooks_slow(card: dict) -> dict | None:
     return None if worst is None else {"hook": worst[1], "p95_ms": worst[2]}
 
 
+def _local_check() -> str | None:
+    from llm_router.local_check import display
+
+    return display.statusline_segment() or None
+
+
 def _part(code: str, fn):
     """``fn()``, or ``None`` (unknown) after recording why it failed."""
     try:
@@ -149,6 +155,8 @@ def build(now: float | None = None) -> dict[str, Any]:
         "claude_weekly_pct": _part("CHZ-FO-STATUSLINE-QUOTA", lambda: _quota(now_ts)),
         "codex": _part("CHZ-FO-STATUSLINE-CODEX", lambda: _codex(now_ts)),
         "ns": None, "hooks_slow": None,
+        # LC-7: "local ok" / "local n/p" or None. Read from local_eligibility.json + the discovery cache; no HTTP.
+        "local_check": _part("CHZ-FO-STATUSLINE-LOCALCHECK", _local_check),
     }
 
     def _card() -> dict:
