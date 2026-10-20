@@ -1,0 +1,663 @@
+"""`llm-router local-check` -- measure YOUR local model on the bundled public benchmark (LC-6, D-259/D-260/D-263/D-264).
+
+    llm-router local-check [run] [--dry-run] [--no-judge] [--yes] [--model M] [--endpoint URL [--allow-remote]]
+                           [--profile quick|standard] [--fresh] [--force] [--judge-route auto|api|subscription]
+    llm-router local-check status [--model M]
+    llm-router local-check explain [--model M]
+
+``run`` discovers a local runtime, shows a plan screen (model + digest, hardware, items in scope, time, judge route,
+cost, cap, consent), runs the local arm serially, has Claude judge the answers that pass the programmatic grader, and records
+a verdict through ``local_check.session``. Only public benchmark text and the local model's answers to it are ever sent to
+Anthropic; no user prompt or file is sent. Routing activation is LC-8: this command only records.
+
+All collaborators are injectable (``Deps``) so the tests run with fakes and no network.
+"""
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+import time
+from collections import Counter
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Mapping
+from urllib.parse import urlsplit
+
+# ---- exit codes (documented in docs/local-check.md)
+EXIT_OK = 0              # PASS, a dry run, status/explain
+EXIT_NOT_PASSED = 1      # completed: FAIL / NOT_PASSED / INCONCLUSIVE / PROBE, or the user declined consent
+EXIT_USAGE = 2
+EXIT_BANK = 3            # the bundled bank failed its integrity check
+EXIT_NO_RUNTIME = 4      # no runtime / model found, or the endpoint was refused
+EXIT_QUOTA = 5           # subscription quota above 95% (override with --force)
+EXIT_REFUSED = 6         # anti-retry, cooldown, scope too narrow (< 50 items fit), run dir mismatch
+EXIT_NO_JUDGE_ROUTE = 7  # no usable judge route (see --no-judge), or the judge cannot be used safely
+EXIT_PROBE_FAILED = 8    # the runtime did not answer a probe (digest / context window)
+EXIT_BUDGET = 10         # judge budget cap reached: INCONCLUSIVE, resumable
+EXIT_LOCK = 11           # another local-check run holds the Ollama lock
+EXIT_RECORD = 12         # the eligibility store refused the record; the run stays reserved
+EXIT_INVALID = 13        # a validity gate failed: nothing recorded
+EXIT_INTERRUPTED = 130   # Ctrl-C: progress is saved, re-run to resume
+
+QUICK_MAX_CHARS = 12_000   # --profile quick: diffs up to 12k characters only
+ROUTE_AUTO, ROUTE_API, ROUTE_SUB = "auto", "api", "subscription"
+
+
+@dataclass
+class Deps:
+    """Everything outside the process, injectable. ``None`` fields are filled with the real thing in ``_resolve``."""
+    environ: Mapping[str, str] | None = None
+    which: Callable[[str], str | None] = shutil.which
+    config_key: Callable[[], str] | None = None
+    interactive: bool | None = None                 # None: stdin and stdout are TTYs
+    input_fn: Callable[[str], str] = input
+    out: Callable[[str], None] = print
+    err: Callable[[str], None] = lambda s: print(s, file=sys.stderr)
+    discover: Callable[..., list] | None = None
+    make_adapter: Callable[..., Any] | None = None
+    load_bank: Callable[[], Any] | None = None
+    hardware: Callable[[], dict] | None = None
+    quota_reader: Callable[[], tuple] | None = None
+    proxy_ports: Callable[[], set[int]] | None = None
+    api_backend: Callable[..., Any] | None = None   # (model, key, configured_base_url) -> backend
+    cli_backend: Callable[..., Any] | None = None   # (model, claude_bin) -> backend
+    now: Callable[[], float] = time.time
+    runs_root: Path | None = None
+    eligibility_path: Path | None = None
+    lock_path: Path | None = None
+    routing_api: Callable[[], bool] | None = None   # True when LC-8's routing API exists
+
+
+# ------------------------------------------------------------------------------------------ judge route (D-260, D-264)
+
+@dataclass
+class Route:
+    kind: str = ""                  # "api" | "subscription" | "" (none)
+    api_key: str = ""
+    configured_base_url: str = ""   # passed to ApiBackend; "" = direct to api.anthropic.com
+    claude_bin: str = ""
+    notes: list[str] = field(default_factory=list)
+    error: str = ""
+
+
+def own_proxy_ports(environ: Mapping[str, str]) -> set[int]:
+    """Ports llm-router's own proxy (and its fail-open shim) listens on: the install sentinel, LLM_ROUTER_PROXY_PORT, then the defaults."""
+    from llm_router import proxy_default as pd
+    ports = {pd.DEFAULT_PORT, pd.DEFAULT_UPSTREAM_PORT}
+    try:
+        sentinel = pd.read_sentinel() or {}
+    except Exception:  # noqa: BLE001 - a broken sentinel must not break route selection
+        sentinel = {}
+    for v in (sentinel.get("port"), sentinel.get("upstream_port"), environ.get("LLM_ROUTER_PROXY_PORT")):
+        try:
+            if v not in (None, ""):
+                ports.add(int(v))
+        except (TypeError, ValueError):
+            pass
+    return ports
+
+
+def points_at_own_proxy(url: str, ports: set[int]) -> bool:
+    try:
+        u = urlsplit(url.strip())
+        host, port = (u.hostname or "").lower(), u.port
+    except ValueError:
+        return False
+    return u.scheme in ("http", "https") and host in ("127.0.0.1", "localhost", "::1") and port in ports
+
+
+def select_route(environ: Mapping[str, str], which: Callable[[str], str | None], ports: set[int], *, want: str = ROUTE_AUTO,
+                 config_key: Callable[[], str] | None = None) -> Route:
+    """D-260: the user's Anthropic key -> API route; else the ``claude`` CLI -> subscription route; else nothing (--no-judge only).
+
+    D-264: when ANTHROPIC_BASE_URL is llm-router's own local proxy the judge goes direct to api.anthropic.com
+    (``configured_base_url=""``); any other custom base URL refuses the API route (the key and prompts would leave for another host).
+    """
+    from llm_router.local_check import judge as J
+    r = Route()
+    key = J.resolve_api_key(dict(environ), config_key) if want != ROUTE_SUB else ""
+    base = J.resolve_anthropic_base_url(dict(environ))
+    claude = which("claude") or ""
+    if want == ROUTE_API and not key:
+        r.error = "no Anthropic API key (set ANTHROPIC_API_KEY or configure the Anthropic provider), so --judge-route api is not available."
+        return r
+    if key and want in (ROUTE_AUTO, ROUTE_API):
+        if base and not J.is_anthropic_url(base):
+            if points_at_own_proxy(base, ports):
+                r.notes.append("ANTHROPIC_BASE_URL points at llm-router's own local proxy; the judge calls go direct to api.anthropic.com, not through it.")
+            else:
+                r.error = (f"ANTHROPIC_BASE_URL points at a custom host ({urlsplit(base).hostname or 'unparseable'}); the judge sends your key and prompts "
+                           "only to api.anthropic.com, so the API route is refused. Use the Claude subscription route instead: "
+                           "re-run with --judge-route subscription (needs the claude CLI), or use --no-judge.")
+                return r
+        r.kind, r.api_key, r.configured_base_url = ROUTE_API, key, ""
+        return r
+    if claude:
+        r.kind, r.claude_bin = ROUTE_SUB, claude
+        return r
+    r.error = ("no judge available: set ANTHROPIC_API_KEY (API route) or install and log in to the claude CLI (subscription route). "
+               "Without a judge only `--no-judge` works: it can record a FAIL, never a PASS.")
+    return r
+
+
+# ------------------------------------------------------------------------------------------ plan
+
+class _ProfileAdapter:
+    """``--profile quick``: the same adapter, but only diffs up to ``QUICK_MAX_CHARS`` are in scope."""
+
+    def __init__(self, inner: Any, cap: int):
+        self._inner, self._cap = inner, cap
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def max_prompt_chars(self, model: str) -> int:
+        m = self._inner.max_prompt_chars(model)
+        return self._cap if m is None else min(m, self._cap)
+
+
+@dataclass
+class PlanInfo:
+    key: str = ""
+    digest: str | None = None
+    settings: str = ""
+    max_chars: int | None = None
+    draw: int | None = None
+    n_drawn: int = 0
+    n_fit: int = 0
+    n_prior: int = 0
+    per_lane: dict[str, int] = field(default_factory=dict)
+    refused: str = ""
+    resume: str = ""
+    estimate_s: float | None = None
+    prior_scored: int = 0
+
+
+def _fmt_s(sec: float) -> str:
+    if sec < 90:
+        return f"{sec:.0f} s"
+    if sec < 5400:
+        return f"{sec / 60:.0f} min"
+    return f"{sec / 3600:.1f} h"
+
+
+def build_plan(d: Deps, adapter: Any, model: str, bank: Any, runs_root: Path, *, no_judge: bool, force: bool) -> PlanInfo:
+    from llm_router.local_check import attempts as A, runner as R, score as S
+    p = PlanInfo()
+    p.digest = adapter.digest(model)
+    p.settings = adapter.settings_hash(model)
+    p.max_chars = adapter.max_prompt_chars(model)
+    p.key = A.config_key(model, p.digest, bank.version, bank.sha256, p.settings)
+    now = d.now()
+    plan = A.Plan(1) if no_judge else A.AttemptLog(runs_root).plan(p.key, now, force=force)
+    if plan.draw is None:
+        p.refused = plan.refused or "refused"
+        return p
+    p.draw = plan.draw
+    items = bank.draw(plan.draw)
+    fit = [i for i in items if p.max_chars is None or len(i.task) <= p.max_chars]
+    p.n_drawn, p.n_fit, p.prior_scored = len(items), len(fit), len(plan.prior)
+    prior_rows = [S.Row.from_dict(r) for r in plan.prior_rows]
+    p.n_prior = len(A.union_ids(plan.prior_assigned, [i.id for i in fit]))
+    lanes = Counter(i.job for i in fit) + Counter(r.job for r in prior_rows if r.present)
+    p.per_lane = dict(sorted(lanes.items()))
+    thin = [j for j in sorted({i.job for i in bank.draw(1)}) if lanes[j] < S.MIN_LANE_N]
+    if p.n_prior < S.MIN_N or thin:
+        p.refused = (f"scope too narrow: only {p.n_prior} of this draw's {p.n_drawn} items fit the model's context window"
+                     f"{f' (max prompt ~{p.max_chars} characters)' if p.max_chars else ''}. A verdict needs at least {S.MIN_N} items"
+                     f" and {S.MIN_LANE_N} per lane{f' (thin: {chr(44).join(thin)})' if thin else ''}. "
+                     "Raise num_ctx (for Ollama: `OLLAMA_CONTEXT_LENGTH` or a Modelfile `PARAMETER num_ctx`), use a longer-context model, or drop --profile quick.")
+        return p
+    resv = plan.reservation
+    if resv:
+        p.resume = resv["run_id"]
+        try:
+            recs = R.RunStore(runs_root / resv["run_id"]).load()
+        except (OSError, R.RunMismatch):
+            recs = []
+        done = {r["item_id"] for r in recs}
+        pend = [R.SimpleItem(i.id, i.task) for i in fit if i.id not in done]
+        p.estimate_s = R.estimate_seconds(pend, R.measure_rate(recs)) if recs else None
+    return p
+
+
+def _hardware_line(hw: Mapping[str, Any]) -> str:
+    bits = []
+    if hw.get("total_gb") is not None:
+        use = f", {hw['usable_gb']} GB usable" if hw.get("usable_gb") is not None else ""
+        bits.append(f"RAM {hw['total_gb']} GB{use}")
+    gpu = hw.get("gpu")
+    if gpu:
+        bits.append(f"GPU {gpu}" + (f" {hw['vram_gb']} GB" if hw.get("vram_gb") is not None else ""))
+    if hw.get("arch"):
+        bits.append(str(hw["arch"]))
+    return ", ".join(bits) or "not detected"
+
+
+# ------------------------------------------------------------------------------------------ run
+
+def _resolve(d: Deps) -> Deps:
+    import os
+    from llm_router import paths
+    from llm_router.local_check import judge as J
+    from llm_router.local_check.bank import load_bank
+    from llm_router.local_check import runtimes
+    from llm_router.resolver import eligibility_store
+    if d.environ is None:
+        d.environ = os.environ
+    if d.interactive is None:
+        d.interactive = bool(sys.stdin.isatty() and sys.stdout.isatty())
+    if d.discover is None:
+        d.discover = runtimes.discover
+    if d.make_adapter is None:
+        d.make_adapter = runtimes.make_adapter
+    if d.load_bank is None:
+        d.load_bank = load_bank
+    if d.hardware is None:
+        def _hw() -> dict:
+            from llm_router import hardware
+            return hardware.probe_cached()
+        d.hardware = _hw
+    if d.proxy_ports is None:
+        d.proxy_ports = lambda: own_proxy_ports(d.environ)       # type: ignore[arg-type]
+    if d.api_backend is None:
+        d.api_backend = lambda model, key, base: J.ApiBackend(model, key, configured_base_url=base)
+    if d.cli_backend is None:
+        d.cli_backend = lambda model, claude_bin: J.ClaudeCliBackend(model, claude_bin=claude_bin)
+    if d.runs_root is None:
+        d.runs_root = paths.state_path("local_check", "runs")
+    if d.eligibility_path is None:
+        d.eligibility_path = eligibility_store.eligibility_path()
+    if d.lock_path is None:
+        lock = paths.state_path("ollama.lock")
+        d.lock_path = lock if lock.exists() else None
+    if d.routing_api is None:
+        def _has_routing() -> bool:
+            try:
+                from llm_router import eligibility_routing
+                return callable(getattr(eligibility_routing, "prefer_passed", None))
+            except Exception:  # noqa: BLE001
+                return False
+        d.routing_api = _has_routing
+    return d
+
+
+def _parser(prog: str, run: bool = True) -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog=prog, add_help=True, description="Measure your local model on the bundled public benchmark.")
+    ap.add_argument("--model", help="local model name (default: the only one found; asked for when several)")
+    if run:
+        ap.add_argument("--endpoint", help="runtime URL (default: auto-discover Ollama, LM Studio, vLLM, llama.cpp on loopback)")
+        ap.add_argument("--allow-remote", action="store_true", help="allow a non-loopback --endpoint (the public bank prompts leave this machine for it)")
+        ap.add_argument("--profile", choices=("quick", "standard"), default="standard", help="quick: only diffs up to 12k characters (narrower scope)")
+        ap.add_argument("--dry-run", action="store_true", help="show the plan screen only; zero model calls")
+        ap.add_argument("--no-judge", action="store_true", help="programmatic grading only: can record a FAIL, never a PASS")
+        ap.add_argument("--yes", "-y", action="store_true", help="consent without a prompt (required when not on a terminal)")
+        ap.add_argument("--fresh", action="store_true", help="discard the open (resumable) run of this configuration and start a new one (counts as a strike)")
+        ap.add_argument("--force", action="store_true", help="override the 24 h cooldown and the subscription-quota refusal (>95%%)")
+        ap.add_argument("--judge-route", choices=(ROUTE_AUTO, ROUTE_API, ROUTE_SUB), default=ROUTE_AUTO,
+                        help="auto: your Anthropic API key if set, else the claude CLI (default)")
+    return ap
+
+
+def _pick_model(d: Deps, endpoints: list, wanted: str | None) -> tuple[Any, str] | str:
+    """(endpoint, model) or an error string."""
+    pairs = [(e, m) for e in endpoints for m in e.models]
+    if wanted:
+        hit = [(e, m) for e, m in pairs if m == wanted]
+        if not hit:
+            shown = ", ".join(sorted({m for _, m in pairs})[:12]) or "none"
+            return f"model {wanted!r} was not found on {', '.join(e.runtime + ' ' + e.base_url for e in endpoints)}. Models found: {shown}."
+        return hit[0]
+    if not pairs:
+        return "a runtime answered but reports no chat models; pull one first (for Ollama: `ollama pull <model>`)."
+    if len(pairs) == 1:
+        return pairs[0]
+    if not d.interactive:
+        return "several models found (" + ", ".join(f"{m}@{e.runtime}" for e, m in pairs[:12]) + "); pass --model."
+    d.out("Local models found:")
+    for n, (e, m) in enumerate(pairs, 1):
+        d.out(f"  {n}. {m}  ({e.runtime})")
+    try:
+        choice = int(d.input_fn("Model number: ").strip())
+        return pairs[choice - 1]
+    except (ValueError, IndexError, EOFError):
+        return "no model chosen; pass --model."
+
+
+def cmd_local_check(argv: list[str], deps: Deps | None = None) -> int:
+    d = _resolve(deps or Deps())
+    args = list(argv)
+    sub = "run"
+    if args and args[0] in ("run", "status", "explain"):
+        sub = args.pop(0)
+    elif args and not args[0].startswith("-"):
+        d.err(f"llm-router local-check: unknown subcommand {args[0]!r} (run, status, explain)")
+        return EXIT_USAGE
+    try:
+        ns = _parser(f"llm-router local-check {sub}", run=(sub == "run")).parse_args(args)
+    except SystemExit as e:
+        return int(e.code or 0) if isinstance(e.code, int) else EXIT_USAGE
+    if sub == "status":
+        return _status(d, ns.model)
+    if sub == "explain":
+        return _explain(d, ns.model)
+    return _run(d, ns)
+
+
+def _run(d: Deps, ns: argparse.Namespace) -> int:
+    from llm_router.local_check import budget as B, consent as C, judge as J, runner as R, runtimes, session as SE
+    from llm_router.local_check.bank import BankError
+    out, err = d.out, d.err
+    if ns.allow_remote and not ns.endpoint:
+        err("--allow-remote only applies together with an explicit --endpoint.")
+        return EXIT_USAGE
+    try:
+        bank = d.load_bank()
+    except BankError as e:
+        err(f"The bundled benchmark failed its integrity check ({e}). Reinstall llm-router.")
+        return EXIT_BANK
+
+    # 1. runtime + model
+    try:
+        endpoints = d.discover(ns.endpoint, allow_remote=bool(ns.allow_remote))
+    except runtimes.RuntimeError_ as e:
+        err(f"Endpoint refused: {e}. A non-loopback endpoint needs --allow-remote (the benchmark prompts would leave this machine).")
+        return EXIT_NO_RUNTIME
+    if not endpoints:
+        err("No local runtime found (looked for Ollama, LM Studio, vLLM, llama.cpp on loopback)." if not ns.endpoint
+            else f"Nothing answers as a model runtime at {ns.endpoint}.")
+        err("Start your runtime, or point to it with --endpoint URL.")
+        return EXIT_NO_RUNTIME
+    picked = _pick_model(d, endpoints, ns.model)
+    if isinstance(picked, str):
+        err(picked)
+        return EXIT_NO_RUNTIME
+    endpoint, model = picked
+    adapter = d.make_adapter(endpoint, allow_remote=bool(ns.allow_remote))
+    if ns.profile == "quick":
+        adapter = _ProfileAdapter(adapter, QUICK_MAX_CHARS)
+
+    # 2. plan
+    runs_root = Path(d.runs_root)
+    try:
+        plan = build_plan(d, adapter, model, bank, runs_root, no_judge=ns.no_judge, force=ns.force)
+    except runtimes.ProbeFailed as e:
+        err(f"The runtime did not answer a probe for {model!r} ({e}). Check that {endpoint.runtime} is running and the model loaded, then retry.")
+        return EXIT_PROBE_FAILED
+
+    # 3. judge route + cost
+    route, quota, est_usd, judge_model = Route(), None, None, bank.manifest.get("judge_id") or ""
+    if not ns.no_judge:
+        route = select_route(d.environ, d.which, d.proxy_ports(), want=ns.judge_route, config_key=d.config_key)
+        if route.kind == ROUTE_API:
+            try:
+                d.api_backend(judge_model, route.api_key, route.configured_base_url)       # validates pricing / URL now, before any consent
+            except J.JudgeSetupError as e:
+                route.error, route.kind = str(e), ""
+            else:
+                est_usd = B.estimate_run_usd(judge_model, plan.n_fit)
+        elif route.kind == ROUTE_SUB:
+            quota = B.check_subscription_quota(force=ns.force, reader=d.quota_reader)
+
+    # 4. plan screen
+    out("== llm-router local-check: plan ==")
+    out(f"Model:      {model}  [{endpoint.runtime} at {endpoint.base_url}]")
+    out(f"Digest:     {plan.digest or 'not reported by this runtime (the verdict expires after 30 days instead of on a model change)'}")
+    out(f"Hardware:   {_hardware_line(d.hardware())}")
+    if not runtimes.is_loopback(endpoint.base_url):
+        out(f"Endpoint:   REMOTE ({endpoint.base_url}): the public benchmark prompts are sent there.")
+    if plan.draw is None:
+        out(f"Items:      none: {plan.refused}")
+    else:
+        lanes = ", ".join(f"{j} {c}" for j, c in plan.per_lane.items())
+        out(f"Items:      {plan.n_fit} of {plan.n_drawn} in this draw fit the model's context (draw {plan.draw}; {lanes}); profile {ns.profile}")
+        if plan.max_chars:
+            out(f"            context fit: prompts up to ~{plan.max_chars} characters")
+    if plan.resume:
+        out(f"Resume:     run {plan.resume} is open; this run continues it (answers already collected are kept)")
+    out("Time:       " + (f"~{_fmt_s(plan.estimate_s)} remaining at the measured rate" if plan.estimate_s is not None
+                           else "measured by a 3-item rate probe at the start of the run; the total is printed when it finishes (small GPUs: minutes; CPU-only: hours)"))
+    if plan.refused:
+        err("Refused: " + plan.refused)
+        return EXIT_REFUSED
+    if ns.no_judge:
+        out("Judge:      none (--no-judge): nothing is sent anywhere; this can record a FAIL, never a PASS.")
+        text = "Proceed with a local-only run? [y/N]"
+    elif route.error:
+        err("Judge:      unavailable: " + route.error)
+        return EXIT_NO_JUDGE_ROUTE
+    else:
+        for n in route.notes:
+            out("Note:       " + n)
+        note = ""
+        if quota is not None:
+            if quota.action == "refuse":
+                err("Judge:      " + quota.message)
+                return EXIT_QUOTA
+            if quota.action in ("warn", "unknown"):
+                note = quota.message
+        text = C.build_consent_text(route.kind, judge_model, n_answers=plan.n_fit, estimate_usd=est_usd, quota_note=note)
+    if ns.dry_run:
+        if not ns.no_judge:
+            out(text.rsplit("\n", 1)[0])        # the consent wording without its "Proceed? [y/N]" question
+        out("Dry run: no model call was made and nothing was written.")
+        return EXIT_OK
+
+    # 5. consent
+    if not C.ask_consent(text, yes=ns.yes, interactive=bool(d.interactive), input_fn=d.input_fn, print_fn=out):
+        out("Not started.")
+        return EXIT_NOT_PASSED
+
+    # 6. run
+    backend = budget = None
+    if not ns.no_judge:
+        try:
+            backend = d.api_backend(judge_model, route.api_key, route.configured_base_url) if route.kind == ROUTE_API else d.cli_backend(judge_model, route.claude_bin)
+        except J.JudgeSetupError as e:
+            err(f"The judge cannot be used: {e}")
+            return EXIT_NO_JUDGE_ROUTE
+        budget = B.Budget(metered=route.kind == ROUTE_API, est_call_usd=B.per_call_estimate_usd(judge_model) if route.kind == ROUTE_API else None)
+    chk = SE.Check(model=model, runtime=endpoint.runtime, bank=bank, adapter=adapter, runs_root=runs_root, backend=backend, budget=budget,
+                   no_judge=bool(ns.no_judge), force=bool(ns.force), fresh=bool(ns.fresh), now=d.now, eligibility_path=Path(d.eligibility_path),
+                   lock_path=d.lock_path, bank_loader=d.load_bank)
+    t0 = time.time()
+    resume_cmd = "llm-router local-check" + (f" --model {model}" if model else "") + (f" --endpoint {ns.endpoint}" if ns.endpoint else "")
+    try:
+        try:
+            outcome = SE.run_check(chk)
+        finally:
+            if backend is not None and hasattr(backend, "cleanup"):
+                backend.cleanup()
+    except KeyboardInterrupt:
+        out(f"\nInterrupted. Progress is saved; re-run to resume: {resume_cmd}")
+        return EXIT_INTERRUPTED
+    except (runtimes.ProbeFailed, R.RunStartError) as e:
+        err(f"The run could not start or continue: the runtime stopped answering ({e}). Nothing was recorded; re-run when it answers: {resume_cmd}")
+        return EXIT_PROBE_FAILED
+    except R.RunMismatch as e:
+        err(f"This run directory belongs to different settings ({e}). Discard it with --fresh (counts as a strike).")
+        return EXIT_REFUSED
+    except B.BudgetExhausted as e:
+        err(f"Judge budget reached ({e.reason}). Resumable: {resume_cmd}")
+        return EXIT_BUDGET
+    except J.JudgeSetupError as e:
+        err(f"The judge cannot be used safely: {e}. The local answers are saved; fix this and re-run: {resume_cmd}")
+        return EXIT_NO_JUDGE_ROUTE
+    for n in outcome.notes:
+        out("Note: " + n)
+    return _report(d, outcome, budget, time.time() - t0, resume_cmd, ns)
+
+
+def _report(d: Deps, o: Any, budget: Any, secs: float, resume_cmd: str, ns: argparse.Namespace) -> int:
+    from llm_router.local_check import score as S
+    out, err = d.out, d.err
+    st = o.status
+    if st == "refused":
+        err("Refused: " + o.reason)
+        return EXIT_REFUSED
+    if st == "lock_held":
+        err(f"Another local-check run is using this runtime ({o.reason}). Wait for it to finish.")
+        return EXIT_LOCK
+    if st == "interrupted":
+        out(f"Interrupted. Progress is saved; re-run to resume: {resume_cmd}")
+        return EXIT_INTERRUPTED
+    if st == "budget_stop":
+        out(f"Stopped: judge budget reached ({o.reason}). INCONCLUSIVE, nothing recorded. Your local answers are kept; resume with: {resume_cmd}")
+        return EXIT_BUDGET
+    res = o.result
+    lines = render_verdict(res, o, budget, secs, d.routing_api(), ns)
+    for ln in lines:
+        out(ln)
+    if st == "record_refused":
+        err(f"The result could not be recorded: {o.reason}. The run stays reserved; re-run to retry: {resume_cmd}")
+        return EXIT_RECORD
+    if res is None:
+        return EXIT_INVALID
+    if res.verdict == S.PASS:
+        return EXIT_OK
+    return EXIT_INVALID if res.verdict == S.INVALID else EXIT_NOT_PASSED
+
+
+def render_verdict(res: Any, o: Any, budget: Any, secs: float, routing_available: bool, ns: argparse.Namespace | None = None) -> list[str]:
+    """The verdict screen: verdict + n first, lane table, gates, rule concentration, what was recorded, routing, spend."""
+    from llm_router.local_check import score as S
+    L: list[str] = []
+    if res is None:
+        return [f"No verdict: {o.reason}"]
+    L.append("")
+    if res.verdict == S.INVALID:
+        L.append(f"== Verdict: INVALID (nothing recorded) == {res.why}")
+    else:
+        pooled = res.pooled or {}
+        L.append(f"== Verdict: {res.verdict}   {res.k}/{res.n_assigned}   (n = {res.n_assigned}; pass bar: k >= {res.kmin}, Wilson 95% lower bound >= 0.60) ==")
+        L.append(res.why)
+        if res.mode == S.JUDGE and res.verdict != S.PASS and res.kfail is not None:
+            L.append(f"powered FAIL at k <= {res.kfail}")
+        L.append("")
+        L.append(f"{'lane':<16}{'k/n':>9}{'rate':>8}{'Wilson LB':>11}")
+        rows = [(j, v) for j, v in res.lanes.items()] + [("pooled", pooled)]
+        for j, v in rows:
+            if v:
+                L.append(f"{j:<16}{str(v['k']) + '/' + str(v['n']):>9}{v['rate']:>8.2f}{v['lb']:>11.2f}")
+        if res.guard_excluded:
+            L.append(f"lane guard (< {S.LANE_GUARD_MIN:.2f}): {', '.join(res.guard_excluded)} excluded from the pass")
+        if res.excluded_unjudged:
+            L.append(f"{res.excluded_unjudged} answer(s) the judge could not rate were excluded from n")
+    L.append("")
+    L.append("gates: " + "  ".join(f"{name.split('_')[0]} {v['status']}" for name, v in res.gates.items()))
+    for name, v in res.gates.items():
+        if v["status"] in ("FAIL", "NOT_MEASURED"):
+            detail = {k: x for k, x in v.items() if k != "status" and x not in (None, [], {})}
+            L.append(f"  {name}: {v['status']} {detail}")
+    rc = res.rule_concentration
+    if rc:
+        L.append(f"rule concentration: grader rule '{rc['rule']}' is behind {rc['with_rule']} of {rc['failures']} failures ({rc['share']:.0%}) -- "
+                 "run `llm-router local-check explain`")
+    # what was recorded
+    L.append("")
+    rep = o.record_report or {}
+    written = sorted(j for j, v in rep.items() if v["status"] == "written")
+    if written:
+        L.append(f"recorded: {', '.join(written)} (local_eligibility.json; provenance: bank, model digest, settings, judge, run id)")
+    elif res.verdict == S.INVALID:
+        L.append("recorded: nothing (a validity gate failed; the run directory is kept for a resume)")
+    elif res.verdict == S.INCONCLUSIVE:
+        L.append("recorded: nothing (INCONCLUSIVE; an earlier recorded PASS is kept). A rerun after 24 h draws the second 70 items.")
+    else:
+        L.append("recorded: nothing" + (" (programmatic probe)" if res.verdict == S.PROBE else ""))
+    passed = [j for j in written if res.verdict == S.PASS and j not in res.guard_excluded]
+    if passed:
+        if routing_available:
+            L.append(f"routing: on for {', '.join(passed)} -- disable with `llm-router local-check disable <lane>`")
+        else:
+            L.append("routing activation arrives in a later update (nothing is routed to your local model yet).")
+    if budget is not None:
+        s = budget.summary()
+        spend = f", ${s['spent_usd']:.2f} spent (cap ${s['cap_usd']:.2f})" if s.get("metered") else ", subscription (no dollar figure)"
+        L.append(f"judge: {s['calls']} calls{spend}; elapsed {_fmt_s(secs)}")
+    else:
+        L.append(f"elapsed {_fmt_s(secs)}")
+    if res.verdict in (S.FAIL, S.NOT_PASSED):
+        L.append("next: `llm-router local-check explain` shows which grader rules failed, by item id.")
+    return L
+
+
+# ------------------------------------------------------------------------------------------ status / explain
+
+def _status(d: Deps, model: str | None) -> int:
+    from llm_router.local_check import attempts as A
+    from llm_router.resolver import eligibility_store
+    out = d.out
+    out("== local-check status ==")
+    lines = eligibility_store.text_job_lines(path=Path(d.eligibility_path))
+    if lines:
+        out("recorded lanes:")
+        for ln in lines:
+            if model is None or f"[{model}]" in ln or ln.startswith(model):
+                out("  " + ln)
+    else:
+        out("recorded lanes: none -- run `llm-router local-check` to measure your local model")
+    log = A.AttemptLog(Path(d.runs_root))
+    now = d.now()
+    by_key: dict[str, list[dict]] = {}
+    for e in log.entries():
+        by_key.setdefault(e["config_key"], []).append(e)
+    shown = False
+    for key, es in sorted(by_key.items(), key=lambda kv: kv[1][-1].get("ts", 0)):
+        cfg = es[-1].get("config") or {}
+        if model and cfg.get("model") != model:
+            continue
+        shown = True
+        scored = [e for e in es if e.get("consumed")]
+        last = scored[-1] if scored else es[-1]
+        v = last.get("verdict")
+        counts = f" {last['k']}/{last['n']}" if last.get("k") is not None and last.get("n") else ""
+        out(f"attempts: {cfg.get('model')} (bank v{cfg.get('bank_version')}): {len(scored)} of {A.MAX_DRAWS} draws used; last {v}{counts} {last.get('date', '')}")
+        if scored and len(scored) < A.MAX_DRAWS:
+            nxt = scored[-1]["ts"] + A.COOLDOWN_S
+            out("  next draw: " + ("now" if now >= nxt else "after " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(nxt)) + " (or --force)"))
+        elif len(scored) >= A.MAX_DRAWS:
+            out("  bank exhausted for this model, bank version and settings; change the model, the settings or update the bank")
+        for draw in (1, 2):
+            r = log.reservation(key, draw, now)
+            if r:
+                left = max(0.0, r["ts"] + A.RESERVATION_TTL_S - now)
+                out(f"  open run {r['run_id']} (draw {draw}): re-run to resume; lapses in {_fmt_s(left)}")
+    if not shown:
+        out("attempts: none")
+    return EXIT_OK
+
+
+def _explain(d: Deps, model: str | None) -> int:
+    from llm_router.local_check import attempts as A
+    out = d.out
+    es = [e for e in A.AttemptLog(Path(d.runs_root)).entries()
+          if e.get("rows") and e.get("state") == "scored" and (model is None or (e.get("config") or {}).get("model") == model)]
+    if not es:
+        out("No finished run with graded items to explain" + (f" for {model}" if model else "") + ". An INVALID run shows its gates only.")
+        return EXIT_OK
+    e = max(es, key=lambda x: x.get("ts", 0))
+    rows = e["rows"]
+    cfg = e.get("config") or {}
+    failed = [r for r in rows if not r.get("ok")]
+    out(f"== last run: {cfg.get('model')}  {e.get('date')}  draw {e.get('draw')}  verdict {e.get('verdict')}  ({len(rows) - len(failed)}/{len(rows)} items ok) ==")
+    out("Item ids are public benchmark ids; no item text, prompt or answer is stored or shown.")
+    if not failed:
+        out("No failed items.")
+        return EXIT_OK
+    hist: dict[str, list[str]] = {}
+    for r in failed:
+        reasons = list(r.get("reasons") or [])
+        if not reasons:
+            reasons = ["judge:fail"] if r.get("prog") and r.get("judge") == "fail" else ["judge:not-rated"] if r.get("prog") else ["unknown"]
+        for rule in reasons:
+            hist.setdefault(rule, []).append(str(r["item_id"]))
+    out(f"{'rule':<28}{'items':>6}  share of {len(failed)} failures")
+    for rule, ids in sorted(hist.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        out(f"{rule:<28}{len(ids):>6}  {len(ids) / len(failed):.0%}")
+        out("    " + ", ".join(sorted(ids)))
+    top, ids = max(hist.items(), key=lambda kv: (len(kv[1]), kv[0]))
+    if len(ids) / len(failed) >= 0.40:
+        out(f"Concentration: rule '{top}' is behind {len(ids)} of {len(failed)} failures; one rule dominating usually means one fixable habit of the model.")
+    return EXIT_OK
