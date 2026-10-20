@@ -4,11 +4,14 @@
                            [--profile quick|standard] [--fresh] [--force] [--judge-route auto|api|subscription]
     llm-router local-check status [--model M]
     llm-router local-check explain [--model M]
+    llm-router local-check enable <lane> [--model M]
+    llm-router local-check disable <lane> [--model M]
 
 ``run`` discovers a local runtime, shows a plan screen (model + digest, hardware, items in scope, time, judge route,
 cost, cap, consent), runs the local arm serially, has Claude judge the answers that pass the programmatic grader, and records
 a verdict through ``local_check.session``. Only public benchmark text and the local model's answers to it are ever sent to
-Anthropic; no user prompt or file is sent. Routing activation is LC-8: this command only records.
+Anthropic; no user prompt or file is sent. After a recorded PASS the lanes are switched on for routing through
+``local_check.routing`` (D-260; a lane the user disabled stays off); ``enable`` / ``disable`` flip one lane by hand.
 
 All collaborators are injectable (``Deps``) so the tests run with fakes and no network.
 """
@@ -66,7 +69,17 @@ class Deps:
     runs_root: Path | None = None
     eligibility_path: Path | None = None
     lock_path: Path | None = None
-    routing_api: Callable[[], bool] | None = None   # True when LC-8's routing API exists
+    routing: Any = None                             # the routing API module (on_pass / enable / disable / ...); default local_check.routing
+    routing_path: Path | None = None                # local_routing.json override (tests)
+    prune: Callable[..., Any] | None = None         # retention.prune(root) -> PruneReport
+    recommend: Callable[..., list] | None = None    # recommend.recommend(hardware, runtime, model, result)
+    inventory: Callable[[], list[str]] | None = None  # installed local model names with tag (for enable / disable)
+    status_lines: Callable[[], list] | None = None  # display.lines(path=...) -> [LCLine]
+
+#: The lanes a local-check run measures and routing can switch.
+LANES = ("commit_message", "pr_description")
+#: Judge calls between two subscription-quota re-checks (one "batch").
+QUOTA_BATCH = 10
 
 
 # ------------------------------------------------------------------------------------------ judge route (D-260, D-264)
@@ -139,6 +152,33 @@ def select_route(environ: Mapping[str, str], which: Callable[[str], str | None],
     r.error = ("no judge available: set ANTHROPIC_API_KEY (API route) or install and log in to the claude CLI (subscription route). "
                "Without a judge only `--no-judge` works: it can record a FAIL, never a PASS.")
     return r
+
+
+# ------------------------------------------------------------------------------------------ subscription quota between batches
+
+def _quota_budget(*, force: bool, reader: Callable[[], tuple] | None, notify: Callable[[str], None]) -> Any:
+    """A call-capped Budget that re-reads the subscription quota every QUOTA_BATCH judge calls (LC-4b: the start-of-run check is one-shot).
+
+    Above 95% (unless --force) ``check`` raises BudgetExhausted, which the session turns into the resumable budget stop; above 80% the
+    user is warned once. An unreadable quota never stops the run.
+    """
+    from llm_router.local_check import budget as B
+
+    @dataclass
+    class QuotaBudget(B.Budget):
+        _last: int = field(default=0, repr=False)
+        _warned: bool = field(default=False, repr=False)
+
+        def check(self) -> None:
+            super().check()
+            if self.calls - self._last >= QUOTA_BATCH:
+                self._last = self.calls
+                dec = B.recheck_quota(force=force, reader=reader)
+                if dec.action == "warn" and not self._warned:
+                    self._warned = True
+                    notify("Note: " + dec.message)
+
+    return QuotaBudget(metered=False)
 
 
 # ------------------------------------------------------------------------------------------ plan
@@ -223,9 +263,12 @@ def build_plan(d: Deps, adapter: Any, model: str, bank: Any, runs_root: Path, *,
 
 
 def _hardware_line(hw: Mapping[str, Any]) -> str:
+    """RAM with the memory a model can use: total minus the reserve (recommend.capacity_gb), never the momentary free memory."""
+    from llm_router.local_check.recommend import capacity_gb
     bits = []
     if hw.get("total_gb") is not None:
-        use = f", {hw['usable_gb']} GB usable" if hw.get("usable_gb") is not None else ""
+        cap = capacity_gb(hw)
+        use = f", {cap:g} GB usable for a model" if cap is not None else ""
         bits.append(f"RAM {hw['total_gb']} GB{use}")
     gpu = hw.get("gpu")
     if gpu:
@@ -272,20 +315,33 @@ def _resolve(d: Deps) -> Deps:
     if d.lock_path is None:
         lock = paths.state_path("ollama.lock")
         d.lock_path = lock if lock.exists() else None
-    if d.routing_api is None:
-        def _has_routing() -> bool:
-            try:
-                from llm_router import eligibility_routing
-                return callable(getattr(eligibility_routing, "prefer_passed", None))
-            except Exception:  # noqa: BLE001
-                return False
-        d.routing_api = _has_routing
+    if d.routing is None:
+        from llm_router.local_check import routing
+        d.routing = routing
+    if d.prune is None:
+        from llm_router.local_check import retention
+        d.prune = retention.prune
+    if d.recommend is None:
+        from llm_router.local_check import recommend
+        d.recommend = recommend.recommend
+    if d.inventory is None:
+        def _inv() -> list[str]:
+            from llm_router.local_check import display
+            return display.inventory()[0]
+        d.inventory = _inv
+    if d.status_lines is None:
+        def _lines() -> list:
+            from llm_router.local_check import display
+            return display.lines(path=Path(d.eligibility_path), now=d.now())
+        d.status_lines = _lines
     return d
 
 
-def _parser(prog: str, run: bool = True) -> argparse.ArgumentParser:
+def _parser(prog: str, run: bool = True, lane: bool = False) -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog=prog, add_help=True, description="Measure your local model on the bundled public benchmark.")
-    ap.add_argument("--model", help="local model name (default: the only one found; asked for when several)")
+    if lane:
+        ap.add_argument("lane", choices=LANES, help="the text-job lane to switch")
+    ap.add_argument("--model", help="local model name with its tag (default: the only one found; asked for when several)")
     if run:
         ap.add_argument("--endpoint", help="runtime URL (default: auto-discover Ollama, LM Studio, vLLM, llama.cpp on loopback)")
         ap.add_argument("--allow-remote", action="store_true", help="allow a non-loopback --endpoint (the public bank prompts leave this machine for it)")
@@ -302,7 +358,12 @@ def _parser(prog: str, run: bool = True) -> argparse.ArgumentParser:
 
 def _pick_model(d: Deps, endpoints: list, wanted: str | None) -> tuple[Any, str] | str:
     """(endpoint, model) or an error string."""
-    pairs = [(e, m) for e in endpoints for m in e.models]
+    pairs, seen = [], set()
+    for e in endpoints:
+        for m in e.models:
+            if (m, e.runtime, e.base_url) not in seen:       # one model listed twice by a runtime is still one model
+                seen.add((m, e.runtime, e.base_url))
+                pairs.append((e, m))
     if wanted:
         hit = [(e, m) for e, m in pairs if m == wanted]
         if not hit:
@@ -329,15 +390,17 @@ def cmd_local_check(argv: list[str], deps: Deps | None = None) -> int:
     d = _resolve(deps or Deps())
     args = list(argv)
     sub = "run"
-    if args and args[0] in ("run", "status", "explain"):
+    if args and args[0] in ("run", "status", "explain", "enable", "disable"):
         sub = args.pop(0)
     elif args and not args[0].startswith("-"):
-        d.err(f"llm-router local-check: unknown subcommand {args[0]!r} (run, status, explain)")
+        d.err(f"llm-router local-check: unknown subcommand {args[0]!r} (run, status, explain, enable, disable)")
         return EXIT_USAGE
     try:
-        ns = _parser(f"llm-router local-check {sub}", run=(sub == "run")).parse_args(args)
+        ns = _parser(f"llm-router local-check {sub}", run=(sub == "run"), lane=sub in ("enable", "disable")).parse_args(args)
     except SystemExit as e:
         return int(e.code or 0) if isinstance(e.code, int) else EXIT_USAGE
+    if sub in ("enable", "disable"):
+        return _switch(d, sub, ns.lane, ns.model)
     if sub == "status":
         return _status(d, ns.model)
     if sub == "explain":
@@ -457,7 +520,10 @@ def _run(d: Deps, ns: argparse.Namespace) -> int:
         except J.JudgeSetupError as e:
             err(f"The judge cannot be used: {e}")
             return EXIT_NO_JUDGE_ROUTE
-        budget = B.Budget(metered=route.kind == ROUTE_API, est_call_usd=B.per_call_estimate_usd(judge_model) if route.kind == ROUTE_API else None)
+        if route.kind == ROUTE_API:
+            budget = B.Budget(metered=True, est_call_usd=B.per_call_estimate_usd(judge_model))
+        else:
+            budget = _quota_budget(force=bool(ns.force), reader=d.quota_reader, notify=out)
     chk = SE.Check(model=model, runtime=endpoint.runtime, bank=bank, adapter=adapter, runs_root=runs_root, backend=backend, budget=budget,
                    no_judge=bool(ns.no_judge), force=bool(ns.force), fresh=bool(ns.fresh), now=d.now, eligibility_path=Path(d.eligibility_path),
                    lock_path=d.lock_path, bank_loader=d.load_bank)
@@ -486,10 +552,10 @@ def _run(d: Deps, ns: argparse.Namespace) -> int:
         return EXIT_NO_JUDGE_ROUTE
     for n in outcome.notes:
         out("Note: " + n)
-    return _report(d, outcome, budget, time.time() - t0, resume_cmd, ns)
+    return _report(d, outcome, budget, time.time() - t0, resume_cmd, model, endpoint.runtime)
 
 
-def _report(d: Deps, o: Any, budget: Any, secs: float, resume_cmd: str, ns: argparse.Namespace) -> int:
+def _report(d: Deps, o: Any, budget: Any, secs: float, resume_cmd: str, model: str, runtime: str) -> int:
     from llm_router.local_check import score as S
     out, err = d.out, d.err
     st = o.status
@@ -506,9 +572,14 @@ def _report(d: Deps, o: Any, budget: Any, secs: float, resume_cmd: str, ns: argp
         out(f"Stopped: judge budget reached ({o.reason}). INCONCLUSIVE, nothing recorded. Your local answers are kept; resume with: {resume_cmd}")
         return EXIT_BUDGET
     res = o.result
-    lines = render_verdict(res, o, budget, secs, d.routing_api(), ns)
-    for ln in lines:
+    routing_lines = _apply_routing(d, o, model) if res is not None and st == "scored" else []
+    for ln in render_verdict(res, o, budget, secs, routing_lines):
         out(ln)
+    if res is not None:
+        for ln in _recommend_lines(d, res, model, runtime):
+            out(ln)
+    for ln in _prune_errors(d):          # a completed run, whatever its verdict (D-259 retention: keep 3 runs, answers 30 days)
+        err(ln)
     if st == "record_refused":
         err(f"The result could not be recorded: {o.reason}. The run stays reserved; re-run to retry: {resume_cmd}")
         return EXIT_RECORD
@@ -519,7 +590,79 @@ def _report(d: Deps, o: Any, budget: Any, secs: float, resume_cmd: str, ns: argp
     return EXIT_INVALID if res.verdict == S.INVALID else EXIT_NOT_PASSED
 
 
-def render_verdict(res: Any, o: Any, budget: Any, secs: float, routing_available: bool, ns: argparse.Namespace | None = None) -> list[str]:
+def _passed_lanes(res: Any, o: Any) -> list[str]:
+    """Lanes this run just recorded as a PASS (never a prereg-only lane: only lanes this run wrote)."""
+    from llm_router.local_check import score as S
+    if res is None or res.verdict != S.PASS:
+        return []
+    rep = o.record_report or {}
+    return sorted(j for j, v in rep.items() if v["status"] == "written" and j not in res.guard_excluded)
+
+
+def _apply_routing(d: Deps, o: Any, model: str) -> list[str]:
+    """D-260: switch the passed lanes on (routing.on_pass) and say, per lane, what happened. A lane the user disabled stays off."""
+    passed = _passed_lanes(o.result, o)
+    if not passed:
+        return []
+    try:
+        states = d.routing.on_pass(model, passed, path=d.routing_path)
+    except Exception as e:  # noqa: BLE001 - a routing-file problem must not turn a recorded PASS into a crash
+        return [f"routing: could not update ({type(e).__name__}); the result is recorded. Switch lanes on with `llm-router local-check enable <lane>`."]
+    L = []
+    for job in passed:
+        s = states.get(job)
+        if s == "enabled":
+            L.append(f"routing: on for {job} -- disable with `llm-router local-check disable {job}`")
+        elif s == "already_on":
+            L.append(f"routing: already on for {job}")
+        elif s == "kept_off":
+            L.append(f"routing: kept off for {job} -- it was disabled; run `llm-router local-check enable {job}`")
+        else:
+            L.append(f"routing: {job}: unexpected state {s!r}")
+    return L
+
+
+def _prune_errors(d: Deps) -> list[str]:
+    """Run retention.prune() on the runs root; return error lines only (nothing when it pruned cleanly or had nothing to do)."""
+    try:
+        rep = d.prune(Path(d.runs_root))
+        errors = list(getattr(rep, "errors", []) or [])
+    except Exception as e:  # noqa: BLE001 - retention must never fail a finished run
+        errors = [f"{type(e).__name__}: {e}"]
+    return [f"retention: {e}" for e in errors]
+
+
+def _recommend_lines(d: Deps, res: Any, model: str, runtime: str) -> list[str]:
+    """On FAIL / NOT_PASSED / a small-scope INCONCLUSIVE: models that fit this machine (measured first, untested labelled, pull text only)."""
+    from llm_router.local_check import score as S
+    from llm_router.local_check.recommend import capacity_gb, empty_reason
+    from llm_router.resolver.eligibility_store import FULL_DRAW_N
+    if not (res.verdict in (S.FAIL, S.NOT_PASSED) or (res.verdict == S.INCONCLUSIVE and res.n_assigned < FULL_DRAW_N)):
+        return []
+    hw = d.hardware()
+    try:
+        recs = d.recommend(hw, runtime, model, res)
+    except Exception as e:  # noqa: BLE001 - recommendations are advice, never a crash
+        return ["", f"recommendations unavailable ({type(e).__name__})."]
+    L = ["", f"== Models that may fit this machine (runtime {runtime}" + (f", ~{capacity_gb(hw):g} GB usable for a model" if capacity_gb(hw) is not None else "") + ") =="]
+    if not recs:
+        return L + [empty_reason(runtime)]
+    for r in recs:
+        if r.status == "measured" and r.pooled_rate is not None:
+            b = (r.bench or {}).get("pooled") or {}
+            tag = f"measured {b.get('k')}/{b.get('n')} on {(r.bench or {}).get('bank_version')}"
+        else:
+            tag = "untested (no measurement; sizes and licence only)"
+        fit = "" if r.fit == "ok" else ", memory unknown"
+        L.append(f"  {r.model_id}  [{r.family}; {r.download_size_gb:g} GB download; {r.licence}; {tag}{fit}]")
+        L.append("    to try it, run yourself: " + (r.pull_command or f"pull {r.model_id} with your runtime"))
+    if recs[0].note:
+        L.append(recs[0].note)
+    L.append("Nothing is pulled or routed for you; then run `llm-router local-check --model <name>` to measure it.")
+    return L
+
+
+def render_verdict(res: Any, o: Any, budget: Any, secs: float, routing_lines: list[str] | None = None) -> list[str]:
     """The verdict screen: verdict + n first, lane table, gates, rule concentration, what was recorded, routing, spend."""
     from llm_router.local_check import score as S
     L: list[str] = []
@@ -566,12 +709,7 @@ def render_verdict(res: Any, o: Any, budget: Any, secs: float, routing_available
         L.append("recorded: nothing (INCONCLUSIVE; an earlier recorded PASS is kept). A rerun after 24 h draws the second 70 items.")
     else:
         L.append("recorded: nothing" + (" (programmatic probe)" if res.verdict == S.PROBE else ""))
-    passed = [j for j in written if res.verdict == S.PASS and j not in res.guard_excluded]
-    if passed:
-        if routing_available:
-            L.append(f"routing: on for {', '.join(passed)} -- disable with `llm-router local-check disable <lane>`")
-        else:
-            L.append("routing activation arrives in a later update (nothing is routed to your local model yet).")
+    L.extend(routing_lines or [])
     if budget is not None:
         s = budget.summary()
         spend = f", ${s['spent_usd']:.2f} spent (cap ${s['cap_usd']:.2f})" if s.get("metered") else ", subscription (no dollar figure)"
@@ -585,19 +723,47 @@ def render_verdict(res: Any, o: Any, budget: Any, secs: float, routing_available
 
 # ------------------------------------------------------------------------------------------ status / explain
 
+def _routing_switches(d: Deps) -> list[tuple[str, str, dict]]:
+    """(model, job, entry) for every switch in local_routing.json; [] when the file is absent or unreadable."""
+    import json
+    path = Path(d.routing_path) if d.routing_path else d.routing.routing_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = []
+    for model, jobs in sorted(data.items()) if isinstance(data, dict) else []:
+        for job, e in sorted(jobs.items()) if isinstance(jobs, dict) else []:
+            e = {"enabled": e} if isinstance(e, bool) else e
+            if isinstance(e, dict):
+                rows.append((model, job, e))
+    return rows
+
+
 def _status(d: Deps, model: str | None) -> int:
     from llm_router.local_check import attempts as A
-    from llm_router.resolver import eligibility_store
     out = d.out
     out("== local-check status ==")
-    lines = eligibility_store.text_job_lines(path=Path(d.eligibility_path))
-    if lines:
+    lines = d.status_lines()
+    shown_lines = [ln.text for ln in lines if model is None or f"[{model}]" in ln.text or ln.text.startswith(model)]
+    if shown_lines:
         out("recorded lanes:")
-        for ln in lines:
-            if model is None or f"[{model}]" in ln or ln.startswith(model):
-                out("  " + ln)
+        for t in shown_lines:
+            out("  " + t)
     else:
         out("recorded lanes: none -- run `llm-router local-check` to measure your local model")
+    switches = [(m, j, e) for m, j, e in _routing_switches(d) if model is None or d.routing.norm_model(m) == d.routing.norm_model(model)]
+    if switches:
+        out("routing switches (local_routing.json):")
+        for m, j, e in switches:
+            if e.get("enabled") is True:
+                out(f"  {m} {j}: on (since {e.get('since', '?')}, source {e.get('source', '?')}) -- disable: `llm-router local-check disable {j} --model {m}`")
+            else:
+                out(f"  {m} {j}: off ({e.get('reason', 'disabled')}) -- enable: `llm-router local-check enable {j} --model {m}`")
+    else:
+        out("routing switches: none (a PASS switches its lanes on; or `llm-router local-check enable <lane>`)")
+    for ln in d.routing.doctor_lines(path=d.routing_path):
+        out(ln)
     log = A.AttemptLog(Path(d.runs_root))
     now = d.now()
     by_key: dict[str, list[dict]] = {}
@@ -626,6 +792,29 @@ def _status(d: Deps, model: str | None) -> int:
                 out(f"  open run {r['run_id']} (draw {draw}): re-run to resume; lapses in {_fmt_s(left)}")
     if not shown:
         out("attempts: none")
+    return EXIT_OK
+
+
+def _switch(d: Deps, sub: str, lane: str, model: str | None) -> int:
+    """`enable|disable <lane> [--model M]`: flip one routing switch through local_check.routing. Model names carry their tag (``qwen3.5:latest``)."""
+    err = d.err
+    if model is None:
+        names = sorted(set(d.inventory()))
+        if len(names) != 1:
+            err(("several local models found (" + ", ".join(names[:12]) + "); pass --model.") if names
+                else "no local model found in the inventory; pass --model NAME (with its tag, as the runtime lists it).")
+            return EXIT_NO_RUNTIME
+        model = names[0]
+    try:
+        if sub == "enable":
+            d.routing.enable(model, lane, "manual", path=d.routing_path)
+            d.out(f"routing: on for {lane} on {model} (set by you). It applies only while the lane is passed and fresh -- see `llm-router local-check status`.")
+        else:
+            d.routing.disable(model, lane, "manual", path=d.routing_path)
+            d.out(f"routing: off for {lane} on {model}. A later PASS keeps it off; `llm-router local-check enable {lane}` switches it back on.")
+    except (OSError, ValueError) as e:
+        err(f"could not update the routing switch: {type(e).__name__}: {e}")
+        return EXIT_RECORD
     return EXIT_OK
 
 
