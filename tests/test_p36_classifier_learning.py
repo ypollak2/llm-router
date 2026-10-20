@@ -411,39 +411,98 @@ def test_lock_degrades_without_fcntl(world, monkeypatch):
     assert calls == [1, 0]
 
 
-def test_prune_does_not_drop_a_concurrent_append(tmp_path):
+def test_prune_does_not_drop_a_concurrent_append(tmp_path, monkeypatch):
+    """Deterministic: a second thread appends in the middle of prune's rewrite (after the read,
+    before the replace). With the lock the append waits and lands after the replace; with no
+    lock it lands before the replace and is lost."""
     import threading
 
     path = tmp_path / "ex.jsonl"
     old = time.time() - examples.MAX_AGE_S - 1000
-    for i in range(300):
-        path.open("a").write(json.dumps({"text_sha": f"old{i:013d}", "source": "redo", "label": 1.0, "ts": old}) + "\n")
-    stop, errs = threading.Event(), []
-    appended = []
+    path.write_text("".join(
+        json.dumps({"text_sha": f"old{i:013d}", "source": "redo", "label": 1.0, "ts": old}) + "\n"
+        for i in range(5)))
+    fresh = {"text_sha": "fresh0000000000a", "source": "redo", "label": 1.0, "ts": time.time()}
+    errs: list = []
+    started = threading.Event()
+    box: dict = {}
+    real_rewrite = examples._rewrite
 
     def appender():
-        i = 0
-        while not stop.is_set():
-            sha = f"new{i:013d}"
-            try:
-                examples.append_row({"text_sha": sha, "source": "redo", "label": 1.0, "ts": time.time()}, path=path)
-                appended.append(sha)
-            except Exception as exc:  # noqa: BLE001
-                errs.append(exc)
-            i += 1
+        started.set()
+        try:
+            examples.append_row(fresh, path=path)
+        except Exception as exc:  # noqa: BLE001
+            errs.append(exc)
 
-    t = threading.Thread(target=appender)
+    def rewrite_with_concurrent_append(target, lines):
+        if "t" in box:  # the appender's own prune (only when unlocked) must not recurse
+            return real_rewrite(target, lines)
+        box["t"] = t = threading.Thread(target=appender)
+        t.start()
+        assert started.wait(2)
+        t.join(0.5)  # unlocked: the append finishes here, before the replace
+        box["finished_mid_rewrite"] = not t.is_alive()
+        real_rewrite(target, lines)
+
+    monkeypatch.setattr(examples, "_rewrite", rewrite_with_concurrent_append)
+    assert examples.prune(path) == 5, "the check found nothing to check"
+    box["t"].join(10)
+    assert not errs
+    assert fresh["text_sha"] in {r["text_sha"] for r in examples.read_examples(path)}
+    assert box["finished_mid_rewrite"] is False  # the lock held the append back
+
+
+def test_hot_path_example_write_gives_up_fast_when_the_lock_is_held(tmp_path, monkeypatch):
+    """The hook and the proxy/MCP loop write inline: a held lock must cost <= ~0.25 s and leave
+    a failopen record, not a 5 s stall."""
+    import threading
+
+    from llm_router import failopen, file_lock, prefixes
+
+    recorded = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: recorded.append(code))
+    path = tmp_path / "ex.jsonl"
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with file_lock.exclusive_lock(path.with_name(path.name + ".lock"), 5.0) as got:
+            assert got
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=holder)
     t.start()
-    time.sleep(0.05)
-    for _ in range(30):
-        examples.prune(path)
-        with path.open("a") as fh:
-            fh.write(json.dumps({"text_sha": "oldX", "source": "redo", "label": 1.0, "ts": old}) + "\n")
-    stop.set()
-    t.join(10)
-    assert not errs and len(appended) > 5, "the check found nothing to check"
-    have = {r["text_sha"] for r in examples.read_examples(path)}
-    assert set(appended) <= have
+    assert held.wait(5)
+    try:
+        for door, embed in (("hook", False), ("proxy", True), ("mcp", True)):
+            monkeypatch.setattr(examples, "embedding_wanted", lambda: False)
+            t0 = time.monotonic()
+            ok = prefixes.record_example("p", "local", "x", door, path=path, embed=embed)
+            took = time.monotonic() - t0
+            assert ok is False and took < 0.3, (door, took)
+    finally:
+        release.set()
+        t.join(10)
+    assert recorded == ["LR-FO-PREFIX-EXAMPLE"] * 3
+    assert not path.exists() or path.read_text() == ""
+
+
+def test_apply_locked_records_failopen_when_prune_is_busy(monkeypatch):
+    from llm_router import classifier_learning as cl
+    from llm_router import failopen
+
+    recorded = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: recorded.append(code))
+
+    def busy(*a, **k):
+        raise examples.LockBusy("held")
+
+    monkeypatch.setattr(examples, "prune", busy)
+    monkeypatch.setattr(cl.complexity_knn, "load_artifact", lambda: None)
+    monkeypatch.setattr(cl, "_log", lambda *a, **k: None)
+    v = cl._apply_locked(dry_run=True, replay=None, examples_path=None, now=1.0)
+    assert v.status == cl.REJECTED and recorded == ["LR-FO-EXAMPLE"]
 
 
 def test_embed_queue_is_bounded_and_drops_with_failopen(monkeypatch):

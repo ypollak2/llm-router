@@ -28,6 +28,7 @@ Retention: see ``docs/RETENTION.md`` (``examples.jsonl``). Mode 0600, directory 
 """
 from __future__ import annotations
 
+import atexit
 import base64
 import contextlib
 import json
@@ -141,17 +142,20 @@ class LockBusy(OSError):
     """``examples.jsonl.lock`` stayed held past the bound: the write is dropped, not blocked."""
 
 
-LOCK_TIMEOUT_S = 5.0
+LOCK_TIMEOUT_S = 5.0  # off-loop / CLI callers (learn, prune, deferred embed writes)
+HOT_LOCK_TIMEOUT_S = 0.25  # hook and event-loop callers: a held lock drops the row, never stalls them
 
 
 @contextlib.contextmanager
-def _file_lock(target: Path):
+def _file_lock(target: Path, timeout: float | None = None):
     """Exclusive lock on ``<file>.lock`` around every rewrite and append, so a prune or trim
-    (read, filter, replace) cannot drop a row another process appended in between."""
+    (read, filter, replace) cannot drop a row another process appended in between. Waits at
+    most ``timeout`` (default ``LOCK_TIMEOUT_S``)."""
     from llm_router import file_lock
 
     status: dict = {}
-    with file_lock.exclusive_lock(target.with_name(target.name + ".lock"), LOCK_TIMEOUT_S, status) as got:
+    wait = LOCK_TIMEOUT_S if timeout is None else timeout
+    with file_lock.exclusive_lock(target.with_name(target.name + ".lock"), wait, status) as got:
         if not got:
             raise LockBusy(f"examples lock not acquired ({status.get('state')})")
         yield
@@ -195,6 +199,18 @@ MAX_PENDING_EMBEDS = 32  # queued + running deferred embeds; more are dropped, n
 _pending = 0
 _pending_lock = threading.Lock()
 _pool: ThreadPoolExecutor | None = None
+
+
+def shutdown_pool() -> None:
+    """Stop the embed pool at exit without waiting for queued embeds (they are dropped)."""
+    global _pool
+    with _pending_lock:
+        pool, _pool = _pool, None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+atexit.register(shutdown_pool)
 
 
 def _bounded_pool() -> ThreadPoolExecutor:
@@ -248,14 +264,17 @@ def run_off_loop(fn, *args, **kwargs) -> bool:
     return True
 
 
-def append_row(row: dict, *, path: Path | str | None = None, max_bytes: int = MAX_BYTES) -> None:
+def append_row(row: dict, *, path: Path | str | None = None, max_bytes: int = MAX_BYTES,
+               lock_timeout: float | None = None) -> None:
     """Append one row (0600, bounded: rows older than 180 days are deleted first, and past
     ``max_bytes`` the oldest half is dropped). Raises on a failed write; callers decide how
-    to fail open."""
+    to fail open. ``lock_timeout`` bounds the wait for the file lock (default
+    ``LOCK_TIMEOUT_S``; latency-sensitive callers pass ``HOT_LOCK_TIMEOUT_S``); on timeout it
+    raises ``LockBusy`` and the row is dropped."""
     target = Path(path) if path is not None else default_path()
     payload = (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8")
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with _file_lock(target):  # prune/trim rewrites and the append are one critical section
+    with _file_lock(target, lock_timeout):  # prune/trim rewrites and the append are one critical section
         if target.exists():
             _prune_locked(target, now=row.get("ts") if isinstance(row.get("ts"), (int, float)) else None)
         if target.exists() and target.stat().st_size > max_bytes:

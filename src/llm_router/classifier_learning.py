@@ -229,6 +229,9 @@ def _lock(target: Path, timeout: float | None = None):
     wait = LOCK_TIMEOUT_S if timeout is None else timeout
     with file_lock.exclusive_lock(Path(str(target) + ".lock"), wait, status) as got:
         if not got:
+            if status.get("state") == "unavailable":
+                raise LockTimeout(f"cannot lock {target.name}.lock (lock primitive or permission failure); "
+                                  "check the directory permissions")
             raise LockTimeout(
                 f"another 'llm-router learn' holds {target.name}.lock (waited {wait:g}s, lock {status.get('state')}); "
                 "try again when it finishes")
@@ -277,8 +280,10 @@ def _apply_locked(*, dry_run, replay, examples_path, now) -> Verdict:
     stamp = time.time() if now is None else now
     try:
         examples.prune(examples_path, now=stamp)
-    except OSError:
-        pass  # retention housekeeping must not stop a learning run
+    except OSError as exc:  # retention housekeeping must not stop a learning run
+        from llm_router import failopen
+
+        failopen.record("LR-FO-EXAMPLE", exc)
     complexity_knn.clear_cache()
     target = complexity_knn.artifact_path()
     base_id = _file_id(target)
