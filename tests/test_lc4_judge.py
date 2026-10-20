@@ -420,12 +420,19 @@ def test_consent_text_api():
 
 def test_consent_text_api_unpriced():
     t = C.build_consent_text(C.ROUTE_API, "m", estimate_usd=None)
-    assert "cannot be estimated" in t and "$" in t                      # the cap is still shown
+    assert "cannot be estimated" in t and "NO dollar cap" in t and "$3.00" not in t     # call-capped only: no dollar claim
+    assert "120 requests" in t
+
+
+def test_consent_priced_api_states_dollar_cap():
+    t = C.build_consent_text(C.ROUTE_API, "m", estimate_usd=1.0)
+    assert "$3.00 or 120 requests" in t and "resumed" not in t
 
 
 def test_consent_text_subscription():
     t = C.build_consent_text(C.ROUTE_SUBSCRIPTION, "m", quota_note="Your Claude plan is at 85% of its limit; x")
-    assert "counts toward your plan limit" in t and "~100 requests" in t and "No API charges" in t and "85%" in t
+    assert "counts toward your plan limit" in t and "~100 requests" in t and "85%" in t
+    assert "No API charges" not in t and "uses your Claude subscription" in t and "billed to that key" in t
     assert "ANTHROPIC_API_KEY" not in t and "$" not in t
 
 
@@ -440,3 +447,101 @@ def test_ask_consent_variants():
     def eof(_):
         raise EOFError
     assert C.ask_consent("t", input_fn=eof, print_fn=out.append) is False
+
+
+# ---- LC-4b -------------------------------------------------------------------------------------------------------------------------------
+def test_default_client_ignores_anthropic_base_url_env(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:9999")
+    client = J.ApiBackend._default_client(KEY)
+    assert str(client.base_url).rstrip("/") == "https://api.anthropic.com"
+
+
+def test_custom_provider_base_url_refused():
+    with pytest.raises(J.JudgeSetupError, match="custom base URL"):
+        J.ApiBackend(_priced_model(), KEY, client_factory=lambda k: None, configured_base_url="http://localhost:4000")
+    with pytest.raises(J.JudgeSetupError):
+        J.ApiBackend(_priced_model(), KEY, client_factory=lambda k: None, configured_base_url="https://api.anthropic.com.evil.example")
+    J.ApiBackend(_priced_model(), KEY, client_factory=lambda k: None, configured_base_url="https://api.anthropic.com")   # the real endpoint is fine
+    J.ApiBackend(_priced_model(), KEY, client_factory=lambda k: None, configured_base_url="")
+
+
+def test_unpriced_model_refused_on_api_route():
+    with pytest.raises(J.JudgeSetupError, match="no price"):
+        J.ApiBackend("definitely-not-a-priced-model-id", KEY, client_factory=lambda k: None)
+    with pytest.raises(J.JudgeSetupError, match="no price"):
+        J.ApiBackend("ollama/llama3.2", KEY, client_factory=lambda k: None)
+
+
+def test_unpriced_metered_call_stops_the_budget():
+    bud = B.Budget()
+    bud.record(None)
+    with pytest.raises(B.BudgetExhausted, match="could not be priced"):
+        bud.check()
+    B.Budget(metered=False).record(None)          # subscription: nothing to price
+
+
+def test_empty_candidate_fails_without_a_call():
+    be = ScriptBackend([])
+    bud = B.Budget()
+    for empty in ("", "   \n"):
+        o = J.judge_candidate(be, bud, "diff", empty)
+        assert o.verdict == "fail" and o.attempts == 0 and o.cost_usd == 0.0
+    assert be.prompts == [] and bud.calls == 0
+
+
+def test_run_g3b_empty_plant_is_fail_no_call():
+    ps = plants()
+    ps[12]["text"] = ""                                   # swapped0: expected fail, judged without a call
+    replies = replies_for(ps)
+    del replies[12]
+    be = ScriptBackend(replies)
+    r = J.run_g3b(be, B.Budget(), ps)
+    assert r.status == "PASS" and r.n_judged == 30 and r.calls == 29 and len(be.prompts) == 29
+
+
+def test_cli_env_allow_list_has_proxy_and_ca_vars():
+    env = {k: "v" for k in ("HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY")}
+    got = J.cli_env(env)
+    assert set(got) == {"HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"}
+
+
+def test_cli_context_manager_removes_temp_dir(tmp_path):
+    exe, _ = make_cli(tmp_path)
+    root = tmp_path / "t"
+    root.mkdir()
+    with J.ClaudeCliBackend("m", claude_bin=exe, environ={"PATH": os.environ["PATH"]}, temp_root=str(root)) as be:
+        be.complete("p")
+        assert list(root.iterdir())
+    assert not list(root.iterdir())
+    be.cleanup()                                          # idempotent
+
+
+def test_cli_cost_is_notional_field(tmp_path):
+    exe, _ = make_cli(tmp_path)
+    with J.ClaudeCliBackend("m", claude_bin=exe, environ={"PATH": os.environ["PATH"]}, temp_root=str(tmp_path)) as be:
+        rep = be.complete("p")
+        assert rep.cost_usd is None and rep.notional_cost_usd == 0.02
+        bud = B.Budget(metered=False)
+        o = J.judge_answer(be, bud, "p")
+        assert o.cost_usd is None and o.notional_cost_usd == pytest.approx(0.02) and bud.spent_usd == 0.0
+
+
+def test_recheck_quota_between_batches():
+    assert B.recheck_quota(reader=lambda: (0.5, "ok", 1.0)).action == "ok"
+    assert B.recheck_quota(reader=lambda: (0.9, "ok", 1.0)).action == "warn"
+    assert B.recheck_quota(reader=lambda: (None, "unknown", None)).action == "unknown"
+    with pytest.raises(B.BudgetExhausted, match="quota"):
+        B.recheck_quota(reader=lambda: (0.97, "ok", 1.0))
+    assert B.recheck_quota(force=True, reader=lambda: (0.97, "ok", 1.0)).action == "warn"
+
+
+def test_served_model_matches_exact_alias_and_mismatch():
+    m = _priced_model()
+    assert J.served_model_matches(m, m) == (True, "ok")
+    assert J.served_model_matches(m + "," + m, m)[0]
+    ok, why = J.served_model_matches("some-other-model", m)
+    assert not ok and "does not match" in why
+    assert not J.served_model_matches("", m)[0] and not J.served_model_matches(m, "")[0]
+    # alias: any other spelling the price table resolves to the same canonical id
+    canon = pricing.resolve(m)
+    assert J.served_model_matches("anthropic/" + m, m)[0] == (pricing.resolve("anthropic/" + m) == canon)

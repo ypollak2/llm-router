@@ -45,6 +45,9 @@ class Budget:
         if self.calls >= self.cap_calls:
             raise BudgetExhausted(f"call cap reached ({self.calls}/{self.cap_calls})")
         if self.metered:
+            if self.unpriced_calls:
+                # spent_usd is only a lower bound once a metered call could not be priced: the USD cap can no longer be enforced, so stop.
+                raise BudgetExhausted(f"{self.unpriced_calls} metered call(s) could not be priced; the ${self.cap_usd:.2f} cap can no longer be enforced")
             if self.spent_usd >= self.cap_usd:
                 raise BudgetExhausted(f"USD cap reached (${self.spent_usd:.2f} of ${self.cap_usd:.2f})")
             if self.est_call_usd is not None and self.spent_usd + self.est_call_usd > self.cap_usd:
@@ -106,3 +109,15 @@ def check_subscription_quota(force: bool = False, reader: Callable[[], tuple] | 
     if value > QUOTA_WARN:
         return QuotaDecision("warn", value, f"Your Claude plan is at {pct}% of its limit; the judge run will use more of it.")
     return QuotaDecision("ok", value, f"Your Claude plan is at {pct}% of its limit.")
+
+
+def recheck_quota(force: bool = False, reader: Callable[[], tuple] | None = None) -> QuotaDecision:
+    """Quota re-check for the runner to call between batches (the start-of-run check is one-shot).
+
+    Same thresholds as ``check_subscription_quota``; on "refuse" it raises ``BudgetExhausted`` so the runner stops with the same resumable
+    INCONCLUSIVE path as a call/USD cap. "warn"/"ok"/"unknown" are returned for the runner to show; "unknown" never stops the run.
+    """
+    d = check_subscription_quota(force=force, reader=reader)
+    if d.action == "refuse":
+        raise BudgetExhausted("subscription quota: " + d.message)
+    return d
