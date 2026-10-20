@@ -35,6 +35,7 @@ PROBE_N = 3
 MAX_TIMEOUT_SCALE = 4.0
 SLOW_ITEM_S = 60.0                      # mean probe time at which the timeout starts scaling
 DEFAULT_EXPECTED_OUT_TOKENS = 200
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)   # 0 on Windows, where symlink checks above still apply
 
 
 class Item(Protocol):
@@ -66,6 +67,15 @@ class RunMismatch(Exception):
     """Resume attempted against a run recorded for a different model/digest/settings."""
 
 
+class RunDirError(RunMismatch):
+    """The run dir cannot be trusted: unreadable/torn ``meta.json``, or a symlinked run file."""
+
+
+class RunStartError(Exception):
+    """The run could not start: the runtime's digest/settings (context window) could not be
+    confirmed, e.g. the runtime was unreachable. Nothing was written; retry when it answers."""
+
+
 # ------------------------------------------------------------------ scope / early stop
 
 def partition_by_fit(items: Sequence[Item], max_chars: int | None
@@ -87,8 +97,12 @@ def early_stop_reached(n_total: int, failures: int, min_pass: int | None) -> boo
 
 def default_is_failure(rec: dict) -> bool:
     """Runner-level failure = no usable answer (error / timeout / empty). Quality failures
-    are the grader's call; pass ``is_failure`` to count those."""
-    return rec.get("status") not in ("ok", "truncated")
+    are the grader's call; pass ``is_failure`` to count those. A truncated answer with no text
+    (the model spent its whole budget thinking) is no usable answer either."""
+    st = rec.get("status")
+    if st == "truncated":
+        return not str(rec.get("text") or "").strip()
+    return st != "ok"
 
 
 # ------------------------------------------------------------------ rate / timeout
@@ -151,29 +165,70 @@ class RunStore:
         self.results_path = self.dir / "results.jsonl"
         self.meta_path = self.dir / "meta.json"
 
+    def _read(self, path: Path) -> str:
+        fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
+        with os.fdopen(fd, "r") as f:
+            return f.read()
+
     def open(self, meta: dict) -> None:
-        """Create the dir (0700) and meta, or verify an existing run matches ``meta``."""
+        """Create the dir (0700, only when we create it) and meta, or verify an existing run
+        matches ``meta``. An existing directory's permissions are never changed."""
+        created = not self.dir.exists()
         self.dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.dir, 0o700)
-        if self.meta_path.exists():
-            old = json.loads(self.meta_path.read_text())
-            diff = {k: (old.get(k), meta.get(k)) for k in meta if old.get(k) != meta.get(k)}
-            if diff:
-                raise RunMismatch(f"run dir was recorded for different settings: {diff}")
-        else:
-            fd = os.open(self.meta_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        if created:
+            os.chmod(self.dir, 0o700)
+        try:
+            if self.meta_path.is_symlink() or self.results_path.is_symlink():
+                raise RunDirError(f"refusing symlinked run file in {self.dir}")
+            if self.meta_path.exists():
+                try:
+                    old = json.loads(self._read(self.meta_path))
+                except (ValueError, UnicodeDecodeError) as exc:
+                    raise RunDirError(
+                        f"{self.meta_path} is unreadable (torn write?): {exc}; "
+                        "delete the run dir to start over") from exc
+                if not isinstance(old, dict):
+                    raise RunDirError(f"{self.meta_path} is not a JSON object; "
+                                      "delete the run dir to start over")
+                diff = {k: (old.get(k), meta.get(k)) for k in meta if old.get(k) != meta.get(k)}
+                if diff:
+                    raise RunMismatch(f"run dir was recorded for different settings: {diff}")
+            else:
+                self._write_meta(meta)
+            if not self.results_path.exists():
+                os.close(os.open(self.results_path,
+                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600))
+        except OSError as exc:
+            raise RunDirError(f"cannot use run dir {self.dir}: {exc}") from exc
+
+    def _write_meta(self, meta: dict) -> None:
+        """Atomic: temp file (0600) + fsync + rename + dir fsync, so a crash leaves either no
+        meta.json or a whole one."""
+        tmp = self.dir / f".meta.json.{os.getpid()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _NOFOLLOW, 0o600)
+        try:
             with os.fdopen(fd, "w") as f:
                 json.dump(meta, f, sort_keys=True)
-        if not self.results_path.exists():
-            os.close(os.open(self.results_path, os.O_WRONLY | os.O_CREAT, 0o600))
-        os.chmod(self.results_path, 0o600)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.meta_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+        with contextlib.suppress(OSError):
+            dfd = os.open(self.dir, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
 
     def load(self) -> list[dict]:
         """Intact records, last write per id wins; a torn trailing line is dropped."""
         out: dict[str, dict] = {}
         if not self.results_path.exists():
             return []
-        for line in self.results_path.read_text().splitlines():
+        for line in self._read(self.results_path).splitlines():
             try:
                 rec = json.loads(line)
             except ValueError:
@@ -184,7 +239,8 @@ class RunStore:
 
     def append(self, rec: dict) -> None:
         # Start on a fresh line even if the previous write was torn mid-line.
-        with open(self.results_path, "ab+") as f:
+        fd = os.open(self.results_path, os.O_RDWR | os.O_APPEND | os.O_CREAT | _NOFOLLOW, 0o600)
+        with os.fdopen(fd, "ab+") as f:
             f.seek(0, os.SEEK_END)
             if f.tell():
                 f.seek(-1, os.SEEK_END)
@@ -249,9 +305,18 @@ class Runner:
         self.store = RunStore(run_dir)
         self.lock_path, self.base_timeout_s, self.probe_n = lock_path, base_timeout_s, probe_n
         self.min_pass, self.is_failure, self.on_result = min_pass, is_failure, on_result
-        self.meta = {"model": model, "runtime": runtime,
-                     "digest": adapter.digest(model),
-                     "settings_hash": adapter.settings_hash(model),
+        # Both calls reach the runtime. A transient failure must not become digest/ctx None in
+        # meta (a later resume would then mismatch), so it stops the run before anything is
+        # written; the settings hash is built from the requested settings plus the confirmed ctx.
+        try:
+            digest = adapter.digest(model)
+            settings = adapter.settings_hash(model)
+        except Exception as exc:    # noqa: BLE001
+            raise RunStartError(
+                f"cannot confirm {model!r} digest/context window: {type(exc).__name__}: {exc}"
+            ) from exc
+        self.meta = {"model": model, "runtime": runtime, "digest": digest,
+                     "settings_hash": settings,
                      "item_ids": [i.id for i in self.items]}
 
     # -- internals
@@ -279,6 +344,8 @@ class Runner:
         with ollama_lock(self.lock_path):
             self.store.open(self.meta)
             for item in self._pending()[: max(0, self.probe_n - len(self.store.load()))]:
+                if self._stop():
+                    break
                 self._one(item, self.base_timeout_s)
         return measure_rate(self.store.load())
 
@@ -293,6 +360,9 @@ class Runner:
             try:
                 # Probe first (no-op when resumed past probe_n results).
                 for item in self._pending()[: max(0, self.probe_n - len(self.store.load()))]:
+                    if self._stop():            # a resumed run may already be past the bar
+                        status = "early_stop"
+                        break
                     self._one(item, self.base_timeout_s)
                     if self._stop():
                         status = "early_stop"
@@ -301,6 +371,9 @@ class Runner:
                     rate = measure_rate(self.store.load())
                     timeout_s = item_timeout(rate, self.base_timeout_s)
                     for item in self._pending():
+                        if self._stop():
+                            status = "early_stop"
+                            break
                         self._one(item, timeout_s)
                         if self._stop():
                             status = "early_stop"

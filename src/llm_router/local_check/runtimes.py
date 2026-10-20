@@ -45,13 +45,23 @@ class RuntimeError_(Exception):
     """Raised for a refused endpoint (non-loopback) or an unreachable required service."""
 
 
+class ProbeFailed(RuntimeError_):
+    """A runtime probe (context window, digest) failed in transit: unreachable, timed out or an
+    unreadable body. Distinct from "the runtime answered and has no such field" (that is
+    ``None``). Never cached, so a transient failure cannot freeze a wrong value."""
+
+
 # --------------------------------------------------------------------------- helpers
 
 def normalize_base(url: str) -> str:
-    """``host:port`` -> ``http://host:port``; strip a trailing slash and a ``/v1`` suffix."""
+    """``host:port`` -> ``http://host:port``; strip a trailing slash and a ``/v1`` suffix.
+    Only http/https are accepted (ValueError otherwise)."""
     url = url.strip()
     if "://" not in url:
         url = "http://" + url
+    scheme = url.split("://", 1)[0].lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"unsupported scheme {scheme!r}: only http and https")
     url = url.rstrip("/")
     if url.endswith("/v1"):
         url = url[:-3]
@@ -59,36 +69,73 @@ def normalize_base(url: str) -> str:
 
 
 def is_loopback(base_url: str) -> bool:
-    host = urlparse(normalize_base(base_url)).hostname or ""
+    try:
+        host = urlparse(normalize_base(base_url)).hostname or ""
+    except ValueError:
+        return False
     return host in LOOPBACK or f"[{host}]" in LOOPBACK
 
 
 def _conn(base_url: str, timeout: float, allow_remote: bool = False) -> http.client.HTTPConnection:
+    """Connection to ``base_url``. RuntimeError_ for a refused (non-loopback) host; ValueError
+    for a malformed URL (bad scheme, non-numeric or out-of-range port, no host)."""
     base = normalize_base(base_url)
+    p = urlparse(base)
+    port = p.port                                  # ValueError on "abc" / 99999
+    if not p.hostname or (port is not None and port == 0):
+        raise ValueError(f"bad endpoint {base!r}")
     if not allow_remote and not is_loopback(base):
         raise RuntimeError_(f"refusing non-loopback endpoint {base!r}")
-    p = urlparse(base)
     cls = http.client.HTTPSConnection if p.scheme == "https" else http.client.HTTPConnection
-    return cls(p.hostname, p.port or (443 if p.scheme == "https" else 80), timeout=timeout)
+    return cls(p.hostname, port or (443 if p.scheme == "https" else 80), timeout=timeout)
 
 
-def _json_request(base_url: str, method: str, path: str, body: dict | None = None,
-                  timeout: float = PROBE_TIMEOUT_S, allow_remote: bool = False) -> Any | None:
-    """JSON response body, or None on any failure (never raises except for a refused host)."""
-    conn = _conn(base_url, timeout, allow_remote)
+def _fetch(base_url: str, method: str, path: str, body: dict | None = None,
+           timeout: float = PROBE_TIMEOUT_S, allow_remote: bool = False) -> tuple[bool, Any | None]:
+    """``(True, data)`` for a 200 JSON body, ``(True, None)`` when the server answered with
+    another status, ``(False, None)`` when the request failed in transit (or the endpoint is
+    malformed). Raises only RuntimeError_ for a refused host."""
+    conn = None
     try:
+        conn = _conn(base_url, timeout, allow_remote)
         payload = json.dumps(body).encode() if body is not None else None
         conn.request(method, path, body=payload,
                      headers={"Content-Type": "application/json"} if payload else {})
         resp = conn.getresponse()
         data = resp.read()
         if resp.status != 200:
-            return None
-        return json.loads(data)
+            return True, None
+        return True, json.loads(data)
+    except RuntimeError_:
+        raise
     except (OSError, ValueError, http.client.HTTPException):
-        return None
+        return False, None
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
+
+
+def _json_request(base_url: str, method: str, path: str, body: dict | None = None,
+                  timeout: float = PROBE_TIMEOUT_S, allow_remote: bool = False) -> Any | None:
+    """JSON response body, or None on any failure (never raises except for a refused host)."""
+    return _fetch(base_url, method, path, body, timeout, allow_remote)[1]
+
+
+PROBE_RETRIES = 1
+PROBE_RETRY_DELAY_S = 0.2
+
+
+def _strict_json(base_url: str, method: str, path: str, body: dict | None = None,
+                 allow_remote: bool = False) -> Any | None:
+    """Like ``_json_request`` but a transit failure raises ProbeFailed (after one retry) instead
+    of looking like "the runtime has no such field". A non-200 answer is a real answer (None)."""
+    for attempt in range(PROBE_RETRIES + 1):
+        ok, data = _fetch(base_url, method, path, body, PROBE_TIMEOUT_S, allow_remote)
+        if ok:
+            return data
+        if attempt < PROBE_RETRIES:
+            time.sleep(PROBE_RETRY_DELAY_S)
+    raise ProbeFailed(f"{method} {path} on {base_url} failed (unreachable, timed out or unreadable)")
 
 
 def strip_think(text: str) -> str:
@@ -160,7 +207,11 @@ class _Adapter:
 
     def __init__(self, base_url: str, *, allow_remote: bool = False, max_tokens: int = MAX_TOKENS,
                  temperature: float = TEMPERATURE):
-        self.base_url = normalize_base(base_url)
+        try:
+            self.base_url = normalize_base(base_url)
+            urlparse(self.base_url).port
+        except ValueError as exc:
+            raise RuntimeError_(f"bad endpoint {base_url!r}: {exc}") from exc
         self.allow_remote = allow_remote
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -195,11 +246,11 @@ class _Adapter:
         """One serial, no-retry generation under a single wall-clock deadline."""
         t0 = time.monotonic()
         deadline = t0 + timeout_s
-        path, body = self._request(model, prompt, system)
         conn = None
         parts: list[str] = []
         res = GenResult(status="ok")
         try:
+            path, body = self._request(model, prompt, system)   # may probe ctx over the network
             conn = _conn(self.base_url, timeout_s, self.allow_remote)
             conn.request("POST", path, body=json.dumps(body).encode(),
                          headers={"Content-Type": "application/json"})
@@ -229,7 +280,7 @@ class _Adapter:
             timed_out = isinstance(exc, TimeoutError) or "timed out" in str(exc)
             res.status = "timeout" if timed_out else "error"
             res.error = None if timed_out else f"{type(exc).__name__}: {exc}"[:300]
-        except (ValueError, http.client.HTTPException) as exc:
+        except Exception as exc:    # noqa: BLE001  one item must never crash the run
             res.status, res.error = "error", f"{type(exc).__name__}: {exc}"[:300]
         finally:
             if conn is not None:
@@ -239,10 +290,10 @@ class _Adapter:
         res.raw_chars = len(raw)
         res.text = strip_think(raw)
         if res.status == "ok":
-            if res.finish_reason == "length":
+            if not res.text:
+                res.status = "empty"             # incl. thinking that ate the whole budget
+            elif res.finish_reason == "length":
                 res.status = "truncated"
-            elif not res.text:
-                res.status = "empty"
         return res
 
 
@@ -256,9 +307,9 @@ class OllamaAdapter(_Adapter):
         self._show: dict[str, dict | None] = {}
 
     def _show_info(self, model: str) -> dict | None:
-        if model not in self._show:
-            self._show[model] = _json_request(self.base_url, "POST", "/api/show",
-                                              {"model": model}, allow_remote=self.allow_remote)
+        if model not in self._show:     # only a real answer is cached; ProbeFailed is not
+            self._show[model] = _strict_json(self.base_url, "POST", "/api/show",
+                                             {"model": model}, allow_remote=self.allow_remote)
         return self._show[model]
 
     def context_length(self, model: str) -> int | None:
@@ -273,7 +324,7 @@ class OllamaAdapter(_Adapter):
         return None
 
     def digest(self, model: str) -> str | None:
-        data = _json_request(self.base_url, "GET", "/api/tags", allow_remote=self.allow_remote)
+        data = _strict_json(self.base_url, "GET", "/api/tags", allow_remote=self.allow_remote)
         for m in (data or {}).get("models", []):
             if model in (m.get("name"), m.get("model")) and m.get("digest"):
                 d = str(m["digest"])
@@ -296,10 +347,13 @@ class OllamaAdapter(_Adapter):
             if not line:
                 continue
             d = json.loads(line)
+            if not isinstance(d, dict):
+                continue
             ev: dict[str, Any] = {}
             if d.get("error"):
                 ev["error"] = d["error"]
-            ev["text"] = (d.get("message") or {}).get("content") or ""
+            msg = d.get("message")
+            ev["text"] = (msg.get("content") if isinstance(msg, dict) else None) or ""
             if d.get("done"):
                 ev["finish_reason"] = d.get("done_reason")
                 ev["prompt_tokens"] = d.get("prompt_eval_count")
@@ -317,9 +371,9 @@ class OpenAICompatAdapter(_Adapter):
         self._cache: dict[str, Any] = {}
 
     def _get(self, path: str) -> Any | None:
-        if path not in self._cache:
-            self._cache[path] = _json_request(self.base_url, "GET", path,
-                                              allow_remote=self.allow_remote)
+        if path not in self._cache:     # only a real answer is cached; ProbeFailed is not
+            self._cache[path] = _strict_json(self.base_url, "GET", path,
+                                             allow_remote=self.allow_remote)
         return self._cache[path]
 
     def _v1_entry(self, model: str) -> dict:
@@ -381,15 +435,20 @@ class OpenAICompatAdapter(_Adapter):
             if payload == b"[DONE]":
                 return
             d = json.loads(payload)
+            if not isinstance(d, dict):
+                continue
             ev: dict[str, Any] = {}
             if d.get("error"):
                 ev["error"] = d["error"]
             for ch in d.get("choices") or []:
-                ev["text"] = (ch.get("delta") or {}).get("content") or ""
+                if not isinstance(ch, dict):
+                    continue
+                delta = ch.get("delta")
+                ev["text"] = (delta.get("content") if isinstance(delta, dict) else None) or ""
                 if ch.get("finish_reason"):
                     ev["finish_reason"] = ch["finish_reason"]
-            u = d.get("usage") or {}
-            if u:
+            u = d.get("usage")
+            if isinstance(u, dict) and u:
                 ev["prompt_tokens"] = u.get("prompt_tokens")
                 ev["completion_tokens"] = u.get("completion_tokens")
             yield ev
@@ -416,6 +475,12 @@ def identify(base_url: str, *, allow_remote: bool = False) -> str | None:
     return "openai"
 
 
+def drop_embeddings(names: list[str]) -> list[str]:
+    """Model names minus embedding models (not chat models); one filter for every source."""
+    return [n for n in names if isinstance(n, str)
+            and not any(x in n.lower() for x in _EMBEDDING_MARKERS)]
+
+
 def list_models(base_url: str, runtime: str, *, allow_remote: bool = False) -> list[str]:
     if runtime == "ollama":
         data = _json_request(base_url, "GET", "/api/tags", allow_remote=allow_remote) or {}
@@ -423,7 +488,7 @@ def list_models(base_url: str, runtime: str, *, allow_remote: bool = False) -> l
     else:
         data = _json_request(base_url, "GET", "/v1/models", allow_remote=allow_remote) or {}
         names = [m.get("id") for m in data.get("data", []) if m.get("id")]
-    return [n for n in names if not any(x in n.lower() for x in _EMBEDDING_MARKERS)]
+    return drop_embeddings(names)
 
 
 def make_adapter(endpoint: Endpoint, **kw) -> _Adapter:
@@ -433,25 +498,31 @@ def make_adapter(endpoint: Endpoint, **kw) -> _Adapter:
 
 
 def discover(endpoint: str | None = None, *, ports: tuple = OPENAI_PROBE_PORTS,
-             include_ollama: bool = True) -> list[Endpoint]:
+             include_ollama: bool = True, allow_remote: bool = False) -> list[Endpoint]:
     """Endpoints that answer right now, each with the models it reports.
 
-    ``endpoint`` (a URL, loopback only) is the override: only it is probed. Otherwise Ollama
+    ``endpoint`` (an http/https URL) is the override: only it is probed. It must be loopback
+    unless the caller passes ``allow_remote=True`` (an explicit opt-in; a non-loopback endpoint
+    without it raises RuntimeError_, a malformed one yields ``[]``). Otherwise Ollama
     comes from ``model_discovery`` (one implementation of "what does Ollama have") and the
     OpenAI-compatible ports are probed on 127.0.0.1 with short timeouts.
     """
     if endpoint:
-        rt = identify(endpoint)
-        if rt is None:
+        try:
+            base = normalize_base(endpoint)
+            rt = identify(base, allow_remote=allow_remote)
+            if rt is None:
+                return []
+            return [Endpoint(rt, base, list_models(base, rt, allow_remote=allow_remote))]
+        except ValueError:
             return []
-        return [Endpoint(rt, normalize_base(endpoint), list_models(endpoint, rt))]
     found: list[Endpoint] = []
     seen: set[str] = set()
     if include_ollama:
         from llm_router import model_discovery
         base = normalize_base(model_discovery._ollama_url())
         if is_loopback(base):
-            names = model_discovery.probe_ollama()
+            names = drop_embeddings(list(model_discovery.probe_ollama() or []))
             if names:
                 found.append(Endpoint("ollama", base, list(names)))
                 seen.add(base)
