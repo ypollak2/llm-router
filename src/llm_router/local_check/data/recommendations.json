@@ -2,7 +2,7 @@
   "schema_version": 1,
   "generated": "2026-10-20",
   "bank_version": 1,
-  "note": "Data only. Measured entries come from recorded results; untested entries carry sizes and licences from the cited pages and make no performance claim.",
+  "note": "Data only. min_vram_gb is null everywhere: the cited pages state no VRAM figure, so GPU machines are fitted on the RAM rule (recommend.py docstring); fill it only from an official model card and cite it in sources.vram. Measured entries come from recorded results; untested entries carry sizes and licences from the cited pages and make no performance claim.",
   "entries": [
     {
       "family": "qwen3.6 35B-A3B (coding)",
@@ -34,6 +34,8 @@
           "n": 70
         },
         "date": "2026-10-20",
+        "date_source": "run date: started_utc 2026-10-20T02:08:13Z in prereg-q37/run/USED.json (result.json itself carries no timestamp; file written 2026-10-20 03:22 local)",
+        "listed_date": "2026-10-20",
         "hardware_class": "owner dev Mac (Apple M5 Pro, 48 GiB unified memory; probed 2026-10-20, not recorded in the run artifact)",
         "source": "~/.rsi/research/primary-plan/v16/prereg-q37/run/result.json (arms.qwen); model digest 017eda0b7c34 per MANIFEST-Q37.json"
       },

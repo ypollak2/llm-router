@@ -13,8 +13,10 @@ D = R.load()
 SRC = Path(R.__file__)
 
 
-def mac(usable):
-    return {"gpu": "apple_unified", "vram_gb": 48.0, "usable_gb": usable, "total_gb": 48.0}
+def mac(total, free=None):
+    """Unified-memory Mac; ``free`` is deliberately independent of capacity (a busy machine)."""
+    return {"gpu": "apple_unified", "vram_gb": total, "total_gb": total,
+            "free_gb": total if free is None else free, "usable_gb": 0.0 if free is None else free}
 
 
 # ---- data file
@@ -39,7 +41,7 @@ def test_measured_claims_have_source_and_untested_have_none():
         if e["status"] == "untested":
             assert b is None
             continue
-        assert b["source"].strip() and b["date"] and b["hardware_class"] and b["bank_version"]
+        assert b["source"].strip() and b["date"] and b["listed_date"] and b["hardware_class"] and b["bank_version"]
         lanes = b["lanes"]
         assert sum(v["k"] for v in lanes.values()) == b["pooled"]["k"]
         assert sum(v["n"] for v in lanes.values()) == b["pooled"]["n"]
@@ -81,24 +83,46 @@ def test_no_model_name_literal_in_recommend_py():
 
 # ---- selection
 def test_big_machine_ranks_measured_first_then_untested_by_size():
-    r = R.recommend(mac(40), "ollama", None, None, today=date(2026, 10, 21))
+    r = R.recommend(mac(64), "ollama", None, None, today=date(2026, 10, 21))
     assert r[0].status == "measured" and r[0].pooled_rate == 60 / 70
     rest = [x.need_gb for x in r[1:]]
     assert rest == sorted(rest) and all(x.status == "untested" for x in r[1:])
     assert r[0].pull_command == f"ollama pull {r[0].model_id}"
 
 
+def test_busy_machine_low_free_but_enough_total_still_fits():
+    # 48 GiB Mac with 2 GB free right now: capacity 48 - 9.6 = 38.4 >= 28.4 (the review's case)
+    r = R.recommend(mac(48, free=2.0), "ollama", None, None, today=date(2026, 10, 21))
+    assert r and r[0].status == "measured" and r[0].fit == "ok"
+    assert R.capacity_gb(mac(48, free=2.0)) == 38.4
+
+
 def test_small_machine_filters_out_big_models():
-    r = R.recommend(mac(6), "ollama", None, None, today=date(2026, 10, 21))
-    assert r and all(x.need_gb <= 6 for x in r) and not any(x.status == "measured" for x in r)
+    # 12 GiB: capacity 12 - 4 = 8.0
+    r = R.recommend(mac(12), "ollama", None, None, today=date(2026, 10, 21))
+    assert r and all(x.need_gb <= 8.0 for x in r) and not any(x.status == "measured" for x in r)
+    assert R.recommend(mac(4), "ollama") == []  # capacity 0: nothing fits, and it is not "unknown"
+
+
+def test_capacity_reserve_is_max_4_or_20_percent():
+    assert R.capacity_gb({"total_gb": 8}) == 4.0
+    assert R.capacity_gb({"total_gb": 16}) == 12.0   # 4 GiB floor
+    assert R.capacity_gb({"total_gb": 48}) == 38.4   # 20%
 
 
 def test_headroom_and_kv_boundary():
     e = next(x for x in D["entries"] if x["status"] == "measured")
     need = R.need_gb(e)
     assert need == round(22 * 1.2 + 2.0, 2)
-    assert R.recommend(mac(need), "ollama")[0].status == "measured"
-    assert not any(x.status == "measured" for x in R.recommend(mac(need - 0.01), "ollama"))
+    total = need / 0.8
+    assert R.capacity_gb(mac(total)) == need
+    assert R.recommend(mac(total), "ollama")[0].status == "measured"
+    assert not any(x.status == "measured" for x in R.recommend(mac(total - 0.1), "ollama"))
+
+
+def test_empty_reason_text():
+    assert R.empty_reason("lmstudio") == "no verified recommendation for lmstudio"
+    assert R.recommend(mac(99), "lmstudio") == []
 
 
 def test_runtime_without_ids_is_empty_and_pull_is_runtime_specific():
@@ -107,8 +131,9 @@ def test_runtime_without_ids_is_empty_and_pull_is_runtime_specific():
 
 
 def test_unknown_hardware_is_kept_and_marked_not_zero():
-    r = R.recommend({"usable_gb": None, "gpu": None}, "ollama")
-    assert r and all(x.fit == "unknown" for x in r)
+    for hw in ({"usable_gb": None, "gpu": None}, {"total_gb": None}, {"usable_gb": 50.0}, None):
+        r = R.recommend(hw, "ollama")
+        assert r and all(x.fit == "unknown" for x in r), hw
     assert len(r) == len([e for e in D["entries"] if e["ids"].get("ollama")])
 
 
@@ -116,8 +141,14 @@ def test_discrete_gpu_uses_vram_when_entry_gives_min_vram():
     d = json.loads(json.dumps(D))
     for e in d["entries"]:
         e["min_vram_gb"] = e["min_ram_gb"]
-    r = R.recommend({"gpu": "nvidia", "vram_gb": 12.0, "usable_gb": 3.0}, "ollama", data=d)
-    assert r and all(x.need_gb <= 12 for x in r)
+    r = R.recommend({"gpu": "nvidia", "vram_gb": 12.0, "total_gb": 16.0}, "ollama", data=d)
+    assert r and all(x.need_gb <= 12 for x in r) and not any(x.status == "measured" for x in r)
+
+
+def test_discrete_gpu_without_min_vram_falls_back_to_ram_rule():
+    hw = {"gpu": "nvidia", "vram_gb": 8.0, "total_gb": 64.0}  # capacity 51.2
+    assert R.recommend(hw, "ollama")[0].status == "measured"
+    assert all(e["min_vram_gb"] is None for e in D["entries"])  # no model card gives a VRAM figure (see docstring)
 
 
 def test_current_model_excluded_and_pass_returns_nothing():
