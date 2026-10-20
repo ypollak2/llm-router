@@ -148,6 +148,10 @@ def _run_check(c: Check, notes: list[str]) -> Outcome:
     digest0 = c.adapter.digest(c.model)
     settings = c.adapter.settings_hash(c.model)
     max_chars = c.adapter.max_prompt_chars(c.model)
+    try:                                   # LC-8b: the num_ctx this run used (cached by the adapter; None if unknown)
+        ctx0 = c.adapter.ctx(c.model)
+    except Exception:                      # noqa: BLE001 - a missing/odd adapter ctx only costs the parity field
+        ctx0 = None
     key = A.config_key(c.model, digest0, bank.version, bank.sha256, settings)
     log = A.AttemptLog(c.runs_root)
     config = {"model": c.model, "digest": digest0, "bank_version": bank.version, "bank_sha256": bank.sha256, "settings_hash": settings, "runtime": c.runtime}
@@ -315,6 +319,7 @@ def _run_check(c: Check, notes: list[str]) -> Outcome:
                 "run_id": run_id, "date": _date(ts),
                 "scope": {"max_prompt_chars": max_chars, "items_excluded_by_context": n_drawn - len(items), "draws": sorted({e["draw"] for e in plan.prior} | {draw})},
                 "attempts": max_n,
+                "ctx": ctx0, "think": getattr(c.adapter, "think", None),      # LC-8b: what routing's parity test compares
             }
             report = eligibility_store.record_local_check(c.model, jobs, provenance, path=c.eligibility_path)
         refused = {j: v for j, v in report.items() if v["status"] != "written"}

@@ -75,3 +75,62 @@ def record_text_job_outcome(*, job: str, model: str, status: str, attempts: int)
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
+# ---- LC-8b: per-attempt LOCAL outcomes, the demotion monitor's input ---------------------------------
+#
+# The row above holds only the FINAL served model. A local model that errored or timed out and was
+# rescued by the next chain entry shows there under the rescuer, and an attempt-1 reject followed by an
+# attempt-2 accept reads as accepted. So a dead or slow Ollama never demoted (review of #675). This
+# sidecar holds one row per LOCAL attempt: ``{"ts", "job", "model", "outcome"}``, outcome
+# ``ok`` (acceptance check passed), ``rejected`` (answered, check failed) or ``error`` (the local model
+# was tried and the router moved on: error, timeout, contract rejection). No prompt text.
+
+LOCAL_ATTEMPTS_FILENAME = "text_job_local_attempts.jsonl"
+OUTCOME_OK = "ok"
+OUTCOME_REJECTED = "rejected"
+OUTCOME_ERROR = "error"
+
+
+def _local_name(model: str) -> str | None:
+    head, sep, rest = model.partition("/")
+    return rest if sep and head in ("ollama", "ollama_chat") else None
+
+
+def _append_local_attempt(job: str, model: str, outcome: str) -> None:
+    row = {"ts": time.time(), "job": job, "model": model, "outcome": outcome}
+    try:
+        path = paths.state_path(LOCAL_ATTEMPTS_FILENAME)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8", opener=paths.private_opener) as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def record_local_attempts(*, job: str, served_model: str, chain_attempts: list[str], accepted: bool) -> list[str]:
+    """Record one ``llm_text_job`` attempt's local outcomes; returns the local models touched.
+
+    Every ``ollama/*`` entry in ``chain_attempts`` other than the served model was tried and failed
+    (``error``), even though a later entry rescued the call. If the served model is local, the
+    acceptance check decides ``ok`` or ``rejected``. Best-effort: never raises.
+    """
+    try:
+        from llm_router.quality_feedback import is_skip_marker
+        from llm_router.local_check.routing import norm_model
+        served_n = norm_model(served_model) if isinstance(served_model, str) else ""
+        local: dict[str, str] = {}
+        for m in chain_attempts or []:
+            if isinstance(m, str) and not is_skip_marker(m) and _local_name(m) is not None:
+                local.setdefault(norm_model(m), m)
+        touched: list[str] = []
+        for n, m in local.items():
+            if n != served_n:
+                _append_local_attempt(job, m, OUTCOME_ERROR)
+                touched.append(m)
+        if served_n in local or (served_model.startswith(("ollama/", "ollama_chat/")) if isinstance(served_model, str) else False):
+            _append_local_attempt(job, served_model, OUTCOME_OK if accepted else OUTCOME_REJECTED)
+            touched.append(served_model)
+        return touched
+    except Exception:
+        return []

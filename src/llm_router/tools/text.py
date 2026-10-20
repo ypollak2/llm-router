@@ -1095,6 +1095,7 @@ async def llm_text_job(
         STATUS_ACCEPTED,
         STATUS_FALLBACK,
         STATUS_REJECTED,
+        record_local_attempts,
         record_text_job_outcome,
     )
 
@@ -1123,6 +1124,7 @@ async def llm_text_job(
     result_text = ""
     accepted = False
     attempt = 0
+    _local_touched: set[str] = set()
 
     from llm_router import eligibility_routing
 
@@ -1144,6 +1146,9 @@ async def llm_text_job(
 
             check = check_output(job, truncated_input, resp.content)
             result_text = check.text
+            # LC-8b: one row per LOCAL attempt (incl. a local failure the next chain entry rescued).
+            _local_touched.update(record_local_attempts(
+                job=job, served_model=resp.model, chain_attempts=getattr(resp, "chain_attempts", None) or [], accepted=check.ok))
             if check.ok:
                 accepted = True
                 break
@@ -1156,7 +1161,8 @@ async def llm_text_job(
     record_text_job_outcome(job=job, model=model_name, status=status, attempts=attempt)
     try:  # LC-8: demotion monitor (never re-enables; never breaks the call)
         from llm_router.local_check import routing as _lc_routing
-        _lc_routing.demotion_check(model_name, job)
+        for _m in sorted(_local_touched):  # LC-8b: every local model tried, not only the served one
+            _lc_routing.demotion_check(_m, job)
     except Exception:  # noqa: BLE001
         pass
 

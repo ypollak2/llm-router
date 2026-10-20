@@ -249,14 +249,27 @@ def prefer_passed(
     """Move the first local model with a routable passed lane to the front; else the chain unchanged.
 
     Only models ALREADY in ``models`` are considered (D-116 / F106 / F112 have run; nothing is added).
-    A model is preferred iff ALL hold: ``local_routing.json`` enables (model, job); the effective lane
-    (user's fresh local-check lane, else pre-registered, D-262) is ``passed``; the lane is fresh against
-    the inventory-cache digest (``local_check.display.inventory``; no HTTP); ``input_len`` fits the lane's
-    ``scope.max_prompt_chars``; and the route-time Ollama settings (``think``, ``num_ctx``) hash to the
-    lane's ``settings_hash``. Any unknown input means no preference. A pre-registered lane carries no
-    scope or settings hash, so it is checked against the window the router will request instead
-    (``input_len`` must fit it and thinking must be off). Never raises; the chain is returned as given
-    on any error. The acceptance check and the Claude fallback in ``llm_text_job`` are unchanged.
+    A model is preferred iff ALL hold:
+
+    * ``local_routing.json`` enables (model, job);
+    * the effective lane (the user's fresh local-check lane, else pre-registered, D-262) is ``passed``;
+    * a local-check lane is VERIFIED against the model digest in the inventory cache (``local_check.display.inventory``,
+      no HTTP): the cache must be fresh and hold a digest equal to the lane's. A missing or stale cache, or no
+      digest, means no preference (the 30-day rule of ``lane_is_fresh`` is for display only);
+    * an entry enabled from a ``local_check`` source never falls back to a pre-registered lane when its own lane
+      is stale (only ``prereg``/``manual`` entries may use one);
+    * settings parity (LC-8b), for a lane that recorded the ctx it was measured with: route-time ``think`` is off,
+      the router's ``num_ctx`` is >= the measured one, and ``input_len`` <= min(``scope.max_prompt_chars``,
+      ``max_prompt_chars(router ctx)``). Temperature is NOT part of the claim: the lane measured at 0 and the router
+      calls with 0.2; the acceptance check, not the temperature, gates every answer. A lane recorded before ctx was
+      stored keeps the old rule (its ``settings_hash`` must equal the hash of the route-time settings);
+    * a pre-registered lane carries no scope or settings: ``input_len`` must fit the window the router will
+      request and thinking must be off.
+
+    When a passed lane is withheld for a reason of this list the router did not fail on, a ``not_preferred``
+    skip cause names it (``why`` shows it); ``local_routing.doctor_lines`` reports the settings ones. Never
+    raises; the chain is returned as given on any error. The acceptance check and the Claude fallback in
+    ``llm_text_job`` are unchanged.
     """
     try:
         return _prefer_passed(models, job, input_len, now, digests, ctx_for, think, eligibility, routing)
@@ -266,10 +279,67 @@ def prefer_passed(
         return models
 
 
+def _measured_ctx(lane: dict) -> int | None:
+    v = lane.get("ctx")
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+
+
+def lane_settings_blocker(lane: dict, source: str, ctx: int | None, use_think: bool) -> tuple[str | None, int | None]:
+    """(cause, prompt-chars limit) for a passed lane at the route-time settings; cause None = settings allow it.
+
+    Causes: ``think_on``, ``ctx_unknown``, ``lane_think`` (measured with thinking on), ``ctx_below_measured``,
+    ``settings_mismatch`` (old lane without ctx), ``no_scope``.
+    """
+    from llm_router.local_check import runtimes as rt
+    if use_think:
+        return "think_on", None
+    if not ctx:
+        return "ctx_unknown", None
+    if source != "local_check":
+        return None, rt.max_prompt_chars(ctx)
+    scope = lane.get("scope")
+    scope_limit = scope.get("max_prompt_chars") if isinstance(scope, dict) else None
+    if not isinstance(scope_limit, int) or isinstance(scope_limit, bool):
+        return "no_scope", None
+    measured = _measured_ctx(lane)
+    if measured is not None and isinstance(lane.get("think"), bool):
+        if lane["think"]:
+            return "lane_think", None
+        if ctx < measured:
+            return "ctx_below_measured", None
+        window = rt.max_prompt_chars(ctx)
+        return None, (min(scope_limit, window) if window is not None else None)
+    want = lane.get("settings_hash")  # a lane recorded before ctx/think were stored
+    if not isinstance(want, str) or rt.settings_hash(
+            temperature=rt.TEMPERATURE, ctx=ctx, max_tokens=rt.MAX_TOKENS, think=False) != want:
+        return "settings_mismatch", None
+    return None, scope_limit
+
+
+def _passed_lane(m_bare: str, job: str, digests: dict[str, str], now: float, eligibility: Path | None,
+                 entry_source: Any) -> tuple[dict | None, str, str | None]:
+    """(lane, source, withheld-cause) for the effective passed lane of one enabled model."""
+    from llm_router.local_check import routing as lr
+    from llm_router.resolver import eligibility_store as ES
+    lane, source, key = None, "unknown", lr.candidates(m_bare)[0]
+    for k in lr.candidates(m_bare):
+        found = ES.effective_text_job_lane(k, job, digests.get(k), now, path=eligibility)
+        if found.lane is not None:
+            lane, source, key = found.lane, found.source, k
+            break
+    if lane is None or lane.get("grade") != "passed":
+        return None, source, None
+    if source == "prereg" and entry_source == "local_check":
+        return None, source, "local_lane_stale"
+    if source == "local_check":
+        stored, cur = lane.get("model_digest"), digests.get(key)
+        if not (isinstance(stored, str) and stored and isinstance(cur, str) and cur and stored == cur):
+            return None, source, "digest_unverified"
+    return lane, source, None
+
+
 def _prefer_passed(models, job, input_len, now, digests, ctx_for, think, eligibility, routing):
     from llm_router.local_check import routing as lr
-    from llm_router.local_check import runtimes as rt
-    from llm_router.resolver import eligibility_store as ES
 
     if not models or _opted_out() or not isinstance(input_len, int) or input_len < 0:
         return models
@@ -280,29 +350,49 @@ def _prefer_passed(models, job, input_len, now, digests, ctx_for, think, eligibi
         head, sep, bare = m.partition("/")
         if not sep or head != "ollama" or not lr.is_enabled(bare, job, path=routing):
             continue
-        lane, source = None, "unknown"
-        for key in lr.candidates(bare):
-            found = ES.effective_text_job_lane(key, job, digests.get(key), now, path=eligibility)
-            if found.lane is not None:
-                lane, source = found.lane, found.source
-                break
-        if lane is None or lane.get("grade") != "passed":
+        e = lr.entry(bare, job, path=routing)
+        lane, source, withheld = _passed_lane(bare, job, digests, now, eligibility, (e or {}).get("source"))
+        if withheld:
+            skip_causes.note(m, skip_causes.NOT_PREFERRED, lane=job, detail=withheld)
+        if lane is None:
             continue
         use_think = _route_time_think() if think is None else think
         ctx = (ctx_for or _route_time_ctx)(m)
-        if use_think or not ctx:
+        cause, limit = lane_settings_blocker(lane, source, ctx, use_think)
+        if cause:
+            skip_causes.note(m, skip_causes.NOT_PREFERRED, lane=job, detail=cause, ctx=ctx, measured=_measured_ctx(lane))
             continue
-        if source == "local_check":
-            scope = lane.get("scope")
-            limit = scope.get("max_prompt_chars") if isinstance(scope, dict) else None
-            want = lane.get("settings_hash")
-            if not isinstance(limit, int) or isinstance(limit, bool) or not isinstance(want, str):
-                continue
-            if rt.settings_hash(temperature=rt.TEMPERATURE, ctx=ctx, max_tokens=rt.MAX_TOKENS, think=False) != want:
-                continue
-        else:
-            limit = rt.max_prompt_chars(ctx)
         if limit is None or input_len > limit:
             continue
         return [m] + models[:idx] + models[idx + 1:]
     return models
+
+
+def settings_notices(*, digests: dict[str, str] | None = None, ctx_for: Any = None, think: bool | None = None,
+                     eligibility: Path | None = None, routing: Path | None = None, now: float | None = None) -> list[str]:
+    """``doctor`` lines for enabled, passed lanes that route-time settings keep from being preferred. Never raises."""
+    import time as _time
+    out: list[str] = []
+    try:
+        from llm_router.local_check import routing as lr
+        if digests is None:
+            from llm_router.local_check import display
+            digests = display.inventory()[1]
+        clock = _time.time() if now is None else now
+        use_think = _route_time_think() if think is None else think
+        for model, jobs in sorted(lr._read(routing).items()):
+            for job, e in sorted(jobs.items() if isinstance(jobs, dict) else []):
+                if not (isinstance(e, dict) and e.get("enabled") is True):
+                    continue
+                lane, source, _ = _passed_lane(model, job, digests, clock, eligibility, e.get("source"))
+                if lane is None:
+                    continue
+                ctx = (ctx_for or _route_time_ctx)(f"ollama/{model}")
+                cause, _limit = lane_settings_blocker(lane, source, ctx, use_think)
+                if cause:
+                    out.append(f"local-check: {model} - {job} passed but not preferred for routing ({cause}; router ctx "
+                               f"{ctx}, measured {_measured_ctx(lane)}): align LLM_ROUTER_OLLAMA_NUM_CTX / think with the check "
+                               f"or re-run `llm-router local-check`")
+    except Exception:  # noqa: BLE001 -- doctor output must never break
+        return out
+    return out

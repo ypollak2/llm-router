@@ -36,8 +36,10 @@ FAILED_ELIGIBILITY = "failed_eligibility"  # F106: local model measurably failed
 
 ELIGIBILITY_BYPASSED = "eligibility_bypassed"  # F112: failed-lane filter skipped for a verified job (``lane``, ``source``=caller)
 
+NOT_PREFERRED = "not_preferred"      # LC-8b: a passed local-check lane was not put first (``lane``=job, ``detail``=cause); nothing dropped
+
 BUILD_REASONS = frozenset({UNAVAILABLE, BLOCKED, POLICY, CAPABILITY_FILTERED, FLOOR, FAILED_ELIGIBILITY,
-                           ELIGIBILITY_BYPASSED})
+                           ELIGIBILITY_BYPASSED, NOT_PREFERRED})
 
 # Causes the report splits local share into (see routing_report.executed_routes).
 CAUSE_BENCH = "bench"
