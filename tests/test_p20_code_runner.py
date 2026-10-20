@@ -699,6 +699,192 @@ def test_open_permissions_never_chmods_through_a_swapped_symlink(setup, tmp_path
     assert not (cfg.run_dir / "w2").exists()
 
 
+def test_walk_tree_parent_identity_stops_a_rename_out_race(setup, tmp_path, monkeypatch):
+    """F122: a subdirectory renamed out of the root while the walker listed it makes `..`
+    resolve outside the root; without the (dev, ino) check the walker deleted outside/c."""
+    cfg = setup[0]
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "c").write_text("PRECIOUS")
+    base = cfg.run_dir / "w"
+    (base / "b").mkdir(parents=True)
+    (base / "b" / "leaf").write_text("x")
+    (base / "c").write_text("y")
+    real_listdir = os.listdir
+    moved = []
+
+    def listdir_then_rename(fd):
+        names = real_listdir(fd)
+        if sorted(names) == ["b", "c"]:
+            return ["c", "b"]  # b is handled first, c afterwards
+        if names == ["leaf"] and not moved:
+            moved.append(1)
+            os.rename(base / "b", outside / "b")  # the agent moves b out after the listing
+        return names
+
+    monkeypatch.setattr(os, "listdir", listdir_then_rename)
+    assert r._delete_tree(cfg.run_dir, base) is False
+    monkeypatch.undo()
+    assert moved and (outside / "c").read_text() == "PRECIOUS"
+
+
+def test_walk_tree_does_not_descend_into_another_filesystem(setup, monkeypatch):
+    """F122: a directory on a different st_dev (a mount point) is neither entered nor removed."""
+    cfg = setup[0]
+    base = cfg.run_dir / "w"
+    (base / "mnt").mkdir(parents=True)
+    (base / "mnt" / "keep.txt").write_text("x")
+    (base / "plain").mkdir()
+    real_stat, real_fstat = os.stat, os.fstat
+    mnt_ino = real_stat(base / "mnt").st_ino
+
+    def shifted(info):
+        fields = list(info)
+        fields[2] += 1  # st_dev
+        return os.stat_result(fields)
+
+    def fake_stat(path, *a, **kw):
+        info = real_stat(path, *a, **kw)
+        return shifted(info) if info.st_ino == mnt_ino else info
+
+    def fake_fstat(fd):
+        info = real_fstat(fd)
+        return shifted(info) if info.st_ino == mnt_ino else info
+
+    monkeypatch.setattr(os, "stat", fake_stat)
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+    assert r._delete_tree(cfg.run_dir, base) is False
+    monkeypatch.undo()
+    assert (base / "mnt" / "keep.txt").exists() and not (base / "plain").exists()
+
+
+def test_purge_stops_at_its_time_budget_and_says_so(setup, monkeypatch):
+    cfg = setup[0]
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    home.mkdir(parents=True)
+    work.mkdir(parents=True)
+    r.git(work, "init", "-q")
+    bottom = _deep_chain(home / "deep", 50)
+    os.close(bottom)
+    (home / "t.txt").write_text(token)
+    monkeypatch.setattr(r, "PURGE_SECONDS", -1.0)
+    monkeypatch.setattr(r, "PURGE_EXTRA_SECONDS", -1.0)
+    with pytest.raises(h.Refuse, match=r"NOT fully deleted.*time budget exceeded") as info:
+        r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir)
+    assert "chain too deep" not in str(info.value)
+    assert "code_runs/w" in str(info.value) and "agent_home/x" in str(info.value)  # named
+    assert home.exists()  # the budget ended the purge; the refusal tells the owner to purge
+
+
+def test_purge_after_budget_stop_still_attempts_the_remaining_paths(setup, monkeypatch):
+    cfg = setup[0]
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    work = cfg.run_dir / "code_runs" / "w"
+    home = cfg.run_dir / "agent_home" / "x"
+    home.mkdir(parents=True)
+    work.mkdir(parents=True)
+    r.git(work, "init", "-q")
+    (home / "t.txt").write_text(token)
+    monkeypatch.setattr(r, "PURGE_SECONDS", -1.0)  # work: stopped at once; home: extra budget
+    with pytest.raises(h.Refuse, match=r"NOT fully deleted.*not fully deleted: code_runs/w;") as info:
+        r.scrub_claude_artifacts(token, work, home, "", cfg.run_dir)
+    assert "agent_home" not in str(info.value).split("not fully deleted: ")[1].split(";")[0]
+    assert not home.exists() and work.exists()
+
+
+def test_scrub_unexpected_error_branch_reports_the_budget_note(setup, monkeypatch):
+    cfg = setup[0]
+    work = cfg.run_dir / "code_runs" / "w"
+    work.mkdir(parents=True)
+    monkeypatch.setattr(r, "PURGE_SECONDS", -1.0)
+    monkeypatch.setattr(r, "PURGE_EXTRA_SECONDS", -1.0)
+    monkeypatch.setattr(h, "scan_for_token", lambda *a, **k: 1 / 0)
+    with pytest.raises(h.Refuse, match=r"scan failed.*NOT fully deleted.*time budget exceeded"):
+        r.scrub_claude_artifacts("FAKE-OAUTH-TOKEN-abcdef0123456789", work, cfg.run_dir / "nohome",
+                                 "", cfg.run_dir)
+
+
+def test_capture_buffer_keeps_only_the_last_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr(r, "MAX_CAPTURE_BYTES", 100_000)
+    done = r.run_agent_process(
+        [sys.executable, "-c", "import sys; sys.stdout.write('a'*300000 + 'END')"],
+        cwd=tmp_path, env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]})
+    assert len(done.stdout) == 100_000 and done.stdout.endswith("END")
+
+
+_CAP_TOKEN = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+_CAP = 100_000
+_CAP_PLACE = {  # where the token starts in a 300000-byte stream
+    "very_start": 0,
+    "straddles_the_cut": 300_000 - _CAP - 10,   # bytes before this offset are dropped
+    "straddles_a_chunk_boundary": 65_536 - 5,   # the reader reads 64 KiB at a time
+}
+
+
+def _flood(tmp_path, offset, token=_CAP_TOKEN, stream="stdout"):
+    code = ("import sys; t=sys.argv[1]; o=int(sys.argv[2]); n=300000; "
+            "s=('a'*o + t).ljust(n, 'b'); "
+            f"sys.{stream}.write(s + 'END'); sys.{stream}.flush()")
+    return [sys.executable, "-c", code, token, str(offset)]
+
+
+@pytest.mark.parametrize("where", sorted(_CAP_PLACE))
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_capture_cap_never_hides_a_token_from_the_scan(tmp_path, monkeypatch, where, stream):
+    monkeypatch.setattr(r, "MAX_CAPTURE_BYTES", _CAP)
+    done = r.run_agent_process(
+        _flood(tmp_path, _CAP_PLACE[where], stream=stream), cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"],
+             "CLAUDE_CODE_OAUTH_TOKEN": _CAP_TOKEN})
+    kept = done.stdout + done.stderr
+    assert done.capture_flag == "token found in agent output"
+    if where != "straddles_a_chunk_boundary":
+        assert _CAP_TOKEN not in kept  # the kept tail no longer holds it: only the flag does
+
+
+def test_capture_cut_without_a_token_is_flagged_over_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(r, "MAX_CAPTURE_BYTES", _CAP)
+    done = r.run_agent_process(
+        _flood(tmp_path, 0, token="not-the-token"), cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"],
+             "CLAUDE_CODE_OAUTH_TOKEN": _CAP_TOKEN})
+    assert done.capture_flag == "agent output over cap"
+    small = r.run_agent_process(
+        [sys.executable, "-c", "print('ok')"], cwd=tmp_path,
+        env={"HOME": str(tmp_path), "PATH": os.environ["PATH"],
+             "CLAUDE_CODE_OAUTH_TOKEN": _CAP_TOKEN})
+    assert small.capture_flag is None
+
+
+@pytest.mark.parametrize("where", sorted(_CAP_PLACE))
+@pytest.mark.parametrize("flood", ["token", "plain"])
+def test_agent_refuses_and_purges_on_capped_output(setup, monkeypatch, capsys, where, flood):
+    """End to end through agent(): the head/cut token, or any cut, refuses with purge + rotate."""
+    cfg = setup[0]
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", _CAP_TOKEN)
+    fake_claude(setup, monkeypatch)
+    monkeypatch.setattr(r, "MAX_CAPTURE_BYTES", _CAP)
+    real = r.run_agent_process
+    seen = {}
+
+    def flooding(argv, **kwargs):
+        seen["home"] = Path(kwargs["env"]["HOME"])
+        (seen["home"] / "t.txt").write_text("scratch")
+        argv = _flood(Path(kwargs["cwd"]), _CAP_PLACE[where],
+                      token=_CAP_TOKEN if flood == "token" else "not-the-token")
+        return real(argv, **{**kwargs, "input": ""})
+
+    monkeypatch.setattr(r, "_claude_run", flooding)
+    assert invoke(setup, "sonnet") == 2
+    err = capsys.readouterr().err
+    assert ("token found in agent output" if flood == "token" else "agent output over cap") in err
+    assert "rotate the token" in err and _CAP_TOKEN not in err
+    assert not seen["home"].exists() and not rows(setup)
+    assert cfg.run_dir.exists()
+
+
 def _deep_chain(top, depth):
     """A directory chain `depth` levels deep (names of one letter), built through dir fds so the
     path is far longer than PATH_MAX. Returns the bottom directory's relative parts."""
@@ -862,14 +1048,57 @@ def test_stop_never_signals_a_pid_it_cannot_reverify(bystander):
         leader.wait()
 
 
-def test_stop_does_not_killpg_a_reaped_leader(bystander, monkeypatch):
-    """With the leader gone from the table, no group signal is sent (its pgid may be reused)."""
+def test_stop_with_missing_leader_row_fails_closed_without_signals(bystander, monkeypatch):
+    """F122: a leader absent from the table (reaped, hidden or unparseable) cannot be shown
+    stopped: AgentSurvived, and no group signal is sent (its pgid may be reused)."""
     sent = []
     monkeypatch.setattr(os, "killpg", lambda *a: sent.append(a))
     gone = subprocess.Popen(["true"], start_new_session=True)
     gone.wait()
-    h.stop_agent_processes(gone.pid, {})
+    with pytest.raises(h.AgentSurvived, match="leader missing"):
+        h.stop_agent_processes(gone.pid, {})
     assert not sent and bystander.poll() is None
+
+
+def test_stop_with_emulated_missing_row_of_a_live_leader(monkeypatch):
+    leader = subprocess.Popen(["sleep", "300"], start_new_session=True)
+    try:
+        real = h.process_table
+        monkeypatch.setattr(h, "process_table",
+                            lambda: {p: x for p, x in real().items() if p != leader.pid})
+        with pytest.raises(h.AgentSurvived, match="leader missing"):
+            h.stop_agent_processes(leader.pid, {})
+        assert leader.poll() is None  # nothing was signalled
+    finally:
+        leader.kill()
+        leader.wait()
+
+
+def test_survivor_message_names_pids_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(r, "DRAIN_SECONDS", 1.0)
+    try:
+        with pytest.raises(h.AgentSurvived, match=r"survived \(pids: \d+") as info:
+            _run(tmp_path, "orphan", 30)
+    finally:
+        pidfile = tmp_path / "pid"
+        if pidfile.exists() and pidfile.read_text():
+            with contextlib.suppress(OSError):
+                os.kill(int(pidfile.read_text()), 9)
+    assert "python" not in str(info.value) and "sleep" not in str(info.value)
+
+
+def test_agent_survivor_message_keeps_the_pids(setup, monkeypatch, capsys):
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "FAKE-OAUTH-TOKEN-abcdef0123456789")
+    fake_claude(setup, monkeypatch)
+
+    def survivor(argv, **kwargs):
+        raise h.AgentSurvived("refusing: agent process survived (pids: 4242, 4243)")
+
+    monkeypatch.setattr(r, "_claude_run", survivor)
+    assert invoke(setup, "sonnet") == 2
+    err = capsys.readouterr().err
+    assert "pids: 4242, 4243" in err and "nothing was scanned" in err
+    assert "claude setup-token" in err
 
 
 def test_unreadable_process_list_refuses(monkeypatch):
