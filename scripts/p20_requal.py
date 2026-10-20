@@ -1011,7 +1011,8 @@ def stop_agent_processes(leader: int, known: dict[int, str], seconds: float = 10
     waiting on it before this call (the table must still list it with pgid == leader), and each
     pid in `known` whose start time, re-read now, equals the one recorded when it was first
     seen below the agent. A pid whose identity cannot be re-verified is never signalled.
-    Raises AgentSurvived if the table cannot be read or something is still alive at the end."""
+    Raises AgentSurvived if the table cannot be read, the leader's row is missing, or something
+    is still alive at the end (the message names the pids only, never a command line)."""
     import signal
     deadline = time.monotonic() + seconds
     while True:
@@ -1020,7 +1021,12 @@ def stop_agent_processes(leader: int, known: dict[int, str], seconds: float = 10
             raise AgentSurvived("refusing: agent process survived (process list unreadable)")
         track_agent_tree(known, table, leader)
         row = table.get(leader)
-        group = row is not None and row.pgid == leader
+        if row is None:
+            # F122: the caller never reaps the leader before this call, so even a dead one is
+            # listed (Z). Missing means a hidden or unparseable row: "stopped" cannot be shown.
+            raise AgentSurvived("refusing: agent process survived (leader missing from the "
+                                "process list, so it cannot be shown stopped)")
+        group = row.pgid == leader
         if group:
             try:
                 os.killpg(leader, signal.SIGKILL)
@@ -1038,8 +1044,13 @@ def stop_agent_processes(leader: int, known: dict[int, str], seconds: float = 10
         if not alive and not (group and members):
             return
         if time.monotonic() > deadline:
-            raise AgentSurvived("refusing: agent process survived")
+            left = sorted(alive | (members if group else set()))
+            raise AgentSurvived("refusing: agent process survived (pids: "
+                                f"{', '.join(map(str, left))})")
         time.sleep(0.1)
+
+
+_last_holders: list[int] = []   # F122: pids found by the last holder check (message only)
 
 
 def _open_paths_of_others(dirs: list[Path], seconds: float) -> bool | None:
@@ -1047,6 +1058,7 @@ def _open_paths_of_others(dirs: list[Path], seconds: float) -> bool | None:
     `dirs`, False if none, None if that could not be determined."""
     roots = [os.path.realpath(d) for d in dirs]
     me = os.getpid()
+    found: set[int] = set()
 
     def under(path: str) -> bool:
         return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
@@ -1062,8 +1074,9 @@ def _open_paths_of_others(dirs: list[Path], seconds: float) -> bool | None:
             except OSError:
                 continue
             if any(under(link) for link in links):
-                return True
-        return False
+                found.add(int(entry.name))
+        _last_holders[:] = sorted(found)
+        return bool(found)
     try:
         done = subprocess.run(["lsof", "-nP", "-w", "-Fpn"], stdin=subprocess.DEVNULL,
                               capture_output=True, timeout=seconds, check=False)
@@ -1076,18 +1089,21 @@ def _open_paths_of_others(dirs: list[Path], seconds: float) -> bool | None:
         if line.startswith("p") and line[1:].isdigit():
             pid = int(line[1:])
         elif line.startswith("n") and pid not in (0, me) and under(line[1:]):
-            return True
-    return False
+            found.add(pid)
+    _last_holders[:] = sorted(found)
+    return bool(found)
 
 
 def assert_dirs_unheld(dirs: list[Path], seconds: float = 60.0) -> None:
     """F117: after the kill, refuse unless no other process holds (cwd or open file) the work
     dir or the scratch HOME. A live process there would race the scan, so it is never scanned."""
+    _last_holders.clear()
     held = _open_paths_of_others(dirs, seconds)
     if held is None:
         raise AgentSurvived("refusing: cannot rule out a surviving agent process")
     if held:
-        raise AgentSurvived("refusing: agent process survived")
+        pids = f" (pids: {', '.join(map(str, _last_holders))})" if _last_holders else ""
+        raise AgentSurvived(f"refusing: agent process survived{pids}")
 
 
 def git_object_ids(work) -> set[str]:
