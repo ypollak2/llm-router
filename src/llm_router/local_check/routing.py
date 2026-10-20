@@ -20,12 +20,15 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import Iterable
 
 from llm_router import paths
+from llm_router.file_lock import exclusive_lock
 
 ROUTING_FILE = "local_routing.json"
 SOURCES = ("local_check", "prereg", "manual")
@@ -84,13 +87,36 @@ def _read(path: Path | None = None) -> dict:
 def _write(data: dict, path: Path | None = None) -> None:
     target = Path(path or routing_path())
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    # LC-8b: unique per process AND thread AND call, so two writers never share a temp file.
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
         with open(tmp, "w", encoding="utf-8", opener=paths.private_opener) as fh:
             json.dump(data, fh, indent=2, sort_keys=True)
         os.replace(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _mutate(fn, path: Path | None = None):
+    """LC-8b: read-modify-write ``local_routing.json`` under the shared advisory file lock.
+
+    ``fn(data)`` edits ``data`` in place and returns the caller's result; the file is rewritten only
+    when ``data`` changed. Raises ``OSError`` when the lock cannot be taken (never writes unlocked).
+    """
+    target = Path(path or routing_path())
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_name(target.name + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    os.close(fd)
+    with exclusive_lock(lock_path) as locked:
+        if not locked:
+            raise OSError("local_routing lock unavailable")
+        data = _read(target)
+        before = json.dumps(data, sort_keys=True)
+        result = fn(data)
+        if json.dumps(data, sort_keys=True) != before:
+            _write(data, target)
+        return result
 
 
 def entry(model: str, job: str, *, path: Path | None = None) -> dict | None:
@@ -113,39 +139,56 @@ def is_enabled(model: str, job: str, *, path: Path | None = None) -> bool:
 
 
 def _store_key(data: dict, model: str) -> str:
+    """The key an existing entry lives under, else the tagged inventory spelling (``x`` -> ``x:latest``)."""
     for key in candidates(model):
         if key in data:
             return key
-    return candidates(model)[0]
+    return norm_model(candidates(model)[0])
 
 
-def enable(model: str, job: str, source: str = "manual", *, path: Path | None = None) -> dict:
-    """Explicitly enable routing for (model, job); clears any disable reason. Returns the stored entry."""
-    if source not in SOURCES:
-        raise ValueError(f"source must be one of {SOURCES}")
-    data = _read(path)
+def _enable_in(data: dict, model: str, job: str, source: str) -> dict:
     key = _store_key(data, model)
     jobs = data.get(key) if isinstance(data.get(key), dict) else {}
     e = {"enabled": True, "since": _iso(), "source": source}
     jobs[job] = e
     data[key] = jobs
-    _write(data, path)
     return dict(e)
+
+
+def _entry_in(data: dict, model: str, job: str) -> dict | None:
+    for key in candidates(model):
+        jobs = data.get(key)
+        e = jobs.get(job) if isinstance(jobs, dict) else None
+        if isinstance(e, bool):
+            return {"enabled": e}
+        if isinstance(e, dict):
+            return e
+    return None
+
+
+def enable(model: str, job: str, source: str = "manual", *, path: Path | None = None) -> dict:
+    """Explicitly enable routing for (model, job); clears any disable reason. Returns the stored entry.
+
+    Pass the inventory name (with its tag); a name without one is stored as ``<name>:latest``.
+    """
+    if source not in SOURCES:
+        raise ValueError(f"source must be one of {SOURCES}")
+    return _mutate(lambda data: _enable_in(data, model, job, source), path)
 
 
 def disable(model: str, job: str, reason: str = "manual", *, path: Path | None = None) -> dict:
     """Disable routing for (model, job); keeps ``since``/``source`` for history. Returns the stored entry."""
-    data = _read(path)
-    key = _store_key(data, model)
-    jobs = data.get(key) if isinstance(data.get(key), dict) else {}
-    old = jobs.get(job)
-    old = old if isinstance(old, dict) else {}
-    e = {"enabled": False, "since": old.get("since") or _iso(), "source": old.get("source") or "manual",
-         "reason": str(reason)[:200], "disabled_at": _iso()}
-    jobs[job] = e
-    data[key] = jobs
-    _write(data, path)
-    return dict(e)
+    def _do(data: dict) -> dict:
+        key = _store_key(data, model)
+        jobs = data.get(key) if isinstance(data.get(key), dict) else {}
+        old = jobs.get(job)
+        old = old if isinstance(old, dict) else {}
+        e = {"enabled": False, "since": old.get("since") or _iso(), "source": old.get("source") or "manual",
+             "reason": str(reason)[:200], "disabled_at": _iso()}
+        jobs[job] = e
+        data[key] = jobs
+        return dict(e)
+    return _mutate(_do, path)
 
 
 def on_pass(model: str, jobs: Iterable[str], *, path: Path | None = None) -> dict[str, str]:
@@ -154,19 +197,23 @@ def on_pass(model: str, jobs: Iterable[str], *, path: Path | None = None) -> dic
     Returns ``{job: "enabled" | "already_on" | "kept_off"}``. ``kept_off`` means the lane was disabled
     earlier (by the user or by the demotion monitor) and a new pass does NOT turn it back on; the caller
     should tell the user to run ``llm-router local-check enable <lane>``. Only call this for lanes of a
-    local-check run that passed (never for prereg-only lanes, D-258).
+    local-check run that passed (never for prereg-only lanes, D-258). One locked read-modify-write.
     """
-    out: dict[str, str] = {}
-    for job in jobs:
-        e = entry(model, job, path=path)
-        if e is None:
-            enable(model, job, "local_check", path=path)
-            out[job] = "enabled"
-        elif e.get("enabled") is True:
-            out[job] = "already_on"
-        else:
-            out[job] = "kept_off"
-    return out
+    wanted = list(jobs)
+
+    def _do(data: dict) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for job in wanted:
+            e = _entry_in(data, model, job)
+            if e is None:
+                _enable_in(data, model, job, "local_check")
+                out[job] = "enabled"
+            elif e.get("enabled") is True:
+                out[job] = "already_on"
+            else:
+                out[job] = "kept_off"
+        return out
+    return _mutate(_do, path)
 
 
 def demoted_entries(*, path: Path | None = None) -> list[tuple[str, str, dict]]:
@@ -182,16 +229,25 @@ def demoted_entries(*, path: Path | None = None) -> list[tuple[str, str, dict]]:
 
 
 def doctor_lines(*, path: Path | None = None) -> list[str]:
-    """One line per demoted lane, for ``doctor``."""
-    return [f"local-check: {m} — {j} routing demoted ({e.get('disabled_at', '?')}): more than "
+    """One line per demoted lane, then one per passed lane the route-time settings keep from routing (LC-8b)."""
+    try:
+        from llm_router import eligibility_routing
+        notices = eligibility_routing.settings_notices(routing=path)
+    except Exception:  # noqa: BLE001
+        notices = []
+    return notices + [f"local-check: {m} — {j} routing demoted ({e.get('disabled_at', '?')}): more than "
             f"{int(DEMOTE_RATE * 100)}% of the last {DEMOTE_WINDOW} calls failed the acceptance check; "
             f"re-enable only with `llm-router local-check enable {j}`" for m, j, e in demoted_entries(path=path)]
 
 
 def _recent_outcomes(model: str, job: str, since: float | None, ledger: Path | None) -> list[str]:
-    """Statuses of the last DEMOTE_WINDOW ledger rows for (model, job) at or after ``since``."""
+    """Outcomes of the last DEMOTE_WINDOW LOCAL attempts for (model, job) at or after ``since``.
+
+    LC-8b: read from the per-attempt local sidecar (``text_job_ledger.record_local_attempts``), not the
+    final-row ledger, so a local failure rescued by a later chain entry still counts.
+    """
     from llm_router import text_job_ledger as L
-    target = Path(ledger or paths.state_path(L.LEDGER_FILENAME))
+    target = Path(ledger or paths.state_path(L.LOCAL_ATTEMPTS_FILENAME))
     try:
         with open(target, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -214,14 +270,15 @@ def _recent_outcomes(model: str, job: str, since: float | None, ledger: Path | N
         ts = r.get("ts")
         if since is not None and isinstance(ts, (int, float)) and ts < since:
             continue
-        rows.append(str(r.get("status")))
+        rows.append(str(r.get("outcome")))
     return list(rows)
 
 
 def demotion_check(model: str, job: str, *, path: Path | None = None, ledger: Path | None = None) -> bool:
-    """Disable (model, job) when more than 30% of its last 20 calls since enabling were rejected.
+    """Disable (model, job) when more than 30% of its last 20 LOCAL attempts since enabling failed.
 
-    Needs a full window of 20 calls (so 7 rejected of 20 demotes, 6 does not). Only an enabled lane is
+    A failed attempt is a rejection by the acceptance check or a local error/timeout that a later chain
+    entry rescued (LC-8b). Needs a full window of 20 attempts (so 7 rejected of 20 demotes, 6 does not). Only an enabled lane is
     considered. Never re-enables. Returns True when it demoted the lane. Best-effort: never raises.
     """
     try:
@@ -231,7 +288,7 @@ def demotion_check(model: str, job: str, *, path: Path | None = None, ledger: Pa
         recent = _recent_outcomes(model, job, _epoch(e.get("since")), ledger)
         if len(recent) < DEMOTE_WINDOW:
             return False
-        bad = sum(1 for s in recent if s != "accepted")
+        bad = sum(1 for s in recent if s != "ok")
         if bad / DEMOTE_WINDOW > DEMOTE_RATE:
             disable(model, job, DEMOTE_REASON, path=path)
             return True

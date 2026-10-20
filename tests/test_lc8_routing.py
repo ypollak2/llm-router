@@ -168,11 +168,12 @@ def test_unchanged_when_digest_changed(ready):
     assert pick(digests={BARE: "sha256:" + "c" * 16}) == CHAIN
 
 
-def test_digest_missing_uses_30_day_expiry(home):
+def test_digest_missing_means_no_preference_even_inside_30_days(home):
+    """LC-8b: routing needs a VERIFIED digest match; the 30-day rule is for display only."""
     lane_file(home, prov={**PROV, "model_digest": DIGEST})
     lr.enable(BARE, JOB, "local_check")
-    assert pick(digests={}, now=NOW)[0] == LOCAL                       # unverifiable but inside 30 days
-    assert pick(digests={}, now=NOW + 31 * 86400) == CHAIN             # expired
+    assert pick(digests={}, now=NOW) == CHAIN
+    assert pick(digests={}, now=NOW + 31 * 86400) == CHAIN
 
 
 def test_unchanged_when_input_over_scope(ready):
@@ -305,11 +306,13 @@ def test_llm_text_job_sets_and_resets_the_context(home, monkeypatch):
 
 # ------------------------------------------------------------------ 3. demotion monitor
 def ledger(home: Path, statuses: list[str], model: str = LOCAL, job: str = JOB, t0: float | None = None) -> Path:
-    path = home / "text_job_outcomes.jsonl"
+    """Per-attempt LOCAL outcomes (LC-8b sidecar); 'accepted' reads as ok, anything else is a failed attempt."""
+    path = home / "text_job_local_attempts.jsonl"
     t0 = t0 if t0 is not None else time.time()
     with open(path, "a") as fh:
         for i, s in enumerate(statuses):
-            fh.write(json.dumps({"ts": t0 + i, "job": job, "model": model, "status": s, "attempts": 1}) + "\n")
+            fh.write(json.dumps({"ts": t0 + i, "job": job, "model": model,
+                                 "outcome": "ok" if s == "accepted" else s}) + "\n")
     return path
 
 
@@ -353,7 +356,7 @@ def test_rejected_counts_but_a_disabled_lane_is_untouched_and_never_reenabled(ho
 
 def test_monitor_survives_a_broken_ledger(home):
     lr.enable(BARE, JOB, "local_check")
-    (home / "text_job_outcomes.jsonl").write_bytes(b"\xff\xfe not json\n{\"a\": 1}\n[1]\n")
+    (home / "text_job_local_attempts.jsonl").write_bytes(b"\xff\xfe not json\n{\"a\": 1}\n[1]\n")
     assert lr.demotion_check(LOCAL, JOB) is False
 
 

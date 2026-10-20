@@ -396,8 +396,10 @@ def record_competence(
     return True
 
 
+# ``ctx`` (the num_ctx the check ran with) and ``think`` (LC-8b) let routing test settings PARITY instead of
+# hash equality; ``ctx`` is stored only as a positive int, ``think`` only as a bool.
 _PROVENANCE_KEYS = ("bank_version", "bank_sha256", "settings_hash", "model_digest", "runtime",
-                    "judge", "run_id", "date", "scope", "attempts")
+                    "judge", "run_id", "date", "scope", "attempts", "ctx", "think")
 _RECORDABLE = {"PASS": "passed", "FAIL": "failed", "NOT_PASSED": "failed"}
 _LANE_STATUS = ("not_passed", "lane_guard")
 
@@ -426,6 +428,10 @@ def record_local_check(
     if not isinstance(jobs_result, Mapping) or not isinstance(provenance, Mapping):
         raise ValueError("jobs_result and provenance must be mappings")
     prov = {k: v for k, v in provenance.items() if k in _PROVENANCE_KEYS}
+    if not (isinstance(prov.get("ctx"), int) and not isinstance(prov.get("ctx"), bool) and prov["ctx"] > 0):
+        prov.pop("ctx", None)
+    if not isinstance(prov.get("think"), bool):
+        prov.pop("think", None)
     bank_sha = prov.get("bank_sha256")
     report: dict[str, dict[str, str]] = {}
     lanes: dict[str, dict[str, Any]] = {}
