@@ -8,7 +8,12 @@
 * ``attempts.jsonl`` is not touched (no answer text; the anti-retry rules read all of it).
 * Symlinked run entries are skipped, never followed or deleted through.
 
-Called from ``llm-router doctor``; the CLI may call :func:`prune` after a run. It never raises.
+* A runs root that is itself a symlink is refused (nothing is deleted or rewritten through it).
+* An unreadable ``attempts.jsonl`` (not UTF-8, I/O error) fails closed: no run is deleted, the failure is reported.
+* A failure on one run (OSError, ValueError incl. UnicodeDecodeError) is collected in ``errors``; other runs go on.
+
+Called from ``llm-router doctor``; the CLI may call :func:`prune` after a run. It does not raise on file contents
+or I/O errors; those land in :attr:`PruneReport.errors`.
 """
 from __future__ import annotations
 
@@ -39,10 +44,12 @@ def default_root() -> Path:
 
 
 def _open_reservations(root: Path, now: float) -> set[str]:
+    """Run ids holding an unexpired reservation. Raises OSError/ValueError when the log exists but cannot be read
+    (the caller then keeps everything); a missing log means no reservations."""
     latest: dict[str, dict] = {}
     try:
         lines = (root / LOG_NAME).read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except FileNotFoundError:
         return set()
     for line in lines:
         try:
@@ -90,14 +97,22 @@ def prune(root: Path | None = None, *, now: float | None = None, keep: int = KEE
     rep = PruneReport()
     root = Path(root) if root is not None else default_root()
     clock = time.time() if now is None else now
+    if root.is_symlink():
+        rep.errors.append("runs root is a symlink: refusing to prune")
+        return rep
     try:
         runs = [p for p in root.iterdir() if p.is_dir() and not p.is_symlink()]
     except OSError:
         return rep
-    protected = _open_reservations(root, clock)
+    try:
+        protected = _open_reservations(root, clock)
+        fail_closed = False
+    except (OSError, ValueError) as exc:
+        protected, fail_closed = set(), True
+        rep.errors.append(f"{LOG_NAME}: {type(exc).__name__}: keeping every run")
     runs.sort(key=_mtime, reverse=True)
     for i, run in enumerate(runs):
-        if i < keep or run.name in protected:
+        if fail_closed or i < keep or run.name in protected:
             rep.kept.append(run.name)
             continue
         try:
@@ -111,6 +126,6 @@ def prune(root: Path | None = None, *, now: float | None = None, keep: int = KEE
             if results.is_file() and not results.is_symlink() and clock - results.stat().st_mtime > answer_days * 86400:
                 if _strip_answers(results):
                     rep.answers_pruned.append(name)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             rep.errors.append(f"{name}: {type(exc).__name__}")
     return rep
