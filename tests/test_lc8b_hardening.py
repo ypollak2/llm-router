@@ -145,11 +145,22 @@ def test_doctor_lines_include_settings_notice_through_routing_module(ready, monk
     assert any("ctx_below_measured" in ln for ln in lr.doctor_lines())
 
 
-def test_session_passes_the_ctx_it_ran_with(monkeypatch):
-    import inspect
-    from llm_router.local_check import session
-    src = inspect.getsource(session.run_check)
-    assert '"ctx": ctx0' in src and "c.adapter.ctx(c.model)" in src
+def test_session_records_the_ctx_and_think_it_ran_with(tmp_path):
+    from tests import test_lc5_scoring as T5
+
+    class Ollama(T5.FakeAdapter):
+        think = False
+
+        def ctx(self, model):
+            return 8192
+
+    out = T5.SE.run_check(T5.check(tmp_path, Ollama(T5.fails(10))))
+    assert out.status == "scored"
+    assert {(v["ctx"], v["think"]) for v in T5.lanes(tmp_path).values()} == {(8192, False)}
+    other = tmp_path / "b"
+    other.mkdir()
+    T5.SE.run_check(T5.check(other, T5.FakeAdapter(T5.fails(10))))     # an adapter that reports no ctx
+    assert all("ctx" not in v for v in T5.lanes(other).values())
 
 
 # ------------------------------------------------------------------ 2. verified digest
