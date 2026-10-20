@@ -262,6 +262,10 @@ class PremiumStatusCommand:
         _health = self.render_classifier_health()
         if str(_health):
             panels += [Panel(_health, border_style=PALETTE.muted_border, expand=False), Text("")]
+        # F124: text jobs a pre-registered run qualified (visibility only; grants no routing).
+        _tj = self.render_text_job_qualification()
+        if str(_tj):
+            panels += [Panel(_tj, border_style=PALETTE.muted_border, expand=False), Text("")]
         # Providers benched until a reported reset time — same only-when-present rule.
         _resets = self.render_provider_resets()
         if str(_resets):
@@ -356,6 +360,22 @@ class PremiumStatusCommand:
             return out
         except Exception:  # noqa: BLE001 — status must still render
             return Text()
+
+    def render_text_job_qualification(self) -> Text:
+        """Text jobs a pre-registered run qualified for a local model. Empty when none."""
+        out = Text()
+        try:
+            from llm_router.resolver.eligibility_store import text_job_lines
+
+            lines = text_job_lines()
+            if lines:
+                out.append("🧪  Local text jobs (qualified, grants no routing)\n",
+                           style=f"bold {PALETTE.accent}")
+                for line in lines:
+                    out.append(f"  {line}\n", style=PALETTE.text_dim)
+        except Exception:  # noqa: BLE001 — status must still render
+            return Text()
+        return out
 
     def render_provider_resets(self) -> Text:
         """Providers skipped until a reset time they reported. Empty ``Text``

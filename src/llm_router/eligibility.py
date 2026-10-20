@@ -47,6 +47,13 @@ from typing import Any, Literal, Mapping
 from llm_router.lane_quality import PAIRS_MAX_GAP_PTS, PAIRS_MIN_LB, PAIRS_MIN_N
 
 Grade = Literal["unknown", "probe", "eligible", "failed"]
+TextJobGrade = Literal["unknown", "passed", "failed"]
+#: Text jobs a pre-registered qualification can cover (``llm_text_job``); the sub-keys of the
+#: ``text_job`` task type in ``local_eligibility.json``.
+TEXT_JOBS: tuple[str, ...] = ("commit_message", "pr_description", "summarize_output")
+#: D-241 absolute bar for a text-job qualification: point rate and Wilson 95% lower bound.
+TEXT_JOB_BAR_POINT = Fraction(4, 5)
+TEXT_JOB_BAR_LB = 0.60
 _Z95 = 1.959964
 # The LB comes from sqrt and a supplied gap from float arithmetic, so neither is
 # exact; float noise is ~1e-14 pts. Both bounds allow 1e-9 pt. A true value
@@ -127,3 +134,21 @@ def grade(evidence: Evidence | Mapping[str, Any] | None) -> Grade:
         return "probe"
     ok = gap <= PAIRS_MAX_GAP_PTS + _EPS_PTS and lb >= PAIRS_MIN_LB - _EPS_PTS
     return "eligible" if ok else "failed"
+
+
+def grade_text_job(lane: Mapping[str, Any] | None) -> TextJobGrade:
+    """D-241 grade of a text-job lane from its pooled counts ``k`` of ``n``.
+
+    ``passed`` iff k/n >= 0.80 and the Wilson 95% lower bound >= 0.60; otherwise ``failed``.
+    Missing, non-integer or impossible counts (bools included) grade ``unknown``, never
+    ``failed`` or ``passed``. There is no reference arm: the Sonnet gap rule of ``grade`` does
+    not apply to a text-job lane.
+    """
+    if not isinstance(lane, Mapping):
+        return "unknown"
+    k, n = _count(lane.get("k")), _count(lane.get("n"))
+    if k is None or n is None or n <= 0 or not (0 <= k <= n):
+        return "unknown"
+    lb, _ = _wilson(k, n, _Z95)
+    ok = Fraction(k, n) >= TEXT_JOB_BAR_POINT and lb >= TEXT_JOB_BAR_LB - _EPS_PTS / 100
+    return "passed" if ok else "failed"
