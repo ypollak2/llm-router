@@ -399,7 +399,9 @@ def test_grep_finds_only_allowlist_and_the_offer_module():
         cwd=ROOT, capture_output=True, text=True, timeout=60, env={**os.environ},
     )
     lines = [ln for ln in proc.stdout.splitlines() if ln]
-    allow = ("scripts/bench/m18_r3.py:", "src/llm_router/qa_policy.py:")
+    allow = ("scripts/bench/m18_r3.py:", "src/llm_router/qa_policy.py:",
+             # LC-9 citation URLs (model-card pages) in the recommendations data; text for the user, never fetched.
+             "src/llm_router/local_check/data/recommendations.json:")
     remaining = []
     for ln in lines:
         if ln.startswith("src/llm_router/runtime_offer.py:") or ln.startswith(allow):
