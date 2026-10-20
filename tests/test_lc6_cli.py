@@ -473,11 +473,14 @@ def test_reservation_expiry_after_7_days_is_not_a_strike(tmp_path: Path) -> None
     assert A.AttemptLog(tmp_path / "runs").strikes(A.AttemptLog(tmp_path / "runs").entries()[0]["config_key"]) == 1       # only the INVALID
 
 
-def test_text_job_lines_has_no_dead_inconclusive_branch() -> None:
-    import inspect
+def test_text_job_lines_status_inconclusive_reads_as_failed(tmp_path: Path) -> None:
+    """The removed dead branch: only not_passed has its own wording; any other status falls back to 'failed'."""
     from llm_router.resolver import eligibility_store as ES
-    src = inspect.getsource(ES.text_job_lines)
-    assert '"inconclusive"' not in src and '"not_passed": "not passed"' in src
+    p = tmp_path / "e.json"
+    lane = {"k": 40, "n": 70, "verdict": "NOT_PASSED"}
+    prov = {"bank_version": "v1", "bank_sha256": "a" * 64, "settings_hash": "h", "date": "2026-10-20"}
+    ES.record_local_check(MODEL, {"commit_message": lane}, prov, path=p)
+    assert "not passed 40/70" in "\n".join(ES.text_job_lines(path=p))
 
 
 # ------------------------------------------------------------------------------------------ wiring
