@@ -97,6 +97,7 @@ class RawReply:
     input_tokens: int | None = None
     output_tokens: int | None = None
     secs: float = 0.0
+    sent: bool = True                  # False: the call failed client-side before any request was sent (nothing can have been billed)
 
 
 class Backend(Protocol):
@@ -140,6 +141,16 @@ def is_anthropic_url(url: str) -> bool:
     return u.scheme == "https" and (u.hostname or "").lower() == "api.anthropic.com" and u.port in (None, 443)
 
 
+def resolve_anthropic_base_url(environ: dict | None = None) -> str:
+    """The Anthropic provider base URL the user has configured (the variables LiteLLM and the Anthropic SDK read), '' when none."""
+    env = os.environ if environ is None else environ
+    for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_BASE"):
+        v = (env.get(k) or "").strip()
+        if v:
+            return v
+    return ""
+
+
 def check_api_route(model: str, configured_base_url: str = "") -> None:
     """Raise ``JudgeSetupError`` (with a user-facing message) when the API route cannot be used honestly.
 
@@ -159,12 +170,13 @@ class ApiBackend:
     name = "api"
     metered = True
 
-    def __init__(self, model: str, api_key: str, client_factory: Callable[[str], object] | None = None, configured_base_url: str = ""):
+    def __init__(self, model: str, api_key: str, client_factory: Callable[[str], object] | None = None, configured_base_url: str | None = None):
         if not model:
             raise JudgeSetupError("a pinned judge model id is required")
         if not api_key:
             raise JudgeSetupError("no Anthropic API key")
-        check_api_route(model, configured_base_url)
+        # None = resolve the configured Anthropic provider base URL here (refusal is not opt-in); "" = explicitly none.
+        check_api_route(model, resolve_anthropic_base_url() if configured_base_url is None else configured_base_url)
         self.model = model
         self._key = api_key
         self._factory = client_factory or self._default_client
@@ -181,6 +193,9 @@ class ApiBackend:
         t0 = time.time()
         try:
             client = self._factory(self._key)
+        except Exception as exc:  # client could not be built: no request was sent, so nothing can have been billed
+            return RawReply(error=type(exc).__name__, secs=round(time.time() - t0, 1), sent=False)
+        try:
             resp = client.messages.create(model=self.model, max_tokens=API_MAX_TOKENS, temperature=0,
                                           messages=[{"role": "user", "content": prompt}])
             text = "".join(getattr(b, "text", "") for b in (getattr(resp, "content", None) or []))
@@ -293,8 +308,10 @@ def judge_answer(backend: Backend, budget: Budget, prompt: str) -> JudgeOutcome:
     for attempt in range(2):
         budget.check()
         rep = backend.complete(prompt)
-        budget.record(rep.cost_usd)
-        costs.append(rep.cost_usd)
+        # A reply with an error and no usage is a FAILED call (not "succeeded but unpriceable"): it is counted and charged an estimate, and the
+        # retry below can still happen. Only a successful reply whose cost is unknown stops the metered budget.
+        failed = rep.error is not None and rep.cost_usd is None and rep.input_tokens is None
+        costs.append(budget.record(rep.cost_usd, failed=failed, sent=rep.sent))
         out.attempts = attempt + 1
         out.served_model = rep.served_model or out.served_model
         out.cost_usd = None if any(c is None for c in costs) else sum(c for c in costs if c is not None)
@@ -320,22 +337,31 @@ def judge_candidate(backend: Backend, budget: Budget, task_input: str, candidate
     return judge_answer(backend, budget, judge_prompt(task_input, candidate))
 
 
+_DATED_SUFFIX = re.compile(r"-\d{8}$")
+
+
+def _served_key(model: str) -> str:
+    m = model.strip()
+    if m.startswith("anthropic/"):
+        m = m[len("anthropic/"):]
+    if m.endswith("[1m]"):
+        m = m[:-len("[1m]")]
+    return _DATED_SUFFIX.sub("", m)
+
+
 def served_model_matches(served: str, pinned: str) -> tuple[bool, str]:
     """G0 helper: does the model that actually answered match the pinned id? -> (ok, reason).
 
-    Match = exact string, or both ids resolve through ``llm_router.pricing`` to the SAME canonical id (the price table's documented alias /
-    undated-name mapping, e.g. an undated name and its dated snapshot). ``served`` may be a comma-separated list (the CLI reports every model it
-    used): ALL entries must match. An empty ``served`` never matches.
+    Match = exact string, except (on either side) a dated ``-YYYYMMDD`` suffix on the same base id, a ``[1m]`` context suffix, and an
+    ``anthropic/`` prefix. Nothing else is collapsed: local/ollama ids and other vendor prefixes only match exactly. ``served`` may be a
+    comma-separated list (the CLI reports every model it used): ALL entries must match. An empty ``served`` never matches.
     """
-    from llm_router import pricing
     names = [n.strip() for n in (served or "").split(",") if n.strip()]
     if not pinned or not names:
         return False, "served model id missing" if pinned else "pinned model id missing"
-    want = pricing.resolve(pinned)
+    want = _served_key(pinned)
     for n in names:
-        if n == pinned:
-            continue
-        if want is not None and pricing.resolve(n) == want:
+        if n == pinned or _served_key(n) == want:
             continue
         return False, f"served model {n!r} does not match pinned {pinned!r}"
     return True, "ok"
