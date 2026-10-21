@@ -91,7 +91,7 @@ Usage:
     llm-router routing-health   — reach, context, USED and latency per day, with n
     llm-router northstar        — routed-and-used share, per session (NS1)
     llm-router kpi              — NS/O1-O2/D1-D5/G1-G4 scorecard; --health: measured/blind/stale; --daily-install/--daily-uninstall: daily row scheduler; --maintenance: daily backfill + weekly report
-    llm-router redo-sample --census|--freeze [--seed N] [--days D] [--allow-below-threshold] — P3.6-c: counts-only census of redo-detector pairs; --freeze draws the seeded validation strata into the state dir (no text is printed or stored)
+    llm-router redo-sample --census|--freeze [--seed N] [--days D] [--allow-below-threshold] [--allow-empty-exclusion] — P3.6-c: counts-only census of redo-detector pairs; --freeze draws the seeded validation strata into the state dir (no text is printed or stored); exit 2 run dir exists, 3 below threshold, 4 no transcripts, 5 empty M0.9 exclusion list
     llm-router statusline       — status line cache refresh (--refresh); prints the line otherwise
     llm-router mod              — receipt band mod for Claude Code: install / uninstall (opt-in)
     llm-router sessions         — list recorded sessions
