@@ -65,3 +65,15 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | `text_job_local` records | In `local_eligibility.json` under `<model>.text_job_local.<job>`: grade, k, n, bank version and sha256, model digest, runtime, judge backend and served model, run id, date, scope, settings hash. No text. The latest scored result for a job replaces the previous one; a stale record (model digest changed, or 30 days with no digest) stays on disk for history and reads as unknown. Delete the `text_job_local` key to forget a model. |
 | Nudge state | `local_check/nudge.json` (0600): the bank versions for which the one-line first-run tip was shown. Deleting it shows the tip again. |
 | Reads | `llm-router status`, `doctor` and the fast status line read `local_eligibility.json` and the discovery cache only. They make no HTTP call and run no model. |
+
+## `redo_validation/<run_id>/` (P3.6-c)
+
+| Item | Value |
+|---|---|
+| `manifest.jsonl` | Sampled pair and session hashes, turn index, UTC day, stratum, detector signals/version, kind/source, previous served class and stratum counts. Session ids are hashed; no prompt or answer text. |
+| `frozen.json` | Counts, window, seed, run id, detector/manifest SHA256, strata, weights, threshold decision, concentration and shortfall. Stores the salt so the local labeller can re-derive pair identities from transcripts. No prompt or answer text or session ids. |
+| Writer | Only `llm-router redo-sample --freeze`; `--census` writes nothing. |
+| Permissions | Run directory 0700; files 0600. The `redo_validation` parent is set to 0700 only when created by this command. |
+| Kept | Until superseded by a later validation; no automatic deletion. |
+| Remove | On owner request, `rm -r` the run directory. |
+| M0.9 exclusions | `src/llm_router/data/redo_m09_excluded.txt` contains unsalted pair hashes only, plus comments. The shipped list is empty because the ids are not derivable from the repository. |
