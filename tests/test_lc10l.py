@@ -1,4 +1,5 @@
 """LC-10l: status distinguishes judged runs from probes. Fakes only."""
+import json
 from pathlib import Path
 
 import pytest
@@ -71,8 +72,49 @@ def test_status_inconclusive_rerun_keeps_earlier_verdict(tmp_path):
     assert second.result.verdict == "INCONCLUSIVE"
     assert attempts_line(tmp_path) == (
         f"attempts: {MODEL} (bank v{BANK.version}): 2 of 2 judged draws used"
-        "; last INCONCLUSIVE 105/140 2027-01-16 (not recorded; earlier verdict kept)"
+        "; last INCONCLUSIVE 105/140 2027-01-16 (not recorded; recorded verdict PASS kept)"
     )
+
+
+def inject_first(tmp_path, entry_fn):
+    """Prepend a synthetic earlier attempt-log entry for the config of the existing log (earlier ts, same key)."""
+    log = A.AttemptLog(tmp_path / "runs")
+    last = log.entries()[0]
+    early = entry_fn(last)
+    log.path.write_text(json.dumps(early) + "\n" + log.path.read_text())
+
+
+def test_status_burnt_invalid_then_inconclusive_has_no_kept_suffix(tmp_path):
+    out = SE.run_check(check(tmp_path, FakeAdapter(fails(18)), clock=Clock()))
+    assert out.result.verdict == "INCONCLUSIVE"
+    inject_first(tmp_path, lambda e: {"config_key": e["config_key"], "config": e["config"], "draw": 1, "ts": 0.5, "date": "2027-01-14",
+                                      "state": "burnt", "strike": True, "consumed": True, "verdict": "INVALID", "rows": [], "k": None})
+    line = attempts_line(tmp_path)
+    assert "2 of 2 judged draws used" in line and "last INCONCLUSIVE" in line
+    assert "kept" not in line and "not recorded" not in line
+
+
+def test_status_not_passed_then_inconclusive_names_recorded_verdict(tmp_path):
+    clock = Clock()
+    first = SE.run_check(check(tmp_path, FakeAdapter({i.id: "progfail" for i in BANK.draw(1)[42:57]}), clock=clock))   # 42 ok, then 15 programmatic failures
+    assert first.result.verdict == "NOT_PASSED"
+    clock.t += A.COOLDOWN_S + 1
+    second = SE.run_check(check(tmp_path, FakeAdapter(fails(5, draw=2)), clock=clock))      # 42 + 65 = 107 of 140: between kfail and kmin
+    assert second.status == "scored", second.reason
+    assert second.result.verdict == "INCONCLUSIVE"
+    assert "last INCONCLUSIVE" in attempts_line(tmp_path)
+    assert attempts_line(tmp_path).endswith("(not recorded; recorded verdict NOT_PASSED kept)")
+
+
+def test_status_removed_record_then_inconclusive_has_no_kept_suffix(tmp_path):
+    clock = Clock()
+    assert SE.run_check(check(tmp_path, FakeAdapter(fails(10)), clock=clock)).result.verdict == "PASS"
+    clock.t += A.COOLDOWN_S + 1
+    assert SE.run_check(check(tmp_path, FakeAdapter({**fails(10), **fails(25, draw=2)}), clock=clock)).result.verdict == "INCONCLUSIVE"
+    assert "recorded verdict PASS kept" in attempts_line(tmp_path)
+    (tmp_path / "elig.json").unlink()
+    line = attempts_line(tmp_path)
+    assert "last INCONCLUSIVE" in line and "kept" not in line
 
 
 def test_status_inconclusive_only_has_no_kept_verdict_suffix(tmp_path):
