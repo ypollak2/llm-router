@@ -1,0 +1,351 @@
+"""Counts-only redo census and frozen validation draw (P3.6-c).
+
+Prompt and answer text is read only in memory; the pool contains metadata only.
+The local frozen.json stores the salt so a later labeller can re-derive pair
+identities from transcripts. Run directories are 0700 and files are 0600.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import random
+import re
+from collections import Counter
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from statistics import median
+
+from llm_router import northstar, offload_share, paths, redo_signal, session_kind
+
+MIN_FLAGGED = 19
+DEFAULT_SEED = 360
+Resolver = Callable[[str], session_kind.Resolution]
+ServedLoader = Callable[[str], list[tuple[float, str]]]
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def pair_key(session_id: str, turn_index: int) -> str:
+    return _sha(f"{session_id}|{turn_index}")[:16]
+
+
+def load_excluded(extra: set[str] | None = None, source: Path | None = None) -> set[str]:
+    """Load unsalted M0.9 hashes (from ``source``, default the shipped file), plus optional extra exclusions."""
+    source = source or Path(__file__).parent / "data" / "redo_m09_excluded.txt"
+    return {line.strip() for line in source.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")} | set(extra or ())
+
+
+@dataclass(frozen=True)
+class Candidate:
+    session_id: str
+    turn_index: int
+    ts: float
+    signals: tuple[str, ...]
+    screened: bool
+    kind: str
+    kind_source: str | None
+    prev_served_class: str | None = None
+
+    @property
+    def key(self) -> str:
+        return pair_key(self.session_id, self.turn_index)
+
+    @property
+    def stratum(self) -> str:
+        return "F" if self.signals else "S" if self.screened else "R"
+
+
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+
+
+def _window(days: float, now: float | None) -> tuple[float, float]:
+    if not math.isfinite(days) or days <= 0:
+        raise ValueError("days must be finite and positive")
+    until = datetime.now(timezone.utc).timestamp() if now is None else now
+    return until - days * 86400, until
+
+
+def _served_loader(since: float, until: float) -> ServedLoader:
+    cache: dict[str, list[tuple[float, str]]] | None = None
+    failure: Exception | None = None
+
+    def load(sid: str) -> list[tuple[float, str]]:
+        nonlocal cache, failure
+        if failure is not None:
+            raise failure
+        if cache is None:
+            try:
+                built: dict[str, list[tuple[float, str]]] = {}
+                for action in offload_share.action_units(since, until)["actions"]:
+                    built.setdefault(action["session_id"], []).append(
+                        (action["ts"], action["served_class"]))
+                cache = built
+            except Exception as exc:  # ledger failure means unmeasured
+                failure = exc
+                raise
+        return cache.get(sid, [])
+
+    return load
+
+
+def _interrupts(entries: list[dict], prompts: list[redo_signal.HumanPrompt]) -> set[int]:
+    """Locate interruption records between consecutive human prompts in one pass."""
+    positions = {p.entry_index: k for k, p in enumerate(prompts)}
+    interrupted: set[int] = set()
+    pending = False
+    for i, rec in enumerate(entries):
+        if i in positions:
+            if pending and positions[i] >= 1:
+                interrupted.add(positions[i])
+            pending = False
+        elif (rec.get("type") == "user"
+              and redo_signal._content_text(
+                  redo_signal._message(rec).get("content")).lstrip().startswith(
+                      "[Request interrupted")):
+            pending = True
+    return interrupted
+
+
+def _screen(prompt: str, previous: str, interrupted: bool) -> bool:
+    similarity = redo_signal.five_gram_jaccard(prompt, previous)
+    return bool(interrupted or (similarity is not None and similarity >= 0.5)
+                or redo_signal._FAILURE_RE.search(prompt.lower().replace("’", "'"))
+                or len(redo_signal._words(prompt)) <= 12)
+
+
+def _spread(pool: list[Candidate]) -> dict:
+    sizes = Counter(p.session_id for p in pool)
+    flagged = Counter(p.session_id for p in pool if p.signals)
+    return {
+        "n_sessions": len(sizes),
+        "max_pairs_per_session": max(sizes.values(), default=0),
+        "largest_session_share": max(sizes.values(), default=0) / len(pool) if pool else 0,
+        "median_pairs_per_session": median(sizes.values()) if sizes else 0,
+        "n_sessions_F": len(flagged),
+        "largest_session_share_F": (
+            max(flagged.values()) / sum(flagged.values()) if flagged else 0),
+    }
+
+
+def collect(*, projects_dir: Path | None = None, days: float = 30,
+            now: float | None = None, resolve: Resolver | None = None,
+            served_loader: ServedLoader | None = None,
+            excluded: set[str] | None = None) -> tuple[list[Candidate], dict]:
+    """Build a text-free pool and counts; injected loaders never access live ledgers."""
+    since, until = _window(days, now)
+    resolve = resolve or session_kind.KindIndex(backfill=True).resolve
+    served_loader = served_loader or _served_loader(since, until)
+    excluded_keys = load_excluded(excluded)
+    kinds: Counter[str] = Counter()
+    counts = dict(sessions_total=0, organic_pairs_eligible=0, no_ts=0,
+                  excluded_m09=0, flagged_ineligible=0)
+    pool: list[Candidate] = []
+    measured = True
+    any_actions = False
+    seen: set[str] = set()
+    root = projects_dir if projects_dir is not None else northstar.claude_projects_dir()
+    for path in sorted(Path(root).glob("*/*.jsonl")):
+        sid = path.stem
+        if sid in seen:
+            continue
+        seen.add(sid)
+        resolution = resolve(sid)
+        kinds[resolution.kind or "untagged"] += 1
+        counts["sessions_total"] += 1
+        if resolution.kind != session_kind.KIND_ORGANIC:
+            continue
+        entries = redo_signal.read_transcript(path)
+        prompts = redo_signal.human_prompts(entries)
+        interrupted = _interrupts(entries, prompts)
+        pairs = redo_signal.turn_pairs(entries)
+        eligible = {p.turn_index for p in pairs}
+        flags: dict[int, list[str]] = {}
+        for ts, k, signal in redo_signal.redo_flag_times(entries):
+            flags.setdefault(k, []).append(signal)
+            if k not in eligible and ts is not None and since <= ts <= until:
+                counts["flagged_ineligible"] += 1
+        try:
+            actions = sorted(served_loader(sid), key=lambda item: item[0])
+        except Exception:  # injected and default loader failures have identical semantics
+            measured = False
+            actions = []
+        any_actions = any_actions or bool(actions)
+        for pair in pairs:
+            if pair.ts is None:
+                counts["no_ts"] += 1
+                continue
+            if not since <= pair.ts <= until:
+                continue
+            counts["organic_pairs_eligible"] += 1
+            if pair_key(sid, pair.turn_index) in excluded_keys:
+                counts["excluded_m09"] += 1
+                continue
+            k = pair.turn_index
+            signals = tuple(flags.get(k, ()))
+            previous_class = next(
+                (cls for ts, cls in reversed(actions) if ts <= pair.ts), None)
+            pool.append(Candidate(
+                sid, k, pair.ts, signals,
+                not signals and _screen(prompts[k].text, prompts[k - 1].text, k in interrupted),
+                resolution.kind, resolution.source, previous_class))
+    measured = measured and any_actions     # an empty ledger measures nothing: n=0 is unmeasured, not 0
+    if not measured:
+        # Partial ledger coverage must not look like a complete measurement.
+        pool = [Candidate(p.session_id, p.turn_index, p.ts, p.signals, p.screened,
+                          p.kind, p.kind_source) for p in pool]
+    strata = Counter(p.stratum for p in pool)
+    signals = Counter(signal for p in pool for signal in p.signals)
+    counts.update(
+        sessions_by_kind={k: kinds[k] for k in sorted(
+            set(kinds) | {"organic", "untagged"})},
+        eligible_after_exclusion=len(pool),
+        N_F=strata["F"], N_S=strata["S"], N_R=strata["R"],
+        flagged_per_signal={s: signals[s] for s in ("reask", "contradiction", "repeat")},
+        cheap_served=(sum(p.prev_served_class in offload_share.OFFLOADED_CLASSES
+                          for p in pool) if measured else None),
+        **_spread(pool),
+    )
+    return pool, counts
+
+
+def census(**kwargs) -> dict:
+    """Return counts only, without printing or writing."""
+    return collect(**kwargs)[1]
+
+
+def draw(pool: Iterable[Candidate], seed: int, salt: str) -> list[dict]:
+    """Pure deterministic stratified draw; input order does not affect the result."""
+    groups = {h: [] for h in ("F", "S", "R")}
+    for pair in pool:
+        groups[pair.stratum].append(pair)
+    rng = random.Random(seed)
+    for candidates in groups.values():
+        candidates.sort(key=lambda p: p.key)
+        rng.shuffle(candidates)
+    flagged = groups["F"]
+    sizes = Counter(p.session_id for p in flagged)
+    concentrated = bool(flagged and max(sizes.values()) / len(flagged) > 0.6)
+    chosen: dict[str, list[Candidate]] = {"F": [], "S": groups["S"][:30]}
+    per_session: Counter[str] = Counter()
+    for p in flagged:
+        if len(chosen["F"]) >= 60:
+            break
+        if concentrated and per_session[p.session_id] >= 15:
+            continue
+        chosen["F"].append(p)
+        per_session[p.session_id] += 1
+    chosen["R"] = groups["R"][:150 - len(chosen["F"]) - len(chosen["S"])]
+    rows: list[dict] = []
+    for h, selected in chosen.items():
+        for p in selected:
+            rows.append(dict(
+                pair_id=_sha(f"{p.session_id}|{p.turn_index}|{salt}")[:16],
+                session_hash=_sha(f"{salt}|{p.session_id}")[:16],
+                turn_index=p.turn_index, day=_iso(p.ts)[:10], stratum=h,
+                signals=list(p.signals), detector_version=redo_signal.PATTERN_VERSION,
+                kind=p.kind, kind_source=p.kind_source,
+                prev_served_class=p.prev_served_class,
+                weight_N_h=len(groups[h]), n_h=len(selected)))
+    return rows
+
+
+def _gate(n: int) -> str:
+    verdict = ("GO" if n >= MIN_FLAGGED else
+               "NO-GO (insufficient_flagged_supply) -- next step: detector tune to v3 "
+               "(P3.6-c PR 3); re-census after the window slides")
+    return f"N_F={n} vs threshold {MIN_FLAGGED}: {verdict}"
+
+
+def _write_private(path: Path, content: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+        os.chmod(path, 0o600)
+        stream.write(content)
+
+
+def cmd_redo_sample(args: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="llm-router redo-sample")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--census", action="store_true")
+    mode.add_argument("--freeze", action="store_true")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--run-id")
+    parser.add_argument("--allow-below-threshold", action="store_true")
+    parser.add_argument("--days", type=float, default=30)
+    parser.add_argument("--projects-dir", type=Path)
+    options = parser.parse_args(args)
+    now = datetime.now(timezone.utc).timestamp()
+    try:
+        since, until = _window(options.days, now)
+    except ValueError as exc:
+        parser.error(str(exc))
+    run_id = options.run_id or datetime.fromtimestamp(now, timezone.utc).strftime(
+        "%Y%m%dT%H%M%SZ")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", run_id):
+        parser.error("run-id must contain only letters, digits, underscores and hyphens")
+    run_dir = paths.state_path("redo_validation", run_id)
+    if options.freeze and os.path.lexists(run_dir):
+        print("Refused: run directory already exists.")
+        return 2
+    pool, counts = collect(projects_dir=options.projects_dir, days=options.days, now=now)
+    if options.census:
+        print(f"window: {_iso(since)} to {_iso(until)}; "
+              f"detector: {redo_signal.PATTERN_VERSION}")
+        for key, value in counts.items():
+            rendered = "unmeasured" if value is None else (
+                json.dumps(value, sort_keys=True) if isinstance(value, dict) else value)
+            print(f"{key}: {rendered}")
+        print(_gate(counts["N_F"]))
+        return 0
+    below = counts["N_F"] < MIN_FLAGGED
+    if below and not options.allow_below_threshold:
+        print(_gate(counts["N_F"]))
+        print("Refused: --allow-below-threshold is required to freeze this supply.")
+        return 3
+    salt = _sha(f"redo-sample-salt|{options.seed}|{run_id}")
+    rows = draw(pool, options.seed, salt)
+    manifest = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
+    drawn = Counter(row["stratum"] for row in rows)
+    strata = {h: {"N": counts[f"N_{h}"], "n": drawn[h]} for h in ("F", "S", "R")}
+    frozen = dict(
+        detector_version=redo_signal.PATTERN_VERSION,
+        detector_sha256=hashlib.sha256(Path(redo_signal.__file__).read_bytes()).hexdigest(),
+        manifest_sha256=hashlib.sha256(manifest.encode("utf-8")).hexdigest(),
+        seed=options.seed, run_id=run_id, salt=salt, min_flagged=MIN_FLAGGED,
+        n_flagged_pool=counts["N_F"], allow_below_threshold=options.allow_below_threshold,
+        no_go="insufficient_flagged_supply" if below else None,
+        concentrated=counts["largest_session_share_F"] > 0.6,
+        shortfall=150 - len(rows),
+        window=dict(days=options.days, since_iso=_iso(since), until_iso=_iso(until)),
+        counts=counts, strata=strata,
+        weights={h: s["N"] / s["n"] if s["n"] else None for h, s in strata.items()},
+        created_utc=_iso(now))
+    parent = run_dir.parent
+    try:
+        os.makedirs(parent, mode=0o700)
+    except FileExistsError:
+        pass
+    else:
+        os.chmod(parent, 0o700)
+    try:
+        os.makedirs(run_dir, mode=0o700)
+    except FileExistsError:
+        print("Refused: run directory already exists.")
+        return 2
+    os.chmod(run_dir, 0o700)
+    _write_private(run_dir / "manifest.jsonl", manifest)
+    _write_private(run_dir / "frozen.json", json.dumps(frozen, sort_keys=True, indent=2) + "\n")
+    print(f"run_id: {run_id}\nrun_dir: {run_dir}")
+    for h, s in strata.items():
+        print(f"{h}: N={s['N']} n={s['n']}")
+    print(_gate(counts["N_F"]))
+    return 0
