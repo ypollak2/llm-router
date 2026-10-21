@@ -261,9 +261,10 @@ def claude_call(brief: str, item: str, model_id: str, *, allow_api_key=False) ->
         raise RuntimeError(f"claude exit {proc.returncode}")
     data = json.loads(proc.stdout)
     used = data.get("modelUsage") or {}
-    cost = float(data.get("total_cost_usd") or 0)
+    raw_cost = data.get("total_cost_usd")
+    cost = float(raw_cost) if raw_cost is not None else None
     return {"result": data.get("result") or "",
-            "cost_usd": cost if cost > 0 and math.isfinite(cost) else None,
+            "cost_usd": cost if cost is not None and cost > 0 and math.isfinite(cost) else None,
             "model_ok": bool(used) and all(
                 key.lower().startswith(model_id.lower()) for key in used)}
 
@@ -272,12 +273,12 @@ def read_ledger(run_dir: Path) -> dict:
     zero = {"calls": 0, "usd": 0.0, "rejected_streak": 0, "estimated_calls": 0}
     try:
         data = json.loads((run_dir / "judge_spend.json").read_text(encoding="utf-8"))
+        estimated = data.get("estimated_calls", zero["estimated_calls"]) if isinstance(data, dict) else None
         if (not isinstance(data, dict)
                 or set(data) not in (set(zero), set(zero) - {"estimated_calls"})
                 or type(data["calls"]) is not int or data["calls"] < 0
                 or type(data["rejected_streak"]) is not int or data["rejected_streak"] < 0
-                or type(data.get("estimated_calls", 0)) is not int
-                or data.get("estimated_calls", 0) < 0
+                or type(estimated) is not int or estimated < 0
                 or type(data["usd"]) not in (int, float)
                 or not math.isfinite(data["usd"]) or data["usd"] < 0):
             return zero
