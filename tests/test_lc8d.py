@@ -85,7 +85,7 @@ async def _run(*, chain, call_llm, timeout_kind=None):
         p(patch("llm_router.router.providers.call_llm", side_effect=fake_call_llm))
         kwargs = {}
         if timeout_kind == "wall":
-            kwargs["max_wall_clock_seconds"] = 0.05
+            kwargs["max_wall_clock_seconds"] = 0.3
         elif timeout_kind == "deadline":
             kwargs["deadline_monotonic"] = time.monotonic() + 0.4
         try:
@@ -144,8 +144,7 @@ async def test_cancellation_propagates():
         task.cancel()
         with pytest.raises(asyncio.CancelledError) as caught:
             await task
-        if hasattr(caught.value, "chain_attempts"):
-            assert caught.value.chain_attempts == [LOCAL]
+        assert caught.value.chain_attempts == [LOCAL]
     finally:
         if not task.done():
             task.cancel()
@@ -207,3 +206,42 @@ async def test_outcome_failure_is_recorded_and_job_returns(monkeypatch):
     result = await T.llm_text_job(JOB, DIFF, object())
     assert "status=accepted" in result
     record.assert_any_call("CHZ-FO-TEXTJOB-OUTCOME", error)
+
+
+@pytest.mark.asyncio
+async def test_local_attempts_failure_is_recorded_and_route_error_propagates(monkeypatch):
+    route_error = RuntimeError("route failed")
+    route_error.chain_attempts = [LOCAL]
+    setup_text_job(monkeypatch, AsyncMock(side_effect=route_error))
+    error = OSError("local attempts unavailable")
+    monkeypatch.setattr(L, "record_local_attempts", MagicMock(side_effect=error))
+    record = MagicMock()
+    monkeypatch.setattr(failopen, "record", record)
+    with pytest.raises(RuntimeError) as caught:
+        await T.llm_text_job(JOB, DIFF, object())
+    assert caught.value is route_error
+    record.assert_any_call("CHZ-FO-TEXTJOB-LOCAL-ATTEMPTS", error)
+
+
+@pytest.mark.asyncio
+async def test_context_reset_failure_is_recorded_and_job_returns(monkeypatch):
+    setup_text_job(monkeypatch, AsyncMock(return_value=response("Update src/a.py handling")))
+    error = RuntimeError("context reset failed")
+    monkeypatch.setattr(er, "reset_text_job_context", MagicMock(side_effect=error))
+    record = MagicMock()
+    monkeypatch.setattr(failopen, "record", record)
+    result = await T.llm_text_job(JOB, DIFF, object())
+    assert "status=accepted" in result
+    record.assert_any_call("CHZ-FO-TEXTJOB-CTX-RESET", error)
+
+
+@pytest.mark.asyncio
+async def test_demotion_failure_is_recorded_and_job_returns(monkeypatch):
+    demote = setup_text_job(monkeypatch, AsyncMock(return_value=response("Update src/a.py handling")))
+    error = RuntimeError("demotion check failed")
+    demote.side_effect = error
+    record = MagicMock()
+    monkeypatch.setattr(failopen, "record", record)
+    result = await T.llm_text_job(JOB, DIFF, object())
+    assert "status=accepted" in result
+    record.assert_any_call("CHZ-FO-TEXTJOB-DEMOTION", error)

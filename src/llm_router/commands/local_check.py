@@ -799,6 +799,32 @@ def _routing_switches(d: Deps) -> list[tuple[str, str, dict]]:
     return rows
 
 
+def _recorded_verdict(d: Deps, cfg: dict) -> str | None:
+    import json
+    if d.eligibility_path is None:
+        return None
+    try:
+        data = json.loads(Path(d.eligibility_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    model = data.get(cfg["model"])
+    if not isinstance(model, dict):
+        return None
+    lanes = model.get("text_job_local")
+    if not isinstance(lanes, dict):
+        return None
+    for _, lane in sorted(lanes.items()):
+        if (isinstance(lane, dict) and lane.get("source") == "local_check"
+                and lane.get("bank_sha256") == cfg.get("bank_sha256")
+                and lane.get("settings_hash") == cfg.get("settings_hash")):
+            if lane.get("grade") == "passed":
+                return "PASS"
+            return "NOT_PASSED" if lane.get("grade") == "failed" and lane.get("status") == "not_passed" else "FAIL"
+    return None
+
+
 def _status(d: Deps, model: str | None) -> int:
     from llm_router.local_check import attempts as A
     out = d.out
@@ -846,7 +872,12 @@ def _status(d: Deps, model: str | None) -> int:
         if scored:
             last = scored[-1]
             counts = f" {last['k']}/{last['n']}" if last.get("k") is not None and last.get("n") else ""
-            out(f"{head}; last {last.get('verdict')}{counts} {last.get('date', '')}{extra}")
+            kept = ""
+            if last.get("verdict") == "INCONCLUSIVE":
+                v = _recorded_verdict(d, cfg)
+                if v is not None:
+                    kept = f" (not recorded; recorded verdict {v} kept)"
+            out(f"{head}; last {last.get('verdict')}{counts} {last.get('date', '')}{kept}{extra}")
         else:
             out(f"{head}; no judged run yet{extra}")
         if scored and len(scored) < A.MAX_DRAWS:
