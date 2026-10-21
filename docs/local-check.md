@@ -19,7 +19,7 @@ llm-router local-check disable <lane> [--model M]
 | Flag | Effect |
 |---|---|
 | `--dry-run` | Prints the plan screen and the consent wording. **Zero model calls**, nothing written. Reports the same refusals a real run would. |
-| `--no-judge` | Programmatic grading only. Nothing is sent anywhere. Can record a FAIL (Wilson upper bound < 0.80), never a PASS. |
+| `--no-judge` | Programmatic grading only. Nothing is sent anywhere. A probe: never a PASS, and it never writes the eligibility store (it cannot replace or downgrade a judged verdict); it appears in the attempt log and in `status` only. |
 | `--yes` | Consent without a prompt. Required when stdin/stdout is not a terminal; without it the command stops before any call. |
 | `--model`, `--endpoint` | Pick the model or runtime. Default: auto-discover Ollama, LM Studio, vLLM and llama.cpp on loopback. |
 | `--allow-remote` | Only together with an explicit `--endpoint`: allows a non-loopback runtime (the benchmark prompts are then sent to it). |
@@ -82,7 +82,7 @@ An early stop instead starts with `not passed (NOT_PASSED) -- stopped early afte
 `status` shows the recorded lanes (the same lines `doctor` shows, including `[routing: on]`), the routing switches in `local_routing.json`
 with the command that flips each, any lane the demotion monitor switched off, and the attempt log.
 The log shows `N of 2 judged draws used`; scored programmatic-only runs add
-`; M programmatic-only run(s) (--no-judge) not counted`.
+`; M programmatic-only run(s) (--no-judge) not counted; latest probe result: V k/n (probe, not a judged verdict)`.
 
 `enable <lane>` switches routing on for a lane by hand (source `manual`); it still applies only while the lane is passed and fresh.
 `disable <lane>` switches it off; a later PASS keeps it off.

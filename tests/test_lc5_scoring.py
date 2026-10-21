@@ -187,10 +187,10 @@ def test_no_judge_never_passes() -> None:
         assert rr.verdict == (S.FAIL if k <= 49 else S.PROBE), (k, rr.why)
 
 
-def test_no_judge_fail_is_recorded_as_failed_lane_counts() -> None:
+def test_no_judge_fail_records_nothing() -> None:       # LC-10k: a probe never writes the eligibility store
     rows = [mkrow(i, "commit_message" if i < 35 else "pr_description", i < 40, judge=None, prog=i < 40) for i in range(70)]
     r = verdict(rows, mode=S.NO_JUDGE, gates=good_gates(g3b=None, judge_served=[]))
-    assert r.verdict == S.FAIL and S.record_plan(r)["commit_message"] == {"k": 40, "n": 70, "verdict": "FAIL"}
+    assert r.verdict == S.FAIL and S.record_plan(r) == {}
 
 
 # ---------------------------------------------------------------- rule concentration
@@ -536,11 +536,12 @@ def test_session_no_judge_cannot_pass_and_consumes_nothing(tmp_path: Path) -> No
     assert again.status == "scored"
 
 
-def test_session_no_judge_early_stop_is_recorded_with_judge_mode_none(tmp_path: Path) -> None:
+def test_session_no_judge_early_stop_is_logged_not_recorded(tmp_path: Path) -> None:
     out2 = SE.run_check(check(tmp_path, FakeAdapter(fails(21, "progfail")), no_judge=True))
-    assert out2.result.verdict == S.NOT_PASSED       # the runner stops at the 15th programmatic failure: partial counts
-    lane = lanes(tmp_path)["commit_message"]
-    assert lane["judge"] == {"backend": "none", "model_served": None, "mode": "none"} and lane["grade"] == "failed" and lane["status"] == "not_passed"
+    assert out2.result.verdict == S.NOT_PASSED       # the runner stops at the 15th programmatic failure; LC-10k: attempt log only
+    assert not (tmp_path / "elig.json").exists()
+    e = A.AttemptLog(tmp_path / "runs").entries()[0]
+    assert e["mode"] == "none" and e["verdict"] == "NOT_PASSED" and e["consumed"] is False and e["recorded"] is False
 
 
 def test_judged_run_requires_backend_and_budget(tmp_path: Path) -> None:

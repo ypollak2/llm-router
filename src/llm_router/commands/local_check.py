@@ -226,16 +226,18 @@ def _fmt_s(sec: float) -> str:
 
 def estimate_run_seconds(model: str, n_items: int, hardware: Mapping) -> tuple[float | None, str]:
     """Size-class estimate only; no runtime calls or measurements."""
-    size = re.search(r"(\d+(?:\.\d+)?)b", model, re.IGNORECASE)
+    size = re.search(r"(?<![A-Za-z0-9.])(?:(\d+)x)?(\d+(?:\.\d+)?)b(?![A-Za-z0-9])", model, re.IGNORECASE)
     if size is None:
         return None, ""
-    billions = float(size.group(1))
+    billions = float(size.group(1) or 1) * float(size.group(2))
     for limit, per_item, label in ((4, 8, "<=4B"), (9, 20, "4-9B"),
                                     (16, 40, "9-16B"), (40, 90, "16-40B"),
                                     (float("inf"), 180, ">40B")):
         if billions <= limit:
             gpu = hardware.get("gpu")
-            factor = 5 if not gpu or str(gpu).lower() == "none" else 1
+            factor = 5 if gpu is not None and str(gpu).lower() == "none" else 1
+            if gpu is None or gpu == "":
+                label += " (GPU unknown)"
             return float(n_items * per_item * factor), label
     return None, ""
 
@@ -704,7 +706,7 @@ def _recommend_lines(d: Deps, res: Any, model: str, runtime: str) -> list[str]:
             version = str((r.bench or {}).get("bank_version")).lower().lstrip("v")
             tag = f"measured {b.get('k')}/{b.get('n')} on v{version}"
         elif getattr(r, "untested_on", None) is not None:
-            tag = f"untested on bank {r.untested_on} (no number shown)"
+            tag = f"untested on bank {r.untested_on} (no number shown)" if r.untested_on else "untested (no number shown)"
         else:
             tag = "untested (no measurement; sizes and licence only)"
         fit = "" if r.fit == "ok" else ", memory unknown"
@@ -836,8 +838,13 @@ def _status(d: Deps, model: str | None) -> int:
         last = scored[-1] if scored else es[-1]
         v = last.get("verdict")
         counts = f" {last['k']}/{last['n']}" if last.get("k") is not None and last.get("n") else ""
-        programmatic = sum(e.get("state") == "scored" and not e.get("consumed") for e in es)
+        probes = [e for e in es if e.get("state") == "scored" and not e.get("consumed")]
+        programmatic = len(probes)
         extra = f"; {programmatic} programmatic-only run(s) (--no-judge) not counted" if programmatic else ""
+        if probes:
+            probe = probes[-1]
+            probe_counts = f" {probe['k']}/{probe['n']}" if probe.get("k") is not None and probe.get("n") else ""
+            extra += f"; latest probe result: {probe.get('verdict')}{probe_counts} (probe, not a judged verdict)"
         out(f"attempts: {cfg.get('model')} (bank v{cfg.get('bank_version')}): {len(scored)} of {A.MAX_DRAWS} judged draws used; last {v}{counts} {last.get('date', '')}{extra}")
         if scored and len(scored) < A.MAX_DRAWS:
             nxt = scored[-1]["ts"] + A.COOLDOWN_S

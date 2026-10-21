@@ -112,7 +112,7 @@ def test_unknown_bank_demotes_and_sort_uses_size():
     source["entries"].append(small)
     rows = R.recommend({}, "ollama", data=source)
     assert [r.model_id for r in rows] == ["fake-small:1b", "fake-chat:1b"]
-    assert rows[1].untested_on == "vNone" and rows[1].bench is None
+    assert rows[1].untested_on == "" and rows[1].bench is None
 
 
 def test_bank_load_failure_and_legacy_recommender(tmp_path):
@@ -142,15 +142,18 @@ def test_dry_run_estimates_without_generating_or_writing(tmp_path):
 def test_size_classes(size, seconds):
     model = f"fake-chat:{size}B"
     assert C.estimate_run_seconds(model, 2, {"gpu": "apple_unified"})[0] == 2 * seconds
-    for gpu in (None, "", "none"):
-        assert C.estimate_run_seconds(model, 2, {"gpu": gpu})[0] == 10 * seconds
+    for gpu in (None, ""):
+        estimate, label = C.estimate_run_seconds(model, 2, {"gpu": gpu})
+        assert estimate == 2 * seconds
+        assert label.endswith(" (GPU unknown)")
+    assert C.estimate_run_seconds(model, 2, {"gpu": "none"})[0] == 10 * seconds
     assert C.estimate_run_seconds("fake-chat:latest", 2, {}) == (None, "")
 
 
 def test_rate_ignores_cold_record():
-    cold = {"status": "ok", "elapsed_s": 1000, "first_token_s": 900,
+    cold = {"status": "ok", "cold": True, "elapsed_s": 1000, "first_token_s": 900,
             "prompt_chars": 100, "completion_tokens": 20}
-    warm = {**cold, "elapsed_s": 4, "first_token_s": 2}
+    warm = {**cold, "cold": False, "elapsed_s": 4, "first_token_s": 2}
     rate = runner.measure_rate(iter([cold, warm, warm]))
     assert rate.n == 2 and rate.mean_item_s == 4
     assert rate.prefill_chars_per_s == 50 and rate.decode_tok_per_s == 10

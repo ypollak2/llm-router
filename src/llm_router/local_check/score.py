@@ -273,7 +273,10 @@ def record_plan(res: Result, *, cumulative: bool = False) -> dict[str, dict[str,
     PASS: every lane that clears the guard gets the pooled counts; an excluded lane gets its OWN counts as FAIL (so an older pass for it is replaced).
     FAIL: every lane gets the pooled counts. NOT_PASSED: the first attempt records the partial counts it has (k of the items scored); a
     cumulative one (``cumulative``: an earlier attempt exists) records k over n_assigned. INCONCLUSIVE writes nothing: a PASS recorded earlier for
-    the same configuration is kept and the rerun is only logged (D-263). INVALID and PROBE record nothing."""
+    the same configuration is kept and the rerun is only logged (D-263). INVALID and PROBE record nothing.
+    A ``--no-judge`` run (mode != JUDGE) records nothing at all (LC-10k): it must never replace or downgrade a judged verdict, so it lives in the attempt log only."""
+    if res.mode != JUDGE:
+        return {}
     jobs = sorted(res.lanes)
     extra = {"rule_concentration": res.rule_concentration} if res.rule_concentration else {}
     pooled = {"k": res.k, "n": res.n_assigned}
