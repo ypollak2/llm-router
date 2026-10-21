@@ -119,9 +119,35 @@ def test_kind_gate(transcripts, monkeypatch, capsys, untagged, mode):
     assert lines[gate].startswith("N_F=1 vs threshold 19: NO-GO")
     assert lines[gate].endswith(
         f"; sessions: organic=1 untagged={untagged} other_kind=2")
-    assert (WARNING in lines) is (untagged > 1)
-    if untagged > 1:
+    if untagged == 1:
+        reason = "insufficient_flagged_supply"
+        assert ("NO-GO (insufficient_flagged_supply) -- next step: detector tune to v3"
+                in lines[gate])
+        assert WARNING not in lines
+    else:
+        reason = "tagging_gap"
+        assert ("NO-GO (tagging_gap) -- next step: fix session tagging, then re-census; "
+                "do not tune the detector on this result" in lines[gate])
+        assert "detector tune to v3" not in lines[gate]
         assert lines[gate + 1] == WARNING
+    if mode == "freeze":
+        frozen = json.loads((run_dir(transcripts) / "frozen.json").read_text())
+        assert frozen["no_go"] == reason
+
+
+@pytest.mark.parametrize("n,untagged,reason", [
+    (5, 0, "insufficient_flagged_supply"),
+    (5, 1, "insufficient_flagged_supply"),
+    (5, 2, "tagging_gap"),
+    (19, 2, None),
+])
+def test_gate(n, untagged, reason):
+    line = sample._gate(n, {"organic": 1, "untagged": untagged})
+    if reason is None:
+        assert line.startswith(f"N_F={n} vs threshold 19: GO; sessions:")
+        assert "tagging_gap" not in line
+    else:
+        assert line.startswith(f"N_F={n} vs threshold 19: NO-GO ({reason}) -- next step:")
 
 
 @pytest.mark.parametrize("exists", [False, True])

@@ -264,10 +264,24 @@ def draw(pool: Iterable[Candidate], seed: int, salt: str) -> list[dict]:
     return rows
 
 
+def _no_go_reason(n: int, kinds: dict[str, int]) -> str | None:
+    if n >= MIN_FLAGGED:
+        return None
+    if kinds["untagged"] > kinds["organic"]:
+        return "tagging_gap"
+    return "insufficient_flagged_supply"
+
+
 def _gate(n: int, kinds: dict[str, int]) -> str:
-    verdict = ("GO" if n >= MIN_FLAGGED else
-               "NO-GO (insufficient_flagged_supply) -- next step: detector tune to v3 "
-               "(P3.6-c PR 3); re-census after the window slides")
+    reason = _no_go_reason(n, kinds)
+    if reason is None:
+        verdict = "GO"
+    elif reason == "tagging_gap":
+        verdict = ("NO-GO (tagging_gap) -- next step: fix session tagging, then "
+                   "re-census; do not tune the detector on this result")
+    else:
+        verdict = ("NO-GO (insufficient_flagged_supply) -- next step: detector tune to v3 "
+                   "(P3.6-c PR 3); re-census after the window slides")
     organic = kinds["organic"]      # collect() always emits both keys
     untagged = kinds["untagged"]
     other_kind = sum(v for k, v in kinds.items() if k not in {"organic", "untagged"})
@@ -361,7 +375,7 @@ def cmd_redo_sample(args: list[str]) -> int:
         manifest_sha256=hashlib.sha256(manifest.encode("utf-8")).hexdigest(),
         seed=options.seed, run_id=run_id, salt=salt, min_flagged=MIN_FLAGGED,
         n_flagged_pool=counts["N_F"], allow_below_threshold=options.allow_below_threshold,
-        no_go="insufficient_flagged_supply" if below else None,
+        no_go=_no_go_reason(counts["N_F"], counts["sessions_by_kind"]),
         concentrated=counts["largest_session_share_F"] > 0.6,
         shortfall=150 - len(rows),
         window=dict(days=options.days, since_iso=_iso(since), until_iso=_iso(until)),
