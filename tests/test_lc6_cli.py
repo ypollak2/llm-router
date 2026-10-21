@@ -135,7 +135,7 @@ def test_fail_run_exit_code_and_explain_histogram(tmp_path: Path) -> None:
     bad = {i.id: "progfail" for i in items[:30]}              # grader rejects: "Here is the commit message" preamble
     d, sink, _ = deps(tmp_path, FakeAdapter(bad))
     code = run(["--yes", "--model", MODEL], d)
-    assert code == LCC.EXIT_NOT_PASSED and ("Verdict: FAIL" in sink.text or "Verdict: NOT_PASSED" in sink.text)
+    assert code == LCC.EXIT_NOT_PASSED and ("Verdict: FAIL" in sink.text or "not passed (NOT_PASSED)" in sink.text)
     d2, s2, _ = deps(tmp_path)
     assert run(["explain"], d2) == 0
     t = s2.text
@@ -155,7 +155,7 @@ def test_explain_without_a_run_and_status_before_and_after(tmp_path: Path) -> No
     assert run(["--yes", "--model", MODEL], d) == 0
     d, sink, _ = deps(tmp_path)
     assert run(["status"], d) == 0
-    assert "passed 60/70" in sink.text and "1 of 2 draws used" in sink.text and "next draw: after" in sink.text
+    assert "passed 60/70" in sink.text and "1 of 2 judged draws used" in sink.text and "next draw: after" in sink.text
 
 
 def test_status_lists_an_open_run(tmp_path: Path) -> None:

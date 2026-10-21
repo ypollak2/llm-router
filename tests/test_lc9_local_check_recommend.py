@@ -84,16 +84,17 @@ def test_no_model_name_literal_in_recommend_py():
 # ---- selection
 def test_big_machine_ranks_measured_first_then_untested_by_size():
     r = R.recommend(mac(64), "ollama", None, None, today=date(2026, 10, 21))
-    assert r[0].status == "measured" and r[0].pooled_rate == 60 / 70
-    rest = [x.need_gb for x in r[1:]]
-    assert rest == sorted(rest) and all(x.status == "untested" for x in r[1:])
+    assert all(x.status == "untested" and x.pooled_rate is None for x in r)
+    sizes = [x.need_gb for x in r]
+    assert sizes == sorted(sizes)
     assert r[0].pull_command == f"ollama pull {r[0].model_id}"
 
 
 def test_busy_machine_low_free_but_enough_total_still_fits():
     # 48 GiB Mac with 2 GB free right now: capacity 48 - 9.6 = 38.4 >= 28.4 (the review's case)
     r = R.recommend(mac(48, free=2.0), "ollama", None, None, today=date(2026, 10, 21))
-    assert r and r[0].status == "measured" and r[0].fit == "ok"
+    assert r and all(x.fit == "ok" for x in r)
+    assert any(x.need_gb == 28.4 for x in r)
     assert R.capacity_gb(mac(48, free=2.0)) == 38.4
 
 
@@ -116,8 +117,9 @@ def test_headroom_and_kv_boundary():
     assert need == round(22 * 1.2 + 2.0, 2)
     total = need / 0.8
     assert R.capacity_gb(mac(total)) == need
-    assert R.recommend(mac(total), "ollama")[0].status == "measured"
-    assert not any(x.status == "measured" for x in R.recommend(mac(total - 0.1), "ollama"))
+    model_id = e["ids"]["ollama"]
+    assert model_id in [x.model_id for x in R.recommend(mac(total), "ollama")]
+    assert model_id not in [x.model_id for x in R.recommend(mac(total - 0.1), "ollama")]
 
 
 def test_empty_reason_text():
@@ -147,7 +149,7 @@ def test_discrete_gpu_uses_vram_when_entry_gives_min_vram():
 
 def test_discrete_gpu_without_min_vram_falls_back_to_ram_rule():
     hw = {"gpu": "nvidia", "vram_gb": 8.0, "total_gb": 64.0}  # capacity 51.2
-    assert R.recommend(hw, "ollama")[0].status == "measured"
+    assert any(x.need_gb == 28.4 for x in R.recommend(hw, "ollama"))
     assert all(e["min_vram_gb"] is None for e in D["entries"])  # no model card gives a VRAM figure (see docstring)
 
 

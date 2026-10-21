@@ -6,6 +6,7 @@ for it. The result describes the model, runtime, settings and benchmark version 
 ```
 llm-router local-check [run] [--dry-run] [--no-judge] [--yes] [--model M] [--endpoint URL [--allow-remote]]
                        [--profile quick|standard] [--fresh] [--force] [--judge-route auto|api|subscription]
+llm-router local-check --help  # run options and all subcommands
 llm-router local-check status [--model M]
 llm-router local-check explain [--model M]
 llm-router local-check enable <lane> [--model M]
@@ -50,8 +51,9 @@ llm-router local-check disable <lane> [--model M]
 
 Model and digest, hardware (RAM and the memory a model can use: total minus a reserve of max(4 GB, 20 %), not the momentary free memory),
 items in scope (how many of the draw's 70 fit the model's context window), time, judge route, cost estimate and cap,
-then the consent wording (`Proceed? [y/N]`). The time is measured by a 3-item rate probe at the start of the run; it is shown on the plan screen
-only when a run is being resumed. **Below 50 items in scope the run is refused** (a verdict needs n >= 50 and >= 20 per lane): raise `num_ctx`
+then the consent wording (`Proceed? [y/N]`). With `--yes` the question is replaced by `consent: given by --yes`.
+When the name includes a parameter count, Time shows an estimate from its size class, labelled as not measured.
+The real run measures its rate on items 2-3 (excluding the cold load) and prints the total; a resumed run shows its measured remaining time. **Below 50 items in scope the run is refused** (a verdict needs n >= 50 and >= 20 per lane): raise `num_ctx`
 (Ollama: a Modelfile `PARAMETER num_ctx`, or `OLLAMA_CONTEXT_LENGTH`) or use a longer-context model.
 
 ## Verdict
@@ -62,6 +64,8 @@ Answers the judge could not rate (after retries) are excluded from n, up to 5 % 
 The screen shows `k/n` and **n first**, the lane table, the validity gates (G0 integrity, G1 serves, G3a grader self-test, G3b judge plants, G5 completeness),
 a rule-concentration warning (one grader rule behind >= 40 % of failures), what was recorded, and one routing line per passed lane.
 
+An early stop instead starts with `not passed (NOT_PASSED) -- stopped early after N of M items (K passed)` and the pass bar.
+
 ### After the verdict
 
 * **Routing is live (D-260).** A recorded PASS switches the passed lanes on, per lane: `routing: on for <lane> -- disable with ...`,
@@ -71,11 +75,14 @@ a rule-concentration warning (one grader rule behind >= 40 % of failures), what 
 * **Retention.** Any completed run (whatever the verdict) is followed by a prune: the last 3 runs are kept, answers older than 30 days are stripped.
   It prints only when it hit an error.
 * **Recommendations.** After a FAIL, NOT_PASSED or an INCONCLUSIVE on fewer than 70 items, the screen lists models that fit this machine from a
-  data file, measured ones first (with their k/n), untested ones labelled as such, each with the pull command as text for you to run. Nothing is
+  data file, comparable measurements first (`measured k/n on vN`). Measurements from another bank are shown as
+  `untested on bank vN (no number shown)`, without their old counts; other untested entries keep their sizes-and-licence label, each with the pull command as text for you to run. Nothing is
   pulled or routed for you. With no entry for your runtime it says `no verified recommendation for <runtime>`.
 
 `status` shows the recorded lanes (the same lines `doctor` shows, including `[routing: on]`), the routing switches in `local_routing.json`
 with the command that flips each, any lane the demotion monitor switched off, and the attempt log.
+The log shows `N of 2 judged draws used`; scored programmatic-only runs add
+`; M programmatic-only run(s) (--no-judge) not counted`.
 
 `enable <lane>` switches routing on for a lane by hand (source `manual`); it still applies only while the lane is passed and fresh.
 `disable <lane>` switches it off; a later PASS keeps it off.

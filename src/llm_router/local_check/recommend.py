@@ -53,6 +53,7 @@ class Recommendation:
     pooled_rate: float | None
     sources: Mapping[str, str] = field(default_factory=dict)
     note: str | None = None        # staleness note, same on every row
+    untested_on: str | None = None
 
 
 def load(path: Path | None = None) -> dict[str, Any]:
@@ -104,7 +105,7 @@ def _passed(current_result: Any) -> bool:
 
 
 def recommend(hardware: Mapping[str, Any] | None, runtime: str | None, current_model: str | None = None,
-              current_result: Any = None, *, data: Mapping[str, Any] | None = None, today: date | None = None) -> list[Recommendation]:
+              current_result: Any = None, *, bank_version: Any = None, data: Mapping[str, Any] | None = None, today: date | None = None) -> list[Recommendation]:
     """Fit-filtered recommendations for ``runtime``; [] when the current model already passed."""
     if current_result is not None and _passed(current_result):
         return []
@@ -121,11 +122,16 @@ def recommend(hardware: Mapping[str, Any] | None, runtime: str | None, current_m
         offered = _offered(hardware or {}, e)
         if offered is not None and need > offered:
             continue
+        bench = e.get("bench")
+        demoted = e["status"] == "measured" and not (
+            bank_version is not None and bench is not None
+            and str(bench.get("bank_version")).lower().lstrip("v") == str(bank_version).lower().lstrip("v"))
         out.append(Recommendation(
-            family=e["family"], model_id=model_id, runtime=runtime or "", status=e["status"],
+            family=e["family"], model_id=model_id, runtime=runtime or "", status="untested" if demoted else e["status"],
             pull_command=key_tmpl[1].format(id=model_id) if key_tmpl else None,
             fit="unknown" if offered is None else "ok", need_gb=need,
-            download_size_gb=float(e["download_size_gb"]), licence=e["licence"], bench=e.get("bench"),
-            pooled_rate=_pooled(e), sources=e.get("sources", {}), note=note))
+            download_size_gb=float(e["download_size_gb"]), licence=e["licence"], bench=None if demoted else bench,
+            pooled_rate=None if demoted else _pooled(e), sources=e.get("sources", {}), note=note,
+            untested_on=f"v{bank_version}" if demoted else None))
     out.sort(key=lambda r: (r.status != "measured", -(r.pooled_rate if r.pooled_rate is not None else 0.0), r.need_gb))
     return out
