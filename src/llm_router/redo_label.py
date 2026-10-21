@@ -341,12 +341,10 @@ def _owner_sample_file(path, seed, others, *, replace):
             os.fsync(stream.fileno())
         if replace:
             os.replace(temporary, path)
-    finally:
+    except BaseException:
         if temporary is not None:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
+            Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def _owner_text(text, width):
