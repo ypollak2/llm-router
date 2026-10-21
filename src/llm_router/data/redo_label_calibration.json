@@ -1,0 +1,29 @@
+{
+  "_comment": "Synthetic calibration pairs for llm-router redo-label --judge. Invented text; no user data. cal_id is a stable label, never a manifest pair_id.",
+  "pairs": [
+    {"cal_id": "cal-1-wrong-try-again", "expected": "redo",
+     "prev_prompt": "Write a function that returns the median of a list of numbers.",
+     "answer_tail": "Here is the function:\n\ndef median(xs):\n    xs = sorted(xs)\n    return xs[len(xs) // 2]\n\nIt sorts the list and returns the middle element.",
+     "prompt": "That is wrong for lists with an even number of items. Try again."},
+    {"cal_id": "cal-2-partial-correction", "expected": "redo",
+     "prev_prompt": "Add input validation to the signup form: email format and password length.",
+     "answer_tail": "I added an email regex check and a minimum password length of 8 to the signup handler. The error messages are shown under each field.",
+     "prompt": "Good, but the password length check is not applied on the server side, only in the browser. Fix that."},
+    {"cal_id": "cal-3-bug-report-about-product", "expected": "not_redo",
+     "prev_prompt": "Show me the current retry settings in the config loader.",
+     "answer_tail": "The config loader reads retry_count and retry_delay from the [network] section. Defaults are 3 and 0.5 seconds.",
+     "prompt": "Unrelated, but the dashboard crashes every time I open the billing tab. It is broken since yesterday, please look into why."},
+    {"cal_id": "cal-4-new-task", "expected": "not_redo",
+     "prev_prompt": "Rename the helper parse_row to parse_record everywhere.",
+     "answer_tail": "Done. I renamed parse_row to parse_record in 4 files and updated the 6 call sites. The tests still pass.",
+     "prompt": "Great. Now write a README section that explains how to run the importer."},
+    {"cal_id": "cal-5-extension", "expected": "not_redo",
+     "prev_prompt": "Implement a slugify function for article titles.",
+     "answer_tail": "I added slugify(title), which lowercases the title, replaces runs of non-alphanumeric characters with a hyphen and trims hyphens at both ends.",
+     "prompt": "Looks right. Also add a unit test with a few awkward titles."},
+    {"cal_id": "cal-6-short-continue", "expected": "not_redo",
+     "prev_prompt": "Go through the failing tests one by one and fix them.",
+     "answer_tail": "Fixed the first two failures (date parsing and the missing fixture). Three failing tests remain; I will take them next unless you want a different order.",
+     "prompt": "continue"}
+  ]
+}

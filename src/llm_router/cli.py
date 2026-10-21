@@ -91,6 +91,7 @@ Usage:
     llm-router routing-health   — reach, context, USED and latency per day, with n
     llm-router northstar        — routed-and-used share, per session (NS1)
     llm-router kpi              — NS/O1-O2/D1-D5/G1-G4 scorecard; --health: measured/blind/stale; --daily-install/--daily-uninstall: daily row scheduler; --maintenance: daily backfill + weekly report
+    llm-router redo-label --run ID --judge|--owner [--projects-dir DIR] [--seed N] [--others N] [--max-calls N] [--max-usd X] [--model-id ID] — P3.6-c: label a frozen redo draw; --judge = sealed isolated claude -p runner (6 calibration pairs per batch of 20, model check, spend cap, resumable); --owner = blind terminal UI (y/n/u/q, needs a TTY). Writes ids+labels only to labels_judge.jsonl / labels_owner.jsonl (pass to redo-score --labels); no text is stored; exit 2 run not found, 3 no TTY, 4 stopped
     llm-router redo-sample --census|--freeze [--seed N] [--days D] [--allow-below-threshold] [--allow-empty-exclusion] — P3.6-c: counts-only census of redo-detector pairs; --freeze draws the seeded validation strata into the state dir (no text is printed or stored); exit 2 run dir exists, 3 below threshold, 4 no transcripts, 5 empty M0.9 exclusion list
     llm-router statusline       — status line cache refresh (--refresh); prints the line otherwise
     llm-router mod              — receipt band mod for Claude Code: install / uninstall (opt-in)
@@ -885,6 +886,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "routing-health",
         "northstar",
         "kpi",
+        "redo-label",
         "redo-sample",
         "statusline",
         "mod",
@@ -939,7 +941,7 @@ _HELP_FLAGS = ("-h", "--help")
 _OWN_HELP_ANYWHERE = frozenset({
     "audit", "calibrate", "cp", "dev-refresh", "discover", "eligibility", "gc", "install", "inventory", "invoice",
     "judge", "kpi", "last", "learn", "local-check", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
-    "proxy", "redo-sample",
+    "proxy", "redo-label", "redo-sample",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
     "statusline", "team-sync", "test-delta", "verify", "welcome", "why",
 })
@@ -1123,6 +1125,9 @@ def main() -> None:
         # KPI-SPEC scorecard: NS, O1-O2, D1-D5, G1-G4.
         from llm_router.commands.kpi import cmd_kpi
         sys.exit(cmd_kpi(args[1:]))
+    elif args and args[0] == "redo-label":
+        from llm_router.redo_label import cmd_redo_label
+        sys.exit(cmd_redo_label(args[1:]))
     elif args and args[0] == "redo-sample":
         # P3.6-c: counts-only census and frozen strata draw for the redo detector validation.
         from llm_router.redo_sample import cmd_redo_sample

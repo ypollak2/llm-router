@@ -76,6 +76,9 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Permissions | Run directory 0700; files 0600. The `redo_validation` parent is set to 0700 only when created by this command. |
 | Kept | Until superseded by a later validation; no automatic deletion. |
 | Remove | On owner request, `rm -r` the run directory. |
+| `labels_judge.jsonl`, `labels_owner.jsonl` | Written only by `llm-router redo-label --judge` / `--owner` (0600, append-only, fsynced per row). Each row is `{"pair_id","label","source"}` with label `redo`, `not_redo`, `unclear` or `lost`; nothing else. A pair whose transcript or turn is gone is written as `lost`, never `not_redo`. Pass them to `redo-score --labels`. Prompt and answer text is re-derived from the transcript at label time, held in memory only, and never written to a file, log or failopen record. |
+| `owner_sample.json` | Written by `redo-label --owner` (0600): the seed and the pair ids of the random non-flagged owner sample (all F pairs are always included). Ids only. |
+| Judge runner | `redo-label --judge` runs `claude -p` with `--no-session-persistence` in an empty temporary working directory with an allow-listed environment and no `ANTHROPIC_BASE_URL`. The text leaves the machine only to the provider that already serves the sessions; the temporary directory is removed after each call. The spend cap (`--max-calls`, `--max-usd`) applies per invocation. |
 | M0.9 exclusions | `src/llm_router/data/redo_m09_excluded.txt` contains unsalted pair hashes only, plus comments. The shipped list is empty because the ids are not derivable from the repository. Freeze refuses an empty effective list unless `--allow-empty-exclusion` is supplied. The size and SHA256 of sorted keys joined with newlines identify the effective list; its SHA256 is also included in every manifest row. |
 
 ## `text_job_outcomes.jsonl` and `text_job_local_attempts.jsonl` (LC-8c)
