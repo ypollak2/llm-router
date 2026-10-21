@@ -5706,6 +5706,10 @@ async def route_and_call(
             else:
                 response = await _dispatch_coro
         except asyncio.CancelledError as _cancel_err:
+            try:
+                _cancel_err.chain_attempts = list(_attempt_trace)
+            except (AttributeError, TypeError):
+                pass
             await _record_route_error(_cancel_err, task_type, profile, correlation_id,
                                       _attempt_trace, models_to_try, _dispatch_started,
                                       effective_complexity)
@@ -5721,6 +5725,10 @@ async def route_and_call(
             await release_envelope(_env_key, _reservation)
             raise
         except asyncio.TimeoutError as _to_err:
+            try:
+                _to_err.chain_attempts = list(_attempt_trace)
+            except (AttributeError, TypeError):
+                pass
             elapsed = _t.monotonic() - _dispatch_started
             await _record_route_error(_to_err, task_type, profile, correlation_id,
                                       _attempt_trace, models_to_try, _dispatch_started,
@@ -5732,22 +5740,32 @@ async def route_and_call(
             # wall-clock-driven timeout. ``_deadline_is_tighter`` was
             # computed at the start of the try block.
             if _deadline_is_tighter and deadline_monotonic is not None:
-                raise DeadlineExceeded(
+                _deadline_err = DeadlineExceeded(
                     f"Routed turn exceeded workflow deadline "
                     f"(deadline_monotonic={deadline_monotonic:.3f}, "
                     f"elapsed ~{elapsed:.3f}s in dispatch) before any "
                     "model returned.",
                     deadline_monotonic=deadline_monotonic,
                     over_by_seconds=elapsed - (_dl_remaining_at_dispatch or 0.0),
-                ) from _to_err
+                )
+                try:
+                    _deadline_err.chain_attempts = list(_attempt_trace)
+                except (AttributeError, TypeError):
+                    pass
+                raise _deadline_err from _to_err
             # Wall-clock-driven timeout (existing T3-S2 path).
-            raise WallClockExceeded(
+            _wall_clock_err = WallClockExceeded(
                 f"Routed turn exceeded max_wall_clock_seconds="
                 f"{max_wall_clock_seconds:.3f}s "
                 f"(elapsed ~{elapsed:.3f}s) before any model returned.",
                 cap_seconds=max_wall_clock_seconds,
                 elapsed_seconds=elapsed,
-            ) from _to_err
+            )
+            try:
+                _wall_clock_err.chain_attempts = list(_attempt_trace)
+            except (AttributeError, TypeError):
+                pass
+            raise _wall_clock_err from _to_err
         except Exception as _disp_err:
             # Preserve the exact dispatch trace for callers on chain exhaustion.
             try:
