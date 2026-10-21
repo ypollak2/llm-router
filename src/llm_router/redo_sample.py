@@ -13,6 +13,9 @@ import math
 import os
 import random
 import re
+import shutil
+import sys
+import tempfile
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -24,6 +27,7 @@ from llm_router import northstar, offload_share, paths, redo_signal, session_kin
 
 MIN_FLAGGED = 19
 DEFAULT_SEED = 360
+EMPTY_EXCLUSION = "M0.9 exclusion list EMPTY: spent M0.9 pairs are NOT excluded"
 Resolver = Callable[[str], session_kind.Resolution]
 ServedLoader = Callable[[str], list[tuple[float, str]]]
 
@@ -147,7 +151,9 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
     excluded_keys = load_excluded(excluded)
     kinds: Counter[str] = Counter()
     counts = dict(sessions_total=0, organic_pairs_eligible=0, no_ts=0,
-                  excluded_m09=0, flagged_ineligible=0)
+                  excluded_m09=0, flagged_ineligible=0,
+                  exclusion_list_size=len(excluded_keys),
+                  exclusion_list_sha256=_sha("\n".join(sorted(excluded_keys))))
     pool: list[Candidate] = []
     measured = True
     any_actions = False
@@ -258,11 +264,24 @@ def draw(pool: Iterable[Candidate], seed: int, salt: str) -> list[dict]:
     return rows
 
 
-def _gate(n: int) -> str:
+def _gate(n: int, kinds: dict[str, int]) -> str:
     verdict = ("GO" if n >= MIN_FLAGGED else
                "NO-GO (insufficient_flagged_supply) -- next step: detector tune to v3 "
                "(P3.6-c PR 3); re-census after the window slides")
-    return f"N_F={n} vs threshold {MIN_FLAGGED}: {verdict}"
+    organic = kinds.get("organic", 0)
+    untagged = kinds.get("untagged", 0)
+    other_kind = sum(v for k, v in kinds.items() if k not in {"organic", "untagged"})
+    return (f"N_F={n} vs threshold {MIN_FLAGGED}: {verdict}; "
+            f"sessions: organic={organic} untagged={untagged} other_kind={other_kind}")
+
+
+def _gate_lines(n: int, kinds: dict[str, int]) -> list[str]:
+    lines = [_gate(n, kinds)]
+    if kinds.get("untagged", 0) > kinds.get("organic", 0):
+        lines.append(
+            "WARNING: most sessions are untagged: N_F shortfall may be a tagging gap, "
+            "not detector supply -- do not tune the detector on this result")
+    return lines
 
 
 def _write_private(path: Path, content: str) -> None:
@@ -280,6 +299,7 @@ def cmd_redo_sample(args: list[str]) -> int:
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--run-id")
     parser.add_argument("--allow-below-threshold", action="store_true")
+    parser.add_argument("--allow-empty-exclusion", action="store_true")
     parser.add_argument("--days", type=float, default=30)
     parser.add_argument("--projects-dir", type=Path)
     options = parser.parse_args(args)
@@ -296,7 +316,14 @@ def cmd_redo_sample(args: list[str]) -> int:
     if options.freeze and os.path.lexists(run_dir):
         print("Refused: run directory already exists.")
         return 2
-    pool, counts = collect(projects_dir=options.projects_dir, days=options.days, now=now)
+    root = (options.projects_dir if options.projects_dir is not None
+            else northstar.claude_projects_dir())
+    root = Path(root)
+    if not root.is_dir() or not any(p.is_file() for p in root.glob("*/*.jsonl")):
+        print(f"WARNING: projects dir missing or contains no transcripts: {root.name}; "
+              "refusing to report a census", file=sys.stderr)
+        return 4
+    pool, counts = collect(projects_dir=root, days=options.days, now=now)
     if options.census:
         print(f"window: {_iso(since)} to {_iso(until)}; "
               f"detector: {redo_signal.PATTERN_VERSION}")
@@ -304,19 +331,31 @@ def cmd_redo_sample(args: list[str]) -> int:
             rendered = "unmeasured" if value is None else (
                 json.dumps(value, sort_keys=True) if isinstance(value, dict) else value)
             print(f"{key}: {rendered}")
-        print(_gate(counts["N_F"]))
+        if counts["exclusion_list_size"] == 0:
+            print(EMPTY_EXCLUSION)
+        print("\n".join(_gate_lines(counts["N_F"], counts["sessions_by_kind"])))
         return 0
+    print("\n".join(_gate_lines(counts["N_F"], counts["sessions_by_kind"])))
     below = counts["N_F"] < MIN_FLAGGED
     if below and not options.allow_below_threshold:
-        print(_gate(counts["N_F"]))
         print("Refused: --allow-below-threshold is required to freeze this supply.")
         return 3
+    if counts["exclusion_list_size"] == 0 and not options.allow_empty_exclusion:
+        print(EMPTY_EXCLUSION)
+        print("Refused: --allow-empty-exclusion is required to freeze without an M0.9 "
+              "exclusion list.")
+        return 5
     salt = _sha(f"redo-sample-salt|{options.seed}|{run_id}")
     rows = draw(pool, options.seed, salt)
+    for row in rows:
+        row["exclusion_list_sha256"] = counts["exclusion_list_sha256"]
     manifest = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
     drawn = Counter(row["stratum"] for row in rows)
     strata = {h: {"N": counts[f"N_{h}"], "n": drawn[h]} for h in ("F", "S", "R")}
     frozen = dict(
+        exclusion_list_size=counts["exclusion_list_size"],
+        exclusion_list_sha256=counts["exclusion_list_sha256"],
+        allow_empty_exclusion=options.allow_empty_exclusion,
         detector_version=redo_signal.PATTERN_VERSION,
         detector_sha256=hashlib.sha256(Path(redo_signal.__file__).read_bytes()).hexdigest(),
         manifest_sha256=hashlib.sha256(manifest.encode("utf-8")).hexdigest(),
@@ -336,16 +375,23 @@ def cmd_redo_sample(args: list[str]) -> int:
         pass
     else:
         os.chmod(parent, 0o700)
+    tmp = Path(tempfile.mkdtemp(prefix=".tmp-" + run_id + "-", dir=parent))
     try:
-        os.makedirs(run_dir, mode=0o700)
-    except FileExistsError:
-        print("Refused: run directory already exists.")
-        return 2
-    os.chmod(run_dir, 0o700)
-    _write_private(run_dir / "manifest.jsonl", manifest)
-    _write_private(run_dir / "frozen.json", json.dumps(frozen, sort_keys=True, indent=2) + "\n")
+        os.chmod(tmp, 0o700)
+        _write_private(tmp / "manifest.jsonl", manifest)
+        _write_private(tmp / "frozen.json", json.dumps(frozen, sort_keys=True, indent=2) + "\n")
+        try:
+            os.rename(tmp, run_dir)
+        except OSError:
+            if os.path.lexists(run_dir):
+                shutil.rmtree(tmp, ignore_errors=True)
+                print("Refused: run directory already exists.")
+                return 2
+            raise
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     print(f"run_id: {run_id}\nrun_dir: {run_dir}")
     for h, s in strata.items():
         print(f"{h}: N={s['N']} n={s['n']}")
-    print(_gate(counts["N_F"]))
     return 0
