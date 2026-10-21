@@ -92,6 +92,7 @@ Usage:
     llm-router northstar        — routed-and-used share, per session (NS1)
     llm-router kpi              — NS/O1-O2/D1-D5/G1-G4 scorecard; --health: measured/blind/stale; --daily-install/--daily-uninstall: daily row scheduler; --maintenance: daily backfill + weekly report
     llm-router redo-sample --census|--freeze [--seed N] [--days D] [--allow-below-threshold] — P3.6-c: counts-only census of redo-detector pairs; --freeze draws the seeded validation strata into the state dir (no text is printed or stored)
+    llm-router redo-score --run ID [--labels PATH ...] [--dry-score] [--seed N] [--reps N] — P3.6-c: text-free scoring of frozen redo validation labels
     llm-router statusline       — status line cache refresh (--refresh); prints the line otherwise
     llm-router mod              — receipt band mod for Claude Code: install / uninstall (opt-in)
     llm-router sessions         — list recorded sessions
@@ -886,6 +887,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "northstar",
         "kpi",
         "redo-sample",
+        "redo-score",
         "statusline",
         "mod",
         "broker",
@@ -939,7 +941,7 @@ _HELP_FLAGS = ("-h", "--help")
 _OWN_HELP_ANYWHERE = frozenset({
     "audit", "calibrate", "cp", "dev-refresh", "discover", "eligibility", "gc", "install", "inventory", "invoice",
     "judge", "kpi", "last", "learn", "local-check", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
-    "proxy", "redo-sample",
+    "proxy", "redo-sample", "redo-score",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
     "statusline", "team-sync", "test-delta", "verify", "welcome", "why",
 })
@@ -1127,6 +1129,9 @@ def main() -> None:
         # P3.6-c: counts-only census and frozen strata draw for the redo detector validation.
         from llm_router.redo_sample import cmd_redo_sample
         sys.exit(cmd_redo_sample(args[1:]))
+    elif args and args[0] == "redo-score":
+        from llm_router.redo_score import cmd_redo_score
+        sys.exit(cmd_redo_score(args[1:]))
     elif args and args[0] == "statusline":
         # The status line's cache refresh (started by the status line itself).
         from llm_router.statusline_refresh import cmd_statusline
