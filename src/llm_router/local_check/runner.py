@@ -125,11 +125,11 @@ class Rate:
 
 def measure_rate(records: Iterable[dict]) -> Rate | None:
     """Prefill/decode estimate from completed records (time-to-first-token = prefill).
-    Exclude the first (cold-load) record when at least two records exist.
+    Exclude flagged cold-load records when a non-cold usable record exists.
     """
-    records = list(records)
-    warm = records[1:] if len(records) >= 2 else records
-    recs = [r for r in warm if r.get("status") in ("ok", "truncated", "empty", "timeout")]
+    recs = [r for r in records if r.get("status") in ("ok", "truncated", "empty", "timeout")]
+    warm = [r for r in recs if not r.get("cold")]
+    recs = warm or recs
     if not recs:
         return None
     pf, dc, outs = [], [], []
@@ -336,6 +336,7 @@ class Runner:
         self.store = RunStore(run_dir)
         self.lock_path, self.base_timeout_s, self.probe_n = lock_path, base_timeout_s, probe_n
         self.min_pass, self.is_failure, self.on_result = min_pass, is_failure, on_result
+        self._cold_pending = True
         # Both calls reach the runtime. A transient failure must not become digest/ctx None in
         # meta (a later resume would then mismatch), so it stops the run before anything is
         # written; the settings hash is built from the requested settings plus the confirmed ctx.
@@ -363,6 +364,9 @@ class Runner:
         res = self.adapter.generate(self.model, item.prompt,
                                     system=getattr(item, "system", None), timeout_s=timeout_s)
         rec = _record(item, res, timeout_s)
+        if self._cold_pending:
+            rec["cold"] = True
+            self._cold_pending = False
         self.store.append(rec)
         if self.on_result:
             self.on_result(rec)

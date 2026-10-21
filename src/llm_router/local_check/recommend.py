@@ -132,6 +132,6 @@ def recommend(hardware: Mapping[str, Any] | None, runtime: str | None, current_m
             fit="unknown" if offered is None else "ok", need_gb=need,
             download_size_gb=float(e["download_size_gb"]), licence=e["licence"], bench=None if demoted else bench,
             pooled_rate=None if demoted else _pooled(e), sources=e.get("sources", {}), note=note,
-            untested_on=f"v{bank_version}" if demoted else None))
+            untested_on=(f"v{bank_version}" if bank_version is not None else "") if demoted else None))
     out.sort(key=lambda r: (r.status != "measured", -(r.pooled_rate if r.pooled_rate is not None else 0.0), r.need_gb))
     return out
