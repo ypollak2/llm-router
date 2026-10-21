@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from llm_router import cli, paths, redo_label as label
+from llm_router.file_lock import exclusive_lock
 
 MODEL = "test-model-1"
 NOW = 1_800_000_000.0
@@ -312,6 +313,91 @@ def test_corrupt_ledger_refuses_without_writing(make_run, capsys, payload):
     assert "Refused: invalid judge_spend.json (" in out and payload not in out
 
 
+def test_recursive_ledger_refuses_without_writing(make_run, capsys):
+    run = make_run(n=1)
+    path = run.run_dir / "judge_spend.json"
+    path.write_text("[" * 100000 + "]" * 100000)
+    before = {p: p.read_bytes() for p in run.run_dir.iterdir()}
+    fake = FakeClaude()
+    assert label.run_judge(options(run), call=fake) == 2
+    assert capsys.readouterr().out.strip() == (
+        "Refused: invalid judge_spend.json (RecursionError).")
+    assert not fake.calls
+    assert {p: p.read_bytes() for p in run.run_dir.iterdir()} == before
+
+
+def test_cmd_refuses_held_lock(make_run, capsys):
+    run = make_run(n=1)
+    lock_path = run.run_dir / ".lock"
+    os.close(os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600))
+    status = {}
+    with exclusive_lock(lock_path, timeout=0, status=status) as acquired:
+        assert acquired and status["state"] == "acquired"
+        before = {p: p.read_bytes() for p in run.run_dir.iterdir()}
+        assert label.cmd_redo_label([
+            "--run", "run1", "--judge", "--model-id", MODEL]) == 2
+        assert capsys.readouterr().out.strip() == (
+            "Refused: another redo-label process holds this run")
+        assert {p: p.read_bytes() for p in run.run_dir.iterdir()} == before
+    for name in ("judge_meta.json", "labels_judge.jsonl", "judge_spend.json"):
+        assert not (run.run_dir / name).exists()
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_cmd_releases_lock(make_run, monkeypatch, raises):
+    run = make_run(n=1)
+
+    def judge(opts):
+        status = {}
+        with exclusive_lock(opts.run_dir / ".lock", timeout=0, status=status) as acquired:
+            assert not acquired and status["state"] == "held"
+        if raises:
+            raise RuntimeError("synthetic failure")
+        return 0
+
+    monkeypatch.setattr(label, "run_judge", judge)
+    args = ["--run", "run1", "--judge", "--model-id", MODEL]
+    if raises:
+        with pytest.raises(RuntimeError, match="synthetic failure"):
+            label.cmd_redo_label(args)
+    else:
+        assert label.cmd_redo_label(args) == 0
+    lock_path = run.run_dir / ".lock"
+    assert lock_path.read_bytes() == b""
+    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+    status = {}
+    with exclusive_lock(lock_path, timeout=0, status=status) as acquired:
+        assert acquired and status["state"] == "acquired"
+
+
+@pytest.mark.parametrize("payload,stop", [
+    (json.dumps({"calls": 2, "usd": 0.01, "rejected_streak": 0,
+                 "estimated_calls": 0}), "stopped: call cap"),
+    ("{", "stopped: invalid judge_spend.json (JSONDecodeError)"),
+])
+def test_judge_rereads_ledger_between_batches(make_run, monkeypatch, capsys,
+                                             payload, stop):
+    run = make_run(n=label.BATCH_SIZE + 1)
+    fake = FakeClaude()
+    original = label.append_label
+    appended = 0
+
+    def append_with_external_write(*args):
+        nonlocal appended
+        original(*args)
+        appended += 1
+        if appended == label.BATCH_SIZE:
+            # Simulate an external update after the first batch's ledger writes.
+            (run.run_dir / "judge_spend.json").write_text(payload)
+
+    monkeypatch.setattr(label, "append_label", append_with_external_write)
+    assert label.run_judge(options(run, max_calls=2), call=fake) == 4
+    assert len(fake.calls) == 1
+    assert len(judge_rows(run)) == label.BATCH_SIZE
+    assert stop in capsys.readouterr().out
+    assert (run.run_dir / "judge_spend.json").read_text() == payload
+
+
 def test_cap_counts_the_upcoming_call(make_run, capsys):
     run = make_run(n=1)
     label.write_ledger(run.run_dir, {"calls": 0, "usd": 2.9, "rejected_streak": 0,
@@ -569,10 +655,10 @@ def test_state_contains_metadata_only_and_private_label_files(make_run):
     files = [p for p in run.state.rglob("*") if p.is_file()]
     assert {p.name for p in files} == {
         "manifest.jsonl", "frozen.json", "labels_judge.jsonl",
-        "labels_owner.jsonl", "owner_sample.json", "judge_meta.json", "judge_spend.json"}
+        "labels_owner.jsonl", "owner_sample.json", "judge_meta.json", "judge_spend.json", ".lock"}
     for path in files:
         assert b"ZQX" not in path.read_bytes()
-        if path.name in {"judge_meta.json", "judge_spend.json"}:
+        if path.name in {"judge_meta.json", "judge_spend.json", ".lock"}:
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
         if path.name.startswith("labels_"):
             assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -634,7 +720,9 @@ def test_corpus_refusal_writes_nothing(make_run, tmp_path, mode, corpus):
         rc, output = run_tui(args, [], run.env)
         assert rc == 2 and b"Refused:" in output
         assert b"ZQX" not in output
-    assert {p: p.read_bytes() for p in run.run_dir.iterdir()} == before
+    # The empty 0600 run lock is the only file an owner-mode refusal may add.
+    assert {p: p.read_bytes() for p in run.run_dir.iterdir()
+            if p.name != ".lock"} == before
 
 
 def test_force_overrides_only_fraction(make_run, tmp_path):

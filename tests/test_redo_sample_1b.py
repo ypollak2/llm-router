@@ -149,6 +149,34 @@ def test_gate(n, untagged, reason):
     else:
         assert line.startswith(f"N_F={n} vs threshold 19: NO-GO ({reason}) -- next step:")
 
+@pytest.mark.parametrize("n", [sample.MIN_FLAGGED - 1, sample.MIN_FLAGGED])
+def test_gate_lines_warning_requires_no_go(n):
+    lines = sample._gate_lines(n, {"organic": 1, "untagged": 2})
+    if n >= sample.MIN_FLAGGED:
+        assert len(lines) == 1
+        assert ": GO;" in lines[0]
+        assert "WARNING" not in lines[0]
+    else:
+        assert "NO-GO (tagging_gap)" in lines[0]
+        assert lines[1:] == [WARNING]
+
+
+def test_tagging_gap_threshold_refusal(transcripts, monkeypatch, capsys):
+    for sid in ("untagged-0", "untagged-1"):
+        write(transcripts, sid)
+    monkeypatch.setattr(
+        session_kind, "tag_kind_of", lambda sid: "organic" if sid == SID else None)
+    assert sample.cmd_redo_sample([
+        "--freeze", "--run-id", "tagging-gap"]) == 3
+    output = capsys.readouterr().out
+    assert "NO-GO (tagging_gap)" in output
+    assert "Refused: --allow-below-threshold is required" in output
+    assert "The cause is session tagging, not detector supply" in output
+    assert "fix session tagging, then re-census" in output
+    assert ("--allow-below-threshold freezes an under-supplied sample "
+            "and does not fix the cause.") in output
+    assert not run_dir(transcripts, "tagging-gap").exists()
+
 
 @pytest.mark.parametrize("exists", [False, True])
 @pytest.mark.parametrize("mode", ["--census", "--freeze"])

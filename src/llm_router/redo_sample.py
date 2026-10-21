@@ -291,7 +291,7 @@ def _gate(n: int, kinds: dict[str, int]) -> str:
 
 def _gate_lines(n: int, kinds: dict[str, int]) -> list[str]:
     lines = [_gate(n, kinds)]
-    if kinds["untagged"] > kinds["organic"]:
+    if _no_go_reason(n, kinds) is not None and kinds["untagged"] > kinds["organic"]:
         lines.append(
             "WARNING: most sessions are untagged: N_F shortfall may be a tagging gap, "
             "not detector supply -- do not tune the detector on this result")
@@ -353,6 +353,10 @@ def cmd_redo_sample(args: list[str]) -> int:
     below = counts["N_F"] < MIN_FLAGGED
     if below and not options.allow_below_threshold:
         print("Refused: --allow-below-threshold is required to freeze this supply.")
+        if _no_go_reason(counts["N_F"], counts["sessions_by_kind"]) == "tagging_gap":
+            print("The cause is session tagging, not detector supply: fix session "
+                  "tagging, then re-census. --allow-below-threshold freezes an "
+                  "under-supplied sample and does not fix the cause.")
         return 3
     if counts["exclusion_list_size"] == 0 and not options.allow_empty_exclusion:
         print(EMPTY_EXCLUSION)
