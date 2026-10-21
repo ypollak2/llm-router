@@ -1,0 +1,1 @@
+Redo labelling now holds an exclusive per-run lock, refuses recursively nested spend ledgers, and re-reads the ledger before each judge batch. Redo sampling suppresses tagging-gap warnings when flagged supply meets the threshold and explains that overriding a tagging-gap refusal freezes an under-supplied sample without fixing session tagging.

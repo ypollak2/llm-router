@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from llm_router import northstar, paths, redo_signal, shadow_frontier
+from llm_router.file_lock import exclusive_lock
 
 LABELS = ("redo", "not_redo", "unclear", "lost")
 VIEW_ANSWER_TAIL = 1500
@@ -322,7 +323,7 @@ def run_judge(options: argparse.Namespace, *,
         return 2
     try:
         ledger = read_ledger(run_dir)
-    except (OSError, ValueError, OverflowError) as exc:
+    except (OSError, ValueError, OverflowError, RecursionError) as exc:
         print(f"Refused: invalid judge_spend.json ({type(exc).__name__}).")
         return 2
     meta_path = run_dir / "judge_meta.json"
@@ -367,6 +368,11 @@ def run_judge(options: argparse.Namespace, *,
     seed = options.seed if options.seed is not None else frozen.get("seed", 360)
     calls, usd, estimated_calls, stop = 0, 0.0, 0, None
     for batch_no, offset in enumerate(range(0, len(pending), BATCH_SIZE)):
+        try:
+            ledger = read_ledger(run_dir)
+        except (OSError, ValueError, OverflowError, RecursionError) as exc:
+            stop = f"stopped: invalid judge_spend.json ({type(exc).__name__})"
+            break
         if ledger["calls"] >= options.max_calls:
             stop = "stopped: call cap"
             break
@@ -490,7 +496,19 @@ The unresolved F-pair rule is never waived.
         options.seed = options.frozen.get("seed", 360)
     if options.judge and any(arg.split("=", 1)[0] == "--others" for arg in args):
         parser.error("--others is owner only")
-    return run_judge(options) if options.judge else run_owner(options)
+    lock_path = options.run_dir / ".lock"
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except OSError:
+        print("Refused: another redo-label process holds this run")
+        return 2
+    status = {}
+    with exclusive_lock(lock_path, timeout=0.0, status=status) as acquired:
+        if not acquired:
+            print("Refused: another redo-label process holds this run")
+            return 2
+        return run_judge(options) if options.judge else run_owner(options)
 
 
 # ---- OWNER TUI (added by part B) ----
