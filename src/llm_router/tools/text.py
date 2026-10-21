@@ -1134,15 +1134,26 @@ async def llm_text_job(
             feedback = history[-1] if history else None
             system_prompt, prompt = build_prompt(job, truncated_input, hint=hint, feedback=feedback)
 
-            resp = await route_and_call(
-                TaskType.GENERATE,
-                prompt,
-                system_prompt=system_prompt,
-                temperature=0.2,
-                ctx=ctx,
-                route_directive_id=_read_hook_route_directive(),
-                eligibility_exempt_reason=eligibility_routing.TEXT_JOB_REASON,  # F112 / D-242
-            )
+            try:
+                resp = await route_and_call(
+                    TaskType.GENERATE,
+                    prompt,
+                    system_prompt=system_prompt,
+                    temperature=0.2,
+                    ctx=ctx,
+                    route_directive_id=_read_hook_route_directive(),
+                    eligibility_exempt_reason=eligibility_routing.TEXT_JOB_REASON,  # F112 / D-242
+                )
+            except Exception as exc:
+                try:
+                    _local_touched.update(record_local_attempts(
+                        job=job, served_model="",
+                        chain_attempts=getattr(exc, "chain_attempts", None) or [],
+                        accepted=False,
+                    ))
+                except Exception:  # noqa: BLE001 -- preserve the original route error
+                    pass
+                raise
 
             check = check_output(job, truncated_input, resp.content)
             result_text = check.text
@@ -1154,17 +1165,22 @@ async def llm_text_job(
                 break
             history.append(check.reason or "acceptance check failed")
     finally:
-        eligibility_routing.reset_text_job_context(_tj_token)
-
-    model_name = resp.model if resp else "unknown"
-    status = STATUS_ACCEPTED if accepted else STATUS_REJECTED
-    record_text_job_outcome(job=job, model=model_name, status=status, attempts=attempt)
-    try:  # LC-8: demotion monitor (never re-enables; never breaks the call)
-        from llm_router.local_check import routing as _lc_routing
-        for _m in sorted(_local_touched):  # LC-8b: every local model tried, not only the served one
-            _lc_routing.demotion_check(_m, job)
-    except Exception:  # noqa: BLE001
-        pass
+        try:
+            eligibility_routing.reset_text_job_context(_tj_token)
+        except Exception:  # noqa: BLE001 -- cleanup must not replace a route error
+            pass
+        status = STATUS_ACCEPTED if accepted else STATUS_REJECTED
+        try:
+            if resp is not None:
+                record_text_job_outcome(job=job, model=resp.model, status=status, attempts=attempt)
+        except Exception:  # noqa: BLE001
+            pass
+        for _m in sorted(_local_touched):
+            try:  # Every local model tried, including attempts from a failed route.
+                from llm_router.local_check import routing as _lc_routing
+                _lc_routing.demotion_check(_m, job)
+            except Exception:  # noqa: BLE001 -- keep checking after one monitor fails
+                pass
 
     lines = [resp.header() if resp else "no response", ""]
     lines.append(f"_Structured: status={status}, attempts={attempt}_")

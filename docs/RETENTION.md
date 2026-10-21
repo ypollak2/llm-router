@@ -77,3 +77,15 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Kept | Until superseded by a later validation; no automatic deletion. |
 | Remove | On owner request, `rm -r` the run directory. |
 | M0.9 exclusions | `src/llm_router/data/redo_m09_excluded.txt` contains unsalted pair hashes only, plus comments. The shipped list is empty because the ids are not derivable from the repository. |
+
+## `text_job_outcomes.jsonl` and `text_job_local_attempts.jsonl` (LC-8c)
+
+| Item | Value |
+|---|---|
+| Rows | Outcomes: `ts`, `session_id`, `job`, `model`, `status`, `attempts`. Local attempts: `ts`, `job`, `model`, `outcome`. No prompt text. |
+| Writers | `text_job_ledger.record_text_job_outcome` and `text_job_ledger._append_local_attempt` (via `record_local_attempts`), called by `llm_text_job`. Writes are best-effort. |
+| Kept | Two generations of 4 MiB per ledger via `capped_log` (`MAX_LEDGER_BYTES`): `<name>` and `<name>.1` (older). The oldest generation is dropped on rotation; a generation can exceed the cap by one row. |
+| Why 4 MiB | Eight times the 512 KiB demotion tail read, about 40,000 small rows per generation. |
+| Reads | Demotion reads the local-attempt ledger's `.1` tail then the live file's tail, each bounded to 512 KiB, keeping the newest 20 matching attempts across rotation. |
+| File mode | Files are created 0600, including the new live file after rotation. |
+| Concurrency | Append takes no lock: one `O_APPEND` write. Rotation uses a non-blocking lock; a writer that cannot take it skips rotation. |
