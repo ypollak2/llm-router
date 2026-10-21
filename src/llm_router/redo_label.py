@@ -33,8 +33,13 @@ VIEW_ANSWER_TAIL = 1500
 VIEW_PREV_HEAD = 500
 VIEW_PROMPT = 2000
 BATCH_SIZE = 20
-# Refuse more than 10% unresolved pairs unless the fraction check is forced.
-MAX_UNRESOLVED_FRAC = 0.10
+# Refuse more than 5% unresolved pairs unless forced; unresolved F pairs always refuse.
+MAX_UNRESOLVED_FRAC = 0.05
+# A batch is BATCH_SIZE (20) + 6 calibration items, each <= ~3500 chars
+# (~1000 tokens): ~26k input tokens at the highest-tier input price (~$15/M)
+# is ~$0.40 plus output, rounded up. Conservative on purpose so --max-usd
+# (default 3.0) is never inert: six unknown-cost calls hit it.
+ESTIMATED_CALL_USD = 0.50
 DEFAULT_MAX_CALLS = 10
 DEFAULT_MAX_USD = 3.0
 LABEL_DEFINITION = """y = 1 iff the developer's message shows that the previous assistant answer did not satisfy the request they gave, and they ask for it to be fixed, redone, retried, or redirected back onto the same task. Evidence is in the message itself plus the end of the previous answer and the head of the previous prompt.
@@ -99,7 +104,6 @@ def resolve_views(rows: list[dict], frozen: dict,
             sid = path.stem
             if sid in seen:
                 continue
-            seen.add(sid)
             session_rows = wanted.get(_sha(f"{salt}|{sid}"))
             if not session_rows:
                 continue
@@ -117,20 +121,27 @@ def resolve_views(rows: list[dict], frozen: dict,
                         prompts[turn - 1].text[:VIEW_PREV_HEAD],
                         pair.answer_tail[-VIEW_ANSWER_TAIL:],
                         prompts[turn].text[:VIEW_PROMPT])
+            seen.add(sid)
             views.update(found)
         except Exception:
             stats["errors"] += 1
     return views
 
 
-def check_corpus(rows, views, projects_dir, errors, force=False) -> str | None:
+def check_corpus(rows, views, projects_dir, errors, force_unresolved=False) -> str | None:
     resolved = sum(row["pair_id"] in views for row in rows)
     projects_dir = Path(projects_dir)
     if (not projects_dir.is_dir() or not any(projects_dir.glob("*/*.jsonl"))
-            or resolved == 0
-            or (not force and (len(rows) - resolved) / len(rows) > MAX_UNRESOLVED_FRAC)):
-        return (f"Refused: only {resolved} of {len(rows)} pairs resolved "
+            or resolved == 0):
+        return (f"Refused: corpus unavailable; only {resolved} of {len(rows)} pairs resolved "
                 f"({errors} session read errors); check --projects-dir.")
+    unresolved_f = sum(row["stratum"] == "F" and row["pair_id"] not in views
+                       for row in rows)
+    if unresolved_f:
+        return f"Refused: unresolved F pairs ({unresolved_f} of {len(rows)} pairs)."
+    if not force_unresolved and (len(rows) - resolved) / len(rows) > MAX_UNRESOLVED_FRAC:
+        return (f"Refused: unresolved fraction exceeds 5% "
+                f"({len(rows) - resolved} of {len(rows)} pairs).")
     return None
 
 
@@ -250,23 +261,28 @@ def claude_call(brief: str, item: str, model_id: str, *, allow_api_key=False) ->
         raise RuntimeError(f"claude exit {proc.returncode}")
     data = json.loads(proc.stdout)
     used = data.get("modelUsage") or {}
+    raw_cost = data.get("total_cost_usd")
+    cost = float(raw_cost) if raw_cost is not None else None
     return {"result": data.get("result") or "",
-            "cost_usd": float(data.get("total_cost_usd") or 0),
+            "cost_usd": cost if cost is not None and cost > 0 and math.isfinite(cost) else None,
             "model_ok": bool(used) and all(
                 key.lower().startswith(model_id.lower()) for key in used)}
 
 
 def read_ledger(run_dir: Path) -> dict:
-    zero = {"calls": 0, "usd": 0.0, "rejected_streak": 0}
+    zero = {"calls": 0, "usd": 0.0, "rejected_streak": 0, "estimated_calls": 0}
     try:
         data = json.loads((run_dir / "judge_spend.json").read_text(encoding="utf-8"))
-        if (not isinstance(data, dict) or set(data) != set(zero)
+        estimated = data.get("estimated_calls", zero["estimated_calls"]) if isinstance(data, dict) else None
+        if (not isinstance(data, dict)
+                or set(data) not in (set(zero), set(zero) - {"estimated_calls"})
                 or type(data["calls"]) is not int or data["calls"] < 0
                 or type(data["rejected_streak"]) is not int or data["rejected_streak"] < 0
+                or type(estimated) is not int or estimated < 0
                 or type(data["usd"]) not in (int, float)
                 or not math.isfinite(data["usd"]) or data["usd"] < 0):
             return zero
-        return {**data, "usd": float(data["usd"])}
+        return {**zero, **data, "usd": float(data["usd"])}
     except (OSError, ValueError, OverflowError):
         return zero
 
@@ -276,7 +292,7 @@ def write_ledger(run_dir: Path, ledger: dict) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             os.fchmod(stream.fileno(), 0o600)
-            json.dump({key: ledger[key] for key in ("calls", "usd", "rejected_streak")}, stream)
+            json.dump({key: ledger[key] for key in ("calls", "usd", "rejected_streak", "estimated_calls")}, stream)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -298,7 +314,7 @@ def run_judge(options: argparse.Namespace, *,
     if views is None:
         views = resolve_views(rows, frozen, options.projects_dir, stats)
     refusal = check_corpus(rows, views, options.projects_dir, stats["errors"],
-                           getattr(options, "force", False))
+                           getattr(options, "force_unresolved", False))
     if refusal:
         print(refusal)
         return 2
@@ -306,7 +322,13 @@ def run_judge(options: argparse.Namespace, *,
     try:
         fd = os.open(meta_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if not isinstance(meta, dict) or not isinstance(meta.get("model_id"), str):
+                raise ValueError
+        except (OSError, ValueError) as exc:
+            print(f"Refused: invalid judge_meta.json ({type(exc).__name__}).")
+            return 2
         if meta["model_id"] != options.model_id:
             print("Refused: --model-id differs from the id recorded for this run.")
             return 2
@@ -317,8 +339,8 @@ def run_judge(options: argparse.Namespace, *,
             stream.flush()
             os.fsync(stream.fileno())
     ledger = read_ledger(run_dir)
-    if ledger["rejected_streak"] >= 2 and not options.force:
-        print("Refused: 2 consecutive rejected batches; rerun with --force to continue.")
+    if ledger["rejected_streak"] >= 2 and not getattr(options, "force_streak", False):
+        print("Refused: 2 consecutive rejected batches; rerun with --force-streak to continue.")
         return 2
     if call is claude_call:
         def default_call(brief, item, model_id):
@@ -337,7 +359,7 @@ def run_judge(options: argparse.Namespace, *,
     calibration = load_calibration()
     expected = {c["cal_id"]: c["expected"] for c in calibration}
     seed = options.seed if options.seed is not None else frozen.get("seed", 360)
-    calls, usd, stop = 0, 0.0, None
+    calls, usd, estimated_calls, stop = 0, 0.0, 0, None
     for batch_no, offset in enumerate(range(0, len(pending), BATCH_SIZE)):
         if ledger["calls"] >= options.max_calls:
             stop = "stopped: call cap"
@@ -346,22 +368,31 @@ def run_judge(options: argparse.Namespace, *,
             stop = "stopped: spend cap"
             break
         reason = shadow_frontier.quota_skip(time.time())
-        if reason and not options.force:
+        if reason and not getattr(options, "force_quota", False):
             stop = f"stopped: quota ({reason})"
             break
         batch = pending[offset:offset + BATCH_SIZE]
         item, id_map = build_batch(batch, calibration, random.Random(seed + batch_no))
         calls += 1
-        cost = 0.0
+        ledger["calls"] += 1
+        write_ledger(run_dir, ledger)
+        cost = ESTIMATED_CALL_USD
+        estimated = True
         try:
             reply = call(build_brief(), item, options.model_id)
-            cost = float(reply.get("cost_usd") or 0)
+            reported_cost = reply.get("cost_usd")
+            if (type(reported_cost) in (int, float)
+                    and math.isfinite(reported_cost) and reported_cost > 0):
+                cost = float(reported_cost)
+                estimated = False
         except Exception as exc:
             stop = f"stopped: call failed ({type(exc).__name__})"
         finally:
             usd += cost
-            ledger["calls"] += 1
             ledger["usd"] += cost
+            if estimated:
+                estimated_calls += 1
+                ledger["estimated_calls"] += 1
             write_ledger(run_dir, ledger)
         if stop:
             break
@@ -395,6 +426,8 @@ def run_judge(options: argparse.Namespace, *,
     detail = " ".join(f"{label}={counts[label]}" for label in LABELS)
     print(f"labelled: {sum(counts.values())} ({detail})")
     print(f"remaining: {remaining}\ncalls: {calls}\nusd: {usd:.4f}")
+    if estimated_calls:
+        print(f"estimated calls: {estimated_calls}")
     if stats["errors"]:
         print(f"read errors: {stats['errors']}")
     if stop:
@@ -410,7 +443,10 @@ def cmd_redo_label(args: list[str]) -> int:
         epilog="""Spend caps (--max-calls / --max-usd) are cumulative and persisted per run.
 To label more owner pairs, rerun --owner with a larger --others; the sample is
 extended and earlier labels are kept.
---force overrides quota, rejected-streak and unresolved-fraction guards.
+--force-quota overrides quota pauses, including unknown or stale quota.
+--force-streak overrides the rejected-streak guard.
+--force-unresolved overrides only the unresolved-fraction guard.
+The unresolved F-pair rule is never waived.
 --allow-api-key permits API-key credentials instead of the subscription.""")
     parser.add_argument("--run", required=True)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -423,8 +459,14 @@ extended and earlier labels are kept.
     parser.add_argument("--max-usd", type=float, default=DEFAULT_MAX_USD)
     parser.add_argument("--model-id")
     parser.add_argument("--allow-api-key", action="store_true")
-    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--force-quota", action="store_true")
+    parser.add_argument("--force-streak", action="store_true")
+    parser.add_argument("--force-unresolved", action="store_true")
+    parser.add_argument("--force", action="store_true", help="obsolete; use the split flags")
     options = parser.parse_args(args)
+    if options.force:
+        print("--force was split: use --force-quota, --force-streak and/or --force-unresolved")
+        return 2
     if options.judge and not options.model_id:
         parser.error("--model-id is required with --judge")
     try:
@@ -510,7 +552,7 @@ def run_owner(options: argparse.Namespace, *, stdin=None, stdout=None) -> int:
         stats = {}
         views = resolve_views(rows, options.frozen, options.projects_dir, stats)
         refusal = check_corpus(rows, views, options.projects_dir, stats["errors"],
-                               getattr(options, "force", False))
+                               getattr(options, "force_unresolved", False))
         if refusal:
             print(refusal, file=stdout, flush=True)
             return 2
