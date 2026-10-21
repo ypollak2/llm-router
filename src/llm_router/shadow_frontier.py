@@ -577,8 +577,8 @@ def judge_env(environ: dict | None = None) -> dict:
     return env
 
 
-def judge_cmd(brief: str, item: str) -> list[str]:
-    return ["claude", "-p", "--no-session-persistence", "--model", JUDGE_MODEL,
+def judge_cmd(brief: str, item: str, model: str = JUDGE_MODEL) -> list[str]:
+    return ["claude", "-p", "--no-session-persistence", "--model", model,
             "--setting-sources", "project,local", "--strict-mcp-config", "--output-format", "json",
             "--max-turns", "1", "--tools", "", "--system-prompt", brief, "--", item]
 
