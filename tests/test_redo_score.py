@@ -126,7 +126,8 @@ def test_unclear_sensitivity():
     result = evaluate({"F": ["redo"] * 15 + ["not_redo"] * 3 + ["unclear"] * 2})
     assert result["gate"]["verdict"] == "inconclusive"
     assert result["gate"]["passed"] is False
-    a, b = result["sensitivity"].values()
+    a = result["sensitivity"]["unclear_as_redo"]
+    b = result["sensitivity"]["unclear_as_not_redo"]
     assert a["gate"]["passed"] and not b["gate"]["passed"]
     assert a["precision"]["tp"] == 17
     assert b["precision"]["fp"] == 5
@@ -135,13 +136,109 @@ def test_unclear_sensitivity():
     assert result["gate"]["verdict"] == "pass"
 
 
-@pytest.mark.parametrize("missing,verdict", [(1, "pass"), (2, "void")])
+@pytest.mark.parametrize("missing,verdict", [(1, "void"), (2, "void")])
 def test_lost_boundary(missing, verdict):
     result = evaluate({"F": ["redo"] * (20 - missing) + [None] * missing})
     assert result["label_counts"]["lost"] == missing
     assert result["label_source_counts"]["none"] == missing
     assert result["lost_fraction"] == missing / 20
     assert result["gate"]["verdict"] == verdict
+
+
+def test_reviewer_probe_and_lost_sensitivity():
+    result = evaluate({"F": ["redo"] * 18 + [None] * 7,
+                       "S": ["not_redo"] * 125})
+    assert result["lost_fraction"] == 7 / 150
+    assert result["precision"]["point"] == 1
+    assert result["gate"]["verdict"] == "void"
+    assert result["gate"]["passed"] is False
+    assert result["gate"]["reason"] == "flagged-stratum label lost"
+    sensitivity = result["sensitivity"]["lost_as_not_redo"]
+    assert scoring._gate(result["precision"])["passed"]
+    assert not sensitivity["gate"]["passed"]
+    assert sensitivity["precision"]["fp"] == 7
+    assert sensitivity["counts"]["lost"] == 0
+    assert "recall" in sensitivity
+    assert result["completeness_rule"] == scoring.COMPLETENESS_RULE
+
+
+@pytest.mark.parametrize("missing,verdict", [(7, "pass"), (8, "void")])
+def test_nonflagged_lost_boundary(missing, verdict):
+    result = evaluate({"F": ["redo"] * 25,
+                       "S": ["not_redo"] * (125 - missing) + [None] * missing})
+    assert result["gate"]["verdict"] == verdict
+
+
+def test_lost_sensitivity_gate_flip():
+    rows, _, labels = fixture({"F": ["redo"] * 18 + [None] * 7})
+    by_pair = {label["pair_id"]: label["label"] for label in labels}
+    base = [(row, by_pair.get(row["pair_id"], "lost")) for row in rows]
+    altered = [(row, "not_redo" if label == "lost" else label)
+               for row, label in base]
+    assert scoring._gate(scoring._precision(base))["passed"]
+    assert not scoring._gate(scoring._precision(altered))["passed"]
+
+
+@pytest.mark.parametrize("unclear,warn", [(1, False), (2, True)])
+def test_unclear_validity(unclear, warn):
+    result = evaluate({"F": ["redo"] * (10 - unclear) + ["unclear"] * unclear,
+                       "S": [None]})
+    for name in ("F", "overall"):
+        assert result["validity"][name] == {
+            "unclear": unclear, "labelled": 10, "rate": unclear / 10}
+    assert len(result["warnings"]) == (2 if warn else 0)
+    empty = evaluate({})
+    assert empty["validity"]["F"]["rate"] is None
+    assert empty["validity"]["overall"]["rate"] is None
+    assert empty["warnings"] == []
+
+
+def test_overall_unclear_warning_and_print(capsys):
+    result = evaluate({"F": ["redo"] * 20, "S": ["unclear"] * 3})
+    assert len(result["warnings"]) == 1
+    assert "overall" in result["warnings"][0]
+    scoring._print_result(result)
+    assert result["warnings"][0] in capsys.readouterr().out
+
+
+def test_precision_bootstrap_deterministic_and_clustered():
+    rows, frozen, labels = fixture({"F": ["redo"] * 16 + ["not_redo"] * 4})
+    for row in rows:
+        row["session_hash"] = "one-session"
+    result = scoring.score(rows, frozen, labels, seed=12, reps=40)
+    bootstrap = result["precision"]["bootstrap"]
+    assert bootstrap == dict(lo=0.8, hi=0.8, reps=40, seed=12, n_discarded=0)
+    assert result == scoring.score(rows, frozen, labels, seed=12, reps=40)
+    assert result["gate"] == scoring.score(
+        rows, frozen, labels, seed=99, reps=1)["gate"]
+    empty = scoring._precision_bootstrap([], seed=12, reps=40)
+    assert empty == dict(lo=None, hi=None, reps=40, seed=12, n_discarded=40)
+
+
+def test_dry_coverage_only(run, capsys):
+    write_run(run, {"F": ["redo"] * 18 + ["unclear"] + [None]})
+    before = snapshot(run)
+    assert invoke("--dry-score") == 0
+    output = capsys.readouterr().out.lower()
+    for forbidden in ("precision", "recall", "wilson", "gate", "pass", "fail", "verdict"):
+        assert forbidden not in output
+    assert "f: labelled=19 unclear=1 lost=1" in output
+    assert "manifest sha: match" in output
+    assert "detector sha: match" in output
+    assert "agreement n: 0" in output
+    assert snapshot(run) == before
+
+
+@pytest.mark.parametrize("dry", [False, True])
+def test_spent_run_message(run, capsys, dry):
+    write_run(run)
+    (run / "test.used").write_text("spent")
+    before = snapshot(run)
+    assert invoke(*(["--dry-score"] if dry else [])) == 2
+    assert capsys.readouterr().out == (
+        "Refused: run is spent (test.used exists) and has no result.json; "
+        "fail-safe, it cannot be re-scored.\n")
+    assert snapshot(run) == before
 
 
 def test_owner_override_and_agreement():
@@ -169,9 +266,11 @@ def test_single_use_privacy_modes_and_dry(run, capsys):
     after = snapshot(run)
     assert invoke() == 2
     assert snapshot(run) == after
-    assert invoke("--dry-score") == 0
+    capsys.readouterr()
+    assert invoke("--dry-score") == 2
     assert snapshot(run) == after
     output = capsys.readouterr().out
+    assert output == "Refused: run already used.\n"
     for row in rows:
         assert row["pair_id"] not in output
         assert row["session_hash"] not in output

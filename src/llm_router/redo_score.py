@@ -19,6 +19,8 @@ from llm_router.redo_sample import _write_private
 STRATA = ("F", "S", "R")
 LABELS = ("redo", "not_redo", "unclear", "lost")
 RULE = "precision>=0.80 and TP>=15"
+COMPLETENESS_RULE = ("all flagged-stratum (F) pairs must be labelled; "
+                     "any lost F pair voids; overall lost > 5% voids")
 
 
 def _precision(rows):
@@ -59,6 +61,28 @@ def _percentile(values, q):
     low = int(position)
     high = min(low + 1, len(values) - 1)
     return values[low] + (values[high] - values[low]) * (position - low)
+
+
+def _precision_bootstrap(rows, seed, reps):
+    clusters = {}
+    for row, label in rows:
+        clusters.setdefault(row["session_hash"], []).append((row, label))
+    keys = sorted(clusters)
+    rng = random.Random(seed)
+    values = []
+    for _ in range(reps):
+        replicate = [item for _ in keys
+                     for item in clusters[rng.choice(keys)]]
+        value = _precision(replicate)["point"]
+        if value is not None:
+            values.append(value)
+    result = dict(lo=None, hi=None, reps=reps, seed=seed,
+                  n_discarded=reps - len(values))
+    if values and result["n_discarded"] <= reps / 2:
+        values.sort()
+        result.update(lo=_percentile(values, 0.025),
+                      hi=_percentile(values, 0.975))
+    return result
 
 
 def _recall(rows, frozen, seed, reps):
@@ -143,22 +167,43 @@ def score(manifest_rows, frozen, labels, *, seed=360, reps=2000) -> dict:
     precision = _precision(resolved)
     basis = "capped per-session F draw" if frozen.get("concentrated") else "stratum F draw"
     precision["basis"] = basis
+    precision["bootstrap"] = _precision_bootstrap(resolved, seed, reps)
     gate = _gate(precision)
     sensitivity = {}
-    for name, replacement in (("unclear_as_redo", "redo"),
-                              ("unclear_as_not_redo", "not_redo")):
-        altered = [(row, replacement if label == "unclear" else label)
+    for name, target, replacement in (
+            ("unclear_as_redo", "unclear", "redo"),
+            ("unclear_as_not_redo", "unclear", "not_redo"),
+            ("lost_as_not_redo", "lost", "not_redo")):
+        altered = [(row, replacement if label == target and
+                    (target != "lost" or row["stratum"] == "F") else label)
                    for row, label in resolved]
         p = _precision(altered)
         sensitivity[name] = dict(
             precision=p, gate=_gate(p), recall=_recall(altered, frozen, seed, reps),
             counts={k: sum(label == k for row, label in altered) for k in LABELS})
     if any(item["gate"]["passed"] != gate["passed"] for item in sensitivity.values()):
-        gate.update(passed=False, verdict="inconclusive", reason="unclear sensitivity")
+        reason = ("unclear sensitivity" if any(
+            sensitivity[name]["gate"]["passed"] != gate["passed"]
+            for name in ("unclear_as_redo", "unclear_as_not_redo"))
+            else "lost sensitivity")
+        gate.update(passed=False, verdict="inconclusive", reason=reason)
     lost_fraction = overall["lost"] / len(resolved) if resolved else 0.0
     if overall["lost"] * 20 > len(resolved):
         gate.update(passed=False, verdict="void", reason="lost fraction exceeds 0.05")
+    if label_counts["by_stratum"]["F"]["lost"]:
+        gate.update(passed=False, verdict="void", reason="flagged-stratum label lost")
+    validity = {}
+    warnings = []
+    for name, counts in (("F", label_counts["by_stratum"]["F"]),
+                         ("overall", label_counts)):
+        labelled = sum(counts[k] for k in LABELS if k != "lost")
+        unclear = counts["unclear"]
+        rate = unclear / labelled if labelled else None
+        validity[name] = dict(unclear=unclear, labelled=labelled, rate=rate)
+        if rate is not None and rate > 0.10:
+            warnings.append(f"unclear rate exceeds 0.10 ({name}: {unclear}/{labelled})")
     result = dict(
+        completeness_rule=COMPLETENESS_RULE, validity=validity, warnings=warnings,
         run_id=frozen.get("run_id"), detector_version=frozen["detector_version"],
         detector_sha=frozen["detector_sha256"],
         manifest_sha256=frozen["manifest_sha256"], n_manifest=len(resolved),
@@ -188,6 +233,11 @@ def _print_result(result):
               f"wilson95 [{p['lo']:.4f}, {p['hi']:.4f}]")
     else:
         print("precision: 0/0 = null")
+    bootstrap = p["bootstrap"]
+    print(f"precision bootstrap95 [{bootstrap['lo']}, {bootstrap['hi']}] "
+          f"discarded: {bootstrap['n_discarded']}/{bootstrap['reps']}")
+    for warning in result["warnings"]:
+        print("warning: " + warning)
     recall = result["recall"]
     if recall["estimable"]:
         print(f"recall: {recall['recall_point']:.4f} "
@@ -217,10 +267,14 @@ def cmd_redo_score(args: list[str]) -> int:
         print("Refused: invalid bootstrap repetitions.")
         return 2
     run_dir = paths.state_path("redo_validation", options.run)
+    if os.path.lexists(run_dir / "result.json"):
+        print("Refused: run already used.")
+        return 2
+    if os.path.lexists(run_dir / "test.used"):
+        print("Refused: run is spent (test.used exists) and has no result.json; "
+              "fail-safe, it cannot be re-scored.")
+        return 2
     try:
-        if not options.dry_score and any(
-                os.path.lexists(run_dir / name) for name in ("test.used", "result.json")):
-            raise ValueError("already used")
         frozen = json.loads((run_dir / "frozen.json").read_text(encoding="utf-8"))
         manifest = (run_dir / "manifest.jsonl").read_bytes()
         if frozen["detector_sha256"] != hashlib.sha256(
@@ -239,6 +293,16 @@ def cmd_redo_score(args: list[str]) -> int:
     except (OSError, ValueError, KeyError, TypeError):
         print("Refused: invalid or unavailable scoring inputs.")
         return 2
+    if options.dry_score:
+        for h in STRATA:
+            counts = result["label_counts"]["by_stratum"][h]
+            labelled = sum(counts[k] for k in LABELS if k != "lost")
+            print(f"{h}: labelled={labelled} unclear={counts['unclear']} "
+                  f"lost={counts['lost']}")
+        print("manifest sha: match")
+        print("detector sha: match")
+        print(f"agreement n: {result['owner_judge_agreement']['n']}")
+        return 0
     if not options.dry_score:
         try:
             _write_private(run_dir / "test.used", datetime.now(timezone.utc).isoformat() + "\n")
