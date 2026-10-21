@@ -268,8 +268,8 @@ def _gate(n: int, kinds: dict[str, int]) -> str:
     verdict = ("GO" if n >= MIN_FLAGGED else
                "NO-GO (insufficient_flagged_supply) -- next step: detector tune to v3 "
                "(P3.6-c PR 3); re-census after the window slides")
-    organic = kinds.get("organic", 0)
-    untagged = kinds.get("untagged", 0)
+    organic = kinds["organic"]      # collect() always emits both keys
+    untagged = kinds["untagged"]
     other_kind = sum(v for k, v in kinds.items() if k not in {"organic", "untagged"})
     return (f"N_F={n} vs threshold {MIN_FLAGGED}: {verdict}; "
             f"sessions: organic={organic} untagged={untagged} other_kind={other_kind}")
@@ -277,7 +277,7 @@ def _gate(n: int, kinds: dict[str, int]) -> str:
 
 def _gate_lines(n: int, kinds: dict[str, int]) -> list[str]:
     lines = [_gate(n, kinds)]
-    if kinds.get("untagged", 0) > kinds.get("organic", 0):
+    if kinds["untagged"] > kinds["organic"]:
         lines.append(
             "WARNING: most sessions are untagged: N_F shortfall may be a tagging gap, "
             "not detector supply -- do not tune the detector on this result")
