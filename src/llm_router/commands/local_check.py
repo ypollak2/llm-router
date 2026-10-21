@@ -799,7 +799,18 @@ def _routing_switches(d: Deps) -> list[tuple[str, str, dict]]:
     return rows
 
 
-def _recorded_verdict(d: Deps, cfg: dict) -> str | None:
+def _lane_verdict(lane: dict) -> str:
+    if lane.get("grade") == "passed":
+        return "PASS"
+    return "NOT_PASSED" if lane.get("grade") == "failed" and lane.get("status") == "not_passed" else "FAIL"
+
+
+def _recorded_verdict(d: Deps, cfg: dict) -> tuple[str, bool] | None:
+    """(pooled recorded verdict, is_for_this_digest) for the config, or None when nothing is recorded.
+
+    A pooled PASS stores the pooled counts as ``passed`` on every lane that cleared the 0.70 guard and a guard-excluded lane as ``failed``
+    with ``status: "lane_guard"``; so the pooled verdict is PASS iff any matching lane passed. A pooled FAIL / NOT_PASSED is stored
+    identically on every lane. The digest is part of the match when both sides have one; a record for another digest is reported as such."""
     import json
     if d.eligibility_path is None:
         return None
@@ -815,14 +826,17 @@ def _recorded_verdict(d: Deps, cfg: dict) -> str | None:
     lanes = model.get("text_job_local")
     if not isinstance(lanes, dict):
         return None
-    for _, lane in sorted(lanes.items()):
-        if (isinstance(lane, dict) and lane.get("source") == "local_check"
+    matching = [lane for _, lane in sorted(lanes.items())
+                if isinstance(lane, dict) and lane.get("source") == "local_check"
                 and lane.get("bank_sha256") == cfg.get("bank_sha256")
-                and lane.get("settings_hash") == cfg.get("settings_hash")):
-            if lane.get("grade") == "passed":
-                return "PASS"
-            return "NOT_PASSED" if lane.get("grade") == "failed" and lane.get("status") == "not_passed" else "FAIL"
-    return None
+                and lane.get("settings_hash") == cfg.get("settings_hash")]
+    if not matching:
+        return None
+    want = cfg.get("digest")
+    same = [ln for ln in matching if not (want and ln.get("model_digest") and ln["model_digest"] != want)]
+    pool, current = (same, True) if same else (matching, False)
+    verdicts = [_lane_verdict(ln) for ln in pool if ln.get("status") != "lane_guard"] or [_lane_verdict(ln) for ln in pool]
+    return ("PASS" if any(_lane_verdict(ln) == "PASS" for ln in pool) else verdicts[0]), current
 
 
 def _status(d: Deps, model: str | None) -> int:
@@ -874,9 +888,10 @@ def _status(d: Deps, model: str | None) -> int:
             counts = f" {last['k']}/{last['n']}" if last.get("k") is not None and last.get("n") else ""
             kept = ""
             if last.get("verdict") == "INCONCLUSIVE":
-                v = _recorded_verdict(d, cfg)
-                if v is not None:
-                    kept = f" (not recorded; recorded verdict {v} kept)"
+                rec = _recorded_verdict(d, cfg)
+                if rec is not None:
+                    kept = (f" (not recorded; recorded verdict {rec[0]} kept)" if rec[1]
+                            else f" (not recorded; recorded verdict {rec[0]} is for an earlier model digest)")
             out(f"{head}; last {last.get('verdict')}{counts} {last.get('date', '')}{kept}{extra}")
         else:
             out(f"{head}; no judged run yet{extra}")

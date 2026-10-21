@@ -139,3 +139,53 @@ def test_stale_no_judge_wording_is_absent():
     for path in paths:
         if path.is_file():
             assert "can record a FAIL" not in path.read_text(encoding="utf-8", errors="replace"), str(path)
+
+
+def _inconclusive_after_pass(tmp_path):
+    clock = Clock()
+    assert SE.run_check(check(tmp_path, FakeAdapter(fails(10)), clock=clock)).result.verdict == "PASS"
+    clock.t += A.COOLDOWN_S + 1
+    assert SE.run_check(check(tmp_path, FakeAdapter({**fails(10), **fails(25, draw=2)}), clock=clock)).result.verdict == "INCONCLUSIVE"
+
+
+def _edit_elig(tmp_path, fn):
+    path = tmp_path / "elig.json"
+    data = json.loads(path.read_text())
+    lanes = data[MODEL]["text_job_local"]
+    assert lanes, "no recorded lanes to edit"
+    fn(lanes)
+    path.write_text(json.dumps(data))
+
+
+def test_status_pooled_pass_with_lane_guard_lane_sorting_first_says_pass(tmp_path):
+    _inconclusive_after_pass(tmp_path)
+
+    def exclude_first(lanes):
+        first = sorted(lanes)[0]
+        assert len(lanes) > 1
+        lanes[first].update({"grade": "failed", "verdict": "failed", "eligible": False, "status": "lane_guard", "k": 3, "n": 10})
+
+    _edit_elig(tmp_path, exclude_first)
+    assert attempts_line(tmp_path).endswith("(not recorded; recorded verdict PASS kept)")
+
+
+def test_status_record_for_earlier_digest_is_not_called_kept(tmp_path):
+    _inconclusive_after_pass(tmp_path)
+
+    def old_digest(lanes):
+        for lane in lanes.values():
+            lane["model_digest"] = "sha256:older"
+
+    _edit_elig(tmp_path, old_digest)
+    line = attempts_line(tmp_path)
+    assert line.endswith("(not recorded; recorded verdict PASS is for an earlier model digest)")
+    assert "kept" not in line
+
+
+def test_status_corrupt_eligibility_file_has_no_suffix_and_no_traceback(tmp_path, capsys):
+    _inconclusive_after_pass(tmp_path)
+    (tmp_path / "elig.json").write_text("{not json")
+    line = attempts_line(tmp_path)
+    assert "last INCONCLUSIVE" in line and "kept" not in line and "not recorded" not in line
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.out + captured.err
