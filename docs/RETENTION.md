@@ -70,8 +70,8 @@ copies do not outlive their TTL). This file lists the history files that have a 
 
 | Item | Value |
 |---|---|
-| `manifest.jsonl` | Sampled pair and session hashes, turn index, UTC day, stratum, detector signals/version, kind/source, previous served class and stratum counts. Session ids are hashed; no prompt or answer text. |
-| `frozen.json` | Counts, window, seed, run id, detector/manifest SHA256, strata, weights, threshold decision, concentration and shortfall. Stores the salt so the local labeller can re-derive pair identities from transcripts. No prompt or answer text or session ids. |
+| `manifest.jsonl` | Sampled pair and session hashes, turn index, UTC day, stratum, detector signals/version, kind/source, previous served class, stratum counts and `exclusion_list_sha256`. Session ids are hashed; no prompt or answer text. |
+| `frozen.json` | Counts, window, seed, run id, detector/manifest SHA256, strata, weights, threshold decision, concentration and shortfall. Records `exclusion_list_size`, `exclusion_list_sha256` and `allow_empty_exclusion`. Stores the salt so the local labeller can re-derive pair identities from transcripts. No prompt or answer text or session ids. |
 | `labels.jsonl` | Default owner/judge JSONL input: pair hash, categorical label (`redo`, `not_redo`, `unclear`, `lost`) and source only. Supplied by the local labeller; no transcript text. Repeated `--labels PATH` inputs are read in place, never copied. Keep local labels private (0600). |
 | `test.used` | UTC timestamp line only. Created exclusively at 0600 before writing results; consumes the frozen run even if the subsequent result write fails. |
 | `result.json` | Counts, label-source agreement, Wilson precision, weighted recall and session-cluster bootstrap intervals, sensitivity, gate verdict and frozen provenance. No pair/session identities or transcript text. Unclear/lost labels are dropped from recall denominators under a within-stratum missing-at-random assumption; concentrated draws have no recall estimate. |
@@ -79,7 +79,7 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Permissions | Run directory 0700; files 0600. The `redo_validation` parent is set to 0700 only when created by this command. |
 | Kept | Until superseded by a later validation; no automatic deletion. |
 | Remove | On owner request, `rm -r` the run directory. |
-| M0.9 exclusions | `src/llm_router/data/redo_m09_excluded.txt` contains unsalted pair hashes only, plus comments. The shipped list is empty because the ids are not derivable from the repository. |
+| M0.9 exclusions | `src/llm_router/data/redo_m09_excluded.txt` contains unsalted pair hashes only, plus comments. The shipped list is empty because the ids are not derivable from the repository. Freeze refuses an empty effective list unless `--allow-empty-exclusion` is supplied. The size and SHA256 of sorted keys joined with newlines identify the effective list; its SHA256 is also included in every manifest row. |
 
 ## `text_job_outcomes.jsonl` and `text_job_local_attempts.jsonl` (LC-8c)
 

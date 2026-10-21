@@ -186,7 +186,7 @@ def test_cli_gate_privacy_modes_and_metadata(isolated, monkeypatch, capsys, n_fl
     assert ("NO-GO" if n_flagged < 19 else ": GO") in output
     assert SENTINEL not in output and "private-fixture-session" not in output
     run = isolated.parent / "state" / "redo_validation" / "fixture"
-    args = ["--freeze", "--run-id", "fixture"]
+    args = ["--freeze", "--run-id", "fixture", "--allow-empty-exclusion"]
     if n_flagged < 19:
         assert sample.cmd_redo_sample(args) == 3
         assert not run.parent.exists()
