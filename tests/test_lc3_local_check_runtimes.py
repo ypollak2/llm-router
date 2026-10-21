@@ -376,7 +376,7 @@ def test_probe_rate_estimate_and_timeout_scaling(mk, tmp_path):
     f = mk("ollama", delay=0.05)
     rn = R.Runner(T.OllamaAdapter(f.url), "fake-a:1b", items(10, size=300), tmp_path / "r")
     rate = rn.probe_rate()
-    assert rate is not None and rate.n == 3
+    assert rate is not None and rate.n == 2
     est = rn.estimate_remaining_s()
     assert est is not None and est > 0
     assert len(f.chat_bodies) == 3                        # probe items are real, kept

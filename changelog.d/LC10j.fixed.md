@@ -1,0 +1,1 @@
+Clarify local-check diagnostics for installed models that cannot be measured, judged draw usage, bank-comparable recommendations, size-class time estimates, automatic consent, subcommand help and early-stopped verdicts; exclude cold-load time from rate estimates.

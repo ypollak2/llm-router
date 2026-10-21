@@ -124,8 +124,12 @@ class Rate:
 
 
 def measure_rate(records: Iterable[dict]) -> Rate | None:
-    """Prefill/decode estimate from completed records (time-to-first-token = prefill)."""
-    recs = [r for r in records if r.get("status") in ("ok", "truncated", "empty", "timeout")]
+    """Prefill/decode estimate from completed records (time-to-first-token = prefill).
+    Exclude the first (cold-load) record when at least two records exist.
+    """
+    records = list(records)
+    warm = records[1:] if len(records) >= 2 else records
+    recs = [r for r in warm if r.get("status") in ("ok", "truncated", "empty", "timeout")]
     if not recs:
         return None
     pf, dc, outs = [], [], []

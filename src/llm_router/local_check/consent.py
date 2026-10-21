@@ -47,9 +47,15 @@ def build_consent_text(route: str, judge_model: str, n_plants: int = _budget.PLA
 def ask_consent(text: str, *, yes: bool = False, interactive: bool = True, input_fn: Callable[[str], str] = input,
                 print_fn: Callable[[str], None] = print) -> bool:
     """True only on ``--yes`` or an explicit y/yes at a prompt. A non-interactive run without ``--yes`` never consents."""
-    print_fn(text)
     if yes:
+        lines = text.splitlines()
+        if lines and lines[-1].endswith("[y/N]"):
+            lines.pop()
+        if lines:
+            print_fn("\n".join(lines))
+        print_fn("consent: given by --yes")
         return True
+    print_fn(text)
     if not interactive:
         print_fn("Not confirmed: re-run with --yes to consent without a prompt.")
         return False

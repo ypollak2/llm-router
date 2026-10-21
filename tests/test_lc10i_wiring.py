@@ -164,7 +164,8 @@ def test_fail_prints_recommendations_measured_first_untested_labelled_pull_text_
     t = sink.text
     assert "== Models that may fit this machine (runtime ollama, ~38.4 GB usable for a model) ==" in t
     rows = [ln for ln in t.splitlines() if ln.startswith("  ") and "[" in ln and "GB download" in ln]
-    assert rows and "measured" in rows[0] and any("untested" in r for r in rows[1:])
+    assert rows and all("untested" in r for r in rows)
+    assert all("60/70" not in r for r in rows)
     assert "to try it, run yourself: ollama pull " in t and "Nothing is pulled or routed for you" in t
 
 

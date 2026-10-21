@@ -227,6 +227,7 @@ class Endpoint:
     runtime: str                      # ollama | lmstudio | vllm | llamacpp | openai
     base_url: str
     models: list[str] = field(default_factory=list)
+    unmeasurable: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- adapters
@@ -537,6 +538,16 @@ def make_adapter(endpoint: Endpoint, **kw) -> _Adapter:
     return OpenAICompatAdapter(endpoint.base_url, runtime=endpoint.runtime, **kw)
 
 
+def _installed_ollama(base: str, *, allow_remote: bool = False) -> list[str]:
+    """Raw installed names, including embedding and decision-only models."""
+    try:
+        data = _json_request(base, "GET", "/api/tags", allow_remote=allow_remote)
+        return [m["name"] for m in _entries(data, "models")
+                if isinstance(m.get("name"), str) and m["name"]]
+    except Exception:  # noqa: BLE001 - optional inventory must not break discovery
+        return []
+
+
 def discover(endpoint: str | None = None, *, ports: tuple = OPENAI_PROBE_PORTS,
              include_ollama: bool = True, allow_remote: bool = False) -> list[Endpoint]:
     """Endpoints that answer right now, each with the models it reports.
@@ -553,7 +564,13 @@ def discover(endpoint: str | None = None, *, ports: tuple = OPENAI_PROBE_PORTS,
             rt = identify(base, allow_remote=allow_remote)
             if rt is None:
                 return []
-            return [Endpoint(rt, base, list_models(base, rt, allow_remote=allow_remote))]
+            names = list_models(base, rt, allow_remote=allow_remote)
+            unmeasurable = []
+            if rt == "ollama":
+                from llm_router import model_discovery
+                names = [n for n in names if model_discovery._is_completion_model(n)]
+                unmeasurable = [n for n in _installed_ollama(base, allow_remote=allow_remote) if n not in names]
+            return [Endpoint(rt, base, names, unmeasurable)]
         except ValueError:
             return []
     found: list[Endpoint] = []
@@ -563,8 +580,9 @@ def discover(endpoint: str | None = None, *, ports: tuple = OPENAI_PROBE_PORTS,
         base = normalize_base(model_discovery._ollama_url())
         if is_loopback(base):
             names = drop_embeddings(list(model_discovery.probe_ollama() or []))
-            if names:
-                found.append(Endpoint("ollama", base, list(names)))
+            unmeasurable = [n for n in _installed_ollama(base) if n not in names]
+            if names or unmeasurable:
+                found.append(Endpoint("ollama", base, list(names), unmeasurable))
                 seen.add(base)
     for port, _hint in ports:
         base = f"http://127.0.0.1:{port}"

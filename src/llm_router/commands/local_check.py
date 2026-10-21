@@ -2,6 +2,7 @@
 
     llm-router local-check [run] [--dry-run] [--no-judge] [--yes] [--model M] [--endpoint URL [--allow-remote]]
                            [--profile quick|standard] [--fresh] [--force] [--judge-route auto|api|subscription]
+    llm-router local-check {run,status,explain,enable,disable} --help
     llm-router local-check status [--model M]
     llm-router local-check explain [--model M]
     llm-router local-check enable <lane> [--model M]
@@ -18,6 +19,7 @@ All collaborators are injectable (``Deps``) so the tests run with fakes and no n
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import sys
 import time
@@ -222,6 +224,22 @@ def _fmt_s(sec: float) -> str:
     return f"{sec / 3600:.1f} h"
 
 
+def estimate_run_seconds(model: str, n_items: int, hardware: Mapping) -> tuple[float | None, str]:
+    """Size-class estimate only; no runtime calls or measurements."""
+    size = re.search(r"(\d+(?:\.\d+)?)b", model, re.IGNORECASE)
+    if size is None:
+        return None, ""
+    billions = float(size.group(1))
+    for limit, per_item, label in ((4, 8, "<=4B"), (9, 20, "4-9B"),
+                                    (16, 40, "9-16B"), (40, 90, "16-40B"),
+                                    (float("inf"), 180, ">40B")):
+        if billions <= limit:
+            gpu = hardware.get("gpu")
+            factor = 5 if not gpu or str(gpu).lower() == "none" else 1
+            return float(n_items * per_item * factor), label
+    return None, ""
+
+
 def build_plan(d: Deps, adapter: Any, model: str, bank: Any, runs_root: Path, *, no_judge: bool, force: bool) -> PlanInfo:
     from llm_router.local_check import attempts as A, runner as R, score as S
     p = PlanInfo()
@@ -338,7 +356,15 @@ def _resolve(d: Deps) -> Deps:
 
 
 def _parser(prog: str, run: bool = True, lane: bool = False) -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog=prog, add_help=True, description="Measure your local model on the bundled public benchmark.")
+    epilog = """subcommands:
+  run      measure your local model (default)
+  status   show recorded lanes, routing switches and draws used
+  explain  show which grader rules failed in the last run, by item id
+  enable   switch routing on for a lane (enable <lane> [--model M])
+  disable  switch routing off for a lane"""
+    ap = argparse.ArgumentParser(
+        prog=prog, add_help=True, description="Measure your local model on the bundled public benchmark.",
+        epilog=epilog if run else None, formatter_class=argparse.RawDescriptionHelpFormatter)
     if lane:
         ap.add_argument("lane", choices=LANES, help="the text-job lane to switch")
     ap.add_argument("--model", help="local model name with its tag (default: the only one found; asked for when several)")
@@ -368,6 +394,10 @@ def _pick_model(d: Deps, endpoints: list, wanted: str | None) -> tuple[Any, str]
         hit = [(e, m) for e, m in pairs if m == wanted]
         if not hit:
             shown = ", ".join(sorted({m for _, m in pairs})[:12]) or "none"
+            for e in endpoints:
+                if wanted in getattr(e, "unmeasurable", []):
+                    return (f"model {wanted!r} is installed on {e.runtime} {e.base_url} but is not a chat/completion model "
+                            f"(embedding or decision-only), so local-check cannot measure it. Measurable models: {shown}.")
             return f"model {wanted!r} was not found on {', '.join(e.runtime + ' ' + e.base_url for e in endpoints)}. Models found: {shown}."
         return hit[0]
     if not pairs:
@@ -395,8 +425,14 @@ def cmd_local_check(argv: list[str], deps: Deps | None = None) -> int:
     elif args and not args[0].startswith("-"):
         d.err(f"llm-router local-check: unknown subcommand {args[0]!r} (run, status, explain, enable, disable)")
         return EXIT_USAGE
+    prog = ("llm-router local-check [run|status|explain|enable|disable]" if sub == "run"
+            else f"llm-router local-check {sub}")
+    ap = _parser(prog, run=(sub == "run"), lane=sub in ("enable", "disable"))
+    if sub == "run" and any(a in ("--help", "-h") for a in args):
+        d.out(ap.format_help())
+        return EXIT_OK
     try:
-        ns = _parser(f"llm-router local-check {sub}", run=(sub == "run"), lane=sub in ("enable", "disable")).parse_args(args)
+        ns = ap.parse_args(args)
     except SystemExit as e:
         return int(e.code or 0) if isinstance(e.code, int) else EXIT_USAGE
     if sub in ("enable", "disable"):
@@ -467,7 +503,8 @@ def _run(d: Deps, ns: argparse.Namespace) -> int:
     out("== llm-router local-check: plan ==")
     out(f"Model:      {model}  [{endpoint.runtime} at {endpoint.base_url}]")
     out(f"Digest:     {plan.digest or 'not reported by this runtime (the verdict expires after 30 days instead of on a model change)'}")
-    out(f"Hardware:   {_hardware_line(d.hardware())}")
+    hw = d.hardware()
+    out(f"Hardware:   {_hardware_line(hw)}")
     if not runtimes.is_loopback(endpoint.base_url):
         out(f"Endpoint:   REMOTE ({endpoint.base_url}): the public benchmark prompts are sent there.")
     if plan.draw is None:
@@ -479,8 +516,15 @@ def _run(d: Deps, ns: argparse.Namespace) -> int:
             out(f"            context fit: prompts up to ~{plan.max_chars} characters")
     if plan.resume:
         out(f"Resume:     run {plan.resume} is open; this run continues it (answers already collected are kept)")
-    out("Time:       " + (f"~{_fmt_s(plan.estimate_s)} remaining at the measured rate" if plan.estimate_s is not None
-                           else "measured by a 3-item rate probe at the start of the run; the total is printed when it finishes (small GPUs: minutes; CPU-only: hours)"))
+    estimate, label = estimate_run_seconds(model, plan.n_fit, hw)
+    if plan.estimate_s is not None:
+        timing = f"~{_fmt_s(plan.estimate_s)} remaining at the measured rate"
+    elif estimate is not None:
+        timing = (f"~{_fmt_s(estimate)} (estimate from the {label} size class, not measured; "
+                  "the real run measures its rate on items 2-3 and prints the total)")
+    else:
+        timing = "measured by a 3-item rate probe at the start of the run; the total is printed when it finishes (small GPUs: minutes; CPU-only: hours)"
+    out("Time:       " + timing)
     if plan.refused:
         err("Refused: " + plan.refused)
         return EXIT_REFUSED
@@ -641,7 +685,14 @@ def _recommend_lines(d: Deps, res: Any, model: str, runtime: str) -> list[str]:
         return []
     hw = d.hardware()
     try:
-        recs = d.recommend(hw, runtime, model, res)
+        bank_version = d.load_bank().version
+    except Exception:  # noqa: BLE001 - unknown bank means no comparable measurement
+        bank_version = None
+    try:
+        try:
+            recs = d.recommend(hw, runtime, model, res, bank_version=bank_version)
+        except TypeError:  # legacy injected four-argument collaborators
+            recs = d.recommend(hw, runtime, model, res)
     except Exception as e:  # noqa: BLE001 - recommendations are advice, never a crash
         return ["", f"recommendations unavailable ({type(e).__name__})."]
     L = ["", f"== Models that may fit this machine (runtime {runtime}" + (f", ~{capacity_gb(hw):g} GB usable for a model" if capacity_gb(hw) is not None else "") + ") =="]
@@ -650,7 +701,10 @@ def _recommend_lines(d: Deps, res: Any, model: str, runtime: str) -> list[str]:
     for r in recs:
         if r.status == "measured" and r.pooled_rate is not None:
             b = (r.bench or {}).get("pooled") or {}
-            tag = f"measured {b.get('k')}/{b.get('n')} on {(r.bench or {}).get('bank_version')}"
+            version = str((r.bench or {}).get("bank_version")).lower().lstrip("v")
+            tag = f"measured {b.get('k')}/{b.get('n')} on v{version}"
+        elif getattr(r, "untested_on", None) is not None:
+            tag = f"untested on bank {r.untested_on} (no number shown)"
         else:
             tag = "untested (no measurement; sizes and licence only)"
         fit = "" if r.fit == "ok" else ", memory unknown"
@@ -673,7 +727,10 @@ def render_verdict(res: Any, o: Any, budget: Any, secs: float, routing_lines: li
         L.append(f"== Verdict: INVALID (nothing recorded) == {res.why}")
     else:
         pooled = res.pooled or {}
-        L.append(f"== Verdict: {res.verdict}   {res.k}/{res.n_assigned}   (n = {res.n_assigned}; pass bar: k >= {res.kmin}, Wilson 95% lower bound >= 0.60) ==")
+        if res.verdict == S.NOT_PASSED:
+            L.append(f"== Verdict: not passed (NOT_PASSED) -- stopped early after {res.n_scored} of {res.n_assigned} items ({res.k} passed); pass bar: k >= {res.kmin}, Wilson 95% lower bound >= 0.60 ==")
+        else:
+            L.append(f"== Verdict: {res.verdict}   {res.k}/{res.n_assigned}   (n = {res.n_assigned}; pass bar: k >= {res.kmin}, Wilson 95% lower bound >= 0.60) ==")
         L.append(res.why)
         if res.mode == S.JUDGE and res.verdict != S.PASS and res.kfail is not None:
             L.append(f"powered FAIL at k <= {res.kfail}")
@@ -779,7 +836,9 @@ def _status(d: Deps, model: str | None) -> int:
         last = scored[-1] if scored else es[-1]
         v = last.get("verdict")
         counts = f" {last['k']}/{last['n']}" if last.get("k") is not None and last.get("n") else ""
-        out(f"attempts: {cfg.get('model')} (bank v{cfg.get('bank_version')}): {len(scored)} of {A.MAX_DRAWS} draws used; last {v}{counts} {last.get('date', '')}")
+        programmatic = sum(e.get("state") == "scored" and not e.get("consumed") for e in es)
+        extra = f"; {programmatic} programmatic-only run(s) (--no-judge) not counted" if programmatic else ""
+        out(f"attempts: {cfg.get('model')} (bank v{cfg.get('bank_version')}): {len(scored)} of {A.MAX_DRAWS} judged draws used; last {v}{counts} {last.get('date', '')}{extra}")
         if scored and len(scored) < A.MAX_DRAWS:
             nxt = scored[-1]["ts"] + A.COOLDOWN_S
             out("  next draw: " + ("now" if now >= nxt else "after " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(nxt)) + " (or --force)"))
