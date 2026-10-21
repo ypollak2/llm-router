@@ -1125,6 +1125,7 @@ async def llm_text_job(
     accepted = False
     attempt = 0
     _local_touched: set[str] = set()
+    completed = False
 
     from llm_router import eligibility_routing
 
@@ -1151,8 +1152,9 @@ async def llm_text_job(
                         chain_attempts=getattr(exc, "chain_attempts", None) or [],
                         accepted=False,
                     ))
-                except Exception:  # noqa: BLE001 -- preserve the original route error
-                    pass
+                except Exception as exc:  # noqa: BLE001 -- preserve the original route error
+                    from llm_router import failopen
+                    failopen.record("CHZ-FO-TEXTJOB-LOCAL-ATTEMPTS", exc)
                 raise
 
             check = check_output(job, truncated_input, resp.content)
@@ -1164,23 +1166,27 @@ async def llm_text_job(
                 accepted = True
                 break
             history.append(check.reason or "acceptance check failed")
+        completed = True
     finally:
         try:
             eligibility_routing.reset_text_job_context(_tj_token)
-        except Exception:  # noqa: BLE001 -- cleanup must not replace a route error
-            pass
+        except Exception as exc:  # noqa: BLE001 -- cleanup must not replace a route error
+            from llm_router import failopen
+            failopen.record("CHZ-FO-TEXTJOB-CTX-RESET", exc)
         status = STATUS_ACCEPTED if accepted else STATUS_REJECTED
         try:
-            if resp is not None:
+            if completed and resp is not None:
                 record_text_job_outcome(job=job, model=resp.model, status=status, attempts=attempt)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            from llm_router import failopen
+            failopen.record("CHZ-FO-TEXTJOB-OUTCOME", exc)
         for _m in sorted(_local_touched):
             try:  # Every local model tried, including attempts from a failed route.
                 from llm_router.local_check import routing as _lc_routing
                 _lc_routing.demotion_check(_m, job)
-            except Exception:  # noqa: BLE001 -- keep checking after one monitor fails
-                pass
+            except Exception as exc:  # noqa: BLE001 -- keep checking after one monitor fails
+                from llm_router import failopen
+                failopen.record("CHZ-FO-TEXTJOB-DEMOTION", exc)
 
     lines = [resp.header() if resp else "no response", ""]
     lines.append(f"_Structured: status={status}, attempts={attempt}_")
