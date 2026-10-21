@@ -82,7 +82,7 @@ def make_run(tmp_path, monkeypatch):
                 turn = 99
             pair_id = digest(f"{sid}|{turn}|{salt}")
             rows.append(dict(pair_id=pair_id, session_hash=digest(f"{salt}|{sid}"),
-                             turn_index=turn, stratum="FSR"[i % 3],
+                             turn_index=turn, stratum="S" if kind else "FSR"[i % 3],
                              signal=[], session_kind="organic"))
             messages = []
             for k in range(4):
@@ -113,7 +113,8 @@ def options(run, **changes):
     values = dict(run="run1", run_dir=run_dir, manifest=manifest, frozen=frozen,
                   projects_dir=run.projects, seed=360, max_calls=10,
                   max_usd=100, model_id=MODEL, others=99,
-                  allow_api_key=False, force=False,
+                  allow_api_key=False, force_quota=False, force_streak=False,
+                  force_unresolved=False,
                   judge=True, owner=False)
     values.update(changes)
     return argparse.Namespace(**values)
@@ -280,7 +281,7 @@ def test_ledger_private_counts_only(make_run):
     assert label.run_judge(options(run), call=FakeClaude(cost=0.5)) == 0
     path = run.run_dir / "judge_spend.json"
     assert json.loads(path.read_text()) == {
-        "calls": 1, "usd": 0.5, "rejected_streak": 0}
+        "calls": 1, "usd": 0.5, "rejected_streak": 0, "estimated_calls": 0}
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert not list(run.run_dir.glob(".judge-spend-*"))
 
@@ -290,7 +291,8 @@ def test_ledger_private_counts_only(make_run):
 def test_missing_or_corrupt_ledger_is_zero(tmp_path, payload):
     if payload is not None:
         (tmp_path / "judge_spend.json").write_text(payload)
-    assert label.read_ledger(tmp_path) == {"calls": 0, "usd": 0.0, "rejected_streak": 0}
+    assert label.read_ledger(tmp_path) == {"calls": 0, "usd": 0.0, "rejected_streak": 0,
+                                           "estimated_calls": 0}
 
 
 def test_failed_call_is_counted_before_return(make_run):
@@ -301,7 +303,7 @@ def test_failed_call_is_counted_before_return(make_run):
 
     assert label.run_judge(options(run), call=fail) == 4
     assert label.read_ledger(run.run_dir) == {
-        "calls": 1, "usd": 0.0, "rejected_streak": 0}
+        "calls": 1, "usd": 0.5, "rejected_streak": 0, "estimated_calls": 1}
     assert judge_rows(run) == []
 
 
@@ -312,19 +314,20 @@ def test_rejected_streak_refuses_and_force_preserves_until_accepted(make_run, ca
         assert label.run_judge(options(run), call=fake) == 4
         assert len(fake.calls) == 1 and judge_rows(run) == []
         assert label.read_ledger(run.run_dir) == {
-            "calls": streak, "usd": streak * 0.5, "rejected_streak": streak}
+            "calls": streak, "usd": streak * 0.5, "rejected_streak": streak,
+            "estimated_calls": 0}
     capsys.readouterr()
     refused = FakeClaude(miss_calibration=True)
     assert label.run_judge(options(run), call=refused) == 2
     assert not refused.calls
-    assert ("Refused: 2 consecutive rejected batches; rerun with --force to continue."
+    assert ("Refused: 2 consecutive rejected batches; rerun with --force-streak to continue."
             in capsys.readouterr().out)
     forced = FakeClaude(miss_calibration=True)
-    assert label.run_judge(options(run, force=True), call=forced) == 4
+    assert label.run_judge(options(run, force_streak=True), call=forced) == 4
     assert len(forced.calls) == 1
     assert label.read_ledger(run.run_dir)["rejected_streak"] == 3
     accepted = FakeClaude()
-    assert label.run_judge(options(run, force=True), call=accepted) == 0
+    assert label.run_judge(options(run, force_streak=True), call=accepted) == 0
     assert len(accepted.calls) == 1
     assert label.read_ledger(run.run_dir)["rejected_streak"] == 0
 
@@ -337,7 +340,7 @@ def test_quota_gate_and_force(make_run, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "stopped: quota (quota_weekly)" in output and "calls: 0" in output
     assert label.read_ledger(run.run_dir)["calls"] == 0
-    assert label.run_judge(options(run, force=True), call=fake) == 0
+    assert label.run_judge(options(run, force_quota=True), call=fake) == 0
     assert len(fake.calls) == 1
 
 
@@ -589,12 +592,12 @@ def test_force_overrides_only_fraction(make_run, tmp_path):
     opts = options(run)
     views = label.resolve_views(opts.manifest, opts.frozen, run.projects)
     assert label.check_corpus(run.rows, views, run.projects, 0) is not None
-    assert label.check_corpus(run.rows, views, run.projects, 0, force=True) is None
-    assert label.check_corpus(run.rows, {}, run.projects, 0, force=True) is not None
-    assert label.check_corpus(run.rows, views, tmp_path / "missing", 0, force=True)
+    assert label.check_corpus(run.rows, views, run.projects, 0, force_unresolved=True) is None
+    assert label.check_corpus(run.rows, {}, run.projects, 0, force_unresolved=True) is not None
+    assert label.check_corpus(run.rows, views, tmp_path / "missing", 0, force_unresolved=True)
     empty = tmp_path / "empty"
     (empty / "proj").mkdir(parents=True)
-    assert label.check_corpus(run.rows, views, empty, 0, force=True)
+    assert label.check_corpus(run.rows, views, empty, 0, force_unresolved=True)
 
 
 @pytest.mark.parametrize("mode", ["judge", "owner"])
@@ -605,7 +608,7 @@ def test_session_read_errors_counted_and_reported(make_run, monkeypatch, capsys,
     original = label.redo_signal.read_transcript
 
     def read(path):
-        if path.stem == "session-0":
+        if path.stem == "session-1":
             raise OSError("ZQXPRIVATE")
         return original(path)
 
@@ -756,3 +759,205 @@ def test_help_documents_escalation_and_cumulative_caps(capsys):
     assert "cumulative" in output
     assert "rerun --owner with a larger --others" in output
     assert "--model-id" in output and "--allow-api-key" in output
+
+
+@pytest.mark.parametrize("exc_type", [SystemExit, KeyboardInterrupt])
+def test_interrupted_call_is_precounted(make_run, exc_type):
+    run = make_run(n=1)
+
+    def crash(*args):
+        # Simulate a crash after inspecting the durable pre-write.
+        assert json.loads((run.run_dir / "judge_spend.json").read_text())["calls"] == 1
+        raise exc_type
+
+    with pytest.raises(exc_type):
+        label.run_judge(options(run), call=crash)
+    assert label.read_ledger(run.run_dir)["calls"] == 1
+    assert judge_rows(run) == []
+
+
+@pytest.mark.parametrize("cost", [None, 0, -1, float("nan"), float("inf"),
+                                 -float("inf"), "0.2", True])
+def test_unknown_cost_is_estimated(make_run, capsys, cost):
+    run, fake = make_run(n=1), FakeClaude(cost=cost)
+
+    def reply(*args):
+        result = fake(*args)
+        if cost is None:
+            result.pop("cost_usd")
+        return result
+
+    assert label.run_judge(options(run), call=reply) == 0
+    assert label.read_ledger(run.run_dir) == {
+        "calls": 1, "usd": 0.50, "rejected_streak": 0, "estimated_calls": 1}
+    assert "estimated calls: 1" in capsys.readouterr().out
+
+
+def test_real_cost_is_exact(make_run, capsys):
+    run = make_run(n=1)
+    assert label.run_judge(options(run), call=FakeClaude(cost=0.123)) == 0
+    ledger = label.read_ledger(run.run_dir)
+    assert ledger["usd"] == 0.123 and ledger["estimated_calls"] == 0
+    assert "estimated calls:" not in capsys.readouterr().out
+
+
+def test_unknown_cost_hits_spend_cap(make_run, capsys):
+    run, fake = make_run(), FakeClaude(cost=None)
+    assert label.run_judge(options(run, max_usd=0.4), call=fake) == 4
+    assert len(fake.calls) == 1
+    assert label.read_ledger(run.run_dir)["usd"] == 0.5
+    output = capsys.readouterr().out
+    assert "stopped: spend cap" in output and "estimated calls: 1" in output
+    assert label.run_judge(options(run, max_usd=0.4), call=fake) == 4
+    assert len(fake.calls) == 1
+    assert "estimated calls:" not in capsys.readouterr().out
+
+
+def test_old_ledger_defaults_estimated_calls_to_zero(tmp_path):
+    old = {"calls": 2, "usd": 0.25, "rejected_streak": 1}
+    (tmp_path / "judge_spend.json").write_text(json.dumps(old))
+    assert label.read_ledger(tmp_path) == {**old, "estimated_calls": 0}
+    label.write_ledger(tmp_path, label.read_ledger(tmp_path))
+    assert json.loads((tmp_path / "judge_spend.json").read_text()) == {
+        **old, "estimated_calls": 0}
+
+
+@pytest.mark.parametrize("value", [True, 1.0, "1", None, -1])
+def test_ledger_rejects_invalid_estimated_calls(tmp_path, value):
+    data = {"calls": 2, "usd": 1, "rejected_streak": 0, "estimated_calls": value}
+    (tmp_path / "judge_spend.json").write_text(json.dumps(data))
+    assert label.read_ledger(tmp_path) == {
+        "calls": 0, "usd": 0.0, "rejected_streak": 0, "estimated_calls": 0}
+
+
+@pytest.mark.parametrize("missing,force,refused", [
+    (6, False, True), (5, False, False), (6, True, False)])
+def test_unresolved_fraction_boundary(make_run, missing, force, refused):
+    run = make_run(n=100 - missing, missing=("session",) * missing)
+    opts = options(run)
+    views = label.resolve_views(run.rows, opts.frozen, run.projects)
+    reason = label.check_corpus(run.rows, views, run.projects, 0,
+                                force_unresolved=force)
+    assert (reason is not None) == refused
+    if refused:
+        assert "unresolved fraction exceeds 5%" in reason
+    fake = FakeClaude()
+    assert label.run_judge(options(run, force_unresolved=force), call=fake) == (
+        2 if refused else 0)
+    assert bool(fake.calls) != refused
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_unresolved_f_pair_never_waived(make_run, force):
+    run = make_run(n=99, missing=("session",))
+    run.rows[-1]["stratum"] = "F"
+    write_jsonl(run.run_dir / "manifest.jsonl", run.rows)
+    opts = options(run, force_unresolved=force)
+    views = label.resolve_views(run.rows, opts.frozen, run.projects)
+    assert "unresolved F pairs (1 of 100 pairs)" in label.check_corpus(
+        run.rows, views, run.projects, 0, force_unresolved=force)
+    before = {p: p.read_bytes() for p in run.run_dir.iterdir()}
+    fake = FakeClaude()
+    assert label.run_judge(opts, call=fake) == 2
+    assert not fake.calls
+    assert {p: p.read_bytes() for p in run.run_dir.iterdir()} == before
+
+
+@pytest.mark.parametrize("reason", ["quota_weekly", "quota_unknown", "quota_stale"])
+@pytest.mark.parametrize("flag", ["force_quota", "force_streak", "force_unresolved"])
+def test_quota_override_is_independent(make_run, monkeypatch, reason, flag):
+    run, fake = make_run(n=1), FakeClaude()
+    monkeypatch.setattr(label.shadow_frontier, "quota_skip", lambda *a: reason)
+    assert label.run_judge(options(run, **{flag: True}), call=fake) == (
+        0 if flag == "force_quota" else 4)
+    assert len(fake.calls) == (1 if flag == "force_quota" else 0)
+
+
+@pytest.mark.parametrize("flag", ["force_quota", "force_streak", "force_unresolved"])
+def test_streak_override_is_independent(make_run, flag):
+    run, fake = make_run(n=1), FakeClaude()
+    label.write_ledger(run.run_dir, {
+        "calls": 0, "usd": 0.0, "rejected_streak": 2, "estimated_calls": 0})
+    assert label.run_judge(options(run, **{flag: True}), call=fake) == (
+        0 if flag == "force_streak" else 2)
+    assert len(fake.calls) == (1 if flag == "force_streak" else 0)
+
+
+@pytest.mark.parametrize("flag", ["force_quota", "force_streak", "force_unresolved"])
+def test_fraction_override_is_independent(make_run, flag):
+    run, fake = make_run(n=94, missing=("session",) * 6), FakeClaude()
+    assert label.run_judge(options(run, **{flag: True}), call=fake) == (
+        0 if flag == "force_unresolved" else 2)
+    assert bool(fake.calls) == (flag == "force_unresolved")
+
+
+@pytest.mark.parametrize("mode", ["--judge", "--owner"])
+def test_legacy_force_returns_two_without_writes(make_run, capsys, mode):
+    run = make_run(n=1)
+    before = {p: p.read_bytes() for p in run.state.rglob("*") if p.is_file()}
+    assert label.cmd_redo_label(["--run", "run1", mode, "--force"]) == 2
+    assert capsys.readouterr().out.strip() == (
+        "--force was split: use --force-quota, --force-streak and/or --force-unresolved")
+    assert {p: p.read_bytes() for p in run.state.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("payload,error", [
+    ("{", "JSONDecodeError"), ("[]", "ValueError"), ("null", "ValueError"),
+    ("{}", "ValueError"), ('{"model_id": 1}', "ValueError"),
+    ('{"model_id": null}', "ValueError"),
+])
+def test_invalid_judge_metadata_refuses_without_writes(make_run, capsys, payload, error):
+    run, fake = make_run(n=1), FakeClaude()
+    (run.run_dir / "judge_meta.json").write_text(payload)
+    before = {p: p.read_bytes() for p in run.run_dir.iterdir()}
+    assert label.run_judge(options(run), call=fake) == 2
+    assert capsys.readouterr().out.strip() == (
+        f"Refused: invalid judge_meta.json ({error}).")
+    assert not fake.calls
+    assert {p: p.read_bytes() for p in run.run_dir.iterdir()} == before
+
+
+@pytest.mark.parametrize("stage", ["read_transcript", "turn_pairs"])
+def test_resolve_views_retries_duplicate_after_error(make_run, monkeypatch, stage):
+    run = make_run(n=1)
+    good = run.projects / "proj" / "session-0.jsonl"
+    duplicate = run.projects / "aaa" / good.name
+    duplicate.parent.mkdir()
+    duplicate.write_bytes(good.read_bytes())
+    original = getattr(label.redo_signal, stage)
+    attempts = []
+
+    def fail_first(*args):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError("ZQXPRIVATE")
+        return original(*args)
+
+    monkeypatch.setattr(label.redo_signal, stage, fail_first)
+    stats = {}
+    views = label.resolve_views(run.rows, options(run).frozen, run.projects, stats)
+    assert set(views) == set(run.prompts)
+    assert len(attempts) == 2 and stats == {"errors": 1, "sessions": 2}
+
+
+@pytest.mark.parametrize("cost", [None, 0, -1])
+def test_claude_call_unknown_cost(make_run, monkeypatch, cost):
+    make_run(n=1)
+    data = dict(result="x", modelUsage={MODEL: {}})
+    if cost is not None:
+        data["total_cost_usd"] = cost
+    monkeypatch.setattr(label.subprocess, "run", lambda cmd, **kwargs:
+                        subprocess.CompletedProcess(cmd, 0, json.dumps(data)))
+    assert label.claude_call("brief", "item", MODEL)["cost_usd"] is None
+
+
+def test_split_flags_documented_in_both_help_surfaces(capsys):
+    with pytest.raises(SystemExit) as exc:
+        label.cmd_redo_label(["--help"])
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    usage = next(line for line in cli.__doc__.splitlines()
+                 if "llm-router redo-label " in line)
+    for flag in ("--allow-api-key", "--force-quota", "--force-streak", "--force-unresolved"):
+        assert flag in output and flag in usage
+    assert "F-pair rule is never waived" in output
