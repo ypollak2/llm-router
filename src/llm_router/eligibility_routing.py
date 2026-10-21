@@ -267,7 +267,8 @@ def prefer_passed(
       request and thinking must be off.
 
     When a passed lane is withheld for a reason of this list the router did not fail on, a ``not_preferred``
-    skip cause names it (``why`` shows it); ``local_routing.doctor_lines`` reports the settings ones. Never
+    skip cause names it (``why`` shows it), including ``input_over_limit``;
+    ``local_routing.doctor_lines`` reports the settings ones. Never
     raises; the chain is returned as given on any error. The acceptance check and the Claude fallback in
     ``llm_text_job`` are unchanged.
     """
@@ -363,6 +364,11 @@ def _prefer_passed(models, job, input_len, now, digests, ctx_for, think, eligibi
             skip_causes.note(m, skip_causes.NOT_PREFERRED, lane=job, detail=cause, ctx=ctx, measured=_measured_ctx(lane))
             continue
         if limit is None or input_len > limit:
+            if limit is not None:
+                skip_causes.note(
+                    m, skip_causes.NOT_PREFERRED, lane=job, detail="input_over_limit",
+                    limit=limit, input_len=input_len,
+                )
             continue
         return [m] + models[:idx] + models[idx + 1:]
     return models
