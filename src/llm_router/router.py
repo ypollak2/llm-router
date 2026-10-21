@@ -5752,7 +5752,7 @@ async def route_and_call(
             # Preserve the exact dispatch trace for callers on chain exhaustion.
             try:
                 _disp_err.chain_attempts = list(_attempt_trace)
-            except Exception:  # noqa: BLE001 -- never replace the original error
+            except (AttributeError, TypeError):  # exception type refuses attributes: keep the original error
                 pass
             await _record_route_error(_disp_err, task_type, profile, correlation_id,
                                       _attempt_trace, models_to_try, _dispatch_started,
