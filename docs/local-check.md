@@ -84,6 +84,8 @@ with the command that flips each, any lane the demotion monitor switched off, an
 The log shows `N of 2 judged draws used`; scored programmatic-only runs add
 `; M programmatic-only run(s) (--no-judge) not counted; latest probe result: V k/n (probe, not a judged verdict)`.
 
+A probe (`--no-judge`) writes no verdict, so `doctor` shows nothing for it; only `local-check status` shows it, labelled as a probe. The `last V k/n <date>` part of that line always comes from the latest judged run (`no judged run yet` when there is none).
+
 `enable <lane>` switches routing on for a lane by hand (source `manual`); it still applies only while the lane is passed and fresh.
 `disable <lane>` switches it off; a later PASS keeps it off.
 

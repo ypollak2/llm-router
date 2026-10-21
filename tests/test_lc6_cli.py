@@ -232,7 +232,7 @@ def test_no_route_without_no_judge_fails_and_no_judge_still_works(tmp_path: Path
     assert run(["--yes", "--model", MODEL], d) == LCC.EXIT_NO_JUDGE_ROUTE and "--no-judge" in sink.etext and seen.adapter.calls == 0
     d, sink, seen = deps(tmp_path, claude=False)
     assert run(["--yes", "--no-judge", "--model", MODEL], d) in (LCC.EXIT_OK, LCC.EXIT_NOT_PASSED)
-    assert seen.judge.calls == 0 and seen.adapter.calls == 70 and "never a PASS" in sink.text and "Verdict: PROBE" in sink.text
+    assert seen.judge.calls == 0 and seen.adapter.calls == 70 and "never records a verdict or enables routing" in sink.text and "Verdict: PROBE" in sink.text
     assert not (tmp_path / "elig.json").exists()
 
 
