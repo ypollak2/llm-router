@@ -152,7 +152,7 @@ def select_route(environ: Mapping[str, str], which: Callable[[str], str | None],
         r.kind, r.claude_bin = ROUTE_SUB, claude
         return r
     r.error = ("no judge available: set ANTHROPIC_API_KEY (API route) or install and log in to the claude CLI (subscription route). "
-               "Without a judge only `--no-judge` works: it can record a FAIL, never a PASS.")
+               "Without a judge only `--no-judge` works: programmatic checks only; the result is shown in `status` as a probe and never records a verdict or enables routing.")
     return r
 
 
@@ -375,7 +375,7 @@ def _parser(prog: str, run: bool = True, lane: bool = False) -> argparse.Argumen
         ap.add_argument("--allow-remote", action="store_true", help="allow a non-loopback --endpoint (the public bank prompts leave this machine for it)")
         ap.add_argument("--profile", choices=("quick", "standard"), default="standard", help="quick: only diffs up to 12k characters (narrower scope)")
         ap.add_argument("--dry-run", action="store_true", help="show the plan screen only; zero model calls")
-        ap.add_argument("--no-judge", action="store_true", help="programmatic grading only: can record a FAIL, never a PASS")
+        ap.add_argument("--no-judge", action="store_true", help="programmatic checks only; the result is shown in `status` as a probe and never records a verdict or enables routing")
         ap.add_argument("--yes", "-y", action="store_true", help="consent without a prompt (required when not on a terminal)")
         ap.add_argument("--fresh", action="store_true", help="discard the open (resumable) run of this configuration and start a new one (counts as a strike)")
         ap.add_argument("--force", action="store_true", help="override the 24 h cooldown and the subscription-quota refusal (>95%%)")
@@ -531,7 +531,7 @@ def _run(d: Deps, ns: argparse.Namespace) -> int:
         err("Refused: " + plan.refused)
         return EXIT_REFUSED
     if ns.no_judge:
-        out("Judge:      none (--no-judge): nothing is sent anywhere; this can record a FAIL, never a PASS.")
+        out("Judge:      none (--no-judge): nothing is sent anywhere; programmatic checks only; the result is shown in `status` as a probe and never records a verdict or enables routing.")
         text = "Proceed with a local-only run? [y/N]"
     elif route.error:
         err("Judge:      unavailable: " + route.error)
@@ -835,9 +835,6 @@ def _status(d: Deps, model: str | None) -> int:
             continue
         shown = True
         scored = [e for e in es if e.get("consumed")]
-        last = scored[-1] if scored else es[-1]
-        v = last.get("verdict")
-        counts = f" {last['k']}/{last['n']}" if last.get("k") is not None and last.get("n") else ""
         probes = [e for e in es if e.get("state") == "scored" and not e.get("consumed")]
         programmatic = len(probes)
         extra = f"; {programmatic} programmatic-only run(s) (--no-judge) not counted" if programmatic else ""
@@ -845,7 +842,13 @@ def _status(d: Deps, model: str | None) -> int:
             probe = probes[-1]
             probe_counts = f" {probe['k']}/{probe['n']}" if probe.get("k") is not None and probe.get("n") else ""
             extra += f"; latest probe result: {probe.get('verdict')}{probe_counts} (probe, not a judged verdict)"
-        out(f"attempts: {cfg.get('model')} (bank v{cfg.get('bank_version')}): {len(scored)} of {A.MAX_DRAWS} judged draws used; last {v}{counts} {last.get('date', '')}{extra}")
+        head = f"attempts: {cfg.get('model')} (bank v{cfg.get('bank_version')}): {len(scored)} of {A.MAX_DRAWS} judged draws used"
+        if scored:
+            last = scored[-1]
+            counts = f" {last['k']}/{last['n']}" if last.get("k") is not None and last.get("n") else ""
+            out(f"{head}; last {last.get('verdict')}{counts} {last.get('date', '')}{extra}")
+        else:
+            out(f"{head}; no judged run yet{extra}")
         if scored and len(scored) < A.MAX_DRAWS:
             nxt = scored[-1]["ts"] + A.COOLDOWN_S
             out("  next draw: " + ("now" if now >= nxt else "after " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(nxt)) + " (or --force)"))
