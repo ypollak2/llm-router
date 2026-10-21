@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -17,6 +18,7 @@ import tempfile
 import sys
 import termios
 import textwrap
+import time
 import tty
 import unicodedata
 from collections import Counter
@@ -31,7 +33,8 @@ VIEW_ANSWER_TAIL = 1500
 VIEW_PREV_HEAD = 500
 VIEW_PROMPT = 2000
 BATCH_SIZE = 20
-PINNED_MODEL_ID = "claude-sonnet-4-5"
+# Refuse more than 10% unresolved pairs unless the fraction check is forced.
+MAX_UNRESOLVED_FRAC = 0.10
 DEFAULT_MAX_CALLS = 10
 DEFAULT_MAX_USD = 3.0
 LABEL_DEFINITION = """y = 1 iff the developer's message shows that the previous assistant answer did not satisfy the request they gave, and they ask for it to be fixed, redone, retried, or redirected back onto the same task. Evidence is in the message itself plus the end of the previous answer and the head of the previous prompt.
@@ -81,7 +84,10 @@ def load_run(run_id: str) -> tuple[Path, list[dict], dict]:
 
 
 def resolve_views(rows: list[dict], frozen: dict,
-                  projects_dir: Path) -> dict[str, PairView]:
+                  projects_dir: Path, stats: dict | None = None) -> dict[str, PairView]:
+    if stats is None:
+        stats = {}
+    stats.update(errors=0, sessions=0)
     wanted: dict[str, list[dict]] = {}
     for row in rows:
         wanted.setdefault(row["session_hash"], []).append(row)
@@ -97,6 +103,7 @@ def resolve_views(rows: list[dict], frozen: dict,
             session_rows = wanted.get(_sha(f"{salt}|{sid}"))
             if not session_rows:
                 continue
+            stats["sessions"] += 1
             entries = redo_signal.read_transcript(path)
             prompts = redo_signal.human_prompts(entries)
             pairs = {p.turn_index: p for p in redo_signal.turn_pairs(entries)}
@@ -112,8 +119,20 @@ def resolve_views(rows: list[dict], frozen: dict,
                         prompts[turn].text[:VIEW_PROMPT])
             views.update(found)
         except Exception:
-            continue
+            stats["errors"] += 1
     return views
+
+
+def check_corpus(rows, views, projects_dir, errors, force=False) -> str | None:
+    resolved = sum(row["pair_id"] in views for row in rows)
+    projects_dir = Path(projects_dir)
+    if (not projects_dir.is_dir() or not any(projects_dir.glob("*/*.jsonl"))
+            or resolved == 0
+            or (not force and (len(rows) - resolved) / len(rows) > MAX_UNRESOLVED_FRAC)):
+        return (f"Refused: only {resolved} of {len(rows)} pairs resolved "
+                f"({errors} session read errors); check --projects-dir.")
+    return None
+
 
 
 def read_labelled(path: Path) -> dict[str, str]:
@@ -193,22 +212,38 @@ def parse_labels(text: str, expected_ids: Iterable[str]) -> dict[str, str]:
         raise ValueError("unparseable judge reply") from None
 
 
-def judge_env_allowlist() -> dict[str, str]:
+def judge_env_allowlist(environ=None, allow_api_key=False) -> dict[str, str]:
     allowed = {"PATH", "HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR",
                "SHELL", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
-               "LLM_ROUTER_SESSION_KIND"}
-    return {key: value for key, value in shadow_frontier.judge_env().items()
-            if key != "ANTHROPIC_BASE_URL" and
-            (key in allowed or key.startswith(("LC_", "ANTHROPIC_", "CLAUDE_CODE_OAUTH")))}
+               "LLM_ROUTER_SESSION_KIND", "CLAUDE_CODE_OAUTH_TOKEN"}
+    if allow_api_key:
+        allowed.update(("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"))
+    return {key: value for key, value in shadow_frontier.judge_env(environ).items()
+            if key in allowed or key.startswith("LC_")}
 
 
-def claude_call(brief: str, item: str, model_id: str) -> dict:
+def judge_preflight(environ, allow_api_key) -> str | None:
+    if not allow_api_key and any(environ.get(key) for key in
+                                 ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")):
+        return ("Refused: ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN is set; the judge must "
+                "run on the subscription. Unset it or pass --allow-api-key.")
+    url = environ.get("ANTHROPIC_BASE_URL")
+    if url:
+        from llm_router.commands.local_check import own_proxy_ports, points_at_own_proxy
+
+        if not points_at_own_proxy(url, own_proxy_ports(environ)):
+            return ("Refused: ANTHROPIC_BASE_URL points at a custom host; the judge would "
+                    "send pair text there. Unset it.")
+    return None
+
+
+def claude_call(brief: str, item: str, model_id: str, *, allow_api_key=False) -> dict:
     cmd = shadow_frontier.judge_cmd(brief, item, model_id)
     cwd = tempfile.mkdtemp(prefix="redo-label-")
     try:
         proc = subprocess.run(
             cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=shadow_frontier.JUDGE_TIMEOUT_S, env=judge_env_allowlist())
+            timeout=shadow_frontier.JUDGE_TIMEOUT_S, env=judge_env_allowlist(allow_api_key=allow_api_key))
     finally:
         shutil.rmtree(cwd)
     if proc.returncode:
@@ -221,12 +256,75 @@ def claude_call(brief: str, item: str, model_id: str) -> dict:
                 key.lower().startswith(model_id.lower()) for key in used)}
 
 
+def read_ledger(run_dir: Path) -> dict:
+    zero = {"calls": 0, "usd": 0.0, "rejected_streak": 0}
+    try:
+        data = json.loads((run_dir / "judge_spend.json").read_text(encoding="utf-8"))
+        if (not isinstance(data, dict) or set(data) != set(zero)
+                or type(data["calls"]) is not int or data["calls"] < 0
+                or type(data["rejected_streak"]) is not int or data["rejected_streak"] < 0
+                or type(data["usd"]) not in (int, float)
+                or not math.isfinite(data["usd"]) or data["usd"] < 0):
+            return zero
+        return {**data, "usd": float(data["usd"])}
+    except (OSError, ValueError, OverflowError):
+        return zero
+
+
+def write_ledger(run_dir: Path, ledger: dict) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=".judge-spend-", dir=run_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump({key: ledger[key] for key in ("calls", "usd", "rejected_streak")}, stream)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, run_dir / "judge_spend.json")
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def run_judge(options: argparse.Namespace, *,
               call: Callable[[str, str, str], dict] = claude_call,
               views: dict[str, PairView] | None = None) -> int:
+    allow_api_key = getattr(options, "allow_api_key", False)
+    refusal = judge_preflight(os.environ, allow_api_key)
+    if refusal:
+        print(refusal)
+        return 2
     run_dir, rows, frozen = load_run(options.run)
+    stats = {"errors": 0, "sessions": 0}
     if views is None:
-        views = resolve_views(rows, frozen, options.projects_dir)
+        views = resolve_views(rows, frozen, options.projects_dir, stats)
+    refusal = check_corpus(rows, views, options.projects_dir, stats["errors"],
+                           getattr(options, "force", False))
+    if refusal:
+        print(refusal)
+        return 2
+    meta_path = run_dir / "judge_meta.json"
+    try:
+        fd = os.open(meta_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta["model_id"] != options.model_id:
+            print("Refused: --model-id differs from the id recorded for this run.")
+            return 2
+    else:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"model_id": options.model_id, "allow_api_key": allow_api_key}, stream)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    ledger = read_ledger(run_dir)
+    if ledger["rejected_streak"] >= 2 and not options.force:
+        print("Refused: 2 consecutive rejected batches; rerun with --force to continue.")
+        return 2
+    if call is claude_call:
+        def default_call(brief, item, model_id):
+            return claude_call(brief, item, model_id, allow_api_key=allow_api_key)
+
+        call = default_call
     path = run_dir / "labels_judge.jsonl"
     labelled = read_labelled(path)
     for row in rows:
@@ -241,50 +339,79 @@ def run_judge(options: argparse.Namespace, *,
     seed = options.seed if options.seed is not None else frozen.get("seed", 360)
     calls, usd, stop = 0, 0.0, None
     for batch_no, offset in enumerate(range(0, len(pending), BATCH_SIZE)):
-        if calls >= options.max_calls:
+        if ledger["calls"] >= options.max_calls:
             stop = "stopped: call cap"
+            break
+        if ledger["usd"] >= options.max_usd:
+            stop = "stopped: spend cap"
+            break
+        reason = shadow_frontier.quota_skip(time.time())
+        if reason and not options.force:
+            stop = f"stopped: quota ({reason})"
             break
         batch = pending[offset:offset + BATCH_SIZE]
         item, id_map = build_batch(batch, calibration, random.Random(seed + batch_no))
         calls += 1
+        cost = 0.0
         try:
             reply = call(build_brief(), item, options.model_id)
-            usd += float(reply["cost_usd"])
+            cost = float(reply.get("cost_usd") or 0)
         except Exception as exc:
             stop = f"stopped: call failed ({type(exc).__name__})"
+        finally:
+            usd += cost
+            ledger["calls"] += 1
+            ledger["usd"] += cost
+            write_ledger(run_dir, ledger)
+        if stop:
             break
         if not reply.get("model_ok"):
             stop = "stopped: model mismatch"
+            ledger["rejected_streak"] += 1
+            write_ledger(run_dir, ledger)
             break
         try:
             labels = parse_labels(reply.get("result"), id_map)
         except ValueError:
             stop = "stopped: unparseable reply"
+            ledger["rejected_streak"] += 1
+            write_ledger(run_dir, ledger)
             break
         misses = sum(labels[key] != expected[ident]
                      for key, (kind, ident) in id_map.items() if kind == "cal")
         if misses:
             stop = f"stopped: calibration miss ({misses} of 6)"
+            ledger["rejected_streak"] += 1
+            write_ledger(run_dir, ledger)
             break
+        ledger["rejected_streak"] = 0
+        write_ledger(run_dir, ledger)
         for key, (kind, ident) in id_map.items():
             if kind == "pair":
                 append_label(path, ident, labels[key], "judge")
                 labelled[ident] = labels[key]
-        if usd > options.max_usd:
-            stop = "stopped: spend cap"
-            break
     counts = Counter(labelled[row["pair_id"]] for row in rows if row["pair_id"] in labelled)
     remaining = sum(row["pair_id"] not in labelled for row in rows)
     detail = " ".join(f"{label}={counts[label]}" for label in LABELS)
     print(f"labelled: {sum(counts.values())} ({detail})")
     print(f"remaining: {remaining}\ncalls: {calls}\nusd: {usd:.4f}")
+    if stats["errors"]:
+        print(f"read errors: {stats['errors']}")
     if stop:
         print(stop)
     return 0 if remaining == 0 and stop is None else 4
 
 
 def cmd_redo_label(args: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="llm-router redo-label")
+    parser = argparse.ArgumentParser(
+        prog="llm-router redo-label", allow_abbrev=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Label redo pairs privately. Judge mode requires --model-id.",
+        epilog="""Spend caps (--max-calls / --max-usd) are cumulative and persisted per run.
+To label more owner pairs, rerun --owner with a larger --others; the sample is
+extended and earlier labels are kept.
+--force overrides quota, rejected-streak and unresolved-fraction guards.
+--allow-api-key permits API-key credentials instead of the subscription.""")
     parser.add_argument("--run", required=True)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--owner", action="store_true")
@@ -294,8 +421,12 @@ def cmd_redo_label(args: list[str]) -> int:
     parser.add_argument("--others", type=int, default=20)
     parser.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS)
     parser.add_argument("--max-usd", type=float, default=DEFAULT_MAX_USD)
-    parser.add_argument("--model-id", default=PINNED_MODEL_ID)
+    parser.add_argument("--model-id")
+    parser.add_argument("--allow-api-key", action="store_true")
+    parser.add_argument("--force", action="store_true")
     options = parser.parse_args(args)
+    if options.judge and not options.model_id:
+        parser.error("--model-id is required with --judge")
     try:
         options.run_dir, options.manifest, options.frozen = load_run(options.run)
     except FileNotFoundError:
@@ -376,6 +507,13 @@ def run_owner(options: argparse.Namespace, *, stdin=None, stdout=None) -> int:
                   file=stdout, flush=True)
             return 3
         rows = options.manifest
+        stats = {}
+        views = resolve_views(rows, options.frozen, options.projects_dir, stats)
+        refusal = check_corpus(rows, views, options.projects_dir, stats["errors"],
+                               getattr(options, "force", False))
+        if refusal:
+            print(refusal, file=stdout, flush=True)
+            return 2
         sample_path = options.run_dir / "owner_sample.json"
         seed, recorded = options.seed, None
         try:
@@ -393,15 +531,13 @@ def run_owner(options: argparse.Namespace, *, stdin=None, stdout=None) -> int:
         if recorded is None or others != recorded:
             _owner_sample_file(sample_path, seed, others, replace=recorded is not None)
         random.Random(seed + 1).shuffle(sample)
-        sample_ids = set(sample)
         label_path = options.run_dir / "labels_owner.jsonl"
         labelled = read_labelled(label_path)
         counts = Counter()
         total = len(sample)
         fd, attrs = None, None
+        screen_drawn = False
         try:
-            views = resolve_views([row for row in rows if row["pair_id"] in sample_ids],
-                                  options.frozen, options.projects_dir)
             for pair_id in sample:
                 if pair_id not in labelled and pair_id not in views:
                     append_label(label_path, pair_id, "lost", "owner")
@@ -417,6 +553,7 @@ def run_owner(options: argparse.Namespace, *, stdin=None, stdout=None) -> int:
                     if pair_id in labelled:
                         continue
                     done = sum(ident in labelled for ident in sample)
+                    screen_drawn = True
                     _owner_screen(stdout, views[pair_id], position, total, done)
                     while True:
                         key = os.read(fd, 1).lower()
@@ -433,12 +570,19 @@ def run_owner(options: argparse.Namespace, *, stdin=None, stdout=None) -> int:
         except KeyboardInterrupt:
             pass
         finally:
-            if attrs is not None:
-                termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+            try:
+                if attrs is not None:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, attrs)
+            finally:
+                if screen_drawn:
+                    stdout.write("\x1b[2J\x1b[H")
+                    stdout.flush()
         detail = " ".join(f"{label}={counts[label]}" for label in LABELS)
         remaining = sum(pair_id not in labelled for pair_id in sample)
         print(f"\nlabelled this session: {sum(counts.values())} ({detail})",
               file=stdout)
+        if stats["errors"]:
+            print(f"read errors: {stats['errors']}", file=stdout)
         print(f"remaining: {remaining} of {total}", file=stdout, flush=True)
         return 0
     except Exception as exc:
