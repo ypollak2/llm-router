@@ -270,21 +270,23 @@ def claude_call(brief: str, item: str, model_id: str, *, allow_api_key=False) ->
 
 
 def read_ledger(run_dir: Path) -> dict:
+    """A missing file is a fresh ledger; an unreadable or invalid one raises (never a silent reset)."""
     zero = {"calls": 0, "usd": 0.0, "rejected_streak": 0, "estimated_calls": 0}
     try:
-        data = json.loads((run_dir / "judge_spend.json").read_text(encoding="utf-8"))
-        estimated = data.get("estimated_calls", zero["estimated_calls"]) if isinstance(data, dict) else None
-        if (not isinstance(data, dict)
-                or set(data) not in (set(zero), set(zero) - {"estimated_calls"})
-                or type(data["calls"]) is not int or data["calls"] < 0
-                or type(data["rejected_streak"]) is not int or data["rejected_streak"] < 0
-                or type(estimated) is not int or estimated < 0
-                or type(data["usd"]) not in (int, float)
-                or not math.isfinite(data["usd"]) or data["usd"] < 0):
-            return zero
-        return {**zero, **data, "usd": float(data["usd"])}
-    except (OSError, ValueError, OverflowError):
+        text = (run_dir / "judge_spend.json").read_text(encoding="utf-8")
+    except FileNotFoundError:
         return zero
+    data = json.loads(text)
+    estimated = data.get("estimated_calls", zero["estimated_calls"]) if isinstance(data, dict) else None
+    if (not isinstance(data, dict)
+            or set(data) not in (set(zero), set(zero) - {"estimated_calls"})
+            or type(data["calls"]) is not int or data["calls"] < 0
+            or type(data["rejected_streak"]) is not int or data["rejected_streak"] < 0
+            or type(estimated) is not int or estimated < 0
+            or type(data["usd"]) not in (int, float)
+            or not math.isfinite(data["usd"]) or data["usd"] < 0):
+        raise ValueError("invalid ledger")
+    return {**zero, **data, "usd": float(data["usd"])}
 
 
 def write_ledger(run_dir: Path, ledger: dict) -> None:
@@ -318,6 +320,11 @@ def run_judge(options: argparse.Namespace, *,
     if refusal:
         print(refusal)
         return 2
+    try:
+        ledger = read_ledger(run_dir)
+    except (OSError, ValueError, OverflowError) as exc:
+        print(f"Refused: invalid judge_spend.json ({type(exc).__name__}).")
+        return 2
     meta_path = run_dir / "judge_meta.json"
     try:
         fd = os.open(meta_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -338,7 +345,6 @@ def run_judge(options: argparse.Namespace, *,
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
-    ledger = read_ledger(run_dir)
     if ledger["rejected_streak"] >= 2 and not getattr(options, "force_streak", False):
         print("Refused: 2 consecutive rejected batches; rerun with --force-streak to continue.")
         return 2
@@ -364,7 +370,7 @@ def run_judge(options: argparse.Namespace, *,
         if ledger["calls"] >= options.max_calls:
             stop = "stopped: call cap"
             break
-        if ledger["usd"] >= options.max_usd:
+        if ledger["usd"] + ESTIMATED_CALL_USD > options.max_usd:
             stop = "stopped: spend cap"
             break
         reason = shadow_frontier.quota_skip(time.time())
@@ -374,7 +380,10 @@ def run_judge(options: argparse.Namespace, *,
         batch = pending[offset:offset + BATCH_SIZE]
         item, id_map = build_batch(batch, calibration, random.Random(seed + batch_no))
         calls += 1
+        before = ledger["usd"]
         ledger["calls"] += 1
+        ledger["usd"] = before + ESTIMATED_CALL_USD
+        ledger["estimated_calls"] += 1
         write_ledger(run_dir, ledger)
         cost = ESTIMATED_CALL_USD
         estimated = True
@@ -385,14 +394,14 @@ def run_judge(options: argparse.Namespace, *,
                     and math.isfinite(reported_cost) and reported_cost > 0):
                 cost = float(reported_cost)
                 estimated = False
+                ledger["usd"] = before + cost
+                ledger["estimated_calls"] -= 1
         except Exception as exc:
             stop = f"stopped: call failed ({type(exc).__name__})"
         finally:
             usd += cost
-            ledger["usd"] += cost
             if estimated:
                 estimated_calls += 1
-                ledger["estimated_calls"] += 1
             write_ledger(run_dir, ledger)
         if stop:
             break

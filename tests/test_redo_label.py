@@ -286,13 +286,63 @@ def test_ledger_private_counts_only(make_run):
     assert not list(run.run_dir.glob(".judge-spend-*"))
 
 
-@pytest.mark.parametrize("payload", [None, "{", "[]", '{"calls": -1}',
-                                    '{"calls": 0, "usd": NaN, "rejected_streak": 0}'])
-def test_missing_or_corrupt_ledger_is_zero(tmp_path, payload):
-    if payload is not None:
-        (tmp_path / "judge_spend.json").write_text(payload)
+def test_missing_ledger_is_zero(tmp_path):
     assert label.read_ledger(tmp_path) == {"calls": 0, "usd": 0.0, "rejected_streak": 0,
                                            "estimated_calls": 0}
+
+
+BAD_LEDGERS = ["{", "[]", '{"calls": -1}', '{"calls": "1", "usd": 0, "rejected_streak": 0}',
+               '{"calls": 0, "usd": -1, "rejected_streak": 0}',
+               '{"calls": 0, "usd": NaN, "rejected_streak": 0}',
+               '{"calls": 0, "usd": 0, "rejected_streak": -2}',
+               '{"calls": 0, "usd": true, "rejected_streak": 0}']
+
+
+@pytest.mark.parametrize("payload", BAD_LEDGERS)
+def test_corrupt_ledger_refuses_without_writing(make_run, capsys, payload):
+    run = make_run(n=1)
+    path = run.run_dir / "judge_spend.json"
+    path.write_text(payload)
+    fake = FakeClaude()
+    assert label.run_judge(options(run), call=fake) == 2
+    assert not fake.calls and path.read_text() == payload
+    assert not (run.run_dir / "judge_meta.json").exists()
+    assert not (run.run_dir / "labels_judge.jsonl").exists()
+    out = capsys.readouterr().out
+    assert "Refused: invalid judge_spend.json (" in out and payload not in out
+
+
+def test_cap_counts_the_upcoming_call(make_run, capsys):
+    run = make_run(n=1)
+    label.write_ledger(run.run_dir, {"calls": 0, "usd": 2.9, "rejected_streak": 0,
+                                     "estimated_calls": 0})
+    fake = FakeClaude()
+    assert label.run_judge(options(run, max_usd=3.0), call=fake) == 4
+    assert not fake.calls and "stopped: spend cap" in capsys.readouterr().out
+    assert label.read_ledger(run.run_dir)["usd"] == 2.9
+
+
+def test_real_cost_replaces_estimate_once(make_run):
+    run = make_run(n=1)
+    label.write_ledger(run.run_dir, {"calls": 0, "usd": 1.0, "rejected_streak": 0,
+                                     "estimated_calls": 0})
+    assert label.run_judge(options(run), call=FakeClaude(cost=0.25)) == 0
+    ledger = label.read_ledger(run.run_dir)
+    assert ledger["usd"] == 1.25 and ledger["estimated_calls"] == 0
+
+
+def test_crash_mid_call_keeps_the_estimate(make_run):
+    run = make_run(n=1)
+    seen = {}
+
+    def crash(*args):
+        seen.update(label.read_ledger(run.run_dir))
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        label.run_judge(options(run), call=crash)
+    assert seen == {"calls": 1, "usd": 0.5, "rejected_streak": 0, "estimated_calls": 1}
+    assert label.read_ledger(run.run_dir) == seen
 
 
 def test_failed_call_is_counted_before_return(make_run):
@@ -803,12 +853,12 @@ def test_real_cost_is_exact(make_run, capsys):
 
 def test_unknown_cost_hits_spend_cap(make_run, capsys):
     run, fake = make_run(), FakeClaude(cost=None)
-    assert label.run_judge(options(run, max_usd=0.4), call=fake) == 4
+    assert label.run_judge(options(run, max_usd=0.6), call=fake) == 4
     assert len(fake.calls) == 1
     assert label.read_ledger(run.run_dir)["usd"] == 0.5
     output = capsys.readouterr().out
     assert "stopped: spend cap" in output and "estimated calls: 1" in output
-    assert label.run_judge(options(run, max_usd=0.4), call=fake) == 4
+    assert label.run_judge(options(run, max_usd=0.6), call=fake) == 4
     assert len(fake.calls) == 1
     assert "estimated calls:" not in capsys.readouterr().out
 
@@ -826,8 +876,8 @@ def test_old_ledger_defaults_estimated_calls_to_zero(tmp_path):
 def test_ledger_rejects_invalid_estimated_calls(tmp_path, value):
     data = {"calls": 2, "usd": 1, "rejected_streak": 0, "estimated_calls": value}
     (tmp_path / "judge_spend.json").write_text(json.dumps(data))
-    assert label.read_ledger(tmp_path) == {
-        "calls": 0, "usd": 0.0, "rejected_streak": 0, "estimated_calls": 0}
+    with pytest.raises(ValueError):
+        label.read_ledger(tmp_path)
 
 
 @pytest.mark.parametrize("missing,force,refused", [
