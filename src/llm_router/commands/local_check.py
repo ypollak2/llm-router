@@ -846,7 +846,10 @@ def _status(d: Deps, model: str | None) -> int:
         if scored:
             last = scored[-1]
             counts = f" {last['k']}/{last['n']}" if last.get("k") is not None and last.get("n") else ""
-            out(f"{head}; last {last.get('verdict')}{counts} {last.get('date', '')}{extra}")
+            kept = ""
+            if last.get("verdict") == "INCONCLUSIVE" and any(e.get("verdict") != "INCONCLUSIVE" for e in scored[:-1]):
+                kept = " (not recorded; earlier verdict kept)"
+            out(f"{head}; last {last.get('verdict')}{counts} {last.get('date', '')}{kept}{extra}")
         else:
             out(f"{head}; no judged run yet{extra}")
         if scored and len(scored) < A.MAX_DRAWS:

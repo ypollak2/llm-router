@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from llm_router.commands import local_check as C
+from llm_router.local_check import attempts as A
 from llm_router.local_check import session as SE
 from tests.test_lc5_scoring import BANK, Clock, FakeAdapter, check, fails
 from tests.test_lc6_cli import MODEL, deps, run
@@ -60,6 +61,29 @@ def test_status_judged_only_has_no_probe_suffix(tmp_path):
     )
 
 
+def test_status_inconclusive_rerun_keeps_earlier_verdict(tmp_path):
+    clock = Clock()
+    first = SE.run_check(check(tmp_path, FakeAdapter(fails(10)), clock=clock))
+    assert first.result.verdict == "PASS"
+    assert (first.result.k, first.result.n_assigned) == (60, 70)
+    clock.t += A.COOLDOWN_S + 1
+    second = SE.run_check(check(tmp_path, FakeAdapter({**fails(10), **fails(25, draw=2)}), clock=clock))
+    assert second.result.verdict == "INCONCLUSIVE"
+    assert attempts_line(tmp_path) == (
+        f"attempts: {MODEL} (bank v{BANK.version}): 2 of 2 judged draws used"
+        "; last INCONCLUSIVE 105/140 2027-01-16 (not recorded; earlier verdict kept)"
+    )
+
+
+def test_status_inconclusive_only_has_no_kept_verdict_suffix(tmp_path):
+    out = SE.run_check(check(tmp_path, FakeAdapter(fails(18)), clock=Clock()))
+    assert out.result.verdict == "INCONCLUSIVE"
+    assert attempts_line(tmp_path) == (
+        f"attempts: {MODEL} (bank v{BANK.version}): 1 of 2 judged draws used"
+        "; last INCONCLUSIVE 52/70 2027-01-15"
+    )
+
+
 @pytest.mark.parametrize("model", ["fake-3n-e4b", "fake3b"])
 def test_size_glued_to_letters_is_unknown(model):
     assert C.estimate_run_seconds(model, 1, {"gpu": "x"}) == (None, "")
@@ -67,7 +91,9 @@ def test_size_glued_to_letters_is_unknown(model):
 
 def test_stale_no_judge_wording_is_absent():
     root = Path(__file__).resolve().parents[1]
-    for directory in ("src", "docs"):
-        for path in (root / directory).rglob("*"):
-            if path.is_file():
-                assert "can record a FAIL" not in path.read_text(encoding="utf-8", errors="replace"), str(path)
+    paths = list(root.glob("README*.md"))
+    for directory in ("src", "docs", "changelog.d"):
+        paths.extend((root / directory).rglob("*"))
+    for path in paths:
+        if path.is_file():
+            assert "can record a FAIL" not in path.read_text(encoding="utf-8", errors="replace"), str(path)

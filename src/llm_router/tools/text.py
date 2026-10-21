@@ -1152,9 +1152,9 @@ async def llm_text_job(
                         chain_attempts=getattr(exc, "chain_attempts", None) or [],
                         accepted=False,
                     ))
-                except Exception as exc:  # noqa: BLE001 -- preserve the original route error
+                except Exception as record_exc:  # noqa: BLE001 -- preserve the original route error
                     from llm_router import failopen
-                    failopen.record("CHZ-FO-TEXTJOB-LOCAL-ATTEMPTS", exc)
+                    failopen.record("CHZ-FO-TEXTJOB-LOCAL-ATTEMPTS", record_exc)
                 raise
 
             check = check_output(job, truncated_input, resp.content)
