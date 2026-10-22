@@ -343,3 +343,67 @@ def test_cli_dispatch_and_inert_help(run, monkeypatch, capsys):
         cli.main()
     assert exc.value.code == 0
     assert seen == [["--run", "X"]]
+
+
+def test_precision_and_weighted_recall_by_kind(capsys):
+    rows, frozen, labels = fixture({
+        "F": ["redo", "not_redo", "redo", "redo"],
+        "S": ["redo", "not_redo", "redo", "not_redo"]})
+    for h in ("F", "S", "R"):
+        members = [row for row in rows if row["stratum"] == h]
+        for i, row in enumerate(members):
+            row["kind"] = "organic" if i < 2 else "untagged"
+        populations = {
+            "F": {"organic": 10, "untagged": 20},
+            "S": {"organic": 30, "untagged": 10},
+            "R": {"organic": 0, "untagged": 0},
+        }[h]
+        frozen["strata"][h]["N"] = sum(populations.values())
+        frozen["strata"][h]["by_kind"] = {
+            kind: {"N": n, "n": sum(r["kind"] == kind for r in members)}
+            for kind, n in populations.items()}
+    result = scoring.score(rows, frozen, labels, reps=20)
+    assert result["precision_by_kind"]["organic"]["point"] == 0.5
+    assert result["precision_by_kind"]["organic"]["tp"] == 1
+    assert result["precision_by_kind"]["organic"]["n"] == 2
+    assert result["precision_by_kind"]["untagged"]["point"] == 1
+    assert result["recall_by_kind"] == {"organic": 0.25, "untagged": 0.8}
+    assert result["recall"]["recall_point"] == pytest.approx(9 / 17)
+    legacy = [{k: v for k, v in row.items() if k != "kind"} for row in rows]
+    baseline = scoring.score(legacy, frozen, labels, reps=20)
+    assert {k: v for k, v in result.items()
+            if k not in ("precision_by_kind", "recall_by_kind")} == baseline
+    scoring._print_result(result)
+    output = capsys.readouterr().out
+    assert "kind organic: precision 1/2 = 0.5000 recall 0.2500" in output
+    assert "kind untagged: precision 2/2 = 1.0000 recall 0.8000" in output
+    del frozen["strata"]["S"]["by_kind"]["organic"]
+    assert scoring.score(rows, frozen, labels, reps=20)["recall_by_kind"] == {
+        "organic": None, "untagged": 0.8}
+
+
+def test_kind_reporting_missing_populations_and_nulls(capsys):
+    rows, frozen, labels = fixture({"F": ["redo"], "S": ["not_redo"]})
+    rows[0]["kind"], rows[1]["kind"] = "organic", "untagged"
+    result = scoring.score(rows, frozen, labels, reps=20)
+    assert result["recall_by_kind"] == {"organic": None, "untagged": None}
+    assert result["precision_by_kind"]["untagged"]["point"] is None
+    scoring._print_result(result)
+    output = capsys.readouterr().out
+    assert "kind organic: precision 1/1 = 1.0000 recall null" in output
+    assert "kind untagged: precision 0/0 = null recall null" in output
+    for h in ("F", "S", "R"):
+        frozen["strata"][h]["by_kind"] = {
+            "organic": {"N": 1}, "untagged": {"N": 0}}
+    # Organic has no resolved S/R observations despite positive populations.
+    assert scoring.score(rows, frozen, labels, reps=20)["recall_by_kind"]["organic"] is None
+
+
+def test_legacy_and_mixed_manifests_omit_kind_reports():
+    rows, frozen, labels = fixture({"F": ["redo", "not_redo"]})
+    for mixed in (False, True):
+        if mixed:
+            rows[0]["kind"] = "organic"
+        result = scoring.score(rows, frozen, labels, reps=20)
+        assert "precision_by_kind" not in result
+        assert "recall_by_kind" not in result
