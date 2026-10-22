@@ -343,6 +343,38 @@ def test_cmd_refuses_held_lock(make_run, capsys):
         assert not (run.run_dir / name).exists()
 
 
+def test_cmd_refuses_when_lock_file_cannot_be_created(make_run, monkeypatch, capsys):
+    make_run(n=1)
+    real_open = os.open
+
+    def deny(path, *args, **kwargs):
+        if Path(path).name == ".lock":
+            raise PermissionError(errno.EACCES, "denied")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(label.os, "open", deny)
+    assert label.cmd_redo_label(["--run", "run1", "--judge", "--model-id", MODEL]) == 2
+    assert capsys.readouterr().out.strip() == "Refused: cannot lock this run directory (PermissionError)"
+
+
+def test_cmd_refuses_when_locking_unavailable(make_run, monkeypatch, capsys):
+    run = make_run(n=1)  # run dir must exist for the lock step
+
+    def unavailable(path, timeout=0.0, status=None):
+        import contextlib
+
+        @contextlib.contextmanager
+        def ctx():
+            status["state"] = "unavailable"
+            yield False
+        return ctx()
+
+    monkeypatch.setattr(label, "exclusive_lock", unavailable)
+    assert label.cmd_redo_label(["--run", "run1", "--judge", "--model-id", MODEL]) == 2
+    assert capsys.readouterr().out.strip() == "Refused: cannot lock this run directory (unavailable)"
+    assert not (run.run_dir / "judge_meta.json").exists()
+
+
 @pytest.mark.parametrize("raises", [False, True])
 def test_cmd_releases_lock(make_run, monkeypatch, raises):
     run = make_run(n=1)

@@ -810,7 +810,7 @@ def _recorded_verdict(d: Deps, cfg: dict) -> tuple[str, bool] | None:
 
     A pooled PASS stores the pooled counts as ``passed`` on every lane that cleared the 0.70 guard and a guard-excluded lane as ``failed``
     with ``status: "lane_guard"``; so the pooled verdict is PASS iff any matching lane passed. A pooled FAIL / NOT_PASSED is stored
-    identically on every lane. The digest is part of the match when both sides have one; a record for another digest is reported as such."""
+    identically on every lane. The digest is part of the match when both sides have one; a record for a different digest is reported as such."""
     import json
     if d.eligibility_path is None:
         return None
@@ -835,8 +835,10 @@ def _recorded_verdict(d: Deps, cfg: dict) -> tuple[str, bool] | None:
     want = cfg.get("digest")
     same = [ln for ln in matching if not (want and ln.get("model_digest") and ln["model_digest"] != want)]
     pool, current = (same, True) if same else (matching, False)
-    verdicts = [_lane_verdict(ln) for ln in pool if ln.get("status") != "lane_guard"] or [_lane_verdict(ln) for ln in pool]
-    return ("PASS" if any(_lane_verdict(ln) == "PASS" for ln in pool) else verdicts[0]), current
+    if any(_lane_verdict(ln) == "PASS" for ln in pool):
+        return "PASS", current
+    counted = [ln for ln in pool if ln.get("status") != "lane_guard"] or pool
+    return _lane_verdict(counted[0]), current
 
 
 def _status(d: Deps, model: str | None) -> int:
@@ -891,7 +893,7 @@ def _status(d: Deps, model: str | None) -> int:
                 rec = _recorded_verdict(d, cfg)
                 if rec is not None:
                     kept = (f" (not recorded; recorded verdict {rec[0]} kept)" if rec[1]
-                            else f" (not recorded; recorded verdict {rec[0]} is for an earlier model digest)")
+                            else f" (not recorded; recorded verdict {rec[0]} is for a different model digest)")
             out(f"{head}; last {last.get('verdict')}{counts} {last.get('date', '')}{kept}{extra}")
         else:
             out(f"{head}; no judged run yet{extra}")
