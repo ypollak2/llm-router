@@ -1,3 +1,3 @@
-# M0.9 pair hashes only; the exclusion mechanism is ready but this list is empty.
-# The ids are not derivable from the repository. A follow-up will populate this
-# file from the owner's local M0.9 run using unsalted redo_sample.pair_key hashes.
+# M0.9 exclusions are supplied locally: state dir redo_m09_excluded.txt or
+# --exclusion-file PATH. Local hashes are never shipped; this shipped list stays empty.
+# Format: one unsalted redo_sample.pair_key hex per line; # comments are allowed.

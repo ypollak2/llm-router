@@ -221,6 +221,19 @@ def score(manifest_rows, frozen, labels, *, seed=360, reps=2000) -> dict:
         recall=_recall(resolved, frozen, seed, reps), sensitivity=sensitivity,
         gate=gate, lost_fraction=lost_fraction, window=frozen.get("window"),
         concentrated=bool(frozen.get("concentrated", False)))
+    if all("kind" in row for row in manifest_rows):
+        kinds = sorted({row["kind"] for row in manifest_rows})
+        result["precision_by_kind"] = {}
+        result["recall_by_kind"] = {}
+        for kind in kinds:
+            subset = [(row, label) for row, label in resolved if row["kind"] == kind]
+            result["precision_by_kind"][kind] = _precision(subset)
+            populations = {
+                h: frozen["strata"][h].get("by_kind", {}).get(kind, {})
+                for h in STRATA}
+            result["recall_by_kind"][kind] = (
+                _recall_point(subset, {"strata": populations})
+                if all("N" in populations[h] for h in STRATA) else None)
     if result["concentrated"]:
         result["precision_basis"] = basis
     return result
@@ -245,6 +258,12 @@ def _print_result(result):
               f"discarded: {recall['n_discarded']}/{recall['reps']}")
     else:
         print("recall: " + recall["reason"])
+    for kind, precision in sorted(result.get("precision_by_kind", {}).items()):
+        point = "null" if precision["point"] is None else f"{precision['point']:.4f}"
+        value = result["recall_by_kind"][kind]
+        kind_recall = "null" if value is None else f"{value:.4f}"
+        print(f"kind {kind}: precision {precision['tp']}/{precision['n']} = "
+              f"{point} recall {kind_recall}")
     print("gate: " + result["gate"]["verdict"])
     print(f"lost: {result['label_counts']['lost']}/{result['n_manifest']}")
     print(f"unclear: {result['label_counts']['unclear']}")

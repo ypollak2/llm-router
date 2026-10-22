@@ -2,7 +2,9 @@
 
 Prompt and answer text is read only in memory; the pool contains metadata only.
 The local frozen.json stores the salt so a later labeller can re-derive pair
-identities from transcripts. Run directories are 0700 and files are 0600.
+identities from transcripts. Frozen metadata records whether untagged sessions
+were admitted, exclusion provenance and, when enabled, per-kind populations and
+draw sizes beside the combined strata. Run directories are 0700 and files are 0600.
 """
 from __future__ import annotations
 
@@ -143,7 +145,8 @@ def _spread(pool: list[Candidate]) -> dict:
 def collect(*, projects_dir: Path | None = None, days: float = 30,
             now: float | None = None, resolve: Resolver | None = None,
             served_loader: ServedLoader | None = None,
-            excluded: set[str] | None = None) -> tuple[list[Candidate], dict]:
+            excluded: set[str] | None = None, include_untagged: bool = False,
+            exclusion_source: str = "shipped") -> tuple[list[Candidate], dict]:
     """Build a text-free pool and counts; injected loaders never access live ledgers."""
     since, until = _window(days, now)
     resolve = resolve or session_kind.KindIndex(backfill=True).resolve
@@ -153,7 +156,9 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
     counts = dict(sessions_total=0, organic_pairs_eligible=0, no_ts=0,
                   excluded_m09=0, flagged_ineligible=0,
                   exclusion_list_size=len(excluded_keys),
-                  exclusion_list_sha256=_sha("\n".join(sorted(excluded_keys))))
+                  exclusion_list_sha256=_sha("\n".join(sorted(excluded_keys))),
+                  exclusion_source=exclusion_source)
+    eligible_by_kind: Counter[str] = Counter()
     pool: list[Candidate] = []
     measured = True
     any_actions = False
@@ -165,9 +170,11 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
             continue
         seen.add(sid)
         resolution = resolve(sid)
-        kinds[resolution.kind or "untagged"] += 1
+        kind_name = resolution.kind or "untagged"
+        kinds[kind_name] += 1
         counts["sessions_total"] += 1
-        if resolution.kind != session_kind.KIND_ORGANIC:
+        if kind_name != session_kind.KIND_ORGANIC and not (
+                include_untagged and resolution.kind in (None, "untagged")):
             continue
         entries = redo_signal.read_transcript(path)
         prompts = redo_signal.human_prompts(entries)
@@ -191,7 +198,9 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
                 continue
             if not since <= pair.ts <= until:
                 continue
-            counts["organic_pairs_eligible"] += 1
+            eligible_by_kind[kind_name] += 1
+            if kind_name == session_kind.KIND_ORGANIC:
+                counts["organic_pairs_eligible"] += 1
             if pair_key(sid, pair.turn_index) in excluded_keys:
                 counts["excluded_m09"] += 1
                 continue
@@ -202,7 +211,7 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
             pool.append(Candidate(
                 sid, k, pair.ts, signals,
                 not signals and _screen(prompts[k].text, prompts[k - 1].text, k in interrupted),
-                resolution.kind, resolution.source, previous_class))
+                kind_name, resolution.source, previous_class))
     measured = measured and any_actions     # an empty ledger measures nothing: n=0 is unmeasured, not 0
     if not measured:
         # Partial ledger coverage must not look like a complete measurement.
@@ -220,6 +229,22 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
                           for p in pool) if measured else None),
         **_spread(pool),
     )
+    if include_untagged:
+        counts["include_untagged"] = True
+        counts["by_kind"] = {}
+        for kind in ("organic", "untagged"):
+            sub_pool = [p for p in pool if p.kind == kind]
+            sub_strata = Counter(p.stratum for p in sub_pool)
+            sub_signals = Counter(signal for p in sub_pool for signal in p.signals)
+            counts["by_kind"][kind] = dict(
+                eligible=eligible_by_kind[kind],
+                eligible_after_exclusion=len(sub_pool),
+                N_F=sub_strata["F"], N_S=sub_strata["S"], N_R=sub_strata["R"],
+                flagged_per_signal={s: sub_signals[s]
+                                    for s in ("reask", "contradiction", "repeat")},
+                cheap_served=(sum(p.prev_served_class in offload_share.OFFLOADED_CLASSES
+                                  for p in sub_pool) if measured else None),
+                **_spread(sub_pool))
     return pool, counts
 
 
@@ -264,16 +289,17 @@ def draw(pool: Iterable[Candidate], seed: int, salt: str) -> list[dict]:
     return rows
 
 
-def _no_go_reason(n: int, kinds: dict[str, int]) -> str | None:
+def _no_go_reason(n: int, kinds: dict[str, int],
+                  include_untagged: bool = False) -> str | None:
     if n >= MIN_FLAGGED:
         return None
-    if kinds["untagged"] > kinds["organic"]:
+    if not include_untagged and kinds["untagged"] > kinds["organic"]:
         return "tagging_gap"
     return "insufficient_flagged_supply"
 
 
-def _gate(n: int, kinds: dict[str, int]) -> str:
-    reason = _no_go_reason(n, kinds)
+def _gate(n: int, kinds: dict[str, int], include_untagged: bool = False) -> str:
+    reason = _no_go_reason(n, kinds, include_untagged)
     if reason is None:
         verdict = "GO"
     elif reason == "tagging_gap":
@@ -286,12 +312,15 @@ def _gate(n: int, kinds: dict[str, int]) -> str:
     untagged = kinds["untagged"]
     other_kind = sum(v for k, v in kinds.items() if k not in {"organic", "untagged"})
     return (f"N_F={n} vs threshold {MIN_FLAGGED}: {verdict}; "
-            f"sessions: organic={organic} untagged={untagged} other_kind={other_kind}")
+            f"sessions: organic={organic} untagged={untagged} other_kind={other_kind}"
+            + ("; include_untagged=on" if include_untagged else ""))
 
 
-def _gate_lines(n: int, kinds: dict[str, int]) -> list[str]:
-    lines = [_gate(n, kinds)]
-    if _no_go_reason(n, kinds) is not None and kinds["untagged"] > kinds["organic"]:
+def _gate_lines(n: int, kinds: dict[str, int],
+                include_untagged: bool = False) -> list[str]:
+    lines = [_gate(n, kinds, include_untagged)]
+    if (not include_untagged and _no_go_reason(n, kinds) is not None
+            and kinds["untagged"] > kinds["organic"]):
         lines.append(
             "WARNING: most sessions are untagged: N_F shortfall may be a tagging gap, "
             "not detector supply -- do not tune the detector on this result")
@@ -316,7 +345,27 @@ def cmd_redo_sample(args: list[str]) -> int:
     parser.add_argument("--allow-empty-exclusion", action="store_true")
     parser.add_argument("--days", type=float, default=30)
     parser.add_argument("--projects-dir", type=Path)
+    parser.add_argument("--include-untagged", action="store_true",
+                        help="include untagged sessions as a disclosed stratum (default: off)")
+    parser.add_argument("--exclusion-file", type=Path,
+                        help="local M0.9 exclusion hashes (default: state dir redo_m09_excluded.txt)")
     options = parser.parse_args(args)
+    local_keys: set[str] | None = None
+    exclusion_source = "shipped"
+    try:
+        local_path = options.exclusion_file
+        if local_path is None:
+            default_path = paths.state_path("redo_m09_excluded.txt")
+            if default_path.is_file():
+                local_path = default_path
+        if local_path is not None:
+            if not local_path.is_file():
+                raise OSError("exclusion path is not a file")
+            local_keys = load_excluded(source=local_path)
+            exclusion_source = "local-file"
+    except (OSError, UnicodeError):
+        print("Refused: exclusion file not found or unreadable.")
+        return 2
     now = datetime.now(timezone.utc).timestamp()
     try:
         since, until = _window(options.days, now)
@@ -337,7 +386,9 @@ def cmd_redo_sample(args: list[str]) -> int:
         print(f"WARNING: projects dir missing or contains no transcripts: {root.name}; "
               "refusing to report a census", file=sys.stderr)
         return 4
-    pool, counts = collect(projects_dir=root, days=options.days, now=now)
+    pool, counts = collect(
+        projects_dir=root, days=options.days, now=now, excluded=local_keys,
+        include_untagged=options.include_untagged, exclusion_source=exclusion_source)
     if options.census:
         print(f"window: {_iso(since)} to {_iso(until)}; "
               f"detector: {redo_signal.PATTERN_VERSION}")
@@ -347,13 +398,16 @@ def cmd_redo_sample(args: list[str]) -> int:
             print(f"{key}: {rendered}")
         if counts["exclusion_list_size"] == 0:
             print(EMPTY_EXCLUSION)
-        print("\n".join(_gate_lines(counts["N_F"], counts["sessions_by_kind"])))
+        print("\n".join(_gate_lines(
+            counts["N_F"], counts["sessions_by_kind"], options.include_untagged)))
         return 0
-    print("\n".join(_gate_lines(counts["N_F"], counts["sessions_by_kind"])))
+    print("\n".join(_gate_lines(
+        counts["N_F"], counts["sessions_by_kind"], options.include_untagged)))
     below = counts["N_F"] < MIN_FLAGGED
     if below and not options.allow_below_threshold:
         print("Refused: --allow-below-threshold is required to freeze this supply.")
-        if _no_go_reason(counts["N_F"], counts["sessions_by_kind"]) == "tagging_gap":
+        if _no_go_reason(counts["N_F"], counts["sessions_by_kind"],
+                          options.include_untagged) == "tagging_gap":
             print("The cause is session tagging, not detector supply: fix session "
                   "tagging, then re-census. --allow-below-threshold freezes an "
                   "under-supplied sample and does not fix the cause.")
@@ -370,22 +424,34 @@ def cmd_redo_sample(args: list[str]) -> int:
     manifest = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
     drawn = Counter(row["stratum"] for row in rows)
     strata = {h: {"N": counts[f"N_{h}"], "n": drawn[h]} for h in ("F", "S", "R")}
+    if options.include_untagged:
+        for h in strata:
+            strata[h]["by_kind"] = {
+                kind: {
+                    "N": sum(p.stratum == h and p.kind == kind for p in pool),
+                    "n": sum(row["stratum"] == h and row["kind"] == kind for row in rows),
+                } for kind in ("organic", "untagged")}
     frozen = dict(
         exclusion_list_size=counts["exclusion_list_size"],
         exclusion_list_sha256=counts["exclusion_list_sha256"],
+        exclusion_source=counts["exclusion_source"],
+        include_untagged=options.include_untagged,
         allow_empty_exclusion=options.allow_empty_exclusion,
         detector_version=redo_signal.PATTERN_VERSION,
         detector_sha256=hashlib.sha256(Path(redo_signal.__file__).read_bytes()).hexdigest(),
         manifest_sha256=hashlib.sha256(manifest.encode("utf-8")).hexdigest(),
         seed=options.seed, run_id=run_id, salt=salt, min_flagged=MIN_FLAGGED,
         n_flagged_pool=counts["N_F"], allow_below_threshold=options.allow_below_threshold,
-        no_go=_no_go_reason(counts["N_F"], counts["sessions_by_kind"]),
+        no_go=_no_go_reason(counts["N_F"], counts["sessions_by_kind"],
+                          options.include_untagged),
         concentrated=counts["largest_session_share_F"] > 0.6,
         shortfall=150 - len(rows),
         window=dict(days=options.days, since_iso=_iso(since), until_iso=_iso(until)),
         counts=counts, strata=strata,
         weights={h: s["N"] / s["n"] if s["n"] else None for h, s in strata.items()},
         created_utc=_iso(now))
+    if options.include_untagged:
+        frozen["sizes_by_kind"] = counts["by_kind"]
     parent = run_dir.parent
     try:
         os.makedirs(parent, mode=0o700)
