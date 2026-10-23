@@ -111,8 +111,8 @@ def test_exclusions_and_comments(isolated, tmp_path):
     assert counts["excluded_m09"] == 1
     assert counts["N_F"] == 0
     listing = tmp_path / "excluded.txt"
-    listing.write_text("\n# comment\n  # more\nabc\n", encoding="utf-8")
-    assert sample.load_excluded({"def"}, source=listing) == {"abc", "def"}
+    listing.write_text("\n# comment\n  # more\n0123456789abcdef\n", encoding="utf-8")
+    assert sample.load_excluded({"def"}, source=listing) == {"0123456789abcdef", "def"}
 
 
 def test_draw_counts_weights_and_determinism():
@@ -121,10 +121,11 @@ def test_draw_counts_weights_and_determinism():
     assert rows == sample.draw(reversed(pool), 360, "salt")
     assert rows != sample.draw(pool, 361, "salt")
     assert Counter(r["stratum"] for r in rows) == {"F": 60, "S": 30, "R": 60}
-    assert {r["weight_N_h"] / r["n_h"] for r in rows if r["stratum"] == "F"} == {70 / 60}
+    assert {r["weight_N_h_combined"] / r["n_h_combined"] for r in rows if r["stratum"] == "F"} == {70 / 60}
     assert set(rows[0]) == {
         "pair_id", "session_hash", "turn_index", "day", "stratum", "signals",
-        "detector_version", "kind", "kind_source", "prev_served_class", "weight_N_h", "n_h"}
+        "detector_version", "kind", "kind_source", "prev_served_class", "weight_N_h_combined",
+        "n_h_combined"}
     small = sample.draw(big_pool(10, 2, 3), 360, "salt")
     assert Counter(r["stratum"] for r in small) == {"F": 10, "S": 2, "R": 3}
 
@@ -205,8 +206,8 @@ def test_cli_gate_privacy_modes_and_metadata(isolated, monkeypatch, capsys, n_fl
     assert frozen["allow_below_threshold"] is (n_flagged < 19)
     assert frozen["no_go"] == ("insufficient_flagged_supply" if n_flagged < 19 else None)
     assert frozen["strata"]["F"] == {"N": n_flagged, "n": n_flagged}
-    assert frozen["weights"]["F"] == 1
-    assert frozen["weights"]["R"] is None
+    assert frozen["weights_combined"]["F"] == 1
+    assert frozen["weights_combined"]["R"] is None
     assert frozen["shortfall"] == 150 - n_flagged
     assert frozen["concentrated"] is (n_flagged < 19)
     assert frozen["manifest_sha256"] == hashlib.sha256(

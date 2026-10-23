@@ -286,6 +286,28 @@ def tag_kind_of(session_id: str | None) -> str | None:
     return kind
 
 
+TAG_STATE_VALID = "valid_tag"
+TAG_STATE_MISSING = "no_tag_file"
+TAG_STATE_CORRUPT = "corrupt_tag"
+
+
+def tag_file_state(session_id: str) -> str:
+    """Why a session does or does not have a usable tag file: ``no_tag_file``,
+    ``corrupt_tag`` (unreadable, not JSON, or no valid kind) or ``valid_tag``. Used by
+    ``redo-sample`` to report why a session is untagged; it bypasses the ``_FOUND`` cache
+    and never raises."""
+    path = _tag_path(session_id)
+    if not os.path.lexists(path):
+        return TAG_STATE_MISSING
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):   # UnicodeDecodeError is a ValueError
+        return TAG_STATE_CORRUPT
+    if not isinstance(raw, dict) or raw.get("kind") not in VALID_KINDS:
+        return TAG_STATE_CORRUPT
+    return TAG_STATE_VALID
+
+
 # ── joining a kind onto records that carry none ──────────────────────────────
 
 SOURCE_OVERRIDE = "override"    # the owner's override file: beats every source below

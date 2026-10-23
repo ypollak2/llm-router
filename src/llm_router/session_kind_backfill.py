@@ -50,6 +50,7 @@ from __future__ import annotations
 import errno
 import glob as _glob
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -162,6 +163,26 @@ def load_sidecar(path: Path | None = None) -> dict[str, str]:
         if isinstance(sid, str) and sid and isinstance(kind, str) and kind and sid not in out:
             out[sid] = kind
     return out
+
+
+SIDECAR_PRESENT = "present"
+SIDECAR_MISSING = "missing"
+SIDECAR_UNREADABLE = "unreadable"
+
+
+def sidecar_status(path: Path | None = None) -> str:
+    """``present``, ``missing`` or ``unreadable``. :func:`load_sidecar` and
+    :class:`session_kind.KindIndex` read an unreadable sidecar as empty; this lets a
+    caller report that state instead of hiding it."""
+    target = path if path is not None else sidecar_path()
+    if not os.path.lexists(target):
+        return SIDECAR_MISSING
+    try:
+        with open(target, "rb") as stream:
+            stream.read()
+    except OSError:
+        return SIDECAR_UNREADABLE
+    return SIDECAR_PRESENT
 
 
 def _claude_projects_dir() -> Path:

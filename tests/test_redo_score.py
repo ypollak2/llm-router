@@ -362,6 +362,7 @@ def test_precision_and_weighted_recall_by_kind(capsys):
         frozen["strata"][h]["by_kind"] = {
             kind: {"N": n, "n": sum(r["kind"] == kind for r in members)}
             for kind, n in populations.items()}
+    frozen["include_untagged"] = True
     result = scoring.score(rows, frozen, labels, reps=20)
     assert result["precision_by_kind"]["organic"]["point"] == 0.5
     assert result["precision_by_kind"]["organic"]["tp"] == 1
@@ -385,6 +386,7 @@ def test_precision_and_weighted_recall_by_kind(capsys):
 def test_kind_reporting_missing_populations_and_nulls(capsys):
     rows, frozen, labels = fixture({"F": ["redo"], "S": ["not_redo"]})
     rows[0]["kind"], rows[1]["kind"] = "organic", "untagged"
+    frozen["include_untagged"] = True
     result = scoring.score(rows, frozen, labels, reps=20)
     assert result["recall_by_kind"] == {"organic": None, "untagged": None}
     assert result["precision_by_kind"]["untagged"]["point"] is None
@@ -407,3 +409,44 @@ def test_legacy_and_mixed_manifests_omit_kind_reports():
         result = scoring.score(rows, frozen, labels, reps=20)
         assert "precision_by_kind" not in result
         assert "recall_by_kind" not in result
+
+
+def test_per_kind_recall_respects_concentration(capsys):
+    rows, frozen, labels = fixture({"F": ["redo", "not_redo"], "S": ["not_redo", "redo"]},
+                                   concentrated=True)
+    for i, row in enumerate(rows):
+        row["kind"] = "organic" if i % 2 == 0 else "untagged"
+    for h in ("F", "S"):
+        frozen["strata"][h]["by_kind"] = {"organic": {"N": 5, "n": 1},
+                                          "untagged": {"N": 5, "n": 1}}
+    # stratum R has no drawn rows in this fixture, so it holds no sessions of any kind
+    frozen["strata"]["R"]["by_kind"] = {"organic": {"N": 0, "n": 0},
+                                        "untagged": {"N": 0, "n": 0}}
+    frozen["include_untagged"] = True
+    result = scoring.score(rows, frozen, labels, reps=20)
+    assert result["recall"]["reason"] == "not estimable (concentrated draw)"
+    assert result["recall_by_kind"] == {"organic": None, "untagged": None}
+    assert result["recall_by_kind_reason"] == result["recall"]["reason"]
+    assert result["precision_by_kind"]["organic"]["n"] == 1
+    scoring._print_result(result)
+    output = capsys.readouterr().out
+    assert "kind organic: precision 1/1 = 1.0000 recall not estimable (concentrated draw)" in output
+    frozen["concentrated"] = False
+    unconcentrated = scoring.score(rows, frozen, labels, reps=20)
+    assert "recall_by_kind_reason" not in unconcentrated
+    assert all(v is not None for v in unconcentrated["recall_by_kind"].values())
+
+
+def test_legacy_rows_with_kind_print_no_per_kind_block(capsys):
+    rows, frozen, labels = fixture({"F": ["redo", "not_redo"], "S": ["not_redo"]})
+    for row in rows:
+        row["kind"] = "organic"     # legacy organic-only manifests already carry kind
+    for h in ("F", "S", "R"):
+        frozen["strata"][h]["by_kind"] = {"organic": {"N": 1, "n": 1}}
+    for flag in (None, False):
+        if flag is not None:
+            frozen["include_untagged"] = flag
+        result = scoring.score(rows, frozen, labels, reps=20)
+        assert "precision_by_kind" not in result and "recall_by_kind" not in result
+        scoring._print_result(result)
+        assert "kind organic" not in capsys.readouterr().out
