@@ -333,14 +333,17 @@ class KindIndex:
     memoised, so reading the tag file costs one stat per distinct session, not one
     per record."""
 
-    def __init__(self, ledger_rows: Iterable[dict] = (), *, backfill: bool = True) -> None:
+    def __init__(self, ledger_rows: Iterable[dict] = (), *, backfill: bool = True,
+                 sidecar: dict[str, str] | None = None) -> None:
         self._ledger: dict[str, set[str]] = {}
         self._tags: dict[str, str | None] = {}
         #: ``backfill=False`` never reads the sidecar: what the backfill command itself
         #: uses to ask "does live evidence already resolve this session?", and what
         #: ``northstar`` passes on every path except ``llm-router kpi``.
         self._use_backfill = backfill
-        self._backfill: dict[str, str] | None = None  # loaded on first need, once per index
+        #: Loaded on first need, once per index; ``sidecar`` hands in a map the caller
+        #: already read, so the file is not opened a second time.
+        self._backfill: dict[str, str] | None = dict(sidecar) if sidecar is not None else None
         for row in ledger_rows:
             self.add(row.get("session_id"), row.get("session_kind"))
 

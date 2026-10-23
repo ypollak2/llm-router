@@ -212,4 +212,4 @@ def test_bad_explicit_exclusion_precedes_window_and_root(tmp_path, capsys, shape
     assert sample.cmd_redo_sample([
         "--census", "--exclusion-file", str(listing), "--days", "-1",
         "--projects-dir", str(tmp_path / "missing-projects")]) == 2
-    assert capsys.readouterr().out == "Refused: exclusion file not found or unreadable.\n"
+    assert capsys.readouterr().out == "Refused: local exclusion file not found or unreadable.\n"
