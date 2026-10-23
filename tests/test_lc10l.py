@@ -169,7 +169,7 @@ def test_status_pooled_pass_with_lane_guard_lane_sorting_first_says_pass(tmp_pat
     assert attempts_line(tmp_path).endswith("(not recorded; recorded verdict PASS kept)")
 
 
-def test_status_record_for_earlier_digest_is_not_called_kept(tmp_path):
+def test_status_record_for_different_digest_is_not_called_kept(tmp_path):
     _inconclusive_after_pass(tmp_path)
 
     def old_digest(lanes):
@@ -178,7 +178,7 @@ def test_status_record_for_earlier_digest_is_not_called_kept(tmp_path):
 
     _edit_elig(tmp_path, old_digest)
     line = attempts_line(tmp_path)
-    assert line.endswith("(not recorded; recorded verdict PASS is for an earlier model digest)")
+    assert line.endswith("(not recorded; recorded verdict PASS is for a different model digest)")
     assert "kept" not in line
 
 
@@ -189,3 +189,43 @@ def test_status_corrupt_eligibility_file_has_no_suffix_and_no_traceback(tmp_path
     assert "last INCONCLUSIVE" in line and "kept" not in line and "not recorded" not in line
     captured = capsys.readouterr()
     assert "Traceback" not in captured.out + captured.err
+
+
+def test_status_lanes_without_stored_digest_match_and_say_kept(tmp_path):
+    _inconclusive_after_pass(tmp_path)
+
+    def drop_digest(lanes):
+        for lane in lanes.values():
+            lane.pop("model_digest", None)
+        assert all("model_digest" not in lane for lane in lanes.values())
+
+    _edit_elig(tmp_path, drop_digest)
+    line = attempts_line(tmp_path)
+    assert line.endswith("(not recorded; recorded verdict PASS kept)")
+    assert "different model digest" not in line
+
+
+def test_status_pooled_fail_then_inconclusive_names_recorded_verdict(tmp_path):
+    _inconclusive_after_pass(tmp_path)
+
+    def pooled_fail(lanes):
+        for lane in lanes.values():
+            lane.update({"grade": "failed", "verdict": "failed", "eligible": False, "status": "failed", "k": 80, "n": 140})
+
+    _edit_elig(tmp_path, pooled_fail)
+    assert attempts_line(tmp_path).endswith("(not recorded; recorded verdict FAIL kept)")
+
+
+def test_status_pooled_not_passed_then_inconclusive_for_different_digest(tmp_path):
+    clock = Clock()
+    first = SE.run_check(check(tmp_path, FakeAdapter({i.id: "progfail" for i in BANK.draw(1)[42:57]}), clock=clock))
+    assert first.result.verdict == "NOT_PASSED"
+    clock.t += A.COOLDOWN_S + 1
+    assert SE.run_check(check(tmp_path, FakeAdapter(fails(5, draw=2)), clock=clock)).result.verdict == "INCONCLUSIVE"
+
+    def other_digest(lanes):
+        for lane in lanes.values():
+            lane["model_digest"] = "sha256:other"
+
+    _edit_elig(tmp_path, other_digest)
+    assert attempts_line(tmp_path).endswith("(not recorded; recorded verdict NOT_PASSED is for a different model digest)")

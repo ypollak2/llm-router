@@ -500,13 +500,16 @@ The unresolved F-pair rule is never waived.
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
         os.close(fd)
-    except OSError:
-        print("Refused: another redo-label process holds this run")
+    except OSError as exc:
+        print(f"Refused: cannot lock this run directory ({type(exc).__name__})")
         return 2
     status = {}
     with exclusive_lock(lock_path, timeout=0.0, status=status) as acquired:
         if not acquired:
-            print("Refused: another redo-label process holds this run")
+            if status.get("state") == "held":
+                print("Refused: another redo-label process holds this run")
+            else:
+                print(f"Refused: cannot lock this run directory ({status.get('state', 'unknown')})")
             return 2
         return run_judge(options) if options.judge else run_owner(options)
 
