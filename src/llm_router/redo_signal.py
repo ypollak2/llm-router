@@ -38,6 +38,19 @@ from llm_router.proxy.escalation import _CLAUDE_REASK_RE, _CONTRADICTION_RE, _OP
 # again" and "I'm missing". v2 is the version that was frozen for validation.
 PATTERN_VERSION = "v2"
 
+# Candidate variants for the tune step (P3.6-c PR 3; design section 5). v2 is the default everywhere and
+# stays byte-identical. v3a and v3b are precision-first candidates written from the design's guidance
+# ("demote or tighten repeat, which produced the v0 false positives and the 5-6 word false positives"), not
+# fitted to data. At most 2 non-baseline candidates may be scored (redo_score tune log).
+BASELINE_VARIANT = "v2"
+VARIANTS = {
+    "v2": "frozen M0.9 patterns",
+    "v3a": "tighten repeat: at least 12 words and Jaccard >= 0.9; reask and contradiction as v2",
+    "v3b": "demote repeat: reported only when reask or contradiction also fires; thresholds as v2",
+}
+V3A_REPEAT_MIN_WORDS = 12
+V3A_JACCARD_MIN = 0.9
+
 SIGNAL_REASK = "reask"
 SIGNAL_CONTRADICTION = "contradiction"
 SIGNAL_REPEAT = "repeat"
@@ -163,7 +176,9 @@ def five_gram_jaccard(a: str, b: str) -> float | None:
     return len(ga & gb) / len(ga | gb)
 
 
-def _signals(prompt: str, previous: str | None) -> list[str]:
+def _signals(prompt: str, previous: str | None, variant: str = BASELINE_VARIANT) -> list[str]:
+    if variant not in VARIANTS:
+        raise ValueError(f"unknown detector variant: {variant}")
     text = prompt.replace("’", "'").lstrip()
     lowered = text.lower()
     out: list[str] = []
@@ -171,27 +186,32 @@ def _signals(prompt: str, previous: str | None) -> list[str]:
         out.append(SIGNAL_REASK)
     if _CONTRADICTION_RE.match(lowered[:80]) or _FAILURE_RE.search(lowered[:FAILURE_WINDOW]):
         out.append(SIGNAL_CONTRADICTION)
-    if previous is not None and len(_words(prompt)) >= REPEAT_MIN_WORDS:
+    min_words, jaccard_min = REPEAT_MIN_WORDS, JACCARD_MIN
+    if variant == "v3a":
+        min_words, jaccard_min = V3A_REPEAT_MIN_WORDS, V3A_JACCARD_MIN
+    if previous is not None and len(_words(prompt)) >= min_words:
         j = five_gram_jaccard(prompt, previous)
-        if j is not None and j >= JACCARD_MIN:
+        if j is not None and j >= jaccard_min and not (variant == "v3b" and not out):
             out.append(SIGNAL_REPEAT)
     return out
 
 
-def redo_flag_times(entries: Iterable[Any]) -> list[tuple[float | None, int, str]]:
+def redo_flag_times(entries: Iterable[Any],
+                    variant: str = BASELINE_VARIANT) -> list[tuple[float | None, int, str]]:
     """``(prompt timestamp, turn_index, signal)`` for every flagged human prompt. ``turn_index`` counts the
     session's human prompts from 0; a prompt with turn_index k is a redo of turn k-1."""
     prompts = human_prompts(list(entries))
     out: list[tuple[float | None, int, str]] = []
     for k in range(1, len(prompts)):
-        for sig in _signals(prompts[k].text, prompts[k - 1].text):
+        for sig in _signals(prompts[k].text, prompts[k - 1].text, variant):
             out.append((prompts[k].ts, k, sig))
     return out
 
 
-def redo_flags(transcript_entries: Iterable[Any]) -> list[tuple[int, str]]:
+def redo_flags(transcript_entries: Iterable[Any],
+               variant: str = BASELINE_VARIANT) -> list[tuple[int, str]]:
     """``(turn_index, signal)`` for every flagged human prompt of one session's transcript records."""
-    return [(k, sig) for _, k, sig in redo_flag_times(transcript_entries)]
+    return [(k, sig) for _, k, sig in redo_flag_times(transcript_entries, variant)]
 
 
 # ── labelling pairs ──────────────────────────────────────────────────────────

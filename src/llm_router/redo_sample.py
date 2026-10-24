@@ -38,6 +38,9 @@ from llm_router import (northstar, offload_share, paths, redo_signal, session_ki
 
 MIN_FLAGGED = 19
 DEFAULT_SEED = 360
+DEFAULT_TUNE_SEED = 361         # a tune set has its own seed: never the test seed
+TUNE_PREFIX = "tune-"
+_RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 EMPTY_EXCLUSION = "M0.9 exclusion list EMPTY: spent M0.9 pairs are NOT excluded"
 LEDGER_PRESENT, LEDGER_MISSING, LEDGER_UNREADABLE = "present", "missing", "unreadable"
 LEDGER_CORRUPT = "corrupt"      # non-blank lines, none of which parsed to a row
@@ -71,6 +74,60 @@ class EvidenceUnreadable(RuntimeError):
     def message(self) -> str:
         detail = " ".join(f"{k}={v}" for k, v in self.counts.items())
         return f"Refused: {self.total} unreadable evidence source(s): {detail}"
+
+
+class PriorRunUnreadable(RuntimeError):
+    """A run directory under redo_validation/ cannot be read as a run: disjointness cannot be proven.
+
+    Carries the count only."""
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        super().__init__(f"{count} unreadable prior run directory(ies)")
+
+
+@dataclass(frozen=True)
+class PriorRun:
+    """The salted pair ids of an earlier run (``purpose`` is ``tune`` or ``test``; legacy runs are test)."""
+    purpose: str
+    salt: str
+    pair_ids: frozenset[str]
+
+
+def tune_dir_name(run: str) -> str:
+    """The run-directory name of a tune id: ``tune-<id>``; an id that already has the prefix is kept."""
+    return run if run.startswith(TUNE_PREFIX) else TUNE_PREFIX + run
+
+
+def load_prior_runs(purposes: set[str]) -> list[PriorRun]:
+    """Every run directory under ``redo_validation/`` whose purpose is in ``purposes``.
+
+    A directory (not dot-prefixed) whose manifest or frozen.json is missing or invalid raises
+    ``PriorRunUnreadable``: an unreadable run cannot be proven disjoint."""
+    root = paths.state_path("redo_validation")
+    if not root.is_dir():
+        return []
+    runs: list[PriorRun] = []
+    bad = 0
+    for run_dir in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
+        try:
+            frozen = json.loads((run_dir / "frozen.json").read_text(encoding="utf-8"))
+            rows = [json.loads(line) for line in
+                    (run_dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+                    if line.strip()]
+            salt = frozen["salt"]
+            ids = frozenset(row["pair_id"] for row in rows)
+            if not isinstance(salt, str) or not all(isinstance(i, str) for i in ids):
+                raise ValueError("invalid run")
+        except (OSError, ValueError, KeyError, TypeError):
+            bad += 1
+            continue
+        purpose = "tune" if frozen.get("purpose") == "tune" else "test"
+        if purpose in purposes:
+            runs.append(PriorRun(purpose, salt, ids))
+    if bad:
+        raise PriorRunUnreadable(bad)
+    return runs
 
 
 def resolve_with_all_evidence(*, override: str | None, tag: str | None, sidecar: str | None,
@@ -260,7 +317,9 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
             served_loader: ServedLoader | None = None,
             excluded: set[str] | None = None, include_untagged: bool = False,
             exclusion_source: str = "shipped",
-            ledger_rows: Iterable[dict] | None = None) -> tuple[list[Candidate], dict]:
+            ledger_rows: Iterable[dict] | None = None,
+            variant: str = redo_signal.BASELINE_VARIANT,
+            prior_runs: list[PriorRun] | None = None) -> tuple[list[Candidate], dict]:
     """Build a text-free pool and counts; injected loaders never access live ledgers."""
     since, until = _window(days, now)
     sidecar_state, sidecar = session_kind_backfill.read_sidecar()    # once per run
@@ -304,6 +363,7 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
     kinds: Counter[str] = Counter()
     counts = dict(sessions_total=0, organic_pairs_eligible=0, no_ts=0,
                   excluded_m09=0, flagged_ineligible=0,
+
                   exclusion_list_size=len(excluded_keys),
                   exclusion_list_sha256=_sha("\n".join(sorted(excluded_keys))),
                   exclusion_source=exclusion_source)
@@ -343,7 +403,7 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
         pairs = redo_signal.turn_pairs(entries)
         eligible = {p.turn_index for p in pairs}
         flags: dict[int, list[str]] = {}
-        for ts, k, signal in redo_signal.redo_flag_times(entries):
+        for ts, k, signal in redo_signal.redo_flag_times(entries, variant):
             flags.setdefault(k, []).append(signal)
             if k not in eligible and ts is not None and since <= ts <= until:
                 counts["flagged_ineligible"] += 1
@@ -364,6 +424,12 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
                 counts["organic_pairs_eligible"] += 1
             if pair_key(sid, pair.turn_index) in excluded_keys:
                 counts["excluded_m09"] += 1
+                continue
+            prior = next((r for r in prior_runs or ()
+                          if _sha(f"{sid}|{pair.turn_index}|{r.salt}")[:16] in r.pair_ids), None)
+            if prior is not None:
+                counts[f"excluded_prior_{prior.purpose}"] = counts.get(
+                    f"excluded_prior_{prior.purpose}", 0) + 1
                 continue
             k = pair.turn_index
             signals = tuple(flags.get(k, ()))
@@ -524,8 +590,15 @@ def cmd_redo_sample(args: list[str]) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--census", action="store_true")
     mode.add_argument("--freeze", action="store_true")
-    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
-    parser.add_argument("--run-id")
+    mode.add_argument("--tune", action="store_true",
+                      help="draw a TUNE set (own seed, own tune-<id> run dir) disjoint from "
+                           "the M0.9 list, every test run and every earlier tune set")
+    parser.add_argument("--seed", type=int, default=None,
+                        help=f"default {DEFAULT_SEED}; {DEFAULT_TUNE_SEED} with --tune")
+    parser.add_argument("--run-id", "--run", dest="run_id")
+    parser.add_argument("--detector", choices=sorted(redo_signal.VARIANTS),
+                        default=redo_signal.BASELINE_VARIANT,
+                        help="detector variant for --census/--freeze; recorded in frozen.json")
     parser.add_argument("--allow-below-threshold", action="store_true")
     parser.add_argument("--allow-empty-exclusion", action="store_true")
     parser.add_argument("--days", type=float, default=30)
@@ -535,6 +608,10 @@ def cmd_redo_sample(args: list[str]) -> int:
     parser.add_argument("--exclusion-file", type=Path,
                         help="local M0.9 exclusion hashes (default: state dir redo_m09_excluded.txt)")
     options = parser.parse_args(args)
+    if options.tune and options.detector != redo_signal.BASELINE_VARIANT:
+        parser.error("--detector is not allowed with --tune: tune sets are drawn with the v2 baseline")
+    seed = options.seed if options.seed is not None else (
+        DEFAULT_TUNE_SEED if options.tune else DEFAULT_SEED)
     local_keys: set[str] | None = None
     exclusion_source = "shipped"
     label = "shipped"       # which file a refusal names: never its path
@@ -573,10 +650,14 @@ def cmd_redo_sample(args: list[str]) -> int:
         parser.error(str(exc))
     run_id = options.run_id or datetime.fromtimestamp(now, timezone.utc).strftime(
         "%Y%m%dT%H%M%SZ")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", run_id):
+    if not _RUN_ID.fullmatch(run_id):
         parser.error("run-id must contain only letters, digits, underscores and hyphens")
+    if options.tune:
+        run_id = tune_dir_name(run_id)
+        if not _RUN_ID.fullmatch(run_id):
+            parser.error("run-id too long")
     run_dir = paths.state_path("redo_validation", run_id)
-    if options.freeze and os.path.lexists(run_dir):
+    if (options.freeze or options.tune) and os.path.lexists(run_dir):
         print("Refused: run directory already exists.")
         return 2
     root = (options.projects_dir if options.projects_dir is not None
@@ -587,16 +668,23 @@ def cmd_redo_sample(args: list[str]) -> int:
               "refusing to report a census", file=sys.stderr)
         return 4
     try:
+        prior_runs = load_prior_runs({"tune", "test"} if options.tune else {"tune"})
+    except PriorRunUnreadable as refused:
+        print(f"Refused: {refused.count} unreadable prior run directory(ies): "
+              "disjointness cannot be proven.")
+        return 2
+    try:
         pool, counts = collect(
             projects_dir=root, days=options.days, now=now, excluded=local_keys,
-            include_untagged=options.include_untagged, exclusion_source=exclusion_source)
+            include_untagged=options.include_untagged, exclusion_source=exclusion_source,
+            variant=options.detector, prior_runs=prior_runs)
     except EvidenceUnreadable as refused:
         print(refused.message())
         return 2
     warnings = _untagged_warnings(counts) if options.include_untagged else []
     if options.census:
         print(f"window: {_iso(since)} to {_iso(until)}; "
-              f"detector: {redo_signal.PATTERN_VERSION}")
+              f"detector: {redo_signal.PATTERN_VERSION}; variant: {options.detector}")
         for key, value in counts.items():
             rendered = "unmeasured" if value is None else (
                 json.dumps(value, sort_keys=True) if isinstance(value, dict) else value)
@@ -610,10 +698,11 @@ def cmd_redo_sample(args: list[str]) -> int:
         return 0
     for line in warnings:
         print(line)
-    print("\n".join(_gate_lines(
-        counts["N_F"], counts["sessions_by_kind"], options.include_untagged)))
+    if not options.tune:    # a tune set is drawn from whatever supply there is: no flagged-supply gate
+        print("\n".join(_gate_lines(
+            counts["N_F"], counts["sessions_by_kind"], options.include_untagged)))
     below = counts["N_F"] < MIN_FLAGGED
-    if below and not options.allow_below_threshold:
+    if below and not options.allow_below_threshold and not options.tune:
         print("Refused: --allow-below-threshold is required to freeze this supply.")
         if _no_go_reason(counts["N_F"], counts["sessions_by_kind"],
                           options.include_untagged) == "tagging_gap":
@@ -626,8 +715,8 @@ def cmd_redo_sample(args: list[str]) -> int:
         print("Refused: --allow-empty-exclusion is required to freeze without an M0.9 "
               "exclusion list.")
         return 5
-    salt = _sha(f"redo-sample-salt|{options.seed}|{run_id}")
-    rows = draw(pool, options.seed, salt)
+    salt = _sha(f"redo-sample-salt|{seed}|{run_id}")
+    rows = draw(pool, seed, salt)
     for row in rows:
         row["exclusion_list_sha256"] = counts["exclusion_list_sha256"]
     manifest = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
@@ -649,10 +738,14 @@ def cmd_redo_sample(args: list[str]) -> int:
         detector_version=redo_signal.PATTERN_VERSION,
         detector_sha256=hashlib.sha256(Path(redo_signal.__file__).read_bytes()).hexdigest(),
         manifest_sha256=hashlib.sha256(manifest.encode("utf-8")).hexdigest(),
-        seed=options.seed, run_id=run_id, salt=salt, min_flagged=MIN_FLAGGED,
+        seed=seed, run_id=run_id, salt=salt, min_flagged=MIN_FLAGGED,
+        purpose="tune" if options.tune else "test", detector_variant=options.detector,
+        excluded_prior_tune=counts.get("excluded_prior_tune", 0),
+        excluded_prior_test=counts.get("excluded_prior_test", 0),
+        n_prior_runs=len(prior_runs),
         n_flagged_pool=counts["N_F"], allow_below_threshold=options.allow_below_threshold,
-        no_go=_no_go_reason(counts["N_F"], counts["sessions_by_kind"],
-                          options.include_untagged),
+        no_go=(None if options.tune else _no_go_reason(
+            counts["N_F"], counts["sessions_by_kind"], options.include_untagged)),
         concentrated=counts["largest_session_share_F"] > 0.6,
         shortfall=150 - len(rows),
         window=dict(days=options.days, since_iso=_iso(since), until_iso=_iso(until)),
@@ -689,4 +782,7 @@ def cmd_redo_sample(args: list[str]) -> int:
     print(f"run_id: {run_id}\nrun_dir: {run_dir}")
     for h, s in strata.items():
         print(f"{h}: N={s['N']} n={s['n']}")
+    print(f"purpose: {frozen['purpose']}; detector: {options.detector}; prior runs excluded from: "
+          f"{len(prior_runs)}; excluded tune pairs: {frozen['excluded_prior_tune']}"
+          + (f"; excluded test pairs: {frozen['excluded_prior_test']}" if options.tune else ""))
     return 0
