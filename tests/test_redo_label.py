@@ -682,6 +682,16 @@ def test_owner_sanitizes_terminal_controls(make_run):
     assert output.count(b"\x1b[2J") == output.count(MARKER) + 1
 
 
+def test_owner_done_marker_only_after_the_whole_pass(make_run):
+    run = make_run(n=4)
+    rc, _ = run_tui(owner_args(), ["n", "q"], run.env)
+    assert rc == 0 and not (run.run_dir / "owner_done.json").exists()
+    rc, _ = run_tui(owner_args(), ["n"] * 3, run.env)
+    assert rc == 0
+    record = json.loads((run.run_dir / "owner_done.json").read_text())
+    assert set(record) == {"n_labelled", "labels_owner_sha256"} and record["n_labelled"] == 4
+
+
 def test_state_contains_metadata_only_and_private_label_files(make_run):
     run = make_run(missing=("session", "turn"))
     assert label.run_judge(options(run), call=FakeClaude()) == 0
@@ -689,7 +699,7 @@ def test_state_contains_metadata_only_and_private_label_files(make_run):
     files = [p for p in run.state.rglob("*") if p.is_file()]
     assert {p.name for p in files} == {
         "manifest.jsonl", "frozen.json", "labels_judge.jsonl",
-        "labels_owner.jsonl", "owner_sample.json", "judge_meta.json", "judge_spend.json", ".lock"}
+        "labels_owner.jsonl", "owner_done.json", "owner_sample.json", "judge_meta.json", "judge_spend.json", ".lock"}
     for path in files:
         assert b"ZQX" not in path.read_bytes()
         if path.name in {"judge_meta.json", "judge_spend.json", ".lock"}:

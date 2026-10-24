@@ -543,6 +543,54 @@ def labels_sha256(paths_in: list[Path]) -> str:
     return hashlib.sha256("\n".join(digests).encode("utf-8")).hexdigest()
 
 
+OWNER_DONE_FILE = "owner_done.json"
+OWNER_LABEL_FILE = "labels_owner.jsonl"
+JUDGE_LABEL_FILE = "labels_judge.jsonl"
+
+
+def _owner_label_count(content: bytes) -> int:
+    """Distinct pair ids the owner label file holds (a malformed line is not a label)."""
+    ids = set()
+    for line in content.decode("utf-8", errors="replace").splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(item, dict) and isinstance(item.get("pair_id"), str):
+            ids.add(item["pair_id"])
+    return len(ids)
+
+
+def write_owner_done(run_dir: Path) -> dict:
+    """Record the owner labelling pass of ``run_dir`` as complete: ``owner_done.json`` holds counts and the
+    sha256 of ``labels_owner.jsonl`` at that moment (no pair id, no text). An explicit marker, because the
+    owner may agree with the judge on every pair. Atomic replace; a later owner label makes it stale."""
+    content = (run_dir / OWNER_LABEL_FILE).read_bytes()
+    record = dict(n_labelled=_owner_label_count(content),
+                  labels_owner_sha256=hashlib.sha256(content).hexdigest())
+    temporary = run_dir / (OWNER_DONE_FILE + ".tmp")
+    with open(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w",
+              encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(record, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, run_dir / OWNER_DONE_FILE)
+    return record
+
+
+def owner_done_valid(run_dir: Path) -> bool:
+    """The owner pass is recorded complete AND ``labels_owner.jsonl`` is still the file it recorded."""
+    try:
+        record = json.loads((run_dir / OWNER_DONE_FILE).read_text(encoding="utf-8"))
+        content = (run_dir / OWNER_LABEL_FILE).read_bytes()
+    except (OSError, ValueError):
+        return False
+    return (isinstance(record, dict) and type(record.get("n_labelled")) is int
+            and record["n_labelled"] > 0
+            and record["n_labelled"] == _owner_label_count(content)
+            and record.get("labels_owner_sha256") == hashlib.sha256(content).hexdigest())
+
+
 def _f1(row: dict):
     value = row["overall"]["unweighted"]["f1"]
     if value is not None and (not isinstance(value, float) or not math.isfinite(value)):
@@ -570,11 +618,18 @@ def _complete(row: dict) -> bool:
     return _has_identity(row) and type(row.get("n_lost")) is int and row["n_lost"] == 0
 
 
+def _canonical_row(row: dict) -> bool:
+    """A complete row scored AFTER the owner labelling pass was recorded complete (``owner_done``) and
+    reading the owner label file. Earlier scorings print F1 and are logged, but are non-canonical."""
+    return _complete(row) and row.get("owner_done") is True
+
+
 def canonical_tune_set(rows: list[dict], tune_run: str):
-    """The tune-set identity of the FIRST complete row scored on ``tune_run``, or None. Its labels digest
-    is the run's canonical labels source: a later score on that run with other labels is refused."""
+    """The tune-set identity of the FIRST canonical row (complete, owner pass done) scored on
+    ``tune_run``, or None. Its labels digest is the run's canonical labels source: a later score on that
+    run with other labels is refused."""
     return next((_tune_set(row) for row in rows
-                 if row.get("tune_run") == tune_run and _complete(row)), None)
+                 if row.get("tune_run") == tune_run and _canonical_row(row)), None)
 
 
 def canonical_tune_run() -> str:
@@ -613,10 +668,15 @@ def tune_argmax(rows: list[dict], candidate: str, detector_sha: str, tune_run: s
             "current detector sha256 (redo_signal.py changed after scoring).")
     key = canonical_tune_set(rows, tune_run)
     if key is None:
+        if any(_complete(row) and row.get("tune_run") == tune_run for row in rows):
+            raise TuneFreezeRefused(
+                "owner_pending", "Refused: the live tune run has complete scorings but none was made after "
+                "the owner labelling pass was recorded complete (redo-label --owner to the end); re-score "
+                "the baseline and candidates after it.")
         raise TuneFreezeRefused(
             "no_complete", "Refused: the live tune run has no complete tune scoring (every manifest pair "
             "labelled and re-read, n_lost 0); complete its labels, then score the baseline and candidates.")
-    same_set = [row for row in rows if _complete(row) and _tune_set(row) == key]
+    same_set = [row for row in rows if _canonical_row(row) and _tune_set(row) == key]
     mine_rows = [row for row in same_set
                  if row["candidate"] == candidate and row.get("detector_sha256") == detector_sha]
     if not mine_rows:
@@ -632,6 +692,10 @@ def tune_argmax(rows: list[dict], candidate: str, detector_sha: str, tune_run: s
                 "incomplete", f"Refused: incomplete tune scoring: the candidate's {len(lost)} row(s) on the "
                 f"live tune run lost pairs (largest n_lost {max(lost)}); every manifest pair must be "
                 "labelled and its transcript re-read.")
+        if any(_complete(row) and row.get("owner_done") is not True for row in on_run):
+            raise TuneFreezeRefused(
+                "owner_pending", "Refused: the candidate's complete tune row(s) were scored before the "
+                "owner labelling pass was recorded complete; re-score it now.")
         raise TuneFreezeRefused(
             "not_in_set", "Refused: the candidate has no row in the canonical tune set (the live tune "
             "run's first complete scoring: same labels digest, scored pairs and projects dir); score it "
@@ -674,13 +738,34 @@ def tune_argmax(rows: list[dict], candidate: str, detector_sha: str, tune_run: s
     return mine_rows[-1]
 
 
+def _check_labels_on_disk(selected: dict, tune_run: str) -> None:
+    """Recompute the digest of the label files the canonical scoring read, from the run dir NOW, and
+    require the owner pass marker to still match; refuse (counts only) on any difference."""
+    run_dir = paths.state_path("redo_validation", tune_run)
+    names = selected.get("label_names")
+    allowed = {OWNER_LABEL_FILE, JUDGE_LABEL_FILE}
+    changed = TuneFreezeRefused(
+        "labels_changed", "Refused: labels on disk changed since canonical scoring; re-score or void.")
+    if (not isinstance(names, list) or not names or not set(names) <= allowed
+            or OWNER_LABEL_FILE not in names):
+        raise changed
+    try:
+        current = labels_sha256([run_dir / name for name in names])
+    except OSError as exc:
+        raise changed from exc
+    if current != selected["labels_sha256"] or not owner_done_valid(run_dir):
+        raise changed
+
+
 def freeze_tune_provenance(path: Path, candidate: str, detector_sha: str) -> dict:
     # Parse and hash one byte snapshot, never separate reads of a changing log.
     if not os.path.lexists(path):
         raise TuneFreezeRefused("no_log", "Refused: non-baseline freeze needs a tune log and none exists; "
                                 "score the baseline and the candidate with redo-score --tune first.")
     content = path.read_bytes()
-    selected = tune_argmax(_parse_tune_log(content), candidate, detector_sha, canonical_tune_run())
+    run = canonical_tune_run()
+    selected = tune_argmax(_parse_tune_log(content), candidate, detector_sha, run)
+    _check_labels_on_disk(selected, run)
     return dict(tune_row_sha256=tune_row_sha256(selected),
                 tune_log_sha256=hashlib.sha256(content).hexdigest(), tune_log_bytes=len(content),
                 tune_run=selected["tune_run"], tune_manifest_sha256=selected["tune_manifest_sha256"],
@@ -796,6 +881,10 @@ def cmd_redo_score_tune(options) -> int:
                               path.read_text(encoding="utf-8").splitlines() if line.strip())
         labels = resolve_tune_labels(rows, label_rows)
         labels_digest = labels_sha256(label_paths)
+        label_names = sorted(p.name for p in label_paths)
+        # Canonical only when the owner pass is recorded complete and the owner file was read from the run dir.
+        owner_done = (owner_done_valid(run_dir) and OWNER_LABEL_FILE in label_names
+                      and all(Path(p).resolve().parent == run_dir.resolve() for p in label_paths))
         projects_dir = options.projects_dir or northstar.claude_projects_dir()
         projects_digest = projects_dir_sha256(projects_dir)
         projects_default = projects_digest == projects_dir_sha256(northstar.claude_projects_dir())
@@ -810,6 +899,10 @@ def cmd_redo_score_tune(options) -> int:
               "files); void the run with redo-sample --void-tune and draw a new tune set.")
         return 2
     print(f"tune run: {run}\ncandidate: {candidate}")
+    if not owner_done:
+        print("NON-CANONICAL: the owner labelling pass is not recorded complete for this run (or the owner "
+              "labels were not read); F1 is printed and logged but locks nothing and cannot be frozen. "
+              "Finish redo-label --owner, then re-score.")
     print(f"n_manifest: {result['n_manifest']} n_scored: {result['n_scored']} "
           f"n_unclear: {result['n_unclear']} n_lost: {result['n_lost']}")
     if errors:
@@ -824,7 +917,8 @@ def cmd_redo_score_tune(options) -> int:
         _append_tune_log(log_path, dict(
             ts=datetime.now(timezone.utc).isoformat(), tune_run=run, candidate=candidate,
             detector_sha256=detector_sha, tune_manifest_sha256=frozen["manifest_sha256"],
-            labels_sha256=labels_digest, scored_pairs_sha256=result["scored_pairs_sha256"],
+            labels_sha256=labels_digest, label_names=label_names, owner_done=owner_done,
+            scored_pairs_sha256=result["scored_pairs_sha256"],
             projects_dir_sha256=projects_digest, projects_dir_default=projects_default,
             n_manifest=result["n_manifest"],
             variant_params={"variant": candidate, "description": redo_signal.VARIANTS[candidate]},

@@ -145,7 +145,8 @@ def test_tune_excludes_test_pairs_and_earlier_tune_pairs(env):
     assert (f2["excluded_prior_test"], f2["excluded_prior_tune"], f2["n_prior_runs"]) == (6, 6, 2)
 
 
-def test_freeze_excludes_tune_pairs_and_records_them(env):
+def test_freeze_excludes_tune_pairs_and_records_them(env, monkeypatch):
+    monkeypatch.setattr(score, "_check_labels_on_disk", lambda selected, run: None)  # fabricated rows
     first = sessions(env, "first", 3)
     assert run_sample("--tune", "--run", "t1") == 0
     second = sessions(env, "second", 3)
@@ -153,7 +154,7 @@ def test_freeze_excludes_tune_pairs_and_records_them(env):
         score._append_tune_log(state(env) / "tune_log.jsonl", dict(
             candidate=candidate, detector_sha256=score.detector_sha256(), tune_run="tune-t1",
             tune_manifest_sha256="m" * 64, labels_sha256="l" * 64, scored_pairs_sha256="s" * 64,
-            projects_dir_sha256="p" * 64, n_unclear=0, n_lost=0,
+            projects_dir_sha256="p" * 64, n_unclear=0, n_lost=0, owner_done=True,
             overall={"unweighted": {"f1": f1}}))
     assert run_sample("--freeze", "--run-id", "test1", "--allow-below-threshold",
                       "--detector", "v3a") == 0
@@ -266,6 +267,8 @@ def write_labels(run, sids, labels, name="labels_owner.jsonl", source="owner"):
     rows = [dict(pair_id=hashlib.sha256(f"{sids[n]}|1|{salt}".encode()).hexdigest()[:16],
                  label=lab, source=source) for n, lab in labels.items()]
     (run / name).write_text("".join(json.dumps(r) + "\n" for r in rows))
+    if name == score.OWNER_LABEL_FILE and rows:
+        score.write_owner_done(run)  # the explicit owner-pass-complete marker
 
 
 @pytest.fixture
@@ -327,7 +330,7 @@ def test_tune_score_is_repeatable_and_owner_overrides_judge(tuned):
     assert first["overall"] == second["overall"] and counts(first["overall"]) == (3, 2, 1)
     assert not (run / "test.used").exists()
     assert sorted(p.name for p in run.iterdir()) == [
-        "frozen.json", "labels_judge.jsonl", "labels_owner.jsonl", "manifest.jsonl"]
+        "frozen.json", "labels_judge.jsonl", "labels_owner.jsonl", "manifest.jsonl", "owner_done.json"]
 
 
 def test_labels_flag_replaces_default_label_files(tuned, tmp_path):
