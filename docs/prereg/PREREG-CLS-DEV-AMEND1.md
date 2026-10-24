@@ -9,14 +9,17 @@ frozen script (`cls_eval.py`, `cls_dev_run.py`, `cls_dev_lib.py`, `cls_label_run
 
 ## Authority
 
-D-280 (owner decision). Everything below is the owner's rule written down; no part of it is the author's choice
-except the session-handling paragraph, which picks what the frozen code already does.
+D-280 (owner decision). The rule itself is the owner's. The author chose the details that implement it, each
+disclosed below: the session-handling paragraph (it picks what the frozen code already does), rounding the bound
+up to the whole second, the flag's shape, and the dedup-order disclosure.
 
 ## Deviation and evidence (counts only)
 
 * **What happened.** The real attach (`scripts/cls_attach.py attach`, not frozen, built after the freeze) ran
-  on the owner's machine, then the frozen `cls_dev_run.py manifest` ran (PINS-RUN entries `attach-m1` /
-  `manifest-m1`).
+  on the owner's machine, then the frozen `cls_dev_run.py manifest` ran. It wrote one PINS-RUN entry, `manifest-m1` (files
+  `dev_manifest.json`, `length_counts.json`, `shingles_real.json`). The attach output `dev/attach-m1/` has no
+  PINS-RUN entry; frozen §15 names only the manifest entry ("the manifest sha256 (one entry, `cls_dev_run.py
+  manifest`...)"), so that is not a deviation.
 * **Counts.** `n_input_real` 737; `n_real_dev` **293**. Drops: 204 duplicates, 190 excluded as secret, and **50
   with no timestamp: all of E1** (`e1_tune` 30, `e1_ho` 20, read from the local-classifier `tasks_local.json`).
   Record recovery found 0 E1 sessions and 0 E1 timestamps.
@@ -48,8 +51,17 @@ except the session-handling paragraph, which picks what the frozen code already 
 5. **Counts recorded.** `attach_counts.json` gains `timestamp_upper_bound_from_mtime`, per set:
    `n_timestamp_from_mtime`, `mtime_utc`, `mtime_ns`, `source_file_sha256`, `source_flag` (`e1_tasks`) and
    `amendment` (`PREREG-CLS-DEV-AMEND1`). The stdout line stays counts only; no text is printed.
-6. **Run entries.** The rerun is `attach-m2` and `manifest-m2`, each under a new PINS-RUN entry. m1 stays
-   pinned and is not rewritten; its manifest remains the record of the NOT_INFORMATIVE result.
+6. **Run entries.** The rerun writes a new attach directory `dev/attach-m2/` and a new manifest PINS-RUN entry
+   `manifest-m2` (out dir `dev/manifest-m2/`). An `attach-m2` PINS-RUN entry is not required (as for m1); if one is
+   added with `pins --run`, it is voluntary. The `manifest-m1` entry and every m1 output stay as they are; the m1
+   manifest remains the record of the NOT_INFORMATIVE result.
+7. **Rerun preconditions (frozen code).** `manifest --run-entry` defaults to `dev_manifest`, so m2 passes
+   `--run-entry manifest-m2` (a duplicate name refuses, exit 2). `manifest --out-dir` must be a new directory:
+   reusing `dev/manifest-m1/` would overwrite pinned files and make the next `verify_at_start` fail (exit 9).
+   `attach --out` must be a new directory under `<cls-root>/dev` (the writer opens files with O_EXCL). The
+   manifest takes `--pins-static`, `--pins-run` and `--selftest-result` as at m1; the existing self-test result
+   stays valid because the scrubber is unchanged. The manifest path checks no finalists/thresholds file (only
+   `assemble` writes those).
 
 ## Why the weaker provenance is acceptable (stated precisely)
 
@@ -118,7 +130,7 @@ by this amendment.
 * T0, the P17D cutoff, and the time-filter rule for **every non-E1 item** (including a non-E1 item with no
   timestamp, which is still dropped as `n_no_timestamp_dropped`). Dedup, the secret detector, fold dealing and
   every later stage.
-* m1: its PINS-RUN entries and outputs.
+* m1: the `manifest-m1` PINS-RUN entry and every m1 output (`dev/attach-m1/`, `dev/manifest-m1/`).
 
 ## Freeze record
 
