@@ -4,7 +4,15 @@ Prompt and answer text is read only in memory; the pool contains metadata only.
 The local frozen.json stores the salt so a later labeller can re-derive pair
 identities from transcripts. Frozen metadata records whether untagged sessions
 were admitted, exclusion provenance and, when enabled, per-kind populations and
-draw sizes beside the combined strata. Run directories are 0700 and files are 0600.
+draw sizes beside the combined strata. With --include-untagged (D-275) a session's kind is
+resolved from ALL evidence by resolve_with_all_evidence: the owner override wins; else any
+non-organic kind from the tag file, backfill sidecar or proxy ledger (the whole ledger,
+streamed) excludes the session; else organic evidence makes it organic; else it is untagged.
+Disagreeing sources exclude the session (excluded_by_evidence). An unreadable or corrupt
+overrides file, tag file, sidecar or ledger refuses the run with counts only. The census
+then reports the ledger and backfill sidecar states and untagged counts by cause (tag,
+ledger and sidecar facets); with the flag off it prints what it printed before. Run directories are 0700 and files
+are 0600.
 """
 from __future__ import annotations
 
@@ -25,13 +33,113 @@ from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
 
-from llm_router import northstar, offload_share, paths, redo_signal, session_kind
+from llm_router import (northstar, offload_share, paths, redo_signal, session_kind,
+                        session_kind_backfill)
 
 MIN_FLAGGED = 19
 DEFAULT_SEED = 360
 EMPTY_EXCLUSION = "M0.9 exclusion list EMPTY: spent M0.9 pairs are NOT excluded"
+LEDGER_PRESENT, LEDGER_MISSING, LEDGER_UNREADABLE = "present", "missing", "unreadable"
+LEDGER_CORRUPT = "corrupt"      # non-blank lines, none of which parsed to a row
+LEDGER_MISSING_WARNING = (
+    "WARNING: proxy ledger missing: sessions are resolved from tag files and the backfill "
+    "sidecar only")
 Resolver = Callable[[str], session_kind.Resolution]
 ServedLoader = Callable[[str], list[tuple[float, str]]]
+_EXCLUSION_KEY = re.compile(r"[0-9a-f]{16}")
+
+
+class InvalidExclusionFile(ValueError):
+    """Lines that are neither blank, comments nor 16 lowercase hex characters; carries the count only."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__(f"{count} invalid exclusion line(s)")
+        self.count = count
+
+
+class EvidenceUnreadable(RuntimeError):
+    """An evidence source (overrides, tag files, sidecar, ledger) is unreadable or corrupt (D-275).
+
+    Carries counts only: ``overrides``, ``tag_files``, ``sidecar`` and ``ledger``."""
+
+    def __init__(self, overrides: int, tag_files: int, sidecar: int, ledger: int) -> None:
+        self.counts = dict(overrides=overrides, tag_files=tag_files, sidecar=sidecar,
+                           ledger=ledger)
+        self.total = overrides + tag_files + sidecar + ledger
+        super().__init__(f"{self.total} unreadable evidence source(s)")
+
+    def message(self) -> str:
+        detail = " ".join(f"{k}={v}" for k, v in self.counts.items())
+        return f"Refused: {self.total} unreadable evidence source(s): {detail}"
+
+
+def resolve_with_all_evidence(*, override: str | None, tag: str | None, sidecar: str | None,
+                              ledger: Iterable[str] = ()) -> session_kind.Resolution:
+    """D-275: one pure rule over every source's kind (``None``, unknown or empty = no evidence).
+
+    The owner override wins. Otherwise the distinct valid kinds of tag, sidecar and ledger:
+    none -> untagged (``Resolution(None, None)``); several -> ``SOURCE_CONFLICT`` (excluded);
+    exactly one -> that kind, with the first source that supplied it (a non-organic kind is
+    excluded by the caller). The live-tag-wins precedence of ``KindIndex.resolve`` does not apply."""
+    if override in session_kind.VALID_KINDS:
+        return session_kind.Resolution(override, session_kind.SOURCE_OVERRIDE)
+    supplied = [(session_kind.SOURCE_TAG, {tag}), (session_kind.SOURCE_BACKFILL, {sidecar}),
+                (session_kind.SOURCE_LEDGER, set(ledger))]
+    supplied = [(src, {k for k in kinds if k in session_kind.VALID_KINDS}) for src, kinds in supplied]
+    distinct = set().union(*(kinds for _, kinds in supplied))
+    if not distinct:
+        return session_kind.Resolution(None, None)
+    if len(distinct) > 1:
+        return session_kind.Resolution(None, session_kind.SOURCE_CONFLICT)
+    (only,) = distinct
+    return session_kind.Resolution(only, next(src for src, kinds in supplied if only in kinds))
+
+
+def _sidecar_warning(state: str) -> str:
+    return (f"WARNING: backfill sidecar {state}: sessions it would resolve are counted "
+            "as untagged")
+
+
+def _feed_ledger(index: session_kind.KindIndex,
+                 rows: Iterable[dict] | None = None) -> tuple[str, int]:
+    """Stream the whole proxy ledger; only session_id -> kinds is kept in ``index``.
+
+    A session with pairs in the window may have been stamped only before it, so the whole
+    ledger is read. A ledger with non-blank lines but no dict row is ``corrupt``. Memory is bounded by streaming, not by time. Return the ledger state
+    and the number of dict rows read. ``rows`` replaces the file in tests.
+    """
+    kept = 0
+    nonblank = 0
+
+    def take(row: object) -> None:
+        nonlocal kept
+        if not isinstance(row, dict):
+            return
+        kept += 1
+        index.add(row.get("session_id"), row.get("session_kind"))
+
+    if rows is not None:
+        for row in rows:
+            take(row)
+        return LEDGER_PRESENT, kept
+    from llm_router.proxy import ledger as proxy_ledger
+    target = proxy_ledger.ledger_path()
+    if not os.path.lexists(target):
+        return LEDGER_MISSING, 0
+    try:
+        with open(target, "rb") as stream:
+            for raw in stream:
+                nonblank += bool(raw.strip())
+                try:
+                    row = json.loads(raw.decode("utf-8", errors="replace"))
+                except ValueError:
+                    continue
+                take(row)
+    except OSError:
+        return LEDGER_UNREADABLE, kept
+    if nonblank and not kept:
+        return LEDGER_CORRUPT, kept
+    return LEDGER_PRESENT, kept
 
 
 def _sha(text: str) -> str:
@@ -45,8 +153,13 @@ def pair_key(session_id: str, turn_index: int) -> str:
 def load_excluded(extra: set[str] | None = None, source: Path | None = None) -> set[str]:
     """Load unsalted M0.9 hashes (from ``source``, default the shipped file), plus optional extra exclusions."""
     source = source or Path(__file__).parent / "data" / "redo_m09_excluded.txt"
-    return {line.strip() for line in source.read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.lstrip().startswith("#")} | set(extra or ())
+    # utf-8-sig: a byte-order mark on the first line is not part of the first key.
+    keys = [line.strip() for line in source.read_text(encoding="utf-8-sig").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")]
+    invalid = sum(not _EXCLUSION_KEY.fullmatch(key) for key in keys)
+    if invalid:
+        raise InvalidExclusionFile(invalid)
+    return set(keys) | set(extra or ())
 
 
 @dataclass(frozen=True)
@@ -146,10 +259,46 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
             now: float | None = None, resolve: Resolver | None = None,
             served_loader: ServedLoader | None = None,
             excluded: set[str] | None = None, include_untagged: bool = False,
-            exclusion_source: str = "shipped") -> tuple[list[Candidate], dict]:
+            exclusion_source: str = "shipped",
+            ledger_rows: Iterable[dict] | None = None) -> tuple[list[Candidate], dict]:
     """Build a text-free pool and counts; injected loaders never access live ledgers."""
     since, until = _window(days, now)
-    resolve = resolve or session_kind.KindIndex(backfill=True).resolve
+    sidecar_state, sidecar = session_kind_backfill.read_sidecar()    # once per run
+    ledger_state: str | None = None
+    ledger_rows_read: int | None = None
+    root = projects_dir if projects_dir is not None else northstar.claude_projects_dir()
+    if resolve is None and include_untagged:
+        index = session_kind.KindIndex(backfill=False)   # holds the ledger stamps only
+        ledger_state, ledger_rows_read = _feed_ledger(index, ledger_rows)
+        overrides_state, owner = session_kind.read_overrides_strict()
+        resolved: dict[str, session_kind.Resolution] = {}
+        bad_tags = 0
+        for path in sorted(Path(root).glob("*/*.jsonl")):
+            sid = path.stem
+            if sid in resolved:
+                continue
+            tag_state, tag_kind = session_kind.tag_evidence(sid)
+            bad_tags += tag_state == "unreadable"
+            resolved[sid] = resolve_with_all_evidence(
+                override=owner.get(sid), tag=tag_kind, sidecar=sidecar.get(sid),
+                ledger=index.ledger_kinds(sid))
+        refused = EvidenceUnreadable(
+            overrides=int(overrides_state == "unreadable"), tag_files=bad_tags,
+            sidecar=int(sidecar_state in (session_kind_backfill.SIDECAR_UNREADABLE,
+                                          session_kind_backfill.SIDECAR_CORRUPT)),
+            ledger=int(ledger_state in (LEDGER_UNREADABLE, LEDGER_CORRUPT)))
+        if refused.total:
+            raise refused
+        resolve = resolved.__getitem__
+    elif resolve is None:
+        resolve = session_kind.KindIndex(backfill=True, sidecar=sidecar).resolve
+    causes: dict[str, Counter[str]] = {
+        "tag": Counter(dict.fromkeys(("no_tag_file", "corrupt_tag"), 0)),
+        "ledger": Counter(dict.fromkeys(("no_ledger_stamp",), 0)),
+        "sidecar": Counter(dict.fromkeys(("sidecar_missing", "sidecar_unreadable", "sidecar_corrupt",
+                                          "sidecar_no_entry", "sidecar_unknown"), 0)),
+    }
+    ledger_conflict_excluded = 0
     served_loader = served_loader or _served_loader(since, until)
     excluded_keys = load_excluded(excluded)
     kinds: Counter[str] = Counter()
@@ -163,16 +312,28 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
     measured = True
     any_actions = False
     seen: set[str] = set()
-    root = projects_dir if projects_dir is not None else northstar.claude_projects_dir()
     for path in sorted(Path(root).glob("*/*.jsonl")):
         sid = path.stem
         if sid in seen:
             continue
         seen.add(sid)
         resolution = resolve(sid)
+        counts["sessions_total"] += 1
+        if include_untagged and resolution.source == session_kind.SOURCE_CONFLICT:
+            # Conflicting ledger stamps are evidence of a kind, not of none: never untagged.
+            ledger_conflict_excluded += 1
+            continue
         kind_name = resolution.kind or "untagged"
         kinds[kind_name] += 1
-        counts["sessions_total"] += 1
+        if include_untagged and kind_name == "untagged":   # one count per facet
+            causes["tag"][session_kind.tag_file_state(sid)] += 1
+            causes["ledger"]["no_ledger_stamp"] += 1
+            if sidecar_state != session_kind_backfill.SIDECAR_PRESENT:
+                causes["sidecar"]["sidecar_" + sidecar_state] += 1
+            elif sid not in sidecar:
+                causes["sidecar"]["sidecar_no_entry"] += 1
+            else:   # "unknown", or anything that is not a kind
+                causes["sidecar"]["sidecar_unknown"] += 1
         if kind_name != session_kind.KIND_ORGANIC and not (
                 include_untagged and resolution.kind in (None, "untagged")):
             continue
@@ -230,6 +391,16 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
         **_spread(pool),
     )
     if include_untagged:
+        counts["backfill_sidecar"] = sidecar_state
+        # Each facet sums to sessions_by_kind["untagged"]; conflicts are excluded, not untagged.
+        counts["untagged_causes"] = {facet: dict(sorted(c.items()))
+                                     for facet, c in sorted(causes.items())}
+        counts["ledger_conflict_excluded"] = ledger_conflict_excluded
+        # sessions_total == sum(sessions_by_kind.values()) + excluded_by_evidence
+        counts["excluded_by_evidence"] = ledger_conflict_excluded
+        if ledger_state is not None:    # None: an injected resolver, the ledger was not read
+            counts["proxy_ledger"] = ledger_state
+            counts["proxy_ledger_rows"] = ledger_rows_read
         counts["include_untagged"] = True
         counts["by_kind"] = {}
         for kind in ("organic", "untagged"):
@@ -285,7 +456,7 @@ def draw(pool: Iterable[Candidate], seed: int, salt: str) -> list[dict]:
                 signals=list(p.signals), detector_version=redo_signal.PATTERN_VERSION,
                 kind=p.kind, kind_source=p.kind_source,
                 prev_served_class=p.prev_served_class,
-                weight_N_h=len(groups[h]), n_h=len(selected)))
+                weight_N_h_combined=len(groups[h]), n_h_combined=len(selected)))
     return rows
 
 
@@ -327,6 +498,20 @@ def _gate_lines(n: int, kinds: dict[str, int],
     return lines
 
 
+def _untagged_warnings(counts: dict) -> list[str]:
+    """Warnings for an --include-untagged run: missing ledger, sidecar, conflicts."""
+    lines = []
+    if counts.get("proxy_ledger") == LEDGER_MISSING:
+        lines.append(LEDGER_MISSING_WARNING)
+    if counts["backfill_sidecar"] in (session_kind_backfill.SIDECAR_UNREADABLE,
+                                      session_kind_backfill.SIDECAR_CORRUPT):
+        lines.append(_sidecar_warning(counts["backfill_sidecar"]))
+    if counts["ledger_conflict_excluded"] > 0:
+        lines.append(f"WARNING: {counts['ledger_conflict_excluded']} session(s) with "
+                     "conflicting kind stamps were excluded")
+    return lines
+
+
 def _write_private(path: Path, content: str) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
@@ -352,7 +537,10 @@ def cmd_redo_sample(args: list[str]) -> int:
     options = parser.parse_args(args)
     local_keys: set[str] | None = None
     exclusion_source = "shipped"
+    label = "shipped"       # which file a refusal names: never its path
     try:
+        load_excluded()     # the shipped list is validated like a local one
+        label = "local"
         local_path = options.exclusion_file
         if local_path is None:
             default_path = paths.state_path("redo_m09_excluded.txt")
@@ -363,9 +551,21 @@ def cmd_redo_sample(args: list[str]) -> int:
                 raise OSError("exclusion path is not a file")
             local_keys = load_excluded(source=local_path)
             exclusion_source = "local-file"
-    except (OSError, UnicodeError):
-        print("Refused: exclusion file not found or unreadable.")
+    except InvalidExclusionFile as exc:     # before UnicodeError: both are ValueErrors
+        print(f"Refused: {label} exclusion file has {exc.count} invalid line(s)")
         return 2
+    except (OSError, UnicodeError):
+        print(f"Refused: {label} exclusion file not found or unreadable.")
+        return 2
+    if local_path is not None:
+        try:
+            readable = local_path.stat().st_mode & 0o044
+        except OSError:
+            print("WARNING: local exclusion file mode could not be checked")
+        else:
+            if readable:
+                print("WARNING: local exclusion file is group- or world-readable; "
+                      "recommended mode 0600")
     now = datetime.now(timezone.utc).timestamp()
     try:
         since, until = _window(options.days, now)
@@ -386,9 +586,14 @@ def cmd_redo_sample(args: list[str]) -> int:
         print(f"WARNING: projects dir missing or contains no transcripts: {root.name}; "
               "refusing to report a census", file=sys.stderr)
         return 4
-    pool, counts = collect(
-        projects_dir=root, days=options.days, now=now, excluded=local_keys,
-        include_untagged=options.include_untagged, exclusion_source=exclusion_source)
+    try:
+        pool, counts = collect(
+            projects_dir=root, days=options.days, now=now, excluded=local_keys,
+            include_untagged=options.include_untagged, exclusion_source=exclusion_source)
+    except EvidenceUnreadable as refused:
+        print(refused.message())
+        return 2
+    warnings = _untagged_warnings(counts) if options.include_untagged else []
     if options.census:
         print(f"window: {_iso(since)} to {_iso(until)}; "
               f"detector: {redo_signal.PATTERN_VERSION}")
@@ -398,9 +603,13 @@ def cmd_redo_sample(args: list[str]) -> int:
             print(f"{key}: {rendered}")
         if counts["exclusion_list_size"] == 0:
             print(EMPTY_EXCLUSION)
+        for line in warnings:
+            print(line)
         print("\n".join(_gate_lines(
             counts["N_F"], counts["sessions_by_kind"], options.include_untagged)))
         return 0
+    for line in warnings:
+        print(line)
     print("\n".join(_gate_lines(
         counts["N_F"], counts["sessions_by_kind"], options.include_untagged)))
     below = counts["N_F"] < MIN_FLAGGED
@@ -448,10 +657,12 @@ def cmd_redo_sample(args: list[str]) -> int:
         shortfall=150 - len(rows),
         window=dict(days=options.days, since_iso=_iso(since), until_iso=_iso(until)),
         counts=counts, strata=strata,
-        weights={h: s["N"] / s["n"] if s["n"] else None for h, s in strata.items()},
+        weights_combined={h: s["N"] / s["n"] if s["n"] else None for h, s in strata.items()},
         created_utc=_iso(now))
     if options.include_untagged:
         frozen["sizes_by_kind"] = counts["by_kind"]
+        frozen["ledger_conflict_excluded"] = counts["ledger_conflict_excluded"]
+        frozen["excluded_by_evidence"] = counts["excluded_by_evidence"]
     parent = run_dir.parent
     try:
         os.makedirs(parent, mode=0o700)

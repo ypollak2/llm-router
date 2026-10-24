@@ -50,6 +50,7 @@ from __future__ import annotations
 import errno
 import glob as _glob
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -155,13 +156,53 @@ def load_sidecar(path: Path | None = None) -> dict[str, str]:
     lines are skipped, not fatal. A duplicate ``session_id`` keeps its FIRST row only --
     write-once means there should never be one, but a hand-edited file must not crash a
     reader, and the first row is the one every earlier read already saw and used."""
+    return read_sidecar(path)[1]
+
+
+SIDECAR_PRESENT = "present"
+SIDECAR_MISSING = "missing"
+SIDECAR_UNREADABLE = "unreadable"
+SIDECAR_CORRUPT = "corrupt"
+
+
+def read_sidecar(path: Path | None = None) -> tuple[str, dict[str, str]]:
+    """One read of the sidecar: its state and the ``session_id -> kind`` map that
+    :func:`load_sidecar` returns. ``missing`` (no file), ``unreadable`` (it cannot be
+    read), ``corrupt`` (non-blank lines but no valid row) or ``present``. The map is empty
+    unless the state is ``present``; :func:`load_sidecar` returns the same map, so a
+    caller that reports the state can resolve kinds from the same read."""
     target = path if path is not None else sidecar_path()
+    if not os.path.lexists(target):
+        return SIDECAR_MISSING, {}
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return SIDECAR_UNREADABLE, {}
     out: dict[str, str] = {}
-    for row in _iter_jsonl(target):
+    nonblank = 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        nonblank += 1
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
         sid, kind = row.get("session_id"), row.get("kind")
         if isinstance(sid, str) and sid and isinstance(kind, str) and kind and sid not in out:
             out[sid] = kind
-    return out
+    if nonblank and not out:
+        return SIDECAR_CORRUPT, {}
+    return SIDECAR_PRESENT, out
+
+
+def sidecar_status(path: Path | None = None) -> str:
+    """``present``, ``missing``, ``unreadable`` or ``corrupt`` (see :func:`read_sidecar`).
+    :func:`load_sidecar` and :class:`session_kind.KindIndex` read an unreadable or
+    corrupt sidecar as empty; this lets a caller report that state instead of hiding it."""
+    return read_sidecar(path)[0]
 
 
 def _claude_projects_dir() -> Path:

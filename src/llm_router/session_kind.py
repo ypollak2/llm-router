@@ -286,6 +286,70 @@ def tag_kind_of(session_id: str | None) -> str | None:
     return kind
 
 
+TAG_STATE_VALID = "valid_tag"
+TAG_STATE_MISSING = "no_tag_file"
+TAG_STATE_CORRUPT = "corrupt_tag"
+
+
+def tag_file_state(session_id: str) -> str:
+    """Why a session does or does not have a usable tag file: ``no_tag_file``,
+    ``corrupt_tag`` (unreadable, not JSON, or no valid kind) or ``valid_tag``. Used by
+    ``redo-sample`` to report why a session is untagged; it bypasses the ``_FOUND`` cache
+    and never raises."""
+    path = _tag_path(session_id)
+    if not os.path.lexists(path):
+        return TAG_STATE_MISSING
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):   # UnicodeDecodeError is a ValueError
+        return TAG_STATE_CORRUPT
+    if not isinstance(raw, dict) or raw.get("kind") not in VALID_KINDS:
+        return TAG_STATE_CORRUPT
+    return TAG_STATE_VALID
+
+
+def read_overrides_strict() -> tuple[str, dict[str, str]]:
+    """``(state, {session_id: kind})`` from the override file, without the lenient fallback of
+    :func:`overrides`. ``missing`` (no file), ``unreadable`` (cannot be read, is not JSON, or is
+    not an object) or ``present``. An entry that is not ``{"kind": <valid kind>}`` is no
+    evidence for that session only. Used by ``redo-sample --include-untagged`` (D-275)."""
+    path = overrides_path()
+    if not os.path.lexists(path):
+        return "missing", {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):   # UnicodeDecodeError is a ValueError
+        return "unreadable", {}
+    if not isinstance(raw, dict):
+        return "unreadable", {}
+    out: dict[str, str] = {}
+    for sid, entry in raw.items():
+        if not isinstance(sid, str) or not sid or not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind")
+        kind = kind.strip().lower() if isinstance(kind, str) else None
+        if kind in VALID_KINDS:
+            out[sid] = kind
+    return "present", out
+
+
+def tag_evidence(session_id: str) -> tuple[str, str | None]:
+    """``(state, kind)`` of a session's tag file, bypassing the ``_FOUND`` cache. ``missing``
+    (no file), ``unreadable`` (cannot be read, not JSON, or not an object) or ``present``
+    (``kind`` is the valid kind, or ``None`` when the value is unknown, empty or bogus)."""
+    path = _tag_path(session_id)
+    if not os.path.lexists(path):
+        return "missing", None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "unreadable", None
+    if not isinstance(raw, dict):
+        return "unreadable", None
+    kind = raw.get("kind")
+    return "present", kind if kind in VALID_KINDS else None
+
+
 # ── joining a kind onto records that carry none ──────────────────────────────
 
 SOURCE_OVERRIDE = "override"    # the owner's override file: beats every source below
@@ -311,14 +375,17 @@ class KindIndex:
     memoised, so reading the tag file costs one stat per distinct session, not one
     per record."""
 
-    def __init__(self, ledger_rows: Iterable[dict] = (), *, backfill: bool = True) -> None:
+    def __init__(self, ledger_rows: Iterable[dict] = (), *, backfill: bool = True,
+                 sidecar: dict[str, str] | None = None) -> None:
         self._ledger: dict[str, set[str]] = {}
         self._tags: dict[str, str | None] = {}
         #: ``backfill=False`` never reads the sidecar: what the backfill command itself
         #: uses to ask "does live evidence already resolve this session?", and what
         #: ``northstar`` passes on every path except ``llm-router kpi``.
         self._use_backfill = backfill
-        self._backfill: dict[str, str] | None = None  # loaded on first need, once per index
+        #: Loaded on first need, once per index; ``sidecar`` hands in a map the caller
+        #: already read, so the file is not opened a second time.
+        self._backfill: dict[str, str] | None = dict(sidecar) if sidecar is not None else None
         for row in ledger_rows:
             self.add(row.get("session_id"), row.get("session_kind"))
 
@@ -327,6 +394,10 @@ class KindIndex:
         unless both are usable: a null stamp is the absence of evidence)."""
         if isinstance(session_id, str) and session_id and kind in VALID_KINDS:
             self._ledger.setdefault(session_id, set()).add(kind)  # type: ignore[arg-type]
+
+    def ledger_kinds(self, session_id: str) -> frozenset[str]:
+        """Every kind a proxy row of ``session_id`` was stamped with (empty if none)."""
+        return frozenset(self._ledger.get(session_id, ()))
 
     def _backfilled(self, session_id: object) -> str | None:
         """The sidecar's kind for ``session_id`` (a usable kind only), or ``None``. Read

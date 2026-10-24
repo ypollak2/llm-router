@@ -1,4 +1,7 @@
-"""Text-free, single-use scoring of a frozen redo validation draw."""
+"""Text-free, single-use scoring of a frozen redo validation draw.
+
+Per-kind precision and recall are reported only for runs frozen with include_untagged.
+"""
 from __future__ import annotations
 
 import argparse
@@ -21,6 +24,7 @@ LABELS = ("redo", "not_redo", "unclear", "lost")
 RULE = "precision>=0.80 and TP>=15"
 COMPLETENESS_RULE = ("all flagged-stratum (F) pairs must be labelled; "
                      "any lost F pair voids; overall lost > 5% voids")
+NOT_ESTIMABLE_CONCENTRATED = "not estimable (concentrated draw)"
 
 
 def _precision(rows):
@@ -87,7 +91,7 @@ def _precision_bootstrap(rows, seed, reps):
 
 def _recall(rows, frozen, seed, reps):
     if frozen.get("concentrated", False):
-        return dict(estimable=False, reason="not estimable (concentrated draw)")
+        return dict(estimable=False, reason=NOT_ESTIMABLE_CONCENTRATED)
     point = _recall_point(rows, frozen)
     result = dict(estimable=True, recall_point=point, ci_lo=None, ci_hi=None,
                   reps=reps, seed=seed, n_discarded=0,
@@ -221,10 +225,14 @@ def score(manifest_rows, frozen, labels, *, seed=360, reps=2000) -> dict:
         recall=_recall(resolved, frozen, seed, reps), sensitivity=sensitivity,
         gate=gate, lost_fraction=lost_fraction, window=frozen.get("window"),
         concentrated=bool(frozen.get("concentrated", False)))
-    if all("kind" in row for row in manifest_rows):
+    # Legacy organic-only manifests also carry ``kind``: only an include_untagged run has
+    # per-kind populations to report against.
+    if frozen.get("include_untagged") is True and all("kind" in row for row in manifest_rows):
         kinds = sorted({row["kind"] for row in manifest_rows})
         result["precision_by_kind"] = {}
         result["recall_by_kind"] = {}
+        if result["concentrated"]:
+            result["recall_by_kind_reason"] = NOT_ESTIMABLE_CONCENTRATED
         for kind in kinds:
             subset = [(row, label) for row, label in resolved if row["kind"] == kind]
             result["precision_by_kind"][kind] = _precision(subset)
@@ -233,7 +241,8 @@ def score(manifest_rows, frozen, labels, *, seed=360, reps=2000) -> dict:
                 for h in STRATA}
             result["recall_by_kind"][kind] = (
                 _recall_point(subset, {"strata": populations})
-                if all("N" in populations[h] for h in STRATA) else None)
+                if not result["concentrated"]
+                and all("N" in populations[h] for h in STRATA) else None)
     if result["concentrated"]:
         result["precision_basis"] = basis
     return result
@@ -261,7 +270,8 @@ def _print_result(result):
     for kind, precision in sorted(result.get("precision_by_kind", {}).items()):
         point = "null" if precision["point"] is None else f"{precision['point']:.4f}"
         value = result["recall_by_kind"][kind]
-        kind_recall = "null" if value is None else f"{value:.4f}"
+        kind_recall = (f"{value:.4f}" if value is not None
+                       else result.get("recall_by_kind_reason", "null"))
         print(f"kind {kind}: precision {precision['tp']}/{precision['n']} = "
               f"{point} recall {kind_recall}")
     print("gate: " + result["gate"]["verdict"])
