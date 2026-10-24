@@ -296,7 +296,7 @@ def test_reader_ge3(tmp_path):
     w = make_world(tmp_path, with_p17d=False)
     f = w["files"]
     drops = A.Counter()
-    items = A.read_ge3(f["ge3_items"], f["ge3_split"], f["ge3_opus_labels"], f["ge3_sonnet_labels"], drops)
+    items = A.read_ge3(f["ge3_items"], f["ge3_split"], f["ge3_opus_labels"], f["ge3_sonnet_labels"], drops, "key")
     assert sorted((x["native"], x["source_set"], x["opus"], x["sonnet"]) for x in items) == [
         ("g-h1", "ge3_ho", "sonnet", "sonnet"), ("g-h2", "ge3_ho", "haiku", None), ("g-nolab", "ge3_ho", None, None),
         ("g-t1", "ge3_tune", "opus", "sonnet")]
@@ -307,7 +307,7 @@ def test_reader_ge3(tmp_path):
 def test_reader_e2_inline_labels(tmp_path):
     f = make_world(tmp_path, with_p17d=False)["files"]
     drops = A.Counter()
-    items = A.read_e2(f["e2_sample"], f["e2_sample"], "id", "truth", drops)
+    items = A.read_e2(f["e2_sample"], f["e2_sample"], "id", "truth", drops, "key")
     assert sorted((x["native"], x["source_set"], x["opus"]) for x in items) == [
         ("e-c1", "e2_cal", "haiku"), ("e-h1", "e2_ho", "opus"), ("e-nots", "e2_ho", "sonnet")]
     assert [x["timestamp"] for x in items if x["native"] == "e-nots"] == [None]
@@ -316,7 +316,7 @@ def test_reader_e2_inline_labels(tmp_path):
 def test_reader_e1(tmp_path):
     f = make_world(tmp_path, with_p17d=False)["files"]
     drops = A.Counter()
-    items = A.read_e1(f["e1_tasks"], f["e1_opus_labels"], "id", "tier", drops)
+    items = A.read_e1(f["e1_tasks"], f["e1_opus_labels"], "id", "tier", drops, "key")
     assert sorted((x["native"], x["source_set"], x["opus"]) for x in items) == [
         ("t1", "e1_tune", "haiku"), ("t2", "e1_ho", "sonnet")]
     assert drops["e1_unknown_split"] == 1
@@ -600,6 +600,97 @@ def test_low_join_share_warns(tmp_path, capsys):
     assert "label file for e2 joined" not in capsys.readouterr().err
 
 
+def _sha_world(tmp_path, n=20, n_joined=20):
+    """Synthetic GE3 (n items, all tune) and E1 (n items, all tune) with text_sha label files that join n_joined
+    items, plus id-keyed label files that join 0 items under the default join."""
+    src = tmp_path / "shaw"
+    src.mkdir()
+    ge3 = [{"id": "g%d" % i, "session_id": "%s-%d" % (SM, i), "timestamp": "2026-09-10T10:%02d:00Z" % i,
+            "prompt": txt(100 + i, "ge3 sha item")} for i in range(n)]
+    e1 = [{"id": "e%d" % i, "split": "tune", "text": txt(200 + i, "e1 sha item"), "session_id": "%s-%d" % (SM, i),
+           "timestamp": "2026-09-11T10:%02d:00Z" % i} for i in range(n)]
+    sha = lambda rows, f: [{"text_sha": S.text_sha(r[f]), "tier": "opus"} for r in rows[:n_joined]]  # noqa: E731
+    byid = lambda rows: [{"id": r["id"], "tier": "opus"} for r in rows]  # noqa: E731
+    f = {"ge3_items": wjsonl(src / "g.jsonl", ge3),
+         "split": src / "split.json",
+         "g_sha": wjsonl(src / "g_sha.jsonl", sha(ge3, "prompt")), "g_id": wjsonl(src / "g_id.jsonl", byid(ge3)),
+         "e1_tasks": src / "e1.json",
+         "e_sha": wjsonl(src / "e_sha.jsonl", sha(e1, "text")), "e_id": wjsonl(src / "e_id.jsonl", byid(e1))}
+    f["split"].write_text(json.dumps({"tune_ids": [r["id"] for r in ge3], "heldout_ids": []}))
+    f["e1_tasks"].write_text(json.dumps(e1))
+    cls = tmp_path / "cls"
+    (cls / "dev").mkdir(parents=True)
+    return f, cls
+
+
+def _ge3_argv(f, cls, name, opus, *extra):
+    return ["attach", "--cls-root", str(cls), "--out", str(cls / "dev" / name), "--ge3-items", str(f["ge3_items"]),
+            "--ge3-split", str(f["split"]), "--ge3-opus-labels", str(f[opus])] + list(extra)
+
+
+def _e1_argv(f, cls, name, opus, *extra):
+    return ["attach", "--cls-root", str(cls), "--out", str(cls / "dev" / name), "--e1-tasks", str(f["e1_tasks"]),
+            "--e1-opus-labels", str(f[opus]), "--e1-label-tier", "tier", "--allow-missing-timestamps", "e1_ho"] + list(extra)
+
+
+def test_ge3_e1_default_join_is_text_sha_and_zero_join_refuses(tmp_path, capsys):
+    f, cls = _sha_world(tmp_path)
+    for fam, mk, sha_key, id_key in (("ge3", _ge3_argv, "g_sha", "g_id"), ("e1", _e1_argv, "e_sha", "e_id")):
+        # default join accepts text_sha labels (no explicit join flag)
+        assert A.main(mk(f, cls, fam + "_ok", sha_key)) == 0, capsys.readouterr().err
+        cap = capsys.readouterr()
+        assert "label file for" not in cap.err
+        counts = json.loads((cls / "dev" / (fam + "_ok") / A.COUNTS).read_text())
+        assert counts["label_join"][fam] == "text_sha"
+        # id-keyed labels under the default join: 0 joined, refused, counts only, nothing written
+        out = cls / "dev" / (fam + "_bad")
+        assert A.main(mk(f, cls, fam + "_bad", id_key)) == 2
+        cap = capsys.readouterr()
+        assert ("Refused: label file for %s joined 0 items (check --%s-label-join and the key field)" % (fam, fam)
+                in cap.err and SENTINEL not in cap.err and cap.out == "" and not out.exists())
+        # the opt-in key join works on the same id-keyed file
+        assert A.main(mk(f, cls, fam + "_key", id_key, "--%s-label-join" % fam, "key")) == 0
+
+
+def test_join_share_warning_boundary(tmp_path, capsys):
+    """Exactly half joined: no warning (the rule is strictly below 50 percent); one fewer: warning."""
+    for n_joined, warns in ((10, False), (9, True)):
+        (tmp_path / ("j%d" % n_joined)).mkdir()
+        f, cls = _sha_world(tmp_path / ("j%d" % n_joined), 20, n_joined)
+        assert A.main(_ge3_argv(f, cls, "w", "g_sha")) == 0
+        err = capsys.readouterr().err
+        assert ("WARNING: label file for ge3 joined %d of 20 items (%d percent, below 50)"
+                % (n_joined, 100 * n_joined // 20) in err) is warns
+        assert ("label file for ge3 joined" in err) is warns and SENTINEL not in err
+
+
+def test_ge3_sonnet_zero_join_refused(tmp_path, capsys):
+    f, cls = _sha_world(tmp_path)
+    # Opus labels by text_sha join; Sonnet labels keyed by id join 0 items under the default: refused before any write
+    out = cls / "dev" / "s"
+    assert A.main(_ge3_argv(f, cls, "s", "g_sha", "--ge3-sonnet-labels", str(f["g_id"]))) == 2
+    cap = capsys.readouterr()
+    assert ("Refused: label file for ge3_sonnet joined 0 items (check --ge3-label-join and the key field)" in cap.err
+            and SENTINEL not in cap.err and cap.out == "" and not out.exists())
+    # Sonnet labels by text_sha: accepted, and a partial join (4 of 20) warns, naming ge3_sonnet
+    assert A.main(_ge3_argv(f, cls, "s_ok", "g_sha", "--ge3-sonnet-labels", str(f["g_sha"]))) == 0
+    assert "label file for" not in capsys.readouterr().err
+    few = wjsonl(tmp_path / "few.jsonl", [{"text_sha": S.text_sha(txt(100 + i, "ge3 sha item")), "tier": "sonnet"}
+                                          for i in range(4)])
+    f["few"] = few
+    assert A.main(_ge3_argv(f, cls, "s_few", "g_sha", "--ge3-sonnet-labels", str(few))) == 0
+    assert "WARNING: label file for ge3_sonnet joined 4 of 20 items (20 percent, below 50)" in capsys.readouterr().err
+
+
+def test_session_from_record_ts_mismatch_counted():
+    rec = {"session_id": S2, "timestamp": "2026-09-01T00:00:00Z", "msg_id": None, "served_model": None}
+    mk = lambda ts: {"text": "x y z", "timestamp": ts, "session_id": None, "requested": None, "requested_basis": None}  # noqa: E731
+    same, diff = mk("2026-09-01T00:00:00Z"), mk("2026-09-05T00:00:00Z")
+    c = A.Counter()
+    A.recover([same, diff], ({}, {S.text_sha("x y z"): rec}), None, lambda m: None, c)
+    assert c["session_from_record"] == 2 and c["session_from_record_ts_mismatch"] == 1
+
+
 def test_ge3_text_sha_join(tmp_path):
     w = make_world(tmp_path, with_p17d=False)
     f = w["files"]
@@ -643,7 +734,8 @@ def test_recovery_follows_earliest_record_wins(tmp_path):
     A.recover([a_, b_], ({}, {sha: other}), None, lambda m: None, c)
     assert a_["session_id"] == S2 and a_["timestamp"] == "2026-09-05T00:00:00Z"   # own timestamp kept
     assert b_["timestamp"] == "2026-09-01T00:00:00Z" and b_["session_id"] == S1   # own session kept
-    assert dict(c) == {"record_joined": 2, "session_from_record": 1, "timestamp_from_record": 1}
+    assert dict(c) == {"record_joined": 2, "session_from_record": 1, "timestamp_from_record": 1,
+                    "session_from_record_ts_mismatch": 1}
     assert not any("not_taken" in k for k in c)
 
 
