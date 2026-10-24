@@ -18,7 +18,7 @@
       "licence": "Apache-2.0",
       "status": "measured",
       "bench": {
-        "bank_version": "PREREG-Q37 (pre-bank; different item set)",
+        "bank_version": "PREREG-Q37 (overlaps bank v1 draw 1; in-sample)",
         "lanes": {
           "commit_message": {
             "k": 32,

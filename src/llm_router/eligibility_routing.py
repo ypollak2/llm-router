@@ -339,39 +339,70 @@ def _passed_lane(m_bare: str, job: str, digests: dict[str, str], now: float, eli
     return lane, source, None
 
 
-def _prefer_passed(models, job, input_len, now, digests, ctx_for, think, eligibility, routing):
+def _routable(m: str, job: str, input_len: int, digests, ctx_for, think, eligibility, routing, now: float) -> bool:
+    """True iff ``ollama/<bare>`` ``m`` has a passed lane for ``job`` that clears every guard of ``prefer_passed``."""
     from llm_router.local_check import routing as lr
+    head, sep, bare = m.partition("/")
+    if not sep or head != "ollama" or not lr.is_enabled(bare, job, path=routing):
+        return False
+    e = lr.entry(bare, job, path=routing)
+    lane, source, withheld = _passed_lane(bare, job, digests, now, eligibility, (e or {}).get("source"))
+    if withheld:
+        skip_causes.note(m, skip_causes.NOT_PREFERRED, lane=job, detail=withheld)
+    if lane is None:
+        return False
+    use_think = _route_time_think() if think is None else think
+    ctx = (ctx_for or _route_time_ctx)(m)
+    cause, limit = lane_settings_blocker(lane, source, ctx, use_think)
+    if cause:
+        skip_causes.note(m, skip_causes.NOT_PREFERRED, lane=job, detail=cause, ctx=ctx, measured=_measured_ctx(lane))
+        return False
+    if limit is None or input_len > limit:
+        if limit is not None:
+            skip_causes.note(
+                m, skip_causes.NOT_PREFERRED, lane=job, detail="input_over_limit",
+                limit=limit, input_len=input_len,
+            )
+        return False
+    return True
 
+
+def _prefer_passed(models, job, input_len, now, digests, ctx_for, think, eligibility, routing):
     if not models or _opted_out() or not isinstance(input_len, int) or input_len < 0:
         return models
     if digests is None:
         from llm_router.local_check import display
         digests = display.inventory()[1]
     for idx, m in enumerate(models):
-        head, sep, bare = m.partition("/")
-        if not sep or head != "ollama" or not lr.is_enabled(bare, job, path=routing):
-            continue
-        e = lr.entry(bare, job, path=routing)
-        lane, source, withheld = _passed_lane(bare, job, digests, now, eligibility, (e or {}).get("source"))
-        if withheld:
-            skip_causes.note(m, skip_causes.NOT_PREFERRED, lane=job, detail=withheld)
-        if lane is None:
-            continue
-        use_think = _route_time_think() if think is None else think
-        ctx = (ctx_for or _route_time_ctx)(m)
-        cause, limit = lane_settings_blocker(lane, source, ctx, use_think)
-        if cause:
-            skip_causes.note(m, skip_causes.NOT_PREFERRED, lane=job, detail=cause, ctx=ctx, measured=_measured_ctx(lane))
-            continue
-        if limit is None or input_len > limit:
-            if limit is not None:
-                skip_causes.note(
-                    m, skip_causes.NOT_PREFERRED, lane=job, detail="input_over_limit",
-                    limit=limit, input_len=input_len,
-                )
-            continue
-        return [m] + models[:idx] + models[idx + 1:]
+        if _routable(m, job, input_len, digests, ctx_for, think, eligibility, routing, now):
+            return [m] + models[:idx] + models[idx + 1:]
     return models
+
+
+def passed_lane_available(
+    job: str, input_len: int, now: float, *,
+    digests: dict[str, str] | None = None, ctx_for: Any = None, think: bool | None = None,
+    eligibility: Path | None = None, routing: Path | None = None,
+) -> bool:
+    """D-272: True iff some model enabled in ``local_routing.json`` has a lane for ``job`` that
+    ``prefer_passed`` would move to the front (same guards: enabled, passed, fresh, digest-verified,
+    settings-matched, input fits). The opt-in gate of ``llm_text_job`` when the env flag is unset.
+    Never raises; False on any error."""
+    try:
+        from llm_router.local_check import routing as lr
+        if _opted_out() or not isinstance(input_len, int) or input_len < 0:
+            return False
+        if digests is None:
+            from llm_router.local_check import display
+            digests = display.inventory()[1]
+        return any(
+            _routable(f"ollama/{model}", job, input_len, digests, ctx_for, think, eligibility, routing, now)
+            for model in sorted(lr._read(routing))
+        )
+    except Exception as exc:  # noqa: BLE001 -- fail-closed: no lane means the job stays with Claude
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ELIGIBILITY-PASSED-AVAILABLE", exc)
+        return False
 
 
 def settings_notices(*, digests: dict[str, str] | None = None, ctx_for: Any = None, think: bool | None = None,

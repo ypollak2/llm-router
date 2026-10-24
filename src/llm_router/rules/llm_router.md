@@ -64,7 +64,7 @@ edit yourself — this is guidance, not enforcement.
 Writing a commit message from a diff, a PR description from commits/diff, or a summary
 of long test/log output is a job whose ENTIRE input is already in hand — there is
 nothing for a local model to guess, which is the usual failure mode this file warns
-about elsewhere. If `LLM_ROUTER_LOCAL_TEXT_JOBS=1` is set, call
+about elsewhere. If `LLM_ROUTER_LOCAL_TEXT_JOBS=1` is set, or the flag is unset and a `local-check` pass covers the job (the tool is then listed), call
 **`llm_text_job(job, input_text)`** for these three jobs (`commit_message`,
 `pr_description`, `summarize_output`) instead of writing them yourself. The result is
 checked before you see it (grounded in a real changed file, keeps error lines/file:line

@@ -51,7 +51,7 @@ def test_q37_values_match_the_recorded_result():
     e = next(x for x in D["entries"] if x["status"] == "measured")
     assert e["bench"]["lanes"] == {"commit_message": {"k": 32, "n": 35}, "pr_description": {"k": 28, "n": 35}}
     assert e["bench"]["pooled"] == {"k": 60, "n": 70}
-    assert "pre-bank" in e["bench"]["bank_version"]
+    assert e["bench"]["bank_version"] == "PREREG-Q37 (overlaps bank v1 draw 1; in-sample)"
 
 
 def test_untested_sources_are_urls():
