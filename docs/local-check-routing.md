@@ -6,6 +6,21 @@ Owner decisions: D-260 (a passed lane routes local-first by default, on the veri
 
 ## What routes, and when
 
+**The env flag (D-272).** `LLM_ROUTER_LOCAL_TEXT_JOBS` is no longer needed for a passed lane:
+
+| `LLM_ROUTER_LOCAL_TEXT_JOBS` | Passed, routable lane for the job | `llm_text_job` |
+|---|---|---|
+| unset | yes | runs, local lane first |
+| unset | no (no pass, stale digest, settings mismatch, disabled, demoted, input too long) | returns `fallback`, no model call |
+| `1` / `true` / `yes` / `on` | any | runs (opt-in; also without a pass); a passed lane goes first |
+| `0` / `false` / `no` / `off` | any | returns `fallback`: global off |
+
+The unset-flag check is `eligibility_routing.passed_lane_available(job, input_len, now)`, which applies the same guards as `prefer_passed` below. The `llm_text_job` tool is
+listed when the flag is on, or unset and some lane is switched on in `local_routing.json`.
+
+**Ollama only (D-274).** `prefer_passed` considers `ollama/` models only. A PASS measured on LM Studio, vLLM or llama.cpp is recorded but switches nothing on; `local-check run` and `status`
+print `measured; routing for this runtime is not supported yet (Ollama only in this release)`.
+
 Only `llm_text_job` (`commit_message`, `pr_description`, `summarize_output`). Plain `llm_*` calls, `llm_edit` and the proxy never use this.
 `eligibility_routing.prefer_passed(models, job, input_len, now)` runs at the router's eligibility step, after D-116 and the F106/F112 step, and moves a local `ollama/` model that is **already in the chain** to the front. It never adds a model. All of these must hold, otherwise the chain is returned unchanged:
 

@@ -78,7 +78,7 @@ def data(version):
     }]}
 
 
-@pytest.mark.parametrize("version", [None, 2, "PREREG-Q37 (pre-bank; different item set)"])
+@pytest.mark.parametrize("version", [None, 2, "PREREG-Q37 (overlaps bank v1 draw 1; in-sample)"])
 def test_incomparable_counts_hidden(tmp_path, version):
     source = data(version)
     original = deepcopy(source)

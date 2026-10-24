@@ -74,8 +74,12 @@ An early stop instead starts with `not passed (NOT_PASSED) -- stopped early afte
 
 * **Routing is live (D-260).** A recorded PASS switches the passed lanes on, per lane: `routing: on for <lane> -- disable with ...`,
   `routing: already on for <lane>`, or `routing: kept off for <lane> -- it was disabled; run ...` (a lane you or the demotion monitor disabled stays
-  off after a new pass). A pre-registered lane is never switched on by a run; only an explicit `enable` does that. See
+  off after a new pass). Routing is Ollama-only in this release (D-274): a judged PASS on LM Studio, vLLM or llama.cpp is recorded, and
+  `run` and `status` print `measured; routing for this runtime is not supported yet (Ollama only in this release)` instead of `routing: on`.
+  A pre-registered lane is never switched on by a run; only an explicit `enable` does that. See
   [local-check-routing.md](local-check-routing.md) for what routing does and the demotion monitor.
+* **No env flag needed (D-272).** With `LLM_ROUTER_LOCAL_TEXT_JOBS` unset, `llm_text_job` runs locally for a job exactly when a lane passes every
+  routing guard (see local-check-routing.md). `LLM_ROUTER_LOCAL_TEXT_JOBS=1` also runs jobs with no pass; `=0` (or `false`/`off`) turns local text jobs off, passed lanes included.
 * **Retention.** Any completed run (whatever the verdict) is followed by a prune: the last 3 runs are kept, answers older than 30 days are stripped.
   It prints only when it hit an error.
 * **Recommendations.** After a FAIL, NOT_PASSED or an INCONCLUSIVE on fewer than 70 items, the screen lists models that fit this machine from a

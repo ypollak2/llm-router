@@ -618,7 +618,7 @@ def _report(d: Deps, o: Any, budget: Any, secs: float, resume_cmd: str, model: s
         out(f"Stopped: judge budget reached ({o.reason}). INCONCLUSIVE, nothing recorded. Your local answers are kept; resume with: {resume_cmd}")
         return EXIT_BUDGET
     res = o.result
-    routing_lines = _apply_routing(d, o, model) if res is not None and st == "scored" else []
+    routing_lines = _apply_routing(d, o, model, runtime) if res is not None and st == "scored" else []
     for ln in render_verdict(res, o, budget, secs, routing_lines):
         out(ln)
     if res is not None:
@@ -645,11 +645,19 @@ def _passed_lanes(res: Any, o: Any) -> list[str]:
     return sorted(j for j, v in rep.items() if v["status"] == "written" and j not in res.guard_excluded)
 
 
-def _apply_routing(d: Deps, o: Any, model: str) -> list[str]:
-    """D-260: switch the passed lanes on (routing.on_pass) and say, per lane, what happened. A lane the user disabled stays off."""
+#: D-274: the one line shown for a judged PASS on a runtime routing cannot use (Ollama only in v16).
+NOT_ROUTABLE_LINE = "measured; routing for this runtime is not supported yet (Ollama only in this release)"
+
+
+def _apply_routing(d: Deps, o: Any, model: str, runtime: str = "ollama") -> list[str]:
+    """D-260: switch the passed lanes on (routing.on_pass) and say, per lane, what happened. A lane the user disabled stays off.
+
+    D-274: a PASS on a non-Ollama runtime is recorded but never switched on: one line says routing is not supported for it."""
     passed = _passed_lanes(o.result, o)
     if not passed:
         return []
+    if runtime != "ollama":
+        return [NOT_ROUTABLE_LINE]
     try:
         states = d.routing.on_pass(model, passed, path=d.routing_path)
     except Exception as e:  # noqa: BLE001 - a routing-file problem must not turn a recorded PASS into a crash
@@ -862,7 +870,7 @@ def _status(d: Deps, model: str | None) -> int:
             else:
                 out(f"  {m} {j}: off ({e.get('reason', 'disabled')}) -- enable: `llm-router local-check enable {j} --model {m}`")
     else:
-        out("routing switches: none (a PASS switches its lanes on; or `llm-router local-check enable <lane>`)")
+        out("routing switches: none (an Ollama PASS switches its lanes on; or `llm-router local-check enable <lane>`)")
     for ln in d.routing.doctor_lines(path=d.routing_path):
         out(ln)
     log = A.AttemptLog(Path(d.runs_root))
@@ -895,6 +903,8 @@ def _status(d: Deps, model: str | None) -> int:
                     kept = (f" (not recorded; recorded verdict {rec[0]} kept)" if rec[1]
                             else f" (not recorded; recorded verdict {rec[0]} is for a different model digest)")
             out(f"{head}; last {last.get('verdict')}{counts} {last.get('date', '')}{kept}{extra}")
+            if last.get("verdict") == "PASS" and cfg.get("runtime", "ollama") != "ollama":
+                out("  " + NOT_ROUTABLE_LINE)
         else:
             out(f"{head}; no judged run yet{extra}")
         if scored and len(scored) < A.MAX_DRAWS:
