@@ -1033,25 +1033,28 @@ _ENV_LOCAL_TEXT_JOBS = "LLM_ROUTER_LOCAL_TEXT_JOBS"  # message text only; the re
 
 
 def _local_text_jobs_flag() -> bool | None:
-    """True = flag opt-in (1/true/yes/on), False = global OFF (0/false/no/off), None = unset or unrecognised (D-272)."""
+    """True = on (1/true/on/yes), False = off (0/false/off/no), None = unset or empty (D-272).
+
+    Case-insensitive, whitespace-stripped. Any other value (``disable``, ``nope``) fails CLOSED: it is
+    off, never "unset", so a typo cannot hand the job to a pass-routed local model (LC-12b)."""
     raw = os.environ.get("LLM_ROUTER_LOCAL_TEXT_JOBS", "").strip().lower()
-    if raw in ("1", "true", "yes", "on"):
-        return True
-    if raw in ("0", "false", "no", "off"):
-        return False
-    return None
+    if raw == "":
+        return None
+    return raw in ("1", "true", "on", "yes")
 
 
 def _local_text_jobs_enabled() -> bool:
-    """Whether ``llm_text_job`` is advertised: the flag is on, or it is unset and a lane is switched on in
-    ``local_routing.json`` (D-272; a default install with no local-check pass stays at zero schema tokens)."""
+    """Whether ``llm_text_job`` is advertised: the flag is on, or it is unset and an OLLAMA lane is switched on in
+    ``local_routing.json`` (D-272/D-274; a default install with no local-check pass stays at zero schema tokens)."""
     flag = _local_text_jobs_flag()
     if flag is not None:
         return flag
+    from llm_router.local_check import display
     from llm_router.local_check import routing as lr
+    ollama = {c for name in display.inventory()[0] for c in lr.candidates(name)}
     return any(
-        isinstance(e, dict) and e.get("enabled") is True
-        for jobs in lr._read().values() if isinstance(jobs, dict) for e in jobs.values()
+        isinstance(e, dict) and e.get("enabled") is True and any(c in ollama for c in lr.candidates(model))
+        for model, jobs in lr._read().items() if isinstance(jobs, dict) for e in jobs.values()
     )
 
 
@@ -1136,7 +1139,8 @@ async def llm_text_job(
 
     flag = _local_text_jobs_flag()
     if flag is False:
-        why = f"Local text jobs are turned off ({_ENV_LOCAL_TEXT_JOBS}=0)."
+        why = (f"Local text jobs are turned off ({_ENV_LOCAL_TEXT_JOBS} is 0/false/no/off, "
+               "or a value that is not recognised: unrecognised values fail closed).")
     elif flag is None and not eligibility_routing.passed_lane_available(
             job, len(truncated_input) + len(hint or ""), time.time()):
         why = (f"No passed local-check lane covers {job} (run `llm-router local-check`, "
@@ -1162,6 +1166,7 @@ async def llm_text_job(
     completed = False
 
     _tj_token = eligibility_routing.set_text_job_context(job, len(truncated_input) + len(hint or ""))  # LC-8
+    _req_token = eligibility_routing.set_require_passed_first() if flag is None else None  # LC-12b
     try:
         for attempt in range(1, MAX_JOB_ATTEMPTS + 1):
             feedback = history[-1] if history else None
@@ -1176,6 +1181,15 @@ async def llm_text_job(
                     ctx=ctx,
                     route_directive_id=_read_hook_route_directive(),
                     eligibility_exempt_reason=eligibility_routing.TEXT_JOB_REASON,  # F112 / D-242
+                )
+            except eligibility_routing.PassedModelNotInChain:
+                # LC-12b: the passed model is not first in the router's chain; no model was called.
+                record_text_job_outcome(job=job, model="none", status=STATUS_FALLBACK, attempts=0)
+                return (
+                    f"Local text jobs are disabled: the passed local model is not in the router's chain for {job} "
+                    f"(set {_ENV_LOCAL_TEXT_JOBS}=1 to run the chain without a pass). "
+                    "_Structured: status=fallback, attempts=0_\n"
+                    "Do this job yourself."
                 )
             except Exception as exc:
                 try:
@@ -1200,6 +1214,8 @@ async def llm_text_job(
             history.append(check.reason or "acceptance check failed")
         completed = True
     finally:
+        if _req_token is not None:
+            eligibility_routing.reset_require_passed_first(_req_token)
         try:
             eligibility_routing.reset_text_job_context(_tj_token)
         except Exception as exc:  # noqa: BLE001 -- cleanup must not replace a route error
@@ -1255,9 +1271,9 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_code)
     if gate("llm_edit"):
         mcp.tool()(llm_edit)
-    # Advertised only when the opt-in flag is set: a default install pays no
-    # tool-schema tokens for it, and the slim tier sets / doc tool counts are
-    # unchanged. Deliberately independent of the slim tier for the same reason
-    # (the flag is the consent; the tier sets describe the default surface).
+    # Advertised when the flag is on, or when it is unset and an Ollama lane is switched on
+    # (D-272/D-274): a default install pays no tool-schema tokens for it, and the slim tier
+    # sets / doc tool counts are unchanged. Registered at server start, so a pass made later
+    # needs an MCP reconnect. Deliberately independent of the slim tier for the same reason.
     if _local_text_jobs_enabled():
         mcp.tool()(llm_text_job)

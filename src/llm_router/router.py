@@ -1140,8 +1140,19 @@ def _drop_failed_eligibility(
             kept = eligibility_routing.note_bypass(models, task_type, c, exempt_reason)
             # LC-8 / D-260: the verified text-job path alone may put a passed local lane first.
             tj = eligibility_routing._text_job_ctx.get() if exempt_reason == eligibility_routing.TEXT_JOB_REASON else None
-            return eligibility_routing.prefer_passed(kept, tj[0], tj[1], time.time()) if tj else kept
+            if not tj:
+                return kept
+            now = time.time()
+            preferred = eligibility_routing.prefer_passed(kept, tj[0], tj[1], now)
+            # LC-12b: the flag is unset, so the pass is the only consent: the chain must lead with it.
+            if eligibility_routing._require_passed_first.get() and not eligibility_routing.passed_model_leads(
+                    preferred, tj[0], tj[1], now):
+                raise eligibility_routing.PassedModelNotInChain(
+                    f"no routable passed local model leads the {tj[0]} chain")
+            return preferred
         return eligibility_routing.filter_chain(models, task_type, c)
+    except eligibility_routing.PassedModelNotInChain:
+        raise
     except Exception as exc:  # noqa: BLE001 - fail-open: the chain stays as built
         from llm_router import failopen
         failopen.record("CHZ-FO-ROUTER-ELIGIBILITY-FILTER", exc)

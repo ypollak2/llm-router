@@ -42,7 +42,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(T, "route_and_call", fake_route)
     monkeypatch.setattr(T, "_announce_routing", noop)
     monkeypatch.setattr(T, "time", SimpleNamespace(time=lambda: NOW))
-    monkeypatch.setattr(display, "inventory", lambda: ([], {BARE: DIGEST}))
+    monkeypatch.setattr(display, "inventory", lambda: ([BARE], {BARE: DIGEST}))
     monkeypatch.setattr(er, "_route_time_ctx", lambda m: CTX)
     monkeypatch.setattr(er, "_route_time_think", lambda: False)
     yield SimpleNamespace(home=tmp_path, calls=calls)
@@ -102,7 +102,7 @@ def test_flag_zero_with_pass_is_not_taken(world, monkeypatch, value):
     passed(world)
     monkeypatch.setenv(FLAG, value)
     out = call_job()
-    assert world.calls == [] and f"{FLAG}=0" in out
+    assert world.calls == [] and "turned off" in out
 
 
 def test_flag_one_without_a_pass_keeps_todays_behaviour(world, monkeypatch):

@@ -10,13 +10,24 @@ Owner decisions: D-260 (a passed lane routes local-first by default, on the veri
 
 | `LLM_ROUTER_LOCAL_TEXT_JOBS` | Passed, routable lane for the job | `llm_text_job` |
 |---|---|---|
-| unset | yes | runs, local lane first |
-| unset | no (no pass, stale digest, settings mismatch, disabled, demoted, input too long) | returns `fallback`, no model call |
-| `1` / `true` / `yes` / `on` | any | runs (opt-in; also without a pass); a passed lane goes first |
-| `0` / `false` / `no` / `off` | any | returns `fallback`: global off |
+| unset or empty | yes, and the passed model leads the router's chain | runs, local lane first |
+| unset or empty | no (no pass, stale digest, settings mismatch, disabled, demoted, input too long) | returns `fallback`, no model call |
+| unset or empty | yes, but the passed model is not in the chain (see below) | returns `fallback`, no model call |
+| `1` / `true` / `on` / `yes` | any | runs (opt-in; also without a pass); a passed lane goes first |
+| `0` / `false` / `off` / `no` | any | returns `fallback`: global off |
+| any other value (`disable`, `nope`, ...) | any | returns `fallback`: fails CLOSED, same as off |
+
+Values are case-insensitive and whitespace-stripped (` 0 ` is off, `TRUE` is on). Only unset or empty means unset (LC-12b).
 
 The unset-flag check is `eligibility_routing.passed_lane_available(job, input_len, now)`, which applies the same guards as `prefer_passed` below. The `llm_text_job` tool is
-listed when the flag is on, or unset and some lane is switched on in `local_routing.json`.
+listed when the flag is on, or unset and some lane of an **Ollama** model is switched on in `local_routing.json` (a lane enabled by hand for a non-Ollama model does not list it).
+The tool is registered when the MCP server starts: a pass or `enable` made afterwards needs an MCP restart or reconnect before `llm_text_job` is listed.
+
+**The passed model must be in the chain (LC-12b).** `prefer_passed` reorders; it never adds a model. The router puts `ollama/*` models into a GENERATE chain only on a cheap tier
+(not PREMIUM or REASONING; `_build_and_filter_chain`, `router.py` ~613-661) and only models that `config.all_ollama_models()` reports and the P0.15 gate admits, and
+`block_providers` or a daily cap can still remove one, so a passed model can be absent. With the flag unset, `llm_text_job` therefore sets `eligibility_routing.set_require_passed_first()`:
+at the eligibility step (`_drop_failed_eligibility`) the router raises `PassedModelNotInChain` unless the model at the head of the chain is a routable passed Ollama model, and the tool
+returns `fallback` with no model called. A call is never served by a cloud model the user did not opt into by the flag. With `=1` no such check applies.
 
 **Ollama only (D-274).** `prefer_passed` considers `ollama/` models only. A PASS measured on LM Studio, vLLM or llama.cpp is recorded but switches nothing on; `local-check run` and `status`
 print `measured; routing for this runtime is not supported yet (Ollama only in this release)`.
@@ -40,7 +51,9 @@ When a passed lane is withheld for a settings reason (`think_on`, `ctx_unknown`,
 A pre-registered lane has no scope, digest or settings. It is preferred only after an explicit `enable`, only with thinking off, and only when the input fits the window the router will request. It is not digest-checked: there is no digest to check.
 The router's Ollama window comes from `LLM_ROUTER_OLLAMA_NUM_CTX` or the shared local window table.
 
-The acceptance check and the Claude fallback in `llm_text_job` are unchanged: a rejected local answer still ends in "do this job yourself".
+The acceptance check and the fallback in `llm_text_job` are unchanged and identical under the unset flag and `=1`: the chain after the passed model is the router's own chain, so if the local model errors the router moves to the next entry; a rejected answer is retried (up to `MAX_JOB_ATTEMPTS`, with the rejection reason fed back, same chain each time), and after the last rejection the result is "do this job yourself". The unset flag adds only the requirement that the passed model lead the chain.
+
+**Age.** A pass older than 30 days whose Ollama digest still equals the stored one routes: design section 5 expires only runtimes that report no digest.
 
 ## The switch: `local_routing.json`
 

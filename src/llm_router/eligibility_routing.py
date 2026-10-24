@@ -222,6 +222,40 @@ _text_job_ctx: contextvars.ContextVar[tuple[str, int] | None] = contextvars.Cont
 TEXT_JOB_REASON = "verified_text_job"
 
 
+_require_passed_first: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "llm_router_text_job_require_passed_first", default=False)
+
+
+class PassedModelNotInChain(RuntimeError):
+    """LC-12b: ``llm_text_job`` runs on a local pass alone (flag unset) and the router's chain does not put a
+    routable passed Ollama model first. Raised before any model is called, so no cloud model serves the job."""
+
+
+def set_require_passed_first() -> contextvars.Token:
+    """Flag unset: the router must lead the text-job chain with a passed local model, or raise
+    :class:`PassedModelNotInChain`. Reset with the token."""
+    return _require_passed_first.set(True)
+
+
+def reset_require_passed_first(token: contextvars.Token) -> None:
+    _require_passed_first.reset(token)
+
+
+def passed_model_leads(models: list[str], job: str, input_len: int, now: float) -> bool:
+    """True iff ``models[0]`` is an Ollama model with a routable passed lane for ``job`` (the ``prefer_passed``
+    guards). Never raises; False on any error (fail closed)."""
+    try:
+        if not models or _opted_out() or not isinstance(input_len, int) or input_len < 0:
+            return False
+        from llm_router.local_check import display
+        digests = display.inventory()[1]
+        return _routable(models[0], job, input_len, digests, None, None, None, None, now)
+    except Exception as exc:  # noqa: BLE001 -- fail-closed: an unverifiable chain is not taken
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ELIGIBILITY-PASSED-LEADS", exc)
+        return False
+
+
 def set_text_job_context(job: str, input_len: int) -> contextvars.Token:
     """``llm_text_job`` names its job and input size for the router's chain step; reset with the token."""
     return _text_job_ctx.set((job, int(input_len)))
