@@ -18,8 +18,11 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -68,7 +71,7 @@ def repo_commit() -> str:
 
 def build_rows(manifest: dict, texts: dict, policy, rules_tier, min_body) -> list[dict]:
     live_from = D.parse_utc(D.HAIKU_LIVE_FROM)
-    rows = []
+    rows, missing = [], 0
     for m in sorted(manifest["items"], key=lambda x: x["item_id"]):
         iid = m["item_id"]
         it = texts.get(iid)
@@ -76,35 +79,59 @@ def build_rows(manifest: dict, texts: dict, policy, rules_tier, min_body) -> lis
             raise S.CLSExit(S.EXIT_REFUSE, "no item text for %s" % iid)
         body = min_body("", [], "", it["text"], model=None)
         tier = rules_tier(body, policy, None)[2]
-        if tier is None and m.get("requested") in policy.by_name:
-            tier = policy.by_name[m["requested"]].name
         if tier not in TIERS:
-            raise S.CLSExit(S.EXIT_REFUSE, "no resolvable tier for %s" % iid)
+            missing += 1   # no fallback to the manifest `requested` tier: that would be a different arm
+            continue
         if m.get("kind") == "syn":
             rec, live = None, True
         else:
             ts = D.parse_utc(it.get("timestamp"))
             if ts is None:
                 raise S.CLSExit(S.EXIT_REFUSE, "no parseable record timestamp for %s" % iid)
-            rec, live = ts.strftime("%Y-%m-%dT%H:%M:%SZ"), ts >= live_from
+            rec, live = D.utc_str(ts), ts >= live_from   # utc_str converts offsets (cls_dev_lib.py:117)
         rows.append({"item_id": iid, "rules_tier": tier, "record_utc": rec, "haiku_live": live,
                      "_kind": m.get("kind")})
+    if missing:
+        raise S.CLSExit(S.EXIT_REFUSE, "Refused: resolver returned no tier for %d item(s)" % missing)
     return rows
+
+
+def drain_shadow_pool() -> None:
+    """Join the engine's background shadow-log worker (engine._submit) so its engine_shadow.jsonl row lands
+    in the scratch LLM_ROUTER_HOME, before that is removed (otherwise the write races the removal)."""
+    from llm_router import engine
+
+    pool, engine._pool = getattr(engine, "_pool", None), None
+    if pool is not None:
+        pool.shutdown(wait=True)
 
 
 def run(a) -> dict:
     out = Path(a.out)
     if out.exists():
         raise S.CLSExit(EXIT_EXISTS, "output exists; refusing to overwrite")
-    import p17d_synthetic as P17
-
     commit = a.resolver_commit or repo_commit()
     if not commit:
         raise S.CLSExit(S.EXIT_REFUSE, "no resolver commit")
-    policy = load_policy(a.tier_policy, a.policy_sha256 or P17.TIER_POLICY_SHA256)
     manifest = json.loads(Path(a.manifest).read_text(encoding="utf-8"))
     texts = read_texts(a.cls_root, [p for p in (a.items, a.syn_items) if p])
-    rows = build_rows(manifest, texts, policy, P17.rules_tier, P17.pa.min_body)
+    # PREREG 2.2: R-E is "the P17D section 4 resolver", which P17D runs inside p17d_synthetic.harness_env
+    # (p17d_synthetic.py:~690-715): strips every LLM_ROUTER_* variable, scratch HOME + LLM_ROUTER_HOME,
+    # ENGINE_MODE=shadow. Reused unchanged, on a scratch dir created (0700) and removed here; the caller's
+    # HOME / LLM_ROUTER_HOME are never written. Imports happen inside so import-time paths see the scratch HOME.
+    scratch = Path(tempfile.mkdtemp(prefix="cls_rules_tier_"))
+    try:
+        os.chmod(scratch, 0o700)
+        import p17d_synthetic as P17
+
+        with P17.harness_env(types.SimpleNamespace(scratch=scratch)):
+            policy = load_policy(a.tier_policy, a.policy_sha256 or P17.TIER_POLICY_SHA256)
+            try:
+                rows = build_rows(manifest, texts, policy, P17.rules_tier, P17.pa.min_body)
+            finally:
+                drain_shadow_pool()
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     lines = [json.dumps({"schema": P.RULES_TIER_SCHEMA, "resolver_commit": commit, "produced_utc": S.utc_now()},
                         sort_keys=True)]
     lines += [json.dumps({k: v for k, v in r.items() if k != "_kind"}, sort_keys=True) for r in rows]
@@ -137,7 +164,7 @@ def main(argv=None) -> int:
         print(json.dumps(run(a), sort_keys=True))
         return 0
     except S.CLSExit as e:
-        print("refused: %s" % e, file=sys.stderr)
+        print(str(e) if str(e).startswith("Refused:") else "refused: %s" % e, file=sys.stderr)
         return e.code
 
 
