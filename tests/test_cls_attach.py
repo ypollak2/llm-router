@@ -126,6 +126,7 @@ def attach_argv(w: dict, *, extra=(), out=None, allow_e1=True) -> list[str]:
         argv += ["--allow-missing-timestamps", "e1_tune", "--allow-missing-timestamps", "e1_ho"]
     for k, v in w["files"].items():
         argv += ["--" + k.replace("_", "-"), str(v)]
+    argv += ["--ge3-label-join", "key", "--e2-label-join", "key", "--e1-label-join", "key"]  # fixtures label by id
     if "e2_sample" in w["files"]:
         argv += ["--e2-opus-labels", str(w["files"]["e2_sample"]), "--e2-label-tier", "truth"]
     return argv + list(extra)
@@ -517,12 +518,14 @@ def synth_items(n: int, n_unlabelled: int, tmp: Path):
 
 def test_unlabelled_items_reach_the_frozen_primary_missing_guard(tmp_path, capsys):
     """The old behaviour DROPPED items without an Opus label, so the manifest saw 0 percent missing and the
-    frozen floor (primary truth missing > 5 percent, PREREG 1.3) could never fire. Now ~10 percent is visible."""
+    frozen floor (primary truth missing > 5 percent, PREREG 1.3) could never fire. Now ~10 percent is visible.
+    The test uses Opus label presence as a proxy for the primary truth; the frozen primary_truths is majority3
+    over Opus, GPT and Sonnet, so the real guard is stricter (it misses more items than this replica)."""
     sample, labs = synth_items(100, 10, tmp_path)
     (tmp_path / "cls" / "dev").mkdir(parents=True)
     out = tmp_path / "cls" / "dev" / "a"
     argv = ["attach", "--cls-root", str(tmp_path / "cls"), "--out", str(out), "--e2-sample", str(sample),
-            "--e2-opus-labels", str(labs)]
+            "--e2-opus-labels", str(labs), "--e2-label-join", "key"]
     assert A.main(argv) == 0
     capsys.readouterr()
     rows = read_out(out, A.ITEMS)
@@ -564,13 +567,37 @@ def test_label_join_modes_and_wrong_join(tmp_path, capsys):
     cls = tmp_path / "cls"
     (cls / "dev").mkdir(parents=True)
     out = cls / "dev" / "wrong"
-    assert A.main(["attach", "--cls-root", str(cls), "--out", str(out), "--e2-sample", str(sample),
-                   "--e2-opus-labels", str(key_labels), "--e2-label-join", "text_sha"]) == 0
+    # default join is text_sha (PREREG 1.3 (4)): id-keyed labels join 0 items and are refused, counts only
+    base = ["attach", "--cls-root", str(cls), "--out", str(out), "--e2-sample", str(sample),
+            "--e2-opus-labels", str(key_labels), "--e2-label-tier", "truth"]
+    assert A.main(base) == 2
+    cap = capsys.readouterr()
+    assert ("Refused: label file for e2 joined 0 items (check --e2-label-join and the key field)" in cap.err
+            and SENTINEL not in cap.err and cap.out == "" and not (out / A.ITEMS).exists())
+    # the opt-in key join works on the same files, and the choice is recorded
+    assert A.main(base + ["--e2-label-join", "key"]) == 0
     counts = json.loads((out / A.COUNTS).read_text())
-    assert counts["n_items"] == 20 and counts["label_join"]["e2"] == "text_sha"
-    assert sum(v["n_no_opus_label"] for v in counts["per_source"].values()) == 20
-    assert counts["dropped_by_source"]["e2"] == {"label_row_key_missing": 15}
-    assert read_out(out, A.LEG_OPUS) == []
+    assert counts["label_join"]["e2"] == "key" and counts["n_items"] == 20
+    assert sum(v["n_no_opus_label"] for v in counts["per_source"].values()) == 5
+
+
+def test_low_join_share_warns(tmp_path, capsys):
+    sample, _ = synth_items(20, 0, tmp_path)
+    rows = read_rows_jsonl(sample)
+    labs = wjsonl(tmp_path / "few.jsonl", [{"text_sha": S.text_sha(r["text"]), "truth": "opus"} for r in rows[:4]])
+    cls = tmp_path / "cls"
+    (cls / "dev").mkdir(parents=True)
+    argv = ["attach", "--cls-root", str(cls), "--out", str(cls / "dev" / "w"), "--e2-sample", str(sample),
+            "--e2-opus-labels", str(labs), "--e2-label-tier", "truth"]
+    assert A.main(argv) == 0
+    err = capsys.readouterr().err
+    assert "WARNING: label file for e2 joined 4 of 20 items (20 percent, below 50)" in err and SENTINEL not in err
+    # 15 of 20 joined: no join-share warning
+    labs2 = wjsonl(tmp_path / "most.jsonl", [{"text_sha": S.text_sha(r["text"]), "truth": "opus"} for r in rows[:15]])
+    argv2 = ["attach", "--cls-root", str(cls), "--out", str(cls / "dev" / "w2"), "--e2-sample", str(sample),
+             "--e2-opus-labels", str(labs2), "--e2-label-tier", "truth"]
+    assert A.main(argv2) == 0
+    assert "label file for e2 joined" not in capsys.readouterr().err
 
 
 def test_ge3_text_sha_join(tmp_path):
@@ -605,23 +632,19 @@ def test_source_set_without_timestamps_refused(tmp_path, capsys):
     assert A.main(attach_argv(w, extra=["--allow-missing-timestamps", "nope"], out=w["cls"] / "dev" / "b")) == 2
 
 
-def test_own_timestamp_without_session_takes_no_foreign_session(tmp_path):
+def test_recovery_follows_earliest_record_wins(tmp_path):
+    """PREREG 1.3 (2): an item missing its session or timestamp takes it from the earliest record with the same
+    sha256(text), even when that record's other field differs from the item's own."""
     other = {"session_id": S2, "timestamp": "2026-09-01T00:00:00Z", "msg_id": None, "served_model": None}
-    same = {"session_id": S1, "timestamp": "2026-09-02T00:00:00Z", "msg_id": None, "served_model": None}
-    mk = lambda ts: {"text": "x y z", "timestamp": ts, "session_id": None, "requested": None, "requested_basis": None}  # noqa: E731
-    a_, b_ = mk("2026-09-05T00:00:00Z"), mk("2026-09-02T00:00:00Z")
+    mk = lambda ts, sid: {"text": "x y z", "timestamp": ts, "session_id": sid, "requested": None, "requested_basis": None}  # noqa: E731
+    a_, b_ = mk("2026-09-05T00:00:00Z", None), mk(None, S1)
     c = A.Counter()
     sha = S.text_sha("x y z")
-    A.recover([a_], ({}, {sha: other}), None, lambda m: None, c)
-    assert a_["session_id"] is None and c["session_not_taken_from_other_record"] == 1 and c["record_joined"] == 0
-    A.recover([b_], ({}, {sha: same}), None, lambda m: None, c)
-    assert b_["session_id"] == S1 and c["session_from_record"] == 1
-    # downstream: no session -> the manifest's unk clustering
-    row = {"item_id": "a" * 16, "text": "x y z", "timestamp": a_["timestamp"], "session_id": None, "group": None,
-           "source_set": "e1_tune", "batch": None, "digest": None, "requested": None}
-    man, _ = D.build_manifest([row], [], ctx=S.ScrubContext(), t0=D.parse_utc(D.T0_DEFAULT),
-                              cutoff=D.parse_utc(D.CUTOFF_DEFAULT))
-    assert man["counts"]["n_unk_group"] == 1
+    A.recover([a_, b_], ({}, {sha: other}), None, lambda m: None, c)
+    assert a_["session_id"] == S2 and a_["timestamp"] == "2026-09-05T00:00:00Z"   # own timestamp kept
+    assert b_["timestamp"] == "2026-09-01T00:00:00Z" and b_["session_id"] == S1   # own session kept
+    assert dict(c) == {"record_joined": 2, "session_from_record": 1, "timestamp_from_record": 1}
+    assert not any("not_taken" in k for k in c)
 
 
 def test_expected_sizes_warn_not_refuse(tmp_path, capsys, item_key):

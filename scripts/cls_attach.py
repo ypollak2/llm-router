@@ -370,8 +370,10 @@ def ledger_requested(ledger_path, need: set) -> dict:
 
 
 def recover(items: list[dict], index, ledger_path, tier_name, counts: Counter) -> None:
-    """Fill a missing session_id / timestamp from the joined record (the item's own values win) and set
-    requested from the ledger (by the record's msg_id), else the served model, else None."""
+    """Fill a missing session_id / timestamp from the record joined by sha256(text), earliest record wins (the
+    literal PREREG 1.3 (2) rule; the item's own values win; session_from_record / timestamp_from_record disclose
+    how many items took a value) and set requested from the ledger (by the record's msg_id), else the served
+    model, else None."""
     recs = []
     for it in items:
         rec = None
@@ -381,12 +383,6 @@ def recover(items: list[dict], index, ledger_path, tier_name, counts: Counter) -
                 rec = by_sidts.get((it["session_id"], it["timestamp"]))
             else:
                 rec = by_sha.get(S.text_sha(it["text"]))
-        if rec is not None and it["timestamp"] and not it["session_id"] and rec["timestamp"] != it["timestamp"]:
-            rec = None  # the sha join found a DIFFERENT record: its session is not this item's (manifest: unk group)
-            counts["session_not_taken_from_other_record"] += 1
-        elif rec is not None and it["session_id"] and not it["timestamp"] and rec["session_id"] != it["session_id"]:
-            rec = None
-            counts["timestamp_not_taken_from_other_record"] += 1
         recs.append(rec)
         if rec is not None:
             counts["record_joined"] += 1
@@ -526,6 +522,18 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
     if has_p17d:
         drops["p17d"] = Counter()
         items += read_p17d(a.p17d_items, a.p17d_labels, drops["p17d"], item_key=mods.get("item_key"))
+
+    for fam, given in (("ge3", has_ge3), ("e2", has_e2), ("e1", has_e1)):
+        if not given:
+            continue
+        rows = [x for x in items if x["source_set"] in SOURCE_SETS[fam]]
+        n_lab = sum(1 for x in rows if x["opus"])
+        if rows and n_lab == 0:
+            raise Refuse("Refused: label file for %s joined 0 items (check --%s-label-join and the key field)"
+                         % (fam, fam))
+        if rows and n_lab / len(rows) < 0.5:
+            print("WARNING: label file for %s joined %d of %d items (%.0f percent, below 50); check --%s-label-join"
+                  % (fam, n_lab, len(rows), 100.0 * n_lab / len(rows), fam), file=sys.stderr)
 
     rec_counts: Counter = Counter()
     index, index_stats = None, None
@@ -687,17 +695,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ge3-split", help="gt500 split.json")
     p.add_argument("--ge3-opus-labels", help="gt500 work/labels_opus.jsonl {id, tier}")
     p.add_argument("--ge3-sonnet-labels", help="gt500 work/labels_sonnet.jsonl {id, tier}")
-    p.add_argument("--ge3-label-join", choices=JOINS, default="key",
-                   help="key: label rows carry the item id; text_sha: rows carry {text_sha} (PREREG 1.3 (4))")
+    p.add_argument("--ge3-label-join", choices=JOINS, default="text_sha",
+                   help="text_sha (default): label rows carry {text_sha} (PREREG 1.3 (4)); key: opt-in, rows carry the item id")
     p.add_argument("--e2-sample", help="p_eval work/sample.jsonl")
     p.add_argument("--e2-opus-labels", help="E2 Opus labels (may be the sample file itself)")
     p.add_argument("--e2-label-key", default="id", help="field joining E2 rows and label rows (default id)")
-    p.add_argument("--e2-label-join", choices=JOINS, default="key", help="see --ge3-label-join")
+    p.add_argument("--e2-label-join", choices=JOINS, default="text_sha", help="see --ge3-label-join")
     p.add_argument("--e2-label-tier", default="tier", help="tier field of an E2 label row (default tier)")
     p.add_argument("--e1-tasks", help="local-classifier tasks_local.json")
     p.add_argument("--e1-opus-labels", help="E1 Opus labels (may be the tasks file itself)")
     p.add_argument("--e1-label-key", default="id", help="field joining E1 rows and label rows (default id)")
-    p.add_argument("--e1-label-join", choices=JOINS, default="key", help="see --ge3-label-join")
+    p.add_argument("--e1-label-join", choices=JOINS, default="text_sha", help="see --ge3-label-join")
     p.add_argument("--e1-label-tier", default="tier", help="tier field of an E1 label row (default tier)")
     p.add_argument("--p17d-items", help="p17d_attach items.jsonl")
     p.add_argument("--p17d-labels", help="p17d labels.jsonl {text_sha, session_id, truth}")
