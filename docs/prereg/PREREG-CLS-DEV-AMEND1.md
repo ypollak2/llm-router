@@ -56,7 +56,8 @@ up to the whole second, the flag's shape, and the dedup-order disclosure.
    added with `pins --run`, it is voluntary. The `manifest-m1` entry and every m1 output stay as they are; the m1
    manifest remains the record of the NOT_INFORMATIVE result.
 7. **Rerun preconditions (frozen code).** `manifest --run-entry` defaults to `dev_manifest`, so m2 passes
-   `--run-entry manifest-m2` (a duplicate name refuses, exit 2). `manifest --out-dir` must be a new directory:
+   `--run-entry manifest-m2` (a duplicate name is refused by `cls_pins.append_run_entry` with exit 5, after the
+   manifest files are written, so the out dir must be new as well). `manifest --out-dir` must be a new directory:
    reusing `dev/manifest-m1/` would overwrite pinned files and make the next `verify_at_start` fail (exit 9).
    `attach --out` must be a new directory under `<cls-root>/dev` (the writer opens files with O_EXCL). The
    manifest takes `--pins-static`, `--pins-run` and `--selftest-result` as at m1; the existing self-test result
