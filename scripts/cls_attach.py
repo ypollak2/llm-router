@@ -70,6 +70,9 @@ SOURCE_SETS = {"ge3": ("ge3_tune", "ge3_ho"), "e2": ("e2_cal", "e2_ho"), "e1": (
                "p17d": ("p17d_f", "p17d_g")}
 SOURCE_FLAGS = ("ge3_items", "ge3_split", "ge3_opus_labels", "ge3_sonnet_labels", "e2_sample", "e2_opus_labels",
                 "e1_tasks", "e1_opus_labels", "p17d_items", "p17d_labels", "ledger")
+# PREREG-CLS-DEV-AMEND1 (D-280): only the E1 sets may take the E1 source file's mtime as an upper-bound timestamp.
+MTIME_SETS = {"e1_tune": "e1_tasks", "e1_ho": "e1_tasks"}
+AMEND1_REF = "PREREG-CLS-DEV-AMEND1"
 PATH_FLAGS = ("cls_root", "out") + SOURCE_FLAGS + ("claude_root", "gt_scripts", "denylist", "env_file")
 
 
@@ -163,6 +166,34 @@ def label_map(path, flag: str, key_field: str, tier_fields: tuple, drops: Counte
 
 def _sha(path) -> str:
     return S.sha256_file(path)
+
+
+def mtime_upper_bound(path) -> tuple[str, int]:
+    """(timestamp, st_mtime_ns) of a source file: UTC, `Z`-suffixed whole seconds in the manifest's own format
+    (cls_dev_lib.utc_str), ROUNDED UP so the string is never earlier than the true mtime (AMEND1)."""
+    ns = os.stat(path).st_mtime_ns
+    sec = -(-ns // 10**9)  # integer ceil: float division would lose the last nanoseconds
+    d = datetime.datetime.fromtimestamp(sec, tz=datetime.timezone.utc)
+    return D.utc_str(d), ns
+
+
+def apply_mtime_bound(items: list[dict], sets, a) -> dict:
+    """AMEND1: for each set in `sets`, an item whose timestamp is still empty after record recovery takes the
+    mtime of its source file as an upper-bound timestamp. Returns the per-set counts record."""
+    rec: dict = {}
+    for src in sorted(sets):
+        path = getattr(a, MTIME_SETS[src], None)
+        if not path:
+            raise Refuse("refusing: --timestamp-upper-bound-from-mtime %s needs --%s" % (src, MTIME_SETS[src].replace("_", "-")))
+        ts, ns = mtime_upper_bound(path)
+        n = 0
+        for it in items:
+            if it["source_set"] == src and not it["timestamp"]:
+                it["timestamp"] = ts
+                n += 1
+        rec[src] = {"n_timestamp_from_mtime": n, "mtime_utc": ts, "mtime_ns": ns,
+                    "source_file_sha256": _sha(path), "source_flag": MTIME_SETS[src], "amendment": AMEND1_REF}
+    return rec
 
 
 # ---------------------------------------------------------------------------------------------
@@ -497,6 +528,13 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
     allow = set(a.allow_missing_timestamps or [])
     if allow - set(EXPECTED_SIZES):
         raise Refuse("refusing: --allow-missing-timestamps names unknown source sets (%s)" % ",".join(sorted(allow - set(EXPECTED_SIZES))))
+    ub = set(a.timestamp_upper_bound_from_mtime or [])
+    if ub - set(MTIME_SETS):
+        raise Refuse("refusing: --timestamp-upper-bound-from-mtime allows only %s (got %s)"
+                     % (",".join(sorted(MTIME_SETS)), ",".join(sorted(ub - set(MTIME_SETS)))))
+    if ub & allow:
+        raise Refuse("refusing: --timestamp-upper-bound-from-mtime and --allow-missing-timestamps both name %s"
+                     % ",".join(sorted(ub & allow)))
     has_ge3 = _need(a, ("ge3_items", "ge3_split", "ge3_opus_labels", "ge3_sonnet_labels"),
                     ("ge3_items", "ge3_split", "ge3_opus_labels"))
     has_e2 = _need(a, ("e2_sample", "e2_opus_labels"), ("e2_sample", "e2_opus_labels"))
@@ -559,6 +597,7 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
     if tier_name is None:
         from llm_router.shadow_eval import tier_name
     recover(items, index, a.ledger, tier_name, rec_counts)
+    mtime_rec = apply_mtime_bound(items, ub, a)
 
     for src in sorted({x["source_set"] for x in items}):
         if src not in allow and not any(D.parse_utc(x["timestamp"]) is not None for x in items
@@ -619,7 +658,7 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
         "script_sha256": _sha(Path(__file__)), "generated_utc": S.utc_now(),
         "n_items": len(items), "n_sessions": len({x["session_id"] for x in items if x["session_id"]}),
         "digest_basis": DIGEST_BASIS, "expected_vs_actual": expected_vs_actual,
-        "allow_missing_timestamps": sorted(allow), "label_join": {k: getattr(a, k + "_label_join") for k in ("ge3", "e2", "e1")},
+        "allow_missing_timestamps": sorted(allow), "timestamp_upper_bound_from_mtime": mtime_rec, "label_join": {k: getattr(a, k + "_label_join") for k in ("ge3", "e2", "e1")},
         "per_source": per_source, "dropped": dict(sorted(total_drop.items())),
         "dropped_by_source": {k: dict(sorted((r, n) for r, n in v.items() if n)) for k, v in sorted(drops.items())},
         "record_recovery": dict(sorted(rec_counts.items())), "record_index": index_stats,
@@ -715,6 +754,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--p17d-labels", help="p17d labels.jsonl {text_sha, session_id, truth}")
     p.add_argument("--allow-missing-timestamps", action="append", metavar="SET",
                    help="accept source set SET with no usable timestamp (repeatable; recorded in attach_counts)")
+    p.add_argument("--timestamp-upper-bound-from-mtime", action="append", metavar="SET",
+                   help="PREREG-CLS-DEV-AMEND1 (D-280): e1_tune / e1_ho only (repeatable); an item with no recovered "
+                        "timestamp takes the E1 tasks file's mtime as an upper bound; refused together with "
+                        "--allow-missing-timestamps for the same set")
     p.add_argument("--claude-root", help="transcript root (top-level */*.jsonl) for record recovery")
     p.add_argument("--gt-scripts", help="directory of the pinned gt500.py and supply.py")
     p.add_argument("--ledger", help="proxy_calls.jsonl (requested_model by msg_id)")

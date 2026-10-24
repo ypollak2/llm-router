@@ -775,3 +775,116 @@ def test_export_real_chmods_existing_parent(tmp_path, capsys, item_key):
     assert A.main(["export-real", "--cls-root", str(w["cls"]), "--items", str(w["out"] / A.ITEMS),
                    "--manifest", str(mpath), "--out", str(out)]) == 0
     assert stat.S_IMODE(os.stat(parent).st_mode) == 0o700
+
+
+# ---------------------------------------------------------------------------------------------
+# PREREG-CLS-DEV-AMEND1 (D-280): E1 upper-bound timestamps from the source file's mtime
+# ---------------------------------------------------------------------------------------------
+
+MTIME_S = 1791319516  # 2026-10-06T20:45:16Z (the owner's tasks_local.json mtime); synthetic fixture only
+MTIME_FLAG = "--timestamp-upper-bound-from-mtime"
+
+
+def mtime_world(tmp_path, *, mtime_ns=MTIME_S * 10**9):
+    w = make_world(tmp_path, with_p17d=False)
+    os.utime(w["files"]["e1_tasks"], ns=(mtime_ns, mtime_ns))
+    return w
+
+
+def mtime_argv(w, *sets, **kw):
+    extra = []
+    for s_ in sets:
+        extra += [MTIME_FLAG, s_]
+    return attach_argv(w, extra=extra + list(kw.pop("more", ())), allow_e1=False, **kw)
+
+
+def test_mtime_bound_fills_only_e1_empty_timestamps(tmp_path, capsys):
+    w = mtime_world(tmp_path)
+    assert A.main(mtime_argv(w, "e1_tune", "e1_ho")) == 0
+    cap = capsys.readouterr()
+    assert_private_stdout(cap.out + cap.err, w["out"], tmp_path)
+    rows = {r["text"]: r for r in read_out(w["out"], A.ITEMS)}
+    assert rows[T["t1"]]["timestamp"] == rows[T["t2"]]["timestamp"] == "2026-10-06T20:45:16Z"
+    assert rows[T["e_nots"]]["timestamp"] is None                      # not an E1 set: untouched
+    assert rows[T["g_t1"]]["timestamp"] == "2026-09-10T10:00:00Z"      # items with a timestamp keep it
+    counts = json.loads((w["out"] / A.COUNTS).read_text())
+    rec = counts["timestamp_upper_bound_from_mtime"]
+    assert set(rec) == {"e1_tune", "e1_ho"}
+    for src in rec:
+        assert rec[src]["n_timestamp_from_mtime"] == 1 and rec[src]["mtime_utc"] == "2026-10-06T20:45:16Z"
+        assert rec[src]["mtime_ns"] == MTIME_S * 10**9 and rec[src]["amendment"] == "PREREG-CLS-DEV-AMEND1"
+        assert rec[src]["source_file_sha256"] == S.sha256_file(w["files"]["e1_tasks"])
+    assert counts["allow_missing_timestamps"] == [] and counts["per_source"]["e1_tune"]["n_no_timestamp"] == 0
+    assert "timestamp_upper_bound_from_mtime" in json.loads(cap.out)
+
+
+def test_mtime_bound_only_for_named_sets_and_rounds_up(tmp_path):
+    w = mtime_world(tmp_path, mtime_ns=MTIME_S * 10**9 + 1)  # 1 ns after the second: the bound must not be earlier
+    assert A.main(mtime_argv(w, "e1_tune", more=["--allow-missing-timestamps", "e1_ho"])) == 0
+    rows = {r["text"]: r for r in read_out(w["out"], A.ITEMS)}
+    assert rows[T["t1"]]["timestamp"] == "2026-10-06T20:45:17Z" and rows[T["t2"]]["timestamp"] is None
+    rec = json.loads((w["out"] / A.COUNTS).read_text())["timestamp_upper_bound_from_mtime"]
+    assert set(rec) == {"e1_tune"}
+
+
+def test_mtime_bound_used_only_when_timestamp_empty(tmp_path):
+    w = mtime_world(tmp_path)
+    w["files"]["e1_tasks"].write_text(json.dumps([
+        {"id": "t1", "split": "tune", "text": T["t1"], "timestamp": "2026-09-01T00:00:00Z"},
+        {"id": "t2", "split": "heldout", "text": T["t2"]}]))
+    os.utime(w["files"]["e1_tasks"], ns=(MTIME_S * 10**9,) * 2)
+    assert A.main(mtime_argv(w, "e1_tune", "e1_ho")) == 0
+    rows = {r["text"]: r for r in read_out(w["out"], A.ITEMS)}
+    assert rows[T["t1"]]["timestamp"] == "2026-09-01T00:00:00Z"
+    assert rows[T["t2"]]["timestamp"] == "2026-10-06T20:45:16Z"
+    rec = json.loads((w["out"] / A.COUNTS).read_text())["timestamp_upper_bound_from_mtime"]
+    assert rec["e1_tune"]["n_timestamp_from_mtime"] == 0 and rec["e1_ho"]["n_timestamp_from_mtime"] == 1
+
+
+@pytest.mark.parametrize("sets", [("ge3_ho",), ("e2_cal",), ("p17d_f",), ("e1",), ("E1_TUNE",), ("e1_tune", "nope")])
+def test_mtime_flag_unknown_or_other_set_refuses(tmp_path, capsys, sets):
+    w = mtime_world(tmp_path)
+    assert A.main(mtime_argv(w, *sets)) == 2
+    cap = capsys.readouterr()
+    assert "allows only e1_ho,e1_tune" in cap.err and cap.out == ""
+    assert not (w["out"] / A.ITEMS).exists() and SENTINEL not in cap.err
+
+
+def test_mtime_flag_with_allow_missing_same_set_refuses(tmp_path, capsys):
+    w = mtime_world(tmp_path)
+    assert A.main(mtime_argv(w, "e1_ho", more=["--allow-missing-timestamps", "e1_ho"])) == 2
+    cap = capsys.readouterr()
+    assert "both name e1_ho" in cap.err and cap.out == "" and not (w["out"] / A.ITEMS).exists()
+
+
+def test_mtime_flag_needs_e1_tasks(tmp_path, capsys):
+    w = mtime_world(tmp_path)
+    del w["files"]["e1_tasks"], w["files"]["e1_opus_labels"]
+    assert A.main(mtime_argv(w, "e1_tune")) == 2
+    assert "needs --e1-tasks" in capsys.readouterr().err
+
+
+def test_without_flag_e1_still_refused(tmp_path, capsys):
+    w = mtime_world(tmp_path)
+    assert A.main(attach_argv(w, allow_e1=False)) == 2
+    assert "source set e1_ho has no timestamps" in capsys.readouterr().err
+
+
+def test_mtime_timestamp_survives_frozen_manifest_and_groups_as_unk(tmp_path):
+    w = mtime_world(tmp_path)
+    assert A.main(mtime_argv(w, "e1_tune", "e1_ho")) == 0
+    rows = read_out(w["out"], A.ITEMS)
+    e1 = [r for r in rows if r["source_set"] in ("e1_tune", "e1_ho")]
+    assert len(e1) == 2
+    t0, cutoff = D.parse_utc(D.T0_DEFAULT), D.parse_utc(D.CUTOFF_DEFAULT)
+    for r in e1:
+        ts = D.parse_utc(r["timestamp"])
+        assert ts is not None and D.time_filter(ts, t0, cutoff) is None   # the frozen filter keeps it
+    legacy = {"opus": read_out(w["out"], A.LEG_OPUS), "sonnet": read_out(w["out"], A.LEG_SONNET)}
+    man, _ = D.build_manifest(rows, [], ctx=S.ScrubContext(), t0=t0, cutoff=cutoff, legacy=legacy)
+    c = man["counts"]
+    assert c["n_no_timestamp_dropped"] == 1                                 # only the non-E1 e_nots item
+    kept = {x["source_set"]: x for x in man["items"] if x["kind"] == "real"}
+    # frozen session handling for an empty session_id: group unk:<set>:<batch or 0>, one group per E1 set
+    assert kept["e1_tune"]["group"] == "unk:e1_tune:0" and kept["e1_ho"]["group"] == "unk:e1_ho:0"
+    assert c["n_unk_group"] == 2
