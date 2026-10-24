@@ -59,7 +59,7 @@ does not decide for you: if the result comes back unapplied (validation failed a
 3 tries) or the task genuinely needs exploration across many unknown files, do the
 edit yourself — this is guidance, not enforcement.
 
-## Self-contained text jobs → `llm_text_job` (opt-in)
+## Self-contained text jobs → `llm_text_job` (on by default for a passed local model)
 
 Writing a commit message from a diff, a PR description from commits/diff, or a summary
 of long test/log output is a job whose ENTIRE input is already in hand — there is
@@ -70,7 +70,7 @@ about elsewhere. If `LLM_ROUTER_LOCAL_TEXT_JOBS=1` is set, or the flag is unset 
 checked before you see it (grounded in a real changed file, keeps error lines/file:line
 refs/exit codes, has the required sections) and comes back `accepted`, `rejected`, or
 `fallback`. **Only use the text when `status=accepted`** — on `rejected` or `fallback`
-(including when the flag is unset, which is the default) do the job yourself from
+(including when no pass covers the job, or, with the flag unset, the local model failed: that call never reaches a cloud model) do the job yourself from
 `input_text`; that is expected, not a failure. `accepted` means the structural checks passed, not that the text is true —
 skim it against the diff or output before using it. Docstrings are edit-shaped work on a
 known file, not a text job — use `llm_edit` for those instead.

@@ -647,6 +647,23 @@ def _passed_lanes(res: Any, o: Any) -> list[str]:
 
 #: D-274: the one line shown for a judged PASS on a runtime routing cannot use (Ollama only in v16).
 NOT_ROUTABLE_LINE = "measured; routing for this runtime is not supported yet (Ollama only in this release)"
+#: LC-12b: `llm_text_job` is registered when the MCP server starts, so a switch made later needs a reconnect.
+RECONNECT_NOTE = "the llm_text_job tool appears after the next MCP restart or reconnect"
+
+
+#: LC-12b: an empty Ollama inventory means Ollama is down, so a reconnect cannot list the tool yet.
+OLLAMA_DOWN_NOTE = "Ollama not reachable now; the tool appears after Ollama is up and MCP reconnects"
+
+
+def _reconnect_note(d: Deps) -> str:
+    return RECONNECT_NOTE if d.inventory() else OLLAMA_DOWN_NOTE
+
+
+def _is_ollama_model(d: Deps, model: str) -> bool:
+    """False only when the Ollama inventory is known and does not hold ``model`` (D-274: routing is Ollama only).
+    An empty inventory cannot say, so it is not read as non-Ollama."""
+    names = {c for n in d.inventory() for c in d.routing.candidates(n)}
+    return not names or any(c in names for c in d.routing.candidates(model))
 
 
 def _apply_routing(d: Deps, o: Any, model: str, runtime: str = "ollama") -> list[str]:
@@ -666,7 +683,7 @@ def _apply_routing(d: Deps, o: Any, model: str, runtime: str = "ollama") -> list
     for job in passed:
         s = states.get(job)
         if s == "enabled":
-            L.append(f"routing: on for {job} -- disable with `llm-router local-check disable {job}`")
+            L.append(f"routing: on for {job} -- disable with `llm-router local-check disable {job}`; {_reconnect_note(d)}")
         elif s == "already_on":
             L.append(f"routing: already on for {job}")
         elif s == "kept_off":
@@ -865,7 +882,9 @@ def _status(d: Deps, model: str | None) -> int:
     if switches:
         out("routing switches (local_routing.json):")
         for m, j, e in switches:
-            if e.get("enabled") is True:
+            if e.get("enabled") is True and not _is_ollama_model(d, m):
+                out(f"  {m} {j}: switched on, but {NOT_ROUTABLE_LINE}")
+            elif e.get("enabled") is True:
                 out(f"  {m} {j}: on (since {e.get('since', '?')}, source {e.get('source', '?')}) -- disable: `llm-router local-check disable {j} --model {m}`")
             else:
                 out(f"  {m} {j}: off ({e.get('reason', 'disabled')}) -- enable: `llm-router local-check enable {j} --model {m}`")
@@ -935,7 +954,10 @@ def _switch(d: Deps, sub: str, lane: str, model: str | None) -> int:
     try:
         if sub == "enable":
             d.routing.enable(model, lane, "manual", path=d.routing_path)
-            d.out(f"routing: on for {lane} on {model} (set by you). It applies only while the lane is passed and fresh -- see `llm-router local-check status`.")
+            if _is_ollama_model(d, model):
+                d.out(f"routing: on for {lane} on {model} (set by you). It applies only while the lane is passed and fresh -- see `llm-router local-check status`; {_reconnect_note(d)}.")
+            else:
+                d.out(f"{model} {lane}: {NOT_ROUTABLE_LINE}")
         else:
             d.routing.disable(model, lane, "manual", path=d.routing_path)
             d.out(f"routing: off for {lane} on {model}. A later PASS keeps it off; `llm-router local-check enable {lane}` switches it back on.")
