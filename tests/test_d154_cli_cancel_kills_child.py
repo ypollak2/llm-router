@@ -108,8 +108,9 @@ def test_the_fake_cli_outlives_its_parent_without_the_fix(tmp_path):
     proc = subprocess.Popen([str(script)], start_new_session=True)
     try:
         end = time.monotonic() + 10
-        while time.monotonic() < end and not grandchild_file.exists():
+        while time.monotonic() < end and not (grandchild_file.exists() and grandchild_file.read_text().strip().isdigit()):
             time.sleep(0.05)
+        assert grandchild_file.exists() and grandchild_file.read_text().strip().isdigit(), "fake CLI never wrote the child pid"
         grandchild = int(grandchild_file.read_text().strip())
         proc.kill()
         proc.wait(5)

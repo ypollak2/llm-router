@@ -509,7 +509,7 @@ The unresolved F-pair rule is never waived.
             if status.get("state") == "held":
                 print("Refused: another redo-label process holds this run")
             else:
-                print(f"Refused: cannot lock this run directory ({status.get('state', 'unknown')})")
+                print(f"Refused: cannot lock this run directory ({status['state']})")
             return 2
         return run_judge(options) if options.judge else run_owner(options)
 
