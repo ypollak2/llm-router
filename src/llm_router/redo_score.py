@@ -385,7 +385,7 @@ def _scope_counts(scored, in_scope):
     return out
 
 
-def tune_candidate_counts(rows, labels_by_pair, signals_by_pair) -> dict:
+def score_tune_candidate(rows, labels_by_pair, signals_by_pair) -> dict:
     """Pure, text-free. ``labels_by_pair``: pair_id -> redo|not_redo|unclear|lost; ``signals_by_pair``:
     pair_id -> the candidate's signals (absent when the transcript could not be re-read, counted lost).
 
@@ -532,7 +532,7 @@ def cmd_redo_score_tune(options) -> int:
         labels = resolve_tune_labels(rows, label_rows)
         projects_dir = options.projects_dir or northstar.claude_projects_dir()
         signals, errors = candidate_signals(rows, frozen, projects_dir, candidate)
-        result = tune_candidate_counts(rows, labels, signals)
+        result = score_tune_candidate(rows, labels, signals)
     except (OSError, ValueError, KeyError, TypeError):
         print("Refused: invalid or unavailable scoring inputs.")
         return 2

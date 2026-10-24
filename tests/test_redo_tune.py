@@ -334,11 +334,11 @@ def test_weighted_counts_use_stratum_weights():
     rows = [dict(pair_id="a", weight_N_h_combined=4, n_h_combined=2),     # weight 2
             dict(pair_id="b", weight_N_h_combined=10, n_h_combined=1),    # weight 10
             dict(pair_id="c", weight_N_h_combined=1, n_h_combined=1)]
-    out = score.tune_candidate_counts(
+    out = score.score_tune_candidate(
         rows, dict(a="redo", b="redo", c="not_redo"), dict(a=("repeat",), b=(), c=("repeat",)))
     assert counts(out["overall"]) == (1, 1, 1) and counts(out["overall"], "weighted") == (2.0, 1.0, 10.0)
     assert out["overall"]["weighted"]["recall"] == round(2 / 12, 4)
-    empty = score.tune_candidate_counts(rows, {}, {})
+    empty = score.score_tune_candidate(rows, {}, {})
     assert (empty["n_scored"], empty["n_lost"]) == (0, 3) and empty["overall"]["unweighted"]["f1"] is None
 
 
