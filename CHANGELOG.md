@@ -13,6 +13,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- P3.6-c PR3c (recall-raising redo variants): `redo_signal` variants `v3c` (extra phrases that reject the
+  previous answer: "that's not what I asked", "still wrong", "still not fixed", "still getting the same error" or
+  a bare "same error", "no, I meant" (not "I meant to"), "undo that", "revert your change", "go back to the
+  previous version" ...; reported as `contradiction`) and `v3d` (`v3c` plus a short rejection of at most 6 words:
+  wrong/not it/not that/not right/not quite/still wrong/broken/failing/the same, minus "not now", ...; bare
+  "still", "not", "no" and "nope" are excluded: a bare "no" after "Want me to push it?" declines an offer, and v2
+  already flags "no," / "no." / "nope"). The v3c/v3d-only patterns ignore text in ``` / ~~~ fences and on `>`
+  quote lines. "same error" needs "still getting / I get the same error" ending the prompt within 6 words without
+  a "when/if/while/on/in/is that/known" continuation; "that broke" needs "it" / "the|your fix|change|code" or a
+  prompt of at most 8 words, as does "that made it worse"; "undo that" / "revert it" must end the prompt or a
+  clause, or name the change ("undo your edit"); "go back to the previous version" must end there and not be
+  followed by "and summarize|explain|list|write|add ..."; "i meant: also ..." is a refinement. Product reports
+  ("same error appears when the server restarts", "I get the same error when the server restarts on prod; is
+  that a known issue?"), new questions ("I meant to ask ..."), git instructions ("undo that last commit on the
+  release branch"), "revert your branch", "go back to the plan", "still not merged" and "still, can you also add
+  X" are must-not-flag fixtures. Both keep every v2 signal, so their flags are
+  a superset of v2's (tests/test_redo_variants_recall.py, including reask/repeat combined with a new phrase).
+  Written from the label definition only, no data. Under the at-most-2-widenings rule v3a, v3b, v3c and v3d are
+  four candidates but only two non-baseline (candidate, detector sha256) pairs may ever be tune-scored, so the
+  owner picks which two. Once both are used, any edit to `redo_signal.py` is a permanent dead end: no variant can
+  be tune-scored or frozen again, only `v2`. `PATTERN_VERSION` and the default stay `v2`.
+- P3.6-c PR3b (anti-gaming): `redo-sample --freeze --detector X` refuses a non-baseline X unless X is the strict F1
+  argmax of the study's canonical tune set. One study has one live tune run: a second `redo-sample --tune` refuses
+  until the first is voided with `redo-sample --void-tune --run ID --reason TEXT` (recorded in every later
+  `frozen.json`; a voided run cannot be scored and its widenings stay spent). The run's first complete
+  `redo-score --tune` row (n_lost 0) fixes the canonical set: tune manifest sha256, labels digest (sha256 over the
+  sorted sha256 of each labels file read), scored-pair digest (sha256 over the sorted pair ids scored),
+  projects-dir digest and unclear count. A later tune score on that run with other label files refuses. Only
+  complete rows with that identity are compared; the set must hold a `v2` row and a row for every other
+  candidate with tune rows at the current detector sha256; competitors are ranked by their maximum F1 there, X by
+  its minimum (X's own older-sha rows are not competitors); a tie fails closed. What this prevents with ordinary
+  CLI use: crowning a loser by re-scoring on another labels file (refused at score time), by scoring the
+  candidate from a projects dir missing transcripts (incomplete, refused at freeze), or by drawing a fresh tune
+  run and scoring only v2 and the candidate there (refused while the first run is live; after a recorded void the
+  other candidates must be re-scored on the new run). `redo-sample --tune` also refuses a non-default
+  `--projects-dir` unless `--allow-nondefault-projects-dir` is passed (recorded with the dir's real-path digest
+  and transcript count): the tune pool must come from the census population, and a curated directory is a
+  procedure violation. What stays procedure-only (the tool cannot detect it): a rigged labels file scored as the
+  run's FIRST complete scoring, edited transcripts, a curated pool drawn with the override flag, and a void
+  combined with a `redo_signal.py` edit that leaves a competitor scored only at an older sha on the voided run.
+  Each refusal cause has its own counts-only message. `frozen.json` records `tune_row_sha256`,
+  `tune_log_sha256`, `tune_log_bytes`, `tune_run`, `tune_manifest_sha256`, `tune_labels_sha256`,
+  `tune_scored_pairs_sha256` and `tune_projects_dir_sha256`; `redo-score` re-runs the gate on the bound log prefix
+  against the live tune run, refuses a tune-set mismatch or a voided bound run, and refuses a baseline freeze that
+  carries tune provenance; `result.json` records `detector_variant`. `redo-sample` prints the run id, never the
+  run directory path.
+  Tune-log rows store `detector_sha256`, `tune_manifest_sha256`, `labels_sha256` and `variant_params`; the widening
+  cap counts distinct (candidate, sha256). `tune_log.jsonl` is append-only by procedure: deleting or rewriting it
+  AFTER a freeze is refused at score time, but an edit BEFORE freeze cannot be detected by the tool and is a
+  procedure violation only.
 - proxy Haiku tier on Claude Haiku 5.5 (HAIKU55-TIER-1, docs/bugs/HAIKU55-TIER-1.md): the Haiku rewrite rules now key
   off the tier's `model`. With `claude-haiku-5-5` the body keeps adaptive thinking, effort and mid-conversation system
   messages (no fold), `max_tokens` clamps to 128K, a body with sampling parameters or an assistant prefill (400 on 5.5)
@@ -23,6 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (4.5 retires not sooner than 2026-10-15). Capabilities are from platform.claude.com, fetched 2026-10-10.
 
 ### Fixed
+- `redo-score` on a test run frozen before the detector source changed (e.g. before #706) now says so and that the
+  test half stays unspent, instead of the generic invalid-inputs refusal; the unreadable-prior-run refusal names the
+  run id(s) and the recovery step (move it aside or remove it), never a path.
 - ledger on every exit (LEDGER-EVERY-EXIT-1, docs/bugs/LEDGER-EVERY-EXIT-1.md): one guard around the whole `llm()` and `llm_act()` body leaves one `usage` and one `routing_decisions` row (caller's session, $0, `error_*` / `breaker_open`, excluded from metrics by the shared predicates) on every exit, including failures before dispatch, `llm_act` refusals and silent returns; paths that already wrote are not doubled. A hard kill stays unledgered. Not re-measured on a live M0-3 run.
 - quality breaker (N21, docs/bugs/N21.md): units of `research` and `harness` sessions no longer feed the breaker. In the M0-3 rerun2 (2026-10-10, n=20 calls, 2 research-tagged sessions that discarded every answer on purpose) they opened `mcp_llm:code` for 24 h for every session. A breaker refusal in `llm()` now writes one `usage` and one `routing_decisions` row (`breaker_open`, caller's session, $0); the shared predicates (`SQL_NOT_ERROR_ROW`, `SQL_REAL_DECISION`) exclude them from routing metrics, bandit, judge and cost readers. session-end hook v30 (both copies), statusline literal updated. M0-3 gate count not re-measured.
 - local model hygiene (N19, N20; docs/bugs/N19.md, docs/bugs/N20.md): `all_ollama_models()` no longer lists an Ollama

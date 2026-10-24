@@ -40,6 +40,8 @@ MIN_FLAGGED = 19
 DEFAULT_SEED = 360
 DEFAULT_TUNE_SEED = 361         # a tune set has its own seed: never the test seed
 TUNE_PREFIX = "tune-"
+VOID_FILE = "voided.json"       # in a tune run dir: the run is voided (counts-only record, kept)
+_VOID_REASON = re.compile(r"[A-Za-z0-9 _.,:;()/#-]{1,200}")
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 EMPTY_EXCLUSION = "M0.9 exclusion list EMPTY: spent M0.9 pairs are NOT excluded"
 LEDGER_PRESENT, LEDGER_MISSING, LEDGER_UNREADABLE = "present", "missing", "unreadable"
@@ -79,11 +81,12 @@ class EvidenceUnreadable(RuntimeError):
 class PriorRunUnreadable(RuntimeError):
     """A run directory under redo_validation/ cannot be read as a run: disjointness cannot be proven.
 
-    Carries the count only."""
+    Carries run directory names only, never paths, and their count."""
 
-    def __init__(self, count: int) -> None:
-        self.count = count
-        super().__init__(f"{count} unreadable prior run directory(ies)")
+    def __init__(self, runs: list[str]) -> None:
+        self.runs = sorted(runs)
+        self.count = len(self.runs)
+        super().__init__(f"{self.count} unreadable prior run directory(ies)")
 
 
 @dataclass(frozen=True)
@@ -108,7 +111,7 @@ def load_prior_runs(purposes: set[str]) -> list[PriorRun]:
     if not root.is_dir():
         return []
     runs: list[PriorRun] = []
-    bad = 0
+    bad_runs: list[str] = []
     for run_dir in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
         try:
             frozen = json.loads((run_dir / "frozen.json").read_text(encoding="utf-8"))
@@ -120,14 +123,68 @@ def load_prior_runs(purposes: set[str]) -> list[PriorRun]:
             if not isinstance(salt, str) or not all(isinstance(i, str) for i in ids):
                 raise ValueError("invalid run")
         except (OSError, ValueError, KeyError, TypeError):
-            bad += 1
+            bad_runs.append(run_dir.name)
             continue
         purpose = "tune" if frozen.get("purpose") == "tune" else "test"
         if purpose in purposes:
             runs.append(PriorRun(purpose, salt, ids))
-    if bad:
-        raise PriorRunUnreadable(bad)
+    if bad_runs:
+        raise PriorRunUnreadable(bad_runs)
     return runs
+
+
+def tune_run_states() -> tuple[list[str], list[dict]]:
+    """``(live tune run names, voided tune run records)`` under ``redo_validation/``.
+
+    One P3.6-c study has ONE canonical tune set: a second ``--tune`` refuses while a live tune run exists,
+    and a non-baseline freeze compares only on the live one. A voided run keeps its directory (its pairs
+    stay excluded from later draws) and its ``voided.json`` record ``{run, reason, voided_utc}``. Raises
+    ``ValueError`` on an unreadable frozen.json or void record."""
+    root = paths.state_path("redo_validation")
+    live: list[str] = []
+    voided: list[dict] = []
+    if not root.is_dir():
+        return live, voided
+    for run_dir in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
+        frozen = json.loads((run_dir / "frozen.json").read_text(encoding="utf-8"))
+        if not isinstance(frozen, dict) or frozen.get("purpose") != "tune":
+            continue
+        if not os.path.lexists(run_dir / VOID_FILE):
+            live.append(run_dir.name)
+            continue
+        record = json.loads((run_dir / VOID_FILE).read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or not all(
+                isinstance(record.get(key), str) for key in ("run", "reason", "voided_utc")):
+            raise ValueError("invalid void record")
+        voided.append({key: record[key] for key in ("run", "reason", "voided_utc")})
+    return live, voided
+
+
+def _void_tune(run: str, reason: str | None) -> int:
+    if reason is None or not _VOID_REASON.fullmatch(reason):
+        print("Refused: --void-tune needs --reason of 1-200 letters, digits, spaces or .,:;()/#_- "
+              "(a procedure note, never prompt text).")
+        return 2
+    run_id = tune_dir_name(run)
+    run_dir = paths.state_path("redo_validation", run_id)
+    try:
+        frozen = json.loads((run_dir / "frozen.json").read_text(encoding="utf-8"))
+        purpose = frozen.get("purpose") if isinstance(frozen, dict) else None
+    except (OSError, ValueError):
+        print("Refused: no readable tune run with this id.")
+        return 2
+    if purpose != "tune":
+        print("Refused: run purpose is not tune.")
+        return 2
+    try:
+        _write_private(run_dir / VOID_FILE, json.dumps(dict(
+            run=run_id, reason=reason, voided_utc=datetime.now(timezone.utc).isoformat()),
+            sort_keys=True) + "\n")
+    except FileExistsError:
+        print("Refused: tune run is already voided.")
+        return 2
+    print(f"voided tune run: {run_id}")
+    return 0
 
 
 def resolve_with_all_evidence(*, override: str | None, tag: str | None, sidecar: str | None,
@@ -591,23 +648,40 @@ def cmd_redo_sample(args: list[str]) -> int:
     mode.add_argument("--census", action="store_true")
     mode.add_argument("--freeze", action="store_true")
     mode.add_argument("--tune", action="store_true",
-                      help="draw a TUNE set (own seed, own tune-<id> run dir) disjoint from "
-                           "the M0.9 list, every test run and every earlier tune set")
+                      help="draw THE tune set of the study (own seed, own tune-<id> run dir) disjoint "
+                           "from the M0.9 list, every test run and every earlier tune set; refuses "
+                           "while a live (not voided) tune run exists")
+    mode.add_argument("--void-tune", action="store_true",
+                      help="void tune run --run with --reason (recorded, shown in later frozen.json); "
+                           "its tune rows are never compared again and its widenings stay spent")
     parser.add_argument("--seed", type=int, default=None,
                         help=f"default {DEFAULT_SEED}; {DEFAULT_TUNE_SEED} with --tune")
     parser.add_argument("--run-id", "--run", dest="run_id")
     parser.add_argument("--detector", choices=sorted(redo_signal.VARIANTS),
                         default=redo_signal.BASELINE_VARIANT,
-                        help="detector variant for --census/--freeze; recorded in frozen.json")
+                        help="detector variant for --census/--freeze; non-baseline freeze requires "
+                             "the logged argmax-F1 candidate")
     parser.add_argument("--allow-below-threshold", action="store_true")
     parser.add_argument("--allow-empty-exclusion", action="store_true")
     parser.add_argument("--days", type=float, default=30)
     parser.add_argument("--projects-dir", type=Path)
+    parser.add_argument("--allow-nondefault-projects-dir", action="store_true",
+                        help="let --tune read a projects dir other than the census default (recorded; "
+                             "a curated tune pool is a procedure violation)")
+    parser.add_argument("--reason", help="with --void-tune: why the tune run is voided")
     parser.add_argument("--include-untagged", action="store_true",
                         help="include untagged sessions as a disclosed stratum (default: off)")
     parser.add_argument("--exclusion-file", type=Path,
                         help="local M0.9 exclusion hashes (default: state dir redo_m09_excluded.txt)")
     options = parser.parse_args(args)
+    if options.reason is not None and not options.void_tune:
+        parser.error("--reason needs --void-tune")
+    if options.void_tune:
+        if options.run_id is None:
+            parser.error("--void-tune needs --run")
+        if not _RUN_ID.fullmatch(options.run_id):
+            parser.error("run-id must contain only letters, digits, underscores and hyphens")
+        return _void_tune(options.run_id, options.reason)
     if options.tune and options.detector != redo_signal.BASELINE_VARIANT:
         parser.error("--detector is not allowed with --tune: tune sets are drawn with the v2 baseline")
     seed = options.seed if options.seed is not None else (
@@ -660,9 +734,29 @@ def cmd_redo_sample(args: list[str]) -> int:
     if (options.freeze or options.tune) and os.path.lexists(run_dir):
         print("Refused: run directory already exists.")
         return 2
+    # redo_score imports redo_sample; defer this import until both modules are loaded.
+    from llm_router.redo_score import TUNE_PROVENANCE_KEYS, TuneFreezeRefused, freeze_tune_provenance
+    tune_provenance = dict.fromkeys(TUNE_PROVENANCE_KEYS)
+    try:
+        detector_sha = hashlib.sha256(Path(redo_signal.__file__).read_bytes()).hexdigest()
+        if options.freeze and options.detector != redo_signal.BASELINE_VARIANT:
+            tune_provenance = freeze_tune_provenance(
+                paths.state_path("redo_validation", "tune_log.jsonl"), options.detector, detector_sha)
+    except TuneFreezeRefused as refused:
+        print(refused.message)
+        return 2
+    except (OSError, ValueError, KeyError, TypeError):
+        print("Refused: non-baseline freeze requires a current logged strict argmax-F1 candidate "
+              "and a readable valid tune log.")
+        return 2
     root = (options.projects_dir if options.projects_dir is not None
             else northstar.claude_projects_dir())
     root = Path(root)
+    projects_default = os.path.realpath(root) == os.path.realpath(northstar.claude_projects_dir())
+    if options.tune and not projects_default and not options.allow_nondefault_projects_dir:
+        print("Refused: a tune pool is drawn from the census population (the default projects dir); "
+              "a non-default --projects-dir needs --allow-nondefault-projects-dir, which is recorded.")
+        return 2
     if not root.is_dir() or not any(p.is_file() for p in root.glob("*/*.jsonl")):
         print(f"WARNING: projects dir missing or contains no transcripts: {root.name}; "
               "refusing to report a census", file=sys.stderr)
@@ -670,8 +764,21 @@ def cmd_redo_sample(args: list[str]) -> int:
     try:
         prior_runs = load_prior_runs({"tune", "test"} if options.tune else {"tune"})
     except PriorRunUnreadable as refused:
-        print(f"Refused: {refused.count} unreadable prior run directory(ies): "
-              "disjointness cannot be proven.")
+        run_names = ", ".join(refused.runs[:5])
+        if len(refused.runs) > 5:
+            run_names += f" and {len(refused.runs) - 5} more"
+        print(f"Refused: {refused.count} unreadable prior run directory(ies): {run_names}; "
+              "disjointness cannot be proven; a run dir under redo_validation/ is incomplete; "
+              "move it aside or remove it.")
+        return 2
+    try:
+        live_tune, voided_tune = tune_run_states()
+    except (OSError, ValueError):
+        print("Refused: a tune run's frozen.json or void record is unreadable.")
+        return 2
+    if options.tune and live_tune:
+        print(f"Refused: a live tune run already exists ({', '.join(live_tune)}); one tune set per "
+              "P3.6-c study: void it first with redo-sample --void-tune --run <id> --reason <text>.")
         return 2
     try:
         pool, counts = collect(
@@ -736,7 +843,7 @@ def cmd_redo_sample(args: list[str]) -> int:
         include_untagged=options.include_untagged,
         allow_empty_exclusion=options.allow_empty_exclusion,
         detector_version=redo_signal.PATTERN_VERSION,
-        detector_sha256=hashlib.sha256(Path(redo_signal.__file__).read_bytes()).hexdigest(),
+        detector_sha256=detector_sha,
         manifest_sha256=hashlib.sha256(manifest.encode("utf-8")).hexdigest(),
         seed=seed, run_id=run_id, salt=salt, min_flagged=MIN_FLAGGED,
         purpose="tune" if options.tune else "test", detector_variant=options.detector,
@@ -750,8 +857,13 @@ def cmd_redo_sample(args: list[str]) -> int:
         shortfall=150 - len(rows),
         window=dict(days=options.days, since_iso=_iso(since), until_iso=_iso(until)),
         counts=counts, strata=strata,
+        projects_dir_sha256=_sha(os.path.realpath(root)), projects_dir_default=projects_default,
+        allow_nondefault_projects_dir=options.allow_nondefault_projects_dir,
+        projects_dir_transcripts=sum(p.is_file() for p in root.glob("*/*.jsonl")),
+        voided_tune_runs=voided_tune, n_voided_tune_runs=len(voided_tune),
         weights_combined={h: s["N"] / s["n"] if s["n"] else None for h, s in strata.items()},
         created_utc=_iso(now))
+    frozen.update(tune_provenance)
     if options.include_untagged:
         frozen["sizes_by_kind"] = counts["by_kind"]
         frozen["ledger_conflict_excluded"] = counts["ledger_conflict_excluded"]
@@ -779,7 +891,7 @@ def cmd_redo_sample(args: list[str]) -> int:
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
-    print(f"run_id: {run_id}\nrun_dir: {run_dir}")
+    print(f"run_id: {run_id}")
     for h, s in strata.items():
         print(f"{h}: N={s['N']} n={s['n']}")
     print(f"purpose: {frozen['purpose']}; detector: {options.detector}; prior runs excluded from: "
