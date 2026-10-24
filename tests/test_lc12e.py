@@ -31,7 +31,7 @@ CLOUD_LOCAL = f"ollama/{CLOUD_BARE}"
 # ----------------------------------------------------------------------------- the predicate
 @pytest.mark.parametrize("name", [
     "ollama/gpt-oss:120b-cloud", "qwen3-coder:480b-cloud", "ollama/foo:cloud", "OLLAMA/x:Cloud",
-    "ollama_chat/glm-4.6:cloud", "deepseek-v3.1:671B-CLOUD", "kimi-k2-cloud",  # untagged name ending -cloud: fail closed
+    "ollama_chat/glm-4.6:cloud", "deepseek-v3.1:671B-CLOUD", "kimi-k2:1t-cloud",
 ])
 def test_cloud_names_are_detected(name):
     assert is_ollama_cloud_model(name) is True

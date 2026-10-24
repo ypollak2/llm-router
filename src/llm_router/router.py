@@ -5263,14 +5263,18 @@ async def route_and_call(
             _leads = False
             if _pass_model is not None and _pass_model in models_to_try:
                 try:
-                    _leads = bool(_tj_ctx) and _er.passed_model_leads([_pass_model], _tj_ctx[0], _tj_ctx[1], time.time())
+                    from llm_router.resolver.inventory import is_ollama_cloud_model
+                    # LC-12e: an Ollama cloud model (-cloud / :cloud tag) is never the local survivor; its prompt
+                    # would leave the machine. Inside the try: an import error is a refusal, not a leaked reservation.
+                    _leads = (bool(_tj_ctx) and not is_ollama_cloud_model(_pass_model)
+                              and _er.passed_model_leads([_pass_model], _tj_ctx[0], _tj_ctx[1], time.time()))
+                except _er.EligibilityStepFailed:  # already counted by the helper; the cause text stays accurate
+                    await _release_reservation_if_held()
+                    raise
                 except Exception as _lead_exc:  # noqa: BLE001 - fail closed: an unverifiable survivor is refused (N1)
                     _er.record_fail_closed(_er.FC_CUT_CHECK, _lead_exc)
                     _leads = False
-            from llm_router.resolver.inventory import is_ollama_cloud_model
-            # LC-12e: an Ollama cloud model (-cloud / :cloud tag) is never the local survivor; its prompt would leave the machine.
-            if (_pass_model is None or _pass_model not in models_to_try or not _tj_ctx
-                    or not _leads or is_ollama_cloud_model(_pass_model)):
+            if _pass_model is None or _pass_model not in models_to_try or not _tj_ctx or not _leads:
                 await _release_reservation_if_held()
                 raise _er.PassedModelNotInChain(
                     f"the passed local model is not in the final {task_type.value} chain")

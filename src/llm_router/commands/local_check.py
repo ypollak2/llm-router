@@ -214,6 +214,7 @@ class PlanInfo:
     resume: str = ""
     estimate_s: float | None = None
     prior_scored: int = 0
+    remote: str = ""        # LC-12e: why the runtime says the model is served off this machine
 
 
 def _fmt_s(sec: float) -> str:
@@ -248,6 +249,12 @@ def build_plan(d: Deps, adapter: Any, model: str, bank: Any, runs_root: Path, *,
     p.digest = adapter.digest(model)
     p.settings = adapter.settings_hash(model)
     p.max_chars = adapter.max_prompt_chars(model)
+    # LC-12e: a cloud model renamed to a local-looking name (`ollama cp`, Modelfile FROM) still carries
+    # remote_host / remote_model in the answers just fetched; refuse before the attempt log is touched.
+    marker = getattr(adapter, "remote_marker", None)
+    p.remote = (marker(model) if callable(marker) else None) or ""
+    if p.remote:
+        return p
     p.key = A.config_key(model, p.digest, bank.version, bank.sha256, p.settings)
     now = d.now()
     plan = A.Plan(1) if no_judge else A.AttemptLog(runs_root).plan(p.key, now, force=force)
@@ -408,12 +415,19 @@ def _pick_model(d: Deps, endpoints: list, wanted: str | None) -> tuple[Any, str]
         return pairs[0]
     if not d.interactive:
         return "several models found (" + ", ".join(f"{m}@{e.runtime}" for e, m in pairs[:12]) + "); pass --model."
+    from llm_router.resolver.inventory import is_ollama_cloud_model
+    local = [(e, m) for e, m in pairs if not is_ollama_cloud_model(m)]
+    cloud = sorted({m for _, m in pairs if is_ollama_cloud_model(m)})
+    if not local:
+        return "only Ollama cloud-hosted models found (" + ", ".join(cloud[:12]) + "); local-check measures local models only."
     d.out("Local models found:")
-    for n, (e, m) in enumerate(pairs, 1):
+    for n, (e, m) in enumerate(local, 1):
         d.out(f"  {n}. {m}  ({e.runtime})")
+    if cloud:
+        d.out("Excluded (Ollama cloud-hosted; prompts leave this machine): " + ", ".join(cloud[:12]))
     try:
         choice = int(d.input_fn("Model number: ").strip())
-        return pairs[choice - 1]
+        return local[choice - 1]
     except (ValueError, IndexError, EOFError):
         return "no model chosen; pass --model."
 
@@ -490,6 +504,9 @@ def _run(d: Deps, ns: argparse.Namespace) -> int:
     except runtimes.ProbeFailed as e:
         err(f"The runtime did not answer a probe for {model!r} ({e}). Check that {endpoint.runtime} is running and the model loaded, then retry.")
         return EXIT_PROBE_FAILED
+    if plan.remote:
+        err(f"Refused: {model} is served off this machine ({plan.remote}); local-check measures local models only.")
+        return EXIT_REFUSED
 
     # 3. judge route + cost
     route, quota, est_usd, judge_model = Route(), None, None, bank.manifest.get("judge_id") or ""
@@ -955,6 +972,11 @@ def _switch(d: Deps, sub: str, lane: str, model: str | None) -> int:
                 else "no local model found in the inventory; pass --model NAME (with its tag, as the runtime lists it).")
             return EXIT_NO_RUNTIME
         model = names[0]
+    if sub == "enable":
+        from llm_router.resolver.inventory import is_ollama_cloud_model
+        if is_ollama_cloud_model(model):
+            err(f"Refused: {model} is a cloud-hosted Ollama model; its prompts leave this machine, so it never routes as local. Nothing was changed.")
+            return EXIT_REFUSED
     try:
         if sub == "enable":
             d.routing.enable(model, lane, "manual", path=d.routing_path)

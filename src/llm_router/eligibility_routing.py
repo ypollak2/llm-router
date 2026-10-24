@@ -240,23 +240,21 @@ class EligibilityStepFailed(PassedModelNotInChain):
 FC_STORE_NAME = "text_job_fail_closed.jsonl"
 FC_ELIGIBILITY_STEP = "CHZ-FC-ROUTER-TEXT-JOB-ELIGIBILITY"
 FC_CUT_CHECK = "CHZ-FC-ROUTER-TEXT-JOB-CUT-CHECK"
+#: Cap per generation (``capped_log``, two generations); a row is ~80 bytes, so ~3,000 rows each.
+FC_MAX_BYTES = 256 * 1024
+#: The doctor counts refusals of the last 7 days: one old crash does not alarm forever.
+FC_WINDOW_S = 7 * 86400
 
 
 def record_fail_closed(code: str, exc: BaseException | None = None) -> None:
     """Persist one refusal; recording failures never prevent the refusal."""
     try:
-        path = paths.state_path(FC_STORE_NAME)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        from llm_router import capped_log
         row = {"c": code, "ts": round(time.time(), 3)}
         if exc is not None:
             row["e"] = type(exc).__name__
-        line = (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        try:
-            if os.write(fd, line) != len(line):
-                raise OSError("short fail-closed store write")
-        finally:
-            os.close(fd)
+        capped_log.append(paths.state_path(FC_STORE_NAME),
+                          (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8"), FC_MAX_BYTES)
     except Exception as store_exc:  # noqa: BLE001 -- recording must never prevent refusal
         try:
             from llm_router import failopen
@@ -265,17 +263,38 @@ def record_fail_closed(code: str, exc: BaseException | None = None) -> None:
             pass
 
 
-def fail_closed_counts() -> dict[str, int] | None:
-    """Count the last 20,000 refusal rows; an unreadable store is unknown, never zero."""
+def _tail_lines(path: Path, max_bytes: int) -> list[str] | None:
+    """The complete lines of the last ``max_bytes`` of ``path``; [] if missing, None if unreadable."""
     try:
-        lines = paths.state_path(FC_STORE_NAME).read_text(encoding="utf-8").splitlines()[-20_000:]
+        with open(path, "rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            start = max(0, size - max_bytes)
+            fh.seek(start)
+            data = fh.read()
     except FileNotFoundError:
-        return {}
+        return []
     except Exception:  # noqa: BLE001 -- unreadable counts are unknown
         return None
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    return lines[1:] if start > 0 else lines  # the first line of a tail read may be cut
+
+
+def fail_closed_counts(now: float | None = None, window_s: float = FC_WINDOW_S) -> dict[str, int] | None:
+    """Refusals per code with ``ts`` in the last ``window_s`` seconds, over both ``capped_log`` generations.
+
+    Each generation is tail-read to its cap, so the read stays bounded even for a file written before the
+    cap existed. A store that holds lines but no valid row is unknown (None), never zero."""
     try:
+        cutoff = (time.time() if now is None else now) - window_s
+        base = paths.state_path(FC_STORE_NAME)
+        lines: list[str] = []
+        for gen in (base.with_name(base.name + ".1"), base):
+            got = _tail_lines(gen, FC_MAX_BYTES + 4096)
+            if got is None:
+                return None
+            lines.extend(got)
         counts: dict[str, int] = {}
-        nonempty = False
+        nonempty = valid = False
         for line in lines:
             if not line.strip():
                 continue
@@ -286,11 +305,24 @@ def fail_closed_counts() -> dict[str, int] | None:
                 continue
             if not isinstance(row, dict) or not isinstance(row.get("c"), str) or not row["c"]:
                 continue
-            code = row["c"]
-            counts[code] = counts.get(code, 0) + 1
-        return None if nonempty and not counts else counts
+            ts = row.get("ts")
+            if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+                continue
+            valid = True
+            if ts >= cutoff:
+                counts[row["c"]] = counts.get(row["c"], 0) + 1
+        return None if nonempty and not valid else counts
     except Exception:  # noqa: BLE001 -- counting must never raise
         return None
+
+
+def _pass_only_refusal(code: str, exc: BaseException) -> None:
+    """LC-12e: on the pass-only text-job path, a crashed eligibility helper is a counted fail-closed refusal
+    (:class:`EligibilityStepFailed`), not a fail-open event that would read as "not in the chain"."""
+    if _require_passed_first.get():
+        record_fail_closed(code, exc)
+        raise EligibilityStepFailed(
+            f"the eligibility step failed ({type(exc).__name__}); local-only routing refuses") from exc
 
 
 def set_require_passed_first() -> contextvars.Token:
@@ -305,7 +337,8 @@ def reset_require_passed_first(token: contextvars.Token) -> None:
 
 def passed_model_leads(models: list[str], job: str, input_len: int, now: float) -> bool:
     """True iff ``models[0]`` is an Ollama model with a routable passed lane for ``job`` (the ``prefer_passed``
-    guards). Never raises; False on any error (fail closed)."""
+    guards). False on any error (fail closed); on the pass-only text-job path the error raises
+    :class:`EligibilityStepFailed` instead (LC-12e), otherwise it never raises."""
     try:
         if not models or _opted_out() or not isinstance(input_len, int) or input_len < 0:
             return False
@@ -313,6 +346,7 @@ def passed_model_leads(models: list[str], job: str, input_len: int, now: float) 
         digests = display.inventory()[1]
         return _routable(models[0], job, input_len, digests, None, None, None, None, now)
     except Exception as exc:  # noqa: BLE001 -- fail-closed: an unverifiable chain is not taken
+        _pass_only_refusal(FC_ELIGIBILITY_STEP, exc)
         from llm_router import failopen
         failopen.record("CHZ-FO-ELIGIBILITY-PASSED-LEADS", exc)
         return False
@@ -365,12 +399,14 @@ def prefer_passed(
     When a passed lane is withheld for a reason of this list the router did not fail on, a ``not_preferred``
     skip cause names it (``why`` shows it), including ``input_over_limit``;
     ``local_routing.doctor_lines`` reports the settings ones. Never
-    raises; the chain is returned as given on any error. The acceptance check and the Claude fallback in
+    raises (except on the pass-only text-job path, where an error raises :class:`EligibilityStepFailed`, LC-12e);
+    the chain is returned as given on any error. The acceptance check and the Claude fallback in
     ``llm_text_job`` are unchanged.
     """
     try:
         return _prefer_passed(models, job, input_len, now, digests, ctx_for, think, eligibility, routing)
     except Exception as exc:  # noqa: BLE001 -- fail-open: the chain stays as built
+        _pass_only_refusal(FC_ELIGIBILITY_STEP, exc)
         from llm_router import failopen
         failopen.record("CHZ-FO-ELIGIBILITY-PREFER-PASSED", exc)
         return models

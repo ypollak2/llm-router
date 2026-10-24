@@ -280,6 +280,11 @@ class _Adapter:
         the context probe failed in transit (LC-6 scope partition must catch it)."""
         return max_prompt_chars(self.ctx(model), self.max_tokens)
 
+    def remote_marker(self, model: str) -> str | None:
+        """LC-12e: why the runtime says ``model`` is served off this machine, or None. Reads only the
+        answers the probes above already fetched; never makes a request."""
+        return None
+
     def generate(self, model: str, prompt: str, *, system: str | None = None,
                  timeout_s: float = 240.0) -> GenResult:
         """One serial, no-retry generation under a single wall-clock deadline."""
@@ -344,6 +349,7 @@ class OllamaAdapter(_Adapter):
     def __init__(self, base_url: str, **kw):
         super().__init__(base_url, **kw)
         self._show: dict[str, dict | None] = {}
+        self._tags_row: dict[str, dict] = {}    # LC-12e: the /api/tags row digest() already read
 
     def _show_info(self, model: str) -> dict | None:
         if model not in self._show:     # only a real answer is cached; ProbeFailed is not
@@ -366,10 +372,19 @@ class OllamaAdapter(_Adapter):
     def digest(self, model: str) -> str | None:
         data = _strict_json(self.base_url, "GET", "/api/tags", allow_remote=self.allow_remote)
         for m in _entries(data, "models"):
+            if model in (m.get("name"), m.get("model")):
+                self._tags_row.setdefault(model, m)
             if model in (m.get("name"), m.get("model")) and m.get("digest"):
                 d = str(m["digest"])
                 return d if d.startswith("sha256:") else "sha256:" + d
         return None
+
+    def remote_marker(self, model: str) -> str | None:
+        """LC-12e: ``remote_host`` / ``remote_model`` in the ``/api/tags`` row (from :meth:`digest`) or the
+        ``/api/show`` answer (from :meth:`context_length`), whichever were fetched. A cloud model copied or
+        re-created under a local-looking name still carries them. No request of its own."""
+        from llm_router.resolver.inventory import ollama_remote_marker
+        return ollama_remote_marker(self._tags_row.get(model), self._show.get(model))
 
     def _request(self, model, prompt, system):
         msgs = ([{"role": "system", "content": system}] if system else []) + \

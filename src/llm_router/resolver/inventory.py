@@ -350,9 +350,15 @@ def is_ollama_cloud_model(model_id: object) -> bool:
     """Identify cloud models by name only; unreadable or empty ids fail closed.
 
     Strip one leading ``ollama/`` or ``ollama_chat/`` prefix (case-insensitive).
-    The tag is the text after the last colon, or the whole untagged name: a
-    lower-cased tag equal to ``cloud`` or ending in ``-cloud`` means cloud.
-    Thus ``cloudy-model:7b`` is local by name, while untagged ``foo-cloud`` is cloud.
+    The tag is the text after the last colon; an untagged name means ``:latest``,
+    as Ollama resolves it, so ``x-cloud`` and ``x-cloud:latest`` are the same model
+    and both are local by name. A lower-cased tag equal to ``cloud`` or ending in
+    ``-cloud`` means cloud. Thus ``cloudy-model:7b`` is local by name.
+
+    A name is not proof: a cloud model copied or re-created under a local-looking
+    name (``ollama cp``, a Modelfile ``FROM``) keeps no marker in it. Ollama's
+    ``remote_host`` / ``remote_model`` metadata (:func:`ollama_remote_marker`) is
+    the check for that case.
     """
     if not isinstance(model_id, str) or not model_id:
         return True
@@ -363,8 +369,25 @@ def is_ollama_cloud_model(model_id: object) -> bool:
             break
     if not name:
         return True
-    tag = name.rsplit(":", 1)[-1].lower()
+    base, sep, tag = name.rpartition(":")
+    tag = tag.lower() if sep and "/" not in tag else "latest"
     return tag == "cloud" or tag.endswith("-cloud")
+
+
+def ollama_remote_marker(tags_row: object, show: object) -> str | None:
+    """Which Ollama answer says the model is served by a remote host, or None.
+
+    Cloud models carry ``remote_host`` / ``remote_model`` in their ``/api/tags`` row and
+    their ``/api/show`` answer, whatever they are named. Reads the two answers given;
+    makes no request. A missing or non-dict answer says nothing (None).
+    """
+    for src, label in ((tags_row, "/api/tags"), (show, "/api/show")):
+        if not isinstance(src, dict):
+            continue
+        for key in ("remote_host", "remote_model"):
+            if src.get(key):
+                return f"{label} reports {key}"
+    return None
 
 
 def _cloud_marker(name: str, tags_row: dict, show: dict) -> str | None:
@@ -376,10 +399,9 @@ def _cloud_marker(name: str, tags_row: dict, show: dict) -> str | None:
     base URL alone calls them local, which is wrong in the one direction that
     matters (a local-only request would send the prompt off the machine).
     """
-    for src, label in ((tags_row, "/api/tags"), (show, "/api/show")):
-        for key in ("remote_host", "remote_model"):
-            if src.get(key):
-                return f"{label} reports {key}"
+    why = ollama_remote_marker(tags_row, show)
+    if why:
+        return why
     if is_ollama_cloud_model(name):
         return "model tag names a cloud variant"
     return None

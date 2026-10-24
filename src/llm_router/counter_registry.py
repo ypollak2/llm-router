@@ -386,16 +386,23 @@ def _read_judge_sampler() -> CounterReading:
 
 
 def _read_text_job_fail_closed() -> CounterReading:
+    """Local-only text jobs refused because their eligibility step crashed, in the last 7 days (LC-12e).
+
+    Windowed (``eligibility_routing.FC_WINDOW_S``) so one old crash does not alarm forever; the store is
+    capped (``capped_log``). An unreadable store is UNKNOWN, never 0.
+    """
     try:
-        from llm_router.eligibility_routing import fail_closed_counts
+        from llm_router.eligibility_routing import FC_WINDOW_S, fail_closed_counts
 
         counts = fail_closed_counts()
         if counts is None:
             return CounterReading(None, alarming=True, unknown_reason="fail-closed store present but unparseable")
         total = sum(counts.values())
+        days = FC_WINDOW_S / 86400
         return CounterReading(
             float(total), alarming=total > 0,
-            detail=tuple(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1])),
+            detail=(f"in the last {days:g} days",)
+            + tuple(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1])),
         )
     except Exception as exc:  # noqa: BLE001
         return CounterReading(None, unknown_reason=type(exc).__name__)
