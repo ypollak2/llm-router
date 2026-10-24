@@ -118,7 +118,6 @@ INHERITED_BENIGN = (
 )
 
 SHORT_NEGATIVES = (
-    "no",
     "wrong",
     "not that one",
     "not quite",
@@ -140,6 +139,21 @@ PRECISION_NEGATIVES = (
     "still need to push it",
     "still on it?",
     "not merged yet",
+    # Review of PR #708, round 2.
+    "i get the same error when the server restarts on prod; is that a known issue in nginx?",
+    "that broke the build on staging yesterday too, before this pr. separate issue",
+    "that made it worse for users on ie11 historically; add a note",
+    "undo that last commit on the release branch, the release manager asked",
+    "go back to the previous version of the spec doc and summarize what changed",
+    "here is the snippet:\n```python\nx = compute()  # still wrong\n```\nadd a docstring to it",
+    "> still wrong\n> that broke it\nwhat does the reviewer mean by this?",
+    "~~~\nundo that\n~~~\nexplain this shell history",
+    "i meant: also update the readme",
+    "i meant, also add a changelog line",
+    "revert that commit on the release branch",
+    "I'm getting the same error in the staging logs from last week",
+    # A bare "no" after "Want me to push it?" declines an offer (design section 1: y=0).
+    "no",
 )
 
 # Planned positives dropped by the tightening, kept here so the choice is explicit: each needs a token
@@ -284,3 +298,98 @@ def test_mixed_pairs_are_strict_supersets_including_transcript_indices():
     for variant in ("v3c", "v3d"):
         first_only = [{"type": "user", "message": {"content": "still wrong"}}]
         assert rs.redo_flags(first_only, variant) == []
+
+
+# Tightened forms that must still flag (round 2): a rejection then punctuation or the end, the last
+# change named, a short "that broke ...", and a rejection after pasted (fenced or quoted) output.
+TIGHTENED_POSITIVES = (
+    "undo that.",
+    "undo that, it broke the tests",
+    "undo your change",
+    "revert it!",
+    "revert your last",
+    "go back to the previous version, then run the tests",
+    "go back to how it was.",
+    "roll that back, please",
+    "that broke it",
+    "that broke your fix",
+    "ugh, that broke the requested behavior",
+    "```\nTraceback: synthetic\n```\nstill wrong",
+    "> synthetic quoted output\nI still get the same error",
+    "i meant the second file: also it should be csv",
+)
+
+
+def test_tightened_forms_still_flag():
+    for prompt in TIGHTENED_POSITIVES:
+        assert rs._signals(prompt, PREVIOUS, "v2") == [], prompt
+        for variant in ("v3c", "v3d"):
+            assert rs._signals(prompt, PREVIOUS, variant) == [rs.SIGNAL_CONTRADICTION], (variant, prompt)
+
+
+def test_short_form_word_limits_round_2():
+    eight = "ok so that broke the requested csv output"
+    nine = "ok so that broke the requested csv output again"
+    assert len(rs._words(eight)) == rs.V3C_SHORT_MAX_WORDS
+    assert rs._signals(eight, PREVIOUS, "v3c") == [rs.SIGNAL_CONTRADICTION]
+    assert rs._signals(nine, PREVIOUS, "v3c") == []
+    six_after = "I still get the same error after your fix to the parser"
+    seven_after = "I still get the same error after your fix to the csv parser"
+    assert rs._signals(six_after, PREVIOUS, "v3c") == [rs.SIGNAL_CONTRADICTION]
+    assert rs._signals(seven_after, PREVIOUS, "v3c") == []
+    # The ending rule sees the whole prompt: a cut window never fakes an end of prompt.
+    padded = "x" * (rs.FAILURE_WINDOW - 30) + " i get the same error " + "when " + "y" * 200
+    assert rs._signals(padded, PREVIOUS, "v3c") == []
+
+
+def test_bare_no_declining_an_offer_is_not_a_redo():
+    entries = [
+        {"type": "user", "message": {"content": "commit the synthetic fix"}},
+        {"type": "assistant", "message": {"content": "Committed. Want me to push it?"}},
+        {"type": "user", "message": {"content": "no"}},
+    ]
+    for variant in ("v2", "v3c", "v3d"):
+        assert rs.redo_flags(entries, variant) == [], variant
+    assert not rs._short_negative_v3d("no") and not rs._short_negative_v3d("nope")
+
+
+def test_unquoted_strips_fences_and_quote_lines_only():
+    assert rs._unquoted("a\n```\nstill wrong\n```\nb") == "a\n\n\nb"
+    assert rs._unquoted("a\n~~~\nx\n~~~") == "a"
+    assert rs._unquoted("a\n```\nunclosed still wrong") == "a"
+    assert rs._unquoted("  > quoted\nkept > not a quote") == "kept > not a quote"
+
+
+_TOKENS = ("still", "wrong", "same", "error", "i", "get", "getting", "undo", "revert", "that", "this",
+           "it", "go", "back", "to", "the", "previous", "version", "and", "summarize", "no", "nope",
+           "meant", "also", ":", ",", ".", "when", "on", "broke", "made", "worse", "your", "change",
+           "claude:", "please", "x", "fix", "didn't", "work", "\n")
+_FENCED = ("still wrong", "undo that", "that broke it", "i still get the same error", "no",
+           "go back to the previous version", "that's not what i asked", "try again")
+
+
+def test_property_random_prompts_with_fences_keep_superset_and_ignore_quoted_text():
+    """Seeded random prompts (N below): v2 <= v3c <= v3d signal by signal, including prompts with
+    fences and quote lines; v3c's own addition never depends on fenced or quoted text."""
+    import random
+
+    rng = random.Random(708)
+    n = 20_000
+    checked = 0
+    for _ in range(n):
+        body = " ".join(rng.choice(_TOKENS) for _ in range(rng.randint(1, 14))).replace("\n ", "\n")
+        hidden = rng.choice(_FENCED)
+        fence = rng.choice(("```", "~~~"))
+        for prompt in (body, f"{fence}\n{hidden}\n{fence}\n{body}", f"> {hidden}\n{body}",
+                       f"{body}\n{fence}\n{hidden}"):
+            previous = rng.choice((PREVIOUS, prompt))
+            v2, v3c, v3d = (rs._signals(prompt, previous, v) for v in ("v2", "v3c", "v3d"))
+            assert set(v2) <= set(v3c) <= set(v3d), prompt
+            assert [s for s in v3c if s in v2] == v2, prompt
+            checked += 1
+        if body.lstrip().startswith(">"):
+            continue
+        plain = rs._redo_phrase_v3c(rs._unquoted(body.replace("’", "'").lstrip().lower()))
+        for wrapped in (f"{fence}\n{hidden}\n{fence}\n{body}", f"> {hidden}\n{body}"):
+            assert rs._redo_phrase_v3c(rs._unquoted(wrapped.lower())) == plain, wrapped
+    assert checked == 4 * n

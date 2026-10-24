@@ -17,24 +17,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous answer: "that's not what I asked", "still wrong", "still not fixed", "still getting the same error" or
   a bare "same error", "no, I meant" (not "I meant to"), "undo that", "revert your change", "go back to the
   previous version" ...; reported as `contradiction`) and `v3d` (`v3c` plus a short rejection of at most 6 words:
-  no/nope/wrong/not it/not that/not right/not quite/still wrong/broken/failing/the same, minus "no worries",
-  "not now", ...; bare "still" and "not" are excluded). Product reports ("same error appears when the server
-  restarts"), new questions ("I meant to ask ..."), "revert your branch", "go back to the plan", "still not
-  merged" and "still, can you also add X" are must-not-flag fixtures. Both keep every v2 signal, so their flags are
+  wrong/not it/not that/not right/not quite/still wrong/broken/failing/the same, minus "not now", ...; bare
+  "still", "not", "no" and "nope" are excluded: a bare "no" after "Want me to push it?" declines an offer, and v2
+  already flags "no," / "no." / "nope"). The v3c/v3d-only patterns ignore text in ``` / ~~~ fences and on `>`
+  quote lines. "same error" needs "still getting / I get the same error" ending the prompt within 6 words without
+  a "when/if/while/on/in/is that/known" continuation; "that broke" needs "it" / "the|your fix|change|code" or a
+  prompt of at most 8 words, as does "that made it worse"; "undo that" / "revert it" must end the prompt or a
+  clause, or name the change ("undo your edit"); "go back to the previous version" must end there and not be
+  followed by "and summarize|explain|list|write|add ..."; "i meant: also ..." is a refinement. Product reports
+  ("same error appears when the server restarts", "I get the same error when the server restarts on prod; is
+  that a known issue?"), new questions ("I meant to ask ..."), git instructions ("undo that last commit on the
+  release branch"), "revert your branch", "go back to the plan", "still not merged" and "still, can you also add
+  X" are must-not-flag fixtures. Both keep every v2 signal, so their flags are
   a superset of v2's (tests/test_redo_variants_recall.py, including reask/repeat combined with a new phrase).
   Written from the label definition only, no data. Under the at-most-2-widenings rule v3a, v3b, v3c and v3d are
   four candidates but only two non-baseline (candidate, detector sha256) pairs may ever be tune-scored, so the
   owner picks which two. Once both are used, any edit to `redo_signal.py` is a permanent dead end: no variant can
   be tune-scored or frozen again, only `v2`. `PATTERN_VERSION` and the default stay `v2`.
-- P3.6-c PR3b (anti-gaming): `redo-sample --freeze --detector X` refuses a non-baseline X unless X's latest row at
-  the current detector sha256 is the strict F1 argmax of its own tune set: the rows with the same `tune_run`,
-  tune manifest sha256 and labels digest (sha256 over the sorted sha256 of each labels file read). That set must
-  hold a `v2` baseline row; competitors are ranked by their maximum F1 in the set and X by its minimum, so
-  re-scoring on another labels file cannot crown a loser; a tie fails closed. Each refusal cause (no log, no row,
-  stale sha, no labels digest, no baseline, not argmax, tie) has its own counts-only message. `frozen.json` records
-  `tune_row_sha256`, `tune_log_sha256`, `tune_log_bytes`, `tune_run`, `tune_manifest_sha256` and
-  `tune_labels_sha256`; `redo-score` re-runs the gate on the bound log prefix, refuses a labels or tune-set
-  mismatch, and refuses a baseline freeze that carries tune provenance; `result.json` records `detector_variant`.
+- P3.6-c PR3b (anti-gaming): `redo-sample --freeze --detector X` refuses a non-baseline X unless X is the strict F1
+  argmax of the study's canonical tune set. One study has one live tune run: a second `redo-sample --tune` refuses
+  until the first is voided with `redo-sample --void-tune --run ID --reason TEXT` (recorded in every later
+  `frozen.json`; a voided run cannot be scored and its widenings stay spent). The run's first complete
+  `redo-score --tune` row (n_lost 0) fixes the canonical set: tune manifest sha256, labels digest (sha256 over the
+  sorted sha256 of each labels file read), scored-pair digest (sha256 over the sorted pair ids scored),
+  projects-dir digest and unclear count. A later tune score on that run with other label files refuses. Only
+  complete rows with that identity are compared; the set must hold a `v2` row and a row for every other
+  candidate with tune rows at the current detector sha256; competitors are ranked by their maximum F1 there, X by
+  its minimum (X's own older-sha rows are not competitors); a tie fails closed. What this prevents with ordinary
+  CLI use: crowning a loser by re-scoring on another labels file (refused at score time), by scoring the
+  candidate from a projects dir missing transcripts (incomplete, refused at freeze), or by drawing a fresh tune
+  run and scoring only v2 and the candidate there (refused while the first run is live; after a recorded void the
+  other candidates must be re-scored on the new run). `redo-sample --tune` also refuses a non-default
+  `--projects-dir` unless `--allow-nondefault-projects-dir` is passed (recorded with the dir's real-path digest
+  and transcript count): the tune pool must come from the census population, and a curated directory is a
+  procedure violation. What stays procedure-only (the tool cannot detect it): a rigged labels file scored as the
+  run's FIRST complete scoring, edited transcripts, a curated pool drawn with the override flag, and a void
+  combined with a `redo_signal.py` edit that leaves a competitor scored only at an older sha on the voided run.
+  Each refusal cause has its own counts-only message. `frozen.json` records `tune_row_sha256`,
+  `tune_log_sha256`, `tune_log_bytes`, `tune_run`, `tune_manifest_sha256`, `tune_labels_sha256`,
+  `tune_scored_pairs_sha256` and `tune_projects_dir_sha256`; `redo-score` re-runs the gate on the bound log prefix
+  against the live tune run, refuses a tune-set mismatch or a voided bound run, and refuses a baseline freeze that
+  carries tune provenance; `result.json` records `detector_variant`. `redo-sample` prints the run id, never the
+  run directory path.
   Tune-log rows store `detector_sha256`, `tune_manifest_sha256`, `labels_sha256` and `variant_params`; the widening
   cap counts distinct (candidate, sha256). `tune_log.jsonl` is append-only by procedure: deleting or rewriting it
   AFTER a freeze is refused at score time, but an edit BEFORE freeze cannot be detected by the tool and is a

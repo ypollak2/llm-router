@@ -5,6 +5,9 @@ tune_log.jsonl is append-only by procedure. A non-baseline freeze binds the log 
 (tune_log_sha256/tune_log_bytes) and the labels digest in frozen.json, so deleting or rewriting
 that prefix AFTER freeze is refused at test scoring. Editing the log BEFORE freeze cannot be
 detected by this tool: it is a procedure violation that only the procedure rule prevents.
+The freeze compares candidates only in the canonical tune set (``tune_argmax``): the one live tune
+run's first complete scoring fixes its labels, scored pairs and projects dir, and every current-sha
+candidate with tune rows must be scored there.
 """
 from __future__ import annotations
 
@@ -21,7 +24,7 @@ from pathlib import Path
 
 from llm_router import northstar, paths, redo_signal
 from llm_router.local_check.stats import wilson
-from llm_router.redo_sample import _sha, _write_private, tune_dir_name
+from llm_router.redo_sample import VOID_FILE, _sha, _write_private, tune_dir_name
 
 STRATA = ("F", "S", "R")
 LABELS = ("redo", "not_redo", "unclear", "lost")
@@ -423,6 +426,7 @@ def score_tune_candidate(rows, labels_by_pair, signals_by_pair) -> dict:
     Overall counts a pair as flagged when any signal fired. Weighted counts use the manifest's stratum
     weights N_h/n_h, so recall is not biased by the thin sampling of unflagged strata."""
     scored = []
+    scored_ids = []
     n_unclear = n_lost = 0
     for row in rows:
         label = labels_by_pair.get(row["pair_id"], "lost")
@@ -434,11 +438,24 @@ def score_tune_candidate(rows, labels_by_pair, signals_by_pair) -> dict:
         else:
             weight = round(row["weight_N_h_combined"] / row["n_h_combined"], 6)
             scored.append((weight, label, tuple(signals)))
+            scored_ids.append(row["pair_id"])
     return dict(
         n_manifest=len(rows), n_scored=len(scored), n_unclear=n_unclear, n_lost=n_lost,
+        scored_pairs_sha256=scored_pairs_sha256(scored_ids),
         overall=_scope_counts(scored, bool),
         per_signal={sig: _scope_counts(scored, lambda signals, sig=sig: sig in signals)
                     for sig in TUNE_SIGNALS})
+
+
+def scored_pairs_sha256(pair_ids) -> str:
+    """sha256 over the sorted pair ids a tune score actually scored (one per line): which pairs, not
+    how many, so two rows with equal counts on different pairs never compare as one tune set."""
+    return hashlib.sha256("\n".join(sorted(pair_ids)).encode("utf-8")).hexdigest()
+
+
+def projects_dir_sha256(projects_dir) -> str:
+    """sha256 of the projects dir's real path: records which transcript tree was read, never the path."""
+    return _sha(os.path.realpath(projects_dir))
 
 
 def candidate_signals(rows, frozen, projects_dir, variant) -> tuple[dict, int]:
@@ -504,7 +521,8 @@ def _parse_tune_log(content: bytes) -> list[dict]:
 
 
 TUNE_PROVENANCE_KEYS = ("tune_row_sha256", "tune_log_sha256", "tune_log_bytes", "tune_run",
-                        "tune_manifest_sha256", "tune_labels_sha256")
+                        "tune_manifest_sha256", "tune_labels_sha256", "tune_scored_pairs_sha256",
+                        "tune_projects_dir_sha256")
 
 
 class TuneFreezeRefused(ValueError):
@@ -532,18 +550,56 @@ def _f1(row: dict):
     return value
 
 
+TUNE_SET_KEYS = ("tune_run", "tune_manifest_sha256", "labels_sha256", "scored_pairs_sha256",
+                 "projects_dir_sha256")
+
+
 def _tune_set(row: dict):
-    return (row.get("tune_run"), row.get("tune_manifest_sha256"), row.get("labels_sha256"))
+    """A row's tune-set identity: tune run, tune manifest, labels digest, WHICH pairs were scored, the
+    projects dir read, and the unclear count. Rows compare only when all of these are equal."""
+    return tuple(row.get(key) for key in TUNE_SET_KEYS) + (row.get("n_unclear"),)
 
 
-def tune_argmax(rows: list[dict], candidate: str, detector_sha: str) -> dict:
-    """The candidate's latest row at ``detector_sha``, if it is the strict F1 argmax of its tune set.
+def _has_identity(row: dict) -> bool:
+    key = _tune_set(row)
+    return all(isinstance(value, str) for value in key[:-1]) and type(key[-1]) is int
 
-    The tune set is the selected row's (tune_run, tune manifest sha256, labels digest): rows scored on
-    another tune run or another labels file are never compared. That set must hold a v2 baseline row with
-    a defined F1. Every competitor ((candidate, detector sha) other than the selected pair) is ranked by
-    its MAXIMUM F1 over its rows in the set, so re-scoring cannot lower it; the candidate by its MINIMUM
-    over its rows at ``detector_sha`` in the set. A tie refuses. Raises ``TuneFreezeRefused``."""
+
+def _complete(row: dict) -> bool:
+    """Every manifest pair was labelled (or unclear) and re-read: no lost pair (B1 of the PR #708 review)."""
+    return _has_identity(row) and type(row.get("n_lost")) is int and row["n_lost"] == 0
+
+
+def canonical_tune_set(rows: list[dict], tune_run: str):
+    """The tune-set identity of the FIRST complete row scored on ``tune_run``, or None. Its labels digest
+    is the run's canonical labels source: a later score on that run with other labels is refused."""
+    return next((_tune_set(row) for row in rows
+                 if row.get("tune_run") == tune_run and _complete(row)), None)
+
+
+def canonical_tune_run() -> str:
+    """The one live (not voided) tune run of this study; refuses with counts only otherwise."""
+    from llm_router.redo_sample import tune_run_states
+    live, voided = tune_run_states()
+    if len(live) != 1:
+        raise TuneFreezeRefused(
+            "tune_runs", f"Refused: a non-baseline freeze needs exactly one live tune run; found {len(live)} "
+            f"live and {len(voided)} voided.")
+    return live[0]
+
+
+def tune_argmax(rows: list[dict], candidate: str, detector_sha: str, tune_run: str) -> dict:
+    """The candidate's latest row at ``detector_sha`` in the canonical tune set, if it is the strict F1
+    argmax there.
+
+    The canonical tune set is fixed by the run, not by the candidate: the identity (``_tune_set``) of the
+    first complete row on ``tune_run``, the study's one live tune run. Only complete rows (n_lost 0) with
+    exactly that identity are compared. The set must hold a v2 baseline row with a defined F1, and EVERY
+    non-baseline candidate with any tune row at ``detector_sha`` must have a row in it, so leaving a
+    competitor out of the set refuses. Each competitor (a (candidate, detector sha) pair of ANOTHER
+    candidate) is ranked by its MAXIMUM F1 in the set, so re-scoring cannot lower it; the candidate by its
+    MINIMUM over its rows at ``detector_sha`` in the set; its own rows at other shas are not competitors.
+    A tie refuses. Raises ``TuneFreezeRefused``."""
     for row in rows:
         _f1(row)
     own = [row for row in rows if row["candidate"] == candidate]
@@ -555,22 +611,47 @@ def tune_argmax(rows: list[dict], candidate: str, detector_sha: str) -> dict:
         raise TuneFreezeRefused(
             "stale_sha", f"Refused: none of the candidate's {len(own)} tune row(s) was scored at the "
             "current detector sha256 (redo_signal.py changed after scoring).")
-    selected = current[-1]
-    key = _tune_set(selected)
-    if None in key:
+    key = canonical_tune_set(rows, tune_run)
+    if key is None:
         raise TuneFreezeRefused(
-            "labels_mismatch", "Refused: the selected tune row has no labels digest or tune-set identity "
-            "(written before labels binding), so its tune set cannot be matched.")
-    same_set = [row for row in rows if _tune_set(row) == key]
+            "no_complete", "Refused: the live tune run has no complete tune scoring (every manifest pair "
+            "labelled and re-read, n_lost 0); complete its labels, then score the baseline and candidates.")
+    same_set = [row for row in rows if _complete(row) and _tune_set(row) == key]
+    mine_rows = [row for row in same_set
+                 if row["candidate"] == candidate and row.get("detector_sha256") == detector_sha]
+    if not mine_rows:
+        on_run = [row for row in current if row.get("tune_run") == tune_run]
+        if any(not _has_identity(row) for row in on_run):
+            raise TuneFreezeRefused(
+                "labels_mismatch", "Refused: the candidate's tune row has no labels digest, scored-pair "
+                "digest or tune-set identity (written before this binding), so its tune set cannot be "
+                "matched.")
+        lost = [row["n_lost"] for row in on_run if type(row.get("n_lost")) is int and row["n_lost"] > 0]
+        if lost:
+            raise TuneFreezeRefused(
+                "incomplete", f"Refused: incomplete tune scoring: the candidate's {len(lost)} row(s) on the "
+                f"live tune run lost pairs (largest n_lost {max(lost)}); every manifest pair must be "
+                "labelled and its transcript re-read.")
+        raise TuneFreezeRefused(
+            "not_in_set", "Refused: the candidate has no row in the canonical tune set (the live tune "
+            "run's first complete scoring: same labels digest, scored pairs and projects dir); score it "
+            "there.")
     baseline = [_f1(row) for row in same_set if row["candidate"] == redo_signal.BASELINE_VARIANT
                 and _f1(row) is not None]
     if not baseline:
         raise TuneFreezeRefused(
-            "no_baseline", f"Refused: the selected tune set has no {redo_signal.BASELINE_VARIANT} "
-            "baseline row with a defined F1 (same tune run and labels digest); score the baseline on "
-            "the same labels first.")
-    mine = [_f1(row) for row in same_set
-            if row["candidate"] == candidate and row.get("detector_sha256") == detector_sha]
+            "no_baseline", f"Refused: the canonical tune set has no {redo_signal.BASELINE_VARIANT} "
+            "baseline row with a defined F1; score the baseline there first.")
+    required = {row["candidate"] for row in rows if row.get("detector_sha256") == detector_sha
+                and row["candidate"] not in (redo_signal.BASELINE_VARIANT, candidate)}
+    present = {row["candidate"] for row in same_set if row.get("detector_sha256") == detector_sha}
+    missing = required - present
+    if missing:
+        raise TuneFreezeRefused(
+            "incomplete_comparison", f"Refused: incomplete comparison: {len(missing)} other candidate(s) "
+            "with tune rows at the current detector sha256 have no row in the canonical tune set; score "
+            "each there before freezing.")
+    mine = [_f1(row) for row in mine_rows]
     if any(value is None for value in mine):
         raise TuneFreezeRefused("undefined_f1", "Refused: the candidate's tune F1 is undefined.")
     best = min(mine)
@@ -578,7 +659,7 @@ def tune_argmax(rows: list[dict], candidate: str, detector_sha: str) -> dict:
     for row in same_set:
         pair = (row["candidate"], row.get("detector_sha256"))
         value = _f1(row)
-        if pair != (candidate, detector_sha) and value is not None:
+        if row["candidate"] != candidate and value is not None:
             competitors[pair] = max(value, competitors.get(pair, value))
     higher = sum(value > best for value in competitors.values())
     tied = sum(value == best for value in competitors.values())
@@ -590,7 +671,7 @@ def tune_argmax(rows: list[dict], candidate: str, detector_sha: str) -> dict:
         raise TuneFreezeRefused(
             "tie", f"Refused: the candidate ties {tied} of {len(competitors)} competitor(s) on tune F1 "
             "in its tune set; a tie fails closed.")
-    return selected
+    return mine_rows[-1]
 
 
 def freeze_tune_provenance(path: Path, candidate: str, detector_sha: str) -> dict:
@@ -599,16 +680,18 @@ def freeze_tune_provenance(path: Path, candidate: str, detector_sha: str) -> dic
         raise TuneFreezeRefused("no_log", "Refused: non-baseline freeze needs a tune log and none exists; "
                                 "score the baseline and the candidate with redo-score --tune first.")
     content = path.read_bytes()
-    selected = tune_argmax(_parse_tune_log(content), candidate, detector_sha)
+    selected = tune_argmax(_parse_tune_log(content), candidate, detector_sha, canonical_tune_run())
     return dict(tune_row_sha256=tune_row_sha256(selected),
                 tune_log_sha256=hashlib.sha256(content).hexdigest(), tune_log_bytes=len(content),
                 tune_run=selected["tune_run"], tune_manifest_sha256=selected["tune_manifest_sha256"],
-                tune_labels_sha256=selected["labels_sha256"])
+                tune_labels_sha256=selected["labels_sha256"],
+                tune_scored_pairs_sha256=selected["scored_pairs_sha256"],
+                tune_projects_dir_sha256=selected["projects_dir_sha256"])
 
 
 def verify_tune_provenance(path: Path, frozen: dict) -> None:
-    """Re-run the freeze gate on the log prefix bound at freeze; the same row must win, on the same
-    tune set and labels digest. Only changes AFTER freeze are detectable here."""
+    """Re-run the freeze gate on the log prefix bound at freeze, against the study's live tune run now;
+    the same row must win, on the same tune set. Only changes AFTER freeze are detectable here."""
     size = frozen["tune_log_bytes"]
     if type(size) is not int or size <= 0:
         raise ValueError("invalid tune log length")
@@ -617,12 +700,15 @@ def verify_tune_provenance(path: Path, frozen: dict) -> None:
     if len(prefix) != size or hashlib.sha256(prefix).hexdigest() != frozen["tune_log_sha256"]:
         raise ValueError("tune log prefix changed")
     _parse_tune_log(content)
-    selected = tune_argmax(_parse_tune_log(prefix), frozen["detector_variant"], frozen["detector_sha256"])
+    selected = tune_argmax(_parse_tune_log(prefix), frozen["detector_variant"], frozen["detector_sha256"],
+                           canonical_tune_run())
     if tune_row_sha256(selected) != frozen["tune_row_sha256"]:
         raise ValueError("selected tune row missing")
     if (selected["labels_sha256"] != frozen["tune_labels_sha256"]
             or selected["tune_run"] != frozen["tune_run"]
-            or selected["tune_manifest_sha256"] != frozen["tune_manifest_sha256"]):
+            or selected["tune_manifest_sha256"] != frozen["tune_manifest_sha256"]
+            or selected["scored_pairs_sha256"] != frozen["tune_scored_pairs_sha256"]
+            or selected["projects_dir_sha256"] != frozen["tune_projects_dir_sha256"]):
         raise TuneFreezeRefused("labels_mismatch", "Refused: frozen tune labels digest or tune set does "
                                 "not match the selected tune row.")
 
@@ -656,8 +742,9 @@ def _print_scope(name, block):
 
 def cmd_redo_score_tune(options) -> int:
     """Score one candidate against a tune set. Repeatable: never writes ``test.used`` or ``result.json``;
-    refuses a run whose frozen.json is not ``purpose: tune`` and a third distinct
-    non-baseline (candidate, detector SHA) pair."""
+    refuses a run whose frozen.json is not ``purpose: tune``, a voided tune run, a third distinct
+    non-baseline (candidate, detector SHA) pair, and labels other than the run's canonical labels (the
+    labels digest of the run's first complete scoring)."""
     candidate = options.candidate or redo_signal.BASELINE_VARIANT
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", options.run):
         print("Refused: invalid run id.")
@@ -682,10 +769,14 @@ def cmd_redo_score_tune(options) -> int:
     if purpose != "tune":
         print("Refused: run purpose is not tune.")
         return 2
+    if os.path.lexists(run_dir / VOID_FILE):
+        print("Refused: tune run is voided; it cannot be scored.")
+        return 2
     log_path = paths.state_path("redo_validation", "tune_log.jsonl")
     try:
         detector_sha = detector_sha256()
-        logged = {(r["candidate"], r.get("detector_sha256")) for r in _read_tune_log(log_path)
+        log = _read_tune_log(log_path)
+        logged = {(r["candidate"], r.get("detector_sha256")) for r in log
                   if r["candidate"] != redo_signal.BASELINE_VARIANT}
     except (OSError, ValueError, KeyError, TypeError):
         print("Refused: tune log unreadable.")
@@ -706,10 +797,17 @@ def cmd_redo_score_tune(options) -> int:
         labels = resolve_tune_labels(rows, label_rows)
         labels_digest = labels_sha256(label_paths)
         projects_dir = options.projects_dir or northstar.claude_projects_dir()
+        projects_digest = projects_dir_sha256(projects_dir)
+        projects_default = projects_digest == projects_dir_sha256(northstar.claude_projects_dir())
         signals, errors = candidate_signals(rows, frozen, projects_dir, candidate)
         result = score_tune_candidate(rows, labels, signals)
     except (OSError, ValueError, KeyError, TypeError):
         print("Refused: invalid or unavailable scoring inputs.")
+        return 2
+    canonical = canonical_tune_set(log, run)
+    if canonical is not None and canonical[TUNE_SET_KEYS.index("labels_sha256")] != labels_digest:
+        print("Refused: labels changed for this tune run (its first complete scoring used other label "
+              "files); void the run with redo-sample --void-tune and draw a new tune set.")
         return 2
     print(f"tune run: {run}\ncandidate: {candidate}")
     print(f"n_manifest: {result['n_manifest']} n_scored: {result['n_scored']} "
@@ -726,7 +824,9 @@ def cmd_redo_score_tune(options) -> int:
         _append_tune_log(log_path, dict(
             ts=datetime.now(timezone.utc).isoformat(), tune_run=run, candidate=candidate,
             detector_sha256=detector_sha, tune_manifest_sha256=frozen["manifest_sha256"],
-            labels_sha256=labels_digest,
+            labels_sha256=labels_digest, scored_pairs_sha256=result["scored_pairs_sha256"],
+            projects_dir_sha256=projects_digest, projects_dir_default=projects_default,
+            n_manifest=result["n_manifest"],
             variant_params={"variant": candidate, "description": redo_signal.VARIANTS[candidate]},
             n_scored=result["n_scored"], n_unclear=result["n_unclear"], n_lost=result["n_lost"],
             overall=result["overall"], per_signal=result["per_signal"]))
