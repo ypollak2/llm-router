@@ -14,6 +14,12 @@ P17D F/G) and writes, under `$CLS/dev/` only (directory 0700, files 0600, never 
   `cls_send_lib.text_sha` of the written item text, the key the manifest computes;
 * `attach_counts.json`: counts and input sha256s only.
 
+Items without an existing Opus label are KEPT in `items.jsonl` (no legacy_opus row; counted per source as
+`n_no_opus_label`): the frozen validity floor (section 1.3, `primary_missing_share` in cls_dev_run) is computed
+over the manifest items, so dropping them here would hide a missing-primary share above 5 percent.
+Digest basis: the raw `assembled_context` / `context` of the source row is used as the digest, not the
+judge's scrubbed view (`attach_counts.digest_basis`).
+
 `export-real` writes the manifest-filtered real DEV items `{item_id, text, group}` (the manifest's own group)
 for `cls_resemble.py --real-items`, so resemblance compares against all real DEV as the manifest defines it.
 
@@ -53,6 +59,15 @@ OUTPUTS = (ITEMS, LEG_OPUS, LEG_SONNET, COUNTS)
 ID_PREFIX = "clsdev:attach:v1:"
 E1_TUNE_SPLITS = ("tune",)
 E1_HO_SPLITS = ("heldout", "held_out", "ho", "holdout", "test")
+E2_CAL_SPLITS = ("calibration",)
+E2_HO_SPLITS = E1_HO_SPLITS
+JOINS = ("key", "text_sha")
+DIGEST_BASIS = "raw_assembled_context"
+# PREREG-CLS-DEV section 1.1 table (sizes taken from design 2.1 / GE3.json / P1.json; the manifest counts replace them)
+EXPECTED_SIZES = {"ge3_tune": 108, "ge3_ho": 234, "e2_cal": 91, "e2_ho": 89, "e1_ho": 20, "e1_tune": 30,
+                  "p17d_f": 32, "p17d_g": 119}
+SOURCE_SETS = {"ge3": ("ge3_tune", "ge3_ho"), "e2": ("e2_cal", "e2_ho"), "e1": ("e1_tune", "e1_ho"),
+               "p17d": ("p17d_f", "p17d_g")}
 SOURCE_FLAGS = ("ge3_items", "ge3_split", "ge3_opus_labels", "ge3_sonnet_labels", "e2_sample", "e2_opus_labels",
                 "e1_tasks", "e1_opus_labels", "p17d_items", "p17d_labels", "ledger")
 PATH_FLAGS = ("cls_root", "out") + SOURCE_FLAGS + ("claude_root", "gt_scripts", "denylist", "env_file")
@@ -160,9 +175,6 @@ def _emit(out: list, drops: Counter, *, source_set, native, text, timestamp, ses
     if not isinstance(text, str) or not text.strip():
         drops["empty_text"] += 1
         return
-    if opus is None:
-        drops["no_opus_label"] += 1
-        return
     withheld = bool(withheld)
     out.append({"source_set": source_set, "native": native, "text": text, "timestamp": ts_of(timestamp),
                 "session_id": sid_of(session_id), "batch": batch,
@@ -171,7 +183,13 @@ def _emit(out: list, drops: Counter, *, source_set, native, text, timestamp, ses
                 "opus": opus, "sonnet": sonnet})
 
 
-def read_ge3(items_path, split_path, opus_path, sonnet_path, drops: Counter) -> list[dict]:
+def _join_key(join: str, native, text):
+    """The key an item is looked up by in a label map: its source key, or (text_sha mode) the helper the
+    manifest uses for its text_sha -> item_id map."""
+    return S.text_sha(text) if join == "text_sha" and isinstance(text, str) else native
+
+
+def read_ge3(items_path, split_path, opus_path, sonnet_path, drops: Counter, join: str = "key") -> list[dict]:
     """GE3: gt500 items.jsonl {id, prompt, session_id, timestamp, context?, context_withheld?}, split.json
     {tune_ids, heldout_ids}, work/labels_opus.jsonl and labels_sonnet.jsonl {id, tier}."""
     try:
@@ -181,8 +199,9 @@ def read_ge3(items_path, split_path, opus_path, sonnet_path, drops: Counter) -> 
         raise Refuse("refusing: --ge3-split is not a {tune_ids, heldout_ids} JSON file") from None
     if tune & held:
         raise Refuse("refusing: --ge3-split tune and heldout ids overlap (%d)" % len(tune & held))
-    opus = label_map(opus_path, "ge3_opus_labels", "id", ("tier", "truth"), drops)
-    sonnet = label_map(sonnet_path, "ge3_sonnet_labels", "id", ("tier", "truth"), drops) if sonnet_path else {}
+    lkey = "text_sha" if join == "text_sha" else "id"
+    opus = label_map(opus_path, "ge3_opus_labels", lkey, ("tier", "truth"), drops)
+    sonnet = label_map(sonnet_path, "ge3_sonnet_labels", lkey, ("tier", "truth"), drops) if sonnet_path else {}
     out: list = []
     for r in read_rows(items_path, "ge3_items"):
         rid = key_of(r.get("id"))
@@ -190,15 +209,20 @@ def read_ge3(items_path, split_path, opus_path, sonnet_path, drops: Counter) -> 
         if src is None:
             drops["ge3_not_in_split"] += 1
             continue
-        o = opus.get(rid)
+        jk = _join_key(join, rid, r.get("prompt"))
+        o = opus.get(jk)
         _emit(out, drops, source_set=src, native=rid, text=r.get("prompt"), timestamp=r.get("timestamp"),
               session_id=r.get("session_id"), digest=r.get("context"), withheld=r.get("context_withheld"),
-              opus=o[0] if o else None, sonnet=(sonnet.get(rid) or (None,))[0], batch=o[1] if o else None)
+              opus=o[0] if o else None, sonnet=(sonnet.get(jk) or (None,))[0], batch=o[1] if o else None)
     return out
 
 
-def _read_keyed(rows, flag, label_path, label_flag, key_field, tier_field, set_of, drops: Counter) -> list[dict]:
-    labels = label_map(label_path, label_flag, key_field, (tier_field,), drops)
+def _read_keyed(rows, flag, label_path, label_flag, key_field, tier_field, set_of, drops: Counter,
+                join: str = "key") -> list[dict]:
+    """join "key": a label row joins by key_field. join "text_sha": a label row {text_sha, ...} joins to the item
+    whose S.text_sha(text) equals it; a row that matches no item shows up only as a missing label."""
+    by_sha = join == "text_sha"
+    labels = label_map(label_path, label_flag, "text_sha" if by_sha else key_field, (tier_field,), drops)
     out: list = []
     for r in rows:
         src = set_of(r.get("split"))
@@ -206,22 +230,32 @@ def _read_keyed(rows, flag, label_path, label_flag, key_field, tier_field, set_o
             drops["%s_unknown_split" % flag] += 1
             continue
         k = key_of(r.get(key_field))
+        if by_sha:
+            tsha = _join_key(join, k, r.get("text"))
+            k = k if k is not None else tsha if isinstance(r.get("text"), str) else None
+        else:
+            tsha = k
         if k is None:
             drops["label_key_missing"] += 1
             continue
-        lab = labels.get(k)
+        lab = labels.get(tsha)
         _emit(out, drops, source_set=src, native=k, text=r.get("text"), timestamp=r.get("timestamp"),
               session_id=r.get("session_id"), digest=r.get("context"), withheld=r.get("context_withheld"),
               opus=lab[0] if lab else None, batch=lab[1] if lab else None)
     return out
 
 
-def read_e2(sample_path, label_path, key_field: str, tier_field: str, drops: Counter) -> list[dict]:
-    """E2 (p_eval work/sample.jsonl {text, split, session_id, timestamp}): split "calibration" -> e2_cal,
-    else e2_ho (the p17d_attach rule). Labels: any file whose rows carry key_field and tier_field (may be
-    the sample file itself)."""
+def _e2_set(split) -> str | None:
+    s = split.strip().lower() if isinstance(split, str) else None
+    return "e2_cal" if s in E2_CAL_SPLITS else "e2_ho" if s in E2_HO_SPLITS else None
+
+
+def read_e2(sample_path, label_path, key_field: str, tier_field: str, drops: Counter, join: str = "key") -> list[dict]:
+    """E2 (p_eval work/sample.jsonl {text, split, session_id, timestamp}): split "calibration" -> e2_cal, the
+    held-out names (as E1) -> e2_ho, any other split dropped and counted (`e2_unknown_split`). Labels: any
+    file whose rows carry key_field and tier_field (may be the sample file itself)."""
     return _read_keyed(read_rows(sample_path, "e2_sample"), "e2", label_path, "e2_opus_labels", key_field,
-                       tier_field, lambda s: "e2_cal" if s == "calibration" else "e2_ho", drops)
+                       tier_field, _e2_set, drops, join)
 
 
 def _e1_set(split) -> str | None:
@@ -229,11 +263,11 @@ def _e1_set(split) -> str | None:
     return "e1_tune" if s in E1_TUNE_SPLITS else "e1_ho" if s in E1_HO_SPLITS else None
 
 
-def read_e1(tasks_path, label_path, key_field: str, tier_field: str, drops: Counter) -> list[dict]:
+def read_e1(tasks_path, label_path, key_field: str, tier_field: str, drops: Counter, join: str = "key") -> list[dict]:
     """E1 (local-classifier tasks_local.json, a JSON list {text, split}): tune -> e1_tune, held-out names ->
     e1_ho, other splits dropped. E1 rows carry no session or timestamp: record recovery fills them."""
     return _read_keyed(read_rows(tasks_path, "e1_tasks"), "e1", label_path, "e1_opus_labels", key_field,
-                       tier_field, _e1_set, drops)
+                       tier_field, _e1_set, drops, join)
 
 
 def read_p17d(items_path, labels_path, drops: Counter, item_key=None) -> list[dict]:
@@ -347,6 +381,12 @@ def recover(items: list[dict], index, ledger_path, tier_name, counts: Counter) -
                 rec = by_sidts.get((it["session_id"], it["timestamp"]))
             else:
                 rec = by_sha.get(S.text_sha(it["text"]))
+        if rec is not None and it["timestamp"] and not it["session_id"] and rec["timestamp"] != it["timestamp"]:
+            rec = None  # the sha join found a DIFFERENT record: its session is not this item's (manifest: unk group)
+            counts["session_not_taken_from_other_record"] += 1
+        elif rec is not None and it["session_id"] and not it["timestamp"] and rec["session_id"] != it["session_id"]:
+            rec = None
+            counts["timestamp_not_taken_from_other_record"] += 1
         recs.append(rec)
         if rec is not None:
             counts["record_joined"] += 1
@@ -456,6 +496,9 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
                 S.guard_dev_path(v, cls_root)
             except S.CLSExit as e:
                 raise Refuse("refusing: --%s %s" % (f.replace("_", "-"), e)) from None
+    allow = set(a.allow_missing_timestamps or [])
+    if allow - set(EXPECTED_SIZES):
+        raise Refuse("refusing: --allow-missing-timestamps names unknown source sets (%s)" % ",".join(sorted(allow - set(EXPECTED_SIZES))))
     has_ge3 = _need(a, ("ge3_items", "ge3_split", "ge3_opus_labels", "ge3_sonnet_labels"),
                     ("ge3_items", "ge3_split", "ge3_opus_labels"))
     has_e2 = _need(a, ("e2_sample", "e2_opus_labels"), ("e2_sample", "e2_opus_labels"))
@@ -472,13 +515,14 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
     items: list = []
     if has_ge3:
         drops["ge3"] = Counter()
-        items += read_ge3(a.ge3_items, a.ge3_split, a.ge3_opus_labels, a.ge3_sonnet_labels, drops["ge3"])
+        items += read_ge3(a.ge3_items, a.ge3_split, a.ge3_opus_labels, a.ge3_sonnet_labels, drops["ge3"],
+                          a.ge3_label_join)
     if has_e2:
         drops["e2"] = Counter()
-        items += read_e2(a.e2_sample, a.e2_opus_labels, a.e2_label_key, a.e2_label_tier, drops["e2"])
+        items += read_e2(a.e2_sample, a.e2_opus_labels, a.e2_label_key, a.e2_label_tier, drops["e2"], a.e2_label_join)
     if has_e1:
         drops["e1"] = Counter()
-        items += read_e1(a.e1_tasks, a.e1_opus_labels, a.e1_label_key, a.e1_label_tier, drops["e1"])
+        items += read_e1(a.e1_tasks, a.e1_opus_labels, a.e1_label_key, a.e1_label_tier, drops["e1"], a.e1_label_join)
     if has_p17d:
         drops["p17d"] = Counter()
         items += read_p17d(a.p17d_items, a.p17d_labels, drops["p17d"], item_key=mods.get("item_key"))
@@ -504,6 +548,11 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
         from llm_router.shadow_eval import tier_name
     recover(items, index, a.ledger, tier_name, rec_counts)
 
+    for src in sorted({x["source_set"] for x in items}):
+        if src not in allow and not any(D.parse_utc(x["timestamp"]) is not None for x in items
+                                        if x["source_set"] == src and x["timestamp"]):
+            raise Refuse("Refused: source set %s has no timestamps (provide record recovery flags)" % src)
+
     seen: dict = {}
     for it in items:
         it["item_id"] = item_id(it["source_set"], it["native"])
@@ -520,6 +569,7 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
         per_source[src] = {
             "n_items": len(rows), "n_sessions": len({x["session_id"] for x in rows if x["session_id"]}),
             "n_no_session": sum(1 for x in rows if not x["session_id"]),
+            "n_no_opus_label": sum(1 for x in rows if not x["opus"]),
             "n_no_timestamp": sum(1 for x in rows if not x["timestamp"]),
             "n_unparseable_timestamp": sum(1 for x in rows if x["timestamp"] and D.parse_utc(x["timestamp"]) is None),
             "digest_present": sum(1 for x in rows if x["digest"]),
@@ -537,6 +587,13 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
     for srcs in by_sha.values():
         for p, q in itertools.combinations(sorted(srcs), 2):
             overlap["%s|%s" % (p, q)] += 1
+    present = [s for k, v in SOURCE_SETS.items() if k in drops for s in v]
+    expected_vs_actual = {s: {"expected": EXPECTED_SIZES[s], "actual": per_source.get(s, {}).get("n_items", 0)}
+                          for s in sorted(present)}
+    for s, v in expected_vs_actual.items():
+        if v["expected"] != v["actual"]:
+            print("WARNING: source set %s expected %d items (PREREG 1.1), attached %d" % (s, v["expected"], v["actual"]),
+                  file=sys.stderr)
     total_drop: Counter = Counter()
     for c in drops.values():
         total_drop.update({k: v for k, v in c.items() if v})
@@ -549,6 +606,8 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
         "what": "CLS-DEV attach (PREREG-CLS-DEV 1.3); counts only, no text",
         "script_sha256": _sha(Path(__file__)), "generated_utc": S.utc_now(),
         "n_items": len(items), "n_sessions": len({x["session_id"] for x in items if x["session_id"]}),
+        "digest_basis": DIGEST_BASIS, "expected_vs_actual": expected_vs_actual,
+        "allow_missing_timestamps": sorted(allow), "label_join": {k: getattr(a, k + "_label_join") for k in ("ge3", "e2", "e1")},
         "per_source": per_source, "dropped": dict(sorted(total_drop.items())),
         "dropped_by_source": {k: dict(sorted((r, n) for r, n in v.items() if n)) for k, v in sorted(drops.items())},
         "record_recovery": dict(sorted(rec_counts.items())), "record_index": index_stats,
@@ -607,6 +666,8 @@ def run_export_real(a) -> dict:
         raise Refuse("refusing: %d items differ from the manifest text_sha" % len(bad))
     rows = [{"item_id": x["item_id"], "text": items[x["item_id"]]["text"], "group": x["group"]} for x in real]
     os.makedirs(out.parent, mode=0o700, exist_ok=True)
+    if S.under(out.parent, cls_root / "dev"):
+        os.chmod(out.parent, 0o700)  # an already-existing parent keeps its old mode otherwise
     write_new(out, jsonl(rows))
     return {"n_real": len(rows), "n_groups": len({r["group"] for r in rows}), "out": str(out)}
 
@@ -626,16 +687,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ge3-split", help="gt500 split.json")
     p.add_argument("--ge3-opus-labels", help="gt500 work/labels_opus.jsonl {id, tier}")
     p.add_argument("--ge3-sonnet-labels", help="gt500 work/labels_sonnet.jsonl {id, tier}")
+    p.add_argument("--ge3-label-join", choices=JOINS, default="key",
+                   help="key: label rows carry the item id; text_sha: rows carry {text_sha} (PREREG 1.3 (4))")
     p.add_argument("--e2-sample", help="p_eval work/sample.jsonl")
     p.add_argument("--e2-opus-labels", help="E2 Opus labels (may be the sample file itself)")
     p.add_argument("--e2-label-key", default="id", help="field joining E2 rows and label rows (default id)")
+    p.add_argument("--e2-label-join", choices=JOINS, default="key", help="see --ge3-label-join")
     p.add_argument("--e2-label-tier", default="tier", help="tier field of an E2 label row (default tier)")
     p.add_argument("--e1-tasks", help="local-classifier tasks_local.json")
     p.add_argument("--e1-opus-labels", help="E1 Opus labels (may be the tasks file itself)")
     p.add_argument("--e1-label-key", default="id", help="field joining E1 rows and label rows (default id)")
+    p.add_argument("--e1-label-join", choices=JOINS, default="key", help="see --ge3-label-join")
     p.add_argument("--e1-label-tier", default="tier", help="tier field of an E1 label row (default tier)")
     p.add_argument("--p17d-items", help="p17d_attach items.jsonl")
     p.add_argument("--p17d-labels", help="p17d labels.jsonl {text_sha, session_id, truth}")
+    p.add_argument("--allow-missing-timestamps", action="append", metavar="SET",
+                   help="accept source set SET with no usable timestamp (repeatable; recorded in attach_counts)")
     p.add_argument("--claude-root", help="transcript root (top-level */*.jsonl) for record recovery")
     p.add_argument("--gt-scripts", help="directory of the pinned gt500.py and supply.py")
     p.add_argument("--ledger", help="proxy_calls.jsonl (requested_model by msg_id)")

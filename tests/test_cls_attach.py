@@ -120,8 +120,10 @@ def make_world(tmp: Path, item_key=None, *, with_p17d=True) -> dict:
     return {"cls": cls, "out": cls / "dev" / "attach1", "files": files}
 
 
-def attach_argv(w: dict, *, extra=(), out=None) -> list[str]:
+def attach_argv(w: dict, *, extra=(), out=None, allow_e1=True) -> list[str]:
     argv = ["attach", "--cls-root", str(w["cls"]), "--out", str(out or w["out"])]
+    if allow_e1 and "e1_tasks" in w["files"]:  # the E1 fixture rows carry no timestamp (recovery tests supply them)
+        argv += ["--allow-missing-timestamps", "e1_tune", "--allow-missing-timestamps", "e1_ho"]
     for k, v in w["files"].items():
         argv += ["--" + k.replace("_", "-"), str(v)]
     if "e2_sample" in w["files"]:
@@ -173,18 +175,25 @@ def test_attach_all_sources(tmp_path, capsys, item_key):
     assert by_text[T["p_f1"]]["digest"].startswith("Working directory")
     pg = [r for r in rows if r["source_set"] == "p17d_g"]
     assert len(pg) == 1 and pg[0]["digest"] is None and pg[0]["requested"] == "sonnet"
-    assert T["g_x"] not in by_text and T["g_nolab"] not in by_text and T["p_f2"] not in by_text
-    assert T["t3"] not in by_text
+    assert T["g_x"] not in by_text and T["t3"] not in by_text
+    # unlabelled items are KEPT (the frozen primary-missing guard counts them); they get no legacy row
+    assert by_text[T["g_nolab"]]["source_set"] == "ge3_ho" and by_text[T["p_f2"]]["source_set"] == "p17d_f"
 
     counts = json.loads((w["out"] / A.COUNTS).read_text())
-    assert counts["dropped"] == {"e1_unknown_split": 1, "ge3_not_in_split": 1, "no_opus_label": 2}
-    assert counts["dropped_by_source"]["p17d"] == {"no_opus_label": 1}
+    assert counts["dropped"] == {"e1_unknown_split": 1, "ge3_not_in_split": 1}
+    assert counts["per_source"]["p17d_f"]["n_no_opus_label"] == 1 and counts["per_source"]["ge3_ho"]["n_no_opus_label"] == 1
+    assert counts["digest_basis"] == "raw_assembled_context"
+    assert counts["allow_missing_timestamps"] == ["e1_ho", "e1_tune"]
+    eva = counts["expected_vs_actual"]
+    assert eva["ge3_tune"] == {"expected": 108, "actual": 1} and eva["e2_cal"] == {"expected": 91, "actual": 1}
+    assert set(eva) == {"ge3_tune", "ge3_ho", "e2_cal", "e2_ho", "e1_tune", "e1_ho", "p17d_f", "p17d_g"}
+    assert "expected_vs_actual" in stdout and "WARNING: source set ge3_tune expected 108" in cap.err
     assert counts["per_source"]["ge3_ho"]["digest_withheld"] == 1
     assert counts["per_source"]["e1_tune"]["n_no_timestamp"] == 1
     assert counts["exact_overlap"] == {"ge3_ho|p17d_g": 1}
     assert counts["legacy"]["conflict"] == {"opus": 1, "sonnet": 0}
     assert set(counts["inputs"]) == set(w["files"]) | {"e2_opus_labels"}
-    assert counts["n_items"] == len(rows) == 10
+    assert counts["n_items"] == len(rows) == 12
 
     for name in (A.LEG_OPUS, A.LEG_SONNET):
         leg = read_out(w["out"], name)
@@ -195,7 +204,7 @@ def test_attach_all_sources(tmp_path, capsys, item_key):
     opus = read_out(w["out"], A.LEG_OPUS)
     conflict_key = (S2, S.text_sha(T["g_h2"]))
     assert conflict_key not in {(x["session_id"], x["text_sha"]) for x in opus}
-    assert len(opus) == 8  # 10 items, 9 keys; the conflicting key (2 items) is written for neither
+    assert len(opus) == 8  # 12 items, 2 unlabelled, 9 keys; the conflicting key (2 items) is written for neither
     assert len(read_out(w["out"], A.LEG_SONNET)) == 2
     blob = (w["out"] / A.COUNTS).read_text()
     assert SENTINEL not in blob and SM not in blob
@@ -288,8 +297,10 @@ def test_reader_ge3(tmp_path):
     drops = A.Counter()
     items = A.read_ge3(f["ge3_items"], f["ge3_split"], f["ge3_opus_labels"], f["ge3_sonnet_labels"], drops)
     assert sorted((x["native"], x["source_set"], x["opus"], x["sonnet"]) for x in items) == [
-        ("g-h1", "ge3_ho", "sonnet", "sonnet"), ("g-h2", "ge3_ho", "haiku", None), ("g-t1", "ge3_tune", "opus", "sonnet")]
-    assert drops["ge3_not_in_split"] == 1 and drops["no_opus_label"] == 1
+        ("g-h1", "ge3_ho", "sonnet", "sonnet"), ("g-h2", "ge3_ho", "haiku", None), ("g-nolab", "ge3_ho", None, None),
+        ("g-t1", "ge3_tune", "opus", "sonnet")]
+    assert drops["ge3_not_in_split"] == 1 and "no_opus_label" not in drops
+    assert [(x["native"], x["opus"]) for x in items if x["opus"] is None] == [("g-nolab", None)]
 
 
 def test_reader_e2_inline_labels(tmp_path):
@@ -324,8 +335,8 @@ def test_reader_p17d(tmp_path, item_key):
     drops = A.Counter()
     items = A.read_p17d(f["p17d_items"], f["p17d_labels"], drops)
     assert sorted((x["native"], x["source_set"], x["opus"], x["requested"]) for x in items) == [
-        ("pf1", "p17d_f", "opus", "opus"), ("pg1", "p17d_g", "opus", "sonnet")]
-    assert drops["no_opus_label"] == 1
+        ("pf1", "p17d_f", "opus", "opus"), ("pf2", "p17d_f", None, "opus"), ("pg1", "p17d_g", "opus", "sonnet")]
+    assert "no_opus_label" not in drops
     assert [x["digest"] for x in items if x["native"] == "pg1"] == [None]
 
 
@@ -390,7 +401,7 @@ def test_record_recovery_fills_e1_and_requested(tmp_path, capsys):
     assert counts["per_source"]["e1_tune"]["requested_basis"] == {"ledger": 1}
     assert counts["per_source"]["e1_ho"]["requested_basis"] == {"transcript_served": 1}
     assert counts["per_source"]["ge3_tune"]["requested_basis"] == {"transcript_served": 1}
-    assert counts["per_source"]["ge3_ho"]["requested_basis"] == {"none": 2}
+    assert counts["per_source"]["ge3_ho"]["requested_basis"] == {"none": 3}
     assert counts["record_recovery"] == {"record_joined": 3, "session_from_record": 2, "timestamp_from_record": 2}
     assert counts["record_index"] == {"transcript_files": 2, "records": 4, "unreadable_file": 0}
     # the recovered E1 items now pass the manifest's time filter and their labels join
@@ -399,7 +410,7 @@ def test_record_recovery_fills_e1_and_requested(tmp_path, capsys):
                               cutoff=D.parse_utc(D.CUTOFF_DEFAULT), legacy={"opus": read_out(w["out"], A.LEG_OPUS)})
     assert man["counts"]["n_no_timestamp_dropped"] == 0
     assert man["counts"]["n_unmapped_labels"]["opus"] == 0
-    assert man["counts"]["n_existing_labels"]["opus"] == len(out_rows) == 5
+    assert len(out_rows) == 6 and man["counts"]["n_existing_labels"]["opus"] == 5  # g-nolab has no label
 
 
 def test_record_recovery_refuses_bad_helper_pins(tmp_path, capsys):
@@ -486,3 +497,166 @@ def test_export_real(tmp_path, capsys, item_key):
     assert A.main(argv[:5] + ["--manifest", str(bad), "--out", str(out3)]) == 2
     assert "lacks 1 manifest items" in capsys.readouterr().err
     assert not out3.exists()
+
+
+# ---------------------------------------------------------------------------------------------
+# review repairs: unlabelled items kept, label join modes, timestamp refusal, sizes, E2 splits, modes
+# ---------------------------------------------------------------------------------------------
+
+def synth_items(n: int, n_unlabelled: int, tmp: Path):
+    """n E2-shaped real items over many sessions; the first n_unlabelled have no Opus label."""
+    rows, labs = [], []
+    for i in range(n):
+        t = "synthetic prompt number %d about topic %s %s" % (i, "abcdefghij"[i % 10] * 3, SENTINEL)
+        rows.append({"id": "i%d" % i, "split": "calibration" if i % 2 else "heldout", "text": t,
+                     "session_id": "%s-s%d" % (SM, i // 2), "timestamp": "2026-08-%02dT00:%02d:00Z" % (1 + i % 20, i % 60)})
+        if i >= n_unlabelled:
+            labs.append({"id": "i%d" % i, "tier": "opus" if i % 3 == 0 else "sonnet"})
+    return wjsonl(tmp / "sample.jsonl", rows), wjsonl(tmp / "labs.jsonl", labs)
+
+
+def test_unlabelled_items_reach_the_frozen_primary_missing_guard(tmp_path, capsys):
+    """The old behaviour DROPPED items without an Opus label, so the manifest saw 0 percent missing and the
+    frozen floor (primary truth missing > 5 percent, PREREG 1.3) could never fire. Now ~10 percent is visible."""
+    sample, labs = synth_items(100, 10, tmp_path)
+    (tmp_path / "cls" / "dev").mkdir(parents=True)
+    out = tmp_path / "cls" / "dev" / "a"
+    argv = ["attach", "--cls-root", str(tmp_path / "cls"), "--out", str(out), "--e2-sample", str(sample),
+            "--e2-opus-labels", str(labs)]
+    assert A.main(argv) == 0
+    capsys.readouterr()
+    rows = read_out(out, A.ITEMS)
+    assert len(rows) == 100
+    assert len(read_out(out, A.LEG_OPUS)) == 90                      # no legacy row for an unlabelled item
+    counts = json.loads((out / A.COUNTS).read_text())
+    assert sum(v["n_no_opus_label"] for v in counts["per_source"].values()) == 10
+    man, _ = D.build_manifest(rows, [], ctx=S.ScrubContext(), t0=D.parse_utc(D.T0_DEFAULT),
+                              cutoff=D.parse_utc(D.CUTOFF_DEFAULT), legacy={"opus": read_out(out, A.LEG_OPUS)})
+    real = [x for x in man["items"] if x["kind"] == "real"]
+    assert len(real) == 100
+    # the guard computation of cls_dev_run (~986-990), with the primary truth = the joined Opus label
+    n_prim_real = sum(1 for x in real if x["truth"]["opus"])
+    floor_counts = dict(man["counts"], n_truth_opus=sum(1 for x in real if x["truth"]["opus"] == "opus"),
+                        primary_missing_share=(1 - n_prim_real / len(real)) if real else 1.0)
+    assert abs(floor_counts["primary_missing_share"] - 0.10) < 0.02
+    floor = D.validity_floor(floor_counts)
+    assert "primary_truth_missing_above_5_percent" in floor["failed"] and floor["status"] == "NOT_INFORMATIVE"
+
+
+def test_label_join_modes_and_wrong_join(tmp_path, capsys):
+    sample, _ = synth_items(20, 0, tmp_path)
+    rows = read_rows_jsonl(sample)
+    sha_labels = wjsonl(tmp_path / "sha_labs.jsonl", [{"text_sha": S.text_sha(r["text"]), "session_id": r["session_id"],
+                                                        "truth": "opus"} for r in rows[:15]])
+    key_labels = wjsonl(tmp_path / "key_labs.jsonl", [{"id": r["id"], "truth": "opus"} for r in rows[:15]])
+    # text_sha mode: 15 of 20 join, 5 stay unlabelled
+    d = A.Counter()
+    items = A.read_e2(sample, sha_labels, "id", "truth", d, "text_sha")
+    assert len(items) == 20 and sum(1 for x in items if x["opus"] == "opus") == 15
+    # key mode on the same items
+    items = A.read_e2(sample, key_labels, "id", "truth", A.Counter(), "key")
+    assert len(items) == 20 and sum(1 for x in items if x["opus"] == "opus") == 15
+    # a wrong join (sha labels read by id, id labels read by sha) loses no item and shows up as n_no_opus_label
+    for lab, mode in ((sha_labels, "key"), (key_labels, "text_sha")):
+        d = A.Counter()
+        items = A.read_e2(sample, lab, "id", "truth", d, mode)
+        assert len(items) == 20 and all(x["opus"] is None for x in items)
+    cls = tmp_path / "cls"
+    (cls / "dev").mkdir(parents=True)
+    out = cls / "dev" / "wrong"
+    assert A.main(["attach", "--cls-root", str(cls), "--out", str(out), "--e2-sample", str(sample),
+                   "--e2-opus-labels", str(key_labels), "--e2-label-join", "text_sha"]) == 0
+    counts = json.loads((out / A.COUNTS).read_text())
+    assert counts["n_items"] == 20 and counts["label_join"]["e2"] == "text_sha"
+    assert sum(v["n_no_opus_label"] for v in counts["per_source"].values()) == 20
+    assert counts["dropped_by_source"]["e2"] == {"label_row_key_missing": 15}
+    assert read_out(out, A.LEG_OPUS) == []
+
+
+def test_ge3_text_sha_join(tmp_path):
+    w = make_world(tmp_path, with_p17d=False)
+    f = w["files"]
+    labs = wjsonl(tmp_path / "ge3_sha.jsonl", [{"text_sha": S.text_sha(T["g_t1"]), "truth": "opus"},
+                                               {"text_sha": S.text_sha(T["g_h1"]), "truth": "sonnet"}])
+    items = A.read_ge3(f["ge3_items"], f["ge3_split"], labs, None, A.Counter(), "text_sha")
+    assert sorted((x["native"], x["opus"]) for x in items) == [("g-h1", "sonnet"), ("g-h2", None), ("g-nolab", None),
+                                                               ("g-t1", "opus")]
+
+
+def read_rows_jsonl(path: Path) -> list[dict]:
+    return [json.loads(x) for x in path.read_text().splitlines() if x.strip()]
+
+
+def test_source_set_without_timestamps_refused(tmp_path, capsys):
+    w = make_world(tmp_path, with_p17d=False)
+    argv = attach_argv(w, allow_e1=False)
+    assert A.main(argv) == 2
+    cap = capsys.readouterr()
+    assert "Refused: source set e1_ho has no timestamps (provide record recovery flags)" in cap.err
+    assert cap.out == "" and not (w["out"] / A.ITEMS).exists()
+    assert SENTINEL not in cap.err and SM not in cap.err
+    # explicit override, recorded
+    assert A.main(attach_argv(w, extra=["--allow-missing-timestamps", "e1_ho"], allow_e1=False)) == 2
+    assert "source set e1_tune has no timestamps" in capsys.readouterr().err
+    assert A.main(attach_argv(w, extra=["--allow-missing-timestamps", "e1_tune", "--allow-missing-timestamps", "e1_ho"],
+                              allow_e1=False)) == 0
+    counts = json.loads((w["out"] / A.COUNTS).read_text())
+    assert counts["allow_missing_timestamps"] == ["e1_ho", "e1_tune"]
+    assert A.main(attach_argv(w, extra=["--allow-missing-timestamps", "nope"], out=w["cls"] / "dev" / "b")) == 2
+
+
+def test_own_timestamp_without_session_takes_no_foreign_session(tmp_path):
+    other = {"session_id": S2, "timestamp": "2026-09-01T00:00:00Z", "msg_id": None, "served_model": None}
+    same = {"session_id": S1, "timestamp": "2026-09-02T00:00:00Z", "msg_id": None, "served_model": None}
+    mk = lambda ts: {"text": "x y z", "timestamp": ts, "session_id": None, "requested": None, "requested_basis": None}  # noqa: E731
+    a_, b_ = mk("2026-09-05T00:00:00Z"), mk("2026-09-02T00:00:00Z")
+    c = A.Counter()
+    sha = S.text_sha("x y z")
+    A.recover([a_], ({}, {sha: other}), None, lambda m: None, c)
+    assert a_["session_id"] is None and c["session_not_taken_from_other_record"] == 1 and c["record_joined"] == 0
+    A.recover([b_], ({}, {sha: same}), None, lambda m: None, c)
+    assert b_["session_id"] == S1 and c["session_from_record"] == 1
+    # downstream: no session -> the manifest's unk clustering
+    row = {"item_id": "a" * 16, "text": "x y z", "timestamp": a_["timestamp"], "session_id": None, "group": None,
+           "source_set": "e1_tune", "batch": None, "digest": None, "requested": None}
+    man, _ = D.build_manifest([row], [], ctx=S.ScrubContext(), t0=D.parse_utc(D.T0_DEFAULT),
+                              cutoff=D.parse_utc(D.CUTOFF_DEFAULT))
+    assert man["counts"]["n_unk_group"] == 1
+
+
+def test_expected_sizes_warn_not_refuse(tmp_path, capsys, item_key):
+    w = make_world(tmp_path, item_key)
+    assert A.main(attach_argv(w)) == 0
+    cap = capsys.readouterr()
+    doc = json.loads(cap.out)
+    for s_, n in A.EXPECTED_SIZES.items():
+        assert doc["expected_vs_actual"][s_]["expected"] == n
+    assert A.EXPECTED_SIZES == {"ge3_tune": 108, "ge3_ho": 234, "e2_cal": 91, "e2_ho": 89, "e1_ho": 20,
+                                "e1_tune": 30, "p17d_f": 32, "p17d_g": 119}
+    warns = [x for x in cap.err.splitlines() if x.startswith("WARNING")]
+    assert len(warns) == 8 and all(SENTINEL not in x and SM not in x for x in warns)
+
+
+def test_e2_unknown_split_counted_not_mapped(tmp_path):
+    sample = wjsonl(tmp_path / "s2.jsonl", [
+        {"id": "a", "split": "calibration", "text": T["e_c1"], "truth": "haiku"},
+        {"id": "b", "split": "HeldOut", "text": T["e_h1"], "truth": "opus"},
+        {"id": "c", "split": "dev2", "text": T["e_nots"], "truth": "opus"},
+        {"id": "d", "text": T["t1"], "truth": "opus"}])
+    d = A.Counter()
+    items = A.read_e2(sample, sample, "id", "truth", d)
+    assert sorted((x["native"], x["source_set"]) for x in items) == [("a", "e2_cal"), ("b", "e2_ho")]
+    assert d["e2_unknown_split"] == 2
+
+
+def test_export_real_chmods_existing_parent(tmp_path, capsys, item_key):
+    w = make_world(tmp_path, item_key)
+    assert A.main(attach_argv(w)) == 0
+    mpath = _manifest_for(w)
+    parent = w["cls"] / "dev" / "exports"
+    parent.mkdir()
+    os.chmod(parent, 0o755)
+    out = parent / "real.jsonl"
+    assert A.main(["export-real", "--cls-root", str(w["cls"]), "--items", str(w["out"] / A.ITEMS),
+                   "--manifest", str(mpath), "--out", str(out)]) == 0
+    assert stat.S_IMODE(os.stat(parent).st_mode) == 0o700
