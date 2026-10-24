@@ -25,7 +25,7 @@ llm-router local-check disable <lane> [--model M]
 | `--dry-run` | Prints the plan screen and the consent wording. **Zero model calls**, nothing written. Reports the same refusals a real run would. |
 | `--no-judge` | Programmatic grading only. Nothing is sent anywhere. A probe: never a PASS, and it never writes the eligibility store (it cannot replace or downgrade a judged verdict); it appears in the attempt log and in `status` only. |
 | `--yes` | Consent without a prompt. Required when stdin/stdout is not a terminal; without it the command stops before any call. |
-| `--model`, `--endpoint` | Pick the model or runtime. Default: auto-discover Ollama, LM Studio, vLLM and llama.cpp on loopback. |
+| `--model`, `--endpoint` | Pick the model or runtime. Default: auto-discover Ollama, LM Studio, vLLM and llama.cpp on loopback. Ollama cloud models are refused: they run off-machine, so local-check measures local models only. A model is cloud when its tag is `cloud` or `*-cloud` (an untagged name means `:latest`), or when Ollama's `/api/tags` row or `/api/show` answer for it reports `remote_host` / `remote_model` (this catches a cloud model renamed with `ollama cp` or a Modelfile `FROM`; no extra request). A model whose Ollama metadata hides that it is remote cannot be detected. The interactive picker lists cloud models as excluded. |
 | `--allow-remote` | Only together with an explicit `--endpoint`: allows a non-loopback runtime (the benchmark prompts are then sent to it). |
 | `--profile quick` | Only diffs up to 12 000 characters (narrower scope; the scope is stored with the result). |
 | `--fresh` | Discards the open (resumable) run of this configuration and starts a new one. Counts as a strike (see below). |

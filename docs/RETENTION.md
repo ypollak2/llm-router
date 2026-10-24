@@ -109,3 +109,15 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Reads | Demotion reads the local-attempt ledger's `.1` tail then the live file's tail, each bounded to 512 KiB, keeping the newest 20 matching attempts across rotation. |
 | File mode | Files are created 0600, including the new live file after rotation. |
 | Concurrency | Append takes no lock: one `O_APPEND` write. Rotation uses a non-blocking lock; a writer that cannot take it skips rotation. |
+
+## `text_job_fail_closed.jsonl` (LC-12e)
+
+| Item | Value |
+|---|---|
+| Rows | `c` (refusal code: `CHZ-FC-ROUTER-TEXT-JOB-ELIGIBILITY` or `CHZ-FC-ROUTER-TEXT-JOB-CUT-CHECK`), `ts`, and `e` (exception class name). No prompt text, no model name, no path. |
+| Writer | `eligibility_routing.record_fail_closed`, called when a local-only (`LLM_ROUTER_LOCAL_TEXT_JOBS` unset) `llm_text_job` is refused because its eligibility step or cut-site check raised. Best-effort: a failed write is recorded with `failopen` code `CHZ-FO-FAIL-CLOSED-UNRECORDED`, and the refusal still happens. |
+| Kept | Two generations of 256 KiB via `capped_log` (`eligibility_routing.FC_MAX_BYTES`): `<name>` and `<name>.1` (older). The oldest generation is dropped on rotation; a generation can exceed the cap by one row. |
+| Why 256 KiB | A row is about 80 bytes, so about 3,000 rows per generation. Each row is a crash; more than that in 7 days is one recurring bug, and the count only needs to be non-zero. |
+| Reads | `eligibility_routing.fail_closed_counts` (the `text_job_fail_closed` counter in `llm-router doctor`) tail-reads each generation to its cap and counts rows from the last 7 days (`FC_WINDOW_S`), so one old crash does not alarm forever. A store with lines but no valid row reads as unknown, never 0. |
+| File mode | Files are created 0600, including the new live file after rotation. |
+| Concurrency | Append takes no lock: one `O_APPEND` write. Rotation uses a non-blocking lock; a writer that cannot take it skips rotation. |
