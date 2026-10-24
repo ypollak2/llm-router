@@ -67,7 +67,7 @@ def facet_sums(counts):
 def test_ledger_stamps_resolve_untagged_and_causes(isolated):
     for sid in ("s-research", "s-organic", "s-conflict", "s-none", "s-corrupt", "s-badkind"):
         write(isolated, sid)
-    tag("s-corrupt", "{not json")
+    tag("s-corrupt", json.dumps({"kind": ""}))   # parses, no usable kind: no evidence
     tag("s-badkind", json.dumps({"kind": "bogus"}))
     rows = [{"session_id": "s-research", "session_kind": "research"},
             {"session_id": "s-organic", "session_kind": "organic"},
@@ -130,16 +130,12 @@ def test_sidecar_entries_and_states(isolated, capsys):
     target.unlink()
     target.mkdir()          # a directory cannot be read as a file: unreadable, not empty
     assert session_kind_backfill.sidecar_status() == "unreadable"
-    _, counts = collect(isolated, include_untagged=True, ledger_rows=[])
-    assert counts["backfill_sidecar"] == "unreadable"
-    assert counts["untagged_causes"]["sidecar"]["sidecar_unreadable"] == 3
-    assert sample.cmd_redo_sample(["--census", "--include-untagged"]) == 0
+    with pytest.raises(sample.EvidenceUnreadable):   # D-275: unreadable evidence refuses
+        collect(isolated, include_untagged=True, ledger_rows=[])
+    assert sample.cmd_redo_sample(["--census", "--include-untagged"]) == 2
     output = capsys.readouterr().out
-    assert "backfill_sidecar: unreadable" in output
-    assert "WARNING: backfill sidecar unreadable" in output
-    assert "untagged_causes: " in output
-    assert SENTINEL not in output and "s-unknown" not in output
-    assert str(target) not in output
+    assert output == ("Refused: 1 unreadable evidence source(s): "
+                      "overrides=0 tag_files=0 sidecar=1 ledger=0\n")
 
 
 def test_tag_file_state():
@@ -280,14 +276,15 @@ def test_conflict_including_organic_is_neither_organic_nor_untagged(isolated):
     assert counts["by_kind"]["organic"]["eligible"] == 0
 
 
-def test_a_tag_file_beats_a_ledger_conflict(isolated):
+def test_a_tag_file_no_longer_beats_a_ledger_conflict(isolated):
+    # D-275 changed this: the old outcome (tag wins, session organic) is gone.
     write(isolated, "s-tagged")
     tag("s-tagged", json.dumps({"kind": "organic"}))
     rows = [{"session_id": "s-tagged", "session_kind": "organic"},
             {"session_id": "s-tagged", "session_kind": "research"}]
     pool, counts = collect(isolated, include_untagged=True, ledger_rows=rows)
-    assert counts["ledger_conflict_excluded"] == 0
-    assert {(p.kind, p.kind_source) for p in pool} == {("organic", session_kind.SOURCE_TAG)}
+    assert counts["ledger_conflict_excluded"] == 1
+    assert pool == []
 
 
 @pytest.mark.parametrize("mode", ["--census", "--freeze"])
@@ -348,12 +345,12 @@ def test_unreadable_ledger_refuses_untagged(isolated, capsys, shape, mode):
     write(isolated, "s-plain")
     target = make_unreadable(shape)
     try:
-        with pytest.raises(sample.ProxyLedgerUnreadable):
+        with pytest.raises(sample.EvidenceUnreadable):
             collect(isolated, include_untagged=True)
         assert sample.cmd_redo_sample([mode, "--include-untagged"]) == 2
         assert capsys.readouterr().out == (
-            "WARNING: proxy ledger unreadable\n"
-            "Refused: proxy ledger unreadable; untagged sessions cannot be resolved\n")
+            "Refused: 1 unreadable evidence source(s): "
+            "overrides=0 tag_files=0 sidecar=0 ledger=1\n")
         assert not paths.state_path("redo_validation").exists()
         # With the flag off the ledger is never read: the run proceeds as before.
         assert sample.cmd_redo_sample(["--census"]) == 0
@@ -429,13 +426,10 @@ def test_all_corrupt_sidecar_is_reported_corrupt(isolated, capsys):
         "{broken\n[]\n" + json.dumps({"session_id": "", "kind": "harness"}) + "\n",
         encoding="utf-8")
     assert session_kind_backfill.read_sidecar() == ("corrupt", {})
-    _, counts = collect(isolated, include_untagged=True, ledger_rows=[])
-    assert counts["backfill_sidecar"] == "corrupt"
-    assert counts["untagged_causes"]["sidecar"]["sidecar_corrupt"] == 2
-    assert counts["untagged_causes"]["sidecar"]["sidecar_no_entry"] == 0
-    facet_sums(counts)
-    assert sample.cmd_redo_sample(["--census", "--include-untagged"]) == 0
-    assert "WARNING: backfill sidecar corrupt" in capsys.readouterr().out
+    with pytest.raises(sample.EvidenceUnreadable):
+        collect(isolated, include_untagged=True, ledger_rows=[])
+    assert sample.cmd_redo_sample(["--census", "--include-untagged"]) == 2
+    assert "sidecar=1" in capsys.readouterr().out
 
 
 def test_bom_on_the_first_line_is_stripped(isolated, tmp_path, capsys):

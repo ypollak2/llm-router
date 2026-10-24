@@ -308,6 +308,48 @@ def tag_file_state(session_id: str) -> str:
     return TAG_STATE_VALID
 
 
+def read_overrides_strict() -> tuple[str, dict[str, str]]:
+    """``(state, {session_id: kind})`` from the override file, without the lenient fallback of
+    :func:`overrides`. ``missing`` (no file), ``unreadable`` (cannot be read, is not JSON, or is
+    not an object) or ``present``. An entry that is not ``{"kind": <valid kind>}`` is no
+    evidence for that session only. Used by ``redo-sample --include-untagged`` (D-275)."""
+    path = overrides_path()
+    if not os.path.lexists(path):
+        return "missing", {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):   # UnicodeDecodeError is a ValueError
+        return "unreadable", {}
+    if not isinstance(raw, dict):
+        return "unreadable", {}
+    out: dict[str, str] = {}
+    for sid, entry in raw.items():
+        if not isinstance(sid, str) or not sid or not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind")
+        kind = kind.strip().lower() if isinstance(kind, str) else None
+        if kind in VALID_KINDS:
+            out[sid] = kind
+    return "present", out
+
+
+def tag_evidence(session_id: str) -> tuple[str, str | None]:
+    """``(state, kind)`` of a session's tag file, bypassing the ``_FOUND`` cache. ``missing``
+    (no file), ``unreadable`` (cannot be read, not JSON, or not an object) or ``present``
+    (``kind`` is the valid kind, or ``None`` when the value is unknown, empty or bogus)."""
+    path = _tag_path(session_id)
+    if not os.path.lexists(path):
+        return "missing", None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "unreadable", None
+    if not isinstance(raw, dict):
+        return "unreadable", None
+    kind = raw.get("kind")
+    return "present", kind if kind in VALID_KINDS else None
+
+
 # ── joining a kind onto records that carry none ──────────────────────────────
 
 SOURCE_OVERRIDE = "override"    # the owner's override file: beats every source below
@@ -352,6 +394,10 @@ class KindIndex:
         unless both are usable: a null stamp is the absence of evidence)."""
         if isinstance(session_id, str) and session_id and kind in VALID_KINDS:
             self._ledger.setdefault(session_id, set()).add(kind)  # type: ignore[arg-type]
+
+    def ledger_kinds(self, session_id: str) -> frozenset[str]:
+        """Every kind a proxy row of ``session_id`` was stamped with (empty if none)."""
+        return frozenset(self._ledger.get(session_id, ()))
 
     def _backfilled(self, session_id: object) -> str | None:
         """The sidecar's kind for ``session_id`` (a usable kind only), or ``None``. Read

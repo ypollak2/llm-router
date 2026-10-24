@@ -44,6 +44,8 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(root))
     monkeypatch.setattr(session_kind, "override_of", lambda sid: None)
     monkeypatch.setattr(session_kind, "tag_kind_of", lambda sid: resolve(sid).kind)
+    monkeypatch.setattr(session_kind, "tag_evidence",     # D-275 path reads tags through this
+                        lambda sid: ("present", resolve(sid).kind))
     return root
 
 
