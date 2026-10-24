@@ -5261,6 +5261,7 @@ async def route_and_call(
             # LC-12d: defense in depth - the survivor must itself be the passed local model, not merely "first".
             _tj_ctx = _er._text_job_ctx.get()
             _leads = False
+            _live_why: str | None = None
             if _pass_model is not None and _pass_model in models_to_try:
                 try:
                     from llm_router.resolver.inventory import is_ollama_cloud_model
@@ -5268,12 +5269,23 @@ async def route_and_call(
                     # would leave the machine. Inside the try: an import error is a refusal, not a leaked reservation.
                     _leads = (bool(_tj_ctx) and not is_ollama_cloud_model(_pass_model)
                               and _er.passed_model_leads([_pass_model], _tj_ctx[0], _tj_ctx[1], time.time()))
+                    # LC-12f: the discovery cache can lag an `ollama cp` of a cloud model onto the passed name
+                    # by up to its TTL; one localhost GET of the live `/api/tags` row closes that window for
+                    # the path that sends user text.
+                    _live_why = (await asyncio.to_thread(_er.live_check_refusal, _pass_model, _tj_ctx[0], time.time())
+                                 if _leads else None)
                 except _er.EligibilityStepFailed:  # already counted by the helper; the cause text stays accurate
                     await _release_reservation_if_held()
                     raise
                 except Exception as _lead_exc:  # noqa: BLE001 - fail closed: an unverifiable survivor is refused (N1)
                     _er.record_fail_closed(_er.FC_CUT_CHECK, _lead_exc)
-                    _leads = False
+                    await _release_reservation_if_held()
+                    raise _er.EligibilityStepFailed(
+                        f"the eligibility step failed ({type(_lead_exc).__name__}); local-only routing refuses") from _lead_exc
+            if _live_why:
+                _er.record_fail_closed(_er.FC_LIVE_CHECK)
+                await _release_reservation_if_held()
+                raise _er.LiveCheckRefused(_live_why)  # the reason alone; llm_text_job words the hand-back
             if _pass_model is None or _pass_model not in models_to_try or not _tj_ctx or not _leads:
                 await _release_reservation_if_held()
                 raise _er.PassedModelNotInChain(

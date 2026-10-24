@@ -526,6 +526,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "GEMINI_CLI_TIER": ("external_tool", "gemini_cli_quota.py", 1),
     "HOST": ("external_tool", "server.py", 1),
     "LOCALAPPDATA": ("external_tool", "install_hooks.py", 1),
+    # LiteLLM's Ollama base URL; read by the LC-12f pre-dispatch check so it asks the daemon that will serve the call.
+    "OLLAMA_API_BASE": ("external_tool", "eligibility_routing.py", 1),
     "OLLAMA_BASE_URL": ("external_tool", "agentic/react.py", 8),
     "OLLAMA_BUDGET_MODELS": ("external_tool", "model_discovery.py", 1),
     # Ollama server's own tuning knob (operator-set, not ours to default):

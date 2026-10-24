@@ -42,7 +42,19 @@ The stream door (`route_and_stream`) never carries the requirement: `llm_text_jo
 **Ollama only (D-274).** `prefer_passed` considers `ollama/` models only. A PASS measured on LM Studio, vLLM or llama.cpp is recorded but switches nothing on; `local-check run` and `status`
 print `measured; routing for this runtime is not supported yet (Ollama only in this release)`.
 
-**Ollama cloud models are excluded (LC-12e).** A model whose tag is `cloud` or ends in `-cloud` (e.g. `gpt-oss:120b-cloud`, `<name>:cloud`) runs off-machine even though the local Ollama daemon lists it, so it is never routable, `local-check` refuses to measure it, `local-check enable` refuses it, and the local-only cut refuses it even if an older `local_routing.json` says passed. An untagged name means `:latest` (`x-cloud` is `x-cloud:latest`, local by name). **Limits.** Detection is by name at route time (no network call), plus Ollama's `remote_host` / `remote_model` metadata at `local-check` time: a cloud model renamed with `ollama cp` or a Modelfile `FROM` is refused when local-check runs, so it never gets a PASS. A model whose Ollama metadata hides that it is remote cannot be detected. A pre-registered (`text_job`) lane is matched by name, not digest, so a cloud model copied onto the name of a model that has one, then enabled by hand, is not caught either.
+**Ollama cloud models are excluded (LC-12e).** A model whose tag is `cloud` or ends in `-cloud` (e.g. `gpt-oss:120b-cloud`, `<name>:cloud`) runs off-machine even though the local Ollama daemon lists it, so it is never routable, `local-check` refuses to measure it, `local-check enable` refuses it, and the local-only cut refuses it even if an older `local_routing.json` says passed. An untagged name means `:latest` (`x-cloud` is `x-cloud:latest`, local by name). Ollama's `remote_host` / `remote_model` metadata is checked at `local-check` time: a cloud model renamed with `ollama cp` or a Modelfile `FROM` is refused when local-check runs, so it never gets a PASS.
+
+**Copy-over after a pass (LC-12f).** A cloud model can also be copied onto a name *after* that name passed (`ollama cp gpt-oss:120b-cloud mine:latest`). Three checks cover this:
+
+| Check | When | What it reads |
+|---|---|---|
+| `remote` flag | every route-time guard (`prefer_passed`, `passed_model_leads`, `passed_lane_available`) | `discovery.json`. Both discovery writers store `remote: true/false` per model from the `/api/tags` row, next to its digest. A model marked `remote: true` is never routable. No network call |
+| digest rewrite | each discovery rescan | a rescan triggered by a changed digest writes the digest it saw. Before LC-12f it kept the old one under a fresh `cached_at` |
+| pre-dispatch live check | a pass-only `llm_text_job` (flag unset), at the cut site, right before the passed model is called | one `GET /api/tags` to the user's own Ollama daemon (`OLLAMA_API_BASE`, else `http://localhost:11434`; loopback only; 2 s timeout). The job hands back with no model call, and the budget reservation is released, when the live digest differs from the pass's `model_digest`, when the row carries remote metadata, when the model is not listed, or when the daemon does not answer, times out or is not loopback |
+
+Why a live call here: the discovery cache refreshes every 12 h by default, and a cached digest is trusted for 7 days. The text-job path is the one that sends user text, it is rare, and it can wait a little. The generation itself is a call to the same daemon, so one extra GET adds no new host. The hook and status-line paths make no network call; this check is not on them. Each live-check refusal is counted in `text_job_fail_closed` (`CHZ-FC-ROUTER-TEXT-JOB-LIVE-CHECK`). With `LLM_ROUTER_LOCAL_TEXT_JOBS=1`, routing is unchanged and no live check runs.
+
+**Limits.** A model whose Ollama metadata hides that it is remote cannot be detected. A pre-registered (`text_job`) lane is matched by name, not digest, so for it the live check tests only remote metadata, not the digest. Ordinary routing with the flag set uses only the name check and the cached `remote` flag, so the refresh lag still applies there.
 
 Only `llm_text_job` (`commit_message`, `pr_description`, `summarize_output`). Plain `llm_*` calls, `llm_edit` and the proxy never use this.
 `eligibility_routing.prefer_passed(models, job, input_len, now)` runs at the router's eligibility step, after D-116 and the F106/F112 step, and moves a local `ollama/` model that is **already in the chain** to the front. It never adds a model. All of these must hold, otherwise the chain is returned unchanged:
@@ -51,6 +63,7 @@ Only `llm_text_job` (`commit_message`, `pr_description`, `summarize_output`). Pl
 |---|---|
 | routing enabled for (model, job) | `local_routing.json` |
 | effective lane is `passed` | `local_eligibility.json` (`text_job_local` first, then `text_job`) |
+| not remote | the model's `discovery.json` entry does not say `remote: true` (LC-12f, no HTTP) |
 | lane verified | a local-check lane needs its stored `model_digest` to equal the digest in the inventory cache (`discovery.json`, no HTTP). A missing or stale (older than 7 days) cache, or no digest for the model, means no preference. The 30-day no-digest rule of the display (`local-check list`) is display only |
 | no prereg fallback for a local-check entry | an entry enabled with `source: local_check` whose own lane went stale (model changed) is not routed on a pre-registered lane. Only `prereg` / `manual` entries may use one |
 | input fits | `len(input) + len(hint) <= min(lane.scope.max_prompt_chars, window of the router's ctx)` |

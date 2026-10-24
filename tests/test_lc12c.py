@@ -14,7 +14,7 @@ from llm_router.text_jobs import MAX_JOB_ATTEMPTS
 from llm_router.tools import text as T
 from llm_router.types import Complexity, LLMResponse, TaskType
 from tests.test_lc12 import FLAG, call_job, passed, world  # noqa: F401
-from tests.test_lc8_routing import BARE, JOB
+from tests.test_lc8_routing import BARE, DIGEST, JOB
 
 LOCAL = f"ollama/{BARE}"
 CLOUD = ["gemini/gemini-2.5-flash", "anthropic/claude-sonnet-5"]
@@ -45,6 +45,8 @@ def e2e(world, tmp_path, mock_env, temp_db, monkeypatch):
 
     monkeypatch.setattr(router, "_build_and_filter_chain", build)
     monkeypatch.setattr(router, "_call_text", call_text)
+    # LC-12f: the pass-only cut site re-reads the live /api/tags row; by default it matches the pass.
+    monkeypatch.setattr(er, "_live_tags", lambda: {"models": [{"name": BARE, "model": BARE, "digest": DIGEST}]})
     from unittest.mock import AsyncMock
     monkeypatch.setattr("llm_router.cost.get_daily_spend", AsyncMock(return_value=0.0))
     monkeypatch.setattr("llm_router.cost.get_monthly_spend", AsyncMock(return_value=0.0))

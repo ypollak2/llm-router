@@ -93,13 +93,16 @@ def parse_param_size(text: object) -> float | None:
 
 
 def tag_metadata(entry: dict) -> dict:
-    """The ranking fields of one ``/api/tags`` model entry (None where absent)."""
+    """Ranking fields (None where absent) and LC-12f ``remote`` privacy metadata of a ``/api/tags`` entry."""
+    from llm_router.resolver.inventory import ollama_remote_marker
+
     details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
     size = entry.get("size")
     return {
         "parameter_size": details.get("parameter_size") or None,
         "size": size if isinstance(size, int) and size > 0 else None,
         "digest": entry.get("digest") or None,
+        "remote": bool(ollama_remote_marker(entry, None)),
     }
 
 

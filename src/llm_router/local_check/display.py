@@ -35,6 +35,21 @@ def _discovery() -> tuple[dict, float]:
         return {}, float("inf")
 
 
+def cached_remote(model: str) -> bool:
+    """LC-12f: True iff discovery.json's entry for this Ollama model says ``remote: true`` (no network)."""
+    try:
+        from llm_router.local_check import routing as lr
+
+        models = _discovery()[0]
+        for k in lr.candidates(model):
+            entry = models.get(f"ollama/{k}")
+            if isinstance(entry, dict) and entry.get("remote") is True:
+                return True
+    except Exception:  # noqa: BLE001 -- name and pre-dispatch checks still apply
+        return False
+    return False
+
+
 def inventory() -> tuple[list[str], dict[str, str]]:
     """(installed local model names, name -> digest) from the discovery cache. No network.
 
