@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- P3.6-c PR3c (recall-raising redo variants): `redo_signal` variants `v3c` (extra answer-directed correction
+  phrases: "that's not what I asked", "still wrong", "same error", "you didn't ...", "no, I meant", "undo that",
+  "revert it", "go back to" ...; reported as `contradiction`) and `v3d` (`v3c` plus a short negative follow-up:
+  at most 6 words, opening with no/nope/wrong/not/still, minus "no worries", "not now", ... ). Both keep every v2
+  signal, so their flags are a superset of v2's and can only raise N_F (tests/test_redo_variants_recall.py).
+  Written from the label definition only, no data. Under the at-most-2-widenings rule v3a, v3b, v3c and v3d are
+  four candidates but only two non-baseline (candidate, detector sha256) pairs may ever be tune-scored, so the
+  owner picks which two. `PATTERN_VERSION` and the default stay `v2`.
+- P3.6-c PR3b (anti-gaming): `redo-sample --freeze --detector X` refuses a non-baseline X unless `tune_log.jsonl`
+  has X's row at the current detector sha256 and X is the strict argmax of overall tune F1; `frozen.json` records
+  `tune_row_sha256`, `tune_log_sha256`, `tune_log_bytes` and `redo-score` verifies them. Tune-log rows store
+  `detector_sha256` and `variant_params`; the widening cap counts distinct (candidate, sha256), so editing a variant
+  and re-scoring is a new candidate. Deleting `tune_log.jsonl` is a procedure violation, visible at score time.
 - proxy Haiku tier on Claude Haiku 5.5 (HAIKU55-TIER-1, docs/bugs/HAIKU55-TIER-1.md): the Haiku rewrite rules now key
   off the tier's `model`. With `claude-haiku-5-5` the body keeps adaptive thinking, effort and mid-conversation system
   messages (no fold), `max_tokens` clamps to 128K, a body with sampling parameters or an assistant prefill (400 on 5.5)
@@ -23,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (4.5 retires not sooner than 2026-10-15). Capabilities are from platform.claude.com, fetched 2026-10-10.
 
 ### Fixed
+- `redo-score` on a test run frozen before the detector source changed (e.g. before #706) now says so and that the
+  test half stays unspent, instead of the generic invalid-inputs refusal; the unreadable-prior-run refusal names the
+  run id(s) and the recovery step (move it aside or remove it), never a path.
 - ledger on every exit (LEDGER-EVERY-EXIT-1, docs/bugs/LEDGER-EVERY-EXIT-1.md): one guard around the whole `llm()` and `llm_act()` body leaves one `usage` and one `routing_decisions` row (caller's session, $0, `error_*` / `breaker_open`, excluded from metrics by the shared predicates) on every exit, including failures before dispatch, `llm_act` refusals and silent returns; paths that already wrote are not doubled. A hard kill stays unledgered. Not re-measured on a live M0-3 run.
 - quality breaker (N21, docs/bugs/N21.md): units of `research` and `harness` sessions no longer feed the breaker. In the M0-3 rerun2 (2026-10-10, n=20 calls, 2 research-tagged sessions that discarded every answer on purpose) they opened `mcp_llm:code` for 24 h for every session. A breaker refusal in `llm()` now writes one `usage` and one `routing_decisions` row (`breaker_open`, caller's session, $0); the shared predicates (`SQL_NOT_ERROR_ROW`, `SQL_REAL_DECISION`) exclude them from routing metrics, bandit, judge and cost readers. session-end hook v30 (both copies), statusline literal updated. M0-3 gate count not re-measured.
 - local model hygiene (N19, N20; docs/bugs/N19.md, docs/bugs/N20.md): `all_ollama_models()` no longer lists an Ollama

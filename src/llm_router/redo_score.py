@@ -1,6 +1,8 @@
 """Text-free, single-use scoring of a frozen redo validation draw.
 
 Per-kind precision and recall are reported only for runs frozen with include_untagged.
+Deleting tune_log.jsonl is a procedure violation: frozen.json binds its prefix with
+tune_log_sha256/tune_log_bytes so deletion or rewriting is visible at test scoring.
 """
 from __future__ import annotations
 
@@ -25,7 +27,7 @@ RULE = "precision>=0.80 and TP>=15"
 COMPLETENESS_RULE = ("all flagged-stratum (F) pairs must be labelled; "
                      "any lost F pair voids; overall lost > 5% voids")
 NOT_ESTIMABLE_CONCENTRATED = "not estimable (concentrated draw)"
-MAX_WIDENINGS = 2           # distinct non-baseline candidates that may ever be tune-scored (M0.9 rule)
+MAX_WIDENINGS = 2           # distinct non-baseline (candidate, detector SHA) pairs (M0.9 rule)
 TUNE_SIGNALS = (redo_signal.SIGNAL_REASK, redo_signal.SIGNAL_CONTRADICTION, redo_signal.SIGNAL_REPEAT)
 
 
@@ -321,7 +323,18 @@ def cmd_redo_score(args: list[str]) -> int:
         manifest = (run_dir / "manifest.jsonl").read_bytes()
         if frozen["detector_sha256"] != hashlib.sha256(
                 Path(redo_signal.__file__).read_bytes()).hexdigest():
-            raise ValueError("detector mismatch")
+            print("Refused: the detector source (redo_signal.py) changed after this run was frozen "
+                  "(for example a run frozen before PR #706/this change added detector variants). "
+                  "The frozen test half stays unspent: re-freeze a new run with the current detector; "
+                  "do not edit the old run.")
+            return 2
+        if frozen.get("detector_variant", redo_signal.BASELINE_VARIANT) != redo_signal.BASELINE_VARIANT:
+            try:
+                verify_tune_provenance(
+                    paths.state_path("redo_validation", "tune_log.jsonl"), frozen)
+            except (OSError, ValueError, KeyError, TypeError):
+                print("Refused: frozen tune-log provenance is invalid or unavailable.")
+                return 2
         if frozen["manifest_sha256"] != hashlib.sha256(manifest).hexdigest():
             raise ValueError("manifest mismatch")
         rows = [json.loads(line) for line in manifest.decode("utf-8").splitlines() if line.strip()]
@@ -453,13 +466,72 @@ def resolve_tune_labels(rows, label_rows) -> dict:
     return {pair: sources.get("owner", sources.get("judge")) for pair, sources in by_pair.items()}
 
 
+def detector_sha256() -> str:
+    return hashlib.sha256(Path(redo_signal.__file__).read_bytes()).hexdigest()
+
+
+def tune_row_sha256(row: dict) -> str:
+    return hashlib.sha256(json.dumps(row, sort_keys=True, allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def _parse_tune_log(content: bytes) -> list[dict]:
+    rows = [json.loads(line) for line in content.decode("utf-8").splitlines() if line.strip()]
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("candidate"), str) or not row["candidate"]:
+            raise ValueError("invalid tune log")
+        if row.get("detector_sha256") is not None and not isinstance(row["detector_sha256"], str):
+            raise ValueError("invalid detector SHA")
+        # Reject non-JSON numeric values anywhere, including older candidate rows.
+        tune_row_sha256(row)
+    return rows
+
+
+def tune_argmax(rows: list[dict], candidate: str, detector_sha: str) -> dict:
+    """Use each candidate's latest row; a tie or undefined selected F1 refuses."""
+    latest = {}
+    for row in rows:
+        value = row["overall"]["unweighted"]["f1"]
+        if value is not None and (not isinstance(value, float) or not math.isfinite(value)):
+            raise ValueError("invalid tune F1")
+        latest[row["candidate"]] = row
+    selected = latest[candidate]
+    best = selected["overall"]["unweighted"]["f1"]
+    if selected.get("detector_sha256") != detector_sha or best is None:
+        raise ValueError("candidate not current or comparable")
+    for other, row in latest.items():
+        value = row["overall"]["unweighted"]["f1"]
+        if other != candidate and value is not None and best <= value:
+            raise ValueError("candidate is not strict argmax")
+    return selected
+
+
+def freeze_tune_provenance(path: Path, candidate: str, detector_sha: str) -> dict:
+    # Parse and hash one byte snapshot, never separate reads of a changing log.
+    content = path.read_bytes()
+    selected = tune_argmax(_parse_tune_log(content), candidate, detector_sha)
+    return dict(tune_row_sha256=tune_row_sha256(selected),
+                tune_log_sha256=hashlib.sha256(content).hexdigest(), tune_log_bytes=len(content))
+
+
+def verify_tune_provenance(path: Path, frozen: dict) -> None:
+    size = frozen["tune_log_bytes"]
+    if type(size) is not int or size <= 0:
+        raise ValueError("invalid tune log length")
+    content = path.read_bytes()
+    prefix = content[:size]
+    if len(prefix) != size or hashlib.sha256(prefix).hexdigest() != frozen["tune_log_sha256"]:
+        raise ValueError("tune log prefix changed")
+    rows = _parse_tune_log(content)
+    if not any(tune_row_sha256(row) == frozen["tune_row_sha256"]
+               and row["candidate"] == frozen["detector_variant"]
+               and row.get("detector_sha256") == frozen["detector_sha256"] for row in rows):
+        raise ValueError("selected tune row missing")
+
+
 def _read_tune_log(path: Path) -> list[dict]:
     if not os.path.lexists(path):
         return []
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if not all(isinstance(r, dict) and isinstance(r.get("candidate"), str) for r in rows):
-        raise ValueError("invalid tune log")
-    return rows
+    return _parse_tune_log(path.read_bytes())
 
 
 def _append_tune_log(path: Path, row: dict) -> None:
@@ -485,7 +557,8 @@ def _print_scope(name, block):
 
 def cmd_redo_score_tune(options) -> int:
     """Score one candidate against a tune set. Repeatable: never writes ``test.used`` or ``result.json``;
-    refuses a run whose frozen.json is not ``purpose: tune`` and a third distinct candidate."""
+    refuses a run whose frozen.json is not ``purpose: tune`` and a third distinct
+    non-baseline (candidate, detector SHA) pair."""
     candidate = options.candidate or redo_signal.BASELINE_VARIANT
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", options.run):
         print("Refused: invalid run id.")
@@ -512,14 +585,16 @@ def cmd_redo_score_tune(options) -> int:
         return 2
     log_path = paths.state_path("redo_validation", "tune_log.jsonl")
     try:
-        logged = {r["candidate"] for r in _read_tune_log(log_path)} - {redo_signal.BASELINE_VARIANT}
+        detector_sha = detector_sha256()
+        logged = {(r["candidate"], r.get("detector_sha256")) for r in _read_tune_log(log_path)
+                  if r["candidate"] != redo_signal.BASELINE_VARIANT}
     except (OSError, ValueError, KeyError, TypeError):
         print("Refused: tune log unreadable.")
         return 2
-    if (candidate != redo_signal.BASELINE_VARIANT and candidate not in logged
+    if (candidate != redo_signal.BASELINE_VARIANT and (candidate, detector_sha) not in logged
             and len(logged) >= MAX_WIDENINGS):
-        print(f"Refused: at most {MAX_WIDENINGS} widenings ({len(logged)} distinct candidates "
-              "already scored).")
+        print(f"Refused: at most {MAX_WIDENINGS} widenings "
+              f"({len(logged)} distinct candidate+detector-sha pairs already scored).")
         return 2
     try:
         label_paths = options.labels or [p for p in (run_dir / "labels_owner.jsonl",
@@ -550,6 +625,8 @@ def cmd_redo_score_tune(options) -> int:
     try:
         _append_tune_log(log_path, dict(
             ts=datetime.now(timezone.utc).isoformat(), tune_run=run, candidate=candidate,
+            detector_sha256=detector_sha,
+            variant_params={"variant": candidate, "description": redo_signal.VARIANTS[candidate]},
             n_scored=result["n_scored"], n_unclear=result["n_unclear"], n_lost=result["n_lost"],
             overall=result["overall"], per_signal=result["per_signal"]))
     except OSError:

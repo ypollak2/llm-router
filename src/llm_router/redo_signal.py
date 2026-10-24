@@ -41,15 +41,22 @@ PATTERN_VERSION = "v2"
 # Candidate variants for the tune step (P3.6-c PR 3; design section 5). v2 is the default everywhere and
 # stays byte-identical. v3a and v3b are precision-first candidates written from the design's guidance
 # ("demote or tighten repeat, which produced the v0 false positives and the 5-6 word false positives"), not
-# fitted to data. At most 2 non-baseline candidates may be scored (redo_score tune log).
+# fitted to data. v3c and v3d are the two recall-raising candidates, derived only from the label
+# definition, without fitting. The widening cap counts distinct (candidate, detector sha256)
+# evaluations: v3a/v3b/v3c/v3d are four candidates, but only two non-baseline ones from their union
+# may ever be scored per tune log. The owner must pick which two.
 BASELINE_VARIANT = "v2"
 VARIANTS = {
     "v2": "frozen M0.9 patterns",
     "v3a": "tighten repeat: at least 12 words and Jaccard >= 0.9; reask and contradiction as v2",
     "v3b": "demote repeat: reported only when reask or contradiction also fires; thresholds as v2",
+    "v3c": "broaden reask phrases under contradiction; all v2 signals retained",
+    "v3d": "v3c plus short negative follow-ups of at most 6 words; all v2 signals retained",
 }
 V3A_REPEAT_MIN_WORDS = 12
 V3A_JACCARD_MIN = 0.9
+# The design screens at <=12 words; precision-first half of that is an unfitted choice.
+V3D_SHORT_MAX_WORDS = 6
 
 SIGNAL_REASK = "reask"
 SIGNAL_CONTRADICTION = "contradiction"
@@ -75,6 +82,48 @@ _FAILURE_RE = re.compile(
     r"|\b(?:failed|failing)\b"
     r"|you (?:didn't|did not|forgot|missed|never|haven't|have not|should have)"
     r"|(?:not|isn't) (?:what i|right|correct|good))")
+
+
+# v3c widens only contradiction, using answer-directed corrections from the label definition.
+# Commands require a prompt-opening imperative and a backward reference, rather than a product
+# report mentioning a rollback in the middle. Overlap with v2 is intentional.
+_REDO_PHRASE_RE_V3C = re.compile(
+    r"\b(?:that's not what i (?:asked|wanted|meant|said)"
+    r"|not what i asked"
+    r"|still (?:wrong|not\b|isn't\b|doesn't\b)"
+    r"|(?:that|it) (?:didn't|did not) work"
+    r"|same (?:error|problem|issue|result)"
+    r"|you (?:didn't|did not)\b"
+    r"|that (?:broke\b|made it worse\b))"
+    r"|^(?:no,\s*)?i meant\b"
+    r"|^(?:(?:please|can you|just)\s+)*(?:undo (?:that|this)\b"
+    r"|revert (?:that|it|this|the last|your)\b"
+    r"|go back to\b|roll that back\b)"
+)
+
+_V3D_REJECTION_RE = re.compile(r"^(?:no|nope|wrong|not|still)\b")
+_V3D_BENIGN_RE = re.compile(
+    r"^(?:no(?:,\s*|\s+)(?:worries|problem|thanks|thank you|need|rush)"
+    r"|not (?:now|yet|today|right now|really|sure|bad|a problem)"
+    r"|no (?:idea|clue)"
+    r"|still (?:working|going|running|waiting|thinking|here|looking|reading|testing))\b"
+)
+
+
+def _short_negative_v3d(text: str) -> bool:
+    """Recognise a short rejection, conservatively excluding acknowledgements and deferrals.
+
+    Callers compute session signals only for prompts k>=1 (a previous prompt exists), providing
+    the 'follows an assistant answer' context for this heuristic. No answer text is inspected.
+    'Not really' and 'not sure' are conservatively treated as benign, as is any mention of 'later'.
+    Exclusions apply only to this addition: inherited v2 false positives must remain for the superset.
+    """
+    return (
+        len(_words(text)) <= V3D_SHORT_MAX_WORDS
+        and _V3D_REJECTION_RE.match(text) is not None
+        and _V3D_BENIGN_RE.match(text) is None
+        and re.search(r"\blater\b", text) is None
+    )
 
 # ── transcript records ───────────────────────────────────────────────────────
 
@@ -186,6 +235,10 @@ def _signals(prompt: str, previous: str | None, variant: str = BASELINE_VARIANT)
         out.append(SIGNAL_REASK)
     if _CONTRADICTION_RE.match(lowered[:80]) or _FAILURE_RE.search(lowered[:FAILURE_WINDOW]):
         out.append(SIGNAL_CONTRADICTION)
+    if variant in ("v3c", "v3d") and SIGNAL_CONTRADICTION not in out:
+        if (_REDO_PHRASE_RE_V3C.search(lowered[:FAILURE_WINDOW])
+                or (variant == "v3d" and _short_negative_v3d(lowered))):
+            out.append(SIGNAL_CONTRADICTION)
     min_words, jaccard_min = REPEAT_MIN_WORDS, JACCARD_MIN
     if variant == "v3a":
         min_words, jaccard_min = V3A_REPEAT_MIN_WORDS, V3A_JACCARD_MIN

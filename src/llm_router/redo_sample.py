@@ -79,11 +79,12 @@ class EvidenceUnreadable(RuntimeError):
 class PriorRunUnreadable(RuntimeError):
     """A run directory under redo_validation/ cannot be read as a run: disjointness cannot be proven.
 
-    Carries the count only."""
+    Carries run directory names only, never paths, and their count."""
 
-    def __init__(self, count: int) -> None:
-        self.count = count
-        super().__init__(f"{count} unreadable prior run directory(ies)")
+    def __init__(self, runs: list[str]) -> None:
+        self.runs = sorted(runs)
+        self.count = len(self.runs)
+        super().__init__(f"{self.count} unreadable prior run directory(ies)")
 
 
 @dataclass(frozen=True)
@@ -108,7 +109,7 @@ def load_prior_runs(purposes: set[str]) -> list[PriorRun]:
     if not root.is_dir():
         return []
     runs: list[PriorRun] = []
-    bad = 0
+    bad_runs: list[str] = []
     for run_dir in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
         try:
             frozen = json.loads((run_dir / "frozen.json").read_text(encoding="utf-8"))
@@ -120,13 +121,13 @@ def load_prior_runs(purposes: set[str]) -> list[PriorRun]:
             if not isinstance(salt, str) or not all(isinstance(i, str) for i in ids):
                 raise ValueError("invalid run")
         except (OSError, ValueError, KeyError, TypeError):
-            bad += 1
+            bad_runs.append(run_dir.name)
             continue
         purpose = "tune" if frozen.get("purpose") == "tune" else "test"
         if purpose in purposes:
             runs.append(PriorRun(purpose, salt, ids))
-    if bad:
-        raise PriorRunUnreadable(bad)
+    if bad_runs:
+        raise PriorRunUnreadable(bad_runs)
     return runs
 
 
@@ -598,7 +599,8 @@ def cmd_redo_sample(args: list[str]) -> int:
     parser.add_argument("--run-id", "--run", dest="run_id")
     parser.add_argument("--detector", choices=sorted(redo_signal.VARIANTS),
                         default=redo_signal.BASELINE_VARIANT,
-                        help="detector variant for --census/--freeze; recorded in frozen.json")
+                        help="detector variant for --census/--freeze; non-baseline freeze requires "
+                             "the logged argmax-F1 candidate")
     parser.add_argument("--allow-below-threshold", action="store_true")
     parser.add_argument("--allow-empty-exclusion", action="store_true")
     parser.add_argument("--days", type=float, default=30)
@@ -660,6 +662,18 @@ def cmd_redo_sample(args: list[str]) -> int:
     if (options.freeze or options.tune) and os.path.lexists(run_dir):
         print("Refused: run directory already exists.")
         return 2
+    tune_provenance = dict(tune_row_sha256=None, tune_log_sha256=None, tune_log_bytes=None)
+    try:
+        detector_sha = hashlib.sha256(Path(redo_signal.__file__).read_bytes()).hexdigest()
+        if options.freeze and options.detector != redo_signal.BASELINE_VARIANT:
+            # redo_score imports redo_sample; defer this import until both modules are loaded.
+            from llm_router.redo_score import freeze_tune_provenance
+            tune_provenance = freeze_tune_provenance(
+                paths.state_path("redo_validation", "tune_log.jsonl"), options.detector, detector_sha)
+    except (OSError, ValueError, KeyError, TypeError):
+        print("Refused: non-baseline freeze requires a current logged strict argmax-F1 candidate "
+              "and a readable valid tune log.")
+        return 2
     root = (options.projects_dir if options.projects_dir is not None
             else northstar.claude_projects_dir())
     root = Path(root)
@@ -670,8 +684,12 @@ def cmd_redo_sample(args: list[str]) -> int:
     try:
         prior_runs = load_prior_runs({"tune", "test"} if options.tune else {"tune"})
     except PriorRunUnreadable as refused:
-        print(f"Refused: {refused.count} unreadable prior run directory(ies): "
-              "disjointness cannot be proven.")
+        run_names = ", ".join(refused.runs[:5])
+        if len(refused.runs) > 5:
+            run_names += f" and {len(refused.runs) - 5} more"
+        print(f"Refused: {refused.count} unreadable prior run directory(ies): {run_names}; "
+              "disjointness cannot be proven; a run dir under redo_validation/ is incomplete; "
+              "move it aside or remove it.")
         return 2
     try:
         pool, counts = collect(
@@ -736,7 +754,7 @@ def cmd_redo_sample(args: list[str]) -> int:
         include_untagged=options.include_untagged,
         allow_empty_exclusion=options.allow_empty_exclusion,
         detector_version=redo_signal.PATTERN_VERSION,
-        detector_sha256=hashlib.sha256(Path(redo_signal.__file__).read_bytes()).hexdigest(),
+        detector_sha256=detector_sha,
         manifest_sha256=hashlib.sha256(manifest.encode("utf-8")).hexdigest(),
         seed=seed, run_id=run_id, salt=salt, min_flagged=MIN_FLAGGED,
         purpose="tune" if options.tune else "test", detector_variant=options.detector,
@@ -752,6 +770,7 @@ def cmd_redo_sample(args: list[str]) -> int:
         counts=counts, strata=strata,
         weights_combined={h: s["N"] / s["n"] if s["n"] else None for h, s in strata.items()},
         created_utc=_iso(now))
+    frozen.update(tune_provenance)
     if options.include_untagged:
         frozen["sizes_by_kind"] = counts["by_kind"]
         frozen["ledger_conflict_excluded"] = counts["ledger_conflict_excluded"]

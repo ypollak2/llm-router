@@ -146,6 +146,9 @@ def test_freeze_excludes_tune_pairs_and_records_them(env):
     first = sessions(env, "first", 3)
     assert run_sample("--tune", "--run", "t1") == 0
     second = sessions(env, "second", 3)
+    score._append_tune_log(state(env) / "tune_log.jsonl", dict(
+        candidate="v3a", detector_sha256=score.detector_sha256(),
+        overall={"unweighted": {"f1": 0.9}}))
     assert run_sample("--freeze", "--run-id", "test1", "--allow-below-threshold",
                       "--detector", "v3a") == 0
     test_dir, tune_dir = state(env) / "test1", state(env) / "tune-t1"
@@ -285,6 +288,8 @@ def counts(block, key="unweighted"):
     ("v2", (3, 2, 1), (1, 0, 3), (1, 1, 3), (1, 1, 3)),
     ("v3a", (3, 1, 1), (1, 0, 3), (1, 1, 3), (1, 0, 3)),
     ("v3b", (2, 1, 2), (1, 0, 3), (1, 1, 3), (0, 0, 4)),
+    ("v3c", (3, 2, 1), (1, 0, 3), (1, 1, 3), (1, 1, 3)),
+    ("v3d", (3, 2, 1), (1, 0, 3), (1, 1, 3), (1, 1, 3)),
 ])
 def test_per_signal_counts_on_planted_pairs(tuned, capsys, candidate, overall, reask, contr, repeat):
     env, run, _ = tuned
@@ -344,12 +349,11 @@ def test_weighted_counts_use_stratum_weights():
 
 # ---- guards ----
 
-def test_two_widenings_then_third_distinct_candidate_refuses(tuned, monkeypatch, capsys):
+def test_two_widenings_then_third_distinct_candidate_refuses(tuned, capsys):
     env, run, _ = tuned
     assert score_tune(env, "v2") == 0                    # the baseline is not a widening
     assert score_tune(env, "v3a") == 0
     assert score_tune(env, "v3b") == 0
-    monkeypatch.setitem(redo_signal.VARIANTS, "v3c", "a third, hypothetical candidate")
     capsys.readouterr()
     before = (state(env) / "tune_log.jsonl").read_text()
     assert score.cmd_redo_score(["--tune", "--run", "t1", "--candidate", "v3c",
