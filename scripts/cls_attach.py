@@ -189,9 +189,9 @@ def _join_key(join: str, native, text):
     return S.text_sha(text) if join == "text_sha" and isinstance(text, str) else native
 
 
-def read_ge3(items_path, split_path, opus_path, sonnet_path, drops: Counter, join: str = "key") -> list[dict]:
+def read_ge3(items_path, split_path, opus_path, sonnet_path, drops: Counter, join: str = "text_sha") -> list[dict]:
     """GE3: gt500 items.jsonl {id, prompt, session_id, timestamp, context?, context_withheld?}, split.json
-    {tune_ids, heldout_ids}, work/labels_opus.jsonl and labels_sonnet.jsonl {id, tier}."""
+    {tune_ids, heldout_ids}, work/labels_opus.jsonl and labels_sonnet.jsonl {text_sha, tier} (join "key": {id, tier})."""
     try:
         split = json.loads(Path(split_path).read_text(encoding="utf-8"))
         tune, held = set(split["tune_ids"]), set(split["heldout_ids"])
@@ -250,7 +250,7 @@ def _e2_set(split) -> str | None:
     return "e2_cal" if s in E2_CAL_SPLITS else "e2_ho" if s in E2_HO_SPLITS else None
 
 
-def read_e2(sample_path, label_path, key_field: str, tier_field: str, drops: Counter, join: str = "key") -> list[dict]:
+def read_e2(sample_path, label_path, key_field: str, tier_field: str, drops: Counter, join: str = "text_sha") -> list[dict]:
     """E2 (p_eval work/sample.jsonl {text, split, session_id, timestamp}): split "calibration" -> e2_cal, the
     held-out names (as E1) -> e2_ho, any other split dropped and counted (`e2_unknown_split`). Labels: any
     file whose rows carry key_field and tier_field (may be the sample file itself)."""
@@ -263,7 +263,7 @@ def _e1_set(split) -> str | None:
     return "e1_tune" if s in E1_TUNE_SPLITS else "e1_ho" if s in E1_HO_SPLITS else None
 
 
-def read_e1(tasks_path, label_path, key_field: str, tier_field: str, drops: Counter, join: str = "key") -> list[dict]:
+def read_e1(tasks_path, label_path, key_field: str, tier_field: str, drops: Counter, join: str = "text_sha") -> list[dict]:
     """E1 (local-classifier tasks_local.json, a JSON list {text, split}): tune -> e1_tune, held-out names ->
     e1_ho, other splits dropped. E1 rows carry no session or timestamp: record recovery fills them."""
     return _read_keyed(read_rows(tasks_path, "e1_tasks"), "e1", label_path, "e1_opus_labels", key_field,
@@ -389,6 +389,8 @@ def recover(items: list[dict], index, ledger_path, tier_name, counts: Counter) -
             if not it["session_id"] and rec["session_id"]:
                 it["session_id"] = rec["session_id"]
                 counts["session_from_record"] += 1
+                if it["timestamp"] and rec["timestamp"] != it["timestamp"]:
+                    counts["session_from_record_ts_mismatch"] += 1  # disclosure only
             if not it["timestamp"] and rec["timestamp"]:
                 it["timestamp"] = rec["timestamp"]
                 counts["timestamp_from_record"] += 1
@@ -523,17 +525,19 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
         drops["p17d"] = Counter()
         items += read_p17d(a.p17d_items, a.p17d_labels, drops["p17d"], item_key=mods.get("item_key"))
 
-    for fam, given in (("ge3", has_ge3), ("e2", has_e2), ("e1", has_e1)):
+    checks = [(fam, "opus", fam, given) for fam, given in (("ge3", has_ge3), ("e2", has_e2), ("e1", has_e1))]
+    checks.append(("ge3", "sonnet", "ge3_sonnet", has_ge3 and bool(a.ge3_sonnet_labels)))
+    for fam, field, name, given in checks:
         if not given:
             continue
         rows = [x for x in items if x["source_set"] in SOURCE_SETS[fam]]
-        n_lab = sum(1 for x in rows if x["opus"])
+        n_lab = sum(1 for x in rows if x[field])
         if rows and n_lab == 0:
             raise Refuse("Refused: label file for %s joined 0 items (check --%s-label-join and the key field)"
-                         % (fam, fam))
+                         % (name, fam))
         if rows and n_lab / len(rows) < 0.5:
             print("WARNING: label file for %s joined %d of %d items (%.0f percent, below 50); check --%s-label-join"
-                  % (fam, n_lab, len(rows), 100.0 * n_lab / len(rows), fam), file=sys.stderr)
+                  % (name, n_lab, len(rows), 100.0 * n_lab / len(rows), fam), file=sys.stderr)
 
     rec_counts: Counter = Counter()
     index, index_stats = None, None
@@ -693,8 +697,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", required=True, help="output directory under <cls-root>/dev")
     p.add_argument("--ge3-items", help="gt500 items.jsonl")
     p.add_argument("--ge3-split", help="gt500 split.json")
-    p.add_argument("--ge3-opus-labels", help="gt500 work/labels_opus.jsonl {id, tier}")
-    p.add_argument("--ge3-sonnet-labels", help="gt500 work/labels_sonnet.jsonl {id, tier}")
+    p.add_argument("--ge3-opus-labels", help="gt500 work/labels_opus.jsonl {text_sha, tier} (default join; {id, tier} with --ge3-label-join key)")
+    p.add_argument("--ge3-sonnet-labels", help="gt500 work/labels_sonnet.jsonl {text_sha, tier} (default join; {id, tier} with --ge3-label-join key)")
     p.add_argument("--ge3-label-join", choices=JOINS, default="text_sha",
                    help="text_sha (default): label rows carry {text_sha} (PREREG 1.3 (4)); key: opt-in, rows carry the item id")
     p.add_argument("--e2-sample", help="p_eval work/sample.jsonl")
