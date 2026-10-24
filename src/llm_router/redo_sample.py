@@ -5,7 +5,7 @@ The local frozen.json stores the salt so a later labeller can re-derive pair
 identities from transcripts. Frozen metadata records whether untagged sessions
 were admitted, exclusion provenance and, when enabled, per-kind populations and
 draw sizes beside the combined strata. With --include-untagged the proxy ledger's
-session stamps (rows from the window start minus two days on, streamed) resolve kinds
+session stamps (the whole ledger, streamed) resolve kinds
 before a session counts as untagged; a session whose stamps conflict is excluded, not
 untagged, and an unreadable ledger refuses the run. The census then reports the ledger and
 backfill sidecar states and untagged counts by cause (tag, ledger and sidecar facets);
@@ -37,8 +37,10 @@ from llm_router import (northstar, offload_share, paths, redo_signal, session_ki
 MIN_FLAGGED = 19
 DEFAULT_SEED = 360
 EMPTY_EXCLUSION = "M0.9 exclusion list EMPTY: spent M0.9 pairs are NOT excluded"
-LEDGER_MARGIN_DAYS = 2      # proxy rows this long before the window can still stamp its sessions
 LEDGER_PRESENT, LEDGER_MISSING, LEDGER_UNREADABLE = "present", "missing", "unreadable"
+LEDGER_MISSING_WARNING = (
+    "WARNING: proxy ledger missing: sessions are resolved from tag files and the backfill "
+    "sidecar only")
 LEDGER_UNREADABLE_LINES = ("WARNING: proxy ledger unreadable",
                            "Refused: proxy ledger unreadable; untagged sessions cannot be resolved")
 Resolver = Callable[[str], session_kind.Resolution]
@@ -63,24 +65,19 @@ def _sidecar_warning(state: str) -> str:
             "as untagged")
 
 
-def _is_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _feed_ledger(index: session_kind.KindIndex, cutoff: float,
+def _feed_ledger(index: session_kind.KindIndex,
                  rows: Iterable[dict] | None = None) -> tuple[str, int]:
-    """Stream proxy ledger stamps into ``index`` (only session_id -> kinds is kept) and
-    return the ledger state and the number of rows read. Rows older than ``cutoff`` are
-    skipped; a row without a numeric ``ts`` is kept, because a stamp that cannot be placed
-    in time is still evidence of a kind. ``rows`` replaces the file in tests."""
+    """Stream the whole proxy ledger; only session_id -> kinds is kept in ``index``.
+
+    A session with pairs in the window may have been stamped only before it, so the whole
+    ledger is read. Memory is bounded by streaming, not by time. Return the ledger state
+    and the number of dict rows read. ``rows`` replaces the file in tests.
+    """
     kept = 0
 
     def take(row: object) -> None:
         nonlocal kept
         if not isinstance(row, dict):
-            return
-        ts = row.get("ts")
-        if _is_number(ts) and ts < cutoff:
             return
         kept += 1
         index.add(row.get("session_id"), row.get("session_kind"))
@@ -233,8 +230,7 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
     if resolve is None:
         index = session_kind.KindIndex(backfill=True, sidecar=sidecar)
         if include_untagged:   # the proxy ledger's session stamps resolve untagged sessions
-            ledger_state, ledger_rows_read = _feed_ledger(
-                index, since - LEDGER_MARGIN_DAYS * 86400, ledger_rows)
+            ledger_state, ledger_rows_read = _feed_ledger(index, ledger_rows)
             if ledger_state == LEDGER_UNREADABLE:
                 raise ProxyLedgerUnreadable("proxy ledger unreadable")
         resolve = index.resolve
@@ -444,8 +440,10 @@ def _gate_lines(n: int, kinds: dict[str, int],
 
 
 def _untagged_warnings(counts: dict) -> list[str]:
-    """Warnings for an --include-untagged run: an unusable sidecar, excluded conflicts."""
+    """Warnings for an --include-untagged run: missing ledger, sidecar, conflicts."""
     lines = []
+    if counts.get("proxy_ledger") == LEDGER_MISSING:
+        lines.append(LEDGER_MISSING_WARNING)
     if counts["backfill_sidecar"] in (session_kind_backfill.SIDECAR_UNREADABLE,
                                       session_kind_backfill.SIDECAR_CORRUPT):
         lines.append(_sidecar_warning(counts["backfill_sidecar"]))

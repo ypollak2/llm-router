@@ -247,7 +247,9 @@ def test_flag_off_census_keys_match_base(isolated, capsys):
     assert set(counts) == FLAG_OFF_KEYS
     assert counts["sessions_by_kind"] == {"organic": 0, "untagged": 1}  # the ledger is not read
     assert sample.cmd_redo_sample(["--census"]) == 0
-    printed = {line.split(":")[0] for line in capsys.readouterr().out.splitlines()}
+    output = capsys.readouterr().out
+    assert sample.LEDGER_MISSING_WARNING not in output
+    printed = {line.split(":")[0] for line in output.splitlines()}
     assert FLAG_OFF_KEYS <= printed
     assert not any(line.startswith(UNTAGGED_ONLY) for line in printed)
 
@@ -298,6 +300,7 @@ def test_conflict_warning_is_printed_and_frozen(isolated, capsys, mode):
     args = [mode, "--include-untagged", "--allow-below-threshold", "--allow-empty-exclusion"]
     assert sample.cmd_redo_sample(args if mode == "--freeze" else args[:2]) == 0
     output = capsys.readouterr().out
+    assert sample.LEDGER_MISSING_WARNING not in output
     assert "WARNING: 2 session(s) with conflicting kind stamps were excluded" in output
     assert "s-conflict" not in output and SENTINEL not in output
     if mode == "--census":
@@ -310,12 +313,21 @@ def test_conflict_warning_is_printed_and_frozen(isolated, capsys, mode):
         assert frozen["counts"]["ledger_conflict_excluded"] == 2
 
 
-def test_missing_ledger_is_allowed_and_reported(isolated, capsys):
+@pytest.mark.parametrize("mode", ["--census", "--freeze"])
+def test_missing_ledger_is_allowed_and_reported(isolated, capsys, mode):
     write(isolated, "s-plain")
     _, counts = collect(isolated, include_untagged=True)
     assert (counts["proxy_ledger"], counts["proxy_ledger_rows"]) == ("missing", 0)
     assert sample.cmd_redo_sample(["--census", "--include-untagged"]) == 0
-    assert "proxy_ledger: missing" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "proxy_ledger: missing" in output
+    assert sample.LEDGER_MISSING_WARNING in output
+    if mode == "--freeze":
+        args = [mode, "--include-untagged", "--allow-below-threshold", "--allow-empty-exclusion"]
+        assert sample.cmd_redo_sample(args) == 0
+        assert sample.LEDGER_MISSING_WARNING in capsys.readouterr().out
+    assert sample.cmd_redo_sample(["--census"]) == 0
+    assert sample.LEDGER_MISSING_WARNING not in capsys.readouterr().out
 
 
 def make_unreadable(shape):
@@ -352,7 +364,7 @@ def test_unreadable_ledger_refuses_untagged(isolated, capsys, shape, mode):
             target.chmod(0o600)
 
 
-def test_ledger_read_is_bounded_to_the_window(isolated):
+def test_ledger_read_has_no_time_cutoff(isolated):
     for sid in ("s-old", "s-recent", "s-no-ts", "s-edge"):
         write(isolated, sid)
     since = NOW - 30 * 86400
@@ -363,10 +375,20 @@ def test_ledger_read_is_bounded_to_the_window(isolated):
         {"session_id": "s-no-ts", "session_kind": "research"},
         "not a row", {"ts": True, "session_id": "s-old", "session_kind": None}])
     pool, counts = collect(isolated, include_untagged=True)
-    assert counts["proxy_ledger_rows"] == 4    # the old row is skipped; True is not a ts
+    assert counts["proxy_ledger_rows"] == 5    # every dict row, including ts: True
     assert counts["sessions_by_kind"] == {
-        "harness": 1, "headless": 1, "organic": 0, "research": 1, "untagged": 1}
-    assert {p.session_id for p in pool} == {"s-old"}
+        "harness": 1, "headless": 1, "organic": 0, "research": 2, "untagged": 0}
+    # A research stamp older than the window still resolves the session.
+    assert pool == []
+
+
+def test_stamp_older_than_window_keeps_session_out_of_untagged(isolated, capsys):
+    write(isolated, "s-probe")
+    ledger_file([{"ts": NOW - 35 * 86400, "session_id": "s-probe", "session_kind": "research"}])
+    pool, counts = collect(isolated, include_untagged=True, days=30)
+    assert counts["sessions_by_kind"]["research"] == 1
+    assert counts["sessions_by_kind"]["untagged"] == 0
+    assert "s-probe" not in {p.session_id for p in pool}
 
 
 def test_default_path_streams_without_read_rows(isolated, monkeypatch):
