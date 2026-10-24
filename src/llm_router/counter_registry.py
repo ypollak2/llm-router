@@ -385,6 +385,22 @@ def _read_judge_sampler() -> CounterReading:
         return CounterReading(None, unknown_reason=type(exc).__name__)
 
 
+def _read_text_job_fail_closed() -> CounterReading:
+    try:
+        from llm_router.eligibility_routing import fail_closed_counts
+
+        counts = fail_closed_counts()
+        if counts is None:
+            return CounterReading(None, alarming=True, unknown_reason="fail-closed store present but unparseable")
+        total = sum(counts.values())
+        return CounterReading(
+            float(total), alarming=total > 0,
+            detail=tuple(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: -kv[1])),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return CounterReading(None, unknown_reason=type(exc).__name__)
+
+
 REGISTRY: tuple[Counter, ...] = (
     Counter(
         id="fail_open_events",
@@ -473,6 +489,14 @@ REGISTRY: tuple[Counter, ...] = (
         reader=_read_judge_sampler,
         unit="call(s) picked",
         tags=("denominator",),
+    ),
+    Counter(
+        id="text_job_fail_closed",
+        makes_visible="a local-only text job refused because its eligibility step crashed; the job went back to Claude and the bug that crashed it is still there",
+        source="llm_router.eligibility_routing:fail_closed_counts",
+        reader=_read_text_job_fail_closed,
+        unit="refusal(s)",
+        tags=("degradation",),
     ),
 )
 

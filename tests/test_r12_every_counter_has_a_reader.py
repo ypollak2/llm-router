@@ -338,6 +338,13 @@ def _drive_judge_sampled(tmp_home: pathlib.Path) -> None:
             os.environ["LLM_ROUTER_JUDGE_SAMPLE_RATE"] = old
 
 
+def _drive_text_job_fail_closed(tmp_home: pathlib.Path) -> None:
+    """LC-12e: the fail-closed refusal writer of the pass-only text job (durable, under LLM_ROUTER_HOME)."""
+    from llm_router import eligibility_routing
+
+    eligibility_routing.record_fail_closed(eligibility_routing.FC_ELIGIBILITY_STEP, RuntimeError("probe"))
+
+
 DRIVERS = {
     "fail_open_events": _drive_fail_open,
     "ledger_events_dropped": _drive_dropped_events,
@@ -349,6 +356,7 @@ DRIVERS = {
     "low_signal_classifications": _drive_low_signal_classifications,
     "draft_acceptance": _drive_draft_acceptance,
     "judge_sampled": _drive_judge_sampled,
+    "text_job_fail_closed": _drive_text_job_fail_closed,
 }
 
 

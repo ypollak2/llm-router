@@ -1129,7 +1129,9 @@ def _lane_complexity(
 def _drop_failed_eligibility(
     models: list[str], task_type: TaskType, c: Complexity, exempt_reason: str | None = None,
 ) -> list[str]:
-    """F106 / D-235: ``eligibility_routing.filter_chain``; the chain is kept if the filter raises.
+    """F106 / D-235: ``eligibility_routing.filter_chain``; the chain is kept if the filter raises (fail-open),
+    except on the pass-only text-job path (flag unset): a raise refuses with ``EligibilityStepFailed``
+    (fail closed, counted by ``eligibility_routing.record_fail_closed``, not by the fail-open counter).
 
     F112 / D-242: ``exempt_reason`` (internal; a caller whose output a mechanical check gates)
     keeps the chain unchanged and only records what the filter would have dropped.
@@ -1153,15 +1155,14 @@ def _drop_failed_eligibility(
         return eligibility_routing.filter_chain(models, task_type, c)
     except eligibility_routing.PassedModelNotInChain:
         raise
-    except Exception as exc:  # noqa: BLE001 - fail-open: the chain stays as built
-        from llm_router import failopen
-        failopen.record("CHZ-FO-ROUTER-ELIGIBILITY-FILTER", exc)
-        # LC-12d / D-277: a pass-only text job (flag unset) must not fall open to the raw chain, whose head
-        # could be a paid cloud model. Fail closed with the refusal the callers already handle.
+    except Exception as exc:  # noqa: BLE001 - fail-open, except the pass-only text-job path (fail closed)
         from llm_router import eligibility_routing as _er_fc
         if exempt_reason == _er_fc.TEXT_JOB_REASON and _er_fc._require_passed_first.get():
-            raise _er_fc.PassedModelNotInChain(
+            _er_fc.record_fail_closed(_er_fc.FC_ELIGIBILITY_STEP, exc)
+            raise _er_fc.EligibilityStepFailed(
                 f"the eligibility step failed ({type(exc).__name__}); local-only routing refuses") from exc
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ROUTER-ELIGIBILITY-FILTER", exc)
         return models
 
 
@@ -5259,8 +5260,17 @@ async def route_and_call(
         if _pass_only:
             # LC-12d: defense in depth - the survivor must itself be the passed local model, not merely "first".
             _tj_ctx = _er._text_job_ctx.get()
+            _leads = False
+            if _pass_model is not None and _pass_model in models_to_try:
+                try:
+                    _leads = bool(_tj_ctx) and _er.passed_model_leads([_pass_model], _tj_ctx[0], _tj_ctx[1], time.time())
+                except Exception as _lead_exc:  # noqa: BLE001 - fail closed: an unverifiable survivor is refused (N1)
+                    _er.record_fail_closed(_er.FC_CUT_CHECK, _lead_exc)
+                    _leads = False
+            from llm_router.resolver.inventory import is_ollama_cloud_model
+            # LC-12e: an Ollama cloud model (-cloud / :cloud tag) is never the local survivor; its prompt would leave the machine.
             if (_pass_model is None or _pass_model not in models_to_try or not _tj_ctx
-                    or not _er.passed_model_leads([_pass_model], _tj_ctx[0], _tj_ctx[1], time.time())):
+                    or not _leads or is_ollama_cloud_model(_pass_model)):
                 await _release_reservation_if_held()
                 raise _er.PassedModelNotInChain(
                     f"the passed local model is not in the final {task_type.value} chain")

@@ -49,6 +49,7 @@ from __future__ import annotations
 import contextvars
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -231,6 +232,67 @@ class PassedModelNotInChain(RuntimeError):
     routable passed Ollama model first. Raised before any model is called, so no cloud model serves the job."""
 
 
+class EligibilityStepFailed(PassedModelNotInChain):
+    """LC-12e: the local-only eligibility step itself raised; the text job is refused (fail closed), not routed."""
+
+
+#: LC-12e: fail-CLOSED refusals of a pass-only text job (counted apart from fail-open events).
+FC_STORE_NAME = "text_job_fail_closed.jsonl"
+FC_ELIGIBILITY_STEP = "CHZ-FC-ROUTER-TEXT-JOB-ELIGIBILITY"
+FC_CUT_CHECK = "CHZ-FC-ROUTER-TEXT-JOB-CUT-CHECK"
+
+
+def record_fail_closed(code: str, exc: BaseException | None = None) -> None:
+    """Persist one refusal; recording failures never prevent the refusal."""
+    try:
+        path = paths.state_path(FC_STORE_NAME)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = {"c": code, "ts": round(time.time(), 3)}
+        if exc is not None:
+            row["e"] = type(exc).__name__
+        line = (json.dumps(row, separators=(",", ":")) + "\n").encode("utf-8")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            if os.write(fd, line) != len(line):
+                raise OSError("short fail-closed store write")
+        finally:
+            os.close(fd)
+    except Exception as store_exc:  # noqa: BLE001 -- recording must never prevent refusal
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-FAIL-CLOSED-UNRECORDED", store_exc, detail=code)
+        except Exception:  # noqa: BLE001 -- even the fallback must never raise
+            pass
+
+
+def fail_closed_counts() -> dict[str, int] | None:
+    """Count the last 20,000 refusal rows; an unreadable store is unknown, never zero."""
+    try:
+        lines = paths.state_path(FC_STORE_NAME).read_text(encoding="utf-8").splitlines()[-20_000:]
+    except FileNotFoundError:
+        return {}
+    except Exception:  # noqa: BLE001 -- unreadable counts are unknown
+        return None
+    try:
+        counts: dict[str, int] = {}
+        nonempty = False
+        for line in lines:
+            if not line.strip():
+                continue
+            nonempty = True
+            try:
+                row = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(row, dict) or not isinstance(row.get("c"), str) or not row["c"]:
+                continue
+            code = row["c"]
+            counts[code] = counts.get(code, 0) + 1
+        return None if nonempty and not counts else counts
+    except Exception:  # noqa: BLE001 -- counting must never raise
+        return None
+
+
 def set_require_passed_first() -> contextvars.Token:
     """Flag unset: the router must lead the text-job chain with a passed local model, or raise
     :class:`PassedModelNotInChain`. Reset with the token."""
@@ -374,9 +436,15 @@ def _passed_lane(m_bare: str, job: str, digests: dict[str, str], now: float, eli
 
 
 def _routable(m: str, job: str, input_len: int, digests, ctx_for, think, eligibility, routing, now: float) -> bool:
-    """True iff ``ollama/<bare>`` ``m`` has a passed lane for ``job`` that clears every guard of ``prefer_passed``."""
+    """True iff ``ollama/<bare>`` ``m`` has a passed lane for ``job`` that clears every guard of ``prefer_passed``.
+
+    An Ollama cloud model (``-cloud`` / ``:cloud`` tag) is never routable: its prompts leave the machine (LC-12e).
+    """
     from llm_router.local_check import routing as lr
+    from llm_router.resolver.inventory import is_ollama_cloud_model
     head, sep, bare = m.partition("/")
+    if is_ollama_cloud_model(m):
+        return False
     if not sep or head != "ollama" or not lr.is_enabled(bare, job, path=routing):
         return False
     e = lr.entry(bare, job, path=routing)

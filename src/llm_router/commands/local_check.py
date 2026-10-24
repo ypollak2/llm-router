@@ -475,6 +475,10 @@ def _run(d: Deps, ns: argparse.Namespace) -> int:
         err(picked)
         return EXIT_NO_RUNTIME
     endpoint, model = picked
+    from llm_router.resolver.inventory import is_ollama_cloud_model
+    if is_ollama_cloud_model(model):
+        err(f"Refused: {model} is a cloud-hosted Ollama model; local-check measures local models only.")
+        return EXIT_REFUSED
     adapter = d.make_adapter(endpoint, allow_remote=bool(ns.allow_remote))
     if ns.profile == "quick":
         adapter = _ProfileAdapter(adapter, QUICK_MAX_CHARS)

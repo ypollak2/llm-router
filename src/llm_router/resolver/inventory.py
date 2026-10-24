@@ -346,6 +346,27 @@ def _ctx_from_model_info(info: Any) -> int | None:
     return None
 
 
+def is_ollama_cloud_model(model_id: object) -> bool:
+    """Identify cloud models by name only; unreadable or empty ids fail closed.
+
+    Strip one leading ``ollama/`` or ``ollama_chat/`` prefix (case-insensitive).
+    The tag is the text after the last colon, or the whole untagged name: a
+    lower-cased tag equal to ``cloud`` or ending in ``-cloud`` means cloud.
+    Thus ``cloudy-model:7b`` is local by name, while untagged ``foo-cloud`` is cloud.
+    """
+    if not isinstance(model_id, str) or not model_id:
+        return True
+    name = model_id
+    for prefix in ("ollama/", "ollama_chat/"):
+        if name.lower().startswith(prefix):
+            name = name[len(prefix):]
+            break
+    if not name:
+        return True
+    tag = name.rsplit(":", 1)[-1].lower()
+    return tag == "cloud" or tag.endswith("-cloud")
+
+
 def _cloud_marker(name: str, tags_row: dict, show: dict) -> str | None:
     """Why this Ollama model is hosted in the cloud, or None.
 
@@ -359,8 +380,7 @@ def _cloud_marker(name: str, tags_row: dict, show: dict) -> str | None:
         for key in ("remote_host", "remote_model"):
             if src.get(key):
                 return f"{label} reports {key}"
-    tag = name.lower().rsplit(":", 1)[-1]
-    if tag == "cloud" or tag.endswith("-cloud"):
+    if is_ollama_cloud_model(name):
         return "model tag names a cloud variant"
     return None
 

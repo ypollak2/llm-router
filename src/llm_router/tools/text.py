@@ -1202,7 +1202,9 @@ async def llm_text_job(
                 tried = attempt - 1 if refused else attempt
                 model = resp.model if resp is not None else (trace[0] if trace else "none")
                 record_text_job_outcome(job=job, model=model, status=STATUS_FALLBACK, attempts=tried)
-                cause = (f"the passed local model is not in the router's chain for {job}" if refused
+                cause = (f"the local-only eligibility step failed for {job} ({type(exc.__cause__).__name__ if exc.__cause__ else 'error'})"
+                         if isinstance(exc, eligibility_routing.EligibilityStepFailed)
+                         else f"the passed local model is not in the router's chain for {job}" if refused
                          else f"local-only routing did not complete ({type(exc).__name__})")
                 return (
                     f"Local text jobs are disabled for this call: {cause}; no cloud model was called "

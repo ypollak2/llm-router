@@ -134,7 +134,7 @@ def test_unset_passed_model_missing_from_the_chain_refuses_with_no_model_call_an
     _drain()
     assert e2e.state["tried"] == []
     assert "status=fallback, attempts=0" in out and "not in the router's chain" in out
-    assert router._pending_spend == before  # PR #705 review: the reservation was leaking here
+    assert router._pending_spend == pytest.approx(before, abs=1e-12)  # PR #705 review: the reservation was leaking here
 
 
 def test_route_and_call_refusal_releases_the_reservation(e2e, monkeypatch):
@@ -161,7 +161,7 @@ def test_route_and_call_refusal_releases_the_reservation(e2e, monkeypatch):
         er.reset_require_passed_first(t2)
         er.reset_text_job_context(t1)
     assert seen["pending_during"] > before  # the reservation WAS held at the refusal point
-    assert router._pending_spend == before
+    assert router._pending_spend == pytest.approx(before, abs=1e-12)
 
 
 def test_unset_capability_filter_removing_the_local_model_refuses_and_releases(e2e, monkeypatch):
@@ -175,7 +175,7 @@ def test_unset_capability_filter_removing_the_local_model_refuses_and_releases(e
     _drain()
     assert e2e.state["tried"] == []
     assert "status=fallback, attempts=0" in out
-    assert router._pending_spend == before
+    assert router._pending_spend == pytest.approx(before, abs=1e-12)
 
 
 def test_flag_on_capability_filter_keeps_the_rest_of_the_chain(e2e, monkeypatch):
@@ -229,7 +229,7 @@ def test_unset_eligibility_step_raising_fails_closed_and_releases_once(e2e, monk
     assert e2e.state["tried"] == []
     assert not [m for m in e2e.state["tried"] if not m.startswith("ollama/")]
     assert "status=fallback, attempts=0" in out and "Do this job yourself." in out
-    assert router._pending_spend == 5.0
+    assert router._pending_spend == pytest.approx(5.0, abs=1e-12)
 
 
 def test_flag_on_eligibility_step_raising_still_fails_open(e2e, monkeypatch):
@@ -250,7 +250,7 @@ def test_unset_survivor_that_is_not_the_passed_model_refuses_and_releases_once(e
     _drain()
     assert e2e.state["tried"] == []
     assert "status=fallback, attempts=0" in out
-    assert router._pending_spend == 5.0
+    assert router._pending_spend == pytest.approx(5.0, abs=1e-12)
 
 
 def test_stream_door_call_never_raises_the_requirement():

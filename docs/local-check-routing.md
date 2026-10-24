@@ -42,6 +42,8 @@ The stream door (`route_and_stream`) never carries the requirement: `llm_text_jo
 **Ollama only (D-274).** `prefer_passed` considers `ollama/` models only. A PASS measured on LM Studio, vLLM or llama.cpp is recorded but switches nothing on; `local-check run` and `status`
 print `measured; routing for this runtime is not supported yet (Ollama only in this release)`.
 
+**Ollama cloud models are excluded (LC-12e).** A model whose tag is `cloud` or ends in `-cloud` (e.g. `gpt-oss:120b-cloud`, `<name>:cloud`) runs off-machine even though the local Ollama daemon lists it, so it is never routable, `local-check` refuses to measure it, and the local-only cut refuses it even if an older `local_routing.json` says passed.
+
 Only `llm_text_job` (`commit_message`, `pr_description`, `summarize_output`). Plain `llm_*` calls, `llm_edit` and the proxy never use this.
 `eligibility_routing.prefer_passed(models, job, input_len, now)` runs at the router's eligibility step, after D-116 and the F106/F112 step, and moves a local `ollama/` model that is **already in the chain** to the front. It never adds a model. All of these must hold, otherwise the chain is returned unchanged:
 
