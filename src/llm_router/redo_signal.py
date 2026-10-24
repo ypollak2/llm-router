@@ -41,15 +41,25 @@ PATTERN_VERSION = "v2"
 # Candidate variants for the tune step (P3.6-c PR 3; design section 5). v2 is the default everywhere and
 # stays byte-identical. v3a and v3b are precision-first candidates written from the design's guidance
 # ("demote or tighten repeat, which produced the v0 false positives and the 5-6 word false positives"), not
-# fitted to data. At most 2 non-baseline candidates may be scored (redo_score tune log).
+# fitted to data. v3c and v3d are the two recall-raising candidates, derived only from the label
+# definition, without fitting. The widening cap counts distinct (candidate, detector sha256)
+# evaluations: v3a/v3b/v3c/v3d are four candidates, but only two non-baseline ones from their union
+# may ever be scored per tune log. The owner must pick which two.
+# Dead end: once both widenings are used, ANY edit to this file (even a comment) changes the detector
+# sha256, so no non-baseline variant can be tune-scored again (a new pair would be a third widening)
+# and none can be frozen (freeze needs the candidate's row at the current sha). Only v2 stays freezable.
 BASELINE_VARIANT = "v2"
 VARIANTS = {
     "v2": "frozen M0.9 patterns",
     "v3a": "tighten repeat: at least 12 words and Jaccard >= 0.9; reask and contradiction as v2",
     "v3b": "demote repeat: reported only when reask or contradiction also fires; thresholds as v2",
+    "v3c": "extra answer-directed correction phrases, reported as contradiction; all v2 signals retained",
+    "v3d": "v3c plus short negative follow-ups of at most 6 words; all v2 signals retained",
 }
 V3A_REPEAT_MIN_WORDS = 12
 V3A_JACCARD_MIN = 0.9
+# The design screens at <=12 words; precision-first half of that is an unfitted choice.
+V3D_SHORT_MAX_WORDS = 6
 
 SIGNAL_REASK = "reask"
 SIGNAL_CONTRADICTION = "contradiction"
@@ -75,6 +85,103 @@ _FAILURE_RE = re.compile(
     r"|\b(?:failed|failing)\b"
     r"|you (?:didn't|did not|forgot|missed|never|haven't|have not|should have)"
     r"|(?:not|isn't) (?:what i|right|correct|good))")
+
+
+# v3c widens only contradiction, using corrections of the previous ANSWER from the label definition
+# (design section 1). Each phrase needs a rejection framing (review of PR #708, rounds 1 and 2):
+# * "same error" only as "still getting / I get the same error" ending the prompt within
+#   V3C_TRAILING_MAX_WORDS words with no product-report continuation ("when", "on", "in", "is that",
+#   "known" ...), or as the whole short prompt; never "I get the same error when the server restarts";
+# * "still not" only with working/fixed/right/correct; "i meant" not followed by "to" (a new question) or
+#   by ": also" (an addition, a refinement);
+# * "that broke" only as "that broke it" / "that broke the fix|change|code"; "that broke ..." and
+#   "that made it worse" otherwise only in a prompt of at most V3C_SHORT_MAX_WORDS words;
+# * commands need a prompt-opening imperative and end there ("undo that." / "revert it"), or name the
+#   last change ("revert your change", "undo your edit"); "go back to the previous version" must end the
+#   prompt (or a clause) and not be followed by a new task ("and summarize what changed"). So "undo that
+#   last commit on the release branch" and "revert your branch" are instructions, not rejections.
+# Text in ``` / ~~~ fences and on ">" quote lines is removed before these v3c/v3d-only matches; v2 is
+# computed on the original text, so every v2 signal is kept (the superset property).
+# Overlap with v2 is intentional.
+V3C_SHORT_MAX_WORDS = 8
+V3C_TRAILING_MAX_WORDS = 6
+_END = r"(?=\s*(?:[.!?,;:]|$))"           # a punctuation mark or the end of the prompt follows
+_NO_NEW_TASK = (r"(?![\s\S]*\b(?:and|then)\s+(?:summari[sz]e|explain|list|write|add|describe|compare|"
+                r"show|tell|document|draft)\b)")
+_REDO_PHRASE_RE_V3C = re.compile(
+    r"\b(?:that's not what i (?:asked|wanted|meant|said)"
+    r"|not what i asked"
+    r"|still (?:wrong\b|(?:not|isn't) (?:working|fixed|right|correct)\b"
+    r"|(?:not|isn't) the (?:requested|one i asked)\b)"
+    r"|(?:that|it) (?:didn't|did not) work"
+    r"|you (?:didn't|did not)\b"
+    r"|that broke (?:it|(?:the|your) (?:fix|change|code))\b)"
+    r"|\b(?:still (?:getting|seeing|having)|i (?:still )?get|i'm (?:still )?getting|i am (?:still )?getting)"
+    r" the same (?:error|problem|issue|result)\b"
+    r"(?![\s\S]*\b(?:when|whenever|if|while|on|in|is that|known)\b)"
+    rf"(?:\W+\w+){{0,{V3C_TRAILING_MAX_WORDS}}}\W*$"
+    r"|^(?:the )?same (?:error|problem|issue|result)(?: again| as before)?\s*[.!]*\s*$"
+    r"|^(?:no,?\s*)?i meant\b(?! to\b)(?!\s*[:,]?\s*also\b)"
+    r"|^(?:(?:please|can you|just)\s+)*(?:"
+    rf"(?:undo|revert) (?:that|this|it){_END}"
+    r"|undo (?:that|this|your) (?:change|changes|edit|edits)\b"
+    r"|revert (?:that|this|your|your last|the last) (?:change|changes|edit|edits)\b"
+    rf"|revert (?:your|the) last{_END}"
+    r"|go back to (?:(?:the|your) (?:previous|old|original|earlier) "
+    rf"(?:version|approach|code|request|answer|one)|how it was){_END}{_NO_NEW_TASK}"
+    rf"|roll that back{_END})"
+)
+_SHORT_BREAK_RE_V3C = re.compile(r"\bthat (?:broke|made it worse)\b")
+_FENCE_RE = re.compile(r"(```|~~~)[\s\S]*?(?:\1|\Z)")
+_QUOTE_LINE_RE = re.compile(r"^[ \t]*>.*$", re.MULTILINE)
+
+
+def _unquoted(text: str) -> str:
+    """``text`` without fenced code blocks (an unclosed fence runs to the end) and ``>`` quote lines."""
+    return _QUOTE_LINE_RE.sub("", _FENCE_RE.sub("\n", text)).strip()
+
+
+def _redo_phrase_v3c(text: str) -> bool:
+    """v3c's addition on lowered, unquoted text: a phrase starting in the first ``FAILURE_WINDOW`` chars
+    (the end-of-prompt conditions see the whole text, so a cut window never fakes an ending)."""
+    match = _REDO_PHRASE_RE_V3C.search(text)
+    if match is not None and match.start() < FAILURE_WINDOW:
+        return True
+    short = _SHORT_BREAK_RE_V3C.search(text[:FAILURE_WINDOW])
+    return short is not None and len(_words(text)) <= V3C_SHORT_MAX_WORDS
+
+
+# Rejection tokens only: bare "still" ("still need to push it", "still on it?", "still, can you also add
+# X") and bare "not" ("not merged yet") are status or refinement, not a rejection of the answer. Bare
+# "no" / "nope" are not v3d's: a "no" after "Want me to push it?" declines an offer (y=0), and v2 already
+# flags "no," / "no." / "no ..." and "nope".
+_V3D_REJECTION_RE = re.compile(
+    r"^(?:wrong|not (?:it|that|right|quite)"
+    r"|still (?:wrong|broken|failing|not working|the same))\b")
+_V3D_BENIGN_RE = re.compile(
+    r"^(?:not (?:now|yet|today|right now|really|sure|bad|a problem)"
+    r"|still (?:working|going|running|waiting|thinking|here|looking|reading|testing))\b"
+)
+
+
+def _short_negative_v3d(text: str) -> bool:
+    """Recognise a short rejection, conservatively excluding acknowledgements and deferrals.
+
+    v2 already flags an opening ``no`` followed by punctuation or a space, and ``nope``
+    (``escalation._CONTRADICTION_RE``); a bare ``no`` is not flagged (it may decline an offer), so
+    v3d's distinct contribution is the "wrong" / "not right" / "not that" / "still wrong" short forms.
+
+    Callers compute session signals only for prompts k>=1 (a previous prompt exists), providing
+    the 'follows an assistant answer' context for this heuristic. No answer text is inspected.
+    'Not really' and 'not sure' are conservatively treated as benign, as is any mention of 'later'.
+    Exclusions apply only to this addition: inherited v2 false positives must remain for the superset.
+    """
+    return (
+        len(_words(text)) <= V3D_SHORT_MAX_WORDS
+        and _V3D_REJECTION_RE.match(text) is not None
+        and _V3D_BENIGN_RE.match(text) is None
+        and re.search(r"\blater\b", text) is None
+    )
 
 # ── transcript records ───────────────────────────────────────────────────────
 
@@ -186,6 +293,10 @@ def _signals(prompt: str, previous: str | None, variant: str = BASELINE_VARIANT)
         out.append(SIGNAL_REASK)
     if _CONTRADICTION_RE.match(lowered[:80]) or _FAILURE_RE.search(lowered[:FAILURE_WINDOW]):
         out.append(SIGNAL_CONTRADICTION)
+    if variant in ("v3c", "v3d") and SIGNAL_CONTRADICTION not in out:
+        unquoted = _unquoted(lowered)
+        if _redo_phrase_v3c(unquoted) or (variant == "v3d" and _short_negative_v3d(unquoted)):
+            out.append(SIGNAL_CONTRADICTION)
     min_words, jaccard_min = REPEAT_MIN_WORDS, JACCARD_MIN
     if variant == "v3a":
         min_words, jaccard_min = V3A_REPEAT_MIN_WORDS, V3A_JACCARD_MIN
