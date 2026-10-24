@@ -192,7 +192,7 @@ def _run_check(c: Check, notes: list[str]) -> Outcome:
     base_log = {"config_key": key, "config": config, "draw": draw, "run_id": run_id, "ts": ts, "date": _date(ts), "mode": mode}
     g = S.GateInputs(judge_pinned=bank.manifest.get("judge_id"), digest_start=digest0)
 
-    # 2. G3a: the grader's 103 self-tests, before any model call.
+    # 2. G3a: the grader's self-tests (110 since LC-1c), before any model call.
     g.g3a = grader_cases.run()
     if g.g3a.get("unexpected"):
         res = S.redact_invalid(S.score([], [], g, mode=mode))

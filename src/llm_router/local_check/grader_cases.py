@@ -51,7 +51,18 @@ diff --git a/internal/cache/lru.go b/internal/cache/lru.go
 +		delete(c.items, c.oldest.key)
 +	}
 """
-FIX: dict[str, tuple[str, list[str]]] = {"py": (DIFF_PY, ["src/pkg/retry.py", "tests/test_retry.py"]), "ts": (DIFF_TS, ["packages/core/src/parse.ts"]), "go": (DIFF_GO, ["internal/cache/lru.go"])}
+DIFF_URL = """diff --git a/src/pkg/limits.py b/src/pkg/limits.py
+--- a/src/pkg/limits.py
++++ b/src/pkg/limits.py
+@@ -1,4 +1,8 @@ def clamp_port(value):
++# Workaround for https://github.com/acme/limits/issues/4821 (see also
++# https://github.com/acme/limits/pull/77, https://github.com/acme/limits/pulls/905
++# and https://github.com/acme/limits/discussions/313).
+ DEFAULT_PORT = 5150
+-    return value
++    return min(value, DEFAULT_PORT)
+"""
+FIX: dict[str, tuple[str, list[str]]] = {"py": (DIFF_PY, ["src/pkg/retry.py", "tests/test_retry.py"]), "ts": (DIFF_TS, ["packages/core/src/parse.ts"]), "go": (DIFF_GO, ["internal/cache/lru.go"]), "url": (DIFF_URL, ["src/pkg/limits.py"])}
 
 PR_OK = ("## Summary\nAdd a `max_delay` cap and a `backoff_factor` to `retry_call` so that the sleep between attempts grows exponentially but never exceeds the cap. "
          "The previous fixed delay is the default behaviour when the factor is 1.\n\n## Test plan\n- Run `pytest tests/test_retry.py`\n- Call `retry_call` with a failing function and check the sleep times\n")
@@ -133,6 +144,13 @@ CASES: list[tuple[str, str, str, str, bool, str | None]] = [
     ("c_fab_url", "commit_message", "py", "Cap delay\n\nSee " + "https:" + "//example.com/retry for background.", False, "ungrounded_url"),
     ("c_issue_ref_in_diff", "commit_message", "go", "Guard nil `oldest` in `Cache.Evict`\n\nRefs #12.", True, None),
     ("c_hash_number_not_in_diff", "commit_message", "py", "Cap delay\n\nSee section #10 of the docs.", False, "ungrounded_issue_ref"),
+    ("c_issue_url_grounds_ref", "commit_message", "url", "Clamp port values\n\nRefs #4821.", True, None),
+    ("c_pull_url_grounds_ref", "commit_message", "url", "Clamp port values\n\nRefs #77.", True, None),
+    ("c_pulls_url_grounds_ref", "commit_message", "url", "Clamp port values\n\nRefs #905.", True, None),
+    ("c_issue_url_absent_number", "commit_message", "url", "Clamp port values\n\nRefs #9999.", False, "ungrounded_issue_ref"),
+    ("c_issue_ref_only_constant", "commit_message", "url", "Clamp port values\n\nRefs #5150.", False, "ungrounded_issue_ref"),
+    ("c_issue_ref_prefix_of_url_number", "commit_message", "url", "Clamp port values\n\nRefs #482.", False, "ungrounded_issue_ref"),
+    ("c_issue_ref_discussion_url", "commit_message", "url", "Clamp port values\n\nRefs #313.", False, "ungrounded_issue_ref"),
     # ---------- pr: must be ACCEPTED
     ("p_ok", "pr_description", "py", PR_OK, True, None),
     ("p_outer_fence", "pr_description", "py", "```markdown\n" + PR_OK + "```", True, None),

@@ -173,7 +173,7 @@ def gates(rows: Sequence[Row], assigned: Sequence[str], abandoned: Sequence[str]
     bad = sum(1 for r in rows if r.error or r.empty)
     out["G1_serves"] = _gate(bool(n and valid / n >= G1_MIN_VALID and bad * 70 <= G1_MAX_BAD_PER_70 * n), n=n, valid=valid,
                              valid_frac=(valid / n if n else 0.0), error_empty_timeout=bad)
-    # G3a grader self-test (103 cases), run before any model call.
+    # G3a grader self-test (110 cases since LC-1c), run before any model call.
     a = g.g3a
     out["G3a_grader_selftest"] = _gate(None if a is None else bool(isinstance(a.get("n"), int) and a["n"] > 0 and not a.get("unexpected")),
                                        n=None if a is None else a.get("n"), unexpected=None if a is None else len(a.get("unexpected", ())))

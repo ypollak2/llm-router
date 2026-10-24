@@ -111,6 +111,72 @@
     "MIT OR Unlicense": 2
   },
   "records": 170,
+  "release_audit": {
+    "audited_ids": [
+      "q37-1a755953e039",
+      "q37-1ef8f35c44ee",
+      "q37-235bb058e7b9",
+      "q37-2531e3470a33",
+      "q37-25c8bfbd67da",
+      "q37-2b3c2fb0b70b",
+      "q37-2f16d01fbc0d",
+      "q37-31a56aa2340a",
+      "q37-3d6db578ca0d",
+      "q37-40b83afa7276",
+      "q37-4e1f53c23543",
+      "q37-5a56a78f7b39",
+      "q37-74bfb14bd359",
+      "q37-7533cba8d713",
+      "q37-7922ff84fecb",
+      "q37-877c3ab5a506",
+      "q37-8e2eeb32de6a",
+      "q37-9c53850d886c",
+      "q37-b7bd4719783b",
+      "q37-d47017cea72c",
+      "q37-e8f3ac4c8505",
+      "q37-fc6cfa02eb4a"
+    ],
+    "bank_sha256": "abb2061051673a2270bc553d751d3b8c9114c35745bdc63c41ce8d1f2f69c6df",
+    "date": "2026-10-24",
+    "defect_rate": {
+      "bank": "1/140 (q37-511a487c23de: grader defect, fixed in the grader by D-268, item kept; item defects 0/140)",
+      "lc1b_items": "0/22"
+    },
+    "defects": {
+      "grader_defect": 0,
+      "item_defect": 0
+    },
+    "human_labels": 0,
+    "known_defects": {
+      "q37-511a487c23de": {
+        "fix": "D-268: an issue ref #N is grounded by an /issues/N, /pull/N or /pulls/N URL in the diff",
+        "item": "kept",
+        "kind": "grader_defect",
+        "rule": "ungrounded_issue_ref",
+        "source": "Q37 G4 run/audit_labels.json"
+      }
+    },
+    "labels": {
+      "grader_defect": 0,
+      "item_defect": 0,
+      "judge_error": 1,
+      "model_error": 4
+    },
+    "method": {
+      "arms": {
+        "local": "qwen3.6:35b-a3b-coding (ollama, think=false, temp 0)",
+        "reference": "claude-sonnet-5-5 (claude -p sealed)"
+      },
+      "grading": "repo grader (score.grade_row) on both arms; sealed Sonnet judge (claude-sonnet-5-5, claude -p) on every valid answer of both arms",
+      "hand_audit": "Claude: every row where either arm failed (5) plus 6 accepted local rows chosen by hash",
+      "judge_plants": "12 plants (4 good, 4 swapped, 4 mutated), 12/12 judged correctly",
+      "second_family_check": "gemma3:12b on 11 rows (weak, advisory)"
+    },
+    "n": 22,
+    "removed": [],
+    "scope": "the 22 items whose in-bank audited flag is false (all in draw 2); the bank file and its audited flags are unchanged, so both draws are unchanged",
+    "task": "LC-1b (audit) / LC-1c (release block, D-268)"
+  },
   "repo_licences": {
     "BurntSushi/ripgrep": "MIT OR Unlicense",
     "aio-libs/aiohttp": "Apache-2.0",
