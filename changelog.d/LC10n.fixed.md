@@ -1,1 +1,1 @@
-Status: INCONCLUSIVE rerun note now reports the pooled recorded verdict (PASS if any matching lane passed, ignoring lane_guard-excluded lanes) and says 'is for an earlier model digest' when the record's digest differs.
+Status: INCONCLUSIVE rerun note now reports the pooled recorded verdict (PASS if any matching lane passed, ignoring lane_guard-excluded lanes) and says 'is for a different model digest' when the record's digest differs.

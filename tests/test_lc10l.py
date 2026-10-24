@@ -206,13 +206,26 @@ def test_status_lanes_without_stored_digest_match_and_say_kept(tmp_path):
 
 
 def test_status_pooled_fail_then_inconclusive_names_recorded_verdict(tmp_path):
+    clock = Clock()
+    first = SE.run_check(check(tmp_path, FakeAdapter(fails(25)), clock=clock))
+    assert first.result.verdict == "FAIL"
+    assert (first.result.k, first.result.n_assigned) == (45, 70)
+    clock.t += A.COOLDOWN_S + 1
+    second = SE.run_check(check(tmp_path, FakeAdapter({**fails(25), **fails(5, draw=2)}), clock=clock))
+    assert second.result.verdict == "INCONCLUSIVE"
+    assert (second.result.k, second.result.n_assigned) == (110, 140)
+    assert attempts_line(tmp_path).endswith("(not recorded; recorded verdict FAIL kept)")
+
+
+def test_status_all_lanes_lane_guard_falls_back_to_pool_verdict(tmp_path):
+    """Every matching lane is guard-excluded and none passed: the `or pool` fallback reports the pool's own (FAIL) verdict."""
     _inconclusive_after_pass(tmp_path)
 
-    def pooled_fail(lanes):
+    def all_guarded(lanes):
         for lane in lanes.values():
-            lane.update({"grade": "failed", "verdict": "failed", "eligible": False, "status": "failed", "k": 80, "n": 140})
+            lane.update({"grade": "failed", "verdict": "failed", "eligible": False, "status": "lane_guard", "k": 3, "n": 10})
 
-    _edit_elig(tmp_path, pooled_fail)
+    _edit_elig(tmp_path, all_guarded)
     assert attempts_line(tmp_path).endswith("(not recorded; recorded verdict FAIL kept)")
 
 

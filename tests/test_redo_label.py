@@ -344,7 +344,7 @@ def test_cmd_refuses_held_lock(make_run, capsys):
 
 
 def test_cmd_refuses_when_lock_file_cannot_be_created(make_run, monkeypatch, capsys):
-    make_run(n=1)
+    run = make_run(n=1)
     real_open = os.open
 
     def deny(path, *args, **kwargs):
@@ -355,6 +355,8 @@ def test_cmd_refuses_when_lock_file_cannot_be_created(make_run, monkeypatch, cap
     monkeypatch.setattr(label.os, "open", deny)
     assert label.cmd_redo_label(["--run", "run1", "--judge", "--model-id", MODEL]) == 2
     assert capsys.readouterr().out.strip() == "Refused: cannot lock this run directory (PermissionError)"
+    for name in ("judge_meta.json", "labels_judge.jsonl", "judge_spend.json"):
+        assert not (run.run_dir / name).exists()
 
 
 def test_cmd_refuses_when_locking_unavailable(make_run, monkeypatch, capsys):
