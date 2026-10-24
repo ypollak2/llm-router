@@ -656,6 +656,10 @@ def run_owner(options: argparse.Namespace, *, stdin=None, stdout=None) -> int:
         if stats["errors"]:
             print(f"read errors: {stats['errors']}", file=stdout)
         print(f"remaining: {remaining} of {total}", file=stdout, flush=True)
+        if remaining == 0 and total > 0:
+            from llm_router.redo_score import write_owner_done
+            record = write_owner_done(options.run_dir)
+            print(f"owner pass complete: n_labelled={record['n_labelled']}", file=stdout, flush=True)
         return 0
     except Exception as exc:
         print(type(exc).__name__, file=stdout, flush=True)

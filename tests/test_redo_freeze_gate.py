@@ -29,6 +29,7 @@ def row(candidate="v3a", f1=0.8, sha=None, run="tune-t1", labels=LABELS, scored=
     return dict(candidate=candidate, detector_sha256=score.detector_sha256() if sha is None else sha,
                 tune_run=run, tune_manifest_sha256="m" * 64, labels_sha256=labels,
                 scored_pairs_sha256=scored, projects_dir_sha256=PROJECTS, n_unclear=0, n_lost=n_lost,
+                owner_done=True, label_names=["labels_owner.jsonl"],
                 overall={"unweighted": {"f1": f1}})
 
 
@@ -49,8 +50,12 @@ def freeze(detector="v3a", run="frozen"):
 
 
 @pytest.fixture
-def pool(env):
-    """The study's one live tune run ``tune-t1`` (its own sessions), then a test pool."""
+def pool(env, monkeypatch):
+    """The study's one live tune run ``tune-t1`` (its own sessions), then a test pool.
+
+    The rows here are fabricated, so the on-disk label re-check is off; ``test_redo_label_canon.py``
+    exercises it on a real scoring flow."""
+    monkeypatch.setattr(score, "_check_labels_on_disk", lambda selected, run: None)
     sessions(env, "tune", 2)
     assert run_sample("--tune", "--run", "t1") == 0
     sessions(env, "gate", 3)
@@ -290,6 +295,7 @@ def test_exploit_route_d_second_tune_run_refused_then_void_needs_full_rescoring(
         json.dumps(dict(pair_id=hashlib.sha256(f"{sid}|{k}|{salt}".encode()).hexdigest()[:16],
                         label="redo" if k == 1 else "not_redo", source="owner")) + "\n"
         for sid in second for k in (1, 2)))
+    score.write_owner_done(t2)
     assert score_tune(env, "v3b", "t1") == 2                # the voided run cannot be scored
     capsys.readouterr()
     for candidate in ("v2", "v3b"):

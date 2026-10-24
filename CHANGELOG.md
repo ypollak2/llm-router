@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- P3.6-c PR3d (review of PR #708): a tune scoring is canonical only after the owner labelling pass is recorded
+  complete (`redo-label --owner` writes counts-only `owner_done.json`: `n_labelled` and the sha256 of
+  `labels_owner.jsonl`); earlier scorings (e.g. judge-only) print F1, log `owner_done: false` and lock nothing, so
+  adding owner labels no longer forces a void. `redo-sample --freeze` recomputes the digest of the canonical label
+  files and refuses (exit 2, "labels on disk changed since canonical scoring; re-score or void") if they differ.
+  No judge-only escape flag: design section 3 gives the owner the final say. v3c "same error" is skipped for
+  prompts longer than 2200 chars (it could not end within six words) instead of rescanning them (was
+  near-quadratic: 84k chars took 1.4 s); v3d benign list adds important/needed/necessary/urgent. Procedure-only:
+  the label-file set is chosen at the first canonical scoring and `--labels` subsets are possible; incomplete
+  scorings print F1 so results can be peeked at (narrow); a candidate first scored after a transcript expires
+  has n_lost > 0 and freeze refuses (fails closed): score all candidates promptly after labelling.
 - P3.6-c PR3c (recall-raising redo variants): `redo_signal` variants `v3c` (extra phrases that reject the
   previous answer: "that's not what I asked", "still wrong", "still not fixed", "still getting the same error" or
   a bare "same error", "no, I meant" (not "I meant to"), "undo that", "revert your change", "go back to the

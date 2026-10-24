@@ -116,10 +116,6 @@ _REDO_PHRASE_RE_V3C = re.compile(
     r"|(?:that|it) (?:didn't|did not) work"
     r"|you (?:didn't|did not)\b"
     r"|that broke (?:it|(?:the|your) (?:fix|change|code))\b)"
-    r"|\b(?:still (?:getting|seeing|having)|i (?:still )?get|i'm (?:still )?getting|i am (?:still )?getting)"
-    r" the same (?:error|problem|issue|result)\b"
-    r"(?![\s\S]*\b(?:when|whenever|if|while|on|in|is that|known)\b)"
-    rf"(?:\W+\w+){{0,{V3C_TRAILING_MAX_WORDS}}}\W*$"
     r"|^(?:the )?same (?:error|problem|issue|result)(?: again| as before)?\s*[.!]*\s*$"
     r"|^(?:no,?\s*)?i meant\b(?! to\b)(?!\s*[:,]?\s*also\b)"
     r"|^(?:(?:please|can you|just)\s+)*(?:"
@@ -130,6 +126,18 @@ _REDO_PHRASE_RE_V3C = re.compile(
     r"|go back to (?:(?:the|your) (?:previous|old|original|earlier) "
     rf"(?:version|approach|code|request|answer|one)|how it was){_END}{_NO_NEW_TASK}"
     rf"|roll that back{_END})"
+)
+# The trailing "same error" form is its own pattern so it can be bounded (review of PR #708: its
+# end-of-prompt lookahead rescanned the rest of the text at every start, near-quadratic on a huge
+# repetitive prompt). It must start in the first FAILURE_WINDOW chars and end within
+# V3C_TRAILING_MAX_WORDS words of the end, so a text longer than FAILURE_WINDOW + V3C_SAME_ERROR_TAIL_CAP
+# chars cannot match it (only six words longer than the cap could); it is skipped there, not truncated.
+V3C_SAME_ERROR_TAIL_CAP = 2000
+_SAME_ERROR_RE_V3C = re.compile(
+    r"\b(?:still (?:getting|seeing|having)|i (?:still )?get|i'm (?:still )?getting|i am (?:still )?getting)"
+    r" the same (?:error|problem|issue|result)\b"
+    r"(?![\s\S]*\b(?:when|whenever|if|while|on|in|is that|known)\b)"
+    rf"(?:\W+\w+){{0,{V3C_TRAILING_MAX_WORDS}}}\W*$"
 )
 _SHORT_BREAK_RE_V3C = re.compile(r"\bthat (?:broke|made it worse)\b")
 _FENCE_RE = re.compile(r"(```|~~~)[\s\S]*?(?:\1|\Z)")
@@ -147,6 +155,10 @@ def _redo_phrase_v3c(text: str) -> bool:
     match = _REDO_PHRASE_RE_V3C.search(text)
     if match is not None and match.start() < FAILURE_WINDOW:
         return True
+    if len(text) <= FAILURE_WINDOW + V3C_SAME_ERROR_TAIL_CAP:
+        same = _SAME_ERROR_RE_V3C.search(text)
+        if same is not None and same.start() < FAILURE_WINDOW:
+            return True
     short = _SHORT_BREAK_RE_V3C.search(text[:FAILURE_WINDOW])
     return short is not None and len(_words(text)) <= V3C_SHORT_MAX_WORDS
 
@@ -159,7 +171,8 @@ _V3D_REJECTION_RE = re.compile(
     r"^(?:wrong|not (?:it|that|right|quite)"
     r"|still (?:wrong|broken|failing|not working|the same))\b")
 _V3D_BENIGN_RE = re.compile(
-    r"^(?:not (?:now|yet|today|right now|really|sure|bad|a problem)"
+    r"^(?:not (?:now|yet|today|right now|really|sure|bad|a problem"
+    r"|(?:that |so |very )?(?:important|needed|necessary|urgent))"
     r"|still (?:working|going|running|waiting|thinking|here|looking|reading|testing))\b"
 )
 
