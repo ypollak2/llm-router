@@ -189,13 +189,68 @@ def test_flag_on_capability_filter_keeps_the_rest_of_the_chain(e2e, monkeypatch)
     assert e2e.state["tried"] and LOCAL not in e2e.state["tried"]
 
 
-def test_unset_emergency_chain_is_never_walked(e2e):
-    """A cloud entry in the BUDGET emergency chain must not be reached when the local model fails."""
+def test_unset_emergency_chain_is_never_walked(e2e, monkeypatch):
+    """A distinct BUDGET emergency chain must not be walked when the local model fails (LC-12d: reachable)."""
+    from llm_router.types import RoutingProfile
     passed(e2e)
+    emergency = [LOCAL, "openai/gpt-4o-mini", "groq/llama-3.3-70b"]  # distinct from the primary chain
+    primary = e2e.state["chain"]
+
+    async def build(task_type, profile, *a, **k):
+        return list(emergency if profile == RoutingProfile.BUDGET else primary)
+
+    monkeypatch.setattr(router, "_build_and_filter_chain", build)
+    real = router._resolve_profile
+
+    def non_budget(*a, **k):  # the emergency path is only reachable from a non-BUDGET profile
+        _p, c, think = real(*a, **k)
+        return RoutingProfile.BALANCED, c, think
+
+    monkeypatch.setattr(router, "_resolve_profile", non_budget)
     e2e.state["script"][LOCAL] = RuntimeError("down")
+    out = call_job()
+    _drain()
+    assert e2e.state["tried"] == [LOCAL]  # one local attempt; the emergency chain (which also has LOCAL) not walked
+    assert "status=fallback" in out and "no cloud model was called" in out
+
+
+def test_unset_eligibility_step_raising_fails_closed_and_releases_once(e2e, monkeypatch):
+    """LC-12d / S1: any exception inside the eligibility step refuses; it never falls open to the raw chain."""
+    passed(e2e)
+    e2e.state["chain"] = [CLOUD[0], LOCAL, CLOUD[1]]  # a paid model heads the raw chain (the reviewer's case)
+
+    def boom(*a, **k):
+        raise RuntimeError("note_bypass broke")
+
+    monkeypatch.setattr(er, "note_bypass", boom)
+    monkeypatch.setattr(router, "_pending_spend", 5.0)  # non-zero seed: a double release would show
+    out = call_job()
+    _drain()
+    assert e2e.state["tried"] == []
+    assert not [m for m in e2e.state["tried"] if not m.startswith("ollama/")]
+    assert "status=fallback, attempts=0" in out and "Do this job yourself." in out
+    assert router._pending_spend == 5.0
+
+
+def test_flag_on_eligibility_step_raising_still_fails_open(e2e, monkeypatch):
+    monkeypatch.setenv(FLAG, "1")
+    passed(e2e)
+    monkeypatch.setattr(er, "note_bypass", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
     call_job()
     _drain()
-    assert all(m == LOCAL for m in e2e.state["tried"])
+    assert e2e.state["tried"]  # the full chain is still served, as before
+
+
+def test_unset_survivor_that_is_not_the_passed_model_refuses_and_releases_once(e2e, monkeypatch):
+    """LC-12d defense in depth: a non-passed head surviving the eligibility step is refused at the cut."""
+    passed(e2e)
+    monkeypatch.setattr(router, "_drop_failed_eligibility", lambda models, *a, **k: list(CLOUD))
+    monkeypatch.setattr(router, "_pending_spend", 5.0)
+    out = call_job()
+    _drain()
+    assert e2e.state["tried"] == []
+    assert "status=fallback, attempts=0" in out
+    assert router._pending_spend == 5.0
 
 
 def test_stream_door_call_never_raises_the_requirement():

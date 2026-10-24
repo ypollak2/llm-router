@@ -125,8 +125,9 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_COMPRESS_RESPONSE": ("llm_router", "tools/text.py", 1),
     # 2026-10-02: opt-in gate for llm_text_job (commit messages, PR
     # descriptions, long-output summaries on a local model with a checked
-    # fallback). 1 = opt-in; unset = on only for a lane with a fresh local-check PASS (D-272);
-    # 0/false/off = global off. See tools/text.py's _local_text_jobs_flag.
+    # fallback). 1 = full chain; unset = LOCAL-ONLY (the passed model alone, hand-back on any failure)
+    # when a local-check PASS exists (D-272/D-277), otherwise not taken; 0/false/off or an
+    # unrecognised value = off. See tools/text.py's _local_text_jobs_flag.
     "LLM_ROUTER_LOCAL_TEXT_JOBS": ("llm_router", "tools/text.py", 1),
     # PLAN v16 P1.3: opt-in trim / bigger-window before ContextOverflow. Off by default (D-47).
     "LLM_ROUTER_PACK_OVERFLOW": ("llm_router", "pack_overflow.py", 1),

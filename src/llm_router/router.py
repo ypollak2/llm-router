@@ -1156,6 +1156,12 @@ def _drop_failed_eligibility(
     except Exception as exc:  # noqa: BLE001 - fail-open: the chain stays as built
         from llm_router import failopen
         failopen.record("CHZ-FO-ROUTER-ELIGIBILITY-FILTER", exc)
+        # LC-12d / D-277: a pass-only text job (flag unset) must not fall open to the raw chain, whose head
+        # could be a paid cloud model. Fail closed with the refusal the callers already handle.
+        from llm_router import eligibility_routing as _er_fc
+        if exempt_reason == _er_fc.TEXT_JOB_REASON and _er_fc._require_passed_first.get():
+            raise _er_fc.PassedModelNotInChain(
+                f"the eligibility step failed ({type(exc).__name__}); local-only routing refuses") from exc
         return models
 
 
@@ -5251,7 +5257,10 @@ async def route_and_call(
         # filter, CLI-backend strip) has run, so none can add, reorder or remove an entry afterwards. The chain
         # becomes the passed local model alone; if a step removed it, the call refuses before any model call.
         if _pass_only:
-            if _pass_model is None or _pass_model not in models_to_try:
+            # LC-12d: defense in depth - the survivor must itself be the passed local model, not merely "first".
+            _tj_ctx = _er._text_job_ctx.get()
+            if (_pass_model is None or _pass_model not in models_to_try or not _tj_ctx
+                    or not _er.passed_model_leads([_pass_model], _tj_ctx[0], _tj_ctx[1], time.time())):
                 await _release_reservation_if_held()
                 raise _er.PassedModelNotInChain(
                     f"the passed local model is not in the final {task_type.value} chain")
