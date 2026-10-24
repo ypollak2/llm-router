@@ -13,19 +13,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- P3.6-c PR3c (recall-raising redo variants): `redo_signal` variants `v3c` (extra answer-directed correction
-  phrases: "that's not what I asked", "still wrong", "same error", "you didn't ...", "no, I meant", "undo that",
-  "revert it", "go back to" ...; reported as `contradiction`) and `v3d` (`v3c` plus a short negative follow-up:
-  at most 6 words, opening with no/nope/wrong/not/still, minus "no worries", "not now", ... ). Both keep every v2
-  signal, so their flags are a superset of v2's and can only raise N_F (tests/test_redo_variants_recall.py).
+- P3.6-c PR3c (recall-raising redo variants): `redo_signal` variants `v3c` (extra phrases that reject the
+  previous answer: "that's not what I asked", "still wrong", "still not fixed", "still getting the same error" or
+  a bare "same error", "no, I meant" (not "I meant to"), "undo that", "revert your change", "go back to the
+  previous version" ...; reported as `contradiction`) and `v3d` (`v3c` plus a short rejection of at most 6 words:
+  no/nope/wrong/not it/not that/not right/not quite/still wrong/broken/failing/the same, minus "no worries",
+  "not now", ...; bare "still" and "not" are excluded). Product reports ("same error appears when the server
+  restarts"), new questions ("I meant to ask ..."), "revert your branch", "go back to the plan", "still not
+  merged" and "still, can you also add X" are must-not-flag fixtures. Both keep every v2 signal, so their flags are
+  a superset of v2's (tests/test_redo_variants_recall.py, including reask/repeat combined with a new phrase).
   Written from the label definition only, no data. Under the at-most-2-widenings rule v3a, v3b, v3c and v3d are
   four candidates but only two non-baseline (candidate, detector sha256) pairs may ever be tune-scored, so the
-  owner picks which two. `PATTERN_VERSION` and the default stay `v2`.
-- P3.6-c PR3b (anti-gaming): `redo-sample --freeze --detector X` refuses a non-baseline X unless `tune_log.jsonl`
-  has X's row at the current detector sha256 and X is the strict argmax of overall tune F1; `frozen.json` records
-  `tune_row_sha256`, `tune_log_sha256`, `tune_log_bytes` and `redo-score` verifies them. Tune-log rows store
-  `detector_sha256` and `variant_params`; the widening cap counts distinct (candidate, sha256), so editing a variant
-  and re-scoring is a new candidate. Deleting `tune_log.jsonl` is a procedure violation, visible at score time.
+  owner picks which two. Once both are used, any edit to `redo_signal.py` is a permanent dead end: no variant can
+  be tune-scored or frozen again, only `v2`. `PATTERN_VERSION` and the default stay `v2`.
+- P3.6-c PR3b (anti-gaming): `redo-sample --freeze --detector X` refuses a non-baseline X unless X's latest row at
+  the current detector sha256 is the strict F1 argmax of its own tune set: the rows with the same `tune_run`,
+  tune manifest sha256 and labels digest (sha256 over the sorted sha256 of each labels file read). That set must
+  hold a `v2` baseline row; competitors are ranked by their maximum F1 in the set and X by its minimum, so
+  re-scoring on another labels file cannot crown a loser; a tie fails closed. Each refusal cause (no log, no row,
+  stale sha, no labels digest, no baseline, not argmax, tie) has its own counts-only message. `frozen.json` records
+  `tune_row_sha256`, `tune_log_sha256`, `tune_log_bytes`, `tune_run`, `tune_manifest_sha256` and
+  `tune_labels_sha256`; `redo-score` re-runs the gate on the bound log prefix, refuses a labels or tune-set
+  mismatch, and refuses a baseline freeze that carries tune provenance; `result.json` records `detector_variant`.
+  Tune-log rows store `detector_sha256`, `tune_manifest_sha256`, `labels_sha256` and `variant_params`; the widening
+  cap counts distinct (candidate, sha256). `tune_log.jsonl` is append-only by procedure: deleting or rewriting it
+  AFTER a freeze is refused at score time, but an edit BEFORE freeze cannot be detected by the tool and is a
+  procedure violation only.
 - proxy Haiku tier on Claude Haiku 5.5 (HAIKU55-TIER-1, docs/bugs/HAIKU55-TIER-1.md): the Haiku rewrite rules now key
   off the tier's `model`. With `claude-haiku-5-5` the body keeps adaptive thinking, effort and mid-conversation system
   messages (no fold), `max_tokens` clamps to 128K, a body with sampling parameters or an assistant prefill (400 on 5.5)

@@ -45,12 +45,15 @@ PATTERN_VERSION = "v2"
 # definition, without fitting. The widening cap counts distinct (candidate, detector sha256)
 # evaluations: v3a/v3b/v3c/v3d are four candidates, but only two non-baseline ones from their union
 # may ever be scored per tune log. The owner must pick which two.
+# Dead end: once both widenings are used, ANY edit to this file (even a comment) changes the detector
+# sha256, so no non-baseline variant can be tune-scored again (a new pair would be a third widening)
+# and none can be frozen (freeze needs the candidate's row at the current sha). Only v2 stays freezable.
 BASELINE_VARIANT = "v2"
 VARIANTS = {
     "v2": "frozen M0.9 patterns",
     "v3a": "tighten repeat: at least 12 words and Jaccard >= 0.9; reask and contradiction as v2",
     "v3b": "demote repeat: reported only when reask or contradiction also fires; thresholds as v2",
-    "v3c": "broaden reask phrases under contradiction; all v2 signals retained",
+    "v3c": "extra answer-directed correction phrases, reported as contradiction; all v2 signals retained",
     "v3d": "v3c plus short negative follow-ups of at most 6 words; all v2 signals retained",
 }
 V3A_REPEAT_MIN_WORDS = 12
@@ -84,24 +87,37 @@ _FAILURE_RE = re.compile(
     r"|(?:not|isn't) (?:what i|right|correct|good))")
 
 
-# v3c widens only contradiction, using answer-directed corrections from the label definition.
-# Commands require a prompt-opening imperative and a backward reference, rather than a product
-# report mentioning a rollback in the middle. Overlap with v2 is intentional.
+# v3c widens only contradiction, using corrections of the previous ANSWER from the label definition
+# (design section 1). Each phrase needs a rejection framing: "same error" only as "still getting / I get
+# the same error" or as the whole short prompt, never as a product report ("same error appears when the
+# server restarts"); "still not" only with working/fixed/right/correct; "i meant" not followed by "to"
+# ("I meant to ask ..." is a new question). Commands require a prompt-opening imperative and a backward
+# reference to the last change ("revert your change", "go back to the previous version"), never
+# "revert your branch" or "go back to the plan". Overlap with v2 is intentional.
 _REDO_PHRASE_RE_V3C = re.compile(
     r"\b(?:that's not what i (?:asked|wanted|meant|said)"
     r"|not what i asked"
-    r"|still (?:wrong|not\b|isn't\b|doesn't\b)"
+    r"|still (?:wrong\b|(?:not|isn't) (?:working|fixed|right|correct)\b"
+    r"|(?:not|isn't) the (?:requested|one i asked)\b)"
     r"|(?:that|it) (?:didn't|did not) work"
-    r"|same (?:error|problem|issue|result)"
+    r"|(?:still (?:getting|seeing|having)|i (?:still )?get|i'm (?:still )?getting|i am (?:still )?getting)"
+    r" the same (?:error|problem|issue|result)\b"
     r"|you (?:didn't|did not)\b"
     r"|that (?:broke\b|made it worse\b))"
-    r"|^(?:no,\s*)?i meant\b"
+    r"|^(?:the )?same (?:error|problem|issue|result)(?: again| as before)?\s*[.!]*\s*$"
+    r"|^(?:no,?\s*)?i meant\b(?! to\b)"
     r"|^(?:(?:please|can you|just)\s+)*(?:undo (?:that|this)\b"
-    r"|revert (?:that|it|this|the last|your)\b"
-    r"|go back to\b|roll that back\b)"
+    r"|revert (?:that|it|this|the last (?:change|edit)|your (?:change|changes|edit|edits|last))\b"
+    r"|go back to (?:the|your) (?:previous|old|original|earlier) "
+    r"(?:version|approach|code|request|answer|one)\b"
+    r"|go back to how it was\b|roll that back\b)"
 )
 
-_V3D_REJECTION_RE = re.compile(r"^(?:no|nope|wrong|not|still)\b")
+# Rejection tokens only: bare "still" ("still need to push it", "still on it?", "still, can you also add
+# X") and bare "not" ("not merged yet") are status or refinement, not a rejection of the answer.
+_V3D_REJECTION_RE = re.compile(
+    r"^(?:no|nope|wrong|not (?:it|that|right|quite)"
+    r"|still (?:wrong|broken|failing|not working|the same))\b")
 _V3D_BENIGN_RE = re.compile(
     r"^(?:no(?:,\s*|\s+)(?:worries|problem|thanks|thank you|need|rush)"
     r"|not (?:now|yet|today|right now|really|sure|bad|a problem)"
@@ -112,6 +128,10 @@ _V3D_BENIGN_RE = re.compile(
 
 def _short_negative_v3d(text: str) -> bool:
     """Recognise a short rejection, conservatively excluding acknowledgements and deferrals.
+
+    v2 already flags an opening ``no`` followed by punctuation or a space, and ``nope``
+    (``escalation._CONTRADICTION_RE``), so v3d's distinct contribution is a bare "no" and the
+    "wrong" / "not right" / "not that" / "still wrong" style short forms.
 
     Callers compute session signals only for prompts k>=1 (a previous prompt exists), providing
     the 'follows an assistant answer' context for this heuristic. No answer text is inspected.

@@ -662,14 +662,17 @@ def cmd_redo_sample(args: list[str]) -> int:
     if (options.freeze or options.tune) and os.path.lexists(run_dir):
         print("Refused: run directory already exists.")
         return 2
-    tune_provenance = dict(tune_row_sha256=None, tune_log_sha256=None, tune_log_bytes=None)
+    # redo_score imports redo_sample; defer this import until both modules are loaded.
+    from llm_router.redo_score import TUNE_PROVENANCE_KEYS, TuneFreezeRefused, freeze_tune_provenance
+    tune_provenance = dict.fromkeys(TUNE_PROVENANCE_KEYS)
     try:
         detector_sha = hashlib.sha256(Path(redo_signal.__file__).read_bytes()).hexdigest()
         if options.freeze and options.detector != redo_signal.BASELINE_VARIANT:
-            # redo_score imports redo_sample; defer this import until both modules are loaded.
-            from llm_router.redo_score import freeze_tune_provenance
             tune_provenance = freeze_tune_provenance(
                 paths.state_path("redo_validation", "tune_log.jsonl"), options.detector, detector_sha)
+    except TuneFreezeRefused as refused:
+        print(refused.message)
+        return 2
     except (OSError, ValueError, KeyError, TypeError):
         print("Refused: non-baseline freeze requires a current logged strict argmax-F1 candidate "
               "and a readable valid tune log.")

@@ -146,9 +146,11 @@ def test_freeze_excludes_tune_pairs_and_records_them(env):
     first = sessions(env, "first", 3)
     assert run_sample("--tune", "--run", "t1") == 0
     second = sessions(env, "second", 3)
-    score._append_tune_log(state(env) / "tune_log.jsonl", dict(
-        candidate="v3a", detector_sha256=score.detector_sha256(),
-        overall={"unweighted": {"f1": 0.9}}))
+    for candidate, f1 in (("v2", 0.5), ("v3a", 0.9)):
+        score._append_tune_log(state(env) / "tune_log.jsonl", dict(
+            candidate=candidate, detector_sha256=score.detector_sha256(), tune_run="tune-t1",
+            tune_manifest_sha256="m" * 64, labels_sha256="l" * 64,
+            overall={"unweighted": {"f1": f1}}))
     assert run_sample("--freeze", "--run-id", "test1", "--allow-below-threshold",
                       "--detector", "v3a") == 0
     test_dir, tune_dir = state(env) / "test1", state(env) / "tune-t1"
