@@ -1182,26 +1182,32 @@ async def llm_text_job(
                     route_directive_id=_read_hook_route_directive(),
                     eligibility_exempt_reason=eligibility_routing.TEXT_JOB_REASON,  # F112 / D-242
                 )
-            except eligibility_routing.PassedModelNotInChain:
-                # LC-12b: the passed model is not first in the router's chain; no model was called.
-                record_text_job_outcome(job=job, model="none", status=STATUS_FALLBACK, attempts=0)
+            except Exception as exc:
+                refused = isinstance(exc, eligibility_routing.PassedModelNotInChain)
+                trace = [] if refused else (getattr(exc, "chain_attempts", None) or [])
+                if not refused:
+                    try:
+                        _local_touched.update(record_local_attempts(
+                            job=job, served_model="", chain_attempts=trace, accepted=False,
+                        ))
+                    except Exception as record_exc:  # noqa: BLE001 -- preserve the original route error
+                        from llm_router import failopen
+                        failopen.record("CHZ-FO-TEXTJOB-LOCAL-ATTEMPTS", record_exc)
+                if _req_token is None:
+                    raise  # flag on: the router's own error, as before
+                # LC-12b / D-277: flag unset = the passed local model alone. A refusal or a local failure hands
+                # the job back; no cloud model was or will be called. Attempts count what really ran.
+                tried = attempt - 1 if refused else attempt
+                model = resp.model if resp is not None else (trace[0] if trace else "none")
+                record_text_job_outcome(job=job, model=model, status=STATUS_FALLBACK, attempts=tried)
+                cause = (f"the passed local model is not in the router's chain for {job}" if refused
+                         else f"the passed local model failed ({type(exc).__name__})")
                 return (
-                    f"Local text jobs are disabled: the passed local model is not in the router's chain for {job} "
-                    f"(set {_ENV_LOCAL_TEXT_JOBS}=1 to run the chain without a pass). "
-                    "_Structured: status=fallback, attempts=0_\n"
+                    f"Local text jobs are disabled for this call: {cause}; no cloud model was called "
+                    f"(set {_ENV_LOCAL_TEXT_JOBS}=1 to run the full chain). "
+                    f"_Structured: status=fallback, attempts={tried}_\n"
                     "Do this job yourself."
                 )
-            except Exception as exc:
-                try:
-                    _local_touched.update(record_local_attempts(
-                        job=job, served_model="",
-                        chain_attempts=getattr(exc, "chain_attempts", None) or [],
-                        accepted=False,
-                    ))
-                except Exception as record_exc:  # noqa: BLE001 -- preserve the original route error
-                    from llm_router import failopen
-                    failopen.record("CHZ-FO-TEXTJOB-LOCAL-ATTEMPTS", record_exc)
-                raise
 
             check = check_output(job, truncated_input, resp.content)
             result_text = check.text

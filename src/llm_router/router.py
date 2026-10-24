@@ -4042,7 +4042,18 @@ async def _dispatch_model_loop(
         )
 
     # ── Emergency fallback: try BUDGET chain when primary chain exhausts ────
-    if _would_fall_back and not _local_override:
+    # LC-12b / D-277: a pass-routed text job (flag unset) never walks the BUDGET chain, which can hold paid
+    # cloud models; the primary chain is the passed local model alone, so exhausting it is the end.
+    from llm_router import eligibility_routing
+    _pass_only_call = (eligibility_exempt_reason == eligibility_routing.TEXT_JOB_REASON
+                       and eligibility_routing._require_passed_first.get())
+    if _pass_only_call and _would_fall_back:
+        route_log.info(
+            "emergency_fallback_skipped",
+            correlation_id=correlation_id,
+            reason="pass_only_text_job",
+        )
+    if _would_fall_back and not _local_override and not _pass_only_call:
         await _notify(
             ctx, "warning",
             f"⚠️  {profile.value} chain exhausted — trying budget models as fallback"
@@ -5129,9 +5140,22 @@ async def route_and_call(
         # verdict in local_eligibility.json). Same placement and override exemption as D-116:
         # after every step that can add a local entry, before the daily-cap step.
         _elig_before = list(models_to_try)
+        # LC-12b / D-277: a pass-routed text job (flag unset) is served by the passed local model ALONE.
+        # `_pass_only` is read here; `_pass_model` is whoever leads the chain after the eligibility step
+        # (that step refuses unless a routable passed model leads). The final chain is cut to it below.
+        from llm_router import eligibility_routing as _er
+        _pass_only = (eligibility_exempt_reason == _er.TEXT_JOB_REASON
+                      and _er._require_passed_first.get())
+        _pass_model: str | None = None
         if models_to_try and not model_override:
-            models_to_try = _drop_failed_eligibility(
-                models_to_try, task_type, _lane_c, eligibility_exempt_reason)
+            try:
+                models_to_try = _drop_failed_eligibility(
+                    models_to_try, task_type, _lane_c, eligibility_exempt_reason)
+            except _er.PassedModelNotInChain:
+                await _release_reservation_if_held()  # PR #705 review: the reservation was taken above
+                raise
+            if _pass_only and models_to_try:
+                _pass_model = models_to_try[0]
         _elig_dropped = [m for m in _elig_before if m not in models_to_try]
 
         # TQ-007 (applied LAST — RED1-01/RED1-02 fix): a daily spend cap was
@@ -5222,6 +5246,16 @@ async def route_and_call(
                 _cli = [m for m in models_to_try if provider_from_model(m) in ("codex", "gemini_cli")]
                 models_to_try = [m for m in models_to_try if m not in _cli]
                 _cap_excluded = list(_cap_excluded) + [(m, "CLI backend cannot return tool calls") for m in _cli]
+
+        # LC-12b / D-277: the LAST chain transform. Every step above (eligibility, TQ-007 cap, P2.4 capability
+        # filter, CLI-backend strip) has run, so none can add, reorder or remove an entry afterwards. The chain
+        # becomes the passed local model alone; if a step removed it, the call refuses before any model call.
+        if _pass_only:
+            if _pass_model is None or _pass_model not in models_to_try:
+                await _release_reservation_if_held()
+                raise _er.PassedModelNotInChain(
+                    f"the passed local model is not in the final {task_type.value} chain")
+            models_to_try = [_pass_model]
 
         if not models_to_try:
             set_span_attributes(
@@ -5531,6 +5565,9 @@ async def route_and_call(
             models_to_try = _apply_routing_policy(
                 models_to_try, _routing_policy, effective_complexity
             )
+            if _pass_only and models_to_try != [_pass_model]:  # LC-12b: the policy may only reorder
+                await _release_reservation_if_held()
+                raise _er.PassedModelNotInChain("a routing policy changed the pass-only chain")
 
         # P0-3: distributed budget-envelope reservation. Enterprise-gated
         # (LLM_ROUTER_ENVELOPE_MODE; strict under enterprise, off in developer) and
@@ -6357,6 +6394,8 @@ async def route_and_stream(
     # F109 / D-116: the Q&A reorder route_and_call applies, before the eligibility filter.
     if models_to_try and not model_override:
         models_to_try = _strip_local_for_qa(models_to_try, task_type)
+    # LC-12b: no exempt_reason here, so the pass-first requirement (exempt text-job branch only) cannot fire on
+    # the stream door; `llm_text_job` calls route_and_call, never this door.
     _elig_before = list(models_to_try)
     if models_to_try and not model_override:
         models_to_try = _drop_failed_eligibility(

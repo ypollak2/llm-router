@@ -651,6 +651,14 @@ NOT_ROUTABLE_LINE = "measured; routing for this runtime is not supported yet (Ol
 RECONNECT_NOTE = "the llm_text_job tool appears after the next MCP restart or reconnect"
 
 
+#: LC-12b: an empty Ollama inventory means Ollama is down, so a reconnect cannot list the tool yet.
+OLLAMA_DOWN_NOTE = "Ollama not reachable now; the tool appears after Ollama is up and MCP reconnects"
+
+
+def _reconnect_note(d: Deps) -> str:
+    return RECONNECT_NOTE if d.inventory() else OLLAMA_DOWN_NOTE
+
+
 def _is_ollama_model(d: Deps, model: str) -> bool:
     """False only when the Ollama inventory is known and does not hold ``model`` (D-274: routing is Ollama only).
     An empty inventory cannot say, so it is not read as non-Ollama."""
@@ -675,7 +683,7 @@ def _apply_routing(d: Deps, o: Any, model: str, runtime: str = "ollama") -> list
     for job in passed:
         s = states.get(job)
         if s == "enabled":
-            L.append(f"routing: on for {job} -- disable with `llm-router local-check disable {job}`; {RECONNECT_NOTE}")
+            L.append(f"routing: on for {job} -- disable with `llm-router local-check disable {job}`; {_reconnect_note(d)}")
         elif s == "already_on":
             L.append(f"routing: already on for {job}")
         elif s == "kept_off":
@@ -947,7 +955,7 @@ def _switch(d: Deps, sub: str, lane: str, model: str | None) -> int:
         if sub == "enable":
             d.routing.enable(model, lane, "manual", path=d.routing_path)
             if _is_ollama_model(d, model):
-                d.out(f"routing: on for {lane} on {model} (set by you). It applies only while the lane is passed and fresh -- see `llm-router local-check status`; {RECONNECT_NOTE}.")
+                d.out(f"routing: on for {lane} on {model} (set by you). It applies only while the lane is passed and fresh -- see `llm-router local-check status`; {_reconnect_note(d)}.")
             else:
                 d.out(f"{model} {lane}: {NOT_ROUTABLE_LINE}")
         else:

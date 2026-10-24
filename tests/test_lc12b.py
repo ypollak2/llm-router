@@ -154,6 +154,7 @@ def test_listing_ignores_enabled_lanes_of_a_non_ollama_model(world):
 def test_routing_on_line_discloses_the_reconnect(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
     d, sink, _ = deps(tmp_path, passing())
+    d.inventory = lambda: [MODEL]  # Ollama reachable: a reconnect will list the tool
     assert run(["--yes", "--model", MODEL], d) == LCC.EXIT_OK
     assert "routing: on for commit_message" in sink.text
     assert "the llm_text_job tool appears after the next MCP restart or reconnect" in sink.text
