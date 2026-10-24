@@ -15,9 +15,9 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
-from llm_router import paths, redo_signal
+from llm_router import northstar, paths, redo_signal
 from llm_router.local_check.stats import wilson
-from llm_router.redo_sample import _write_private
+from llm_router.redo_sample import _sha, _write_private, tune_dir_name
 
 STRATA = ("F", "S", "R")
 LABELS = ("redo", "not_redo", "unclear", "lost")
@@ -25,6 +25,8 @@ RULE = "precision>=0.80 and TP>=15"
 COMPLETENESS_RULE = ("all flagged-stratum (F) pairs must be labelled; "
                      "any lost F pair voids; overall lost > 5% voids")
 NOT_ESTIMABLE_CONCENTRATED = "not estimable (concentrated draw)"
+MAX_WIDENINGS = 2           # distinct non-baseline candidates that may ever be tune-scored (M0.9 rule)
+TUNE_SIGNALS = (redo_signal.SIGNAL_REASK, redo_signal.SIGNAL_CONTRADICTION, redo_signal.SIGNAL_REPEAT)
 
 
 def _precision(rows):
@@ -288,7 +290,15 @@ def cmd_redo_score(args: list[str]) -> int:
     parser.add_argument("--dry-score", action="store_true")
     parser.add_argument("--seed", type=int, default=360)
     parser.add_argument("--reps", type=int, default=2000)
+    parser.add_argument("--tune", action="store_true",
+                        help="score a candidate detector variant against a tune set's labels")
+    parser.add_argument("--candidate", choices=sorted(redo_signal.VARIANTS), default=None)
+    parser.add_argument("--projects-dir", type=Path, default=None)
     options = parser.parse_args(args)
+    if not options.tune and (options.candidate or options.projects_dir):
+        parser.error("--candidate and --projects-dir need --tune")
+    if options.tune:
+        return cmd_redo_score_tune(options)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", options.run):
         print("Refused: invalid run id.")
         return 2
@@ -305,6 +315,9 @@ def cmd_redo_score(args: list[str]) -> int:
         return 2
     try:
         frozen = json.loads((run_dir / "frozen.json").read_text(encoding="utf-8"))
+        if frozen.get("purpose") == "tune":
+            print("Refused: tune run: use --tune.")
+            return 2
         manifest = (run_dir / "manifest.jsonl").read_bytes()
         if frozen["detector_sha256"] != hashlib.sha256(
                 Path(redo_signal.__file__).read_bytes()).hexdigest():
@@ -340,4 +353,206 @@ def cmd_redo_score(args: list[str]) -> int:
             print("Refused: scoring output unavailable.")
             return 2
     _print_result(result)
+    return 0
+
+
+# ---- tune scoring: candidate detector variants against a tune set (no single-use marker) ----
+
+def _prf(tp, fp, fn):
+    def ratio(num, den):
+        return num / den if den else None
+    return dict(tp=tp, fp=fp, fn=fn, precision=ratio(tp, tp + fp), recall=ratio(tp, tp + fn),
+                f1=ratio(2 * tp, 2 * tp + fp + fn))
+
+
+def _scope_counts(scored, in_scope):
+    """``scored``: (weight, label, signals) for labelled pairs. Unweighted and stratum-weighted counts."""
+    out = {}
+    for name, weight_of in (("unweighted", lambda w: 1.0), ("weighted", lambda w: w)):
+        tp = fp = fn = 0.0
+        for weight, label, signals in scored:
+            w = weight_of(weight)
+            hit = in_scope(signals)
+            if label == "redo":
+                tp, fn = (tp + w, fn) if hit else (tp, fn + w)
+            elif hit:
+                fp += w
+        if name == "unweighted":
+            out[name] = _prf(int(tp), int(fp), int(fn))
+        else:
+            out[name] = {k: (round(v, 4) if isinstance(v, float) else v)
+                         for k, v in _prf(tp, fp, fn).items()}
+    return out
+
+
+def tune_candidate_counts(rows, labels_by_pair, signals_by_pair) -> dict:
+    """Pure, text-free. ``labels_by_pair``: pair_id -> redo|not_redo|unclear|lost; ``signals_by_pair``:
+    pair_id -> the candidate's signals (absent when the transcript could not be re-read, counted lost).
+
+    Per signal: tp = redo and the signal fired, fp = not_redo and it fired, fn = redo and it did not.
+    Overall counts a pair as flagged when any signal fired. Weighted counts use the manifest's stratum
+    weights N_h/n_h, so recall is not biased by the thin sampling of unflagged strata."""
+    scored = []
+    n_unclear = n_lost = 0
+    for row in rows:
+        label = labels_by_pair.get(row["pair_id"], "lost")
+        signals = signals_by_pair.get(row["pair_id"])
+        if label == "unclear":
+            n_unclear += 1
+        elif label not in ("redo", "not_redo") or signals is None:
+            n_lost += 1
+        else:
+            weight = round(row["weight_N_h_combined"] / row["n_h_combined"], 6)
+            scored.append((weight, label, tuple(signals)))
+    return dict(
+        n_manifest=len(rows), n_scored=len(scored), n_unclear=n_unclear, n_lost=n_lost,
+        overall=_scope_counts(scored, bool),
+        per_signal={sig: _scope_counts(scored, lambda signals, sig=sig: sig in signals)
+                    for sig in TUNE_SIGNALS})
+
+
+def candidate_signals(rows, frozen, projects_dir, variant) -> tuple[dict, int]:
+    """Re-derive the candidate's signals per manifest pair from the transcripts, in memory only.
+
+    Returns ``(pair_id -> signals, number of sessions that raised)``; pairs not found stay absent."""
+    salt = frozen["salt"]
+    wanted = {}
+    for row in rows:
+        wanted.setdefault(row["session_hash"], []).append(row)
+    out, errors, seen = {}, 0, set()
+    for path in sorted(Path(projects_dir).glob("*/*.jsonl")):
+        sid = path.stem
+        session_rows = wanted.get(_sha(f"{salt}|{sid}")[:16])
+        if sid in seen or not session_rows:
+            continue
+        seen.add(sid)
+        try:
+            prompts = redo_signal.human_prompts(redo_signal.read_transcript(path))
+            for row in session_rows:
+                turn = row["turn_index"]
+                if 1 <= turn < len(prompts) and _sha(f"{sid}|{turn}|{salt}")[:16] == row["pair_id"]:
+                    out[row["pair_id"]] = tuple(redo_signal._signals(
+                        prompts[turn].text, prompts[turn - 1].text, variant))
+        except (OSError, ValueError, KeyError, TypeError):
+            errors += 1
+    return out, errors
+
+
+def resolve_tune_labels(rows, label_rows) -> dict:
+    """pair_id -> label, the owner label overriding the judge's; invalid or conflicting rows raise."""
+    ids = {row["pair_id"] for row in rows}
+    by_pair = {}
+    for row in label_rows:
+        pair, label, source = row["pair_id"], row["label"], row["source"]
+        if pair not in ids or label not in LABELS or source not in ("owner", "judge"):
+            raise ValueError("invalid label row")
+        sources = by_pair.setdefault(pair, {})
+        if source in sources and sources[source] != label:
+            raise ValueError("conflicting labels")
+        sources[source] = label
+    return {pair: sources.get("owner", sources.get("judge")) for pair, sources in by_pair.items()}
+
+
+def _read_tune_log(path: Path) -> list[dict]:
+    if not os.path.lexists(path):
+        return []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not all(isinstance(r, dict) and isinstance(r.get("candidate"), str) for r in rows):
+        raise ValueError("invalid tune log")
+    return rows
+
+
+def _append_tune_log(path: Path, row: dict) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8", newline="\n") as stream:
+        os.chmod(path, 0o600)
+        stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _fmt(value):
+    return "n/a" if value is None else (f"{value:.4f}" if isinstance(value, float) else str(value))
+
+
+def _print_scope(name, block):
+    u, w = block["unweighted"], block["weighted"]
+    print(f"{name}: tp={u['tp']} fp={u['fp']} fn={u['fn']} precision={_fmt(u['precision'])} "
+          f"recall={_fmt(u['recall'])} f1={_fmt(u['f1'])} | weighted tp={_fmt(w['tp'])} "
+          f"fp={_fmt(w['fp'])} fn={_fmt(w['fn'])} precision={_fmt(w['precision'])} "
+          f"recall={_fmt(w['recall'])} f1={_fmt(w['f1'])}")
+
+
+def cmd_redo_score_tune(options) -> int:
+    """Score one candidate against a tune set. Repeatable: never writes ``test.used`` or ``result.json``;
+    refuses a run whose frozen.json is not ``purpose: tune`` and a third distinct candidate."""
+    candidate = options.candidate or redo_signal.BASELINE_VARIANT
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", options.run):
+        print("Refused: invalid run id.")
+        return 2
+    # ``tune-<id>`` is the tune dir; a bare dir name that exists (e.g. a test run) is reached too,
+    # so that the purpose guard below can refuse it by name rather than pretend it is missing.
+    run = tune_dir_name(options.run)
+    if not paths.state_path("redo_validation", run).is_dir() and paths.state_path(
+            "redo_validation", options.run).is_dir():
+        run = options.run
+    run_dir = paths.state_path("redo_validation", run)
+    try:
+        frozen = json.loads((run_dir / "frozen.json").read_text(encoding="utf-8"))
+        manifest = (run_dir / "manifest.jsonl").read_bytes()
+        if frozen["manifest_sha256"] != hashlib.sha256(manifest).hexdigest():
+            raise ValueError("manifest mismatch")
+        rows = [json.loads(line) for line in manifest.decode("utf-8").splitlines() if line.strip()]
+        purpose = frozen.get("purpose")
+    except (OSError, ValueError, KeyError, TypeError):
+        print("Refused: invalid or unavailable scoring inputs.")
+        return 2
+    if purpose != "tune":
+        print("Refused: run purpose is not tune.")
+        return 2
+    log_path = paths.state_path("redo_validation", "tune_log.jsonl")
+    try:
+        logged = {r["candidate"] for r in _read_tune_log(log_path)} - {redo_signal.BASELINE_VARIANT}
+    except (OSError, ValueError, KeyError, TypeError):
+        print("Refused: tune log unreadable.")
+        return 2
+    if (candidate != redo_signal.BASELINE_VARIANT and candidate not in logged
+            and len(logged) >= MAX_WIDENINGS):
+        print(f"Refused: at most {MAX_WIDENINGS} widenings ({len(logged)} distinct candidates "
+              "already scored).")
+        return 2
+    try:
+        label_paths = options.labels or [p for p in (run_dir / "labels_owner.jsonl",
+                                                     run_dir / "labels_judge.jsonl")
+                                         if os.path.lexists(p)]
+        label_rows = []
+        for path in label_paths:
+            label_rows.extend(json.loads(line) for line in
+                              path.read_text(encoding="utf-8").splitlines() if line.strip())
+        labels = resolve_tune_labels(rows, label_rows)
+        projects_dir = options.projects_dir or northstar.claude_projects_dir()
+        signals, errors = candidate_signals(rows, frozen, projects_dir, candidate)
+        result = tune_candidate_counts(rows, labels, signals)
+    except (OSError, ValueError, KeyError, TypeError):
+        print("Refused: invalid or unavailable scoring inputs.")
+        return 2
+    print(f"tune run: {run}\ncandidate: {candidate}")
+    print(f"n_manifest: {result['n_manifest']} n_scored: {result['n_scored']} "
+          f"n_unclear: {result['n_unclear']} n_lost: {result['n_lost']}")
+    if errors:
+        print(f"read errors: {errors}")
+    _print_scope("overall", result["overall"])
+    for sig in TUNE_SIGNALS:
+        _print_scope(sig, result["per_signal"][sig])
+    if not result["n_scored"]:
+        print("WARNING: no scored pairs; nothing logged (an empty set is not a scored candidate)")
+        return 3
+    try:
+        _append_tune_log(log_path, dict(
+            ts=datetime.now(timezone.utc).isoformat(), tune_run=run, candidate=candidate,
+            n_scored=result["n_scored"], n_unclear=result["n_unclear"], n_lost=result["n_lost"],
+            overall=result["overall"], per_signal=result["per_signal"]))
+    except OSError:
+        print("Refused: tune log unavailable.")
+        return 2
     return 0
