@@ -3,6 +3,10 @@
 Measures **your own local model** on a bundled public benchmark of two text jobs (`commit_message`, `pr_description`) and records a verdict
 for it. The result describes the model, runtime, settings and benchmark version on this machine; it is not a claim about any other setup.
 
+Bank v1 audit: all 140 items have grader and judge results for two models (a local model and a Sonnet reference), and the known defect rate is
+1/140 (one grader defect, `q37-511a487c23de`, fixed in the grader; 0 item defects). The audit used no human labels: a Sonnet judge and a hand
+audit by Claude. The bank manifest's `release_audit` block records it.
+
 ```
 llm-router local-check [run] [--dry-run] [--no-judge] [--yes] [--model M] [--endpoint URL [--allow-remote]]
                        [--profile quick|standard] [--fresh] [--force] [--judge-route auto|api|subscription]

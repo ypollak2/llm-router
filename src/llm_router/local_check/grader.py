@@ -1,4 +1,7 @@
-"""Programmatic grader for commit_message and pr_description answers (ported from the frozen PREREG-Q37 grader; behaviour identical).
+"""Programmatic grader for commit_message and pr_description answers (ported from the frozen PREREG-Q37 grader; behaviour identical except one documented fix).
+
+The fix (D-268): an issue ref ``#N`` is also grounded by an ``/issues/N``, ``/pull/N`` or ``/pulls/N`` URL in the context. The Q37 G4 audit found
+that the frozen rule false-failed bank item q37-511a487c23de, whose diff carries the number only as an ``issues/18861`` URL.
 
 Enforces ``rubric.LIMITS`` and nothing else; identical for every arm. A failed rule fails the answer; each rule has a name that appears in the
 ``reasons`` list. Diff-grounding rules (no invented content): every file path named (backticked, or bare with a directory and a known extension)
@@ -252,6 +255,11 @@ def grade_pr(t: str, diff: str, L: dict[str, int]) -> tuple[list[str], str | Non
     return r, summary, plan
 
 
+def issue_ref_grounded(ref: str, ctx: str) -> bool:
+    """Accept a literal issue reference or its issue/pull URL path in context."""
+    return "#" + ref in ctx or re.search(r"/(?:issues|pull|pulls)/" + re.escape(ref) + r"(?!\d)", ctx) is not None
+
+
 def grade_text(item: dict[str, Any], text: str | None) -> dict[str, Any]:
     """Grade one answer. Returns ``valid``, ``ok``, ``reason`` (``accepted`` or comma-joined rule names), ``reasons``, ``flags``, ``ungrounded``, ``test_claim``."""
     t, flags = clean(text)
@@ -270,7 +278,7 @@ def grade_text(item: dict[str, Any], text: str | None) -> dict[str, Any]:
     if c:
         reasons.append("test_claim")
     ctx = item["messages"][-1]["content"] if item.get("messages") else diff
-    if any(("#" + ref) not in ctx for ref in re.findall(r"(?<![\w&])#(\d{2,})\b", t)):
+    if any(not issue_ref_grounded(ref, ctx) for ref in re.findall(r"(?<![\w&])#(\d{2,})\b", t)):
         reasons.append("ungrounded_issue_ref")
     if any(u.rstrip(".,;:") not in ctx for u in re.findall(r"https?://[^\s)>\]`]+", t)):
         reasons.append("ungrounded_url")

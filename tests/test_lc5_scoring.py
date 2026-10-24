@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,14 @@ from llm_router.local_check.runtimes import GenResult
 FIX = Path(__file__).parent / "fixtures"
 PINNED = "claude-sonnet-5-5"
 BANK = load_bank()
+
+D268_DEVIATIONS = {
+    "q37-511a487c23de": {
+        "old": "ungrounded_issue_ref",
+        "new": "judge:None",
+        "reason": "Q37 G4-audit grader defect fixed (D-268)",
+    },
+}
 
 
 # ---------------------------------------------------------------- pure scorer helpers
@@ -764,7 +773,7 @@ def test_port_equivalence_q37_rescored_is_pass_60_of_70() -> None:
     cases = json.loads((FIX / "lc5" / "q37_cases.json").read_text())["cases"]
     with gzip.open(FIX / "lc2" / "q37_items.jsonl.gz", "rt", encoding="utf-8") as f:
         shipped = {d["id"]: d for d in (json.loads(x) for x in f if x.strip())}
-    rows, regraded = [], 0
+    rows, regraded, deviations = [], 0, 0
     for iid, c in sorted(cases.items()):
         if iid in shipped:
             it = shipped[iid]
@@ -772,13 +781,28 @@ def test_port_equivalence_q37_rescored_is_pass_60_of_70() -> None:
             rec = {"status": "truncated" if c["done_reason"] == "length" else "ok", "text": it["answers"]["qwen"], "error": c["err"]}
             row = S.grade_row(item, rec, c["judge"])
             assert row.ok == c["ok"], (iid, row.reasons, c["reason"])
-            assert (",".join(row.reasons) or ("judge:" + str(c["judge"]) if not row.ok else "accepted")) == c["reason"], iid
+            reason = ",".join(row.reasons) or ("judge:" + str(c["judge"]) if not row.ok else "accepted")
+            deviation = D268_DEVIATIONS.get(iid)
+            if deviation is not None:
+                assert c["reason"] == deviation["old"], deviation["reason"]
+                assert reason == deviation["new"], deviation["reason"]
+                assert row.prog is True
+                assert row.reasons == ()
+                assert c["judge"] is None
+                # Q37 never judged this answer (it failed the old rule), so the regraded row is programmatic-ok with no judge verdict,
+                # which G5 would count as an unjudged answer. The score below replays the recorded Q37 outcome for it; with a judge
+                # pass the item would add 1 to k (61/70, still PASS).
+                row = replace(row, prog=False, reasons=(c["reason"],))
+                deviations += 1
+            else:
+                assert reason == c["reason"], iid
             regraded += 1
         else:
             assert c["reason"] == "accepted" and c["judge"] == "pass"
             row = S.Row(iid, c["job"], c["size"], c["lang"], True, True, False, False, True, "pass", True, ())
         rows.append(row)
     assert regraded == 64 and len(rows) == 70
+    assert deviations == 1
     res = S.score(rows, ids(rows), good_gates())
     assert res.verdict == S.PASS and (res.k, res.n_assigned, res.kmin, res.kfail) == (60, 70, 56, 49)
     assert (res.lanes["commit_message"]["k"], res.lanes["commit_message"]["n"]) == (32, 35)

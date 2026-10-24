@@ -1,4 +1,4 @@
-"""LC-2: the ported local-check rubric/grader/stats reproduce the frozen Q37 behaviour."""
+"""LC-2: reproduce frozen Q37 behaviour except the documented D-268 grader fix."""
 
 from __future__ import annotations
 
@@ -17,6 +17,14 @@ PKG = Path(grader.__file__).parent
 ALLOWED_LICENCES = {"MIT", "BSD-3-Clause", "Apache-2.0", "MIT OR Apache-2.0", "Unlicense OR MIT"}
 FIXTURE_MAX_BYTES = 400_000
 
+D268_DEVIATIONS = {
+    ("q37-511a487c23de", "qwen"): {
+        "old": (False, ["ungrounded_issue_ref"]),
+        "new": (True, []),
+        "reason": "Q37 G4-audit grader defect fixed (D-268)",
+    },
+}
+
 
 def _load() -> list[dict]:
     with gzip.open(FIXTURE, "rt", encoding="utf-8") as f:
@@ -26,7 +34,8 @@ def _load() -> list[dict]:
 # (1) self-test cases -------------------------------------------------------------------------
 def test_grader_self_test_cases_all_pass() -> None:
     r = grader_cases.run()
-    assert r["n"] == 103, "Q37 froze 103 grader cases"
+    assert r["n"] == 110, "Q37 froze 103 cases and LC-1c (D-268) added 7 issue-ref cases"
+    assert r["n"] > 103
     assert r["n_accept"] > 0 and r["n_reject"] > 0
     assert r["unexpected"] == []
 
@@ -44,7 +53,7 @@ def test_each_grader_case(case: tuple) -> None:
 # (2) port equivalence ------------------------------------------------------------------------
 def test_port_equivalence_on_stored_q37_answers() -> None:
     items = _load()
-    checked = failing = 0
+    checked = failing = deviations = 0
     mismatches = []
     for it in items:
         for arm in ("qwen", "sonnet"):
@@ -52,9 +61,15 @@ def test_port_equivalence_on_stored_q37_answers() -> None:
             g = grader.grade_text({**it, "messages": [{"role": "user", "content": it["context"]}]}, it["answers"][arm])
             checked += 1
             failing += not exp["prog_ok"]
-            if (g["ok"], g["reasons"]) != (exp["prog_ok"], exp["reasons"]):
+            deviation = D268_DEVIATIONS.get((it["id"], arm))
+            if deviation is not None:
+                assert (exp["prog_ok"], exp["reasons"]) == deviation["old"], deviation["reason"]
+                assert (g["ok"], g["reasons"]) == deviation["new"], deviation["reason"]
+                deviations += 1
+            elif (g["ok"], g["reasons"]) != (exp["prog_ok"], exp["reasons"]):
                 mismatches.append((it["id"], arm, g["reasons"], exp["reasons"]))
     assert checked == 2 * len(items) == 128
+    assert deviations == 1
     assert failing >= 5, "the equivalence set must contain programmatic failures, or it proves nothing"
     assert mismatches == []
 

@@ -13,6 +13,8 @@ item. ``Bank.draw(1)`` and ``Bank.draw(2)`` are the two disjoint 70-item draws,
 at most 1). Draw 1 is the audited draw (membership, not ordering: it holds audited items
 only); draw 2 takes the rest. Picks inside a stratum are a hash seeded with the bank sha,
 so draws are reproducible.
+Draw membership uses the in-bank flag; manifest release_audit may audit draw 2
+items without moving draws.
 
 ``Item.audited`` is True when both arms (qwen3.6 and Sonnet) answered the item in Q37
 (frozen run or calibration slices 1-3) with grader and judge results behind it, and any
@@ -126,6 +128,11 @@ class Bank:
         self._plants = plants
 
     # ---- items
+    @property
+    def audited_ids(self) -> frozenset[str]:
+        """IDs audited in-bank or by the optional release audit."""
+        return frozenset(i.id for i in self._items if i.audited) | frozenset(self.manifest.get("release_audit", {}).get("audited_ids", []))
+
     def items(self, job: str | None = None, stratum: str | None = None) -> list[Item]:
         """Items filtered by job and/or stratum ("small/py")."""
         return [i for i in self._items if (job is None or i.job == job) and (stratum is None or i.stratum == stratum)]
@@ -214,4 +221,19 @@ def load_bank(data_dir: Path | str | None = None) -> Bank:
     for name, actual_counts in checks.items():
         if counts.get(name) != dict(actual_counts):
             raise BankError(f"manifest counts.{name} do not match the bank")
+    if "release_audit" in manifest:
+        audit = manifest["release_audit"]
+        if not isinstance(audit, dict):
+            raise BankError("manifest release_audit must be a dict")
+        if "bank_sha256" in audit and audit["bank_sha256"] != manifest["bank_sha256"]:
+            raise BankError("manifest release_audit.bank_sha256 does not match the bank")
+        if "audited_ids" in audit:
+            ids = audit["audited_ids"]
+            if not isinstance(ids, list) or any(not isinstance(iid, str) for iid in ids):
+                raise BankError("manifest release_audit.audited_ids must be a list of strings")
+            if len(ids) != len(set(ids)):
+                raise BankError("manifest release_audit.audited_ids contains duplicates")
+            known_ids = {i.id for i in items}
+            if any(iid not in known_ids for iid in ids):
+                raise BankError("manifest release_audit.audited_ids contains an unknown item id")
     return Bank(manifest, items, plants)

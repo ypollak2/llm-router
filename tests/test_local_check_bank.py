@@ -418,3 +418,69 @@ def test_rebuilt_and_reused_plant_counts_are_separate(bank):
     c = bank.manifest["counts"]
     assert c["plants_topped_up"] == c["plants_by_provenance"]["lc1-rebuilt"]
     assert c["plants_reused_q37_calib"] == c["plants_by_provenance"]["q37-calib1"]
+
+
+def test_shipped_release_audit(bank):
+    audit = bank.manifest["release_audit"]
+    assert isinstance(audit, dict)
+    assert audit["bank_sha256"] == bank.manifest["bank_sha256"]
+    assert audit["bank_sha256"] == hashlib.sha256((DATA / bank.manifest["bank_file"]).read_bytes()).hexdigest()
+    ids = audit["audited_ids"]
+    assert len(ids) == len(set(ids)) == 22
+    items = {i.id: i for i in bank.items()}
+    assert all(iid in items and items[iid].audited is False for iid in ids)
+    in_bank = frozenset(i.id for i in bank.items() if i.audited)
+    assert isinstance(bank.audited_ids, frozenset)
+    assert bank.audited_ids == in_bank | frozenset(ids)
+    assert len(bank.audited_ids) == 140
+
+
+def test_removing_release_audit_preserves_draws(bank, copy):
+    mp = copy / "manifest.json"
+    manifest = json.loads(mp.read_text())
+    del manifest["release_audit"]
+    mp.write_text(json.dumps(manifest))
+    without = B.load_bank(copy)
+    for draw in (1, 2):
+        assert [i.id for i in without.draw(draw)] == [i.id for i in bank.draw(draw)]
+    assert without.audited_ids == frozenset(i.id for i in bank.items() if i.audited)
+
+
+def test_release_audit_sha_mismatch_is_refused(copy):
+    _rewrite_manifest(copy, release_audit={"bank_sha256": "0" * 64})
+    with pytest.raises(B.BankError, match=r"release_audit.bank_sha256"):
+        B.load_bank(copy)
+
+
+def test_release_audit_unknown_id_is_refused(copy):
+    _rewrite_manifest(copy, release_audit={"audited_ids": ["unknown-item"]})
+    with pytest.raises(B.BankError, match="unknown item id"):
+        B.load_bank(copy)
+
+
+@pytest.mark.parametrize("audit", [None, [], "audit", {"audited_ids": None}, {"audited_ids": "item"}, {"audited_ids": [123]}])
+def test_malformed_release_audit_is_refused(copy, audit):
+    _rewrite_manifest(copy, release_audit=audit)
+    with pytest.raises(B.BankError, match="release_audit"):
+        B.load_bank(copy)
+
+
+def test_duplicate_release_audit_ids_are_refused(bank, copy):
+    iid = bank.items()[0].id
+    _rewrite_manifest(copy, release_audit={"audited_ids": [iid, iid]})
+    with pytest.raises(B.BankError, match="duplicates"):
+        B.load_bank(copy)
+
+
+def test_release_audit_optional_fields_and_unknown_keys(bank, copy):
+    _rewrite_manifest(copy, release_audit={"future_field": "accepted"})
+    assert B.load_bank(copy).audited_ids == frozenset(i.id for i in bank.items() if i.audited)
+
+
+def test_release_audit_does_not_bypass_bank_integrity(copy):
+    assert "release_audit" in json.loads((copy / "manifest.json").read_text())
+    p = copy / "bank-v1.jsonl.gz"
+    recs = gzip.decompress(p.read_bytes()).replace(b"diff --git", b"diff --GIT", 1)
+    p.write_bytes(gzip.compress(recs, mtime=0))
+    with pytest.raises(B.BankIntegrityError):
+        B.load_bank(copy)
