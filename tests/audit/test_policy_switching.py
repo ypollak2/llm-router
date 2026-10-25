@@ -83,9 +83,7 @@ def test_quality_policy_sorts_by_task_specific_score_descending(monkeypatch):
     )
     chain = ["openai/gpt-4o", "anthropic/claude-sonnet-4-6", "ollama/llama3"]
     result = apply_routing_policy(chain, "quality", task_type="code")
-    # ollama has no score entry -> falls back to the FREE_PROVIDERS default of
-    # 0.5, which sits between the two explicit scores here? No: 0.5 < 0.90, so
-    # ollama ends up last.
+    # ollama has no score entry -> unknown (W1-3: no invented 0.5), sorted last.
     assert result == [
         "anthropic/claude-sonnet-4-6",
         "openai/gpt-4o",
