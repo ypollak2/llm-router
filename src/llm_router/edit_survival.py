@@ -91,7 +91,10 @@ def _commits_touching_since(repo_root: Path, file_path: Path, since_epoch: float
         rel = file_path.resolve().relative_to(repo_root.resolve())
     except ValueError:
         return -1  # file isn't inside this repo at all
-    since_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(since_epoch))
+    # Git reads a zone-less --since as LOCAL time. ``since_epoch`` is UTC, so on a host east of
+    # UTC a zone-less string lands hours in the future and every later commit looks older than
+    # the edit (a survived edit is scored as redo). Name the zone explicitly.
+    since_iso = time.strftime("%Y-%m-%dT%H:%M:%S +0000", time.gmtime(since_epoch))
     try:
         out = subprocess.run(
             ["git", "-C", str(repo_root), "log", f"--since={since_iso}",
