@@ -64,18 +64,18 @@ _IMAGE_PART_TYPES = ("image", "image_url", "input_image", "image_file")
 _BARE_PART_TYPES = _IMAGE_PART_TYPES + ("text", "input_text", "input_file")
 
 
-def _has_image(value) -> bool:
+def has_image(value) -> bool:
     """True when *value* (a content, a message, or a list of either) carries an image part."""
     if isinstance(value, list):
-        return any(_has_image(v) for v in value)
+        return any(has_image(v) for v in value)
     if isinstance(value, dict):
         if value.get("type") in _IMAGE_PART_TYPES or value.get("images"):
             return True
-        return _has_image(value.get("content"))
+        return has_image(value.get("content"))
     return False
 
 
-def _newest_user_turn(value):
+def newest_user_turn(value):
     """The newest user turn of a request field: the trailing run of role-less content
     parts (a bare Responses part list), else the last item whose role is ``user`` (a
     role-less typed item, such as a tool output, counts as the caller's). A dict (the
@@ -99,7 +99,7 @@ def _newest_user_turn(value):
 def refuses_images(payload: dict) -> bool:
     """True when ``/route`` must refuse *payload*: its ``prompt`` or Ollama-style ``images``
     field carries image content in the newest turn."""
-    return any(_has_image(_newest_user_turn(v))
+    return any(has_image(newest_user_turn(v))
                for v in ({"images": payload.get("images")}, payload.get("prompt")))
 
 
