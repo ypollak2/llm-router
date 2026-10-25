@@ -13,7 +13,11 @@ So, for an ``ollama/`` or ``ollama_chat/`` model whose daemon (``OLLAMA_API_BASE
 loopback: the call gets its own client that ignores proxy env and never follows a redirect
 (:func:`direct_handler`), our urllib requests use an opener with no proxy handler (:func:`open_url`), and
 LiteLLM's model map gets the model's entry from our own direct ``/api/show`` (:func:`ensure_ollama_model_info`),
-so LiteLLM does not look it up. A non-loopback Ollama base (a LAN GPU box, say) is left exactly as it was:
+so LiteLLM does not look it up. That is guaranteed on every call, not once: the entry is written (failure-shaped) before
+the fetch, concurrent callers wait for the fetch, and a missing entry is re-inserted. Residuals: an insert that
+raises (failopen-counted) leaves LiteLLM its own lookup; a value next to a filename/config example cue
+(``.env.example``) is exempt from the secret door and counted (``exempted_by_label``); earlier turns are not
+scanned (counted: ``history_secret_shape``), and assistant ``tool_calls`` arguments are never read. A non-loopback Ollama base (a LAN GPU box, say) is left exactly as it was:
 proxy policy there is the user's environment, NO_PROXY included.
 
 The secret door (D-28 A): a prompt in which ``engine.secret_names`` finds a secret goes only to loopback, non-cloud
@@ -106,7 +110,7 @@ def open_url(req: Any, *, base_url: str, timeout: float):
     """``urlopen`` for a request to ``base_url``: direct (no proxy, no redirect) when it is loopback; a
     non-loopback base keeps ``urllib.request.urlopen`` and so the user's proxy env and NO_PROXY."""
     if is_loopback_base(base_url):
-        return direct_opener().open(req, timeout=timeout)
+        return direct_opener().open(fullurl=req, timeout=timeout)  # a network read; keyword so the W0-4 raw-write scan (positional arg 0 = file mode) does not count it
     return urllib.request.urlopen(req, timeout=timeout)
 
 
@@ -185,7 +189,8 @@ class SecretHit:
 
 
 #: Counts by category only, never a value: ``refused:<label>``, ``overridden:<label>``, ``logged:<label>`` (a shape
-#: too weak to refuse on: JWTs, quoted literals, placeholders). Per process; ``llm-router`` log lines carry the same.
+#: too weak to refuse on: JWTs, quoted literals, placeholders), ``exempted_by_label:<label>`` (a real-looking value
+#: a filename/config cue exempted), ``history_secret_shape:<label>`` (an earlier turn holds a secret shape). Per process; ``llm-router`` log lines carry the same.
 secret_counts: collections.Counter = collections.Counter()
 _counts_lock = threading.Lock()
 
@@ -197,7 +202,8 @@ def count_secret_event(kind: str, label: str) -> None:
 
 
 def _scan_text(text: str, where: str, hits: list[SecretHit], seen: set[tuple[str, str]]) -> None:
-    for name, high in engine.secret_findings(text).items():
+    exempt = lambda name: count_secret_event("exempted_by_label", engine.SECRET_LABELS.get(name, name))  # noqa: E731
+    for name, high in engine.secret_findings(text, on_exempt=exempt).items():
         label = engine.SECRET_LABELS.get(name, name)
         if high:
             if (label, where) not in seen:
@@ -228,6 +234,26 @@ def scan_secrets(prompt: Any = None, system_prompt: Any = None, caller_context: 
         log.warning("secret scan failed (%s); treating the request as holding a secret", type(exc).__name__)
         return hits + [SecretHit("unscannable text", "the request")]
     return hits
+
+
+def note_history_secrets(messages: Any) -> None:
+    """Count, by category only, the earlier turns (``messages``) that hold a high-precision secret shape. History is
+    NOT scanned for the door (each turn was scanned when it was new; one old secret must not refuse every later
+    turn), so a secret sent in turn N is replayed to a cloud model in turn N+1 when the caller sends history. This
+    counter (``history_secret_shape:<label>``, once per request and category, never a value) makes that
+    visible. Never raises, never changes routing. Assistant ``tool_calls`` arguments are not read (SECURITY.md)."""
+    try:
+        if not isinstance(messages, list):
+            return
+        labels: set[str] = set()
+        for text in _texts(messages):
+            for name, high in engine.secret_findings(text).items():
+                if high:
+                    labels.add(engine.SECRET_LABELS.get(name, name))
+        for label in sorted(labels):
+            count_secret_event("history_secret_shape", label)
+    except Exception as exc:  # noqa: BLE001 - a counter must not break a request
+        log.debug("history secret count failed (%s)", type(exc).__name__)
 
 
 def refusal(hits: list[SecretHit], **kw: Any) -> SecretLocalOnlyRefused:
@@ -273,11 +299,22 @@ def override_requested(*, prefix: bool = False, flag: bool = False) -> bool:
     return bool(prefix or flag or _request_allow_cloud.get())
 
 
-def split_override(prompt: str | None) -> tuple[str | None, bool]:
-    """``(prompt without the ``cloud:`` prefix, True)`` when the prompt carries the override, else ``(prompt, False)``."""
+def _secret_present(*parts: Any) -> bool:
+    """True when any text in ``parts`` holds a high-precision secret. No counts (the door's scan counts). A scan that
+    raises counts as found, so the override still reaches the door's own fail-closed hit."""
+    try:
+        return any(any(engine.secret_findings(t).values()) for part in parts for t in _texts(part))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def split_override(prompt: str | None, *other_parts: Any) -> tuple[str | None, bool]:
+    """``(prompt without the ``cloud:`` prefix, True)`` when the prompt starts with ``cloud:`` AND the request holds a
+    secret (in the rest of the prompt or in ``other_parts``: system prompt, caller context); otherwise
+    ``(prompt, False)`` with the prompt untouched, so a prompt that merely starts with "cloud:" is not rewritten."""
     if isinstance(prompt, str):
         m = _OVERRIDE_RE.match(prompt)
-        if m:
+        if m and _secret_present(prompt[m.end():], *other_parts):
             return prompt[m.end():], True
     return prompt, False
 
@@ -322,6 +359,10 @@ INFO_REFRESH_OK_S = 300.0
 #: The ``litellm.model_cost`` keys this module wrote (tests remove them, conftest ``_reset_local_privacy``).
 _info_written: set[str] = set()
 _info_lock = threading.Lock()
+#: A fetch in flight for (daemon, bare model): concurrent callers wait on its event instead of returning early.
+_info_inflight: dict[tuple[str, str], threading.Event] = {}
+#: The last entry we computed for (daemon, bare model), re-inserted if the model map loses it.
+_info_entries: dict[tuple[str, str], dict[str, Any]] = {}
 
 
 def _bare(model: str) -> str:
@@ -344,39 +385,87 @@ def _model_info_entry(bare: str, show: Any) -> dict[str, Any]:
             "max_tokens": window, "max_input_tokens": window, "max_output_tokens": window}
 
 
+def _install_model_info(litellm: Any, bare: str, entry: dict[str, Any]) -> None:
+    """Put ``entry`` in LiteLLM's model map under ``ollama/<bare>`` and refresh its lower-case index."""
+    litellm.model_cost[f"ollama/{bare}"] = entry
+    _info_written.add(f"ollama/{bare}")
+    invalidate = getattr(litellm.utils, "_invalidate_model_cost_lowercase_map", None)
+    if callable(invalidate):
+        invalidate()
+
+
 def ensure_ollama_model_info(model: str, api_base: str | None = None) -> None:
-    """Give LiteLLM's model map the entry for a loopback Ollama ``model`` from our own ``/api/show``.
+    """Give LiteLLM's model map the entry for a loopback Ollama ``model`` from our own ``/api/show``, and make it
+    impossible for LiteLLM to run its own lookup.
 
     LiteLLM looks a non-catalogued Ollama model up with ``POST /api/show`` on its module-level httpx client, which
     honours proxy env and sends ``OLLAMA_API_KEY``; an entry in ``litellm.model_cost`` (its public model map) makes
-    it skip that lookup. Ours goes by ``http.client`` to the loopback daemon only, with no proxy and no key. Once
-    per daemon and model while the last answer is fresh (:data:`INFO_REFRESH_OK_S`); a failed answer writes
-    LiteLLM's own failure entry, so its lookup does not run through the proxy instead, and is retried after
-    :data:`INFO_RETRY_FAILED_S`. An entry LiteLLM's catalogue already has is left alone. Never raises."""
+    it skip that lookup. Ours goes by ``http.client`` to the loopback daemon only, with no proxy and no key.
+
+    On every call, before it returns, the entry is in ``model_cost``: (1) a fetch in flight for the same daemon and
+    model is waited for (at most the fetch timeout plus a second), (2) LiteLLM's failure-shaped entry is written
+    BEFORE the fetch and overwritten by the real one on success, (3) the entry is re-inserted when it is gone
+    (a cost-map reload) even inside the freshness window, (4) the failopen path leaves an entry too. A good answer is
+    re-fetched after :data:`INFO_REFRESH_OK_S`, a failed one after :data:`INFO_RETRY_FAILED_S`. An entry LiteLLM's
+    own catalogue already has is left alone. Never raises; if even the insert fails, failopen counts it and LiteLLM
+    does its own lookup (the one residual, see SECURITY.md)."""
     if not direct_ollama(model, api_base):
         return
+    mine: threading.Event | None = None
+    key: tuple[str, str] | None = None
     try:
         import litellm
         base, bare = ollama_api_base(api_base), _bare(model)
         names = {bare.lower(), f"ollama/{bare}".lower(), f"ollama_chat/{bare}".lower()}
-        key, now = (base, bare), time.monotonic()
+        key = (base, bare)
+        wait_for: threading.Event | None = None
         with _info_lock:
+            now = time.monotonic()
             last = _info_attempted.get(key)
-            if last is not None and now - last[0] < (INFO_REFRESH_OK_S if last[1] else INFO_RETRY_FAILED_S):
-                return
-            if last is None and any(k.lower() in names for k in list(litellm.model_cost)):
+            present = any(k.lower() in names for k in list(litellm.model_cost))
+            inflight = _info_inflight.get(key)
+            if inflight is not None:
+                wait_for = inflight
+            elif last is None and present:
                 return  # LiteLLM's own catalogue knows this model
-            _info_attempted[key] = (now, False)  # claimed: concurrent callers skip while this one fetches
+            elif last is not None and now - last[0] < (INFO_REFRESH_OK_S if last[1] else INFO_RETRY_FAILED_S):
+                if not present:  # fresh answer, entry gone (cost-map reload): put it back
+                    _install_model_info(litellm, bare, _info_entries.get(key) or _model_info_entry(bare, None))
+                return
+            else:
+                if not present:  # the safe entry first: LiteLLM must never find the model unknown
+                    _install_model_info(litellm, bare, _info_entries.get(key) or _model_info_entry(bare, None))
+                mine = _info_inflight[key] = threading.Event()
+        if wait_for is not None:
+            wait_for.wait(MODEL_INFO_TIMEOUT_S + 1.0)
+            with _info_lock:
+                if not any(k.lower() in names for k in list(litellm.model_cost)):
+                    _install_model_info(litellm, bare, _info_entries.get(key) or _model_info_entry(bare, None))
+            return
         from llm_router.local_check import runtimes
         ok, show = runtimes._fetch(base, "POST", "/api/show", {"name": bare}, timeout=MODEL_INFO_TIMEOUT_S)
         ok = bool(ok) and isinstance(show, dict)
+        entry = _model_info_entry(bare, show if ok else None)
         with _info_lock:
             _info_attempted[key] = (time.monotonic(), ok)
-        litellm.model_cost[f"ollama/{bare}"] = _model_info_entry(bare, show if ok else None)
-        _info_written.add(f"ollama/{bare}")
-        invalidate = getattr(litellm.utils, "_invalidate_model_cost_lowercase_map", None)
-        if callable(invalidate):
-            invalidate()
-    except Exception as exc:  # noqa: BLE001 - LiteLLM then does its own lookup; counted, never raised
+            _info_entries[key] = entry
+            _install_model_info(litellm, bare, entry)
+    except Exception as exc:  # noqa: BLE001 - counted, never raised; an entry is left in place when we can
         from llm_router import failopen
         failopen.record("CHZ-FO-LOCAL-PRIVACY-MODEL-INFO", exc, detail=f"model={model}")
+        try:
+            import litellm
+            bare = _bare(model)
+            with _info_lock:
+                if key is not None:
+                    _info_attempted.setdefault(key, (time.monotonic(), False))
+                if f"ollama/{bare}" not in litellm.model_cost:
+                    _install_model_info(litellm, bare, _info_entries.get(key) or _model_info_entry(bare, None))
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        if mine is not None and key is not None:
+            with _info_lock:
+                if _info_inflight.get(key) is mine:
+                    del _info_inflight[key]
+            mine.set()

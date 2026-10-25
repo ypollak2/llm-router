@@ -70,14 +70,12 @@ def test_a_values_in_labelled_blocks_are_not_refused_and_unlabelled_ones_are():
     key = fx.real_shaped("openai_key", 5)
     aws = fx.real_shaped("aws_key_id", 6)
     token = fx.real_shaped("github_token", 7)
-    labelled = [
+    labelled = [   # filename / config cues only (repair 4 dropped the free-text words: they launder a real key)
         f"# .env.example\nOPENAI_API_KEY=\"{key}\"\n",
         f".env.sample:\nAPI_KEY=\"{key}\"",
         f"Here is a sample config:\n```\nOPENAI_API_KEY={key}\n```",
-        f"placeholder values below\nGITHUB_TOKEN={token}",
-        f"example credentials: {aws}",
         f"sample env file\n\nAWS_ACCESS_KEY_ID={aws}",
-        f"DATABASE_URL={fx.real_shaped('db_url_password', 8)}  # example, not a real password",
+        f"cat config/secrets.yml.template\nGITHUB_TOKEN={token}",
     ]
     assert [t[:30] for t in labelled if high(t)] == []
     assert [t[:30] for t in labelled if local_privacy.scan_secrets(t)] == []

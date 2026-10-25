@@ -1304,6 +1304,8 @@ def _reset_local_privacy():
             cost.pop(key, None)
     lp._info_written.clear()
     lp._info_attempted.clear()
+    lp._info_inflight.clear()
+    lp._info_entries.clear()
 
 
 @pytest.fixture

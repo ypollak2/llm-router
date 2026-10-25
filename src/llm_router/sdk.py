@@ -362,10 +362,10 @@ def _secret_door(prompt: str, messages: list[dict] | None, context: str | None, 
     keeps those, and ``execute_chain`` / ``execute_agent`` then call it direct, no proxy); with none left it is
     refused with the category and the remedy. The `cloud:` prefix overrides, logged as a count."""
     from llm_router import local_privacy as lp
-    prompt, override = lp.split_override(prompt)
+    prompt, override = lp.split_override(prompt, context)
     override = lp.override_requested(prefix=override, flag=allow_cloud)
     # Only the new request and the explicit ``context`` are scanned, never ``messages`` (earlier turns): see SECURITY.md.
-    del messages
+    lp.note_history_secrets(messages)
     hits = lp.scan_secrets(prompt, None, context)
     if not hits:
         return prompt, lambda chain: chain

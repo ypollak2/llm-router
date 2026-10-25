@@ -39,7 +39,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from llm_router import capped_log, decision_ledger, failopen, ml_lexical, prompt_key
 from llm_router.classify import GATEWAY_POLICY, _score_categories, classify_signals
@@ -428,17 +428,21 @@ def _entropy(s: str) -> float:
     return -sum(c / n * math.log2(c / n) for c in (s.count(ch) for ch in set(s)))
 
 
-#: A label near a value that says the value is an example: ``.env.example``, "sample config", "placeholder", ...
+#: A filename or config cue near a value that says the value is an example: ``.env.example`` / ``.env.sample`` /
+#: ``example.env``, "sample config" / "example env file", or a path ending ``.example`` / ``.sample`` /
+#: ``.template``. Free-text words ("fake", "dummy", "placeholder", "not a real", "for illustration") are NOT cues:
+#: anyone can write them next to a real key (#721 review, round 2), so they exempt nothing.
 _EXAMPLE_LABEL = re.compile(
-    r"\.env\.(?:example|sample|template)|\b(?:example|sample)\.env\b|\bplaceholders?\b|\bdummy\b|\bfake\b|"
-    r"\b(?:example|sample)\s+(?:env|config|configuration|credentials?|keys?|tokens?|secrets?|values?|file|output)\b|"
-    r"\bnot\s+a\s+real\b|\bfor\s+illustration\b", re.I)
+    r"\.env\.(?:example|sample|template)\b|\b(?:example|sample)\.env\b|"
+    r"\b(?:example|sample)\s+(?:env|config|configuration)\b|"
+    r"[\w./-]+\.(?:example|sample|template)(?![\w-]|\.\w)", re.I)
 
 
 def _labelled_example(text: str, start: int, end: int) -> bool:
-    """True when the line holding ``text[start:end]``, or one of the two lines above it (a fence or heading), is
-    labelled as an example, sample or placeholder. The label is the author's statement that the value is not real;
-    it exempts a real-looking value on purpose. Bounded to 300 characters before and 200 after the value."""
+    """True when the line holding ``text[start:end]``, or one of the two lines above it (a fence or heading), carries
+    a filename/config example cue (:data:`_EXAMPLE_LABEL`). The cue is the author's statement that the value is not
+    real; it exempts a real-looking value on purpose, and the door counts every exemption
+    (``exempted_by_label:<label>``). Bounded to 300 characters before and 200 after the value."""
     window_start = text.rfind("\n", 0, start) + 1
     for _ in range(2):
         window_start = text.rfind("\n", 0, max(0, window_start - 1)) + 1
@@ -502,11 +506,12 @@ def _windows(text: str):
             return
 
 
-def secret_findings(text: str) -> dict[str, bool]:
+def secret_findings(text: str, on_exempt: Callable[[str], None] | None = None) -> dict[str, bool]:
     """``{shape name: is_high}`` for the secret shapes in ``text`` (names only, never the secret).
 
     ``is_high`` is True when some match of a ``HIGH_PRECISION`` shape is a real-looking value: not a placeholder
     (``AKIA...EXAMPLE``, ``ghp_xxxx...``, ``YOUR_API_KEY_HERE``, ``postgres:postgres@``), long and random enough.
+    ``on_exempt(name)`` is called for each real-looking match a filename/config label exempted (the door counts them).
     Linear in ``len(text)``."""
     found: dict[str, bool] = {}
     for offset, window in _windows(text):
@@ -532,7 +537,9 @@ def secret_findings(text: str) -> dict[str, bool]:
                     high = not _is_placeholder(value) and _random_looking(
                         body, bits=3.0 if name == "aws_key_id" else 3.5, distinct=9 if name == "aws_key_id" else 12)
                 if high and _labelled_example(window, m.start(), m.end()):
-                    high = False  # the author labelled it an example (.env.example, sample, placeholder, ...)
+                    high = False  # a filename/config cue labels it an example (.env.example, sample config, ...)
+                    if on_exempt is not None:
+                        on_exempt(name)
                 if high:
                     found[name] = True
         if "assigned_literal" not in found:

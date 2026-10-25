@@ -44,7 +44,7 @@ Please include:
 
 **Multi-provider routing:**
 When you route a task, your prompt is sent to:
-1. **Local Ollama** (if configured) — stays on your machine when the Ollama endpoint (`OLLAMA_API_BASE`, else `http://localhost:11434`) is loopback. Since LC-12h the router's prompt-carrying calls to a loopback daemon ignore `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (LiteLLM honoured them even for `localhost`). An endpoint you point at another host, or a loopback port that forwards elsewhere (`ssh -L`, a local reverse proxy), sends the prompt there.
+1. **Local Ollama** (if configured) — stays on your machine when the Ollama endpoint (`OLLAMA_API_BASE`, else `http://localhost:11434`) is loopback. Since LC-12h the router's prompt-carrying calls to a loopback daemon ignore `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (LiteLLM honoured them even for `localhost`). An endpoint you point at another host, or a loopback port that forwards elsewhere (`ssh -L`, a local reverse proxy), sends the prompt there. LiteLLM's own model-info lookup (`POST /api/show`, which would carry the model name, the daemon URL and `OLLAMA_API_KEY`) is made impossible, not just unlikely: `local_privacy.ensure_ollama_model_info` puts a failure-shaped entry in `litellm.model_cost` before its own direct fetch, makes concurrent callers for the same model wait for that fetch (at most the 2 s fetch timeout plus 1 s), and re-inserts the entry if it is missing on any later call (a cost-map reload). Residual: if that insert itself raises (counted as `CHZ-FO-LOCAL-PRIVACY-MODEL-INFO` in failopen), LiteLLM does its own lookup.
 2. **Your configured providers** (OpenAI, Gemini, etc.) — governed by their privacy policies
 3. **Not** to llm-router servers — we don't run servers
 
@@ -55,12 +55,15 @@ precision" means a real-looking value, not a shape alone: a provider key prefix 
 Google, GitHub, Slack, AWS `AKIA`/`ASIA`) with enough length and entropy, a PEM private-key block with a body,
 a bearer token with entropy, a database URL whose password is not a common word, or a JWT that decodes to real-looking claims. Obvious placeholders are
 not refused: AWS documentation keys (`...EXAMPLE`), runs of `x` / `*` / `0` / `.`, `YOUR_...` / `<...>` /
-`${...}` / `changeme` / `placeholder` / `dummy` / `test` values, sequential typing, URL passwords equal to the
+`${...}` / `changeme` / `placeholder` / `dummy` / `test` values (a value that is itself shaped like one), sequential typing, URL passwords equal to the
 user name or in a short common-word list (`postgres:postgres@`, `user:password@`, `admin:admin@`), the jwt.io sample
 and JWTs whose identity claims are all test/demo values (or `alg: none`, or whose signature is a placeholder). A value on
-a line, or under a line, labelled `.env.example` / `.env.sample` / sample / placeholder / dummy / fake is not refused
-either: the label is the author's statement that it is an example (so a real secret directly under such a label is
-exempt too). Quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a
+a line, or up to two lines under a line, that carries a filename or config cue (`.env.example` / `.env.sample` /
+`.env.template` / `example.env`, "sample config" / "example env", or a path ending `.example` / `.sample` /
+`.template`) is not refused either: the cue is the author's statement that it is an example, so a real secret next to
+such a cue is exempt too (residual: anyone can type the cue). Free-text words (`fake`, `dummy`, `placeholder`, "not a
+real", "for illustration") are not cues and exempt nothing: `fake? no. <key>` is refused. Every exemption is counted
+as `exempted_by_label:<category>`. Quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a
 counter and the category, never the value) and never refused. `engine.secret_findings` is the detector; its quantifiers
 are bounded and it scans long text in overlapping windows, so it is linear in the text and misses nothing at a
 window edge. A refused call skips the semantic cache and the judge queue, gets no emergency fallback to the budget
@@ -70,13 +73,16 @@ SDK (`llm_router.sdk.route`, whose Ollama leg also goes direct).
 - **The scan reads** the new request: the prompt, the system prompt and the caller context of this one call. **Not**
   earlier turns of the conversation (`messages`): each was scanned when it was the new request, and scanning them again
   made one past secret refuse every later turn. The price: a real secret in turn 3 that the caller overrode (or that a
-  host sent on its own) is replayed to a cloud model in turn 4 as history, and the door does not see it.
+  host sent on its own) is replayed to a cloud model in turn 4 as history, and the door does not see it. It is
+  counted, not blocked: each request whose `messages` hold a high-precision secret shape adds
+  `history_secret_shape:<category>` (category only, never the value) to `local_privacy.secret_counts`. The
+  `tool_calls` arguments of assistant messages are not read by that count or by any scan (only `content` text is).
 - **The refusal** names the category and the place, never the value, and the way forward: start a local model
   (`llm-router local-check`), remove the secret, or override. The gateway answers HTTP 422 with that text (a 5xx
   would invite retries) with a typed body, `{"error": {"type": "secret_local_only_refused", "categories": [...],
   "places": [...], "remedy": ...}}`; the MCP tools return the message as the tool error; the SDK raises a
   `RoutingError` that is also a `SecretLocalOnlyRefused`.
-- **Override, per request:** start the prompt with `cloud:` (stripped before anything reads the text), or pass the
+- **Override, per request:** start the prompt with `cloud:` (stripped before anything reads the text, but only when the request holds a secret; with no secret the prompt is left exactly as typed), or pass the
   flag where a prefix cannot be typed: `allow_cloud=True` (`route_and_call`, `sdk.route` / `Router.run`), the body field
   `"allow_cloud": true` (`/route`) or the header `X-LLM-Router-Allow-Cloud: 1` (gateway). The
   request then routes as ordinary traffic, and the override is counted (`overridden:<category>`), category only. An explicit
@@ -102,7 +108,7 @@ the proxy env when one is set.
 | Site | Carries | Status |
 |---|---|---|
 | `context_summary.py` (`_generate`, session-end summary) | conversation text | fixed |
-| `hooks/auto-route.py` (`classify_with_ollama`, first 500 chars of a prompt) | prompt text | fixed (hook v77) |
+| `hooks/auto-route.py` (`classify_with_ollama`, first 500 chars of a prompt) | prompt text | fixed (hook v78) |
 | `hooks/direct_executor.py` (`call_ollama`, `ollama_is_alive`, `available_ollama_models`) | prompt text, probes | fixed |
 | `toolkit/adapters/ollama.py` | agent messages | fixed |
 | `hooks/playwright-compress.py` | page snapshot text | fixed (hook v5) |

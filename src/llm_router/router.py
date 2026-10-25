@@ -4724,7 +4724,7 @@ async def route_and_call(
     skip_causes.begin()  # F23: fresh per-call list of passed-over entries
     # LC-12h: the per-request secret override (`cloud:` prefix) is read and stripped before anything sees the text.
     from llm_router import local_privacy as _lp
-    prompt, _secret_override = _lp.split_override(prompt)
+    prompt, _secret_override = _lp.split_override(prompt, system_prompt, caller_context)
     _secret_override = _lp.override_requested(prefix=_secret_override, flag=allow_cloud)
     correlation_id = uuid4().hex[:8]
     # Phase 0.5 (Option A sidecar bridge): when the hook minted a directive id
@@ -5333,6 +5333,7 @@ async def route_and_call(
         # Only the NEW request and what this call attached are scanned, never ``messages`` (earlier turns): each was
         # scanned when it was the new request, and one past secret must not refuse every later turn. SECURITY.md.
         _secret_hits = _lp.scan_secrets(prompt, system_prompt, caller_context)
+        _lp.note_history_secrets(messages)
         _secret_private = bool(_secret_hits)
         if _secret_private and _secret_override:
             for _h in _secret_hits:
@@ -6464,7 +6465,7 @@ async def route_and_stream(
     """
     config = get_config()
     from llm_router import local_privacy as _lp_ov
-    prompt, _secret_override = _lp_ov.split_override(prompt)  # LC-12h: the `cloud:` override, stripped first
+    prompt, _secret_override = _lp_ov.split_override(prompt, system_prompt, caller_context)  # LC-12h: the `cloud:` override, stripped first
     _secret_override = _lp_ov.override_requested(prefix=_secret_override, flag=allow_cloud)
     correlation_id = uuid4().hex[:8]
     seq = 0  # Event counter
