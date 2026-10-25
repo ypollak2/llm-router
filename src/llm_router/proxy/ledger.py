@@ -298,7 +298,9 @@ def write_row(row: dict, path: Path | None = None) -> None:
     for k, v in ENGINE_FIELD_DEFAULTS.items():
         if row.get(k) is None:
             row[k] = v
-    if row.get("inventory_sig") is None:  # W0-1: cached signature of the resource map, no file read when warm
+    # W0-1: the proxy ledger stamps inventory_sig HERE, at write time, not at decision time; the
+    # signature is keyed on the map token so it lags the decision only if the map changed in between.
+    if row.get("inventory_sig") is None:
         from llm_router import decision_stamp
 
         row["inventory_sig"] = decision_stamp.inventory_sig()

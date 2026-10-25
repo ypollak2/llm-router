@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import ast
 import builtins
+import os
+import stat
+import time
 import importlib.util
 import json
 import sqlite3
@@ -81,26 +84,118 @@ def test_inventory_sig_is_none_without_a_usable_map(tmp_path):
     assert decision_stamp.inventory_sig(tmp_path / "missing.json") is None
 
 
-def test_warm_inventory_sig_does_no_file_io(tmp_path):
+def test_warm_inventory_sig_reads_and_opens_no_file(tmp_path):
+    """A warm call is one ``stat`` (the map token): no read, no open, no database."""
     p = _map(tmp_path, {"ollama/a": "connected"})
     cold = decision_stamp.inventory_sig(p)
     calls = MagicMock()
-    real_open, real_stat = builtins.open, Path.stat
+    real_open = builtins.open
 
     def counting_open(*a, **k):
         calls("open", a[:1])
         return real_open(*a, **k)
 
-    def counting_stat(self, *a, **k):
-        calls("stat", str(self))
-        return real_stat(self, *a, **k)
-
     with patch("llm_router.map_reader.load_data", side_effect=AssertionError("re-read on a warm cache")), \
-         patch.object(builtins, "open", counting_open), patch.object(Path, "stat", counting_stat), \
-         patch("os.stat", side_effect=AssertionError("os.stat on a warm cache")):
+         patch("llm_router.state_files.connect_sqlite", side_effect=AssertionError("db on a warm cache")), \
+         patch.object(builtins, "open", counting_open):
         for _ in range(50):
             assert decision_stamp.inventory_sig(p) == cold
     calls.assert_not_called()
+
+
+def test_a_map_rewrite_gives_the_new_sig_at_once_without_waiting_for_a_ttl(tmp_path):
+    """The cache is keyed on map_reader.token(), not a clock: no reset_cache() between the two calls."""
+    p = _map(tmp_path, {"ollama/a": "connected", "codex/b": "connected"})
+    before = decision_stamp.inventory_sig(p)
+    old = p.stat().st_mtime_ns
+    _map(tmp_path, {"ollama/a": "connected", "codex/b": "absent"})  # model b goes absent
+    os.utime(p, ns=(old + 5_000_000, old + 5_000_000))  # a coarse-mtime filesystem still moves the token
+    after = decision_stamp.inventory_sig(p)
+    assert after and after != before
+
+
+def _caps_map(tmp_path: Path, caps, window=None) -> Path:
+    row = resource_map._row("ollama", "local", "ollama/a", status="connected", effective_priority=1)
+    row["capabilities_reported"] = True
+    row["capabilities"] = caps
+    if window is not None:
+        row["limits"] = {"max_context": window}
+    data = {"schema": resource_map.SCHEMA, "generated_at": resource_map._iso(time.time()),
+            "policy": "balanced", "resources": [row]}
+    return resource_map.write_map(data, tmp_path / "resource_map.json")
+
+
+def test_a_capability_or_window_change_changes_the_sig(tmp_path):
+    sigs = []
+    for caps, window in ((["completion", "tools"], 8192), (["completion"], 8192),
+                         (["completion", "tools", "vision"], 8192), (["completion", "tools"], 32768)):
+        p = _caps_map(tmp_path, caps, window)
+        decision_stamp.reset_cache()
+        sigs.append(decision_stamp.inventory_sig(p))
+    assert all(sigs) and len(set(sigs)) == 4, sigs
+
+
+# ── inventory_snapshots: a sig resolves to the inventory it hashed ───────────────────────────────
+
+
+def test_an_old_sig_still_resolves_after_the_map_changed(tmp_path):
+    db = tmp_path / "usage.db"
+    p = _caps_map(tmp_path, ["completion", "tools"], 8192)
+    old_sig = decision_stamp.inventory_sig(p, db_path=db)
+    _caps_map(tmp_path, ["completion"], 4096)  # the map changes: tools lost, window smaller
+    decision_stamp.reset_cache()
+    new_sig = decision_stamp.inventory_sig(p, db_path=db)
+    assert new_sig != old_sig
+    old = decision_stamp.resolve_inventory(old_sig, db_path=db)
+    new = decision_stamp.resolve_inventory(new_sig, db_path=db)
+    assert old["rows"] == [{"chain_id": "ollama/a", "status": "connected", "effective_priority": 1,
+                            "tools": True, "vision": False, "window": 8192}]
+    assert (new["rows"][0]["tools"], new["rows"][0]["window"]) == (False, 4096)
+    assert old["policy"] == "balanced"
+    assert decision_stamp.resolve_inventory("000000000000", db_path=db) is None
+    assert decision_stamp.resolve_inventory(None, db_path=db) is None
+
+
+def test_the_snapshot_is_written_once_per_sig_and_the_db_stays_0600(tmp_path):
+    db = tmp_path / "usage.db"
+    p = _caps_map(tmp_path, ["completion", "tools"], 8192)
+    for _ in range(3):
+        decision_stamp.reset_cache()  # a cold compute each time, as in a short-lived hook process
+        decision_stamp.inventory_sig(p, db_path=db)
+    con = sqlite3.connect(db)
+    try:
+        assert con.execute("SELECT count(*) FROM inventory_snapshots").fetchone() == (1,)
+        sig, ts, body = con.execute("SELECT sig, first_seen_ts, body_json FROM inventory_snapshots").fetchone()
+    finally:
+        con.close()
+    assert len(sig) == 12 and ts.endswith("Z") and json.loads(body)["rows"]
+    assert stat.S_IMODE(os.stat(db).st_mode) == 0o600
+
+
+def test_a_decision_row_sig_resolves_to_the_inventory_in_the_same_db(temp_db):
+    """End to end: a real writer stamps the sig, and the snapshot is in the same usage.db."""
+    p = _map(temp_db.parent, {"ollama/a": "connected"})
+    with patch("llm_router.map_reader.token", return_value=(1,)), \
+         patch("llm_router.map_reader.load_data", return_value=json.loads(p.read_text())):
+        decision_stamp.reset_cache()
+        _direct(layer="L1", confidence=0.9)
+    (sig,) = sqlite3.connect(str(temp_db)).execute("SELECT inventory_sig FROM routing_decisions").fetchone()
+    assert sig and decision_stamp.resolve_inventory(sig, db_path=temp_db)["rows"][0]["chain_id"] == "ollama/a"
+
+
+@pytest.mark.parametrize("label", ["agent-route", "agent-route-cli", "build-fast-path", "benchmark-fp",
+                                   "ollama", "api", "heuristic-weak", "hook", "something-new"])
+def test_a_label_outside_the_closed_set_is_null_not_a_layer(label):
+    assert decision_stamp.layer_for(label) is None
+    assert decision_stamp.stamp(label, 0.9, "r")["layer"] is None
+
+
+def test_every_layer_in_the_closed_set_is_accepted_and_the_ledger_layers_are_included():
+    from llm_router import decision_ledger
+
+    assert set(decision_ledger.LAYERS) <= set(decision_stamp.LAYERS)
+    for lyr in decision_stamp.LAYERS:
+        assert decision_stamp.layer_for(lyr) == lyr
 
 
 def test_stamp_helpers_never_invent_a_confidence():
@@ -111,6 +206,7 @@ def test_stamp_helpers_never_invent_a_confidence():
     assert decision_stamp.confidence_for("L1", 0.8) == 0.8
     assert decision_stamp.layer_for("prefix:opus") == "prefix"
     assert decision_stamp.layer_for("heuristic+unservable:code") == "heuristic"
+    assert decision_stamp.layer_for("L3") == "L3" and decision_stamp.layer_for("rules") == "rules"
     assert decision_stamp.layer_for("") is None and decision_stamp.layer_for(None) is None
 
 
@@ -155,7 +251,7 @@ async def test_error_row_writer_stamps_layer_reason_and_inventory(cache_env, cal
     with pytest.raises(RuntimeError):
         await _call(boom)
     layer, conf, reason, sig, rc, _ = _row(cache_env)
-    assert (layer, conf, sig) == ("unhinted", None, SIG)
+    assert (layer, conf, sig) == (None, None, SIG)
     assert reason == rc and rc.startswith("error_")
 
 
@@ -179,10 +275,17 @@ def test_direct_writer_stamps_engine_layer_confidence_reason_and_inventory(temp_
     assert (layer, conf, reason, sig, rc) == ("L1", 0.91, "direct", SIG, "direct")
 
 
-def test_direct_writer_confidence_null_and_layer_from_label_when_not_given(temp_db, fixed_sig):
-    _direct(classifier_type="build-fast-path")
+def test_direct_writer_layer_from_a_known_label_and_null_for_a_door_name(temp_db, fixed_sig):
+    _direct(classifier_type="heuristic")
     layer, conf, reason, sig, *_ = _row(temp_db)
-    assert (layer, conf, reason, sig) == ("build-fast-path", None, "direct", SIG)
+    assert (layer, conf, reason, sig) == ("heuristic", None, "direct", SIG)
+
+
+@pytest.mark.parametrize("door", ["agent-route", "agent-route-cli", "build-fast-path"])
+def test_direct_writer_stores_null_layer_for_a_door_or_fast_path_name(temp_db, fixed_sig, door):
+    _direct(classifier_type=door)
+    layer, conf, *_ = _row(temp_db)
+    assert (layer, conf) == (None, None)
 
 
 def test_direct_writer_prefix_has_layer_prefix_and_no_confidence(temp_db, fixed_sig):
@@ -298,3 +401,106 @@ def test_why_prints_the_real_layer_and_confidence_for_a_new_row(cache_env, monke
     assert "n/a" not in text.split("2 confidence:")[1].split("3 layer:")[0]
     assert sqlite3.connect(str(cache_env)).execute(
         "SELECT inventory_sig FROM routing_decisions").fetchone() == (SIG,)
+
+
+# ── AST ratchet: a new routing-decision writer cannot skip the stamp ─────────────────────────────
+
+#: Writers deliberately NOT stamped, each with the reason. Anything not here must stamp.
+_EXEMPT_DIRECT_CALLERS = {
+    # Door names, not layers: the closed set maps them to a NULL layer; confidence/reason/inventory_sig
+    # are still stamped by log_direct_to_db itself.
+    ("hooks/agent-route.py", "agent-route"), ("hooks/agent-route.py", "agent-route-cli"),
+    ("src/llm_router/hooks/agent-route.py", "agent-route"), ("src/llm_router/hooks/agent-route.py", "agent-route-cli"),
+}
+_SRC_FILES = [*sorted((ROOT / "src").rglob("*.py")), *sorted((ROOT / "hooks").glob("*.py"))]
+
+
+def _callee(call: ast.Call) -> str | None:
+    f = call.func
+    return f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+
+
+def _enclosing(tree: ast.AST, call: ast.Call):
+    funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.lineno <= call.lineno <= (n.end_lineno or n.lineno)]
+    return min(funcs, key=lambda n: (n.end_lineno or 0) - n.lineno) if funcs else None
+
+
+def _is_stamp_call(node) -> bool:
+    return isinstance(node, ast.Call) and _callee(node) == "stamp"
+
+
+def _stamps(call: ast.Call, tree: ast.AST) -> bool:
+    """True when ``call`` passes inventory_sig itself or splats the result of ``stamp(...)`` (a Name is
+    resolved in the enclosing function; ambiguous or unresolved = not stamped)."""
+    if any(k.arg == "inventory_sig" for k in call.keywords):
+        return True
+    for k in call.keywords:
+        if k.arg is not None:
+            continue
+        if _is_stamp_call(k.value):
+            return True
+        if isinstance(k.value, ast.Name):
+            fn = _enclosing(tree, call)
+            vals = [n.value for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                    and any(getattr(t, "id", None) == k.value.id for t in n.targets)] if fn else []
+            if len(vals) == 1 and _is_stamp_call(vals[0]):
+                return True
+    return False
+
+
+def test_every_cost_routing_decision_writer_call_stamps():
+    """Calls that carry ``reason_code=`` are the cost.log_routing_decision writer (the other functions of
+    the same name, in model_tracking / routing_hints, never take it). Each must splat stamp(...)."""
+    seen = []
+    for path in _SRC_FILES:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+            if _callee(call) in {"log_routing_decision", "_cost_log_routing_decision"} \
+                    and any(k.arg == "reason_code" for k in call.keywords):
+                seen.append(f"{path.relative_to(ROOT)}:{call.lineno}")
+                assert _stamps(call, tree), f"{path.relative_to(ROOT)}:{call.lineno} writes a routing decision without the stamp"
+    assert len(seen) >= 3, seen  # router.py, cost.py (failed call), savings_logger.py: an empty scan proves nothing
+
+
+def test_every_log_direct_to_db_caller_passes_the_layer_or_is_a_listed_door():
+    seen, exempt = [], []
+    for path in _SRC_FILES:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call) and _callee(n) == "log_direct_to_db"):
+            rel = str(path.relative_to(ROOT))
+            seen.append(f"{rel}:{call.lineno}")
+            if any(k.arg == "layer" for k in call.keywords):
+                continue
+            ct = next((k.value.value for k in call.keywords if k.arg == "classifier_type"
+                       and isinstance(k.value, ast.Constant)), None)
+            assert (rel, ct) in _EXEMPT_DIRECT_CALLERS, f"{rel}:{call.lineno} log_direct_to_db without layer= ({ct!r})"
+            exempt.append((rel, ct))
+    assert len(seen) >= 4 and exempt, (seen, exempt)  # sdk, auto-route x2, agent-route x4
+    # every listed exemption is still real: a stale entry would hide a future bypass
+    assert set(exempt) == _EXEMPT_DIRECT_CALLERS, set(exempt) ^ _EXEMPT_DIRECT_CALLERS
+
+
+def test_the_writers_that_take_no_stamp_kwargs_stamp_inside():
+    """log_direct_to_db (hook, agent-route, SDK) and the proxy ledger's write_row stamp themselves."""
+    sl = ast.parse((ROOT / "src/llm_router/hooks/savings_logger.py").read_text())
+    fn = next(n for n in ast.walk(sl) if isinstance(n, ast.FunctionDef) and n.name == "log_direct_to_db")
+    assert any(_is_stamp_call(n) for n in ast.walk(fn)), "log_direct_to_db no longer calls decision_stamp.stamp"
+    pl = ast.parse((ROOT / "src/llm_router/proxy/ledger.py").read_text())
+    fn = next(n for n in ast.walk(pl) if isinstance(n, ast.FunctionDef) and n.name == "write_row")
+    assert any(isinstance(n, ast.Call) and _callee(n) == "inventory_sig" for n in ast.walk(fn)), \
+        "proxy ledger write_row no longer stamps inventory_sig"
+    # and the proxy ledger has one door: only proxy/server.py calls write_row
+    callers = {str(p.relative_to(ROOT)) for p in _SRC_FILES
+               for c in ast.walk(ast.parse(p.read_text())) if isinstance(c, ast.Call) and _callee(c) == "write_row"
+               and isinstance(c.func, ast.Attribute) and getattr(c.func.value, "id", None) == "ledger"}
+    assert callers == {"src/llm_router/proxy/server.py"}, callers
+
+
+def test_unstamped_routing_decision_inserts_are_the_listed_ones():
+    """A raw ``INSERT INTO routing_decisions`` outside cost.py is a writer the stamp does not reach."""
+    hits = {str(p.relative_to(ROOT)) for p in (ROOT / "src").rglob("*.py")
+            if "INSERT INTO routing_decisions" in p.read_text(encoding="utf-8")}
+    # cost.py = the stamped writer. lineage_store.py = the lineage subsystem's own table of the same
+    # name in its own database (a different schema): documented as not stamped in the PR.
+    assert hits == {"src/llm_router/cost.py", "src/llm_router/lineage/lineage_store.py"}, hits

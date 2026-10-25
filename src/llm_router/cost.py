@@ -1615,7 +1615,7 @@ async def log_route_error(
             session_id=_ci.call_session_id(),
             tool_use_id=_ci.tool_use_id(),
             # W0-1: no classifier ran for a failed call; the reason and the inventory are known.
-            **_decision_stamp.stamp("unhinted", None, reason),
+            **_decision_stamp.stamp(None, None, reason),  # layer NULL: the upstream layer is not known here
         )
     except Exception as _rd_err:  # noqa: BLE001 — the usage row above already stands
         import logging

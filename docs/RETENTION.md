@@ -130,3 +130,13 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Helper | `llm_router.state_files`: `open_private`, `private_dir`, `ensure_private_file`, `connect_sqlite`. A new writer under the state directory uses these, not a bare `open(..., "a")`. `tests/test_w04_state_file_modes.py::test_raw_state_writes_ratchet` freezes the legacy raw writers per file (`tests/w04_raw_write_baseline.json`); the count may only go down. |
 | Older files | `state_files.migrate_once` runs from `llm-router doctor` and the MCP server start. It tightens existing files to 0600 and directories to 0700 once; the marker `.modes_migrated_v1` holds counts only (no names, no content). Symlinks are skipped, never followed, and nothing outside the state directory is changed. A file written at a wider mode after the marker exists is not repaired until the writer is routed through the helper; delete the marker to run the repair again. |
 | Not covered | Writers listed in the baseline (they create files at the umask default until routed), and files other tools place under the state directory. |
+
+## `inventory_snapshots` in `usage.db` (W0-1)
+
+| Item | Value |
+|---|---|
+| Rows | `sig` (primary key, sha256[:12]), `first_seen_ts` (UTC), `body_json`: the canonical resource-map inventory that `sig` hashed (per resource: chain id, status, effective priority, tools, vision, context window; and the routing policy). Model and provider ids only: no prompt text, no keys, no quota. |
+| Writer | `decision_stamp.inventory_sig`, on a cold compute only, and only when the signature is not yet in the table (a `SELECT` first, then `INSERT OR IGNORE`). File created through `state_files.connect_sqlite` (0600). |
+| Kept | Forever, and for as long as `routing_decisions`: that table has no TTL or pruning in `usage.db`, and a snapshot is one small row per distinct inventory. A snapshot is never deleted while any `routing_decisions.inventory_sig` may reference it. If a prune of `routing_decisions` is ever added, it must keep every snapshot a surviving row names. |
+| Reader | `decision_stamp.resolve_inventory(sig)`: the inventory at decision time, or None. |
+| Failure | A failed write is recorded with `failopen` code `W01-SNAPSHOT`; the routing row is still written (its signature then does not resolve). |
