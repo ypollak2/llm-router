@@ -12,7 +12,6 @@ Launch:
 from __future__ import annotations
 
 import json
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -26,6 +25,7 @@ from textual.widgets import Footer, Static
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01
 
 from llm_router import paths
+from llm_router.state_files import connect_sqlite
 from llm_router.provider_classes import not_error_row_sql, real_decision_sql
 from llm_router.sqlite_wal import enable_wal
 
@@ -224,7 +224,7 @@ def _fetch_data() -> DashboardData:
         return d
 
     try:
-        conn = sqlite3.connect(str(_db_path()), timeout=3)
+        conn = connect_sqlite(_db_path(), create=False, timeout=3)
         # M-06 / the sqlite_wal adoption gap. `busy_timeout` governs how long the
         # journal_mode PRAGMA itself waits for its exclusive lock, so setting it
         # AFTER is the one ordering that leaves that statement on the 5s default.

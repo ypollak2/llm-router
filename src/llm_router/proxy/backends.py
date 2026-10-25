@@ -460,23 +460,32 @@ _chain_cache: dict[tuple, list[str]] = {}
 _chain_cache_token: tuple | None = None
 
 
-def _classify_class(text: str, *, capabilities: bool = True) -> tuple[str, str]:
-    """``(task_type, complexity)`` the proxy routes on.
+def _classify_full(text: str, *, capabilities: bool = True) -> tuple[str, str, str, float | None]:
+    """``(task_type, complexity, layer, confidence)`` the proxy routes on.
 
     PLAN v16 P1.6 / D-72: ``classify_signals(GATEWAY_POLICY)`` decides, exactly as before the
     wiring; the one engine only runs after it, in shadow. ``LLM_ROUTER_ENGINE_MODE=decide`` makes
-    the engine decide, reusing the hook's Decision for this turn by ``text_sha`` (P1.6-h)."""
+    the engine decide, reusing the hook's Decision for this turn by ``text_sha`` (P1.6-h).
+
+    W0-1: ``layer`` is the engine's layer when it decided, else ``rules``; ``confidence`` is the
+    engine's, else None (the rules score is not a probability)."""
     from llm_router import engine_door
 
     d = engine_door.decision(text, door="proxy", proxy=True)
     if d is not None:
-        return d.task_type, d.complexity
+        return d.task_type, d.complexity, d.layer, d.confidence
     from llm_router.classify import GATEWAY_POLICY, classify_signals
 
     sig = classify_signals(text, GATEWAY_POLICY, capabilities=capabilities)
     out = sig.task_type.value, sig.complexity.value
     engine_door.shadow(text, door="proxy", rules_task=out[0], rules_complexity=out[1])
-    return out
+    return out[0], out[1], "rules", None
+
+
+def _classify_class(text: str, *, capabilities: bool = True) -> tuple[str, str]:
+    """``(task_type, complexity)`` the proxy routes on (see :func:`_classify_full`)."""
+    task, cx, _layer, _conf = _classify_full(text, capabilities=capabilities)
+    return task, cx
 
 
 async def policy_chain(text: str) -> tuple[str, str, list[str]]:
@@ -521,10 +530,11 @@ async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool
     del pinned
     from llm_router import map_reader
 
-    task, cx = _classify_class(text, capabilities=False)  # the class only (P0.9-e)
+    task, cx, layer, conf = _classify_full(text, capabilities=False)  # the class only (P0.9-e)
     chain = _chain_cache.get((task, cx, map_reader.token())) or []
     model = next((m for m in chain if tool_capable(m, anthropic=anthropic)), None)
-    return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": model}
+    return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": model,
+            "layer": layer, "confidence": conf}
 
 
 def tier_classify_pure(text: str) -> dict:

@@ -404,6 +404,7 @@ async def llm_route(
         "budget_pct_used": budget_pct,
         "quality_mode": q_mode.value if hasattr(q_mode, "value") else str(q_mode),
         "classifier_cost_usd": classification.classifier_cost_usd,
+        "layer": getattr(classification, "layer", None),  # W0-1: the engine layer, else the router derives it
     }
 
     # Step 4: Route and call
@@ -597,6 +598,7 @@ async def llm_auto(
         "budget_pct_used": budget_pct,
         "quality_mode": q_mode.value if hasattr(q_mode, "value") else str(q_mode),
         "classifier_cost_usd": classification.classifier_cost_usd,
+        "layer": getattr(classification, "layer", None),  # W0-1
     }
 
     resp = await route_and_call(

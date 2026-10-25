@@ -258,6 +258,11 @@ class TierDecision:
     # computed it (P0.9-e: computed at most once, and only then); None = not computed.
     # The proxy reuses it for the ledger's ``tier_haiku_block`` instead of a second pass.
     haiku_block: str | None = None
+    # W0-1: which classifier layer decided the class, and its confidence (None = not measured, or
+    # the call never reached the classifier). Written to the ledger as cls_layer / cls_confidence.
+    cls_layer: str | None = None
+    cls_confidence: float | None = None
+
     # Lane A (``proxy/lane_a.py``): the closed reason and the engine confidence (or None) for a
     # continuation step on a pinned model. None = the lane was not evaluated for this decision.
     lane_a_reason: str | None = None
@@ -436,7 +441,10 @@ def with_complexity_knn(base=None):
 
         # P3.6-b: both live deciders answered; one text-free row {ts, rules_tier, knn_tier, source}
         classifier_health.record_agreement(choice.get("complexity"), ks.needs_frontier)
-        choice["complexity"] = complexity_knn.frontier_complexity(choice.get("complexity"), ks.needs_frontier)
+        moved = complexity_knn.frontier_complexity(choice.get("complexity"), ks.needs_frontier)
+        if moved != choice.get("complexity"):
+            choice["layer"], choice["confidence"] = "knn", None  # W0-1: the kNN score decided the tier
+        choice["complexity"] = moved
         choice["complexity_score"] = round(ks.score, 4)
         return choice
 
@@ -665,6 +673,14 @@ class ClaudeTierPolicy:
         # Lane A: Haiku for confident continuation steps despite ``pinned_models``. Needs this
         # YAML key AND ``LLM_ROUTER_PROXY_LANE_A=on`` AND ``haiku_rewrite`` to serve (default off).
         self.lane_a = lane_a_config or lane_a.LaneAConfig()
+        # PR2: the conversation memory (cache rule, consecutive cap) and, only when the YAML switch is
+        # on, the breaker + failure feed. A lane that is off holds neither state nor files nor tasks.
+        self._lane_turns = lane_a.TurnMemory()
+        self.lane_runtime = None
+        if self.lane_a.enabled:
+            from llm_router.proxy.lane_a_breaker import LaneARuntime
+
+            self.lane_runtime = LaneARuntime(self.lane_a.breaker)
         self._classify = with_complexity_knn(classify) if complexity_knn else classify
         # Quota pressure step (``quota_pressure:`` in the policy YAML). ``quota``
         # is a ``() -> QuotaReading`` hook for tests; the default reads the
@@ -842,6 +858,15 @@ class ClaudeTierPolicy:
             return None
         return cap
 
+    def _lane_on(self) -> bool:
+        """All three switches: YAML ``lane_a.enabled``, env ``LLM_ROUTER_PROXY_LANE_A``, ``haiku_rewrite``."""
+        return bool(self.lane_a.enabled and lane_a.env_on() and self.haiku_rewrite)
+
+    def lane_a_unserved(self, body: dict, session_id: str | None) -> None:
+        """The proxy sent a lane A step to Haiku but the pinned model answered it (retry): the prefix
+        was not moved, so the cache rule must not count this step as a Haiku step."""
+        self._lane_turns.forget(conversation_key(body, session_id))
+
     async def _lane_a(self, body: dict, session_id: str | None, classify, requested: str | None, req_tier: Tier,
                       phases: _Phases, block: "_HaikuBlock | None") -> "lane_a.LaneAOutcome":
         """Lane A on a ``pinned_models`` request: why the step stays pinned, or that it may be
@@ -876,6 +901,14 @@ class ClaudeTierPolicy:
             if haiku is None or self.rank[req_tier.name] <= self.rank[haiku.name]:
                 return out(lane_a.R_NO_HAIKU_TIER)
             text = tier_text(body)
+            key = conversation_key(body, session_id)
+            sig = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+            def done(*a, **kw):
+                o = out(*a, **kw)
+                o.key, o.sig = key, sig
+                return o
+
             with phases("classify"):
                 # Side-effect free (PR1 repair): no shadow row, no decision cache or ledger row, no
                 # Ollama embed, no classifier_health write, no sqlite on the event loop. An explicit
@@ -885,20 +918,41 @@ class ClaudeTierPolicy:
                 dec = await asyncio.to_thread(_pure_engine, text) if text else None
             conf = lane_a.clean_conf(dec.confidence) if dec is not None else None
             if dec is None or conf is None or dec.layer == "fallback":
-                return out(lane_a.R_CONF_UNAVAILABLE)
+                return done(lane_a.R_CONF_UNAVAILABLE)
             # L1 only (a cache hit counts when it was an L1 verdict); abstain or below tau is low.
             if not str(dec.reason).startswith("L1 ") or dec.abstain or conf < self.lane_a.tau:
-                return out(lane_a.R_LOW_CONF, conf)
+                return done(lane_a.R_LOW_CONF, conf)
             task, cx = rules.get("task_type"), rules.get("complexity")
             tier = self.tier_for(task, cx)
             if (dec.tier != "haiku" or tier is None or tier.name != "haiku"
                     or (dec.task_type, dec.complexity) != (task, cx)):
-                return out(lane_a.R_ENGINE_DISAGREE, conf)
+                return done(lane_a.R_ENGINE_DISAGREE, conf)
             if not self._haiku_body_ok(body, block):
-                return out(lane_a.R_HAIKU_BODY, conf)
-            if not (self.lane_a.enabled and lane_a.env_on() and self.haiku_rewrite):
-                return out(lane_a.R_ELIGIBLE, conf)
-            return out(lane_a.R_SERVED, conf, True, task, cx, list(rules.get("chain_head") or [])[:4])
+                return done(lane_a.R_HAIKU_BODY, conf)
+            # Loop guard, then the cache rule (PR2): both are read-only on the conversation memory.
+            run = self._lane_turns.get(key, sig)
+            if run >= self.lane_a.max_consecutive:
+                return done(lane_a.R_CONSEC_CAP, conf)
+            if run == 0:  # not on Haiku yet this turn: the prefix would be written again there
+                cost = switch_cost_usd(haiku.model, _approx_context_tokens(body))
+                if cost is None or cost >= self.lane_a.max_switch_usd:
+                    return done(lane_a.R_SWITCH_COST, conf)
+            if not self._lane_on():
+                return done(lane_a.R_ELIGIBLE, conf)
+            # Serve branch: every switch is on and the step is otherwise eligible. Only here may the
+            # veto embed (D-297) or the breaker be consulted, so a lane that is off does neither.
+            if self.complexity_knn:
+                from llm_router import complexity_knn
+
+                ks = await complexity_knn.complexity_score(text)
+                if ks is not None and ks.needs_frontier:
+                    return done(lane_a.R_KNN_VETO, conf)
+            allowed, probe = (await self.lane_runtime.breaker.admit()) if self.lane_runtime else (False, False)
+            if not allowed:
+                return done(lane_a.R_BREAKER_OPEN, conf)
+            o = done(lane_a.R_SERVED, conf, True, task, cx, list(rules.get("chain_head") or [])[:4])
+            o.probe = probe
+            return o
         except Exception:  # noqa: BLE001 - lane A never costs a call: stay pinned
             return out(lane_a.R_ERROR)
 
@@ -909,13 +963,15 @@ class ClaudeTierPolicy:
         (default off); otherwise the request goes to the D-31 arm (``_pinned_arm_or_keep``), and
         the lane's reason and confidence ride on the decision either way."""
         lane = await self._lane_a(body, session_id, classify, requested, req_tier, phases, block)
+        if lane.key is not None and self._lane_on():
+            self._lane_turns.note(lane.key, lane.sig, served=lane.serve, capped=lane.reason == lane_a.R_CONSEC_CAP)
         if lane.serve:
             haiku = self.by_name["haiku"]
             return TierDecision(requested, haiku.model, haiku.name, REASON_HAIKU_REWRITE, switched=True,
                                 task_type=lane.task_type, complexity=lane.complexity,
                                 body_rewrite=REWRITE_HAIKU, proposed_tier=haiku.name,
                                 chain_head=lane.chain_head, lane_a_reason=lane.reason,
-                                lane_a_conf=lane.conf)
+                                lane_a_conf=lane.conf, detail=lane_a.DETAIL_PROBE if lane.probe else None)
         decision = await self._pinned_arm_or_keep(body, session_id, classify, requested, req_tier, phases, block)
         decision.lane_a_reason, decision.lane_a_conf = lane.reason, lane.conf
         return decision
@@ -999,7 +1055,8 @@ class ClaudeTierPolicy:
                             proposed_tier=haiku.name, arm=haiku_arm.ARM_NAME,
                             arm_assignment=haiku_arm.ASSIGNED, arm_reason=haiku_arm.WHY_MATCHED + matched,
                             arm_bucket=bucket, arm_turn=turn_id,
-                            chain_head=list(choice.get("chain_head") or [])[:4])
+                            chain_head=list(choice.get("chain_head") or [])[:4],
+                            cls_layer=choice.get("layer"), cls_confidence=choice.get("confidence"))
 
     def decide_unclassified(self, body: dict, session_id: str | None, sticky: Stickiness) -> TierDecision:
         """The decision for a call the proxy could not label (``step_class == unknown``,
@@ -1068,7 +1125,7 @@ class ClaudeTierPolicy:
                   else REASON_EXPLICIT_PREFIX_PIN)
         return TierDecision(requested, target.model, target.name, reason,
                             switched=_canonical(target.model) != _canonical(requested),
-                            body_rewrite=rewrite)
+                            body_rewrite=rewrite, cls_layer="prefix")
 
     async def decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                      classify=None) -> TierDecision:
@@ -1286,4 +1343,5 @@ class ClaudeTierPolicy:
                             body_rewrite=body_rewrite,
                             task_type=task, complexity=cx, chain_head=list(choice.get("chain_head") or [])[:4],
                             complexity_score=choice.get("complexity_score"), detail=detail,
-                            proposed_tier=proposed)
+                            proposed_tier=proposed,
+                            cls_layer=choice.get("layer"), cls_confidence=choice.get("confidence"))
