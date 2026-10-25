@@ -136,6 +136,17 @@ class Candidate:
         return c
 
 
+def _open_private(path: Path, mode: str, **kw):
+    """W0-4b / S7: the pool holds prompt text, so it is created 0600. Uses the package helper;
+    this script may also run without the package importable, so fall back to an inline opener."""
+    try:
+        from llm_router.state_files import open_private
+        return open_private(path, mode, **kw)
+    except ImportError:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return open(path, mode, opener=lambda p, f: os.open(p, f, 0o600), **kw)
+
+
 def default_pool_path() -> Path:
     home = Path(os.environ.get("LLM_ROUTER_HOME", Path.home() / ".llm-router"))
     return home / "ground_truth_candidates.jsonl"
@@ -204,12 +215,12 @@ class Pool:
 
     def _append(self, c: Candidate) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as fh:
+        with _open_private(self.path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(c.to_json(), ensure_ascii=False, sort_keys=True) + "\n")
 
     def _reject(self, reason: str, detail: dict) -> None:
         self.funnel_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.funnel_path.open("a", encoding="utf-8") as fh:
+        with _open_private(self.funnel_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"ts": time.time(), "reason": reason, **detail},
                                 ensure_ascii=False, sort_keys=True) + "\n")
 

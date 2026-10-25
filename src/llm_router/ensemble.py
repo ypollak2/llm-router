@@ -209,6 +209,7 @@ def engine_classification(prompt: str) -> ClassificationResult:
         classifier_model="engine",
         classifier_cost_usd=0.0,
         classifier_latency_ms=d.ms,
+        layer=d.layer,
     )
 
 

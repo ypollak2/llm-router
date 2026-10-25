@@ -325,4 +325,4 @@ def test_the_trigger_adds_no_llm_router_import():
 
 def test_the_hook_pair_is_byte_identical_at_version_42():
     a, b = (ROOT / "hooks" / "session-start.py").read_bytes(), START.read_bytes()
-    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 42"
+    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 43"

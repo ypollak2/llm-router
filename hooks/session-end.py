@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 50
+# llm_router-hook-version: 51
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -78,6 +78,22 @@ except ImportError:
         return int(os.environ.get("LLM_ROUTER_SUBPROCESS_TIMEOUT", "15"))
     def http_timeout() -> int:
         return int(os.environ.get("LLM_ROUTER_HTTP_TIMEOUT", "10"))
+
+# W0-4b / S7: state files created by this hook are 0600 from creation (a plain open() makes
+# 0666 & ~umask = 0644, readable by other local users). Stdlib only: the hook may run
+# where the llm_router package is not importable, so it cannot use llm_router.state_files.
+def _priv_open(path, mode="a", **kw):
+    return open(path, mode, opener=lambda p, f: os.open(p, f, 0o600), **kw)
+
+
+def _priv_sqlite(path, **kw):
+    import sqlite3
+    try:
+        os.close(os.open(os.fspath(path), os.O_RDONLY | os.O_CREAT, 0o600))
+    except OSError:
+        pass  # sqlite3.connect below reports the real problem, as it did before
+    return sqlite3.connect(str(path), **kw)
+
 
 def _router_home():
     """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
@@ -241,7 +257,7 @@ def _fetch_live_usage() -> dict | None:
         # calls to clobber the session-start baseline, making start == end (delta = 0).
         # SESSION_CC_SNAP_FILE is updated only once: in main(), after the delta is computed.
         os.makedirs(_state_dir(), exist_ok=True)
-        with open(_usage_json(), "w") as f:
+        with _priv_open(_usage_json(), "w") as f:
             json.dump({**result, "highest_pressure": max(s, w, n) / 100.0}, f)
         return result
     except Exception:
@@ -296,7 +312,7 @@ def _render_quota_timeline(session_id: str | None, db_path: str) -> str:
         return ""
     
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _priv_sqlite(db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
@@ -532,7 +548,7 @@ def _sync_import_savings_log() -> None:
             pass
         return
     try:
-        conn = sqlite3.connect(_db_path())
+        conn = _priv_sqlite(_db_path())
         conn.execute("""
             CREATE TABLE IF NOT EXISTS savings_stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -594,7 +610,7 @@ def _sync_import_savings_log() -> None:
         # Insert failed — append the claimed rows back to the live log for a
         # later retry (append, never clobber newly-arrived lines), then drop it.
         try:
-            with open(claim) as _cf, open(_savings_log_path(), "a") as _lf:
+            with open(claim) as _cf, _priv_open(_savings_log_path(), "a") as _lf:
                 _lf.write(_cf.read())
         except OSError:
             pass
@@ -1797,7 +1813,7 @@ def _format_provider_section(table: str, title: str, emoji: str) -> list[str]:
     if not os.path.exists(_db_path()):
         return []
     try:
-        conn = sqlite3.connect(_db_path())
+        conn = _priv_sqlite(_db_path())
         if not conn.execute(
             f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'"
         ).fetchone():
@@ -1853,7 +1869,7 @@ def _format_codex_section() -> list[str]:
     if not os.path.exists(_db_path()):
         return []
     try:
-        conn = sqlite3.connect(_db_path())
+        conn = _priv_sqlite(_db_path())
         # Confirm the table exists before SELECTing
         if not conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='codex_usage'"
@@ -2287,7 +2303,7 @@ def _append_stop_note(note: str) -> None:
         notes.append({"ts": time.time(), "note": str(note)})
         os.makedirs(_state_dir(), exist_ok=True)
         tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        with _priv_open(tmp, "w", encoding="utf-8") as f:
             json.dump(notes[-10:], f)
         os.replace(tmp, path)
     except Exception:  # noqa: BLE001 -- a lost note costs one line, never the Stop
@@ -2411,7 +2427,7 @@ def _refresh_northstar_line() -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with _priv_open(tmp, "w", encoding="utf-8") as f:
             json.dump({"session_id": sid, "line": line, "ts": time.time()}, f)
         os.replace(tmp, path)
     finally:
@@ -2612,7 +2628,7 @@ def _refresh_ledger_cache() -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.{os.getpid()}.tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with _priv_open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f)
         os.replace(tmp, path)
     finally:
@@ -2884,7 +2900,7 @@ def _claim_background_stop_work(now: float | None = None) -> bool:
         except OSError:  # no claim yet: this Stop takes it
             pass
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+        with _priv_open(path, "w") as f:
             f.write(str(now))
         os.utime(path, (now, now))
         return True
@@ -2940,7 +2956,7 @@ def _write_text_atomic(path, text: str) -> None:
     path = os.fspath(path)
     tmp = f"{path}.{os.getpid()}.tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with _priv_open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
         os.replace(tmp, path)
     finally:
@@ -3524,7 +3540,7 @@ def main() -> None:
         # so the NEXT session starts from today's end-of-session baseline.
         if current and is_live:
             try:
-                with open(_session_cc_snap_file(), "w") as f:
+                with _priv_open(_session_cc_snap_file(), "w") as f:
                     json.dump(current, f)
             except OSError:
                 pass

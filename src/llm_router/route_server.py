@@ -50,6 +50,59 @@ def is_auto_model(name: object) -> bool:
     return isinstance(name, str) and name.strip().lower() in AUTO_MODEL_NAMES
 
 
+# P2.4 ext-a / D-165 (4) / F33: a request whose NEWEST user turn carries an image is refused
+# (the router has no image channel, so the part would be dropped silently); images only in
+# history are flattened. Shared with gateway.py, which imports these.
+IMAGES_UNSUPPORTED = (
+    "This gateway routes to a text-completion backend and cannot read images. "
+    "The request included image content, which would have been silently ignored, "
+    "so it is refused instead. Remove the image parts to route this prompt as text."
+)
+
+_IMAGE_PART_TYPES = ("image", "image_url", "input_image", "image_file")
+# Role-less content parts at the top of a Responses `input` list are one user turn.
+_BARE_PART_TYPES = _IMAGE_PART_TYPES + ("text", "input_text", "input_file")
+
+
+def _has_image(value) -> bool:
+    """True when *value* (a content, a message, or a list of either) carries an image part."""
+    if isinstance(value, list):
+        return any(_has_image(v) for v in value)
+    if isinstance(value, dict):
+        if value.get("type") in _IMAGE_PART_TYPES or value.get("images"):
+            return True
+        return _has_image(value.get("content"))
+    return False
+
+
+def _newest_user_turn(value):
+    """The newest user turn of a request field: the trailing run of role-less content
+    parts (a bare Responses part list), else the last item whose role is ``user`` (a
+    role-less typed item, such as a tool output, counts as the caller's). A dict (the
+    Ollama generate ``images`` field) is the request itself; anything else has none."""
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, list):
+        return None
+    i = len(value)
+    while i > 0 and isinstance(value[i - 1], dict) and "role" not in value[i - 1] \
+            and value[i - 1].get("type") in _BARE_PART_TYPES:
+        i -= 1
+    if i < len(value):
+        return value[i:]
+    for item in reversed(value):
+        if isinstance(item, dict) and item.get("role", "user") == "user":
+            return item
+    return None
+
+
+def refuses_images(payload: dict) -> bool:
+    """True when ``/route`` must refuse *payload*: its ``prompt`` or Ollama-style ``images``
+    field carries image content in the newest turn."""
+    return any(_has_image(_newest_user_turn(v))
+               for v in ({"images": payload.get("images")}, payload.get("prompt")))
+
+
 def _client_failure(what: str, exc: BaseException) -> None:
     """Log a failure to the local ``llm_router.gateway`` logger: the exception CLASS and the
     length of its text, never the text (F91). Exception text can hold the prompt or a
@@ -341,6 +394,10 @@ def make_handler():
                 except Exception as e:
                     _client_failure("feedback failed", e)
                     return self._send(500, {"error": "{}: feedback failed".format(type(e).__name__)})
+            # F33 (#558 review): refuse an image in ``prompt`` / ``images`` with 400, like the
+            # gateway's /route. ``messages`` is history and is flattened, never refused.
+            if isinstance(payload, dict) and refuses_images(payload):
+                return self._send(400, {"error": IMAGES_UNSUPPORTED})
             try:
                 self._send(200, route_payload(payload))
             except ValueError as e:

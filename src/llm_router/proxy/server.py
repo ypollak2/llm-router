@@ -60,7 +60,7 @@ from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import authority, failopen, local_models, prompt_key, shadow_frontier
 from llm_router import prefixes as user_prefixes
-from llm_router.proxy import haiku_arm, haiku_guard, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
+from llm_router.proxy import haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -422,6 +422,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             prefixes.update(row)
         except Exception as exc:  # noqa: BLE001 - the ledger row matters more than its cost fields
             failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
+        lane_a.ensure_fields(row)  # every continuation row, served or not, carries lane_a_reason/_conf
         ledger.write_row(row, cfg.ledger_path)
 
     def _budget_left(t0: float) -> float:
@@ -447,6 +448,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 # still held to the capability filter, as in choose_model: a pin KNOWN to
                 # lack what the request needs (tools array, images, window) keeps the call
                 # on Claude (model None, forwarded as policy_kept).
+                # F33: the window check counts irreducible tokens only. A pin with a known
+                # small window that passes is forwarded the UNTRIMMED body; this path does
+                # not trim history (docs/empty-chain-behaviour.md).
                 pin_ok = needs is None or bool(capability_filter.filter_chain([cfg.model], needs))
                 choice = {"task_type": "local_agent", "complexity": "pinned",
                           "chain_head": [cfg.model] if pin_ok else [],
@@ -829,6 +833,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 decision = await tier_policy.decide(body, row.get("session_id"), sticky_view or sticky)
         except Exception as exc:  # noqa: BLE001 - fail-safe: forward unchanged
             row.update(served_model=body.get("model"), tier=None, tier_reason=REASON_DECISION_ERROR,
+                       lane_a_reason=lane_a.R_ERROR, lane_a_conf=None,
                        tier_proposed=None,
                        tier_switch=False, tier_switch_cost_usd=None, tier_complexity_score=None,
                        tier_detail=ledger.scrub_detail(f"{type(exc).__name__}: {exc}"),
@@ -839,6 +844,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    tier_switch=decision.switched, tier_switch_cost_usd=decision.switch_cost_usd,
                    tier_task_type=decision.task_type, tier_complexity=decision.complexity,
                    tier_complexity_score=decision.complexity_score,
+                   # W0-1: the layer / confidence / reason the engine fields carry (NULL = not decided
+                   # by a classifier layer, or no confidence measured).
+                   cls_layer=decision.cls_layer, cls_confidence=decision.cls_confidence,
+                   cls_reason=decision.reason,
                    # decision.detail is always one of our own fixed reason
                    # strings (escalation.REASON_*), never free text off the
                    # request, so it needs no scrubbing — unlike the error
@@ -846,6 +855,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    tier_detail=decision.detail,
                    tier_quota_pressure=decision.quota_pressure, tier_quota_state=decision.quota_state,
                    tier_decision_s=round(time.monotonic() - t0, 3))
+        if decision.lane_a_reason is not None:
+            # Lane A (proxy/lane_a.py): closed reason code + engine confidence; no request text.
+            row.update(lane_a_reason=decision.lane_a_reason, lane_a_conf=decision.lane_a_conf)
         if decision.arm is not None:
             # D-31 experiment arm: ids and enums only, never request text.
             row.update(tier_arm=decision.arm, tier_arm_assignment=decision.arm_assignment,
@@ -883,11 +895,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
     async def forward(request: Request, raw: bytes, body: dict | None, row: dict | None, *,
                       original: tuple[bytes, dict] | None = None, on_retry=None, on_usage=None,
-                      on_reply=None):
+                      on_reply=None, lane_feed=None):
         """``original``: when ``raw`` is a tier-rewritten body, the client's own
         (bytes, body). A 4xx on the rewritten call (a parameter the target tier
         does not take, a model the account cannot use) is retried once with
-        it, so a rewrite can never turn a working call into a failed one."""
+        it, so a rewrite can never turn a working call into a failed one.
+
+        ``lane_feed`` (lane A serves only, ``lane_a_breaker.ServedStep``): the step went to Haiku.
+        A 5xx or a timeout is retried once on ``original`` like a 4xx (reason ``retried_original``),
+        and every Haiku failure (also an empty, truncated or unparseable reply) is fed to the breaker."""
         headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
         headers["accept-encoding"] = "identity"
         url = upstream + request.url.path + (("?" + request.url.query) if request.url.query else "")
@@ -897,11 +913,44 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             req = http.build_request(request.method, url, headers=headers, content=content)
             return await http.send(req, stream=True)
 
+        lf = lane_feed if original is not None else None
+
+        def lane_retried(status, detail) -> None:
+            """The Haiku call of a lane A step failed and the pinned model will answer."""
+            nonlocal lf
+            lf.failure(f"http_{status}" if status else "timeout")
+            lf = None
+            if row is not None:
+                row["tier_retry"] = {"status": status, "detail": detail}
+                row.update(served_model=row.get("requested_model"), tier_switch=False,
+                           tier_switch_cost_usd=None)
+                row.pop("tier_body_rewrite", None)
+                if row.get("lane_a_reason") == lane_a.R_SERVED:
+                    row["lane_a_reason"] = lane_a.R_RETRIED
+            if on_retry is not None:
+                on_retry()
+
         try:
-            up = await send(raw)
-            if original is not None and 400 <= up.status_code < 500 and up.status_code not in (401, 413):
+            try:
+                up = await send(raw)
+            except httpx.TimeoutException:
+                if lf is None:
+                    raise
+                lane_retried(None, "timeout")
+                raw, body = original
+                up = await send(raw)
+            if lf is not None and up.status_code >= 500:
                 text = (await up.aread()).decode("utf-8", "replace")
                 await up.aclose()
+                lane_retried(up.status_code, ledger.scrub_detail(text))
+                raw, body = original
+                up = await send(raw)
+            elif original is not None and 400 <= up.status_code < 500 and up.status_code not in (401, 413):
+                text = (await up.aread()).decode("utf-8", "replace")
+                await up.aclose()
+                if lf is not None:
+                    lf.failure(f"http_{up.status_code}")
+                    lf = None
                 if row is not None:
                     row["tier_retry"] = {"status": up.status_code, "detail": ledger.scrub_detail(text)}
                     # The rewrite never ran, so neither did its switch.
@@ -911,6 +960,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     if row.get("tier_arm_assignment") == haiku_arm.ASSIGNED:
                         # The arm's Haiku call was refused; the pinned model answered.
                         row["tier_arm_assignment"] = haiku_arm.TREATMENT_RETRIED
+                    if row.get("lane_a_reason") == lane_a.R_SERVED:
+                        row["lane_a_reason"] = lane_a.R_RETRIED  # Haiku refused the body; the pinned model answered
                 if on_retry is not None:
                     on_retry()
                 raw, body = original
@@ -924,10 +975,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     up = await send(json.dumps(without_thinking(body)).encode())
                 else:
                     await up.aclose()
+                    if lf is not None:
+                        lf.reply(up.status_code, text.encode(), "")
                     if on_reply is not None:
                         on_reply(up.status_code, b"", "")
                     return _finish_error(up.status_code, text.encode(), up.headers, row, t0)
         except httpx.HTTPError as exc:
+            if lf is not None:
+                lf.failure("timeout" if isinstance(exc, httpx.TimeoutException) else "upstream_error")
             if row is not None:
                 row.update(upstream_status=502,
                            detail=row.get("detail") or ledger.scrub_detail(f"upstream: {type(exc).__name__}"))
@@ -945,11 +1000,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
         async def relay():
             buf = bytearray()
+            finished = broke = False
             try:
                 async for chunk in up.aiter_raw():
-                    if row is not None:
+                    if row is not None or lf is not None:
                         buf.extend(chunk)
                     yield chunk
+                finished = True
+            except httpx.HTTPError:
+                broke = True
+                raise
             finally:
                 await up.aclose()
                 if row is not None:
@@ -958,6 +1018,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     if on_usage is not None and up.status_code == 200:
                         on_usage(row.get("usage"))
                     write(row)
+                if lf is not None and (finished or broke):
+                    # A client that went away mid-stream is neither (no verdict on Haiku).
+                    try:
+                        if broke:
+                            lf.failure("stream_error")
+                        else:
+                            lf.reply(up.status_code, bytes(buf), up.headers.get("content-type", ""))
+                    except Exception as exc:  # noqa: BLE001
+                        failopen.record("LR-FO-LANE-A-FEED-REPLY", exc)
                 if on_reply is not None:
                     # Last thing, after the final byte left: the shadow side learns
                     # Claude's reply is complete. Never raises into the relay.
@@ -1020,6 +1089,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row["tier_reason_proposed"] = proposed
             row.update(served_model=body.get("model"), tier=None, tier_switch=False,
                        tier_switch_cost_usd=None)
+            if row.get("lane_a_reason") == lane_a.R_SERVED:
+                row["lane_a_reason"] = lane_a.R_ELIGIBLE  # advise never serves: the step would have been eligible
         row["tier_reason"] = authority.ADVISE
         return await forward(request, raw, body, row)
 
@@ -1099,6 +1170,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # user's `opus:` forwards the ORIGINAL bytes, unstripped, on the requested model.
         if lane_gate is not None:
             lane_gate.observe(body, row.get("session_id"))
+        if tier_policy is not None and tier_policy.lane_runtime is not None:
+            tier_policy.lane_runtime.observe(body, row.get("session_id"))  # lane A redo feed (in memory)
         row["authority"] = authority.mode()
         if row["authority"] == authority.ADVISE:
             if ov is not None:
@@ -1171,11 +1244,21 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             _add_phase(row, "fold", (time.perf_counter() - fold_t0) * 1000.0)
             row["tier_body_rewrite"] = REWRITE_HAIKU
 
+        lane_feed = None
+        if row.get("lane_a_reason") == lane_a.R_SERVED and tier_policy.lane_runtime is not None:
+            from llm_router.proxy.lane_a_breaker import ServedStep
+
+            lane_feed = ServedStep(tier_policy.lane_runtime, probe=decision.detail == lane_a.DETAIL_PROBE,
+                                   session_id=row.get("session_id"), model=decision.served_model,
+                                   session_kind=row.get("session_kind"))
+
         def _on_retry() -> None:
             sticky.record(key, body.get("model"), decision.complexity, "tier_rejected")
+            if lane_feed is not None:
+                tier_policy.lane_a_unserved(body, row.get("session_id"))
 
         return await forward(request, json.dumps(sent).encode(), sent, row, original=(raw, body),
-                             on_retry=_on_retry, on_usage=_on_usage, on_reply=on_reply)
+                             on_retry=_on_retry, on_usage=_on_usage, on_reply=on_reply, lane_feed=lane_feed)
 
     @contextlib.asynccontextmanager
     async def lifespan(app):
@@ -1419,6 +1502,9 @@ def cmd_proxy(argv: list[str]) -> int:
         return 2
 
     import uvicorn
+
+    from llm_router import state_files
+    state_files.harden_state()  # W0-4b / S7: 0600/0700 repair on every proxy start, never raises
 
     steps = ",".join(sorted(cfg.steps)) or "off (pass-through only)"
     print(f"llm-router proxy -> http://{a.host}:{a.port}  steps={steps}  "

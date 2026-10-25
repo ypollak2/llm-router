@@ -20,6 +20,7 @@ from llm_router.terminal_style import Color
 from llm_router.tool_surface import route_call, route_tool  # CHZ-SURF-01
 
 from llm_router import paths
+from llm_router import state_files as _sf
 
 
 # ── Formatting utilities ────────────────────────────────────────────────────
@@ -547,7 +548,7 @@ def _routing_decision_state(db_path: Path) -> _RoutingDecisionState:
             f"usage database not found at {db_path} — nothing has been recorded yet",
         )
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = _sf.connect_sqlite(db_path, create=False)  # W0-4b: a read never creates a db
         try:
             rows = conn.execute(
                 "SELECT COUNT(*) FROM routing_decisions "
@@ -818,7 +819,7 @@ def _check_savings_posture() -> list[str]:
     if db.is_file():
         _state = _routing_decision_state(db)
         try:
-            conn = sqlite3.connect(str(db))
+            conn = _sf.connect_sqlite(db, create=False)  # W0-4b: a read never creates a db
             row = conn.execute(
                 "SELECT "
                 "  SUM(CASE WHEN complexity='simple' THEN 1 ELSE 0 END), "
@@ -1038,7 +1039,7 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     """
     from llm_router import state_files
 
-    _modes = state_files.migrate_once()  # W0-4 / S7: one-time 0600/0700 repair of older state files
+    _modes = state_files.harden_state()  # W0-4b / S7: 0600/0700 repair on every doctor run
     if _modes and (_modes["files_fixed"] or _modes["dirs_fixed"]):
         print(f"state modes: tightened {_modes['files_fixed']} file(s), {_modes['dirs_fixed']} dir(s) to 0600/0700")
 
@@ -1771,6 +1772,13 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
             print(f"    {_red('•')} {issue}")
         exit_code = 1
     print()
+
+    # W0-4c: doctor creates files of its own (seats.json, the state dir) during the checks above,
+    # AFTER the harden at the top. On a fresh HOME that left them 0644/0755 until the next run.
+    _late = state_files.harden_state()
+    if _late and (_late["files_fixed"] or _late["dirs_fixed"]):
+        print(f"state modes: tightened {_late['files_fixed']} file(s), {_late['dirs_fixed']} dir(s) to 0600/0700")
+        print()
 
     return exit_code, issues
 

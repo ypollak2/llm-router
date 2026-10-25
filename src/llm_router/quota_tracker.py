@@ -32,11 +32,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import aiosqlite
 
 from llm_router.config import get_config
 
 from llm_router import paths
+from llm_router import state_files
 
 
 @dataclass(frozen=True)
@@ -300,7 +300,7 @@ class QuotaTracker:
 
         try:
             from llm_router.aiosqlite_util import mark_worker_daemon
-            _conn = aiosqlite.connect(str(db_path), timeout=5)
+            _conn = state_files.connect_aiosqlite(db_path, create=False, timeout=5)
             mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
             async with _conn as db:
                 # T-20: match the provider names the registry actually assigns.

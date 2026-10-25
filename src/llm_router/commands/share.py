@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from llm_router import pricing as _pricing  # noqa: E402
 
 from llm_router import paths
+from llm_router.state_files import connect_sqlite
 
 _sonnet = _pricing.price_for("sonnet")
 SONNET_IN, SONNET_OUT = (_sonnet.input, _sonnet.output) if _sonnet else (0.0, 0.0)
@@ -131,7 +132,7 @@ def _gather_stats(db_path: str | None = None) -> SavingsStats:
     top_model = "—"
 
     try:
-        conn = sqlite3.connect(db_path)
+        conn = connect_sqlite(db_path, create=False)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(

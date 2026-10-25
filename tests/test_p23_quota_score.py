@@ -437,7 +437,7 @@ assert "llm_router.router" not in sys.modules
     for path in (HOOK, other):
         version = next(s for s in path.read_text().splitlines()
                        if s.startswith("# llm_router-hook-version:"))
-        assert version == "# llm_router-hook-version: 24"
+        assert version == "# llm_router-hook-version: 25"
 
 
 def test_load_data_freshness_and_cache(monkeypatch):

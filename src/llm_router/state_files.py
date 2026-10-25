@@ -14,25 +14,25 @@ Fixing writers one by one has failed before, so this module is the single place 
   (sqlite). SQLite gives ``-wal``, ``-shm`` and ``-journal`` the mode of the main database
   file, so a 0600 main file means 0600 sidecars; :func:`connect_sqlite` also tightens sidecars
   that already exist.
-* :func:`harden_tree` / :func:`migrate_once` -- one-time repair of files written by older
-  versions. Never follows a symlink, never touches anything outside the root, records COUNTS
-  only (no file names, no content).
+* :func:`harden_tree` / :func:`harden_state` -- repair of files written by older versions or by
+  writers that are not routed through this module yet. :func:`harden_state` runs on EVERY
+  doctor run and server start (W0-4b: a once-only marker left every later 0644 file wide
+  forever; a full pass over 3,000 files costs 0.04 s when every file needs a chmod and 0.008 s when none does;
+  scripts/time_harden_state.py, 2026-10-25). Never follows a symlink, never touches
+  anything outside the root, records COUNTS only (no file names, no content).
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sqlite3
 import stat
-import time
 from pathlib import Path
 
 from llm_router import paths
 
 FILE_MODE = 0o600
 DIR_MODE = 0o700
-MARKER_NAME = ".modes_migrated_v1"
 _SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
 
 
@@ -96,15 +96,44 @@ def ensure_private_file(path: str | os.PathLike) -> Path:
     return p
 
 
-def connect_sqlite(path: str | os.PathLike, **kwargs) -> sqlite3.Connection:
-    """``sqlite3.connect`` with the database pre-created at 0600 so ``-wal``/``-shm`` inherit it."""
-    if str(path) in ("", ":memory:") or str(path).startswith("file:"):
+def _is_special(path) -> bool:
+    return str(path) in ("", ":memory:") or str(path).startswith("file:")
+
+
+def connect_sqlite(path: str | os.PathLike, *, create: bool = True, **kwargs) -> sqlite3.Connection:
+    """``sqlite3.connect`` with the database pre-created at 0600 so ``-wal``/``-shm`` inherit it.
+
+    ``create=False`` is for readers: a missing database raises ``sqlite3.OperationalError``
+    ("unable to open database file") and nothing is created -- a read never makes a file or a
+    directory. An existing database is tightened as usual."""
+    if _is_special(path):
         return sqlite3.connect(str(path), **kwargs)  # in-memory / URI: no file for us to create
-    p = ensure_private_file(path)
+    if create:
+        p = ensure_private_file(path)
+    else:
+        p = Path(path)
+        if not p.is_file():
+            raise sqlite3.OperationalError("unable to open database file")
+        ensure_private_file(p)
     conn = sqlite3.connect(str(p), **kwargs)
     for suffix in _SQLITE_SIDECARS:  # created by the first write, mode copied from the main file
         _tighten(str(p) + suffix, FILE_MODE)
     return conn
+
+
+def connect_aiosqlite(path: str | os.PathLike, *, create: bool = True, **kwargs):
+    """``aiosqlite.connect`` with the same 0600 pre-creation as :func:`connect_sqlite`.
+    Returns the (not yet started) aiosqlite connection, exactly like ``aiosqlite.connect``."""
+    import aiosqlite
+
+    if not _is_special(path):
+        if create:
+            ensure_private_file(path)
+        elif Path(path).is_file():
+            ensure_private_file(path)
+        else:
+            raise sqlite3.OperationalError("unable to open database file")
+    return aiosqlite.connect(path if isinstance(path, str) else str(path), **kwargs)
 
 
 def harden_tree(root: str | os.PathLike | None = None) -> dict[str, int]:
@@ -143,21 +172,15 @@ def harden_tree(root: str | os.PathLike | None = None) -> dict[str, int]:
     return counts
 
 
-def migrate_once(root: str | os.PathLike | None = None) -> dict[str, int] | None:
-    """Run :func:`harden_tree` at most once per state directory (marker file, counts only).
-    Returns the counts when it ran, ``None`` when the marker already exists or the state
-    directory does not exist yet. Never raises."""
+def harden_state(root: str | os.PathLike | None = None) -> dict[str, int] | None:
+    """Run :func:`harden_tree` over the state directory. Called on every doctor run and server
+    start, so a file that a legacy writer created at 0644 is repaired on the next start, and a
+    chmod that failed is simply retried. Returns the counts, or ``None`` when the state
+    directory does not exist (yet) or is a symlink. Never raises."""
     try:
         base = Path(root) if root is not None else paths.llm_router_home()
         if not base.is_dir() or os.path.islink(base):
             return None
-        marker = base / MARKER_NAME
-        if marker.exists():
-            return None
-        counts = harden_tree(base)
-        counts["ts"] = int(time.time())
-        with open_private(marker, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(counts))
-        return counts
+        return harden_tree(base)
     except Exception:  # noqa: BLE001 -- housekeeping must never break a caller
         return None

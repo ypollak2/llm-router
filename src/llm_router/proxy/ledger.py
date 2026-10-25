@@ -143,6 +143,14 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
                         ``tier_arm_bucket`` is bucket(session_id, turn) = sha256(session|turn|salt)
                         as a full-precision fraction, so anyone can recompute the assignment. Absent = not in the arm
 
+  lane_a_reason, lane_a_conf
+                        Lane A (``proxy.lane_a``, D-285; default off). On EVERY continuation row, even
+                        with the lane off: ``lane_a_reason`` is one of ``lane_a.REASONS`` (a closed set;
+                        null if the value is not in it) and ``lane_a_conf`` is the engine's confidence on
+                        the newest human prompt, or null when the engine did not run or gave none. Never
+                        invented. ``eligible`` = every gate passed and a switch was off; ``served`` = the
+                        Haiku tier answered. Turn-first / sub-agent rows from a pinned model carry them too.
+
 Cost fields, on EVERY row (``proxy.cost_accounting``; for rows written since #261,
 null = unknown, never 0; rows written before #261 carry zeros for unknown usage):
   served_by, anthropic_usage, anthropic_cost_usd, counterfactual_cost_usd
@@ -298,6 +306,12 @@ def write_row(row: dict, path: Path | None = None) -> None:
     for k, v in ENGINE_FIELD_DEFAULTS.items():
         if row.get(k) is None:
             row[k] = v
+    # W0-1: the proxy ledger stamps inventory_sig HERE, at write time, not at decision time; the
+    # signature is keyed on the map token so it lags the decision only if the map changed in between.
+    if row.get("inventory_sig") is None:
+        from llm_router import decision_stamp
+
+        row["inventory_sig"] = decision_stamp.inventory_sig()
     try:
         state_files.private_dir(target.parent)
         with state_files.open_private(target, "a", encoding="utf-8") as fh:

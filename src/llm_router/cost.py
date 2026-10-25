@@ -36,6 +36,7 @@ from llm_router.savings import net_saved
 
 from llm_router import paths
 from llm_router.call_identity import note_ledger_write as _ci_note_write
+from llm_router import state_files
 
 
 def _detect_synthetic() -> bool:
@@ -1191,7 +1192,7 @@ async def _get_db() -> aiosqlite.Connection:
     # interpreter alive forever — this was the hang-at-exit bug. Daemon
     # threads cannot block exit; WAL journaling keeps the DB file safe even
     # if such a leaked thread is killed mid-write.
-    _conn = aiosqlite.connect(str(config.llm_router_db_path))
+    _conn = state_files.connect_aiosqlite(config.llm_router_db_path)
     # Mark the worker daemon *before* awaiting (the thread hasn't started yet).
     _mark_worker_daemon(_conn)
     db = await _conn
@@ -1587,6 +1588,7 @@ async def log_route_error(
     # reason_code starts ``error_``, which every routing-metric reader excludes.
     try:
         from llm_router import call_identity as _ci
+        from llm_router import decision_stamp as _decision_stamp
 
         await log_routing_decision(
             prompt="",
@@ -1613,6 +1615,8 @@ async def log_route_error(
             correlation_id=correlation_id,
             session_id=_ci.call_session_id(),
             tool_use_id=_ci.tool_use_id(),
+            # W0-1: no classifier ran for a failed call; the reason and the inventory are known.
+            **_decision_stamp.stamp(None, None, reason),  # layer NULL: the upstream layer is not known here
         )
     except Exception as _rd_err:  # noqa: BLE001 — the usage row above already stands
         import logging

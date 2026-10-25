@@ -343,9 +343,11 @@ def _route(prompt: str, *, task_type: str | None, complexity: str | None,
     from llm_router.hooks.direct_executor import execute_agent, execute_chain
 
     decision = None
+    _layer = "override"  # W0-1: the caller named both, so no layer classified
     if not task_type or not complexity:
         _t, _c, decision = _decide(prompt, session_id=session_id, task_id=task_id)
         task_type, complexity = task_type or _t, complexity or _c
+        _layer = decision.layer if decision is not None else "rules"
 
     zone, _pct = get_current_pressure()
     # File/local tasks → agent-loop (local tool-calling model); Q&A → text call.
@@ -370,7 +372,8 @@ def _route(prompt: str, *, task_type: str | None, complexity: str | None,
     try:  # meter, like the gateway/hook paths
         from llm_router.hooks.savings_logger import log_direct_savings, log_direct_to_db
         log_direct_to_db(result=result, prompt=prompt, task_type=task_type,
-                         complexity=complexity, classifier_type="sdk", session_id=session_id, door="sdk")
+                         complexity=complexity, classifier_type="sdk", session_id=session_id, door="sdk",
+                         layer=_layer, confidence=decision.confidence if decision is not None else None)
         log_direct_savings(result=result, task_type=task_type, complexity=complexity,
                            session_id=session_id, host="sdk")
     except Exception:

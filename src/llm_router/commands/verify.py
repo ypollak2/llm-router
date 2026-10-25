@@ -65,6 +65,7 @@ from llm_router.terminal_style import (
 )
 
 from llm_router import paths
+from llm_router.state_files import connect_sqlite
 
 
 def check_configuration() -> tuple[bool, str]:
@@ -90,7 +91,7 @@ def check_database() -> tuple[bool, str]:
         return False, f"Database not found: {db_path}"
 
     try:
-        conn = sqlite3.connect(db_path)
+        conn = connect_sqlite(db_path, create=False)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM routing_decisions")
         cursor.fetchone()
@@ -247,7 +248,7 @@ def check_last_decisions(limit: int = 5) -> list[str]:
         return []
 
     try:
-        conn = sqlite3.connect(db_path)
+        conn = connect_sqlite(db_path, create=False)
         cursor = conn.cursor()
         cursor.execute(
             "SELECT timestamp, model, task_type, task_complexity, cost_usd FROM routing_decisions "

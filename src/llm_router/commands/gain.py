@@ -10,6 +10,7 @@ from llm_router.terminal_style import Color
 from llm_router.tool_surface import route_tool  # CHZ-SURF-01: never print a raw tool name
 
 from llm_router import paths
+from llm_router.state_files import connect_sqlite
 
 
 def bold(text: str) -> str:
@@ -129,7 +130,7 @@ class SavingsAnalytics:
             return []
 
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = connect_sqlite(self.db_path, create=False)
             conn.row_factory = sqlite3.Row
 
             cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -535,7 +536,13 @@ class SavingsAnalytics:
             from llm_router.cost import get_compression_stats
             import asyncio
             days = period_days if period_days else 7
-            compression_data = asyncio.run(get_compression_stats(days=days))
+            # W0-4c: get_compression_stats() opens (and so creates) usage.db; a read-only
+            # report on a fresh install must not. No db = no compression stats yet.
+            from llm_router.config import get_config
+            compression_data = (
+                asyncio.run(get_compression_stats(days=days))
+                if get_config().llm_router_db_path.exists() else {}
+            )
             
             has_rtk = False
             has_token_savior = False

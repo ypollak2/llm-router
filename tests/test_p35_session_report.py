@@ -214,7 +214,7 @@ async def test_the_stop_line_does_not_carry_the_block(p35):  # noqa: F811
 
 def test_the_hook_pair_is_byte_identical_at_current_version():
     a, b = (ROOT / "hooks" / "session-end.py").read_bytes(), HOOK.read_bytes()
-    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 50"
+    assert a == b and b.splitlines()[1] == b"# llm_router-hook-version: 51"
 
 
 @pytest.mark.parametrize("bad", [None, []])

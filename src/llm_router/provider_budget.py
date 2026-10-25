@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import aiosqlite
 
 from llm_router.config import get_config
+from llm_router import state_files
 
 
 # Known cost tiers for external models (approximate $/1K tokens blended).
@@ -142,7 +142,7 @@ async def get_provider_spend() -> dict[str, float]:
     # started yet, so daemon takes effect (marking after await is a no-op:
     # daemon can't be changed on a started thread).
     from llm_router.aiosqlite_util import mark_worker_daemon
-    _conn = aiosqlite.connect(str(db_path))
+    _conn = state_files.connect_aiosqlite(db_path, create=False)
     mark_worker_daemon(_conn)
     db = await _conn
     try:

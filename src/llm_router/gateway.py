@@ -897,47 +897,15 @@ def _refuse_tools_if_present(tools, tool_choice=None) -> None:
 # NEWEST user turn (the request) is refused; an image only in earlier turns keeps the
 # handling it had before P2.4: the history is flattened (the context pack renders the
 # part as `[image]`) and the request routes as text.
-_IMAGES_UNSUPPORTED = (
-    "This gateway routes to a text-completion backend and cannot read images. "
-    "The request included image content, which would have been silently ignored, "
-    "so it is refused instead. Remove the image parts to route this prompt as text."
+# The pure helpers live in route_server (zero-dependency) so the stdlib /route refuses the
+# same requests with the same text; F33.
+from llm_router.route_server import (  # noqa: E402,F401
+    _BARE_PART_TYPES,
+    _IMAGE_PART_TYPES,
+    _has_image,
+    _newest_user_turn,
 )
-
-_IMAGE_PART_TYPES = ("image", "image_url", "input_image", "image_file")
-# Role-less content parts at the top of a Responses `input` list are one user turn.
-_BARE_PART_TYPES = _IMAGE_PART_TYPES + ("text", "input_text", "input_file")
-
-
-def _has_image(value) -> bool:
-    """True when *value* (a content, a message, or a list of either) carries an image part."""
-    if isinstance(value, list):
-        return any(_has_image(v) for v in value)
-    if isinstance(value, dict):
-        if value.get("type") in _IMAGE_PART_TYPES or value.get("images"):
-            return True
-        return _has_image(value.get("content"))
-    return False
-
-
-def _newest_user_turn(value):
-    """The newest user turn of a request field: the trailing run of role-less content
-    parts (a bare Responses part list), else the last item whose role is ``user`` (a
-    role-less typed item, such as a tool output, counts as the caller's). A dict (the
-    Ollama generate ``images`` field) is the request itself; anything else has none."""
-    if isinstance(value, dict):
-        return value
-    if not isinstance(value, list):
-        return None
-    i = len(value)
-    while i > 0 and isinstance(value[i - 1], dict) and "role" not in value[i - 1] \
-            and value[i - 1].get("type") in _BARE_PART_TYPES:
-        i -= 1
-    if i < len(value):
-        return value[i:]
-    for item in reversed(value):
-        if isinstance(item, dict) and item.get("role", "user") == "user":
-            return item
-    return None
+from llm_router.route_server import IMAGES_UNSUPPORTED as _IMAGES_UNSUPPORTED  # noqa: E402
 
 
 def _refuse_images_if_present(*values) -> None:
