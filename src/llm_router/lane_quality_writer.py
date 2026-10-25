@@ -27,14 +27,25 @@ trailing 14 days when no flip is recorded):
   ``eligibility.evidence_from_counts``, the function behind ``eligibility.grade`` and
   ``lane_quality.batch_passed``. One rule, no copy of it.
 
-WINDOW (D-301, the prereg owner's decision). The S1 window of a task group closes at whichever comes FIRST: (a) the
-first judge batch with at least 60 decided pairs (after the dedupe), or (b) 28 days after the owner flip. The
-closing batch is the one FINAL row (``window_complete: true``), and the only one S1 counts; ``lane_quality`` ignores
-a ``shadow_pairs`` row without it. The final row is informative only if the cannot_judge share is at most 20%;
-a closing batch above it, or a 28-day close with n < 60, is written as NOT INFORMATIVE (``informative: false``,
-``batch_passed`` False): S1 gets no credit. Below 60 and before 28 days nothing is written. Once a task group has a
-final row nothing is written for it again and nothing reopens it (``window_closed``): only a prereg amendment can.
-The 60 and the 28 days are ``lane_a_shadow.CONSTANTS`` (``FINAL_WINDOW_PAIRS`` / ``FINAL_WINDOW_DAYS``).
+WINDOW (D-301, amended by D-302; the prereg owner's decisions). The S1 window of a task group closes at whichever
+comes FIRST: (a) the first judge batch with at least 60 decided pairs (after the dedupe) AND a cannot_judge share of
+at most 20%, or (b) 28 days after the owner flip. The closing batch is the one FINAL row (``window_complete: true``),
+and the only one S1 counts; ``lane_quality`` ignores a ``shadow_pairs`` row without it.
+
+* A batch with n >= 60 and MORE than 20% cannot_judge does NOT close the window (a judge outage must not burn it):
+  it is written NON-final (``window_complete: false``, ``diagnostic: true``) and the window stays open; a later
+  batch at or under 20% closes it informative.
+* At flip + 28 days the window closes NOT INFORMATIVE (``informative: false``, no S1 credit) when n < 60 OR the last
+  batch's cannot_judge share is above 20%.
+* The pair window is clamped to ``until = min(now, flip + 28 d)``: a pair after day 28 never counts, even when the
+  writer first runs later. Pairs from before the flip are never counted and show in ``excluded["before_flip"]``.
+* The flip (``lane_a_flip.json``, written by the proxy: the first request that saw all four switches on) is the
+  window start. With no flip recorded the n >= 60 close still applies and the 28-day close never fires.
+* Once a task group has a final row nothing is written for it again (``window_closed``) and nothing reopens it,
+  not even when the row is later invalidated (D-302: a changed lane A model, judge brief sha, prompt set or breaker
+  thresholds); only a prereg amendment opens a new window. Each row is stamped with those four identities.
+
+The 60, 20% and 28 days are ``lane_a_shadow.CONSTANTS``.
 
 OUTPUT, one JSON line appended to ``lane_quality.jsonl`` (0600 through ``state_files``):
 
@@ -42,7 +53,8 @@ OUTPUT, one JSON line appended to ``lane_quality.jsonl`` (0600 through ``state_f
      "kind": "shadow_pairs", "n": 64, "gap_pts": 1.6, "newcombe_lb": -7.4, "source": "lane_a_pairs:...",
      "lane": "A", "k_laneA": 60, "k_frontier": 61, "cannot_judge": 3, "cannot_judge_share": 0.045,
      "excluded": {...}, "window_complete": true, "informative": true, "close_reason": "n_reached",
-     "not_informative_reason": null, "flip_ts": <epoch s>, "since": <epoch s>, "until": <epoch s>}
+     "not_informative_reason": null, "identity": {...4 keys}, "flip_ts": <epoch s>, "since": <epoch s>,
+     "until": <epoch s>}
 
 ``door/served_class/task_group/kind/n/gap_pts/newcombe_lb/source/ts`` are the keys ``lane_quality`` reads (plus
 ``window_complete`` and ``informative``); the rest is audit.
@@ -88,7 +100,8 @@ def _ts(value: Any) -> float | None:
     return float(value)
 
 
-def tally(rows: Iterable[dict], *, since: float, until: float, brief_sha: str | None = None) -> dict[str, dict]:
+def tally(rows: Iterable[dict], *, since: float, until: float, brief_sha: str | None = None,
+          flip: float | None = None) -> dict[str, dict]:
     """``{task_group: counts}`` over the lane A verdict ``rows`` stamped inside ``[since, until]``.
 
     One pair per step: rows are first reduced to the first verdict of each ``(session_id, msg_count)``
@@ -97,7 +110,8 @@ def tally(rows: Iterable[dict], *, since: float, until: float, brief_sha: str | 
     ``counts``: ``n`` (decided), ``k_a``, ``k_f``, ``cannot_judge`` (judged attempts that decided nothing: explicit
     cannot_judge, a null label, and the judge failures of ``shadow_frontier.judge_pending``, which are verdict rows
     marked cannot_judge with a reason), ``excluded`` (``{reason: count}``) and ``ids`` (the decided pairs' task ids,
-    for the source hash)."""
+    for the source hash). With a ``flip``, lane A rows stamped before it are never counted and are reported as
+    ``excluded["before_flip"]`` (every such row, before the dedupe)."""
     if brief_sha is None:
         brief_sha = shadow_frontier.JUDGE_BRIEF_SHA256
     out: dict[str, dict] = {}
@@ -117,7 +131,12 @@ def tally(rows: Iterable[dict], *, since: float, until: float, brief_sha: str | 
         if not lane_a_shadow.is_lane_a(r):
             continue
         ts = _ts(r.get("ts"))
-        if ts is None or not since <= ts <= until:
+        if ts is None:
+            continue
+        if flip is not None and ts < flip:
+            exclude(name_of(r), "before_flip")
+            continue
+        if not since <= ts <= until:
             continue
         inside.append(r)
     kept, dropped = lane_a_shadow.dedupe_steps(inside)
@@ -150,23 +169,31 @@ def tally(rows: Iterable[dict], *, since: float, until: float, brief_sha: str | 
 
 
 def batch_row(task_group: str, counts: dict, *, now: float, since: float, until: float,
-              flip: float | None = None) -> tuple[dict | None, str]:
-    """``(row, status)``: the FINAL ``lane_quality`` row for one task group, or None with the reason there is none
-    yet (``n_below_min``). D-301: the window of a task group closes at the first batch with >= 60 decided pairs
-    (after the one-pair-per-step dedupe) or 28 days after the owner flip (``flip``), whichever comes first. The
-    closing row is the only one S1 counts (``window_complete: true``). It is informative only when the
-    cannot_judge share is at most 20%; otherwise (or at 28 days with n < 60) it is a NOT INFORMATIVE final row,
-    which earns no S1 credit."""
+              flip: float | None = None, identity: dict | None = None) -> tuple[dict | None, str]:
+    """``(row, status)`` for one task group, or ``(None, "n_below_min")`` while nothing is due. D-301 / D-302:
+
+    * n >= 60 and cannot_judge share <= 20%: the FINAL informative row (``n_reached``);
+    * n >= 60 and share > 20% before day 28: a NON-final diagnostic row (``window_complete: false``), status
+      ``diagnostic``: the window stays open;
+    * 28 days after the owner flip (``until`` has reached ``flip + 28 d``): the FINAL row, NOT INFORMATIVE when
+      n < 60 (``n_below_min``) or the share is above 20% (``cannot_judge_share``).
+
+    Only a final row is counted by S1, and a NOT INFORMATIVE one earns no credit. Every row is stamped with the four
+    ``identity`` values (default: the config in force) that D-302 ties a final row's validity to."""
     from llm_router import eligibility
 
     n, cj = counts["n"], counts["cannot_judge"]
     attempts = n + cj
     share = (cj / attempts) if attempts else 0.0
-    if n >= MIN_PAIRS:
-        close = CLOSE_PAIRS
-        why = None if share <= lane_a_shadow.CANNOT_JUDGE_MAX_SHARE else "cannot_judge_share"
-    elif flip is not None and until >= flip + lane_a_shadow.FINAL_WINDOW_DAYS * 86400.0:
-        close, why = CLOSE_TIME, "n_below_min"
+    too_many_cj = share > lane_a_shadow.CANNOT_JUDGE_MAX_SHARE
+    past_28d = flip is not None and until >= flip + lane_a_shadow.FINAL_WINDOW_DAYS * 86400.0
+    final = True
+    if n >= MIN_PAIRS and not too_many_cj:
+        close, why = CLOSE_PAIRS, None
+    elif past_28d:
+        close, why = CLOSE_TIME, ("n_below_min" if n < MIN_PAIRS else "cannot_judge_share")
+    elif n >= MIN_PAIRS:  # over 20% cannot_judge, window still open: diagnostic only
+        close, why, final = None, "cannot_judge_share", False
     else:
         return None, "n_below_min"
     informative = why is None
@@ -178,8 +205,12 @@ def batch_row(task_group: str, counts: dict, *, now: float, since: float, until:
            "source": f"lane_a_pairs:{task_group}:n={n}:{digest}", "lane": lane_a_shadow.LANE_TAG,
            "k_laneA": counts["k_a"], "k_frontier": counts["k_f"], "cannot_judge": cj,
            "cannot_judge_share": round(share, 4), "excluded": dict(sorted(counts.get("excluded", {}).items())),
-           "window_complete": True, "informative": informative, "close_reason": close, "not_informative_reason": why,
+           "window_complete": final, "informative": informative, "close_reason": close, "not_informative_reason": why,
+           "identity": identity if identity is not None else lane_a_shadow.current_identities(),
            "flip_ts": flip, "since": since, "until": until}
+    if not final:
+        row["diagnostic"] = True
+        return row, "diagnostic"
     if informative:
         ev = eligibility.evidence_from_counts(counts["k_a"], n, counts["k_f"], n)
         row.update(n=ev.n, gap_pts=ev.gap_pts, newcombe_lb=ev.lb_pts)
@@ -188,11 +219,8 @@ def batch_row(task_group: str, counts: dict, *, now: float, since: float, until:
 
 def closed_groups(rows: Iterable[dict]) -> set[str]:
     """Task groups of lane A whose window is complete: a FINAL ``shadow_pairs`` row exists. Nothing reopens one
-    (D-301): only a preregistration amendment can."""
-    return {r["task_group"] for r in rows
-            if isinstance(r, dict) and r.get("kind") == "shadow_pairs" and r.get("window_complete") is True
-            and r.get("door") == lane_a_shadow.DOOR and r.get("served_class") == lane_a_shadow.SERVED_CLASS
-            and isinstance(r.get("task_group"), str)}
+    (D-301, D-302): only a preregistration amendment can."""
+    return lane_a_shadow.final_groups(rows)
 
 
 def write_all(*, now: float | None = None, since: float | None = None, until: float | None = None,
@@ -200,19 +228,24 @@ def write_all(*, now: float | None = None, since: float | None = None, until: fl
     """Write the FINAL row of each task group whose window closes now (see ``batch_row``). Returns a summary
     ``{"groups": {task_group: {...counts, "status", "grade"}}, "written": int}``. Creates no file when there is no
     lane A verdict row, and none under ``dry_run``. The window start is the owner flip (``lane_a_shadow.read_flip``)
-    when recorded, else the trailing 14 days; an explicit ``since`` / ``until`` (a formal read) overrides."""
+    when recorded, else the trailing 14 days; an explicit ``since`` overrides it. The window END is always clamped to
+    ``flip + 28 d`` (D-302): a pair after day 28 never counts."""
     now = time.time() if now is None else now
     until = now if until is None else until
     flip = lane_a_shadow.read_flip()
+    if flip is not None:
+        until = min(until, flip + lane_a_shadow.FINAL_WINDOW_DAYS * 86400.0)
     if since is None:
         since = flip if flip is not None else until - lane_a_shadow.WINDOW_DAYS * 86400.0
     rows = _read_jsonl(verdicts or _verdicts_path())
-    groups = tally(rows, since=since, until=until)
+    groups = tally(rows, since=since, until=until, flip=flip)
     target = out or paths.state_path(lane_quality.FILE)
     existing = lane_quality.read_rows(target) if groups else []
     closed = closed_groups(existing)
-    summary: dict = {"groups": {}, "written": 0, "since": since, "until": until, "flip_ts": flip}
+    summary: dict = {"groups": {}, "written": 0, "diagnostic": 0, "since": since, "until": until, "flip_ts": flip}
     from llm_router import eligibility
+
+    identity = lane_a_shadow.current_identities() if groups else None
 
     for name, counts in sorted(groups.items()):
         info = {k: counts[k] for k in ("n", "k_a", "k_f", "cannot_judge", "excluded")}
@@ -223,9 +256,18 @@ def write_all(*, now: float | None = None, since: float | None = None, until: fl
         if name in closed:
             info["status"] = "window_closed"  # complete: later batches neither count nor reopen it
             continue
-        row, status = batch_row(name, counts, now=now, since=since, until=until, flip=flip)
+        row, status = batch_row(name, counts, now=now, since=since, until=until, flip=flip, identity=identity)
         if row is None:
             info["status"] = status
+            continue
+        if row.get("diagnostic"):
+            info["status"] = "diagnostic"  # n >= 60 but over 20% cannot_judge: the window stays open (D-302)
+            info["cannot_judge_share"] = row["cannot_judge_share"]
+            if dry_run or _same_diagnostic(existing, name, row):
+                continue
+            with state_files.open_private(target, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, sort_keys=True) + "\n")
+            summary["diagnostic"] += 1
             continue
         if row["informative"]:
             info["grade"] = eligibility.grade({"n": row["n"], "gap_pts": row["gap_pts"], "lb_pts": row["newcombe_lb"]})
@@ -239,6 +281,13 @@ def write_all(*, now: float | None = None, since: float | None = None, until: fl
         info["status"] = status
         summary["written"] += 1
     return summary
+
+
+def _same_diagnostic(existing: list[dict], task_group: str, row: dict) -> bool:
+    """The latest diagnostic row of the group already says the same (same n and cannot_judge): do not repeat it."""
+    last = [r for r in existing if r.get("kind") == "shadow_pairs" and r.get("diagnostic") is True
+            and r.get("task_group") == task_group and r.get("door") == row["door"]]
+    return bool(last) and (last[-1].get("n"), last[-1].get("cannot_judge")) == (row["n"], row["cannot_judge"])
 
 
 def _parse_when(text: str) -> float:

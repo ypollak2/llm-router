@@ -417,3 +417,27 @@ def test_offload_failure_is_reported_not_raised(_scorecard_env, monkeypatch):
     off = kpi.compute_scorecard(since=SINCE, until=UNTIL)["offload"]
     assert off["measurable"] is False and "RuntimeError" in off["reason"]
     assert "not measurable" in kpi._offload_render_lines(off)[0]
+
+
+def test_s1_report_prints_the_age_of_each_final_lane_a_row_and_reports_an_invalidated_one(_scorecard_env, monkeypatch):
+    """D-302: a final shadow-pair row is exempt from the 28-day read cap; S1 prints its age in days, and a row whose
+    stamped identities no longer match is reported as invalidated, not counted."""
+    from llm_router import lane_a_shadow
+
+    ident = lane_a_shadow.current_identities()
+    assert ident is not None
+    final = {"ts": UNTIL - 40 * 86400.0, "door": "proxy", "served_class": "haiku", "task_group": "tech_op",
+             "kind": "shadow_pairs", "n": 64, "gap_pts": 1.0, "newcombe_lb": -5.0, "source": "fixture",
+             "window_complete": True, "informative": True, "identity": ident}
+    stale = dict(final, task_group="qa", identity={**ident, "breaker_sha": "old"}, ts=UNTIL - 50 * 86400.0)
+    fx.write_jsonl(paths.state_path("lane_quality.jsonl"), [final, stale])
+    monkeypatch.setattr(ns, "local_shadow_units", lambda days=30, db_path=None, **kw: iter(()))
+    off = kpi.compute_scorecard(since=SINCE, until=UNTIL)["offload"]
+    (live,) = off["quality_sampled_lanes"]
+    assert (live["task_group"], live["age_days"]) == ("tech_op", 40.0)
+    (dead,) = off["invalidated_lanes"]
+    assert (dead["task_group"], dead["mismatch"], dead["age_days"]) == ("qa", ["breaker_sha"], 50.0)
+    text = "\n".join(kpi._offload_render_lines(off))
+    assert "final window proxy/haiku/tech_op: n=64, age 40.0 d" in text
+    assert "INVALIDATED window proxy/haiku/qa: age 50.0 d, changed breaker_sha" in text
+    assert any("INVALIDATED" in c and "prereg amendment" in c for c in off["caveats"])

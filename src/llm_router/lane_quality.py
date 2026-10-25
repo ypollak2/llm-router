@@ -12,7 +12,12 @@ A lane is *quality-sampled* when its LATEST batch (blind audit or shadow-pair ba
 * audit         ``n >= 30`` and ``acceptable / n >= 26 / 30``;
 * shadow_pairs  ``n >= 60``, point gap ``<= 3`` points and Newcombe lower bound ``>= -10``, and ONLY a FINAL
                 row (``window_complete: true``, D-301): the one batch that closed the lane's window. Earlier
-                rows are diagnostic and never counted; the first final row of a lane is its verdict.
+                rows are diagnostic and never counted; the first VALID final row of a lane is its verdict.
+                D-302: a final row is exempt from the 28-day read cap (credit does not expire by age) and is
+                invalidated ONLY when the lane A model, the judge brief sha, the prompt set or the breaker
+                thresholds it was stamped with (``identity``) no longer match the current config. An
+                invalidated lane is reported (``invalidated_lanes``), never re-opened here: a new window needs a
+                prereg amendment.
 
 The latest batch decides: a newer failing batch un-samples a lane that an older batch passed. Until the redo
 detector is validated (P3.6-c) this applies to EVERY lane, because "not redone" is true almost always
@@ -98,12 +103,29 @@ def lane_of(row: dict) -> Lane | None:
     return lane if all(isinstance(x, str) and x for x in lane) else None  # type: ignore[return-value]
 
 
-def final_only(rows: Iterable[dict]) -> list[dict]:
-    """The rows S1 may count (D-301). A ``shadow_pairs`` row counts only if it is FINAL (``window_complete`` is
-    true); earlier ones are diagnostic. A lane's window closes once: if several final rows exist for one lane, the
-    FIRST by ``ts`` is the verdict and later ones neither count nor reopen it. Other kinds pass through."""
+_CURRENT = object()  # "the identities of the config in force", looked up only when a final row exists
+
+
+def _identity(identity: Any) -> dict | None:
+    if identity is _CURRENT:
+        from llm_router import lane_a_shadow
+        return lane_a_shadow.current_identities()
+    return identity
+
+
+def final_state(rows: Iterable[dict], identity: Any = _CURRENT) -> tuple[list[dict], dict[Lane, dict]]:
+    """``(counted, invalidated)`` (D-301, D-302). ``counted``: the rows S1 may count. A ``shadow_pairs`` row counts
+    only if it is FINAL (``window_complete`` is true) and its stamped ``identity`` (lane A model, judge brief sha,
+    prompt set, breaker thresholds) equals ``identity`` (default: the config in force); earlier ones are diagnostic.
+    A lane's window closes once: of its valid final rows the FIRST by ``ts`` is the verdict and later ones neither
+    count nor reopen it. Other kinds pass through. ``invalidated``: ``{lane: {"ts", "source", "mismatch"}}`` for a
+    lane that has final rows and no valid one: its window needs a prereg amendment, nothing opens one here."""
+    from llm_router import lane_a_shadow
+
     out: list[dict] = []
     first: dict[Lane, tuple[float, dict]] = {}
+    stale: dict[Lane, tuple[float, dict, list[str]]] = {}
+    current: Any = _CURRENT
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -115,26 +137,50 @@ def final_only(rows: Iterable[dict]) -> list[dict]:
         lane, ts = lane_of(row), _ts(row.get("ts"))
         if lane is None or ts is None:
             continue
+        if current is _CURRENT:
+            current = _identity(identity)
+        bad = lane_a_shadow.identity_mismatch(row.get("identity"), current)
+        if bad:
+            if lane not in stale or ts < stale[lane][0]:
+                stale[lane] = (ts, row, bad)
+            continue
         if lane not in first or ts < first[lane][0]:
             first[lane] = (ts, row)
-    return out + [r for _, r in first.values()]
+    invalid = {lane: {"ts": t, "source": r.get("source"), "mismatch": bad}
+               for lane, (t, r, bad) in stale.items() if lane not in first}
+    return out + [r for _, r in first.values()], invalid
 
 
-def sampled_lanes(rows: Iterable[dict], now: float) -> dict[Lane, dict]:
-    """``{lane: latest batch}`` for the lanes whose latest batch inside ``[now - 28 d, now]`` passed.
-    Each value: ``{"kind", "n", "ts", "source"}``."""
+def final_only(rows: Iterable[dict], identity: Any = _CURRENT) -> list[dict]:
+    """The rows S1 may count: see :func:`final_state`."""
+    return final_state(rows, identity)[0]
+
+
+def sampled_report(rows: Iterable[dict], now: float, identity: Any = _CURRENT) -> tuple[dict[Lane, dict], dict[Lane, dict]]:
+    """``(sampled, invalidated)`` at ``now``. ``sampled``: ``{lane: latest batch}`` for the lanes whose latest batch
+    passed, each ``{"kind", "n", "ts", "source", "age_days"}``. Audit batches count inside ``[now - 28 d, now]``;
+    a FINAL ``shadow_pairs`` row is not age-capped (D-302), only ``ts <= now``. ``age_days`` is the batch's age."""
     latest: dict[Lane, tuple[float, dict, bool]] = {}
-    rows = final_only(rows)
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
+    counted, invalid = final_state(rows, identity)
+    for row in counted:
         ts, lane, passed = _ts(row.get("ts")), lane_of(row), batch_passed(row)
-        if ts is None or lane is None or passed is None or not now - WINDOW_DAYS * 86400.0 <= ts <= now:
+        if ts is None or lane is None or passed is None or ts > now:
+            continue
+        if row.get("kind") != "shadow_pairs" and ts < now - WINDOW_DAYS * 86400.0:
             continue
         if lane not in latest or ts >= latest[lane][0]:
             latest[lane] = (ts, row, passed)
-    return {lane: {"kind": r["kind"], "n": r["n"], "ts": t, "source": r.get("source")}
-            for lane, (t, r, ok) in latest.items() if ok}
+    sampled = {lane: {"kind": r["kind"], "n": r["n"], "ts": t, "source": r.get("source"),
+                      "age_days": round((now - t) / 86400.0, 2)}
+               for lane, (t, r, ok) in latest.items() if ok}
+    for lane, info in invalid.items():
+        info["age_days"] = round((now - info["ts"]) / 86400.0, 2)
+    return sampled, invalid
+
+
+def sampled_lanes(rows: Iterable[dict], now: float, identity: Any = _CURRENT) -> dict[Lane, dict]:
+    """``{lane: latest batch}`` for the lanes whose latest batch passed: see :func:`sampled_report`."""
+    return sampled_report(rows, now, identity)[0]
 
 
 def read_rows(path: Path | None = None) -> list[dict]:

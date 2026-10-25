@@ -774,6 +774,26 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     # at startup. Off: None, nothing is attached, 0 Frontier calls.
     frontier = shadow_frontier.FrontierShadow() if shadow_frontier.enabled() else None
 
+    flip_stamped = False
+
+    async def stamp_flip() -> None:
+        """D-302: the owner flip is the FIRST request that sees all four lane A switches on (YAML ``lane_a.enabled``,
+        ``LLM_ROUTER_PROXY_LANE_A=on``, ``haiku_rewrite``, the shadow flag), eligible step or not. Any switch off:
+        nothing is read from or written to disk. The write (first wins, 0600) runs in a worker thread, once per
+        process; it never costs the call."""
+        nonlocal flip_stamped
+        if flip_stamped or tier_policy is None or frontier is None:
+            return
+        try:
+            seen = dict(yaml_enabled=bool(tier_policy.lane_a.enabled), env_on=lane_a.env_on(),
+                        haiku_rewrite=bool(tier_policy.haiku_rewrite), shadow_on=shadow_frontier.enabled())
+            if not all(seen.values()):
+                return
+            await asyncio.to_thread(lane_a_shadow.maybe_record_flip, time.time(), **seen)
+            flip_stamped = True
+        except Exception as exc:  # noqa: BLE001 - evidence bookkeeping must never cost the call
+            failopen.record("LR-FO-LANE-A-FLIP", exc)
+
     def frontier_on_reply(request: Request, raw: bytes, row: dict, inner, lane: dict | None = None):
         """Wrap ``inner`` (the local-shadow callback, or None) so that, once the Haiku reply
         is complete, the client's original bytes are replayed to the requested model in the
@@ -1179,6 +1199,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             lane_gate.observe(body, row.get("session_id"))
         if tier_policy is not None and tier_policy.lane_runtime is not None:
             tier_policy.lane_runtime.observe(body, row.get("session_id"))  # lane A redo feed (in memory)
+        await stamp_flip()
         row["authority"] = authority.mode()
         if row["authority"] == authority.ADVISE:
             if ov is not None:

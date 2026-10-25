@@ -192,7 +192,7 @@ so lane A is never counted twice; the S1 rule is unchanged, so lane A reaches th
 price at or below the highest Haiku entry of `pricing.py` (`pricing.haiku_input_rate()`; unknown models are not
 cheap). Not actions: side calls, deterministic filtering (`served_by=local_filter`), raw passthrough, technical
 ops under 4 KB, semantic-cache hits, rows of non-organic sessions. A lane is quality-sampled when its latest
-audit or shadow-pair batch in `lane_quality.jsonl` inside the trailing 28 days passed (audit n >= 30 and
+audit batch inside the trailing 28 days, or lane A's FINAL shadow-pair row (no age cap, D-302; invalidated by a changed lane A model, judge brief, prompt set or breaker thresholds), passed (audit n >= 30 and
 >= 26/30; or n >= 60 pairs, gap <= 3 pts, Newcombe LB >= -10); the file is written by the audit tooling and
 read here. Until a batch passes, `offload.action.k` is 0 by rule and `caveats` says so. **Known limits:** a
 sub-agent spawned through the MCP path counts under door `mcp`; `technical_ops.jsonl` does not exist before P2.1

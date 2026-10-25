@@ -503,9 +503,11 @@ def _hand_lb(k1, n1, k2, n2):
     return (p1 - p2) - math.sqrt((p1 - l1) ** 2 + (u2 - p2) ** 2)
 
 
-def _pairs(k_a, k_f, n=60, *, group="tech_op", start=0):
-    """n decided pairs with exactly k_a Haiku-acceptable and k_f Frontier-acceptable (spread over the rows)."""
-    return [_verdict(start + i, group=group, a=i < k_a, f=i < k_f) for i in range(n)]
+def _pairs(k_a, k_f, n=60, *, group="tech_op", start=0, ts=None):
+    """n decided pairs with exactly k_a Haiku-acceptable and k_f Frontier-acceptable (spread over the rows).
+    ``ts``: stamp row i at ``ts + i`` (default: just before NOW)."""
+    return [_verdict(start + i, group=group, a=i < k_a, f=i < k_f, **({} if ts is None else {"ts": ts + i}))
+            for i in range(n)]
 
 
 @pytest.mark.parametrize("k_a,k_f,passes", [(59, 60, True), (60, 60, True), (57, 58, False)])
@@ -567,14 +569,14 @@ def test_writer_excludes_cannot_judge_and_reports_the_share(on):
     assert out["groups"]["tech_op"]["cannot_judge"] == 10
 
 
-def test_writer_refuses_a_batch_when_cannot_judge_is_over_20_percent(on):
+def test_writer_does_not_close_the_window_when_cannot_judge_is_over_20_percent(on):
     _write_verdicts(_pairs(60, 60, n=60) + [_verdict(200 + i, cj=True) for i in range(16)])   # 16/76 = 21%
     out = lqw.write_all(now=NOW)
-    # D-301: the batch that reaches 60 closes the window; above 20% cannot_judge it closes NOT INFORMATIVE
-    assert out["groups"]["tech_op"]["status"] == "not_informative" and out["written"] == 1
+    # D-302: n >= 60 at over 20% cannot_judge is a diagnostic row; the window stays open
+    assert out["groups"]["tech_op"]["status"] == "diagnostic" and out["written"] == 0 and out["diagnostic"] == 1
     (row,) = lane_quality.read_rows()
-    assert (row["window_complete"], row["informative"], row["not_informative_reason"]) == (
-        True, False, "cannot_judge_share")
+    assert (row["window_complete"], row["diagnostic"], row["not_informative_reason"]) == (
+        False, True, "cannot_judge_share")
     assert lane_quality.batch_passed(row) is False and lane_quality.sampled_lanes([row], NOW) == {}
 
 
@@ -622,7 +624,8 @@ def test_writer_round_trip_feeds_s1_numerator_and_the_latest_batch_decides(on):
     lqw.write_all(now=NOW)
     rows = lane_quality.read_rows()
     assert lane_quality.sampled_lanes(rows, NOW) == {
-        ("proxy", "haiku", "tech_op"): {"kind": "shadow_pairs", "n": 60, "ts": rows[0]["ts"], "source": rows[0]["source"]}}
+        ("proxy", "haiku", "tech_op"): {"kind": "shadow_pairs", "n": 60, "ts": rows[0]["ts"], "source": rows[0]["source"],
+                                      "age_days": 0.0}}
     # D-301: the window closes once. A later final row neither un-samples nor reopens the lane ...
     worse = dict(rows[0], ts=NOW + 5, gap_pts=9.0, source="newer")
     assert lane_quality.sampled_lanes(rows + [worse], NOW + 10) == lane_quality.sampled_lanes(rows, NOW + 10) != {}
@@ -1004,15 +1007,15 @@ def test_the_arm_judge_failures_write_no_verdict_row_as_before(on, run):
     assert len(haiku_guard.read_jsonl(sf.judge_ledger_path())) == 1
 
 
-def test_over_20_percent_judge_failures_make_the_batch_not_informative_and_it_is_not_counted(on):
-    """60 decided pairs and 16 judge failures (21%): the closing batch is NOT INFORMATIVE, S1 gets no credit."""
+def test_over_20_percent_judge_failures_leave_the_window_open_and_nothing_is_counted(on):
+    """60 decided pairs and 16 judge failures (21%): a diagnostic row only (D-302), S1 gets nothing yet."""
     _write_verdicts(_pairs(60, 60, n=60))
     _judge(_boom, [_lane_pair(500 + i) for i in range(16)])
     out = lqw.write_all(now=NOW)
     assert out["groups"]["tech_op"]["cannot_judge"] == 16 and out["groups"]["tech_op"]["n"] == 60
     (row,) = lane_quality.read_rows()
     assert (row["informative"], row["not_informative_reason"], row["window_complete"]) == (
-        False, "cannot_judge_share", True)
+        False, "cannot_judge_share", False)
     assert row["cannot_judge_share"] == pytest.approx(16 / 76, abs=1e-4)
     assert lane_quality.sampled_lanes([row], NOW) == {}
     # at 20% exactly (15 of 75) it is informative and counts
@@ -1200,10 +1203,12 @@ async def test_a_served_lane_a_row_and_its_pair_carry_the_same_body_sha(on, tmp_
     assert row["lane_a_body_sha"] == sf.body_sha(sent)
     assert pair["served_body_sha"] == pair["replay_body_sha"] == pair["body_sha"] == row["lane_a_body_sha"]
     assert _ledger()[0]["served_body_sha"] == row["lane_a_body_sha"]
-    # the owner flip is recorded by that first lane A step with the shadow on, 0600, once
+    # the owner flip is recorded by the first request that saw all four switches on, 0600, once
     flip = lane_a_shadow.read_flip()
     assert flip is not None and stat.S_IMODE(lane_a_shadow.flip_path().stat().st_mode) == 0o600
     assert lane_a_shadow.record_flip(flip + 99) is False and lane_a_shadow.read_flip() == flip
+    assert lane_a_shadow.read_flip_row()["switches"] == dict(yaml_enabled=True, env_on=True, haiku_rewrite=True,
+                                                             shadow_on=True)
 
 
 # ── SHOULD-6 / D-301: the window closes once; only the final row counts ─────────────────────────────────
@@ -1227,8 +1232,9 @@ def test_the_60th_decided_pair_writes_the_final_row_and_the_59th_does_not(on):
 def test_28_days_after_the_flip_with_fewer_than_60_pairs_is_final_not_informative_and_earns_nothing(on):
     flip = NOW - 29 * 86400.0
     assert lane_a_shadow.record_flip(flip)
-    _write_verdicts(_pairs(10, 10, n=10) + [_verdict(7000, session_id="s", msg_count=1, ts=NOW - 5),
-                                            _verdict(7001, session_id="s", msg_count=1, ts=NOW - 4)])
+    t = flip + 86400.0
+    _write_verdicts(_pairs(10, 10, n=10, ts=t) + [_verdict(7000, session_id="s", msg_count=1, ts=t + 50),
+                                                  _verdict(7001, session_id="s", msg_count=1, ts=t + 60)])
     out = lqw.write_all(now=NOW)
     (row,) = lane_quality.read_rows()
     assert out["groups"]["tech_op"]["status"] == "not_informative"
@@ -1278,7 +1284,8 @@ def test_rows_before_the_final_row_are_diagnostic_and_never_counted(on):
 
 def test_after_the_final_row_later_batches_do_not_count_and_do_not_reopen(on):
     lane_a_shadow.record_flip(NOW - 40 * 86400.0)
-    _write_verdicts(_pairs(40, 40, n=40, start=0) + _pairs(20, 20, n=20, start=100))
+    t = NOW - 35 * 86400.0
+    _write_verdicts(_pairs(40, 40, n=40, start=0, ts=t) + _pairs(20, 20, n=20, start=100, ts=t + 100))
     assert lqw.write_all(now=NOW)["written"] == 1
     first = lane_quality.read_rows()[0]
     _write_verdicts(_pairs(0, 60, n=60, start=200))                          # a terrible second batch, and 28 d long gone
@@ -1290,7 +1297,7 @@ def test_after_the_final_row_later_batches_do_not_count_and_do_not_reopen(on):
     sf._append_private(paths.state_path(lane_quality.FILE), first | {"ts": NOW + 9, "gap_pts": 9.0, "source": "later"})
     assert lane_quality.sampled_lanes(lane_quality.read_rows(), NOW + 100.0)
     # another task group has its own window
-    _write_verdicts(_pairs(60, 60, n=60, group="code", start=400))
+    _write_verdicts(_pairs(60, 60, n=60, group="code", start=400, ts=t + 500))
     assert lqw.write_all(now=NOW + 4000.0)["groups"]["code"]["status"] == "written"
 
 
@@ -1331,3 +1338,261 @@ def test_excluded_counts_are_written_into_the_row(on):
 
 def test_the_unused_lane_a_breaker_read_state_is_gone():
     assert not hasattr(lb, "read_state")
+
+
+# ═══ Repair round 2 (D-302 + review of the round-1 head) ═════════════════════════════════════════════════════
+
+DAYS = 86400.0
+
+
+def _cj_batch(n_decided, n_cj, *, t, start=0):
+    return _pairs(n_decided, n_decided, n=n_decided, start=start, ts=t) + [
+        _verdict(start + 5000 + i, cj=True, ts=t + 1000 + i) for i in range(n_cj)]
+
+
+def test_n_60_at_21_percent_cannot_judge_is_non_final_and_the_window_stays_open_then_a_later_batch_closes_it(on):
+    flip = NOW - 10 * DAYS
+    assert lane_a_shadow.record_flip(flip)
+    _write_verdicts(_cj_batch(60, 16, t=flip + 100))                         # 16/76 = 21%
+    out = lqw.write_all(now=NOW)
+    (diag,) = lane_quality.read_rows()
+    assert out["written"] == 0 and out["groups"]["tech_op"]["status"] == "diagnostic"
+    assert (diag["window_complete"], diag["diagnostic"], diag["n"], diag["cannot_judge"]) == (False, True, 60, 16)
+    assert lane_quality.sampled_lanes([diag], NOW) == {} and lane_quality.final_only([diag]) == []
+    assert "tech_op" not in lqw.closed_groups(lane_quality.read_rows())          # the window is still open
+    assert lqw.write_all(now=NOW + 1)["diagnostic"] == 0 and len(lane_quality.read_rows()) == 1   # same counts: no repeat row
+    # a later batch of judged pairs brings the share to 16/89 = 18% (<= 20%): the window closes informative
+    _write_verdicts(_pairs(13, 13, n=13, start=300, ts=flip + 5000))
+    out = lqw.write_all(now=NOW + 2)
+    final = lane_quality.read_rows()[-1]
+    assert out["written"] == 1 and out["groups"]["tech_op"]["status"] == "written"
+    assert (final["window_complete"], final["informative"], final["n"], final["cannot_judge"]) == (True, True, 73, 16)
+    assert final["close_reason"] == "n_reached" and lane_quality.sampled_lanes(lane_quality.read_rows(), NOW + 3)
+
+
+def test_28_days_after_the_flip_with_the_last_batch_above_20_percent_is_not_informative(on):
+    flip = NOW - 29 * DAYS
+    assert lane_a_shadow.record_flip(flip)
+    _write_verdicts(_cj_batch(70, 20, t=flip + DAYS))                         # 20/90 = 22%, n well above 60
+    out = lqw.write_all(now=NOW)
+    (row,) = lane_quality.read_rows()
+    assert out["groups"]["tech_op"]["status"] == "not_informative"
+    assert (row["window_complete"], row["informative"], row["close_reason"], row["not_informative_reason"]) == (
+        True, False, "window_28d", "cannot_judge_share")
+    assert row["n"] == 70 and row["gap_pts"] is None and lane_quality.sampled_lanes([row], NOW) == {}
+
+
+def test_28_days_after_the_flip_with_the_last_batch_at_20_percent_and_n_60_is_informative(on):
+    flip = NOW - 29 * DAYS
+    lane_a_shadow.record_flip(flip)
+    _write_verdicts(_cj_batch(60, 15, t=flip + DAYS))                         # exactly 20%
+    lqw.write_all(now=NOW)
+    (row,) = lane_quality.read_rows()
+    assert row["informative"] is True and row["close_reason"] == "n_reached"
+
+
+SWITCHES = dict(yaml_enabled=True, env_on=True, haiku_rewrite=True, shadow_on=True)
+
+
+async def test_the_flip_is_written_on_an_ineligible_request_with_all_four_on_and_records_the_values(
+        home, tmp_path, monkeypatch):
+    monkeypatch.setenv(sf.ENV_FLAG, "on")
+    monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
+    up = UpstreamU()
+    app = _app(tmp_path, _raw(), up)
+    assert not lane_a_shadow.flip_path().exists()
+    t0 = time.time()
+    r = await _post(app, _body(continuation=False, sid="s-first"))             # a turn-first step: lane A cannot serve it
+    assert r.status_code == 200
+    (row,) = ledger.read_rows(tmp_path / "proxy_calls.jsonl")
+    assert row["lane_a_reason"] != "served" and "lane" not in row
+    flip = lane_a_shadow.read_flip_row()
+    assert flip is not None and t0 - 0.01 <= flip["flip_ts"] <= time.time() + 0.01   # flip_ts is rounded to ms
+    assert flip["switches"] == SWITCHES                                          # the four values it saw, auditable
+    assert stat.S_IMODE(lane_a_shadow.flip_path().stat().st_mode) == 0o600
+    # first write wins: later requests (eligible or not) change nothing
+    first = lane_a_shadow.flip_path().read_text()
+    for b in (_body(sid="s2"), _body(continuation=False, sid="s3")):
+        assert (await _post(app, b)).status_code == 200
+    assert lane_a_shadow.flip_path().read_text() == first and lane_a_shadow.read_flip() == flip["flip_ts"]
+
+
+@pytest.mark.parametrize("off", ["yaml", "env", "rewrite", "shadow"])
+async def test_the_flip_is_not_written_with_any_one_switch_off_and_the_state_dir_is_untouched(
+        home, tmp_path, monkeypatch, off):
+    if off != "shadow":
+        monkeypatch.setenv(sf.ENV_FLAG, "on")
+    if off != "env":
+        monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
+    raw = _raw(OFF_LANE if off == "yaml" else LANE_ON, **({"haiku_rewrite": False} if off == "rewrite" else {}))
+    app = _app(tmp_path, raw, UpstreamU())
+    before = {str(p.relative_to(home)) for p in home.rglob("*")} if home.exists() else set()
+    for b in (_body(continuation=False, sid="a"), _body(sid="b")):
+        assert (await _post(app, b)).status_code == 200
+    assert not lane_a_shadow.flip_path().exists()
+    after = {str(p.relative_to(home)) for p in home.rglob("*")} if home.exists() else set()
+    assert not [f for f in after - before if "lane_a_flip" in f]
+
+
+@pytest.mark.parametrize("off", list(SWITCHES))
+def test_maybe_record_flip_needs_all_four(on, off):
+    assert lane_a_shadow.maybe_record_flip(NOW, **{**SWITCHES, off: False}) is False
+    assert not lane_a_shadow.flip_path().exists()
+    assert lane_a_shadow.maybe_record_flip(NOW, **SWITCHES) is True
+    assert lane_a_shadow.maybe_record_flip(NOW + 9, **SWITCHES) is False and lane_a_shadow.read_flip() == NOW
+
+
+def test_the_old_first_served_step_flip_trigger_is_gone(on):
+    assert not hasattr(sf.FrontierShadow, "_record_flip")
+
+
+async def test_a_served_step_alone_no_longer_stamps_the_flip(on):
+    _usage()
+    await _sample(_shadow(), FakeReplay(), _ctx(), task_id="served")          # sampler path only: no proxy request
+    assert not lane_a_shadow.flip_path().exists()
+
+
+def test_with_no_flip_the_n_60_close_works_and_the_28_day_close_never_fires(on):
+    assert lane_a_shadow.read_flip() is None
+    _write_verdicts(_pairs(60, 60, n=60))
+    out = lqw.write_all(now=NOW)
+    assert out["written"] == 1 and out["flip_ts"] is None
+    (row,) = lane_quality.read_rows()
+    assert (row["close_reason"], row["informative"], row["flip_ts"]) == ("n_reached", True, None)
+    # a far-future clock with only 10 pairs and no flip: still nothing
+    paths.state_path(lane_quality.FILE).unlink()
+    sf.verdicts_path().unlink()
+    _write_verdicts(_pairs(10, 10, n=10, ts=NOW + 400 * DAYS))
+    assert lqw.write_all(now=NOW + 401 * DAYS)["written"] == 0
+    assert not paths.state_path(lane_quality.FILE).exists()
+
+
+async def test_the_sampler_stops_for_a_task_group_once_its_window_is_final(on):
+    _usage()
+    _write_verdicts(_pairs(60, 60, n=60))
+    assert lqw.write_all(now=NOW)["written"] == 1                              # tech_op is final
+    fs, rep = _shadow(), FakeReplay()
+    hit = _step_with_key(True)                                                  # a key the 2% rate WOULD sample
+    await _sample(fs, rep, _ctx(n=hit), task_id="after-final")
+    last = _ledger()[-1]
+    assert (last["outcome"], last["reason"]) == ("skipped", "window_final") and rep.calls == []
+    # another, still open task group keeps sampling (fill: every step)
+    await _sample(fs, rep, _ctx(n=hit, group="code"), task_id="other-group")
+    assert _ledger()[-1]["outcome"] == "replayed" and len(rep.calls) == 1
+    # and an open diagnostic row (non-final) does not stop the sampler
+    paths.state_path(lane_quality.FILE).unlink()
+    sf.verdicts_path().unlink()
+    _write_verdicts(_cj_batch(60, 16, t=NOW - 2000))
+    assert lqw.write_all(now=NOW)["diagnostic"] == 1
+    await _sample(fs, rep, _ctx(n=_step_with_key(True, session="sess-b"), session="sess-b"), task_id="still-open")
+    assert _ledger()[-1]["outcome"] == "replayed"
+
+
+def _final(now=NOW, **kw):
+    counts = {"n": 64, "k_a": 62, "k_f": 63, "cannot_judge": 0, "ids": [f"t{i}" for i in range(64)]}
+    row, status = lqw.batch_row("tech_op", counts, now=now, since=now - 14 * DAYS, until=now)
+    assert status == "written"
+    return {**row, **kw}
+
+
+def test_a_final_row_older_than_28_days_still_counts_and_its_age_is_reported(on):
+    row = _final(now=NOW - 90 * DAYS)
+    assert lane_quality.sampled_lanes([row], NOW)
+    (info,) = lane_quality.sampled_lanes([row], NOW).values()
+    assert info["age_days"] == 90.0
+    # an audit row keeps the 28-day read cap
+    audit = {"ts": NOW - 29 * DAYS, "door": "proxy", "served_class": "haiku", "task_group": "qa", "kind": "audit",
+             "n": 30, "acceptable": 30, "source": "a"}
+    assert lane_quality.sampled_lanes([audit], NOW) == {}
+    # a final row dated after now is not counted yet
+    assert lane_quality.sampled_lanes([_final(now=NOW + 60)], NOW) == {}
+
+
+@pytest.mark.parametrize("key", list(lane_a_shadow.IDENTITY_KEYS))
+def test_a_final_row_with_a_changed_identity_is_invalidated_and_not_counted(on, key):
+    row = _final()
+    assert set(row["identity"]) == set(lane_a_shadow.IDENTITY_KEYS) and lane_quality.sampled_lanes([row], NOW)
+    stale = dict(row, identity={**row["identity"], key: "something-else"})
+    sampled, invalid = lane_quality.sampled_report([stale], NOW)
+    assert sampled == {}
+    assert invalid[("proxy", "haiku", "tech_op")]["mismatch"] == [key]
+    assert invalid[("proxy", "haiku", "tech_op")]["age_days"] == 0.0
+    # the writer does not open a new window by itself
+    sf._append_private(paths.state_path(lane_quality.FILE), stale)
+    _write_verdicts(_pairs(60, 60, n=60))
+    out = lqw.write_all(now=NOW + 5)
+    assert out["written"] == 0 and out["groups"]["tech_op"]["status"] == "window_closed"
+    # an unstamped final row cannot be shown valid either
+    bare = {k: v for k, v in row.items() if k != "identity"}
+    assert lane_quality.sampled_lanes([bare], NOW) == {}
+
+
+def test_the_identities_follow_the_lane_a_config_judge_brief_and_breaker(on, monkeypatch):
+    from tests.test_proxy_lane_a import _policy
+
+    base = lane_a_shadow.identities_of(_policy())
+    assert base == lane_a_shadow.identities_of(_policy())
+    raw = _raw()
+    raw["tiers"][0]["model"] = "claude-haiku-5-5"
+    changed = {
+        "lane_a_model": lane_a_shadow.identities_of(pt.ClaudeTierPolicy.from_dict(raw)),
+        "prompt_set_sha": lane_a_shadow.identities_of(_policy(LANE_ON | {"tau": 0.7})),
+        "breaker_sha": lane_a_shadow.identities_of(_policy(LANE_ON | {"breaker": {"trip_failures": 7}})),
+    }
+    for key, ident in changed.items():
+        assert [k for k in ident if ident[k] != base[k]] == [key]
+    assert lane_a_shadow.identities_of(_policy(LANE_ON | {"prev_tool_classes": ["technical_op", "web"]}))[
+        "prompt_set_sha"] != base["prompt_set_sha"]
+    monkeypatch.setattr(sf, "JUDGE_BRIEF_SHA256", "f" * 64)
+    now_ident = lane_a_shadow.identities_of(_policy())
+    assert [k for k in now_ident if now_ident[k] != base[k]] == ["judge_brief_sha"]
+
+
+def test_the_s1_action_units_report_the_invalidated_lane_and_it_earns_no_credit(on):
+    stale = _audit_row("tech_op")
+    stale["identity"] = {**stale["identity"], "lane_a_model": "claude-haiku-9"}
+    res = _units(_kpi_rows(), [stale | {"ts": KPI_NOW - 40 * DAYS}])
+    assert res["sampled"] == {} and list(res["invalidated"]) == [("proxy", "haiku", "tech_op")]
+    assert res["invalidated"][("proxy", "haiku", "tech_op")]["mismatch"] == ["lane_a_model"]
+    assert osh.summarize_actions(res["actions"])["lane_a"]["k"] == 0
+    good = _units(_kpi_rows(), [_audit_row("tech_op") | {"ts": KPI_NOW - 40 * DAYS}])
+    assert list(good["sampled"].values())[0]["age_days"] == pytest.approx(40.0, abs=0.1)
+    assert osh.summarize_actions(good["actions"])["lane_a"]["k"] == 3 and good["invalidated"] == {}
+
+
+def test_should_a_a_writer_that_first_runs_at_flip_plus_40_days_clamps_the_pair_window_to_day_28(on):
+    flip = NOW - 40 * DAYS
+    assert lane_a_shadow.record_flip(flip)
+    _write_verdicts(_pairs(50, 50, n=50, ts=flip + 2 * DAYS)                    # 50 pairs before day 28
+                    + _pairs(20, 20, n=20, start=500, ts=flip + 29 * DAYS))      # 20 more on day 29
+    out = lqw.write_all(now=NOW)
+    (row,) = lane_quality.read_rows()
+    assert out["groups"]["tech_op"]["n"] == 50 and out["groups"]["tech_op"]["status"] == "not_informative"
+    assert (row["n"], row["window_complete"], row["informative"], row["close_reason"],
+            row["not_informative_reason"]) == (50, True, False, "window_28d", "n_below_min")
+    assert row["until"] == flip + 28 * DAYS
+    assert lane_quality.sampled_lanes([row], NOW) == {}
+    # an explicit later --until cannot widen the window either
+    paths.state_path(lane_quality.FILE).unlink()
+    out = lqw.write_all(now=NOW, until=NOW + 5 * DAYS)
+    assert out["until"] == flip + 28 * DAYS and out["groups"]["tech_op"]["n"] == 50
+
+
+def test_nit_2_pairs_from_before_the_flip_are_counted_in_the_written_rows_excluded(on):
+    flip = NOW - 20 * DAYS
+    lane_a_shadow.record_flip(flip)
+    _write_verdicts(_pairs(60, 60, n=60, ts=flip + 100)
+                    + [_verdict(6000 + i, ts=flip - 100 - i) for i in range(7)])
+    lqw.write_all(now=NOW)
+    (row,) = lane_quality.read_rows()
+    assert row["n"] == 60 and row["excluded"] == {"before_flip": 7}
+
+
+async def test_nit_1_a_replay_without_a_sha_leaves_replay_body_sha_none_and_voids_the_pair(on):
+    _usage()
+    await _sample(_shadow(), FakeReplay(), _ctx(), task_id="no-sha")             # FakeReplay reports no sent_sha
+    (pair,) = [json.loads(line) for f in sf.pairs_dir().glob("*.jsonl") for line in f.read_text().splitlines()]
+    assert "replay_body_sha" in pair and pair["replay_body_sha"] is None         # not the served-side sha
+    verdict = _verdict(1, served_body_sha=pair["served_body_sha"] or "served-sha", replay_body_sha=None)
+    t = lqw.tally([verdict], since=0, until=NOW + 1)["tech_op"]
+    assert t["n"] == 0 and t["excluded"] == {"body_sha_mismatch": 1}

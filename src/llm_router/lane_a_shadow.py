@@ -56,6 +56,10 @@ R_STEP_SEEN = "step_seen"
 FINAL_WINDOW_PAIRS = 60
 FINAL_WINDOW_DAYS = 28
 FLIP_FILE = "lane_a_flip.json"
+#: D-302: the four switches whose joint "on" is the owner flip, and the four identities that keep a final row valid.
+FLIP_SWITCHES = ("yaml_enabled", "env_on", "haiku_rewrite", "shadow_on")
+IDENTITY_KEYS = ("lane_a_model", "judge_brief_sha", "prompt_set_sha", "breaker_sha")
+R_WINDOW_FINAL = "window_final"
 
 #: The prereg's ``LANEA-CONSTANTS`` keys this module owns, with the value in force.
 CONSTANTS = {
@@ -177,23 +181,29 @@ def flip_path() -> Path:
     return paths.state_path(FLIP_FILE)
 
 
-def read_flip() -> float | None:
-    """The owner flip time: when lane A serving first ran with the shadow on (all switches on), epoch seconds, or
-    None when it has not (or the file is unreadable)."""
+def read_flip_row() -> dict | None:
+    """The whole flip row (``flip_ts``, the four ``switches`` it saw, ``source``), or None."""
     import json
 
     try:
         raw = json.loads(flip_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    ts = _ts(raw.get("flip_ts")) if isinstance(raw, dict) else None
-    return ts
+    return raw if isinstance(raw, dict) and _ts(raw.get("flip_ts")) is not None else None
 
 
-def record_flip(now: float) -> bool:
+def read_flip() -> float | None:
+    """The owner flip time (D-302): the first proxy request that saw all four switches on, epoch seconds, or None
+    when there was none (or the file is unreadable)."""
+    raw = read_flip_row()
+    return _ts(raw.get("flip_ts")) if raw is not None else None
+
+
+def record_flip(now: float, switches: dict | None = None) -> bool:
     """Record ``now`` as the owner flip time if none is recorded yet (first write wins, 0600 through
-    ``state_files``). Called only when a lane A step was served with the shadow on, so a lane that is off creates
-    no file. True when this call wrote it."""
+    ``state_files``), with the ``switches`` the request saw, so the flip can be audited. Blocking I/O: call it
+    through ``to_thread`` from the event loop. True when this call wrote it. Use :func:`maybe_record_flip` from the
+    proxy: it never writes unless all four switches are on."""
     import json
 
     from llm_router import state_files
@@ -201,12 +211,74 @@ def record_flip(now: float) -> bool:
     p = flip_path()
     if p.exists():
         return False
+    row = {"flip_ts": round(now, 3), "switches": switches,
+           "source": "first proxy request that saw all four lane A switches on"}
     try:
         with state_files.open_private(p, "x", encoding="utf-8") as fh:
-            fh.write(json.dumps({"flip_ts": round(now, 3), "source": "first lane A step served with the shadow on"}))
+            fh.write(json.dumps(row, sort_keys=True))
     except FileExistsError:
         return False
     return True
+
+
+def maybe_record_flip(now: float, *, yaml_enabled: bool, env_on: bool, haiku_rewrite: bool, shadow_on: bool) -> bool:
+    """D-302: the owner flip is the first proxy request that sees ``lane_a.enabled`` (YAML), the env switch,
+    ``haiku_rewrite`` and the shadow flag all on, whether or not that step is eligible. Writes nothing (no file, no
+    directory) when any one is off. True when this call wrote the flip."""
+    seen = {"yaml_enabled": bool(yaml_enabled), "env_on": bool(env_on), "haiku_rewrite": bool(haiku_rewrite),
+            "shadow_on": bool(shadow_on)}
+    if not all(seen.values()):
+        return False
+    return record_flip(now, seen)
+
+
+def final_groups(rows: Iterable[dict]) -> set[str]:
+    """Task groups of lane A whose window is complete: a FINAL ``shadow_pairs`` row exists (valid or not). Nothing
+    reopens one; only a preregistration amendment can (D-301, D-302)."""
+    return {r["task_group"] for r in rows
+            if isinstance(r, dict) and r.get("kind") == "shadow_pairs" and r.get("window_complete") is True
+            and r.get("door") == DOOR and r.get("served_class") == SERVED_CLASS
+            and isinstance(r.get("task_group"), str)}
+
+
+def identities_of(policy: Any) -> dict:
+    """The four identities a final row is valid for (D-302): the lane A model (the ``haiku`` tier's model), the
+    judge brief sha, the prompt set lane A serves (the allowlisted step classes and the confidence floor) and the
+    breaker thresholds. A change to any of them ends the window's credit."""
+    import dataclasses
+    import json
+
+    from llm_router import shadow_frontier
+
+    cfg = policy.lane_a
+
+    def sha(obj: Any) -> str:
+        return hashlib.sha256(json.dumps(obj, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+    return {"lane_a_model": policy.haiku_model, "judge_brief_sha": shadow_frontier.JUDGE_BRIEF_SHA256,
+            "prompt_set_sha": sha({"prev_tool_classes": sorted(cfg.prev_tool_classes), "tau": cfg.tau}),
+            "breaker_sha": sha(dataclasses.asdict(cfg.breaker))}
+
+
+def current_identities() -> dict | None:
+    """The identities of the tier policy in force (``LLM_ROUTER_PROXY_TIER_POLICY``, else the bundled one), or
+    None when it cannot be read (then no final row can be shown valid)."""
+    import os
+
+    from llm_router.proxy import tiers
+
+    try:
+        return identities_of(tiers.ClaudeTierPolicy.load(os.environ.get("LLM_ROUTER_PROXY_TIER_POLICY") or None))
+    except (OSError, ValueError, TypeError, ImportError, AttributeError):
+        return None
+
+
+def identity_mismatch(stamped: Any, current: dict | None) -> list[str]:
+    """The identity keys on which a final row's stamp differs from ``current`` (all four when it has no stamp or
+    the current ones are unknown)."""
+    if not isinstance(stamped, dict) or current is None:
+        return list(IDENTITY_KEYS)
+    return [k for k in IDENTITY_KEYS if stamped.get(k) is None or stamped.get(k) != current.get(k)]
 
 
 def lane_day_spend(ledger_rows: Iterable[dict], day: str) -> tuple[int, int]:

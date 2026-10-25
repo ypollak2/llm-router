@@ -73,7 +73,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from llm_router import failopen, lane_a_shadow, paths
+from llm_router import failopen, lane_a_shadow, lane_quality, paths
 from llm_router.proxy import haiku_guard
 from llm_router.proxy.steps import _text_of, newest_human_text, non_system
 from llm_router.proxy.translate import parse_sse_usage
@@ -123,6 +123,7 @@ R_NOT_SAMPLED = "not_sampled"
 R_LANE_BUCKET = lane_a_shadow.R_LANE_BUCKET
 R_NO_KEY = lane_a_shadow.R_NO_KEY
 R_STEP_SEEN = lane_a_shadow.R_STEP_SEEN
+R_WINDOW_FINAL = lane_a_shadow.R_WINDOW_FINAL
 
 JUDGE_BRIEF = (
     "You review two answers to the same developer request. They are labelled A and B in a "
@@ -509,6 +510,8 @@ class FrontierShadow:
         """Lane A's sampling decision: the deterministic key against the fill / steady rate of its task group.
         Records the rate and phase on ``job`` so the ledger and the pair row say which one applied."""
         group = lane.get("task_group")
+        if group in lane_a_shadow.final_groups(lane_quality.read_rows()):
+            return R_WINDOW_FINAL  # D-302: the group's window is final; no 2% sampling after the close
         rows = lane_a_shadow.read_verdict_rows(verdicts_path())
         if rows is None:  # unreadable: keep the phase we last read (fill at the very start)
             rate, phase = self._phase.get(group, lane_a_shadow.phase_for(0))
@@ -535,8 +538,6 @@ class FrontierShadow:
             base = {"ts": round(now, 3), "day": _day(now), "task_id": job["task_id"], "door": job["door"],
                     "served": job["served"], "requested": job["requested"], "body_sha": body_sha(job["raw"]),
                     "est_input_tokens": est}
-            if job.get("lane") is not None:
-                await asyncio.to_thread(self._record_flip, now)
             reason = pre or await asyncio.to_thread(self._gate, now, base["day"], job, est)
             if job.get("lane") is not None:
                 base.update(_lane_fields(job))
@@ -563,14 +564,6 @@ class FrontierShadow:
             if owns:
                 self._busy = False
 
-    @staticmethod
-    def _record_flip(now: float) -> None:
-        """The owner flip time (D-301): the first lane A step served with the shadow on. Never raises."""
-        try:
-            lane_a_shadow.record_flip(now)
-        except Exception as exc:  # noqa: BLE001 - evidence bookkeeping must never cost the call
-            failopen.record("LR-FO-LANE-A-FLIP", exc)
-
     def _record(self, job: dict, base: dict, rep: Replay, latency_s: float) -> None:
         text, usage = reply_text(rep.body, rep.ctype) if rep.status == 200 else ("", {})
         out = usage.get("output_tokens") if isinstance(usage, dict) else None
@@ -591,8 +584,9 @@ class FrontierShadow:
             "requested": base["requested"], "body_sha": base["body_sha"],
             "request_context": request_context(body), "cheap_response": cheap_text,
             "frontier_response": text, **_lane_fields(job),
-            # the bytes the replay really sent, hashed where they were sent (replay_http); the pairing check
-            **({"replay_body_sha": rep.sent_sha or base["body_sha"]} if job.get("lane") is not None else {})})
+            # the bytes the replay really sent, hashed where they were sent (replay_http); the pairing check.
+            # No sha from the replay leaves this None, which voids the pair: never fall back to the served side.
+            **({"replay_body_sha": rep.sent_sha} if job.get("lane") is not None else {})})
         prune_pairs(base["ts"])
 
 

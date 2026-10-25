@@ -648,8 +648,8 @@ No offload or saving figure is claimed; none has been measured.
 
 Everything below is inert unless lane A actually SERVED a step: with the lane off there is no sampler, no shadow call,
 no `shadow_frontier/` file, no `lane_quality.jsonl` and no `lane` key on any row (`tests/test_lane_a_pr3.py` compares
-the state dir and replays the frozen main golden with `LLM_ROUTER_SHADOW_FRONTIER=on` too). The owner flip that
-makes the shadow run is `LLM_ROUTER_SHADOW_FRONTIER=on` (OD-4 = A) on top of the lane A switches.
+the state dir and replays the frozen main golden with `LLM_ROUTER_SHADOW_FRONTIER=on` too). The shadow runs with
+`LLM_ROUTER_SHADOW_FRONTIER=on` (OD-4 = A) on top of the lane A switches. Owner flip runbook: turn all four on, then send one request through the proxy to stamp the flip.
 
 - **Lane tag.** The ledger row of a step Haiku answered for lane A carries `lane: "A"` (with `tier_reason:
   haiku_rewrite`, `lane_a_reason: served`). A retried step (`retried_original`, the pinned model answered), the D-31
@@ -674,7 +674,7 @@ makes the shadow run is `LLM_ROUTER_SHADOW_FRONTIER=on` (OD-4 = A) on top of the
   judge`) reads the lane A verdict rows and appends the FINAL row of a task group to `lane_quality.jsonl` (0600,
   `state_files`): `{ts, door: "proxy", served_class: "haiku", task_group, kind: "shadow_pairs", n, gap_pts,
   newcombe_lb, source, lane: "A", k_laneA, k_frontier, cannot_judge, cannot_judge_share, excluded, window_complete,
-  informative, close_reason, not_informative_reason, flip_ts, since, until}`. `gap_pts = (acc_frontier - acc_laneA) *
+  informative, close_reason, not_informative_reason, identity, flip_ts, since, until}`. `gap_pts = (acc_frontier - acc_laneA) *
   100` (positive = Haiku worse), `newcombe_lb` = the unpaired Newcombe lower bound of `acc_laneA - acc_frontier`,
   both from `eligibility.evidence_from_counts`, the function `eligibility.grade` and `lane_quality.batch_passed` use.
   - **One pair per step.** Rows are reduced to the FIRST verdict of each `(session_id, msg_count)` (PREREG-LANEA
@@ -689,20 +689,34 @@ makes the shadow run is `LLM_ROUTER_SHADOW_FRONTIER=on` (OD-4 = A) on top of the
     one, is `excluded.body_sha_mismatch`.
   - **A row missing `task_group` or `rate_phase`, judged by another model or under another brief
     (`JUDGE_BRIEF_SHA256`), is not evidence** (`excluded`, written into the row).
-  - **Window and the final row (D-301, prereg owner).** A task group's S1 window closes at whichever comes FIRST: the
-    first judge batch with at least 60 decided pairs (after the dedupe), or 28 days after the owner flip. That batch is
-    the one row with `window_complete: true`, and the only one S1 counts; `lane_quality` ignores a `shadow_pairs` row
-    without it, and the first final row of a lane is its verdict. It is `informative` only if `cannot_judge` is at most
-    20% of judged attempts; a closing batch above that, or a 28-day close with n < 60, is a NOT INFORMATIVE final row
-    (`informative: false`, no gap / bound): S1 gets no credit. Below 60 pairs and before 28 days nothing is written
-    (counts are printed, not stored). Once a task group has its final row no new window opens and nothing reopens it;
-    only a preregistration amendment can. `FINAL_WINDOW_PAIRS` (60) and `FINAL_WINDOW_DAYS` (28) are in
-    `lane_a_shadow.CONSTANTS`.
-  - **Owner flip source.** `lane_a_flip.json` in the state dir (`{flip_ts}`, 0600, `state_files`, first write wins) is
-    written by the first lane A step served WITH the Frontier shadow on (lane enabled, `haiku_rewrite`, authority
-    route and `LLM_ROUTER_SHADOW_FRONTIER=on` all in force), from the shadow's background task. A lane that is off
-    creates no file. With no flip recorded the writer reads the trailing 14 days and no 28-day close can fire. The
-    window starts at the flip (`since` defaults to it); `--since/--until` is a formal read.
+  - **Window and the final row (D-301, amended by D-302; prereg owner).** A task group's S1 window closes at whichever
+    comes FIRST: the first judge batch with at least 60 decided pairs (after the dedupe) AND a `cannot_judge` share of
+    at most 20%, or 28 days after the owner flip. That batch is the one row with `window_complete: true`, and the only
+    one S1 counts; `lane_quality` ignores a `shadow_pairs` row without it. A batch with n >= 60 and MORE than 20%
+    `cannot_judge` is written NON-final (`window_complete: false`, `diagnostic: true`) and the window stays open, so a
+    judge outage cannot burn it; a later batch at or under 20% closes it informative. At flip + 28 days the window
+    closes NOT INFORMATIVE (`informative: false`, no gap / bound, S1 gets no credit) when n < 60 OR the last batch's
+    share is above 20%. The pair window is clamped to `until = min(now, flip + 28 d)`: a pair after day 28 never
+    counts, even when the writer first runs later. Pairs from before the flip never count and are written into the
+    row as `excluded.before_flip`. Below 60 pairs and before 28 days nothing is written. Once a task group has its
+    final row no new window opens and nothing reopens it, and the **sampler stops** for that group (skip reason
+    `window_final`: no 2% sampling after the close). `FINAL_WINDOW_PAIRS` (60), `FINAL_WINDOW_DAYS` (28) and
+    `CANNOT_JUDGE_MAX_SHARE` (0.20) are in `lane_a_shadow.CONSTANTS`.
+  - **A final row does not age out, and four identities invalidate it (D-302).** The S1 28 day read cap applies to
+    audit batches only; credit from a final `shadow_pairs` row does not expire by age, and `kpi` prints each final
+    row's age in days (`quality_sampled_lanes[].age_days`). Each row is stamped with `identity`: `lane_a_model` (the
+    `haiku` tier's model), `judge_brief_sha`, `prompt_set_sha` (the sha of lane A's `prev_tool_classes` and `tau`) and
+    `breaker_sha` (the `lane_a.breaker` thresholds). S1 ignores a final row whose stamp differs from the config in
+    force on any of the four (or has no stamp) and reports the lane under `invalidated_lanes` (with a caveat); nothing
+    opens a new window by itself, that needs a prereg amendment. Nothing else invalidates a final row.
+  - **Owner flip (D-302).** The flip is the FIRST PROXY REQUEST that sees all four switches on: YAML
+    `lane_a.enabled`, `LLM_ROUTER_PROXY_LANE_A=on`, `haiku_rewrite` and the shadow flag, whether or not that step is
+    eligible. It is recorded on that request in `lane_a_flip.json` in the state dir (`{flip_ts, switches, source}`,
+    0600, `state_files`, first write wins; the write runs in a worker thread, not on the event loop). `switches` holds
+    the four values the request saw, so the flip can be audited. It is never written, and no directory is created,
+    when any one switch is off, so a lane that is off leaves the state dir as on main. With no flip recorded the
+    writer reads the trailing 14 days, the n >= 60 close still applies and no 28-day close can fire. The window starts
+    at the flip (`since` defaults to it); `--since` is a formal read. Owner flip runbook: turn all four on, then send one request through the proxy to stamp the flip.
   - The same evidence writes the same `source`. The arm's verdict rows (no `lane`) are never read.
   - **Lane A verdicts and the arm's guard.** Lane A verdicts share `verdicts.jsonl` but are tagged `lane: "A"`: the
     arm's D-20 `haiku_guard.shadow_trigger`, `shadow_frontier.verdict_summary` (the statusline and the session report)
@@ -716,8 +730,8 @@ makes the shadow run is `LLM_ROUTER_SHADOW_FRONTIER=on` (OD-4 = A) on top of the
   the numerator iff it was served by a local / Haiku / very-cheap model, not redone, not escalated, and its lane
   `(door, served_class, task_group)` is quality-sampled. A lane A step is a proxy action served by Haiku whose
   `prev_tool_class` is `technical_op`, so its lane is `(proxy, haiku, tech_op)`; it enters the numerator only when
-  the lane's FINAL batch (`window_complete: true`, D-301) passes (n >= 60, gap <= 3 points, lower bound >= -10) and is
-  inside the 28 day S1 reading window.
+  the lane's FINAL batch (`window_complete: true`, D-301) passes (n >= 60, gap <= 3 points, lower bound >= -10) and its
+  four identities still match the config (D-302; a final row is not age-capped).
   **Lane-level caveat.** Sampling is per lane, not per lane A step: once the final batch passes, the whole lane
   `(proxy, haiku, tech_op)` is quality-sampled (`offload_share.py`, `a["sampled"] = lane in sampled`), so any other
   Haiku-served `tech_op` proxy action in the window (for example one where the client itself chose Haiku) joins the
