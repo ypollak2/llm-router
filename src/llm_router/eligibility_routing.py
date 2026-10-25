@@ -238,6 +238,11 @@ class LiveCheckRefused(PassedModelNotInChain):
     before any model call."""
 
 
+class OverflowSwitchRefused(PassedModelNotInChain):
+    """LC-12g: the passed model's window cannot hold the text job and ``LLM_ROUTER_PACK_OVERFLOW`` would switch the
+    call to another local model, which has no pass and got no live check; refused before any model call."""
+
+
 class EligibilityStepFailed(PassedModelNotInChain):
     """LC-12e: the local-only eligibility step itself raised; the text job is refused (fail closed), not routed."""
 
@@ -247,6 +252,9 @@ FC_STORE_NAME = "text_job_fail_closed.jsonl"
 FC_ELIGIBILITY_STEP = "CHZ-FC-ROUTER-TEXT-JOB-ELIGIBILITY"
 FC_CUT_CHECK = "CHZ-FC-ROUTER-TEXT-JOB-CUT-CHECK"
 FC_LIVE_CHECK = "CHZ-FC-ROUTER-TEXT-JOB-LIVE-CHECK"
+FC_OVERFLOW_SWITCH = "CHZ-FC-PROVIDERS-TEXT-JOB-OVERFLOW-SWITCH"
+#: LC-12g: the live-check reason for a non-loopback ``OLLAMA_API_BASE`` (no request is made).
+NOT_LOOPBACK = "endpoint is not loopback (text would leave the machine)"
 LIVE_CHECK_TIMEOUT_S = 2.0
 #: Cap per generation (``capped_log``, two generations); a row is ~80 bytes, so ~3,000 rows each.
 FC_MAX_BYTES = 256 * 1024
@@ -331,6 +339,31 @@ def _pass_only_refusal(code: str, exc: BaseException) -> None:
         record_fail_closed(code, exc)
         raise EligibilityStepFailed(
             f"the eligibility step failed ({type(exc).__name__}); local-only routing refuses") from exc
+
+
+def pass_only_call(exempt_reason: str | None) -> bool:
+    """LC-12g: THE pass-only predicate (flag unset, D-277): a text-job route (``TEXT_JOB_REASON``) inside
+    ``llm_text_job``'s :func:`set_require_passed_first`. The router computes it once per call; everything
+    below the router reads :func:`pass_only_dispatch_active`."""
+    return exempt_reason == TEXT_JOB_REASON and _require_passed_first.get()
+
+
+#: Set by the router for the dispatch of a call where :func:`pass_only_call` is true, so ``providers`` and
+#: ``semantic_cache`` (which do not see ``eligibility_exempt_reason``) apply the router's own predicate.
+_pass_only_dispatch: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "llm_router_pass_only_dispatch", default=False)
+
+
+def pass_only_dispatch_active() -> bool:
+    return _pass_only_dispatch.get()
+
+
+def set_pass_only_dispatch(on: bool) -> contextvars.Token:
+    return _pass_only_dispatch.set(bool(on))
+
+
+def reset_pass_only_dispatch(token: contextvars.Token) -> None:
+    _pass_only_dispatch.reset(token)
 
 
 def set_require_passed_first() -> contextvars.Token:
@@ -479,13 +512,17 @@ def _passed_lane(m_bare: str, job: str, digests: dict[str, str], now: float, eli
     return lane, source, None
 
 
+def _ollama_base() -> str:
+    """The daemon LiteLLM sends the generation to: ``OLLAMA_API_BASE``, else ``http://localhost:11434``."""
+    return os.environ.get("OLLAMA_API_BASE", "").strip() or "http://localhost:11434"
+
+
 def _live_tags() -> Any | None:
     """The user's Ollama daemon's ``/api/tags`` answer, or None. The daemon is the one LiteLLM sends the
-    generation to (``OLLAMA_API_BASE``, else ``http://localhost:11434``); a non-loopback endpoint is refused."""
+    generation to (:func:`_ollama_base`); a non-loopback endpoint is refused."""
     from llm_router.local_check import runtimes as rt
-    base = os.environ.get("OLLAMA_API_BASE", "").strip() or "http://localhost:11434"
     try:
-        ok, data = rt._fetch(base, "GET", "/api/tags", timeout=LIVE_CHECK_TIMEOUT_S)
+        ok, data = rt._fetch(_ollama_base(), "GET", "/api/tags", timeout=LIVE_CHECK_TIMEOUT_S)
     except rt.RuntimeError_:  # a non-loopback daemon: the text would leave the machine
         return None
     return data if ok else None
@@ -495,8 +532,8 @@ def live_check_refusal(model: str, job: str, now: float) -> str | None:
     """LC-12f: pre-dispatch check of a pass-only text job, right before the passed model is called.
 
     One GET of ``/api/tags`` to the user's own (loopback) Ollama daemon, with a short timeout.
-    Returns None when the live row still matches the pass, else "ollama did not answer" (error,
-    timeout or non-loopback endpoint: fail closed), "model not listed", "remote metadata"
+    Returns None when the live row still matches the pass, else :data:`NOT_LOOPBACK` (no request is
+    made), "ollama did not answer" (error or timeout: fail closed), "model not listed", "remote metadata"
     (``ollama_remote_marker`` on the row), "digest changed" (a local-check lane's stored
     ``model_digest`` differs from the live row's digest, normalised to the adapters' ``sha256:``
     prefix), or "no passed lane". A pre-registered lane is keyed by name, not digest, so only
@@ -512,6 +549,9 @@ def live_check_refusal(model: str, job: str, now: float) -> str | None:
     lane, source, _ = _passed_lane(bare, job, display.inventory()[1], now, None, (e or {}).get("source"))
     if lane is None:
         return "no passed lane"
+    from llm_router.local_check import runtimes as rt
+    if not rt.is_loopback(_ollama_base()):
+        return NOT_LOOPBACK
     data = _live_tags()
     if not isinstance(data, dict) or not isinstance(data.get("models"), list):
         return "ollama did not answer"

@@ -1147,7 +1147,7 @@ def _drop_failed_eligibility(
             now = time.time()
             preferred = eligibility_routing.prefer_passed(kept, tj[0], tj[1], now)
             # LC-12b: the flag is unset, so the pass is the only consent: the chain must lead with it.
-            if eligibility_routing._require_passed_first.get() and not eligibility_routing.passed_model_leads(
+            if eligibility_routing.pass_only_call(exempt_reason) and not eligibility_routing.passed_model_leads(
                     preferred, tj[0], tj[1], now):
                 raise eligibility_routing.PassedModelNotInChain(
                     f"no routable passed local model leads the {tj[0]} chain")
@@ -1157,7 +1157,7 @@ def _drop_failed_eligibility(
         raise
     except Exception as exc:  # noqa: BLE001 - fail-open, except the pass-only text-job path (fail closed)
         from llm_router import eligibility_routing as _er_fc
-        if exempt_reason == _er_fc.TEXT_JOB_REASON and _er_fc._require_passed_first.get():
+        if _er_fc.pass_only_call(exempt_reason):
             _er_fc.record_fail_closed(_er_fc.FC_ELIGIBILITY_STEP, exc)
             raise _er_fc.EligibilityStepFailed(
                 f"the eligibility step failed ({type(exc).__name__}); local-only routing refuses") from exc
@@ -3925,6 +3925,24 @@ async def _dispatch_model_loop(
             )
 
         except Exception as e:
+            from llm_router.eligibility_routing import OverflowSwitchRefused as _OverflowRefused
+            if isinstance(e, _OverflowRefused):
+                # LC-12g: a policy refusal, not a provider fault. No health failure (two would bench the
+                # daemon), no attempt_failed row, no "failed ... trying next"; the pass-only chain has one
+                # model, so the walk stops. llm_text_job reads the cause off the exhaustion error.
+                await _notify(ctx, "warning", f"{model}: the input does not fit and switching to an unpassed "
+                                              "model is refused - local-only job stops here")
+                route_log.warning(
+                    "routing_policy_refusal",
+                    correlation_id=correlation_id,
+                    model=model,
+                    provider=provider,
+                    error_type=type(e).__name__,
+                    fallback_reason="overflow_switch_refused",
+                )
+                last_error = e
+                chain_errors.append((model, f"{type(e).__name__}: {e}"))
+                break
             _note_local_timeout(model, e)  # LOCAL-TIMEOUT-1
             if model.startswith("ollama/") and _is_timeout_error(e):
                 _local_timed_out_in_call = True  # N22
@@ -4052,8 +4070,7 @@ async def _dispatch_model_loop(
     # LC-12b / D-277: a pass-routed text job (flag unset) never walks the BUDGET chain, which can hold paid
     # cloud models; the primary chain is the passed local model alone, so exhausting it is the end.
     from llm_router import eligibility_routing
-    _pass_only_call = (eligibility_exempt_reason == eligibility_routing.TEXT_JOB_REASON
-                       and eligibility_routing._require_passed_first.get())
+    _pass_only_call = eligibility_routing.pass_only_call(eligibility_exempt_reason)
     if _pass_only_call and _would_fall_back:
         route_log.info(
             "emergency_fallback_skipped",
@@ -4418,7 +4435,7 @@ async def _dispatch_model_loop(
     raise RuntimeError(
         f"All models failed for {task_type.value}/{profile.value}. "
         f"Last error: {last_error}.{chain_summary}{setup_hint}"
-    )
+    ) from last_error  # LC-12g: llm_text_job reads an OverflowSwitchRefused cause
 
 
 #: R15. Reported stop reasons that mean the generation did not complete
@@ -5151,8 +5168,7 @@ async def route_and_call(
         # `_pass_only` is read here; `_pass_model` is whoever leads the chain after the eligibility step
         # (that step refuses unless a routable passed model leads). The final chain is cut to it below.
         from llm_router import eligibility_routing as _er
-        _pass_only = (eligibility_exempt_reason == _er.TEXT_JOB_REASON
-                      and _er._require_passed_first.get())
+        _pass_only = _er.pass_only_call(eligibility_exempt_reason)
         _pass_model: str | None = None
         if models_to_try and not model_override:
             try:
@@ -5270,8 +5286,8 @@ async def route_and_call(
                     _leads = (bool(_tj_ctx) and not is_ollama_cloud_model(_pass_model)
                               and _er.passed_model_leads([_pass_model], _tj_ctx[0], _tj_ctx[1], time.time()))
                     # LC-12f: the discovery cache can lag an `ollama cp` of a cloud model onto the passed name
-                    # by up to its TTL; one localhost GET of the live `/api/tags` row closes that window for
-                    # the path that sends user text.
+                    # by up to its TTL; one localhost GET of the live `/api/tags` row narrows that window, for
+                    # the path that sends user text, to the milliseconds between this check and the generate call.
                     _live_why = (await asyncio.to_thread(_er.live_check_refusal, _pass_model, _tj_ctx[0], time.time())
                                  if _leads else None)
                 except _er.EligibilityStepFailed:  # already counted by the helper; the cause text stays accurate
@@ -5387,7 +5403,10 @@ async def route_and_call(
         # Semantic dedup cache — skip the LLM call entirely when the same request
         # (same key) was answered recently: exact text, or cosine similarity ≥
         # threshold when Ollama is configured. Within 24 hours.
-        if task_type not in MEDIA_TASK_TYPES and not model_override:
+        # LC-12g / D-277: never on a pass-only text job. The check embeds the prompt through Ollama's
+        # /api/embeddings (urllib: honours HTTP_PROXY, no loopback check), and a hit could return an
+        # answer a cloud model wrote, which breaks "the local model alone".
+        if task_type not in MEDIA_TASK_TYPES and not model_override and not _pass_only:
             try:
                 from llm_router import semantic_cache
                 cached = await semantic_cache.check(prompt, task_type, key=_semantic_key)
@@ -5781,6 +5800,8 @@ async def route_and_call(
         _led_tok = (
             _LEDGER_SESSION_OVERRIDE.set(agent_session_id) if agent_session_id else None
         )
+        # LC-12g: providers and semantic_cache read the router's pass-only predicate for this dispatch.
+        _po_tok = _er.set_pass_only_dispatch(_pass_only)
         try:
             if _effective_timeout is not None and _effective_timeout > 0:
                 response = await asyncio.wait_for(
@@ -5877,6 +5898,7 @@ async def route_and_call(
             # leak into a later route on this task (nested/sequential calls).
             if _led_tok is not None:
                 _LEDGER_SESSION_OVERRIDE.reset(_led_tok)
+            _er.reset_pass_only_dispatch(_po_tok)
         # RED1-5-02: do NOT release _pending_spend here. This line is reached only
         # after `_dispatch_model_loop` returned a successful response, and every
         # success return in that loop already released the reservation exactly once

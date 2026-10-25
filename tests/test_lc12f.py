@@ -232,7 +232,7 @@ def test_live_check_refuses_a_non_loopback_daemon_without_connecting(live, monke
     monkeypatch.setattr(http.client, "HTTPConnection", _FakeConn)
     out = call_job()
     _drain()
-    assert _FakeConn.made == [] and live.state["tried"] == [] and "ollama did not answer" in out
+    assert _FakeConn.made == [] and live.state["tried"] == [] and er.NOT_LOOPBACK in out  # LC-12g: own reason
 
 
 def test_live_check_asks_the_daemon_litellm_uses(monkeypatch):
