@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from unittest.mock import patch
 
 from llm_router.scorer import score_model, score_all_models
 from llm_router.types import COMPLEXITY_WEIGHTS, ModelCapability, ProviderTier, TaskType
@@ -40,7 +41,9 @@ class TestScoreModel:
 
     def test_local_free_model_high_score_zero_pressure(self):
         """Local model with no budget pressure should score near the top."""
-        sm = score_model("ollama/qwen3:32b", "code", "simple", pressure=0.0)
+        # W1-3: local quality came from the deleted invented table; supply a measured one.
+        with patch("llm_router.scorer.get_quality_score", return_value=0.70):
+            sm = score_model("ollama/qwen3:32b", "code", "simple", pressure=0.0)
         assert sm.score > 0.8, f"expected high score for free local, got {sm.score}"
 
     def test_unknown_complexity_falls_back_to_moderate(self):
@@ -61,9 +64,13 @@ class TestScoreModel:
     def test_quality_model_wins_on_complex_task(self):
         """High-quality model should beat cheap model on complex tasks."""
         # Cheap model: moderate quality, zero pressure
-        cheap = score_model("ollama/llama:8b", "code", "complex", pressure=0.0)
-        # Premium model: high quality, some pressure
-        premium = score_model("ollama/qwen3-coder:32b", "code", "complex", pressure=0.2)
+        # W1-3: explicit measured scores replace the deleted invented local table.
+        with patch("llm_router.scorer.get_quality_score",
+                   side_effect=lambda m, t: {"ollama/llama:8b": 0.55,
+                                             "ollama/qwen3-coder:32b": 0.76}[m]):
+            cheap = score_model("ollama/llama:8b", "code", "complex", pressure=0.0)
+            # Premium model: high quality, some pressure
+            premium = score_model("ollama/qwen3-coder:32b", "code", "complex", pressure=0.2)
         # qwen3-coder has higher quality score than generic llama
         assert premium.score > cheap.score
 
