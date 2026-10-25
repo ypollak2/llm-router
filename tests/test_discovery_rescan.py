@@ -322,3 +322,32 @@ def test_env_override_and_restoration_rebuild_despite_throttle(tmp_path, monkeyp
     assert _holders(table, "fake-env:1b")
     monkeypatch.delenv("OLLAMA_BUDGET_MODELS")
     assert not _holders(table, "fake-env:1b")
+
+
+def _carry_scenario():
+    """Cached seats: claude connected seen at t=10000. Later a blind process (claude CLI
+    not found) that also sees codex newly connected."""
+    scan.rescan(force=True, probe=lambda: [], now=10000,
+                detect=lambda: fake_seats(10000, claude=seats.Seat(kind="claude.ai", plan="max")))
+    blind = lambda now: fake_seats(now, claude=seats.Seat(reason="claude CLI not found"),  # noqa: E731
+                                   codex=seats.Seat(kind="chatgpt", plan="plus"))
+    return blind
+
+
+def test_carried_seat_does_not_hide_another_seat_change():
+    blind = _carry_scenario()
+    res = scan.rescan(force=True, probe=lambda: [], detect=lambda: blind(10600), now=10600)
+    assert res.seats_changed == ["codex"]
+    saved = seats.load_seats()
+    assert saved.codex.status == "connected", "codex change missing from seats.json"
+    assert saved.claude.status == "connected"                  # still carried
+
+
+def test_carry_anchor_survives_saving_another_seat_change():
+    blind = _carry_scenario()
+    scan.rescan(force=True, probe=lambda: [], detect=lambda: blind(10600), now=10600)
+    assert seats.load_seats().age_seconds(10600) == 600        # detected_at not advanced
+    scan.rescan(force=True, probe=lambda: [], detect=lambda: blind(10000 + 3500), now=10000 + 3500)
+    assert seats.load_seats().claude.status == "connected"     # inside the hour
+    scan.rescan(force=True, probe=lambda: [], detect=lambda: blind(10000 + 3700), now=10000 + 3700)
+    assert seats.load_seats().claude.status != "connected"     # carry ended on time

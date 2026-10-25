@@ -59,6 +59,7 @@ LEARN_NAMES = ("claude", "codex", "gemini", "gh", "node", "ollama")
 INTERPRETERS = ("node",)
 LEARNED_MAX_AGE_S = 7 * 24 * 3600
 LEARN_REFRESH_S = 3600
+LEARN_LOCK_TIMEOUT_S = 0.5
 # Generic install locations (user-local bin, Homebrew on Apple silicon, the
 # classic /usr/local). Searched after the learned dirs; never user-specific.
 FALLBACK_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -258,28 +259,45 @@ def search_path(env: dict | None = None, now: float | None = None) -> str:
 
 
 def _learn(name: str, found: str, now: float) -> None:
-    """Record the dir *found* is in. Writes only on a new entry or a stale one."""
-    d = os.path.dirname(os.path.abspath(found))
-    dirs = _read_learned()
-    entry = dirs.get(d) if isinstance(dirs.get(d), dict) else {}
-    names = sorted(set(entry.get("names") or []) | {name})
-    seen = entry.get("seen_at")
-    if names == entry.get("names") and isinstance(seen, (int, float)) and 0 <= now - seen < LEARN_REFRESH_S:
+    """Record the dir *found* is in. Writes only on a new entry or a stale one.
+
+    A relative hit (a relative PATH entry, resolved against this process's cwd)
+    is not recorded: other processes have other cwds. The read-modify-write runs
+    under an exclusive lock so two processes cannot lose each other's entry."""
+    if not os.path.isabs(found):
         return
-    dirs[d] = {"names": names, "seen_at": now}
+    d = os.path.normpath(os.path.dirname(found))
+
+    def fresh(dirs: dict) -> bool:
+        entry = dirs.get(d) if isinstance(dirs.get(d), dict) else {}
+        seen = entry.get("seen_at")
+        return (name in (entry.get("names") or []) and isinstance(seen, (int, float))
+                and 0 <= now - seen < LEARN_REFRESH_S)
+
+    if fresh(_read_learned()):          # common case: no lock, no write
+        return
     path = _cli_path_file()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w") as f:
-                json.dump({"schema": 1, "dirs": dirs}, f, indent=2, sort_keys=True)
-            os.replace(tmp, path)
-        except BaseException:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
+        from llm_router.file_lock import exclusive_lock
+        with exclusive_lock(path.with_name(path.name + ".lock"), timeout=LEARN_LOCK_TIMEOUT_S) as locked:
+            if not locked:              # best-effort: the next sighting re-learns
+                return
+            dirs = _read_learned()
+            if fresh(dirs):
+                return
+            entry = dirs.get(d) if isinstance(dirs.get(d), dict) else {}
+            dirs[d] = {"names": sorted(set(entry.get("names") or []) | {name}), "seen_at": now}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    json.dump({"schema": 1, "dirs": dirs}, f, indent=2, sort_keys=True)
+                os.replace(tmp, path)
+            except BaseException:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+                raise
     except OSError as exc:
         from llm_router import failopen
         failopen.record("CHZ-FO-CLI-PATH-WRITE", exc)
