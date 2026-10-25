@@ -101,7 +101,7 @@ def _ts(value: Any) -> float | None:
 
 
 def tally(rows: Iterable[dict], *, since: float, until: float, brief_sha: str | None = None,
-          flip: float | None = None) -> dict[str, dict]:
+          flip: float | None = None, identity_sha: str | None = None) -> dict[str, dict]:
     """``{task_group: counts}`` over the lane A verdict ``rows`` stamped inside ``[since, until]``.
 
     One pair per step: rows are first reduced to the first verdict of each ``(session_id, msg_count)``
@@ -111,7 +111,12 @@ def tally(rows: Iterable[dict], *, since: float, until: float, brief_sha: str | 
     cannot_judge, a null label, and the judge failures of ``shadow_frontier.judge_pending``, which are verdict rows
     marked cannot_judge with a reason), ``excluded`` (``{reason: count}``) and ``ids`` (the decided pairs' task ids,
     for the source hash). With a ``flip``, lane A rows stamped before it are never counted and are reported as
-    ``excluded["before_flip"]`` (every such row, before the dedupe)."""
+    ``excluded["before_flip"]`` (every such row, before the dedupe).
+
+    ``identity_sha`` (D-302 point 4, D-303): the sha of the identities the batch is stamped with. Only pairs whose own
+    ``identity_sha`` (stamped by the proxy at sample time) equals it count; a different one is
+    ``excluded["identity_mismatch"]``, a pair with none (legacy) ``excluded["identity_missing"]``. ``None`` skips the
+    check (the writer always passes the stamp)."""
     if brief_sha is None:
         brief_sha = shadow_frontier.JUDGE_BRIEF_SHA256
     out: dict[str, dict] = {}
@@ -148,6 +153,14 @@ def tally(rows: Iterable[dict], *, since: float, until: float, brief_sha: str | 
             exclude(name, "missing_tags")
             continue
         g = group(name)
+        if identity_sha is not None:
+            pair_sha = r.get("identity_sha")
+            if not (isinstance(pair_sha, str) and pair_sha):
+                exclude(name, "identity_missing")
+                continue
+            if pair_sha != identity_sha:
+                exclude(name, "identity_mismatch")
+                continue
         if r.get("judge_model") != JUDGE_MODEL or r.get("judge_brief_sha256") != brief_sha:
             exclude(name, "judge_mismatch")
             continue
@@ -244,8 +257,9 @@ def write_all(*, now: float | None = None, since: float | None = None, until: fl
     if since is None:
         since = flip if flip is not None else until - lane_a_shadow.WINDOW_DAYS * 86400.0
     rows = _read_jsonl(verdicts or _verdicts_path())
-    groups = tally(rows, since=since, until=until, flip=flip)
     identity_row = lane_a_shadow.read_identity_row()
+    stamp_sha = lane_a_shadow.identity_sha(identity_row["identity"]) if identity_row is not None else None
+    groups = tally(rows, since=since, until=until, flip=flip, identity_sha=stamp_sha)
     if flip is not None and identity_row is not None and until >= flip + lane_a_shadow.FINAL_WINDOW_DAYS * 86400.0:
         # NIT-2: at flip + 28 d a task group the proxy could serve but that has no lane A row still closes
         # NOT INFORMATIVE (n = 0). The groups come from the proxy's recorded identity; with none recorded the

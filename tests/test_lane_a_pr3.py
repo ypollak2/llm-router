@@ -78,11 +78,15 @@ def _ledger() -> list[dict]:
     return haiku_guard.read_jsonl(sf.ledger_path())
 
 
+# PR4: every pair carries the identity_sha of the proxy that sampled it; the tests' proxy runs the bundled policy
+BUNDLED_SHA = lane_a_shadow.identity_sha(lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None)))
+
+
 def _verdict(i, *, group="tech_op", a=True, f=True, cj=False, ts=None, phase="fill", lane="A", **kw):
     row = {"ts": NOW - 100 - i if ts is None else ts, "task_id": f"t{i}", "acceptable": None if cj else a,
            "frontier_acceptable": None if cj else f, "cannot_judge": cj, "judge_model": "sonnet",
            "judge_brief_sha256": sf.JUDGE_BRIEF_SHA256, "lane": lane, "task_group": group, "rate_phase": phase,
-           "served_body_sha": "sha-x", "replay_body_sha": "sha-x"}
+           "served_body_sha": "sha-x", "replay_body_sha": "sha-x", "identity_sha": BUNDLED_SHA}
     row.update(kw)
     if lane is None:
         for k in ("lane", "task_group", "rate_phase", "judge_brief_sha256", "served_body_sha", "replay_body_sha"):
@@ -141,8 +145,8 @@ def test_decided_pairs_count_only_lane_a_tagged_decided_rows_of_the_group_in_the
     rows = [_verdict(1), _verdict(2, group="code"), _verdict(3, cj=True), _verdict(4, lane=None),
             _verdict(5, phase=None), _verdict(6, ts=since - 1), _verdict(7, a=False, f=False),
             dict(_verdict(8), acceptable=None)]
-    assert lane_a_shadow.count_decided(rows, "tech_op", since=since, until=until) == 2
-    assert lane_a_shadow.count_decided(rows, "code", since=since, until=until) == 1
+    assert lane_a_shadow.count_decided(rows, "tech_op", since=since, until=until, identity_sha=BUNDLED_SHA) == 2
+    assert lane_a_shadow.count_decided(rows, "code", since=since, until=until, identity_sha=BUNDLED_SHA) == 1
 
 
 async def test_fill_reaches_60_decided_pairs_per_task_group_then_drops_to_2_percent(on):
@@ -256,7 +260,8 @@ def test_a_lane_context_exists_only_for_a_step_lane_a_served():
               "tier_task_type": "query", "lane_a_conf": 0.7}
     ctx = lane_a_shadow.context_from_row(served, body)
     assert ctx == {"lane": "A", "session_id": "s", "msg_count": 3, "task_group": "tech_op",
-                   "prev_tool_class": "technical_op", "conf": 0.7, "served_body_sha": None}
+                   "prev_tool_class": "technical_op", "conf": 0.7, "served_body_sha": None,
+                   "identity_sha": None}
     for reason in (None, "eligible", "retried_original", "off", "breaker_open_reserved", "error", "low_conf"):
         assert lane_a_shadow.context_from_row(dict(served, lane_a_reason=reason), body) is None, reason
     assert "prompt" not in json.dumps(ctx).lower() and CANARY_PROMPT not in json.dumps(ctx)
@@ -972,7 +977,7 @@ def test_reading_the_trip_changes_no_file(home):
 def _lane_pair(i, **kw):
     return _pair(f"J{i}", lane="A", task_group="tech_op", rate_phase="fill", rate=1.0, session_id=f"s{i}",
                  msg_count=i, conf=0.7, prev_tool_class="technical_op", served_body_sha="sha-x",
-                 replay_body_sha="sha-x", **kw)
+                 replay_body_sha="sha-x", identity_sha=BUNDLED_SHA, **kw)
 
 
 def _judge(run, pairs):
@@ -1049,7 +1054,7 @@ def test_a_cannot_judge_row_with_boolean_labels_is_not_decided(on):
     assert not lane_a_shadow.is_decided(odd[0])
     t = lqw.tally(_pairs(60, 60) + odd, since=0, until=NOW + 1)["tech_op"]
     assert (t["n"], t["k_a"], t["k_f"], t["cannot_judge"]) == (60, 60, 60, 5)
-    assert lane_a_shadow.count_decided(odd, "tech_op", since=0, until=NOW + 1) == 0   # and not for the phase flip
+    assert lane_a_shadow.count_decided(odd, "tech_op", since=0, until=NOW + 1, identity_sha=BUNDLED_SHA) == 0   # and not for the phase flip
 
 
 # ── SHOULD-2: one pair per step ──────────────────────────────────────────────
@@ -1061,7 +1066,7 @@ def test_60_verdict_rows_for_one_step_give_n_equal_1(on):
     _write_verdicts(rows)
     out = lqw.write_all(now=NOW)
     assert out["written"] == 0 and out["groups"]["tech_op"]["status"] == "n_below_min"
-    assert lane_a_shadow.count_decided(rows, "tech_op", since=0, until=NOW + 1) == 1       # nor does it flip the phase
+    assert lane_a_shadow.count_decided(rows, "tech_op", since=0, until=NOW + 1, identity_sha=BUNDLED_SHA) == 1       # nor does it flip the phase
 
 
 def test_the_first_verdict_of_a_step_wins_whatever_the_file_order(on):
@@ -1335,7 +1340,7 @@ def test_the_judge_model_is_imported_not_repeated():
 def test_the_phase_count_ignores_rows_the_writer_excludes(on):
     rows = ([_verdict(i) for i in range(30)] + [_verdict(100 + i, judge_model="haiku") for i in range(30)]
             + [_verdict(200 + i, judge_brief_sha256="0" * 64) for i in range(30)])
-    assert lane_a_shadow.count_decided(rows, "tech_op", since=0, until=NOW + 1) == 30
+    assert lane_a_shadow.count_decided(rows, "tech_op", since=0, until=NOW + 1, identity_sha=BUNDLED_SHA) == 30
 
 
 def test_excluded_counts_are_written_into_the_row(on):
@@ -1651,7 +1656,7 @@ async def test_a_proxy_started_with_its_own_tier_policy_stamps_that_policy_and_s
     assert lane_a_shadow.read_flip_row()["identity"] == mine
     assert stat.S_IMODE(lane_a_shadow.identity_path().stat().st_mode) == 0o600
     t = time.time() + 1
-    _write_verdicts(_pairs(60, 60, ts=t))
+    _write_verdicts([{**r, "identity_sha": lane_a_shadow.identity_sha(mine)} for r in _pairs(60, 60, ts=t)])
     out = lqw.write_all(now=t + 500)
     assert out["written"] == 1
     (row,) = lane_quality.read_rows()
@@ -1759,3 +1764,139 @@ def test_an_invalidated_row_is_valid_again_when_the_proxy_identity_returns(home)
     lane_a_shadow.record_identity(ident)                                                 # and is reverted
     sampled, invalid = lane_quality.sampled_report(rows, NOW + 1)
     assert sampled and not invalid
+
+
+# ---- PR4: per-pair identity (SHOULD-A) and the identity record without the shadow (SHOULD-B) ----
+
+def test_pairs_collected_under_policy_a_earn_nothing_after_a_restart_under_policy_b(home, monkeypatch):
+    monkeypatch.setenv(sf.ENV_FLAG, "on")
+    ident_a = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None))
+    ident_b = {**ident_a, "prompt_set_sha": "b" * 16}
+    lane_a_shadow.record_identity(ident_a)
+    t = time.time() + 1
+    _write_verdicts([{**r, "identity_sha": lane_a_shadow.identity_sha(ident_a)} for r in _pairs(60, 60, ts=t)])
+    lane_a_shadow.record_identity(ident_b)               # the proxy restarts with policy B before the writer runs
+    out = lqw.write_all(now=t + 500)
+    assert out["written"] == 0 and not lane_quality.read_rows()
+    g = out["groups"]["tech_op"]
+    assert g["n"] == 0 and g["excluded"] == {"identity_mismatch": 60}
+    assert lane_a_shadow.identity_sha(ident_a) != lane_a_shadow.identity_sha(ident_b)
+
+
+def test_a_legacy_pair_without_an_identity_sha_is_excluded_as_identity_missing(on):
+    t = time.time() + 1
+    rows = [{k: v for k, v in r.items() if k != "identity_sha"} for r in _pairs(60, 60, ts=t)]
+    _write_verdicts(rows)
+    out = lqw.write_all(now=t + 500)
+    assert out["written"] == 0 and out["groups"]["tech_op"]["excluded"] == {"identity_missing": 60}
+
+
+def test_a_window_that_spans_a_restart_counts_only_the_pairs_of_the_stamped_identity(on):
+    t = time.time() + 1
+    rows = _pairs(60, 60, ts=t)
+    _write_verdicts([{**r, "identity_sha": "f" * 16} if i < 30 else r for i, r in enumerate(rows)])
+    out = lqw.write_all(now=t + 500)
+    assert out["written"] == 0 and out["groups"]["tech_op"]["n"] == 30
+    assert out["groups"]["tech_op"]["excluded"] == {"identity_mismatch": 30}
+
+
+def test_a_served_pair_context_carries_the_identity_sha_through_to_the_verdict_fields():
+    row = {"lane_a_reason": lane_a.R_SERVED, "session_id": "s", "tier_task_type": "code", "prev_tool_class": "x"}
+    ctx = lane_a_shadow.context_from_row(row, {"messages": []}, "abc123")
+    assert ctx["identity_sha"] == "abc123" and "identity_sha" in sf.LANE_KEYS
+    assert sf._lane_fields({"lane": ctx, "rate": 1, "rate_phase": "fill"})["identity_sha"] == "abc123"
+
+
+@pytest.mark.parametrize("lane_cfg,env,expect", [(LANE_ON, "on", True), (OFF_LANE, "on", False), (LANE_ON, None, False)])
+async def test_with_the_shadow_off_the_identity_record_is_refreshed_whenever_lane_a_serving_is_on(
+        home, tmp_path, monkeypatch, lane_cfg, env, expect):
+    monkeypatch.delenv(sf.ENV_FLAG, raising=False)
+    if env:
+        monkeypatch.setenv(lane_a.ENV_SWITCH, env)
+    stale = {**lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None)), "breaker_sha": "old"}
+    if expect:
+        lane_a_shadow.record_identity(stale)
+    app = _app(tmp_path, _raw({**lane_cfg, "tau": 0.9}), UpstreamU())
+    await _post(app, _body(continuation=False, sid="a"))
+    assert not lane_a_shadow.flip_path().exists()                       # the FLIP still needs the shadow
+    if expect:
+        mine = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.from_dict(_raw({**lane_cfg, "tau": 0.9})))
+        assert lane_a_shadow.current_identities() == mine != stale
+    else:
+        assert not lane_a_shadow.identity_path().exists()               # lane off: nothing written
+
+
+async def test_a_restart_with_the_shadow_off_and_a_changed_policy_invalidates_the_old_final_row(
+        home, tmp_path, monkeypatch):
+    monkeypatch.delenv(sf.ENV_FLAG, raising=False)
+    monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
+    lane_a_shadow.record_identity(lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None)))
+    t = time.time() + 1
+    _write_verdicts(_pairs(60, 60, ts=t))
+    assert lqw.write_all(now=t + 500)["written"] == 1
+    (row,) = lane_quality.read_rows()
+    assert lane_quality.sampled_report([row], t + 600)[0]
+    app = _app(tmp_path, _raw({**LANE_ON, "tau": 0.9}), UpstreamU())    # restart: shadow off, policy changed
+    await _post(app, _body(continuation=False, sid="a"))
+    sampled, invalid = lane_quality.sampled_report([row], t + 600)
+    assert not sampled and invalid
+
+
+async def test_the_fill_phase_counts_only_pairs_of_the_current_identity(on):
+    """SHOULD-1 (#736 review): 60 decided pairs under policy A, then the record changes to B: B is still in fill
+    (the writer counts 0 pairs under B, so the sampler must not starve it at 2%). Legacy pairs do not count."""
+    _usage()
+    _write_verdicts([_verdict(i) for i in range(60)])                       # 60 under A (the bundled record)
+    since, until = NOW - lane_a_shadow.WINDOW_DAYS * 86400.0, NOW
+    cur = lane_a_shadow.identity_sha(lane_a_shadow.current_identities())
+    assert cur == BUNDLED_SHA
+    assert lane_a_shadow.count_decided(sf_rows := lane_a_shadow.read_verdict_rows(sf.verdicts_path()), "tech_op",
+                                       since=since, until=until, identity_sha=cur) == 60
+    fs, rep = _shadow(), FakeReplay()
+    skip_n = _step_with_key(False)                                          # a key the 2% steady rate would skip
+    await _sample(fs, rep, _ctx(n=skip_n), task_id="a")
+    assert (_ledger()[-1]["rate_phase"], _ledger()[-1]["outcome"]) == ("steady", "skipped")
+    lane_a_shadow.record_identity({**lane_a_shadow.current_identities(), "lane_a_model": "claude-haiku-NEW"})
+    new = lane_a_shadow.identity_sha(lane_a_shadow.current_identities())
+    assert new != cur
+    assert lane_a_shadow.count_decided(sf_rows, "tech_op", since=since, until=until, identity_sha=new) == 0
+    await _sample(fs, rep, _ctx(n=skip_n), task_id="b")
+    last = _ledger()[-1]
+    assert (last["rate_phase"], last["rate"], last["outcome"]) == ("fill", 1.0, "replayed")
+    legacy = [{k: v for k, v in _verdict(100 + i).items() if k != "identity_sha"} for i in range(60)]
+    assert lane_a_shadow.count_decided(legacy, "tech_op", since=0, until=NOW + 1, identity_sha=new) == 0
+    assert lane_a_shadow.count_decided(legacy, "tech_op", since=0, until=NOW + 1, identity_sha=None) == 0
+
+
+async def test_a_served_step_carries_the_batch_identity_through_server_sampler_judge_and_writer(
+        on, tmp_path, monkeypatch):
+    """SHOULD-2 (#736 review): the real server path (``pair_identity_sha``) -> sampler -> pair -> verdict (fake
+    judge) -> writer. A non-bundled policy (tau 0.5), so a hand-stamped bundled sha cannot pass by accident. The
+    pair's sha must equal the sha of the policy file the proxy loaded AND the batch stamp (the record); a hash
+    that differs by serialization (mutant: reversed key order, no sort_keys) makes n 0 and fails here."""
+    monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
+    _usage(updated=time.time())
+    app = _app(tmp_path, _raw({**LANE_ON, "tau": 0.5}), UpstreamU())
+    r = await _post(app, _body(sid="e2e"))
+    assert r.status_code == 200
+    await app.state.frontier_shadow.drain()
+    pairs = [json.loads(line) for f in sf.pairs_dir().glob("*.jsonl") for line in f.read_text().splitlines()]
+    assert len(pairs) == 1
+    loaded = lane_a_shadow.identity_sha(lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(str(tmp_path / "tiers.yaml"))))
+    assert loaded != BUNDLED_SHA and pairs[0]["identity_sha"] == loaded
+
+    def judge(brief, item):
+        return {"result": json.dumps({"acceptable_A": True, "acceptable_B": True, "cannot_judge": False}),
+                "cost_usd": 0.0, "model_ok": True}
+    out = sf.judge_pending(run=judge, rng=lambda: 0.99, clock=time.time, usage_path=paths.state_path("usage.json"))
+    assert out["verdicts"] == 1
+    (v,) = haiku_guard.read_jsonl(sf.verdicts_path())
+    batch = lane_a_shadow.identity_sha(lane_a_shadow.current_identities())     # the record the proxy wrote
+    assert v["identity_sha"] == batch == loaded
+    t = lqw.tally([v], since=0, until=time.time() + 10, identity_sha=batch)
+    assert t["tech_op"]["n"] == 1 and t["tech_op"]["excluded"] == {}
+    rows = [{**v, "task_id": f"c{i}", "session_id": f"s{i}", "msg_count": i + 2, "ts": time.time() + i * 0.001}
+            for i in range(60)]                                                # 60 more distinct steps, same stamp
+    _write_verdicts(rows)
+    out = lqw.write_all(now=time.time() + 100)
+    assert out["written"] == 1 and out["groups"]["tech_op"]["n"] == 61 and out["groups"]["tech_op"]["excluded"] == {}

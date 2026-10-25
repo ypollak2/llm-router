@@ -775,24 +775,40 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     # at startup. Off: None, nothing is attached, 0 Frontier calls.
     frontier = shadow_frontier.FrontierShadow() if shadow_frontier.enabled() else None
 
+    pair_sha_cache: list = []
+
+    def pair_identity_sha() -> str | None:
+        """PR4: the sha of the identities THIS proxy runs with, stamped on every lane A pair at sample time so the
+        writer can refuse a pair collected under another policy. Computed once; None when it cannot be."""
+        if not pair_sha_cache:
+            try:
+                pair_sha_cache.append(lane_a_shadow.identity_sha(lane_a_shadow.identities_of(tier_policy)))
+            except Exception as exc:  # noqa: BLE001 - a pair without a stamp is excluded, never a failed call
+                failopen.record("LR-FO-LANE-A-PAIR-SHA", exc)
+                return None
+        return pair_sha_cache[0]
+
     flip_stamped = False
     flip_busy = False          # a write is in flight: concurrent first requests do not spawn another thread
     flip_retry_at = 0.0        # after a failed write, no new attempt before this monotonic time
 
     async def stamp_flip() -> None:
-        """D-302: the owner flip is the FIRST request that sees all four lane A switches on (YAML ``lane_a.enabled``,
-        ``LLM_ROUTER_PROXY_LANE_A=on``, ``haiku_rewrite``, the shadow flag), eligible step or not. Any switch off:
-        nothing is read from or written to disk. With all four on, the same write also records the identities of
-        the policy THIS proxy loaded (D-303: ``lane_a_identity.json``), whatever file or flag it came from. The
+        """D-302: with the three serving switches on (YAML ``lane_a.enabled``, ``LLM_ROUTER_PROXY_LANE_A=on``,
+        ``haiku_rewrite``) the first request records the identities of the policy THIS proxy loaded (D-303:
+        ``lane_a_identity.json``), whatever file or flag it came from, eligible step or not; the owner flip needs
+        all four (the shadow flag too) and is written by the same call. Any serving switch off: nothing is read
+        from or written to disk. The
         write (first flip wins, 0600) runs in a worker thread, once per process, by one request at a time; after a
         failed write the next try waits ``LANE_A_FLIP_BACKOFF_S``. It never costs the call."""
         nonlocal flip_stamped, flip_busy, flip_retry_at
-        if flip_stamped or flip_busy or tier_policy is None or frontier is None:
+        if flip_stamped or flip_busy or tier_policy is None:
             return
         try:
             seen = dict(yaml_enabled=bool(tier_policy.lane_a.enabled), env_on=lane_a.env_on(),
-                        haiku_rewrite=bool(tier_policy.haiku_rewrite), shadow_on=shadow_frontier.enabled())
-            if not all(seen.values()) or time.monotonic() < flip_retry_at:
+                        haiku_rewrite=bool(tier_policy.haiku_rewrite),
+                        shadow_on=frontier is not None and shadow_frontier.enabled())
+            if not (seen["yaml_enabled"] and seen["env_on"] and seen["haiku_rewrite"]) \
+                    or time.monotonic() < flip_retry_at:
                 return
             flip_busy = True
             await asyncio.to_thread(lane_a_shadow.maybe_record_flip, time.time(), **seen,
@@ -1268,7 +1284,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if row.get("lane_a_reason") == lane_a.R_SERVED:
                 # prereg section 3: the sha of the bytes the Frontier replay must send; the pair is void if the two differ
                 row["lane_a_body_sha"] = shadow_frontier.body_sha(raw)
-            on_reply = frontier_on_reply(request, raw, row, on_reply, lane_a_shadow.context_from_row(row, body))
+            on_reply = frontier_on_reply(request, raw, row, on_reply, lane_a_shadow.context_from_row(row, body, pair_identity_sha()))
         key = conversation_key(body, row.get("session_id"))
 
         def _on_usage(usage) -> None:
