@@ -39,6 +39,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
+from llm_router import state_files
 
 __all__ = [
     "EXPORT_SCHEMA",
@@ -118,7 +119,7 @@ def export_rows(
 
     column_list = ", ".join(EXPORT_SCHEMA)
 
-    conn = sqlite3.connect(str(source_db))
+    conn = state_files.connect_sqlite(source_db, create=False)
     try:
         # LEDGER-ERR-1: a failed or cache-served call is not a routing decision to export.
         where.append(real_decision_sql(conn))
@@ -210,7 +211,7 @@ def import_rows(
     cost; those rows are silently dropped (the importer is best-effort).
     """
     team_db.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(team_db))
+    conn = sqlite3.connect(str(team_db))  # shared team db: a user-chosen, possibly multi-user path, not private state
     try:
         ensure_team_schema(conn)
         scanned = inserted = duplicate = invalid = 0

@@ -190,13 +190,13 @@ For non-interactive setup, write ~/.llm-router/.env directly.""",
     # G2: Initialize ~/.llm-router/ directory and usage database so the first
     # `llm-router status` / `llm-router savings-report` command doesn't fail on a
     # missing directory. Done here so it happens before hooks start writing.
-    import sqlite3 as _sqlite3
+    from llm_router import state_files
     _state_dir = paths.llm_router_home()
     try:
         _state_dir.mkdir(parents=True, exist_ok=True)
         _usage_db = _state_dir / "usage.db"
         if not _usage_db.exists():
-            _conn = _sqlite3.connect(str(_usage_db))
+            _conn = state_files.connect_sqlite(_usage_db)
             _conn.execute(
                 "CREATE TABLE IF NOT EXISTS usage ("
                 "  id INTEGER PRIMARY KEY AUTOINCREMENT,"

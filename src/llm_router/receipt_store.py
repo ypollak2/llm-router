@@ -17,10 +17,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import aiosqlite
 
 from llm_router.contract import RoutingContract
 from llm_router.gates import GateResult
+from llm_router import state_files
 
 def _db_path() -> Path:
     """Where receipts.db lives, resolved PER CALL.
@@ -129,7 +129,7 @@ async def store_receipt(receipt: Receipt) -> None:
         # Daemon thread: store_receipt runs fire-and-forget; if the loop
         # shuts down before this task finishes, the `async with` never exits
         # and a non-daemon aiosqlite worker thread would hang interpreter exit.
-        _conn = aiosqlite.connect(str(_db_path()))
+        _conn = state_files.connect_aiosqlite(_db_path())
         # See cost._get_db: mark the worker thread daemon before it starts
         # (aiosqlite >=0.22 stores it as `_thread`; older versions were a
         # Thread subclass) so a dropped pending write can't block exit.
@@ -175,7 +175,7 @@ async def get_session_receipts(since_timestamp: float) -> list[dict]:
         if not _db_path().exists():
             return []
         from llm_router.aiosqlite_util import mark_worker_daemon
-        _conn = aiosqlite.connect(str(_db_path()))
+        _conn = state_files.connect_aiosqlite(_db_path(), create=False)
         mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
         async with _conn as db:
             await db.execute(_CREATE_TABLE)

@@ -21,6 +21,7 @@ from typing import Optional
 from llm_router.savings import net_saved
 
 from llm_router import paths
+from llm_router import state_files
 
 
 
@@ -84,7 +85,7 @@ def fetch_session_decisions(
         return []
 
     try:
-        conn = sqlite3.connect(_db_path())
+        conn = state_files.connect_sqlite(_db_path(), create=False)
         conn.row_factory = sqlite3.Row
 
         start_iso = start.isoformat()
@@ -123,7 +124,7 @@ def fetch_session_corrections(
         return []
 
     try:
-        conn = sqlite3.connect(_db_path())
+        conn = state_files.connect_sqlite(_db_path(), create=False)
         conn.row_factory = sqlite3.Row
 
         start_iso = start.isoformat()

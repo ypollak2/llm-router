@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 2
+# llm_router-hook-version: 3
 """Stop hook — soft stop enforcement for direct text answers.
 
 When Claude answers a Q&A prompt in plain text (no tool call), the
@@ -18,6 +18,18 @@ import os
 import sys
 import time
 from pathlib import Path
+
+# W0-4b / S7: state files created by this hook are 0600 from creation (a plain open() makes
+# 0666 & ~umask = 0644, readable by other local users). Stdlib only: the hook may run
+# where the llm_router package is not importable, so it cannot use llm_router.state_files.
+def _priv_open(path, mode="a", **kw):
+    return open(path, mode, opener=lambda p, f: os.open(p, f, 0o600), **kw)
+
+
+def _priv_write_text(path, data, encoding=None):
+    with _priv_open(path, "w", encoding=encoding) as fh:
+        return fh.write(data)
+
 
 def _router_home():
     """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
@@ -109,7 +121,7 @@ def _increment_strikes(session_id: str, task_type: str, expected_tool: str) -> i
     data["last_at"] = time.time()
     try:
         _router_dir().mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data))
+        _priv_write_text(path, json.dumps(data))
     except OSError:
         pass
     return data["count"]
@@ -119,7 +131,7 @@ def _log_direct_answer(session_id: str, expected_tool: str, strikes: int) -> Non
     try:
         _router_dir().mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        with _log_path().open("a", encoding="utf-8") as f:
+        with _priv_open(_log_path(), "a", encoding="utf-8") as f:
             # chz-surface-ok: strike LOG record — logical name, tier-independent.
             f.write(
                 f"[{ts}] DIRECT_ANSWER session={session_id[:12]} "
