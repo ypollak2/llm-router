@@ -230,6 +230,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_LOCAL_GATE": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_LOCAL_SHADOW": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIERS": ("llm_router", "proxy/server.py", 1),
+    "LLM_ROUTER_PROXY_LANE_A": ("llm_router", "proxy/lane_a.py", 1),
     "LLM_ROUTER_PROXY_TIER_POLICY": ("llm_router", "proxy/server.py", 1),
     # P2.2-A: routing authority, route (default) | advise; authority.py, per request.
     "LLM_ROUTER_AUTHORITY": ("llm_router", "authority.py", 1),

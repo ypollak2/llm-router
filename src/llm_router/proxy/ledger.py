@@ -143,6 +143,14 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
                         ``tier_arm_bucket`` is bucket(session_id, turn) = sha256(session|turn|salt)
                         as a full-precision fraction, so anyone can recompute the assignment. Absent = not in the arm
 
+  lane_a_reason, lane_a_conf
+                        Lane A (``proxy.lane_a``, D-285; default off). On EVERY continuation row, even
+                        with the lane off: ``lane_a_reason`` is one of ``lane_a.REASONS`` (a closed set;
+                        null if the value is not in it) and ``lane_a_conf`` is the engine's confidence on
+                        the newest human prompt, or null when the engine did not run or gave none. Never
+                        invented. ``eligible`` = every gate passed and a switch was off; ``served`` = the
+                        Haiku tier answered. Turn-first / sub-agent rows from a pinned model carry them too.
+
 Cost fields, on EVERY row (``proxy.cost_accounting``; for rows written since #261,
 null = unknown, never 0; rows written before #261 carry zeros for unknown usage):
   served_by, anthropic_usage, anthropic_cost_usd, counterfactual_cost_usd

@@ -542,6 +542,65 @@ narrow, logged exception, off unless `haiku_arm_share` is set (a fraction 0-1; a
 - **Cost note:** the turn after a treated one returns to the pinned model, so that call re-reads the Opus cache
   prefix; a treated turn pays a cold Haiku prefix. Quota-pressure caps are unaffected (they only move calls down).
 
+### Lane A (`proxy/lane_a.py`, D-285): Haiku for confident continuation steps (default OFF)
+
+A continuation is a step that answers the results of the assistant's last tool calls. Lane A lets the Haiku
+tier serve such a step despite `pinned_models`; turn-first, sub-agent and harness steps stay on the pinned model.
+`pinned_models` is unchanged and no model name is hardcoded: the served model is the policy's `haiku` tier.
+No offload or saving figure is claimed; none has been measured.
+
+- **Serving needs all three:** `lane_a.enabled: true` in the tier policy YAML, `LLM_ROUTER_PROXY_LANE_A=on` in the
+  proxy's environment (read on every request; unset or `off` is the kill switch, no restart) and `haiku_rewrite: true`.
+  The YAML block is strict (`enabled` bool, `tau` in (0, 1], `prev_tool_classes` a non-empty list that never
+  includes `edit`, `exec` or `agent`); a bad value stops the policy loading. `tau` is a placeholder until it is
+  pre-registered. The allowlist starts as `[technical_op]`.
+- **Gates, first failure wins** (run with the switches off too): continuation on a pinned model, client tools, main
+  thread, organic session kind, no `opus:` / `/model` pin, no correction signal, last tool class allowlisted, a Haiku
+  tier below the requested one, then the engine verdict on the newest human prompt: L1 layer (a cache hit of an L1
+  verdict counts), not abstained, confidence >= `tau`, tier Haiku and the same task/complexity as the rules'
+  classifier; then a body Haiku accepts. Any error leaves the step pinned.
+- **Ledger, on every continuation row, even with lane A off:** `lane_a_reason` (closed set below; a value outside it
+  is written as null) and `lane_a_conf` (the engine confidence, or null; null when the engine did not run or gave
+  none). The ledger is JSONL, so there is no schema migration. Turn-first and sub-agent rows from a pinned model
+  carry the same two fields.
+
+  | reason | meaning |
+  |---|---|
+  | `served` / `retried_original` | served on Haiku / Haiku refused the body and the pinned model answered |
+  | `eligible` | every gate passed, a switch was off (or authority is `advise`): stayed pinned |
+  | `off` | the lane was not evaluated (no tier policy, step served elsewhere) |
+  | `not_pinned`, `not_continuation`, `pinned_turn`, `not_main_thread`, `session_kind` | the step is not lane A's |
+  | `pinned_by_user`, `correction_signal` | an explicit pin or a redo signal |
+  | `not_allowlisted` | the last tool class is not in `prev_tool_classes` |
+  | `no_haiku_tier`, `haiku_body_blocked` | no Haiku tier below the request / a body Haiku would 400 |
+  | `conf_unavailable`, `low_conf`, `engine_disagree` | no engine confidence / below `tau` or abstained or not L1 / engine and rules classes differ |
+  | `breaker_open_reserved` | reserved for the breaker PR; nothing writes it yet |
+  | `error` | the lane raised; the step was forwarded as sent |
+
+  The share of `eligible` rows among continuation rows on a pinned model measures how much traffic lane A could take
+  (`s_A`). **Denominator:** continuation rows whose reason is neither `off` nor `not_pinned` (those two mean the lane
+  never looked at the step). **`off` vs `eligible`:** `off` = the lane was not evaluated at all (tiers off, advise
+  authority, an unknown model, a decision timeout); `eligible` = it was evaluated, every gate passed and a switch is
+  off. So a lane that is switched off reads `eligible`, not `off`.
+- **The gates have no side effect (repair round 1).** With the lane off the gates classify with the rules
+  classifier alone (`backends.tier_classify_pure`) and `engine.compute(text, cache=False)`, both run in a worker
+  thread. They write no `engine_shadow.jsonl` row, no decision-ledger row (also in `LLM_ROUTER_ENGINE_MODE=decide`),
+  no `decide_cache.sqlite` and no `classifier_health` row, and make no Ollama embed even with `complexity_knn: true`
+  (the lane ignores that wrapper), and nothing blocks the event loop. The only new state is the two ledger keys.
+  `tests/test_proxy_lane_a.py` compares the state dir after 100 steps, with `complexity_knn` on and off, in shadow
+  and decide mode.
+- **Confidence is quantised.** The engine's L1 confidence is `score/(score+2)`: 0.600 (score 3), 0.6667 (4),
+  0.714 (5), 0.75 (6), 0.778 (7). The shipped `tau` 0.67 is a placeholder (the pre-registration sets it): it sits
+  just above the score-4 bin, so short one-line questions read `low_conf` and the `eligible` set is the longer,
+  multi-question prompts. Read `s_A` as that, not as "share of simple prompts". Tested at the shipped value.
+- **One verdict per turn.** The verdict comes from the newest human prompt, so every continuation step of one turn
+  shares the same reason and confidence. `s_A` per step is clustered by turn and says nothing about how hard the
+  continuation step itself is.
+- **A bad `lane_a:` block stops the whole tier policy loading** (it raises, it does not just disable the lane).
+- **Not in this PR:** the breaker and failure feed, the Frontier shadow sampler and lane tags, the quality writer, and
+  a cache-switch-cost rule. **PR2 adds the 5xx/429 fallback and the breaker; nothing should flip the switches
+  before then** (until PR2 a Haiku 5xx, 429 or timeout has no fallback; only a 4xx is retried on the pinned model).
+
 ### Key finding (1.2): per-turn switching does not pay; conversation-level might
 
 Per-turn tier switching loses money under prompt caching: a switch mid-task
