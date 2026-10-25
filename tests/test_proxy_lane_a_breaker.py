@@ -175,13 +175,19 @@ async def test_unreadable_state_opens_the_breaker_and_records_a_failopen_code(tm
     # a locked / unreadable file is the same direction
     f.write_text(json.dumps({"key": lb.KEY, "state": "closed"}))
     os.chmod(f, 0)
+    locked = None
     try:
         if not os.access(f, os.R_OK):  # (root can read it anyway)
             codes.clear()
-            assert await _breaker(tmp_path).admit() == (False, False)
+            locked = _breaker(tmp_path)
+            assert await locked.admit() == (False, False)
             assert "LR-FO-LANE-A-BREAKER-READ" in codes
     finally:
         os.chmod(f, 0o600)
+    if locked is not None:
+        await locked.flush()
+        if getattr(locked, "_flush_task", None) is not None:
+            await locked._flush_task  # its background flush task would otherwise re-create the file after the unlink (CI flake)
     # absent file: a fresh start, closed, and nothing recorded
     f.unlink()
     codes.clear()
