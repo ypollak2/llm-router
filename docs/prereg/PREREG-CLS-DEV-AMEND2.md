@@ -41,7 +41,7 @@ the reading of the canary.
 
 1. **Rule.** Every CLS runner invocation that spawns `codex exec` (generation, labels, the canary, and verify) runs
    with the environment variable `CODEX_HOME=<absolute path>`, the path being the dedicated directory
-   `~/.codex-cls` expanded to an absolute path (`/Users/yaliandrona/.codex-cls` on the owner's machine). The
+   `~/.codex-cls` expanded to an absolute path. The
    variable is exported in the shell that starts the runner; no script changes. The frozen child env
    (`cls_send_lib.codex_child_env`, lines 483-488) copies `os.environ` and pops only `ANTHROPIC_BASE_URL`,
    `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`, and `child_call` passes that env to `send` (line 577), which passes it to
