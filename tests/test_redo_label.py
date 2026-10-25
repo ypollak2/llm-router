@@ -712,6 +712,29 @@ def test_minimum_message_reports_the_available_pairs_when_it_cannot_be_reached(m
     assert b"Rerun" not in output and b"rerun" not in output
 
 
+def _drain_pty(master: int, *, idle: float = 0.5, overall: float = 15.0) -> bytes:
+    """Everything the writer left in a pty master. One ``os.read`` returns whatever the line
+    discipline has handed over so far -- on Linux a partial chunk (CI runs 40212431331 and
+    40214069230) -- so read until EOF/EIO, or until the master has been quiet for ``idle``
+    seconds (the writer has already returned), or ``overall`` seconds have passed."""
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + overall
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([master], [], [], idle)
+        if not ready:
+            break
+        try:
+            data = os.read(master, 65536)
+        except OSError as err:
+            if err.errno == errno.EIO:  # Linux: slave side closed
+                break
+            raise
+        if not data:
+            break
+        chunks.append(data)
+    return b"".join(chunks)
+
+
 def test_minimum_message_names_the_unverifiable_sample(make_run, monkeypatch):
     from llm_router import redo_score as score
     run = make_run(n=30)
@@ -723,7 +746,7 @@ def test_minimum_message_names_the_unverifiable_sample(make_run, monkeypatch):
     try:
         with os.fdopen(slave, "w", closefd=False) as tty_out, open(slave, "rb", closefd=False) as tty_in:
             assert label.run_owner(options_, stdin=tty_in, stdout=tty_out) == 0
-        text = os.read(master, 65536).decode()
+        text = _drain_pty(master).decode()
     finally:
         os.close(master)
         os.close(slave)
