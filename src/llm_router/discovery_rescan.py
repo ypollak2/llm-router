@@ -85,6 +85,10 @@ def key_names_present(environ=None, env_files=None) -> list[str]:
                         names.add(name)
         except (OSError, UnicodeError):
             continue
+    if env_files is None:
+        # `<provider>.key` files count too: discovery.keys reads them for the map.
+        from llm_router.discovery.keys import _keyfile_values
+        names.update(_keyfile_values())
     return sorted(names)
 
 
@@ -211,7 +215,12 @@ def rescan(force=False, *, probe=probe_tags, detect=None, now=None,
                 name for name in models if model_discovery._is_completion_model(name)
             ])
 
-    detected = detect() if detect is not None else seats.detect_seats(timeout=2.0)
+    raw = detect() if detect is not None else seats.detect_seats(timeout=2.0)
+    cached_seats = seats.load_seats()
+    # A process that cannot see a CLI must not undo another's recent "connected".
+    # A carried result is not saved, so seats.json keeps its own detected_at and
+    # the carry ends CARRY_MAX_AGE_S after the last real sighting.
+    detected = seats.carry_recent(raw, cached_seats, now)
     summary = _seat_state(detected)
     seat_fp = seat_fingerprint(detected)
     old_summary = old.get("seat_state")
@@ -219,8 +228,7 @@ def rescan(force=False, *, probe=probe_tags, detect=None, now=None,
         result.seats_changed = sorted(
             name for name in _SEAT_NAMES if summary[name] != old_summary[name]
         )
-    cached_seats = seats.load_seats()
-    if (seat_fp != old.get("seat_fp") or cached_seats is None
+    if detected is raw and (seat_fp != old.get("seat_fp") or cached_seats is None
             or cached_seats.is_stale(now)
             or seat_fingerprint(cached_seats) != seat_fp):
         seats.save_seats(detected)

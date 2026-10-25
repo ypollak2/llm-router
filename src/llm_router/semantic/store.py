@@ -32,6 +32,7 @@ import hashlib
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from llm_router import state_files
 from llm_router.sqlite_wal import enable_wal
 
 SCHEMA_VERSION = 1
@@ -120,7 +121,7 @@ def index_path(root: Path | str | None = None, base: Path | None = None) -> Path
 def connect(root: Path | str | None = None, base: Path | None = None) -> sqlite3.Connection:
     path = index_path(root, base)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path))
+    conn = state_files.connect_sqlite(str(path))
     conn.row_factory = sqlite3.Row
     # M-06 / the sqlite_wal adoption gap. `busy_timeout` governs how long the
     # journal_mode PRAGMA itself waits for its exclusive lock, so setting it

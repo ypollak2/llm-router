@@ -18,6 +18,16 @@ Sources, each optional and each with a timeout:
 - Ollama:  GET ``/api/tags`` on the configured URL.
 - API keys: presence of the well-known env vars, never their values.
 
+CLI lookup (MAP-FIX): processes run with different PATHs (a launchd service
+gets ``/usr/bin:/bin:/usr/sbin:/sbin``; an MCP server or a hook gets the user's
+shell PATH), and all of them write one shared map. So a CLI is looked up on the
+process PATH, then on the directories where any process of this user last found
+claude, codex, gemini, gh, node or ollama (``cli_path.json`` in the state dir,
+the primary source), then on the generic install dirs in ``FALLBACK_DIRS``. The
+probe subprocess gets that merged PATH, so a ``#!/usr/bin/env node`` script
+finds ``node``. A learned dir is refreshed only when a binary is found in it and
+expires after ``LEARNED_MAX_AGE_S``, so an uninstall still shows.
+
 Nothing here stores a token, an email, or an account id. ``seats.json``
 holds kinds and plan names only.
 """
@@ -25,18 +35,37 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.request
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+log = logging.getLogger(__name__)
+
 SEATS_FILE_NAME = "seats.json"
 STALE_AFTER_SECONDS = 24 * 3600
+
+CLI_PATH_FILE = "cli_path.json"
+LEARN_NAMES = ("claude", "codex", "gemini", "gh", "node", "ollama")
+# Interpreters a `#!/usr/bin/env <name>` CLI needs (codex is a node script):
+# looked up on every detection so a full-PATH process teaches their dirs.
+INTERPRETERS = ("node",)
+LEARNED_MAX_AGE_S = 7 * 24 * 3600
+LEARN_REFRESH_S = 3600
+# Generic install locations (user-local bin, Homebrew on Apple silicon, the
+# classic /usr/local). Searched after the learned dirs; never user-specific.
+FALLBACK_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
+# A "not connected" seat whose reason ends with this, or mentions a failed
+# probe, is "no evidence" rather than "logged out" (see no_evidence).
+NOT_FOUND_SUFFIX = "CLI not found"
+CARRY_MAX_AGE_S = 3600
 
 _API_KEY_VARS = (
     "ANTHROPIC_API_KEY",
@@ -190,20 +219,139 @@ class Seats:
         return age is None or age > STALE_AFTER_SECONDS
 
 
+# ── CLI lookup ──────────────────────────────────────────────────────────────
+
+def _cli_path_file() -> Path:
+    from llm_router import paths as _paths
+    return _paths.state_path(CLI_PATH_FILE)
+
+
+def _read_learned() -> dict:
+    try:
+        data = json.loads(_cli_path_file().read_text())
+    except (OSError, ValueError):
+        return {}
+    dirs = data.get("dirs") if isinstance(data, dict) else None
+    return dirs if isinstance(dirs, dict) else {}
+
+
+def learned_dirs(now: float | None = None) -> list[str]:
+    """Dirs where a CLI was found within ``LEARNED_MAX_AGE_S``, newest first."""
+    now = time.time() if now is None else now
+    live = []
+    for d, entry in _read_learned().items():
+        seen = entry.get("seen_at") if isinstance(entry, dict) else None
+        if isinstance(seen, (int, float)) and 0 <= now - seen <= LEARNED_MAX_AGE_S:
+            live.append((seen, d))
+    return [d for _, d in sorted(live, reverse=True)]
+
+
+def search_path(env: dict | None = None, now: float | None = None) -> str:
+    """Process PATH, then learned dirs, then existing ``FALLBACK_DIRS``; no repeats."""
+    env = os.environ if env is None else env
+    out: list[str] = []
+    for d in [*(env.get("PATH") or "").split(os.pathsep), *learned_dirs(now),
+              *(os.path.expanduser(f) for f in FALLBACK_DIRS if os.path.isdir(os.path.expanduser(f)))]:
+        if d and d not in out:
+            out.append(d)
+    return os.pathsep.join(out)
+
+
+def _learn(name: str, found: str, now: float) -> None:
+    """Record the dir *found* is in. Writes only on a new entry or a stale one."""
+    d = os.path.dirname(os.path.abspath(found))
+    dirs = _read_learned()
+    entry = dirs.get(d) if isinstance(dirs.get(d), dict) else {}
+    names = sorted(set(entry.get("names") or []) | {name})
+    seen = entry.get("seen_at")
+    if names == entry.get("names") and isinstance(seen, (int, float)) and 0 <= now - seen < LEARN_REFRESH_S:
+        return
+    dirs[d] = {"names": names, "seen_at": now}
+    path = _cli_path_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump({"schema": 1, "dirs": dirs}, f, indent=2, sort_keys=True)
+            os.replace(tmp, path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+    except OSError as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-CLI-PATH-WRITE", exc)
+
+
+def find_cli(name: str, *, env: dict | None = None, now: float | None = None) -> str | None:
+    """``shutil.which`` on :func:`search_path`; a hit teaches its dir to every process."""
+    now = time.time() if now is None else now
+    found = shutil.which(name, path=search_path(env, now))
+    if found is None:
+        log.info("seats: %s not found on the process PATH or learned dirs", name)
+    elif name in LEARN_NAMES:
+        _learn(name, found, now)
+    return found
+
+
 # ── probes ──────────────────────────────────────────────────────────────────
 
+@dataclass(frozen=True)
+class ProbeFailure:
+    """The CLI exists but its probe gave no answer (timeout, launch error)."""
+    reason: str
+
+
 def _default_runner(argv: list[str], timeout: float) -> tuple[int, str] | None:
-    """Run a CLI and return (returncode, stdout+stderr), or None if it is
-    missing or hangs. Never raises."""
-    if shutil.which(argv[0]) is None:
+    """Run a CLI found by :func:`find_cli` with the merged PATH in its env, so a
+    ``#!/usr/bin/env node`` script resolves ``node``. Returns (returncode,
+    stdout+stderr), or None when the CLI is missing. A timeout or launch error
+    is raised; :func:`_probe` turns it into a :class:`ProbeFailure`."""
+    exe = find_cli(argv[0])
+    if exe is None:
         return None
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    proc = subprocess.run(
+        [exe, *argv[1:]], capture_output=True, text=True, timeout=timeout, check=False,
+        env={**os.environ, "PATH": search_path()},
+    )
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _probe(runner: Runner, argv: list[str], timeout: float):
+    """runner(argv) with its failure kept apart from "not found"."""
+    try:
+        return runner(argv, timeout)
+    except subprocess.TimeoutExpired:
+        why = f"{argv[0]} CLI probe timed out after {timeout:g}s"
+    except (OSError, subprocess.SubprocessError) as exc:
+        why = f"{argv[0]} CLI probe failed to launch: {type(exc).__name__}"
+    log.info("seats: %s", why)
+    return ProbeFailure(why)
+
+
+def no_evidence(status: str | None, reason: str | None) -> bool:
+    """True for a not-connected verdict that only says "could not look":
+    the CLI was not found on this process's PATH, or its probe failed."""
+    reason = reason or ""
+    return status != "connected" and (reason.endswith(NOT_FOUND_SUFFIX) or "CLI probe " in reason)
+
+
+def carry_recent(new: "Seats", prior: "Seats | None", now: float,
+                 max_age_s: float = CARRY_MAX_AGE_S) -> "Seats":
+    """Keep a prior connected claude/codex/gemini seat, at most *max_age_s* old,
+    over a :func:`no_evidence` verdict from a process that could not see the CLI."""
+    age = prior.age_seconds(now) if prior is not None else None
+    if age is None or not 0 <= age <= max_age_s:
+        return new
+    keep = {}
+    for name in ("claude", "codex", "gemini"):
+        old, cur = getattr(prior, name), getattr(new, name)
+        if old.status == "connected" and no_evidence(cur.status, cur.reason):
+            log.info("seats: keeping %s connected (seen %.0fs ago) over %r", name, age, cur.reason)
+            keep[name] = old
+    return replace(new, **keep) if keep else new
 
 
 def _first_line(text: str) -> str:
@@ -224,9 +372,11 @@ def _key_only_seat(why: str, not_logged: "Seat | None") -> Seat:
 
 
 def _detect_claude(runner: Runner, env: dict, timeout: float) -> Seat:
-    res = runner(["claude", "auth", "status"], timeout)
+    res = _probe(runner, ["claude", "auth", "status"], timeout)
     not_logged = None
-    if res is not None:
+    if isinstance(res, ProbeFailure):
+        not_logged = Seat(status="installed_not_connected", reason=res.reason)
+    elif res is not None:
         not_logged = Seat(status="installed_not_connected",
                           reason=_first_line(res[1]) or "claude auth status reports no login")
         code, out = res
@@ -277,9 +427,11 @@ def _codex_plan_from_auth(home: Path, now: float) -> tuple[str | None, bool]:
 
 
 def _detect_codex(runner: Runner, env: dict, home: Path, timeout: float, now: float) -> Seat:
-    res = runner(["codex", "login", "status"], timeout)
+    res = _probe(runner, ["codex", "login", "status"], timeout)
     not_logged = None
-    if res is not None:
+    if isinstance(res, ProbeFailure):
+        not_logged = Seat(status="installed_not_connected", reason=res.reason)
+    elif res is not None:
         _, out = res
         low = out.lower()
         # The reason is the first line codex itself printed (for a broken
@@ -335,8 +487,8 @@ def _detect_copilot(runner: Runner, home: Path, which: Callable[[str], str | Non
                     timeout: float) -> Seat:
     """GitHub Copilot: `gh copilot --version`, hosts.json, VS Code extension dir.
     Existence checks only; the files' contents (tokens) are never read."""
-    res = runner(["gh", "copilot", "--version"], timeout) if which("gh") else None
-    cli_ok = res is not None and res[0] == 0
+    res = _probe(runner, ["gh", "copilot", "--version"], timeout) if which("gh") else None
+    cli_ok = isinstance(res, tuple) and res[0] == 0
     hosts = (home / ".config" / "github-copilot" / "hosts.json").exists()
     try:
         ext = any((home / ".vscode" / "extensions").glob("github.copilot-*"))
@@ -355,7 +507,8 @@ def _detect_copilot(runner: Runner, home: Path, which: Callable[[str], str | Non
 
 
 def _detect_ollama(env: dict, timeout: float, opener=urllib.request.urlopen,
-                   which: Callable[[str], str | None] = shutil.which) -> Seat:
+                   which: Callable[[str], str | None] | None = None) -> Seat:
+    which = which or find_cli
     url = env.get("OLLAMA_URL") or "http://localhost:11434"
     try:
         req = urllib.request.Request(f"{url}/api/tags", method="GET")
@@ -377,13 +530,17 @@ def detect_seats(
     runner: Runner = _default_runner,
     env: dict | None = None,
     home: Path | None = None,
-    which: Callable[[str], str | None] = shutil.which,
+    which: Callable[[str], str | None] | None = None,
     opener=urllib.request.urlopen,
     now: float | None = None,
 ) -> Seats:
     env = dict(os.environ) if env is None else env
     home = home or Path.home()
     now = time.time() if now is None else now
+    if which is None:
+        which = find_cli
+        for name in INTERPRETERS:
+            find_cli(name)
     return Seats(
         claude=_detect_claude(runner, env, timeout),
         codex=_detect_codex(runner, env, home, timeout, now),

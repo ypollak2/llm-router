@@ -1,8 +1,8 @@
 """Which API keys exist, where they came from, and who can use them (P1.8 task 2).
 
 ``discover()`` returns one :class:`KeyInfo` per key variable that is set. It
-records the variable NAME, the provider, the source (``env``, ``dotenv:<path>``
-or ``keychain``), the tools that can use it and the billing kind. A key's value
+records the variable NAME, the provider, the source (``env``, ``dotenv:<path>``,
+``keyfile:<path>`` or ``keychain``), the tools that can use it and the billing kind. A key's value
 is never returned, stored or logged: dotenv files are scanned for ``NAME=`` with
 a non-empty value and the value is dropped on the same line; the keychain probes
 look at the exit code only and discard their output.
@@ -13,7 +13,13 @@ variable whose dotenv value equals the process value is labelled with that
 file, and one whose value differs is ``env``. A real-env export that happens to
 equal a dotenv value is therefore labelled ``dotenv:`` (first file in priority
 order); that ambiguity cannot be removed without a pre-merge snapshot.
-Keychain is consulted for variables that are in neither.
+Key files (MAP-FIX): the setup flows write ``$LLM_ROUTER_HOME/<provider>.key``
+(the table is ``config._DISK_KEY_FILES``) and ``config.load_disk_keys()`` copies
+them into the environment the first time ``get_config()`` runs. They are read
+here too, with the same rule as dotenv (an env value equal to the file's value is
+labelled with the file), so a fresh process and one that already ran
+``get_config()`` report the same keys with the same source.
+Keychain is consulted for variables that are in none of these.
 """
 from __future__ import annotations
 
@@ -48,7 +54,7 @@ Probe = Callable[[str], bool]
 class KeyInfo:
     var: str
     provider: str
-    source: str            # "env" | "dotenv:<path>" | "keychain"
+    source: str            # "env" | "dotenv:<path>" | "keyfile:<path>" | "keychain"
     usable_by: tuple[str, ...]
     billing: str           # "paid" | "free_tier" | "unknown"
 
@@ -80,6 +86,26 @@ def _dotenv_values(path: Path) -> dict[str, str]:
     return out
 
 
+def _keyfile_values() -> dict[str, tuple[Path, str]]:
+    """var -> (path, stripped value) for each non-empty ``<provider>.key`` file.
+    The value is only compared by :func:`discover`, never returned or logged."""
+    from llm_router import paths
+    from llm_router.config import _DISK_KEY_FILES, _state_dir   # the dir load_disk_keys reads
+
+    out: dict[str, tuple[Path, str]] = {}
+    for stem, var in _DISK_KEY_FILES.items():
+        path = _state_dir() / f"{stem}.key"
+        if var not in KEY_TABLE or paths.regular_file_or_none(path) is None:
+            continue
+        try:
+            val = path.read_text(errors="replace").strip()
+        except OSError:
+            continue
+        if val:
+            out[var] = (path, val)
+    return out
+
+
 def keychain_has(var: str, *, platform: str | None = None, run=subprocess.run) -> bool:
     """True when the OS keychain holds ``llm-router-<var>``. Existence only."""
     from llm_router.claude_creds import keychain_query
@@ -96,6 +122,7 @@ def discover(*, env: dict | None = None, dotenv_paths: list[Path] | None = None,
         dotenv_paths = env_loader.candidate_env_paths()
     probe = keychain if keychain is not None else keychain_has
     files = [(p, _dotenv_values(p)) for p in dotenv_paths]
+    keyfiles = _keyfile_values()
     found: list[KeyInfo] = []
     for var, (provider, usable_by, billing) in KEY_TABLE.items():
         source = None
@@ -105,11 +132,17 @@ def discover(*, env: dict | None = None, dotenv_paths: list[Path] | None = None,
                 if vals.get(var) == env[var].strip():
                     source = f"dotenv:{p}"
                     break
+            else:
+                if var in keyfiles and keyfiles[var][1] == env[var].strip():
+                    source = f"keyfile:{keyfiles[var][0]}"
         else:
             for p, vals in files:
                 if var in vals:
                     source = f"dotenv:{p}"
                     break
+            else:
+                if var in keyfiles:
+                    source = f"keyfile:{keyfiles[var][0]}"
         if source is None and probe(var):
             source = "keychain"
         if source is not None:

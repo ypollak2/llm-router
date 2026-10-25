@@ -27,11 +27,11 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import time
 from pathlib import Path
 from typing import Any
 
+from llm_router import state_files
 from llm_router.logging import get_logger
 from llm_router.types import LLMResponse
 
@@ -92,7 +92,7 @@ class IdempotencyStore:
             self.db_path.touch(mode=0o600)
         else:
             _secure_perms(self.db_path)
-        self._conn = sqlite3.connect(str(self.db_path))
+        self._conn = state_files.connect_sqlite(str(self.db_path))
         # CHZ-AUD-D-04 (sibling): zero freed pages on DELETE so the TTL sweep
         # physically removes response bytes rather than leaving them in
         # unallocated pages.

@@ -704,6 +704,32 @@ def test_owner_pass_without_the_spot_check_minimum_writes_no_marker(make_run, ot
     assert not (run.run_dir / "owner_done.json").exists()
 
 
+def test_minimum_message_reports_the_available_pairs_when_it_cannot_be_reached(make_run):
+    run = make_run(n=15)                          # 5 F pairs and 10 S/R pairs: 20 spot checks cannot exist
+    rc, output = run_tui(owner_args(20), ["n"] * 15, run.env)
+    assert rc == 0 and not (run.run_dir / "owner_done.json").exists()
+    assert b"holds only 10 S/R pairs" in output and b"cannot reach the minimum of 20" in output
+    assert b"Rerun" not in output and b"rerun" not in output
+
+
+def test_minimum_message_names_the_unverifiable_sample(make_run, monkeypatch):
+    from llm_router import redo_score as score
+    run = make_run(n=30)
+    monkeypatch.setattr(score, "owner_sample_state", lambda run_dir: None)
+    options_ = options(run, owner=True, judge=False, others=20)
+    for pair_id in {r["pair_id"] for r in run.rows}:
+        label.append_label(run.run_dir / "labels_owner.jsonl", pair_id, "not_redo", "owner")
+    master, slave = pty.openpty()
+    try:
+        with os.fdopen(slave, "w", closefd=False) as tty_out, open(slave, "rb", closefd=False) as tty_in:
+            assert label.run_owner(options_, stdin=tty_in, stdout=tty_out) == 0
+        text = os.read(master, 65536).decode()
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert "cannot be verified" in text and "NOT recorded complete" in text
+
+
 def test_raised_others_invalidates_the_old_marker(make_run):
     from llm_router import redo_score as score
     run = make_run(n=45)                          # 15 F pairs and 30 S/R pairs

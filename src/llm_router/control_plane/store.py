@@ -7,6 +7,7 @@ import typing
 from contextlib import closing
 from pathlib import Path
 
+from llm_router import state_files
 from llm_router.control_plane.schemas import (
     InstanceHeartbeatRecord,
     TenantPolicyVersionRecord,
@@ -118,7 +119,7 @@ class ControlPlaneStore(typing.Protocol):
 class SqliteControlPlaneStore:
     def __init__(self, db_path: str | Path = ":memory:") -> None:
         self._db_path = db_path
-        self._conn = sqlite3.connect(
+        self._conn = state_files.connect_sqlite(
             str(db_path),
             check_same_thread=False,
         )
