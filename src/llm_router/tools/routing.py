@@ -696,11 +696,19 @@ async def llm_stream(
 
     # LC-12h / D-28 A: a prompt with a secret streams from a loopback local model only, or not at all.
     from llm_router import local_privacy
-    _secret = local_privacy.contains_secret(prompt, system_prompt)
-    if _secret:
+    prompt, _override = local_privacy.split_override(prompt)  # the `cloud:` prefix, stripped first
+    _hits = local_privacy.scan_secrets(prompt, system_prompt)
+    _secret = bool(_hits) and not _override  # an overridden request is ordinary traffic, not a private dispatch
+    if _hits and _override:
+        for _h in _hits:
+            local_privacy.count_secret_event("overridden", _h.label)
+    elif _hits:
         _local = local_privacy.local_only_chain(chain)
-        if not _local:
-            return f"Error: {local_privacy.secret_refusal_reason()}"
+        _pinned = bool(model) and not local_privacy.stays_local(model)
+        if not _local or _pinned:
+            for _h in _hits:
+                local_privacy.count_secret_event("refused", _h.label)
+            return "Error: " + local_privacy.refusal_message(_hits, model_override=model if _pinned else None)
         target_model = _local[0]
 
     messages: list[dict[str, str]] = []

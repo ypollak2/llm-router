@@ -23,3 +23,17 @@ status: fixed in this change
 - **Test.** `tests/test_lc12h.py` (socket-level trace, both transports). Mutants, each red: dropping the direct
   client for ordinary routes (5 tests), re-enabling the semantic-cache check on the secret door (2), reverting
   `semantic_cache._cache_disabled` to the pass-only marker (2).
+
+### Repair 1 (PR #721 review FAIL)
+
+- **Symptom.** The door refused placeholders (`AKIAIOSFODNN7EXAMPLE`, `ghp_` + `x` * 36, `postgres:postgres@db`,
+  `YOUR_API_KEY_HERE_...`, JWT fixtures) and scanned all history, so one placeholder refused every later turn of a
+  chat; the refusal had no category, no remedy, no override and was a 502 at the gateway. `sdk.route` bypassed the door.
+  `db_url_password` took 1.6 s on 48k chars. `reset_secret_dispatch` had no test. A failed `/api/show` was memoized forever.
+- **Cause.** The detector's shapes were built to log, then reused to refuse. Nothing separated placeholders from values.
+- **Fix.** `engine.secret_findings` (high-precision set, placeholder and entropy tests, bounded quantifiers, windows);
+  `local_privacy.scan_secrets` / `refusal_message` / `split_override`; 422 at the gateway and route server; the SDK
+  door; TTLs in `ensure_ollama_model_info`; `local_privacy.open_url` at every prompt-carrying urllib Ollama site.
+- **Test.** `tests/test_lc12h_repair.py`: 0 refusals on 31 placeholders and 260 ordinary prompts, refusals on 250
+  random real-shaped secrets (10 kinds x 25 seeds), the marker test, the SDK test, the straddle and ReDoS tests.
+  Rule: a shape that logs is not a shape that refuses; a refusal needs a measured placeholder corpus first.

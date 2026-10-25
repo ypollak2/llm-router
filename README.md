@@ -157,9 +157,11 @@ is routed; `off` disables that. Full modes and per-host overrides:
   call (the `llm_*` text tools, the gateway, streaming) contains an API key,
   token or private key, llm-router sends it only to Ollama models on a loopback
   daemon — direct, not through an HTTP proxy, with no semantic cache, judge
-  queue or cloud fallback — or refuses it. Not covered: the Claude Code proxy
-  (logs only), agent delegation, and what a host already sent to its own
-  model. **[Details and limits](SECURITY.md#data-handling--storage-mapping)**.
+  queue or cloud fallback — or refuses it with the secret's category and how to
+  proceed (`cloud:` prefix to override one request). Placeholders such as
+  `AKIA...EXAMPLE` or `postgres:postgres@` are not refused. Not covered: the
+  Claude Code proxy and hooks (logs only), agent delegation, and what a host
+  already sent to its own model. **[Details and limits](SECURITY.md#data-handling--storage-mapping)**.
 - **Automatic fallback with circuit breakers.** A provider that fails or
   rate-limits is skipped, not retried into the ground.
 - **You can see it working.** A status line, terminal title and OS

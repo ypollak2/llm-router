@@ -4709,6 +4709,9 @@ async def route_and_call(
     """
     config = get_config()
     skip_causes.begin()  # F23: fresh per-call list of passed-over entries
+    # LC-12h: the per-request secret override (`cloud:` prefix) is read and stripped before anything sees the text.
+    from llm_router import local_privacy as _lp
+    prompt, _secret_override = _lp.split_override(prompt)
     correlation_id = uuid4().hex[:8]
     # Phase 0.5 (Option A sidecar bridge): when the hook minted a directive id
     # for this turn (threaded down from an MCP door), the BILLABLE-ROW
@@ -5313,13 +5316,21 @@ async def route_and_call(
         # LC-12h / D-28 A: the secret door, after every chain transform (none can add a cloud entry back). A prompt
         # with a secret goes to loopback, non-cloud local models only, or nowhere; the dispatch below is then private
         # (no semantic cache, no judge queue, no emergency fallback, direct client, overflow kept local).
-        from llm_router import local_privacy as _lp
-        _secret_private = _lp.contains_secret(prompt, system_prompt, caller_context, messages)
+        _secret_hits = _lp.scan_secrets(prompt, system_prompt, caller_context, messages)
+        _secret_private = bool(_secret_hits)
+        if _secret_private and _secret_override:
+            for _h in _secret_hits:
+                _lp.count_secret_event("overridden", _h.label)
+            _secret_private = False  # the caller asked for this request to go as ordinary traffic
         if _secret_private:
             _local_chain = _lp.local_only_chain(models_to_try)
-            if not _local_chain:
+            _pinned_cloud = bool(model_override) and not _lp.stays_local(model_override)
+            if not _local_chain or _pinned_cloud:
+                for _h in _secret_hits:
+                    _lp.count_secret_event("refused", _h.label)
                 await _release_reservation_if_held()
-                raise _lp.SecretLocalOnlyRefused(_lp.secret_refusal_reason())
+                raise _lp.SecretLocalOnlyRefused(_lp.refusal_message(
+                    _secret_hits, model_override=model_override if _pinned_cloud else None))
             models_to_try = _local_chain
         _private = _pass_only or _secret_private
 
@@ -6436,6 +6447,8 @@ async def route_and_stream(
         WallClockExceeded: Wall-clock timeout during dispatch.
     """
     config = get_config()
+    from llm_router import local_privacy as _lp_ov
+    prompt, _secret_override = _lp_ov.split_override(prompt)  # LC-12h: the `cloud:` override, stripped first
     correlation_id = uuid4().hex[:8]
     seq = 0  # Event counter
 
@@ -6523,11 +6536,18 @@ async def route_and_stream(
 
     # LC-12h / D-28 A: the secret door, as in route_and_call: loopback local models only, or refused.
     from llm_router import local_privacy as _lp
-    _secret_private = _lp.contains_secret(prompt, system_prompt, caller_context)
+    _secret_hits = _lp.scan_secrets(prompt, system_prompt, caller_context)
+    _secret_private = bool(_secret_hits)
+    if _secret_private and _secret_override:
+        for _h in _secret_hits:
+            _lp.count_secret_event("overridden", _h.label)
+        _secret_private = False
     if _secret_private:
         models_to_try = _lp.local_only_chain(models_to_try)
         if not models_to_try:
-            raise _lp.SecretLocalOnlyRefused(_lp.secret_refusal_reason())
+            for _h in _secret_hits:
+                _lp.count_secret_event("refused", _h.label)
+            raise _lp.SecretLocalOnlyRefused(_lp.refusal_message(_secret_hits))
 
     # ── Emit route.started event ──────────────────────────────────────────
     seq += 1

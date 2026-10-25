@@ -345,14 +345,14 @@ def _prompt(prev: str, chunk: str) -> str:
 def _generate(model: str, prompt: str) -> str:
     import urllib.request
 
-    from llm_router import local_models
+    from llm_router import local_models, local_privacy
 
     body = json.dumps({"model": model, "stream": False,
                        "messages": [{"role": "user", "content": prompt}],
                        "options": {"num_ctx": local_models.num_ctx(model), "temperature": 0}}).encode()
     req = urllib.request.Request(_ollama_url() + "/api/chat", data=body,
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as r:  # noqa: S310
+    with local_privacy.open_url(req, base_url=_ollama_url(), timeout=120) as r:  # LC-12h: conversation text, direct
         return str(json.load(r).get("message", {}).get("content", "")).strip()
 
 

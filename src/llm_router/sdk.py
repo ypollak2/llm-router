@@ -335,12 +335,44 @@ def _pack_kwargs(prompt: str, messages: list[dict] | None, chain,
                           "agent_context": agent_context}
 
 
+def _secret_door(prompt: str, messages: list[dict] | None, context: str | None):
+    """LC-12h / D-28 A for the SDK door: ``(prompt without the `cloud:` override, chain filter)``.
+
+    A request with a high-precision secret may only run on a loopback, non-cloud Ollama model (the chain filter
+    keeps those, and ``execute_chain`` / ``execute_agent`` then call it direct, no proxy); with none left it is
+    refused with the category and the remedy. The `cloud:` prefix overrides, logged as a count."""
+    from llm_router import local_privacy as lp
+    prompt, override = lp.split_override(prompt)
+    hits = lp.scan_secrets(prompt, None, context, messages)
+    if not hits:
+        return prompt, lambda chain: chain
+    if override:
+        for h in hits:
+            lp.count_secret_event("overridden", h.label)
+        return prompt, lambda chain: chain
+
+    def only_local(chain):
+        from llm_router.hooks.direct_executor import _get_ollama_url
+        from llm_router.resolver.inventory import is_ollama_cloud_model
+        loopback = lp.is_loopback_base(_get_ollama_url())
+        kept = [m for m in chain if m.provider == "ollama" and loopback and not is_ollama_cloud_model(m.model)]
+        if not kept:
+            for h in hits:
+                lp.count_secret_event("refused", h.label)
+            raise RoutingError(lp.refusal_message(
+                hits, why=None if loopback else "the configured Ollama endpoint is not loopback"))
+        return kept
+    return prompt, only_local
+
+
 def _route(prompt: str, *, task_type: str | None, complexity: str | None,
            timeout: int, session_id: str, task_id: str = "",
            messages: list[dict] | None = None, context: str | None = None) -> RouteResult:
     # Lazy imports keep ``import llm_router`` cheap.
     from llm_router.hooks.chain_builder import build_chain, get_current_pressure, needs_claude_tools
     from llm_router.hooks.direct_executor import execute_agent, execute_chain
+
+    prompt, _door = _secret_door(prompt, messages, context)
 
     decision = None
     if not task_type or not complexity:
@@ -351,13 +383,13 @@ def _route(prompt: str, *, task_type: str | None, complexity: str | None,
     # File/local tasks → agent-loop (local tool-calling model); Q&A → text call.
     # The agent loop needs a capable tool-caller, so bias its chain to the coder tier.
     if needs_claude_tools(prompt, task_type):
-        chain = build_chain("complex", zone, "code")
+        chain = _door(build_chain("complex", zone, "code"))
         request, packed = _pack_kwargs(prompt, messages, chain, session_id, agent=True)
         agent_context = _join(context, packed.get("agent_context"))
         extra = {"context": agent_context} if agent_context else {}
         result = execute_agent(request, chain, timeout=max(timeout, 180), **extra)
     else:
-        chain = build_chain(complexity, zone, task_type, qa_last_resort=True)
+        chain = _door(build_chain(complexity, zone, task_type, qa_last_resort=True))
         request, packed = _pack_kwargs(prompt, messages, chain, session_id)
         extra = {"context": packed["context"], "history": packed["history"]} if packed else {}
         if context:

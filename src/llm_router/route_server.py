@@ -347,6 +347,9 @@ def make_handler():
                 self._send(400, {"error": invalid_request_message(e)})
             except Exception as e:                      # routing / provider failure
                 _client_failure("route failed", e)
+                from llm_router.engine import SecretLocalOnlyError
+                if isinstance(e, SecretLocalOnlyError):  # LC-12h: policy refusal; category + remedy, 422 not 502
+                    return self._send(422, {"error": str(e)})
                 self._send(502, {"error": "{}: routing failed".format(type(e).__name__)})
 
         def log_message(self, *_a):                     # quiet by default

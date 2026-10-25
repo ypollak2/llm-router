@@ -30,13 +30,14 @@ import llm_router.config as config_module
 from llm_router import classifier, local_privacy, providers, router
 from llm_router import eligibility_routing as er
 from llm_router.types import LLMResponse, TaskType
+from tests import secret_fixtures
 from tests.test_lc12 import passed, world  # noqa: F401
 from tests.test_lc12c import GOOD, LOCAL, e2e  # noqa: F401
 from tests.test_lc12g import PROXY_VARS, REAL_CALL_TEXT, SECRET, FakeServer, _SwitchingPack
 from tests.test_lc8_routing import BARE
 
-#: A GitHub-token shape (engine.secret_names: "github_token"); synthetic.
-TOKEN = "ghp_" + "Ab3" * 12
+#: A GitHub-token shape (engine.secret_findings: high-precision "github_token"), random, drawn at test time.
+TOKEN = secret_fixtures.real_shaped("github_token", 1)
 CLOUD = "openai/gpt-4o"
 CTX_LEN = 32768
 TRANSPORTS = pytest.mark.parametrize("aiohttp", [True, False], ids=["aiohttp-transport", "httpx-transport"])
@@ -365,7 +366,7 @@ def test_secret_scan_fails_closed(monkeypatch):
 
     def boom(text):
         raise ValueError("scan broke")
-    monkeypatch.setattr(engine, "secret_names", boom)
+    monkeypatch.setattr(engine, "secret_findings", boom)
     assert local_privacy.contains_secret("plain text") is True
     monkeypatch.undo()
     assert local_privacy.contains_secret("plain text", None, [{"role": "user", "content": "hi"}]) is False

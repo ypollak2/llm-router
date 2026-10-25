@@ -272,7 +272,8 @@ def describe_image(path: str, model: str, timeout: int = 120) -> str | None:
         request = urllib.request.Request(
             f"{_get_ollama_url().rstrip('/')}/api/chat",
             data=body, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        from llm_router import local_privacy
+        with local_privacy.open_url(request, base_url=_get_ollama_url(), timeout=timeout) as response:
             text = json.loads(response.read()).get("message", {}).get("content", "")
     except Exception:
         return None

@@ -610,7 +610,8 @@ def run_agent_loop(
         if deadline_s is not None:
             call_timeout = max(0.1, min(call_timeout, deadline_s - (_t0 - started)))
         try:
-            with urllib.request.urlopen(req, timeout=call_timeout) as resp:
+            from llm_router import local_privacy
+            with local_privacy.open_url(req, base_url=ollama_url, timeout=call_timeout) as resp:
                 result = json.loads(resp.read())
         except Exception as _exc:
             _trace.emit("llm.error", iteration=iteration,

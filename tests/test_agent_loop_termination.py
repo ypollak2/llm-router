@@ -28,6 +28,10 @@ from llm_router.hooks.agent_loop import (
     FINISH_TOOL, _parse_constrained, _tool_call_schema,
 )
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("open_url_via_urlopen")
+
 
 def test_the_schema_offers_a_way_to_stop():
     """Stopping must be as expressible as calling — one enum value, not an

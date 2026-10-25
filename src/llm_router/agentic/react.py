@@ -365,6 +365,8 @@ def _default_ollama_client(model: str, base_url: str | None = None) -> OllamaCli
     import os
     import urllib.request
 
+    from llm_router import local_privacy
+
     url = _validated_ollama_env_url(
         base_url or os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434"
     ).rstrip("/")
@@ -375,7 +377,7 @@ def _default_ollama_client(model: str, base_url: str | None = None) -> OllamaCli
         req = urllib.request.Request(  # noqa: S310 — fixed localhost Ollama URL from config
             f"{url}/api/chat", data=body, headers={"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:  # noqa: S310
+            with local_privacy.open_url(req, base_url=url, timeout=120) as resp:  # noqa: S310
                 data = json.loads(resp.read())
         except Exception as exc:  # noqa: BLE001 — surface the failure, don't fake an empty answer
             return ChatTurn(error=f"ollama call failed ({model}): {exc}")

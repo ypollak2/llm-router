@@ -1306,6 +1306,18 @@ def _reset_local_privacy():
     lp._info_attempted.clear()
 
 
+@pytest.fixture
+def open_url_via_urlopen(monkeypatch):
+    """LC-12h: prompt-carrying Ollama requests go through ``local_privacy.open_url`` (a direct opener for a loopback
+    daemon). A test that fakes the network by patching ``urllib.request.urlopen`` uses this to keep that seam: the
+    request is handed to whatever ``urlopen`` is at call time."""
+    import urllib.request
+
+    from llm_router import local_privacy
+    monkeypatch.setattr(local_privacy, "open_url",
+                        lambda req, *, base_url, timeout: urllib.request.urlopen(req, timeout=timeout))
+
+
 @pytest.fixture(autouse=True)
 def _restore_redactor_registry():
     """Snapshot and restore `plugins.redaction._REDACTORS` around every test.

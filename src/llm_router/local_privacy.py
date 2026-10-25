@@ -26,9 +26,13 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import collections
 import os
+import re
 import threading
+import time
 import urllib.request
+from dataclasses import dataclass
 from typing import Any
 
 from llm_router import engine
@@ -46,7 +50,17 @@ def is_ollama_model(model: object) -> bool:
 
 def ollama_api_base(api_base: str | None = None) -> str:
     """The daemon LiteLLM sends an Ollama call to: ``api_base``, else ``OLLAMA_API_BASE``, else localhost:11434."""
-    return (api_base or "").strip() or os.environ.get("OLLAMA_API_BASE", "").strip() or DEFAULT_OLLAMA_BASE
+    raw = (api_base or "").strip() or os.environ.get("OLLAMA_API_BASE", "").strip() or DEFAULT_OLLAMA_BASE
+    return _strip_endpoint(raw)
+
+
+_ENDPOINT_SUFFIX = re.compile(r"/api(?:/(?:generate|chat|show|tags|embed|embeddings|pull|ps))?/*$|/+$")
+
+
+def _strip_endpoint(url: str) -> str:
+    """The daemon's base: LiteLLM's ``get_server_api_base`` drops a trailing ``/api/generate``-style endpoint (and
+    slashes), so an ``OLLAMA_API_BASE`` of ``http://127.0.0.1:11434/api/generate`` is the daemon at 127.0.0.1:11434."""
+    return _ENDPOINT_SUFFIX.sub("", url)
 
 
 def is_loopback_base(url: str | None) -> bool:
@@ -147,15 +161,96 @@ def _texts(part: Any):
                         yield text
 
 
-def contains_secret(*parts: Any) -> bool:
-    """True when any text in ``parts`` (strings, or message lists) holds a secret shape (``engine.secret_names``).
+@dataclass(frozen=True)
+class SecretHit:
+    """One high-precision secret shape found in a request: its category and where (never the value)."""
+    label: str
+    where: str
 
-    Fails closed: a scan that raises reads as "secret", so the call stays local or is refused."""
+
+#: Counts by category only, never a value: ``refused:<label>``, ``overridden:<label>``, ``logged:<label>`` (a shape
+#: too weak to refuse on: JWTs, quoted literals, placeholders). Per process; ``llm-router`` log lines carry the same.
+secret_counts: collections.Counter = collections.Counter()
+_counts_lock = threading.Lock()
+
+
+def count_secret_event(kind: str, label: str) -> None:
+    with _counts_lock:
+        secret_counts[f"{kind}:{label}"] += 1
+    log.info("secret door: %s %s", kind, label)
+
+
+def _scan_text(text: str, where: str, hits: list[SecretHit], seen: set[tuple[str, str]]) -> None:
+    for name, high in engine.secret_findings(text).items():
+        label = engine.SECRET_LABELS.get(name, name)
+        if high:
+            if (label, where) not in seen:
+                seen.add((label, where))
+                hits.append(SecretHit(label, where))
+        else:
+            count_secret_event("logged", label)
+
+
+def scan_secrets(prompt: Any = None, system_prompt: Any = None, caller_context: Any = None,
+                 messages: Any = None) -> list[SecretHit]:
+    """The high-precision secrets in a request, each with the category and where it was found: ``current prompt``,
+    ``system prompt``, ``caller context`` or ``earlier turn N`` (N counts ``messages`` from 1). Placeholders and the
+    log-only shapes are counted (:data:`secret_counts`) and not returned. Fails closed: a scan that raises is one
+    ``unscannable text`` hit, so the call stays local or is refused."""
+    hits: list[SecretHit] = []
+    seen: set[tuple[str, str]] = set()
     try:
-        return any(engine.secret_names(text) for part in parts for text in _texts(part))
+        for part, where in ((prompt, "current prompt"), (system_prompt, "system prompt"),
+                            (caller_context, "caller context")):
+            for text in _texts(part):
+                _scan_text(text, where, hits, seen)
+        if isinstance(messages, list):
+            for n, msg in enumerate(messages, 1):
+                for text in _texts([msg]):
+                    _scan_text(text, f"earlier turn {n}", hits, seen)
     except Exception as exc:  # noqa: BLE001 - fail closed
-        log.warning("secret scan failed (%s); treating the prompt as holding a secret", type(exc).__name__)
-        return True
+        log.warning("secret scan failed (%s); treating the request as holding a secret", type(exc).__name__)
+        return hits + [SecretHit("unscannable text", "the request")]
+    return hits
+
+
+def contains_secret(*parts: Any) -> bool:
+    """True when any text in ``parts`` (strings, or message lists) holds a high-precision secret."""
+    return bool(scan_secrets(messages=[{"content": t} for part in parts for t in _texts(part)]))
+
+
+#: The per-request override: a prompt that starts with ``cloud:`` is sent as ordinary cloud traffic even though it
+#: holds a secret. Same family as the ``claude:`` / ``native:`` redo prefixes; stripped before anything reads the text.
+_OVERRIDE_RE = re.compile(r"^\s*cloud\s*:\s*", re.IGNORECASE)
+OVERRIDE_HINT = "start the prompt with `cloud:`"
+
+
+def split_override(prompt: str | None) -> tuple[str | None, bool]:
+    """``(prompt without the ``cloud:`` prefix, True)`` when the prompt carries the override, else ``(prompt, False)``."""
+    if isinstance(prompt, str):
+        m = _OVERRIDE_RE.match(prompt)
+        if m:
+            return prompt[m.end():], True
+    return prompt, False
+
+
+def refusal_message(hits: list[SecretHit], *, model_override: str | None = None, why: str | None = None) -> str:
+    """The refusal text: categories and places, never a value, and the three ways forward."""
+    found = "; ".join(f"{h.label} ({h.where})" for h in hits) or "secret-shaped text"
+    history_only = bool(hits) and all(h.where.startswith("earlier turn") for h in hits)
+    cause = (" The secret is only in the conversation history, not in your current prompt "
+             f"({', '.join(sorted({h.where for h in hits}))})." if history_only else "")
+    if why:
+        pass
+    elif model_override:
+        why = f"you asked for model {model_override!r}, which is not a local model"
+    elif not is_loopback_base(ollama_api_base()):
+        why = "the configured Ollama endpoint is not loopback"
+    else:
+        why = "no local model is available for it"
+    return (f"Refused: this request contains what looks like a secret: {found}.{cause} Nothing was sent to a cloud "
+            f"model ({why}). To proceed: install or start a local model (`llm-router local-check`), remove the "
+            f"secret, or override for this request ({OVERRIDE_HINT}; the override is logged as a count only).")
 
 
 def stays_local(model: object, api_base: str | None = None) -> bool:
@@ -171,15 +266,14 @@ def local_only_chain(models: list[str]) -> list[str]:
     return [m for m in models if stays_local(m)]
 
 
-def secret_refusal_reason() -> str:
-    why = ("the Ollama endpoint is not loopback" if not is_loopback_base(ollama_api_base())
-           else "no local model in the chain")
-    return f"{engine.SECRET_REFUSAL} ({why})"
-
-
 # ── LiteLLM's model-info lookup ──────────────────────────────────────────────
 
-_info_attempted: set[tuple[str, str]] = set()
+#: (daemon, bare model) -> monotonic time of our last ``/api/show`` fetch, and whether it answered.
+_info_attempted: dict[tuple[str, str], tuple[float, bool]] = {}
+#: A failed, 404 or slow answer is retried after this long (LiteLLM retried every call); a good answer is
+#: re-fetched after the longer one, so an ``ollama cp`` / re-pull is seen without a restart.
+INFO_RETRY_FAILED_S = 10.0
+INFO_REFRESH_OK_S = 300.0
 #: The ``litellm.model_cost`` keys this module wrote (tests remove them, conftest ``_reset_local_privacy``).
 _info_written: set[str] = set()
 _info_lock = threading.Lock()
@@ -211,20 +305,28 @@ def ensure_ollama_model_info(model: str, api_base: str | None = None) -> None:
     LiteLLM looks a non-catalogued Ollama model up with ``POST /api/show`` on its module-level httpx client, which
     honours proxy env and sends ``OLLAMA_API_KEY``; an entry in ``litellm.model_cost`` (its public model map) makes
     it skip that lookup. Ours goes by ``http.client`` to the loopback daemon only, with no proxy and no key. Once
-    per daemon and model per process (LiteLLM caches its own lookups the same way); a failed answer writes
-    LiteLLM's own failure entry, so its lookup does not run through the proxy instead. Never raises."""
+    per daemon and model while the last answer is fresh (:data:`INFO_REFRESH_OK_S`); a failed answer writes
+    LiteLLM's own failure entry, so its lookup does not run through the proxy instead, and is retried after
+    :data:`INFO_RETRY_FAILED_S`. An entry LiteLLM's catalogue already has is left alone. Never raises."""
     if not direct_ollama(model, api_base):
         return
     try:
         import litellm
         base, bare = ollama_api_base(api_base), _bare(model)
         names = {bare.lower(), f"ollama/{bare}".lower(), f"ollama_chat/{bare}".lower()}
+        key, now = (base, bare), time.monotonic()
         with _info_lock:
-            if (base, bare) in _info_attempted or any(k.lower() in names for k in litellm.model_cost):
+            last = _info_attempted.get(key)
+            if last is not None and now - last[0] < (INFO_REFRESH_OK_S if last[1] else INFO_RETRY_FAILED_S):
                 return
-            _info_attempted.add((base, bare))
+            if last is None and any(k.lower() in names for k in list(litellm.model_cost)):
+                return  # LiteLLM's own catalogue knows this model
+            _info_attempted[key] = (now, False)  # claimed: concurrent callers skip while this one fetches
         from llm_router.local_check import runtimes
         ok, show = runtimes._fetch(base, "POST", "/api/show", {"name": bare}, timeout=MODEL_INFO_TIMEOUT_S)
+        ok = bool(ok) and isinstance(show, dict)
+        with _info_lock:
+            _info_attempted[key] = (time.monotonic(), ok)
         litellm.model_cost[f"ollama/{bare}"] = _model_info_entry(bare, show if ok else None)
         _info_written.add(f"ollama/{bare}")
         invalidate = getattr(litellm.utils, "_invalidate_model_cost_lowercase_map", None)

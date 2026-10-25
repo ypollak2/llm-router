@@ -25,6 +25,9 @@ from llm_router.hooks.direct_executor import (
 )
 
 
+pytestmark = pytest.mark.usefixtures("open_url_via_urlopen")
+
+
 # ── Quality Gate ─────────────────────────────────────────────────────────────
 
 class TestQualityGate:

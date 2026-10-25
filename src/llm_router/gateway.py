@@ -371,10 +371,15 @@ def _routing_failure(exc: Exception) -> HTTPException:
     """The client-facing error for a failed route (F76). The client gets the exception CLASS
     and a fixed message, never the provider's text (it can echo the prompt); the scrubbed
     detail goes to the local log only."""
+    from llm_router.engine import SecretLocalOnlyError
     from llm_router.route_server import _client_failure
 
     limited = _rate_limit_cause(exc)
     _client_failure("routing failed", exc)
+    if isinstance(exc, SecretLocalOnlyError):
+        # LC-12h: a policy refusal, not an upstream failure: 422 (change the request and resend; a 5xx invites
+        # retries). The text names the secret's category and place, never its value, and the three ways forward.
+        return HTTPException(status_code=422, detail=str(exc))
     if limited is None:
         return HTTPException(status_code=502, detail=f"{type(exc).__name__}: routing failed")
     secs = _retry_after_s(limited)

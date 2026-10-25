@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 4
+# llm_router-hook-version: 5
 """PostToolUse hook — compress Playwright page snapshots via cheap LLM.
 
 After every browser_snapshot call:
@@ -156,6 +156,16 @@ def _extract_snapshot(payload: dict) -> str | None:
 
 # ── Compression strategies (free-first) ──────────────────────────────────────
 
+def _ollama_open(req, base_url, timeout):
+    """LC-12h: a request that carries prompt text goes to a loopback Ollama direct (no HTTP proxy env, no redirect);
+    a remote daemon, or a host without the llm_router package, keeps urlopen and so the user's proxy policy."""
+    try:
+        from llm_router.local_privacy import open_url
+    except ImportError:
+        return urllib.request.urlopen(req, timeout=timeout)
+    return open_url(req, base_url=base_url, timeout=timeout)
+
+
 def _try_ollama(snapshot: str) -> str | None:
     """Compress via Ollama. Returns summary or None on any failure."""
     prompt = _COMPRESS_PROMPT.format(snapshot=snapshot[:MAX_SNAPSHOT_CHARS])
@@ -172,7 +182,7 @@ def _try_ollama(snapshot: str) -> str | None:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+        with _ollama_open(req, OLLAMA_BASE, OLLAMA_TIMEOUT) as resp:
             data = json.loads(resp.read())
             text = data.get("response", "").strip()
             return text or None
