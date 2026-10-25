@@ -546,6 +546,8 @@ def shadow_trigger(rows: list[dict], *, until: float, since: float | None = None
     since = until - SHADOW_WINDOW_DAYS * 86400.0 if since is None else since
     n = k = cj = 0
     for r in rows:
+        if r.get("lane") == "A":  # PREREG-LANEA section 10: lane A has its own trigger (lane_a_shadow_trigger)
+            continue
         ts = _num(r.get("ts"))
         if ts is None or not since <= ts <= until:
             continue
@@ -563,6 +565,31 @@ def shadow_trigger(rows: list[dict], *, until: float, since: float | None = None
                     value=f"acceptable {k}/{n}" + (f" = {k / n:.1%}" if n else "") + ci_txt,
                     wilson95=list(ci) if ci else None, cannot_judge=cj,
                     bar=f"< 26/30 at n>={SHADOW_MIN_N}")
+
+
+def lane_a_shadow_trigger(rows: list[dict], *, until: float, since: float | None = None) -> dict:
+    """Lane A's quality trigger (PREREG-LANEA section 10; lever ``proxy_haiku``, task ``lane_a``): the lane A
+    verdict rows only (``lane == "A"``), one per step (the first), over the same window, n and 26/30 bar as the
+    arm's D-20 shadow trigger. It is read by the lane A breaker, never by ``evaluate`` / ``run``: a lane A quality
+    trip must not turn off the arm."""
+    from llm_router import lane_a_shadow
+
+    since = until - SHADOW_WINDOW_DAYS * 86400.0 if since is None else since
+    cand = [r for r in rows if lane_a_shadow.is_lane_a(r) and _num(r.get("ts")) is not None
+            and since <= _num(r.get("ts")) <= until]
+    kept, _ = lane_a_shadow.dedupe_steps(cand)
+    n = k = cj = 0
+    for r in kept:
+        if r.get("cannot_judge") is True:
+            cj += 1
+            continue
+        if not isinstance(r.get("acceptable"), bool):
+            continue
+        n += 1
+        k += 1 if r["acceptable"] else 0
+    return _trigger("lane_a_shadow", n=n, k=k, min_n=SHADOW_MIN_N, tripped=n > 0 and k / n < SHADOW_MIN_RATE,
+                    value=f"lane A acceptable {k}/{n}" + (f" = {k / n:.1%}" if n else ""),
+                    cannot_judge=cj, bar=f"< 26/30 at n>={SHADOW_MIN_N}")
 
 
 # ── evaluation ──────────────────────────────────────────────────────────────

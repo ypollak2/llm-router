@@ -122,6 +122,7 @@ R_SIZE_UNKNOWN = "size_unknown"
 R_NOT_SAMPLED = "not_sampled"
 R_LANE_BUCKET = lane_a_shadow.R_LANE_BUCKET
 R_NO_KEY = lane_a_shadow.R_NO_KEY
+R_STEP_SEEN = lane_a_shadow.R_STEP_SEEN
 
 JUDGE_BRIEF = (
     "You review two answers to the same developer request. They are labelled A and B in a "
@@ -382,6 +383,7 @@ class Replay:
     status: int
     body: bytes
     ctype: str
+    sent_sha: str | None = None  # sha256 of the bytes actually sent (lane A: the prereg section 3 pairing check)
 
 
 ReplayFn = Callable[[bytes], Awaitable[Replay]]
@@ -403,12 +405,13 @@ async def replay_http(client, url: str, headers: dict, content: bytes, *,
             buf.extend(chunk)
             if len(buf) > max_bytes:
                 raise ReplyTooLarge(f"reply over {max_bytes} bytes")
-        return Replay(resp.status_code, bytes(buf), resp.headers.get("content-type", ""))
+        return Replay(resp.status_code, bytes(buf), resp.headers.get("content-type", ""), body_sha(content))
     finally:
         await resp.aclose()
 
 
-LANE_KEYS = ("lane", "task_group", "rate_phase", "rate", "session_id", "msg_count", "prev_tool_class", "conf")
+LANE_KEYS = ("lane", "task_group", "rate_phase", "rate", "session_id", "msg_count", "prev_tool_class", "conf",
+             "served_body_sha", "replay_body_sha")
 
 
 def _lane_fields(job: dict) -> dict:
@@ -485,7 +488,8 @@ class FrontierShadow:
             return R_CAP_CALLS
         lane = job.get("lane")
         if lane is not None:
-            lane_calls, lane_tokens = lane_a_shadow.lane_day_spend(_read_rows(ledger_path()), day)
+            ledger_rows = _read_rows(ledger_path())
+            lane_calls, lane_tokens = lane_a_shadow.lane_day_spend(ledger_rows, day)
             if lane_calls >= lane_a_shadow.BUCKET_CALLS_PER_DAY:
                 return R_LANE_BUCKET
         if est is None:
@@ -496,12 +500,12 @@ class FrontierShadow:
         if lane is not None:
             if lane_tokens + need > lane_a_shadow.BUCKET_INPUT_TOKENS_PER_DAY:
                 return R_LANE_BUCKET
-            return self._lane_sample_gate(now, job, lane)
+            return self._lane_sample_gate(now, job, lane, ledger_rows)
         if self._rng() >= sample_rate(now):
             return R_NOT_SAMPLED
         return None
 
-    def _lane_sample_gate(self, now: float, job: dict, lane: dict) -> str | None:
+    def _lane_sample_gate(self, now: float, job: dict, lane: dict, ledger_rows: list[dict]) -> str | None:
         """Lane A's sampling decision: the deterministic key against the fill / steady rate of its task group.
         Records the rate and phase on ``job`` so the ledger and the pair row say which one applied."""
         group = lane.get("task_group")
@@ -517,7 +521,12 @@ class FrontierShadow:
         u = lane_a_shadow.sample_key(lane.get("session_id"), lane.get("msg_count"))
         if u is None:
             return R_NO_KEY
-        return None if u < rate else R_NOT_SAMPLED
+        if u >= rate:
+            return R_NOT_SAMPLED
+        # One pair per step (prereg section 3): a resent step has the same key, so the key alone would sample it again.
+        if lane_a_shadow.step_key(lane) in lane_a_shadow.seen_steps(ledger_rows):
+            return R_STEP_SEEN
+        return None
 
     async def _run(self, job: dict, pre: str | None, owns: bool) -> None:
         try:
@@ -526,6 +535,8 @@ class FrontierShadow:
             base = {"ts": round(now, 3), "day": _day(now), "task_id": job["task_id"], "door": job["door"],
                     "served": job["served"], "requested": job["requested"], "body_sha": body_sha(job["raw"]),
                     "est_input_tokens": est}
+            if job.get("lane") is not None:
+                await asyncio.to_thread(self._record_flip, now)
             reason = pre or await asyncio.to_thread(self._gate, now, base["day"], job, est)
             if job.get("lane") is not None:
                 base.update(_lane_fields(job))
@@ -552,6 +563,14 @@ class FrontierShadow:
             if owns:
                 self._busy = False
 
+    @staticmethod
+    def _record_flip(now: float) -> None:
+        """The owner flip time (D-301): the first lane A step served with the shadow on. Never raises."""
+        try:
+            lane_a_shadow.record_flip(now)
+        except Exception as exc:  # noqa: BLE001 - evidence bookkeeping must never cost the call
+            failopen.record("LR-FO-LANE-A-FLIP", exc)
+
     def _record(self, job: dict, base: dict, rep: Replay, latency_s: float) -> None:
         text, usage = reply_text(rep.body, rep.ctype) if rep.status == 200 else ("", {})
         out = usage.get("output_tokens") if isinstance(usage, dict) else None
@@ -571,7 +590,9 @@ class FrontierShadow:
             "ts": base["ts"], "task_id": base["task_id"], "door": base["door"], "served": base["served"],
             "requested": base["requested"], "body_sha": base["body_sha"],
             "request_context": request_context(body), "cheap_response": cheap_text,
-            "frontier_response": text, **_lane_fields(job)})
+            "frontier_response": text, **_lane_fields(job),
+            # the bytes the replay really sent, hashed where they were sent (replay_http); the pairing check
+            **({"replay_body_sha": rep.sent_sha or base["body_sha"]} if job.get("lane") is not None else {})})
         prune_pairs(base["ts"])
 
 
@@ -680,6 +701,18 @@ def parse_verdict(text: str) -> dict | None:
     return {"acceptable_A": a, "acceptable_B": b, "cannot_judge": False}
 
 
+def _append_judge_failure(pair: dict, row: dict, reason: str) -> None:
+    """Lane A only (prereg section 6): a judge error, timeout, unparsed or malformed reply, or a model mismatch is
+    ``cannot_judge`` for the lane, so it counts in the quality writer's cannot_judge share. It is a verdict row with
+    null labels and a reason, and no text. The arm writes nothing here (its behaviour is unchanged)."""
+    _append_private(verdicts_path(), {
+        "ts": pair.get("ts"), "judged_at": row["ts"], "task_id": pair.get("task_id"),
+        "body_sha": pair.get("body_sha"), "served": pair.get("served"), "requested": pair.get("requested"),
+        "acceptable": None, "frontier_acceptable": None, "cannot_judge": True, "cannot_judge_reason": reason,
+        "judge_model": JUDGE_MODEL, "cheap_label": None,
+        **{k: pair.get(k) for k in LANE_KEYS}, "judge_brief_sha256": JUDGE_BRIEF_SHA256})
+
+
 def judge_pending(*, run: Callable[[str, str], dict] = claude_judge, rng: Callable[[], float] = random.random,
                   clock: Callable[[], float] = time.time, usage_path: Path | None = None) -> dict:
     """Judge every stored pair not yet attempted, within the caps. Returns a count summary."""
@@ -719,6 +752,8 @@ def judge_pending(*, run: Callable[[str, str], dict] = claude_judge, rng: Callab
             _append_private(judge_ledger_path(), dict(row, outcome="error", reason=type(exc).__name__,
                                                       cost_usd=None, model_ok=None))
             summary["failed"] += 1
+            if lane_pair:
+                _append_judge_failure(pair, row, type(exc).__name__)
             continue
         summary["judged"] += 1
         verdict = parse_verdict(res.get("result", "")) if res.get("model_ok") else None
@@ -727,6 +762,8 @@ def judge_pending(*, run: Callable[[str, str], dict] = claude_judge, rng: Callab
                                                   model_ok=res.get("model_ok")))
         if verdict is None:
             summary["failed"] += 1
+            if lane_pair:
+                _append_judge_failure(pair, row, outcome)
             continue
         cheap_key, frontier_key = ("acceptable_A", "acceptable_B") if cheap_first else ("acceptable_B", "acceptable_A")
         _append_private(verdicts_path(), {
@@ -743,13 +780,15 @@ def judge_pending(*, run: Callable[[str, str], dict] = claude_judge, rng: Callab
     return summary
 
 
-def verdict_summary(*, now: float | None = None, days: int = 7, path: Path | None = None) -> dict:
+def verdict_summary(*, now: float | None = None, days: int = 7, path: Path | None = None,
+                    lane: str | None = None) -> dict:
     """Quality vs Frontier over the last ``days`` days, from the blind-judge verdict rows (P35-2).
 
     ``k`` = verdicts where the served (cheap) answer was ``acceptable``; ``n`` = verdicts that
     decided. ``cannot_judge`` rows and rows with no boolean ``acceptable`` are not verdicts: they are
     counted apart in ``undecided``. ``frontier_k`` / ``frontier_n``: the Frontier answer's own
-    acceptable count over the decided rows that judged it. ``rate`` and ``wilson`` (95 percent) are None at n=0 (unknown,
+    acceptable count over the decided rows that judged it. ``lane=None`` is the arm's rows; ``lane="A"`` is lane A's (separate
+    populations, never mixed). ``rate`` and ``wilson`` (95 percent) are None at n=0 (unknown,
     never 0); ``window`` is ``"<days>d"``."""
     from llm_router.shadow_eval import wilson
 
@@ -757,6 +796,8 @@ def verdict_summary(*, now: float | None = None, days: int = 7, path: Path | Non
     since = now - days * 86400.0
     k = n = undecided = fk = fn = 0
     for row in _read_rows(path or verdicts_path()):
+        if lane_a_shadow.is_lane_a(row) != (lane == lane_a_shadow.LANE_TAG):
+            continue  # the arm's summary has no lane A rows; ``lane="A"`` is lane A's own, never mixed
         ts = row.get("ts")
         if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not since <= ts <= now:
             continue

@@ -7,8 +7,11 @@ client's unmodified bytes, sent to the model the client asked for), judged blind
 the client has its reply; this module says WHICH served steps are replayed and how many:
 
 * **Deterministic key.** ``u = sha256(f"{session_id}|{msg_count}|{SALT}")[:8] / 2**64``; a step is sampled iff
-  ``u < rate``. No ``random``, no clock: the same step always gets the same answer, so a retry or a second
-  proxy cannot sample it twice or skip it the other time.
+  ``u < rate``. No ``random``, no clock: the same step always gets the same answer. That alone does NOT stop a
+  step being sampled twice: a client that resends the same step (same session and msg_count, new msg_id) gets
+  the same key again. So the sampler also skips a step that already has a replay in the shadow ledger
+  (reason ``step_seen``), and the writer counts one pair per ``(session_id, msg_count)`` (prereg section 3;
+  ``dedupe_steps``: the FIRST verdict of a step wins).
 * **Fill phase, then steady (the OD-4 = A pattern, per task_group).** ``rate`` is 1.0 until the task group has
   ``FILL_UNTIL_DECIDED_PAIRS`` (60) decided pairs in the trailing ``WINDOW_DAYS`` (14) days of verdict rows,
   then ``STEADY_RATE`` (2%). 1-2% alone cannot reach 60 pairs at the expected volume (D-292), and the arm's
@@ -47,6 +50,12 @@ PHASE_FILL = "fill"
 PHASE_STEADY = "steady"
 R_LANE_BUCKET = "lane_a_bucket"
 R_NO_KEY = "no_key"
+R_STEP_SEEN = "step_seen"
+#: D-301 (prereg owner): the S1 window of a task group closes at the first batch with this many decided pairs
+#: (after the one-pair-per-step dedupe) or this many days after the owner flip, whichever comes first.
+FINAL_WINDOW_PAIRS = 60
+FINAL_WINDOW_DAYS = 28
+FLIP_FILE = "lane_a_flip.json"
 
 #: The prereg's ``LANEA-CONSTANTS`` keys this module owns, with the value in force.
 CONSTANTS = {
@@ -59,6 +68,8 @@ CONSTANTS = {
     "MIN_PAIRS": 60,
     "CANNOT_JUDGE_MAX_SHARE": CANNOT_JUDGE_MAX_SHARE,
     "WINDOW_DAYS": WINDOW_DAYS,
+    "FINAL_WINDOW_PAIRS": FINAL_WINDOW_PAIRS,
+    "FINAL_WINDOW_DAYS": FINAL_WINDOW_DAYS,
 }
 
 
@@ -107,15 +118,95 @@ def _ts(value: Any) -> float | None:
     return float(value)
 
 
+def step_key(row: dict) -> tuple:
+    """The step a lane A row belongs to: ``(session_id, msg_count)`` (prereg section 3), else its task id (a row
+    without both ids still counts once)."""
+    sid, mc = row.get("session_id"), row.get("msg_count")
+    if isinstance(sid, str) and sid and isinstance(mc, int) and not isinstance(mc, bool) and mc >= 0:
+        return ("step", sid, mc)
+    return ("task", str(row.get("task_id")))
+
+
+def dedupe_steps(rows: Iterable[dict]) -> tuple[list[dict], list[dict]]:
+    """``(kept, dropped)``: one row per step, the FIRST by ``ts`` (ties: file order). The first replay of a step is
+    its pair; a resend of the same step never replaces evidence already seen and never adds a second pair."""
+    ordered = sorted(enumerate(rows), key=lambda p: (_ts(p[1].get("ts")) if _ts(p[1].get("ts")) is not None
+                                                     else float("inf"), p[0]))
+    seen: set = set()
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for _, r in ordered:
+        k = step_key(r)
+        if k in seen:
+            dropped.append(r)
+        else:
+            seen.add(k)
+            kept.append(r)
+    return kept, dropped
+
+
+def judged_by_prereg(row: dict) -> bool:
+    """Judged by the preregistered judge model under the preregistered brief (prereg section 6)."""
+    from llm_router import shadow_frontier
+
+    return (row.get("judge_model") == shadow_frontier.JUDGE_MODEL
+            and row.get("judge_brief_sha256") == shadow_frontier.JUDGE_BRIEF_SHA256)
+
+
 def count_decided(rows: Iterable[dict], task_group: str, *, since: float, until: float) -> int:
-    """Decided lane A pairs of ``task_group`` among verdict ``rows`` stamped inside ``[since, until]``."""
-    n = 0
+    """Decided lane A pairs of ``task_group`` among verdict ``rows`` stamped inside ``[since, until]``: one per
+    step, judged by the preregistered judge and brief (the same rows the quality writer counts)."""
+    cand = []
     for r in rows:
         ts = _ts(r.get("ts"))
-        if (is_lane_a(r) and r.get("task_group") == task_group and has_tags(r) and is_decided(r)
-                and ts is not None and since <= ts <= until):
-            n += 1
-    return n
+        if is_lane_a(r) and r.get("task_group") == task_group and ts is not None and since <= ts <= until:
+            cand.append(r)
+    kept, _ = dedupe_steps(cand)
+    return sum(1 for r in kept if has_tags(r) and is_decided(r) and judged_by_prereg(r))
+
+
+def seen_steps(ledger_rows: Iterable[dict]) -> set:
+    """Steps that already have a Frontier replay in the shadow ledger (a call was made, ok or failed)."""
+    return {step_key(r) for r in ledger_rows
+            if is_lane_a(r) and r.get("outcome") in ("replayed", "replay_failed")}
+
+
+def flip_path() -> Path:
+    from llm_router import paths
+
+    return paths.state_path(FLIP_FILE)
+
+
+def read_flip() -> float | None:
+    """The owner flip time: when lane A serving first ran with the shadow on (all switches on), epoch seconds, or
+    None when it has not (or the file is unreadable)."""
+    import json
+
+    try:
+        raw = json.loads(flip_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    ts = _ts(raw.get("flip_ts")) if isinstance(raw, dict) else None
+    return ts
+
+
+def record_flip(now: float) -> bool:
+    """Record ``now`` as the owner flip time if none is recorded yet (first write wins, 0600 through
+    ``state_files``). Called only when a lane A step was served with the shadow on, so a lane that is off creates
+    no file. True when this call wrote it."""
+    import json
+
+    from llm_router import state_files
+
+    p = flip_path()
+    if p.exists():
+        return False
+    try:
+        with state_files.open_private(p, "x", encoding="utf-8") as fh:
+            fh.write(json.dumps({"flip_ts": round(now, 3), "source": "first lane A step served with the shadow on"}))
+    except FileExistsError:
+        return False
+    return True
 
 
 def lane_day_spend(ledger_rows: Iterable[dict], day: str) -> tuple[int, int]:
@@ -147,7 +238,7 @@ def context_from_row(row: dict, body: dict) -> dict | None:
         return None
     msgs = body.get("messages") if isinstance(body, dict) else None
     prev = row.get("prev_tool_class")
-    return {"lane": LANE_TAG, "session_id": row.get("session_id"),
+    return {"lane": LANE_TAG, "session_id": row.get("session_id"), "served_body_sha": row.get("lane_a_body_sha"),
             "msg_count": len(msgs) if isinstance(msgs, list) else None,
             "task_group": task_group_of(row.get("tier_task_type"), prev),
             "prev_tool_class": prev, "conf": lane_a.clean_conf(row.get("lane_a_conf"))}

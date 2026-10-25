@@ -10,7 +10,9 @@ A lane is *quality-sampled* when its LATEST batch (blind audit or shadow-pair ba
 ``WINDOW_DAYS`` days passed:
 
 * audit         ``n >= 30`` and ``acceptable / n >= 26 / 30``;
-* shadow_pairs  ``n >= 60``, point gap ``<= 3`` points and Newcombe lower bound ``>= -10``.
+* shadow_pairs  ``n >= 60``, point gap ``<= 3`` points and Newcombe lower bound ``>= -10``, and ONLY a FINAL
+                row (``window_complete: true``, D-301): the one batch that closed the lane's window. Earlier
+                rows are diagnostic and never counted; the first final row of a lane is its verdict.
 
 The latest batch decides: a newer failing batch un-samples a lane that an older batch passed. Until the redo
 detector is validated (P3.6-c) this applies to EVERY lane, because "not redone" is true almost always
@@ -23,7 +25,7 @@ runs the audit or the shadow pairs (this module only reads):
     {"ts": <epoch s or ISO>, "door": "proxy", "served_class": "haiku", "task_group": "qa",
      "kind": "audit", "n": 30, "acceptable": 27, "source": "<path or id of the batch>"}
     {"ts": ..., "door": ..., "served_class": ..., "task_group": ..., "kind": "shadow_pairs",
-     "n": 64, "gap_pts": 2.1, "newcombe_lb": -6.4, "source": "..."}
+     "n": 64, "gap_pts": 2.1, "newcombe_lb": -6.4, "source": "...", "window_complete": true}
 
 No file, an unreadable file or a malformed row yields no sampled lane: the numerator is then 0 and the report
 says so. Nothing here is guessed.
@@ -80,6 +82,8 @@ def batch_passed(row: dict) -> bool | None:
         # the same rate at larger n: ok / n >= 26 / 30, in integers
         return n >= AUDIT_MIN_N and ok * AUDIT_MIN_N >= AUDIT_MIN_ACCEPTABLE * n
     if kind == "shadow_pairs":
+        if row.get("informative") is False:  # a final NOT INFORMATIVE row (D-301): no credit, whatever its numbers
+            return False
         gap, lb = _real(row.get("gap_pts")), _real(row.get("newcombe_lb"))
         if gap is None or lb is None:
             return None
@@ -94,10 +98,33 @@ def lane_of(row: dict) -> Lane | None:
     return lane if all(isinstance(x, str) and x for x in lane) else None  # type: ignore[return-value]
 
 
+def final_only(rows: Iterable[dict]) -> list[dict]:
+    """The rows S1 may count (D-301). A ``shadow_pairs`` row counts only if it is FINAL (``window_complete`` is
+    true); earlier ones are diagnostic. A lane's window closes once: if several final rows exist for one lane, the
+    FIRST by ``ts`` is the verdict and later ones neither count nor reopen it. Other kinds pass through."""
+    out: list[dict] = []
+    first: dict[Lane, tuple[float, dict]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("kind") != "shadow_pairs":
+            out.append(row)
+            continue
+        if row.get("window_complete") is not True:
+            continue
+        lane, ts = lane_of(row), _ts(row.get("ts"))
+        if lane is None or ts is None:
+            continue
+        if lane not in first or ts < first[lane][0]:
+            first[lane] = (ts, row)
+    return out + [r for _, r in first.values()]
+
+
 def sampled_lanes(rows: Iterable[dict], now: float) -> dict[Lane, dict]:
     """``{lane: latest batch}`` for the lanes whose latest batch inside ``[now - 28 d, now]`` passed.
     Each value: ``{"kind", "n", "ts", "source"}``."""
     latest: dict[Lane, tuple[float, dict, bool]] = {}
+    rows = final_only(rows)
     for row in rows:
         if not isinstance(row, dict):
             continue

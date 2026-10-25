@@ -671,22 +671,58 @@ makes the shadow run is `LLM_ROUTER_SHADOW_FRONTIER=on` (OD-4 = A) on top of the
   - The 12, 400k, 60, 2% and 14 days are the numbers the PREREG-LANEA draft lists; the SALT is its draft literal.
 - **`lane_quality` shadow_pairs writer (`lane_quality_writer.py`).** Nothing wrote `kind: shadow_pairs` rows before; now
   `python -m llm_router.lane_quality_writer [--since T] [--until T] [--dry-run]` (also run after `shadow_frontier
-  judge`) reads the lane A verdict rows and, per task group with at least 60 decided pairs in the window (default the
-  last 14 days) and at most 20% `cannot_judge`, appends one row to `lane_quality.jsonl` (0600, `state_files`):
-  `{ts, door: "proxy", served_class: "haiku", task_group, kind: "shadow_pairs", n, gap_pts, newcombe_lb, source,
-  lane: "A", k_laneA, k_frontier, cannot_judge, cannot_judge_share, since, until}`. `gap_pts = (acc_frontier -
-  acc_laneA) * 100` (positive = Haiku worse), `newcombe_lb` = the unpaired Newcombe lower bound of `acc_laneA -
-  acc_frontier`, both from `eligibility.evidence_from_counts`, the function `eligibility.grade` and
-  `lane_quality.batch_passed` use. `cannot_judge` pairs are excluded from `n` and reported. A row missing `task_group`
-  or `rate_phase`, judged by another model or under another brief (`JUDGE_BRIEF_SHA256`), is not evidence. A failing
-  batch is written too: `lane_quality` lets the latest batch decide. The same evidence writes the same `source`,
-  so a re-run adds nothing. The arm's verdict rows (no `lane`) are never read. Because they share `verdicts.jsonl`,
-  lane A verdicts also feed the existing `haiku_guard` shadow trigger (the `proxy_haiku` lever).
+  judge`) reads the lane A verdict rows and appends the FINAL row of a task group to `lane_quality.jsonl` (0600,
+  `state_files`): `{ts, door: "proxy", served_class: "haiku", task_group, kind: "shadow_pairs", n, gap_pts,
+  newcombe_lb, source, lane: "A", k_laneA, k_frontier, cannot_judge, cannot_judge_share, excluded, window_complete,
+  informative, close_reason, not_informative_reason, flip_ts, since, until}`. `gap_pts = (acc_frontier - acc_laneA) *
+  100` (positive = Haiku worse), `newcombe_lb` = the unpaired Newcombe lower bound of `acc_laneA - acc_frontier`,
+  both from `eligibility.evidence_from_counts`, the function `eligibility.grade` and `lane_quality.batch_passed` use.
+  - **One pair per step.** Rows are reduced to the FIRST verdict of each `(session_id, msg_count)` (PREREG-LANEA
+    section 3); the rest are `excluded.duplicate_step`. The sampler skips a step that already has a replay
+    (`step_seen`), and the phase count uses the same rule. A client that resends a step cannot add a pair.
+  - **Judge failures are cannot_judge.** For lane A pairs `judge_pending` writes a verdict row with `cannot_judge: true`
+    and `cannot_judge_reason` (the exception name, `unparsed` or `model_mismatch`) when the judge errors, times out,
+    returns unparseable JSON or runs on the wrong model, so they count in the cannot_judge share (prereg section 6).
+    The arm writes no such row (unchanged).
+  - **Pairing check (prereg section 3).** The served ledger row carries `lane_a_body_sha` (sha256 of the client's
+    bytes); `replay_http` hashes the bytes it actually sent (`Replay.sent_sha`). A pair whose two shas differ, or lack
+    one, is `excluded.body_sha_mismatch`.
+  - **A row missing `task_group` or `rate_phase`, judged by another model or under another brief
+    (`JUDGE_BRIEF_SHA256`), is not evidence** (`excluded`, written into the row).
+  - **Window and the final row (D-301, prereg owner).** A task group's S1 window closes at whichever comes FIRST: the
+    first judge batch with at least 60 decided pairs (after the dedupe), or 28 days after the owner flip. That batch is
+    the one row with `window_complete: true`, and the only one S1 counts; `lane_quality` ignores a `shadow_pairs` row
+    without it, and the first final row of a lane is its verdict. It is `informative` only if `cannot_judge` is at most
+    20% of judged attempts; a closing batch above that, or a 28-day close with n < 60, is a NOT INFORMATIVE final row
+    (`informative: false`, no gap / bound): S1 gets no credit. Below 60 pairs and before 28 days nothing is written
+    (counts are printed, not stored). Once a task group has its final row no new window opens and nothing reopens it;
+    only a preregistration amendment can. `FINAL_WINDOW_PAIRS` (60) and `FINAL_WINDOW_DAYS` (28) are in
+    `lane_a_shadow.CONSTANTS`.
+  - **Owner flip source.** `lane_a_flip.json` in the state dir (`{flip_ts}`, 0600, `state_files`, first write wins) is
+    written by the first lane A step served WITH the Frontier shadow on (lane enabled, `haiku_rewrite`, authority
+    route and `LLM_ROUTER_SHADOW_FRONTIER=on` all in force), from the shadow's background task. A lane that is off
+    creates no file. With no flip recorded the writer reads the trailing 14 days and no 28-day close can fire. The
+    window starts at the flip (`since` defaults to it); `--since/--until` is a formal read.
+  - The same evidence writes the same `source`. The arm's verdict rows (no `lane`) are never read.
+  - **Lane A verdicts and the arm's guard.** Lane A verdicts share `verdicts.jsonl` but are tagged `lane: "A"`: the
+    arm's D-20 `haiku_guard.shadow_trigger`, `shadow_frontier.verdict_summary` (the statusline and the session report)
+    skip them, so lane A cannot turn off the arm and a strong arm cannot hide a weak lane A. Lane A's own trigger is
+    `haiku_guard.lane_a_shadow_trigger` (acceptable below 26/30 at n >= 20 in 14 days, one per step), read by the
+    lane A breaker (lever `proxy_haiku`, task `lane_a`, PREREG-LANEA section 10): while closed, `admit` re-reads the
+    verdicts at most every 5 minutes in a worker thread, and a trip opens the breaker with the 24 h quality cooldown
+    (`shadow_quality:` reason). After a probe closes it only newer verdicts count (`quality_floor`, persisted).
+    `verdict_summary(lane="A")` is lane A's own summary; nothing mixes the two unlabeled.
 - **KPI separation, and what the S1 numerator now includes (D-285).** The S1 definition is unchanged: an action is in
   the numerator iff it was served by a local / Haiku / very-cheap model, not redone, not escalated, and its lane
   `(door, served_class, task_group)` is quality-sampled. A lane A step is a proxy action served by Haiku whose
   `prev_tool_class` is `technical_op`, so its lane is `(proxy, haiku, tech_op)`; it enters the numerator only when
-  the writer's latest batch for that lane passes (n >= 60, gap <= 3 points, lower bound >= -10) inside 28 days.
+  the lane's FINAL batch (`window_complete: true`, D-301) passes (n >= 60, gap <= 3 points, lower bound >= -10) and is
+  inside the 28 day S1 reading window.
+  **Lane-level caveat.** Sampling is per lane, not per lane A step: once the final batch passes, the whole lane
+  `(proxy, haiku, tech_op)` is quality-sampled (`offload_share.py`, `a["sampled"] = lane in sampled`), so any other
+  Haiku-served `tech_op` proxy action in the window (for example one where the client itself chose Haiku) joins the
+  numerator too. The S1 rule did not change in this PR and this was already true of any sampled lane; the prereg should
+  say it.
   Before that it is in the denominator only, as before. `kpi` `offload` now has `lane_a` (the lane A actions,
   `quality_sampled`, `lanes`) and `not_lane_a`; `action` = `lane_a` + `not_lane_a` in both `k` and `n`, so nothing is
   counted twice. The persisted `daily_offload` rows are left as they are (no new key). The D-31 arm's Haiku turns stay in

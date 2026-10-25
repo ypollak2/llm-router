@@ -1233,6 +1233,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                                  original=original, on_reply=on_reply)
         if (frontier is not None and row.get("tier_reason") == REASON_HAIKU_REWRITE
                 and decision.served_model != body.get("model")):
+            if row.get("lane_a_reason") == lane_a.R_SERVED:
+                # prereg section 3: the sha of the bytes the Frontier replay must send; the pair is void if the two differ
+                row["lane_a_body_sha"] = shadow_frontier.body_sha(raw)
             on_reply = frontier_on_reply(request, raw, row, on_reply, lane_a_shadow.context_from_row(row, body))
         key = conversation_key(body, row.get("session_id"))
 

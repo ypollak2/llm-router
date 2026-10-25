@@ -188,7 +188,7 @@ wilson95, n_sessions, largest_session_share, window}`.
 `tech_op`); `quality_sampled_lanes` lists the lanes that passed. `offload.lane_a` / `offload.not_lane_a` split `action`
 by the proxy ledger's `lane: "A"` tag (steps lane A served on Haiku, D-285): `action` = `lane_a` + `not_lane_a` in k and n,
 so lane A is never counted twice; the S1 rule is unchanged, so lane A reaches the numerator only when its lane
-`(proxy, haiku, tech_op)` has a passing `shadow_pairs` batch (written by `lane_quality_writer`). "Very cheap" = a local provider, or an input
+`(proxy, haiku, tech_op)` has a passing FINAL `shadow_pairs` batch (`window_complete: true`, D-301; written by `lane_quality_writer`). "Very cheap" = a local provider, or an input
 price at or below the highest Haiku entry of `pricing.py` (`pricing.haiku_input_rate()`; unknown models are not
 cheap). Not actions: side calls, deterministic filtering (`served_by=local_filter`), raw passthrough, technical
 ops under 4 KB, semantic-cache hits, rows of non-organic sessions. A lane is quality-sampled when its latest

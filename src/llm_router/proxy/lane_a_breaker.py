@@ -33,6 +33,13 @@ internal error in ``admit``. An ABSENT file is a fresh start and reads closed. T
 again after 30 minutes. The breaker is built only when ``lane_a.enabled`` is true in the YAML; a lane that is
 off creates no object, no file and no task.
 
+QUALITY (D-301 / PREREG-LANEA section 10). The Frontier-shadow verdicts of lane A are this breaker's quality signal
+(``haiku_guard.lane_a_shadow_trigger``: acceptable below 26/30 at n >= 20 lane A pairs in 14 days), NOT the arm's D-20
+shadow trigger, which ignores lane A rows. While closed, ``admit`` re-reads them at most every ``QUALITY_POLL_S`` in a
+worker thread (a lane that is off has no breaker, so no read); a trip opens it like a redo-rate trip (reason
+``shadow_quality``, ``quality_cooldown_s``). After a probe closes it, only verdicts newer than that moment count
+(``quality_floor``), as for the arm's evidence floor.
+
 A half-open probe has an id (``probe_seq``). A late outcome of a probe whose id is no longer current (it timed
 out and a newer probe was admitted) is ignored, so it cannot close or reopen the breaker (PR3, N5).
 """
@@ -53,6 +60,7 @@ STATE_FILE = "lane_a_breaker.json"
 KEY = "proxy_haiku:lane_a"
 CLOSED, OPEN, HALF_OPEN = "closed", "open", "half_open"
 _MAX_UNITS = 500
+QUALITY_POLL_S = 300.0
 _UNREADABLE = object()  # _read: the state file exists but cannot be used
 #: Failure kinds that say nothing about Haiku's quality or health, so they never count toward a trip (PR3, N2):
 #: a bad token (the pinned model fails the same way) and a request that is too large for any model.
@@ -75,7 +83,11 @@ class LaneABreaker:
     """In-memory breaker with an asynchronous, coalesced flush. ``clock`` is wall time (persisted)."""
 
     def __init__(self, cfg: lane_a.BreakerConfig | None = None, path: Path | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 quality_fn: Callable[["LaneABreaker", float], str | None] | None = None) -> None:
+        self.quality_fn = quality_fn  # None: no shadow-quality watch (the breaker alone)
+        self.quality_floor: float | None = None
+        self._quality_at: float | None = None
         self.cfg = cfg or lane_a.BreakerConfig()
         self.path = path
         self.clock = clock
@@ -122,6 +134,7 @@ class LaneABreaker:
         cd = num(raw.get("cooldown_s"))
         self.cooldown_s = cd if cd is not None and cd > 0 else self.cfg.cooldown_s
         self.reason = raw.get("reason") if isinstance(raw.get("reason"), str) else None
+        self.quality_floor = num(raw.get("quality_floor"))
         self.probe_at = None  # a probe in flight before a restart is gone
         self.failures = [t for t in (num(x) for x in raw.get("failures") or []) if t is not None]
         self.units = [(t, bool(r)) for t, r in ((num(u[0]), u[1]) for u in raw.get("units") or []
@@ -133,7 +146,8 @@ class LaneABreaker:
     def _snapshot(self) -> dict:
         return {"version": 1, "key": KEY, "state": self.state, "opened_at": self.opened_at,
                 "cooldown_s": self.cooldown_s, "reason": self.reason, "failures": list(self.failures),
-                "units": [[t, r] for t, r in self.units[-_MAX_UNITS:]], "events": self.events[-50:]}
+                "units": [[t, r] for t, r in self.units[-_MAX_UNITS:]], "events": self.events[-50:],
+                "quality_floor": self.quality_floor}
 
     def _write(self, snap: dict) -> None:
         p = self._file()
@@ -201,6 +215,7 @@ class LaneABreaker:
         self.state, self.opened_at, self.reason, self.probe_at = CLOSED, None, None, None
         self.failures.clear()
         self.units.clear()
+        self.quality_floor = self.clock()  # the verdicts that opened it cannot reopen it
         self._event("closed", "probe_passed")
         self._mark_dirty()
 
@@ -222,6 +237,12 @@ class LaneABreaker:
                 self.probe_at = now
                 self.probe_seq += 1
                 return True, True
+            if self.quality_fn is not None and (self._quality_at is None or now - self._quality_at >= QUALITY_POLL_S):
+                self._quality_at = now
+                reason = await asyncio.to_thread(self.quality_fn, self, now)
+                if reason:
+                    self._open(f"shadow_quality:{reason}", self.cfg.quality_cooldown_s)
+                    return False, False
             return True, False
         except Exception as exc:  # noqa: BLE001 - a breaker that cannot decide does not serve
             failopen.record("LR-FO-LANE-A-BREAKER-ADMIT", exc)
@@ -350,6 +371,19 @@ def read_reply(status: int, buf: bytes, ctype: str) -> tuple[dict | None, str | 
 # ── the feed ─────────────────────────────────────────────────────────────────
 
 
+def shadow_quality_reason(breaker: "LaneABreaker", now: float) -> str | None:
+    """The default quality watch: ``haiku_guard.lane_a_shadow_trigger`` over the lane A verdict rows newer than the
+    breaker's evidence floor. The trigger's text when it tripped, else None. Runs in a worker thread."""
+    from llm_router.proxy import haiku_guard
+
+    since = now - haiku_guard.SHADOW_WINDOW_DAYS * 86400.0
+    if breaker.quality_floor is not None:
+        since = max(since, breaker.quality_floor)
+    trig = haiku_guard.lane_a_shadow_trigger(haiku_guard.read_jsonl(haiku_guard.shadow_verdicts_path()),
+                                             until=now, since=since)
+    return f"{trig['value']} ({trig['bar']})" if trig["tripped"] else None
+
+
 class LaneAFeed(FailureFeed):
     """``local_gate.FailureFeed`` whose settled outcomes go to the breaker in memory (the parent
     appends a unit to a file, which would block the loop)."""
@@ -367,7 +401,7 @@ class LaneARuntime:
 
     def __init__(self, cfg: lane_a.BreakerConfig, path: Path | None = None,
                  clock: Callable[[], float] = time.time) -> None:
-        self.breaker = LaneABreaker(cfg, path, clock)
+        self.breaker = LaneABreaker(cfg, path, clock, quality_fn=shadow_quality_reason)
         self.feed = LaneAFeed(self.breaker)
 
     def observe(self, body: dict, session_id: str | None) -> None:
@@ -420,15 +454,4 @@ class ServedStep:
                              session_kind=self.session_kind, probe=self.probe, probe_id=self.probe_id)
 
 
-def read_state() -> dict | None:
-    """Read-only view of the saved breaker state for ``quality_breaker.open_classes`` (the Stop-line and
-    ``llm-router status``). ``None`` when there is no file, it is unreadable or it is not a lane A state.
-    Creates nothing, writes nothing, never raises."""
-    try:
-        raw = json.loads(state_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return raw if isinstance(raw, dict) and raw.get("key") == KEY else None
-
-
-__all__ = ["LaneABreaker", "LaneAFeed", "LaneARuntime", "ServedStep", "read_reply", "read_state", "state_path"]
+__all__ = ["LaneABreaker", "LaneAFeed", "LaneARuntime", "ServedStep", "read_reply", "shadow_quality_reason", "state_path"]
