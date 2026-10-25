@@ -150,6 +150,8 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
                         the newest human prompt, or null when the engine did not run or gave none. Never
                         invented. ``eligible`` = every gate passed and a switch was off; ``served`` = the
                         Haiku tier answered. Turn-first / sub-agent rows from a pinned model carry them too.
+  lane_a_body_sha       Lane A served rows only (PR3 repair): the sha256 of the client's original bytes, which the
+                        Frontier replay must send unchanged; a pair whose replay sha differs is void (prereg section 3).
 
 Cost fields, on EVERY row (``proxy.cost_accounting``; for rows written since #261,
 null = unknown, never 0; rows written before #261 carry zeros for unknown usage):

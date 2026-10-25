@@ -58,7 +58,7 @@ from urllib.parse import urlsplit
 from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS, LocalAgentConfig, enabled_from_env
 from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
-from llm_router import authority, failopen, local_models, prompt_key, shadow_frontier
+from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_key, shadow_frontier
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
 from llm_router.proxy import escalation
@@ -114,6 +114,7 @@ OKF_ATTACH_TIMEOUT_S = 2.0
 
 ANTHROPIC_UPSTREAM = "https://api.anthropic.com"
 DEFAULT_PORT = 8787
+LANE_A_FLIP_BACKOFF_S = 60.0  # after a failed flip/identity write, wait this long before the next try
 DEFAULT_STEP_BUDGET_S = 30.0
 DEFAULT_NUM_CTX = local_models.DEFAULT_NUM_CTX
 #: Replies remembered for Message Threads continues (STEP-SIDECALL-1). Two ids per human turn at most.
@@ -774,10 +775,41 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     # at startup. Off: None, nothing is attached, 0 Frontier calls.
     frontier = shadow_frontier.FrontierShadow() if shadow_frontier.enabled() else None
 
-    def frontier_on_reply(request: Request, raw: bytes, row: dict, inner):
+    flip_stamped = False
+    flip_busy = False          # a write is in flight: concurrent first requests do not spawn another thread
+    flip_retry_at = 0.0        # after a failed write, no new attempt before this monotonic time
+
+    async def stamp_flip() -> None:
+        """D-302: the owner flip is the FIRST request that sees all four lane A switches on (YAML ``lane_a.enabled``,
+        ``LLM_ROUTER_PROXY_LANE_A=on``, ``haiku_rewrite``, the shadow flag), eligible step or not. Any switch off:
+        nothing is read from or written to disk. With all four on, the same write also records the identities of
+        the policy THIS proxy loaded (D-303: ``lane_a_identity.json``), whatever file or flag it came from. The
+        write (first flip wins, 0600) runs in a worker thread, once per process, by one request at a time; after a
+        failed write the next try waits ``LANE_A_FLIP_BACKOFF_S``. It never costs the call."""
+        nonlocal flip_stamped, flip_busy, flip_retry_at
+        if flip_stamped or flip_busy or tier_policy is None or frontier is None:
+            return
+        try:
+            seen = dict(yaml_enabled=bool(tier_policy.lane_a.enabled), env_on=lane_a.env_on(),
+                        haiku_rewrite=bool(tier_policy.haiku_rewrite), shadow_on=shadow_frontier.enabled())
+            if not all(seen.values()) or time.monotonic() < flip_retry_at:
+                return
+            flip_busy = True
+            await asyncio.to_thread(lane_a_shadow.maybe_record_flip, time.time(), **seen,
+                                    identity=lane_a_shadow.identities_of(tier_policy),
+                                    task_groups=lane_a_shadow.task_groups_of(tier_policy))
+            flip_stamped = True
+        except Exception as exc:  # noqa: BLE001 - evidence bookkeeping must never cost the call
+            flip_retry_at = time.monotonic() + LANE_A_FLIP_BACKOFF_S
+            failopen.record("LR-FO-LANE-A-FLIP", exc)
+        finally:
+            flip_busy = False
+
+    def frontier_on_reply(request: Request, raw: bytes, row: dict, inner, lane: dict | None = None):
         """Wrap ``inner`` (the local-shadow callback, or None) so that, once the Haiku reply
         is complete, the client's original bytes are replayed to the requested model in the
-        background. Only schedules; the relay never waits on the replay."""
+        background. Only schedules; the relay never waits on the replay. ``lane``: the lane A
+        context of a step lane A served (PR3), else None (the arm's rules apply)."""
         headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP}
         headers["accept-encoding"] = "identity"
         url = upstream + request.url.path + (("?" + request.url.query) if request.url.query else "")
@@ -794,7 +826,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             frontier.maybe_sample(raw, row.get("served_model"), row.get("requested_model"),
                                   shadow_frontier.DOOR_PROXY, row.get("msg_id"), replay=replay,
                                   cheap_status=status, cheap_reply=buf, cheap_ctype=ctype,
-                                  cheap_usage=row.get("usage"))
+                                  cheap_usage=row.get("usage"), lane=lane)
         return _on_reply
 
     def request_fields(body: dict, raw: bytes, parent_main: bool | None = None) -> dict:
@@ -909,9 +941,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         url = upstream + request.url.path + (("?" + request.url.query) if request.url.query else "")
         t0 = time.monotonic()
 
-        async def send(content: bytes):
+        async def send(content: bytes, header_timeout_s: float | None = None):
             req = http.build_request(request.method, url, headers=headers, content=content)
-            return await http.send(req, stream=True)
+            if header_timeout_s is None:
+                return await http.send(req, stream=True)
+            # Lane A (PR3, S1): bound the wait for the RESPONSE HEADERS only; the stream that follows keeps the
+            # shared client's read timeout. A hung Haiku call then falls back to the pinned model in
+            # ``lane_a.header_timeout_s`` (default 60 s), not after the client's 600 s.
+            try:
+                return await asyncio.wait_for(http.send(req, stream=True), header_timeout_s)
+            except asyncio.TimeoutError as exc:
+                raise httpx.ReadTimeout(f"lane A: no response headers in {header_timeout_s:g}s") from exc
 
         lf = lane_feed if original is not None else None
 
@@ -932,7 +972,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
         try:
             try:
-                up = await send(raw)
+                up = await send(raw, tier_policy.lane_a.header_timeout_s if lf is not None else None)
             except httpx.TimeoutException:
                 if lf is None:
                     raise
@@ -975,8 +1015,6 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     up = await send(json.dumps(without_thinking(body)).encode())
                 else:
                     await up.aclose()
-                    if lf is not None:
-                        lf.reply(up.status_code, text.encode(), "")
                     if on_reply is not None:
                         on_reply(up.status_code, b"", "")
                     return _finish_error(up.status_code, text.encode(), up.headers, row, t0)
@@ -1172,6 +1210,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             lane_gate.observe(body, row.get("session_id"))
         if tier_policy is not None and tier_policy.lane_runtime is not None:
             tier_policy.lane_runtime.observe(body, row.get("session_id"))  # lane A redo feed (in memory)
+        await stamp_flip()
         row["authority"] = authority.mode()
         if row["authority"] == authority.ADVISE:
             if ov is not None:
@@ -1226,7 +1265,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                                  original=original, on_reply=on_reply)
         if (frontier is not None and row.get("tier_reason") == REASON_HAIKU_REWRITE
                 and decision.served_model != body.get("model")):
-            on_reply = frontier_on_reply(request, raw, row, on_reply)
+            if row.get("lane_a_reason") == lane_a.R_SERVED:
+                # prereg section 3: the sha of the bytes the Frontier replay must send; the pair is void if the two differ
+                row["lane_a_body_sha"] = shadow_frontier.body_sha(raw)
+            on_reply = frontier_on_reply(request, raw, row, on_reply, lane_a_shadow.context_from_row(row, body))
         key = conversation_key(body, row.get("session_id"))
 
         def _on_usage(usage) -> None:
@@ -1250,7 +1292,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
             lane_feed = ServedStep(tier_policy.lane_runtime, probe=decision.detail == lane_a.DETAIL_PROBE,
                                    session_id=row.get("session_id"), model=decision.served_model,
-                                   session_kind=row.get("session_kind"))
+                                   session_kind=row.get("session_kind"), probe_id=decision.lane_a_probe_id)
 
         def _on_retry() -> None:
             sticky.record(key, body.get("model"), decision.complexity, "tier_rejected")

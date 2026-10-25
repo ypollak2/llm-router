@@ -644,7 +644,34 @@ def open_classes(*, units_fn: UnitsFn | None = None) -> list[dict]:
             })
     except Exception:  # noqa: BLE001 — visibility must never raise
         pass
+    out.extend(_lane_a_open())
     return sorted(out, key=lambda r: r["key"])
+
+
+#: Lane A's own breaker (``proxy/lane_a_breaker.py``) keeps its state in its own file, off the synchronous
+#: ``quality_breaker.json`` path. These two literals are the file and key it writes; a test pins them to
+#: ``lane_a_breaker.STATE_FILE`` / ``KEY``. They are not imported: this module runs inside the session-end hook,
+#: which must not pull in the proxy.
+LANE_A_STATE_FILE = "lane_a_breaker.json"
+LANE_A_KEY = "proxy_haiku:lane_a"
+
+
+def _lane_a_open() -> list[dict]:
+    """The lane A breaker as an open class, so a lane A trip shows in ``status``, ``northstar`` and the Stop-line.
+    READ-ONLY: it reads the file lane A wrote and never creates, writes or trips anything; no file (a lane that
+    is off, or one that never tripped), an unreadable file or a closed state is an empty list. Never raises."""
+    try:
+        raw = json.loads(paths.state_path(LANE_A_STATE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    try:
+        if not isinstance(raw, dict) or raw.get("key") != LANE_A_KEY or raw.get("state") not in (OPEN, HALF_OPEN):
+            return []
+        units = raw.get("units")
+        return [{"key": LANE_A_KEY, "state": raw["state"], "failure_rate": None,
+                 "n": len(units) if isinstance(units, list) else 0, "unknown": 0}]
+    except Exception:  # noqa: BLE001 — visibility must never raise
+        return []
 
 
 def stop_line_summary(*, units_fn: UnitsFn | None = None) -> str | None:

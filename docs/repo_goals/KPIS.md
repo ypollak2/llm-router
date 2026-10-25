@@ -185,11 +185,14 @@ wilson95, n_sessions, largest_session_share, window}`.
 | `offload.spread` | k = actions another Frontier subscription served (Codex gpt-5.5, gpt-6, Gemini Pro); n = all actions; never in a numerator (D-24) | as `action` |
 
 `by_lane` splits `action` by `(door, served_class, task_group)`; `by_task_type` by task group (`qa`, `code`,
-`tech_op`); `quality_sampled_lanes` lists the lanes that passed. "Very cheap" = a local provider, or an input
+`tech_op`); `quality_sampled_lanes` lists the lanes that passed. `offload.lane_a` / `offload.not_lane_a` split `action`
+by the proxy ledger's `lane: "A"` tag (steps lane A served on Haiku, D-285): `action` = `lane_a` + `not_lane_a` in k and n,
+so lane A is never counted twice; the S1 rule is unchanged, so lane A reaches the numerator only when its lane
+`(proxy, haiku, tech_op)` has a passing FINAL `shadow_pairs` batch (`window_complete: true`, D-301; written by `lane_quality_writer`). "Very cheap" = a local provider, or an input
 price at or below the highest Haiku entry of `pricing.py` (`pricing.haiku_input_rate()`; unknown models are not
 cheap). Not actions: side calls, deterministic filtering (`served_by=local_filter`), raw passthrough, technical
 ops under 4 KB, semantic-cache hits, rows of non-organic sessions. A lane is quality-sampled when its latest
-audit or shadow-pair batch in `lane_quality.jsonl` inside the trailing 28 days passed (audit n >= 30 and
+audit batch inside the trailing 28 days, or lane A's FINAL shadow-pair row (no age cap, D-302; invalidated by a changed lane A model, judge brief, prompt set or breaker thresholds), passed (audit n >= 30 and
 >= 26/30; or n >= 60 pairs, gap <= 3 pts, Newcombe LB >= -10); the file is written by the audit tooling and
 read here. Until a batch passes, `offload.action.k` is 0 by rule and `caveats` says so. **Known limits:** a
 sub-agent spawned through the MCP path counts under door `mcp`; `technical_ops.jsonl` does not exist before P2.1

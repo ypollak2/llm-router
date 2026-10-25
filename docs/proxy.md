@@ -566,7 +566,7 @@ No offload or saving figure is claimed; none has been measured.
 
   | reason | meaning |
   |---|---|
-  | `served` / `retried_original` | served on Haiku / Haiku refused the body and the pinned model answered |
+  | `served` / `retried_original` | served on Haiku / Haiku refused the body (4xx), answered a 5xx or hung past `header_timeout_s`, and the pinned model answered the client's own bytes instead |
   | `eligible` | every gate passed, a switch was off (or authority is `advise`): stayed pinned |
   | `off` | the lane was not evaluated (no tier policy, step served elsewhere) |
   | `not_pinned`, `not_continuation`, `pinned_turn`, `not_main_thread`, `session_kind` | the step is not lane A's |
@@ -626,7 +626,8 @@ No offload or saving figure is claimed; none has been measured.
   retried ONCE on the pinned model with the client's own bytes and the row reads `retried_original`
   (`tier_retry.status` is the status, or null for a timeout); the retried step no longer counts as a Haiku step for
   the cache rule. The 5xx and timeout retry applies only to lane A serves; the D-31 arm and every other call keep
-  their old behaviour (4xx only). A client that goes away mid-stream is no verdict on Haiku.
+  their old behaviour (4xx only). A client that goes away mid-stream is no verdict on Haiku, and a failure after the
+  first byte reached the client is not retried (it is fed as `stream_error`). A 401 or 413 is not counted (PR3).
 - **`haiku_units` (PR2).** The `proxy_haiku` probe's units now also include continuation rows served on Haiku by lane
   A (`lane_a_reason: served`, `tier_reason: haiku_rewrite`, served model Haiku), tagged `lane: "A"`; they were
   invisible because only the first call of each human turn counted. Their redo is the same escalation window
@@ -637,9 +638,139 @@ No offload or saving figure is claimed; none has been measured.
   pinned model with `knn_veto`. An abstain (no artifact, embedder down) does not veto, as in the wrapper. The vote is
   asked only on the serve branch (all three switches on, every other gate passed), so with the lane off there is no
   embed or model call, and with `complexity_knn: false` nothing changes. So `eligible` (switch off) is the share
-  BEFORE the veto and the cost and cap gates that run after it.
-- **Not in this PR:** the Frontier shadow sampler and lane tags, and the quality writer (PR3). The prereg owns tau, the
-  allowlist and the breaker thresholds; the numbers above are defaults until it freezes them.
+  after the cost-switch and consecutive-cap gates and before the knn vote and the breaker: a step the cost rule or the
+  cap stops reads `switch_cost_high` / `consecutive_cap` even with the lane off, and `eligible` steps may still be
+  vetoed by the vote or stopped by an open breaker once the lane is on.
+- **The prereg owns tau, the allowlist and the breaker thresholds;** the numbers above are defaults until it
+  freezes them (draft: `PREREG-LANEA`).
+
+#### Lane A PR3: Frontier shadow, lane tags, quality writer, KPI split (default OFF)
+
+Everything below is inert unless lane A actually SERVED a step: with the lane off there is no sampler, no shadow call,
+no `shadow_frontier/` file, no `lane_quality.jsonl` and no `lane` key on any row (`tests/test_lane_a_pr3.py` compares
+the state dir and replays the frozen main golden with `LLM_ROUTER_SHADOW_FRONTIER=on` too). The shadow runs with
+`LLM_ROUTER_SHADOW_FRONTIER=on` (OD-4 = A) on top of the lane A switches. Owner flip runbook: turn all four on, then send one request through the proxy to stamp the flip. At flip + 28 d a task group the proxy could serve (`task_groups` in `lane_a_identity.json`: `code`, `qa`, and `tech_op` when `technical_op` is allowlisted) that has no lane A row closes with a NOT INFORMATIVE row (`n_below_min`, n = 0); with no identity record the group set is unknown and such a group gets no row. Concurrent first requests run one write; after a failed write the proxy waits 60 s before the next try.
+
+- **Lane tag.** The ledger row of a step Haiku answered for lane A carries `lane: "A"` (with `tier_reason:
+  haiku_rewrite`, `lane_a_reason: served`). A retried step (`retried_original`, the pinned model answered), the D-31
+  arm and every other row carry no `lane` key. The shadow ledger, the pair store and the verdict rows carry `lane`,
+  `task_group`, `rate_phase`, `rate`, `session_id`, `msg_count`, `prev_tool_class` and `conf` for lane A steps only.
+- **Shadow sampler (`lane_a_shadow.py`, run by `shadow_frontier.FrontierShadow`).** After the Haiku reply has left, a
+  background task replays the client's UNMODIFIED bytes to the model the client asked for (the proxy never awaits it;
+  at most one replay in flight). The judge is the existing blind Sonnet judge (`python -m llm_router.shadow_frontier
+  judge`, 20 calls a day); a lane A pair is shown to it in an order derived from its id.
+  - **Which steps.** Deterministic key `sha256(session_id|msg_count|SALT)[:8] / 2^64`, no `random`, no clock; sampled
+    iff `key < rate`. A step with no session id or message count is skipped (`no_key`).
+  - **Fill then 2% (OD-4 = A, per task group).** `rate` is 1.0 until the task group has 60 decided pairs among the
+    verdict rows of the last 14 days, then 0.02. A decided pair has two boolean verdicts and `cannot_judge` not true.
+    The arm's own clock (100% for 14 days after the shadow first ran) is unchanged and never applies to lane A.
+  - **Bucket (D-293).** At most 12 lane A replays and 400k lane A input tokens per UTC day, INSIDE the unchanged
+    global cap (20 calls, 400k tokens): every replay counts toward the global cap, so the arm gets what lane A left.
+    A skip reads `lane_a_bucket` (or `cap_calls` / `cap_tokens` when the global cap binds first). Quota pause rules
+    (session >= 80%, weekly >= 85%, stale or unknown `usage.json`) apply as for the arm. Every skip is a ledger row.
+  - The 12, 400k, 60, 2% and 14 days are the numbers the PREREG-LANEA draft lists; the SALT is its draft literal.
+- **`lane_quality` shadow_pairs writer (`lane_quality_writer.py`).** Nothing wrote `kind: shadow_pairs` rows before; now
+  `python -m llm_router.lane_quality_writer [--since T] [--until T] [--dry-run]` (also run after `shadow_frontier
+  judge`) reads the lane A verdict rows and appends the FINAL row of a task group to `lane_quality.jsonl` (0600,
+  `state_files`): `{ts, door: "proxy", served_class: "haiku", task_group, kind: "shadow_pairs", n, gap_pts,
+  newcombe_lb, source, lane: "A", k_laneA, k_frontier, cannot_judge, cannot_judge_share, excluded, window_complete,
+  informative, close_reason, not_informative_reason, identity, flip_ts, since, until}`. `gap_pts = (acc_frontier - acc_laneA) *
+  100` (positive = Haiku worse), `newcombe_lb` = the unpaired Newcombe lower bound of `acc_laneA - acc_frontier`,
+  both from `eligibility.evidence_from_counts`, the function `eligibility.grade` and `lane_quality.batch_passed` use.
+  - **One pair per step.** Rows are reduced to the FIRST verdict of each `(session_id, msg_count)` (PREREG-LANEA
+    section 3); the rest are `excluded.duplicate_step`. The sampler skips a step that already has a replay
+    (`step_seen`), and the phase count uses the same rule. A client that resends a step cannot add a pair.
+  - **Judge failures are cannot_judge.** For lane A pairs `judge_pending` writes a verdict row with `cannot_judge: true`
+    and `cannot_judge_reason` (the exception name, `unparsed` or `model_mismatch`) when the judge errors, times out,
+    returns unparseable JSON or runs on the wrong model, so they count in the cannot_judge share (prereg section 6).
+    The arm writes no such row (unchanged).
+  - **Pairing check (prereg section 3).** The served ledger row carries `lane_a_body_sha` (sha256 of the client's
+    bytes); `replay_http` hashes the bytes it actually sent (`Replay.sent_sha`). A pair whose two shas differ, or lack
+    one, is `excluded.body_sha_mismatch`.
+  - **A row missing `task_group` or `rate_phase`, judged by another model or under another brief
+    (`JUDGE_BRIEF_SHA256`), is not evidence** (`excluded`, written into the row).
+  - **Window and the final row (D-301, amended by D-302; prereg owner).** A task group's S1 window closes at whichever
+    comes FIRST: the first judge batch with at least 60 decided pairs (after the dedupe) AND a `cannot_judge` share of
+    at most 20%, or 28 days after the owner flip. That batch is the one row with `window_complete: true`, and the only
+    one S1 counts; `lane_quality` ignores a `shadow_pairs` row without it. A batch with n >= 60 and MORE than 20%
+    `cannot_judge` is written NON-final (`window_complete: false`, `diagnostic: true`) and the window stays open, so a
+    judge outage cannot burn it; a later batch at or under 20% closes it informative. At flip + 28 days the window
+    closes NOT INFORMATIVE (`informative: false`, no gap / bound, S1 gets no credit) when n < 60 OR the last batch's
+    share is above 20%. The pair window is clamped to `until = min(now, flip + 28 d)`: a pair after day 28 never
+    counts, even when the writer first runs later. Pairs from before the flip never count and are written into the
+    row as `excluded.before_flip`. Below 60 pairs and before 28 days nothing is written. Once a task group has its
+    final row no new window opens and nothing reopens it, and the **sampler stops** for that group (skip reason
+    `window_final`: no 2% sampling after the close). `FINAL_WINDOW_PAIRS` (60), `FINAL_WINDOW_DAYS` (28) and
+    `CANNOT_JUDGE_MAX_SHARE` (0.20) are in `lane_a_shadow.CONSTANTS`.
+  - **A final row does not age out, and four identities invalidate it (D-302).** The S1 28 day read cap applies to
+    audit batches only; credit from a final `shadow_pairs` row does not expire by age, and `kpi` prints each final
+    row's age in days (`quality_sampled_lanes[].age_days`). Each row is stamped with `identity`: `lane_a_model` (the
+    `haiku` tier's model), `judge_brief_sha`, `prompt_set_sha` and
+    `breaker_sha` (the `lane_a.breaker` thresholds). **Prompt set** (pending prereg confirmation: confirmed by the
+    D-302 refinement) = sha of the `prev_tool_classes` allowlist + `tau` + any text-adding rewrite setting; the only
+    such setting is `haiku_fold_system` (it wraps mid-conversation system text in `<system-reminder>`); the default
+    Haiku rewrite adds no system prompt or template text. **The identity is the PROXY's (D-303).** The proxy computes
+    the four values from the policy it loaded at startup (`--tier-policy FILE`, the env path or the bundled one) and,
+    at the flip point (all four switches on), records them in `lane_a_identity.json` (state dir, 0600, replaced
+    at each proxy start; lane off writes nothing) and in the flip row. The writer stamps final rows from that record
+    and writes nothing, reporting `identity_unknown`, when none is recorded (the window stays open). S1 ignores a
+    final row whose stamp differs from the proxy's most recent recorded identity on any of the four (or has no
+    stamp) and reports the lane under `invalidated_lanes` (with a caveat); `kpi` prints and returns the compared
+    identity's sha (`compared_identity`) next to it. Validity is computed on every read, never latched: a reverted
+    change restores credit (D-303). The window itself never reopens; a new one needs a prereg amendment. Nothing else
+    invalidates a final row.
+  - **Owner flip (D-302).** The flip is the FIRST PROXY REQUEST that sees all four switches on: YAML
+    `lane_a.enabled`, `LLM_ROUTER_PROXY_LANE_A=on`, `haiku_rewrite` and the shadow flag, whether or not that step is
+    eligible. It is recorded on that request in `lane_a_flip.json` in the state dir (`{flip_ts, switches, source}`,
+    0600, `state_files`, first write wins; the write runs in a worker thread, not on the event loop). `switches` holds
+    the four values the request saw, so the flip can be audited. It is never written, and no directory is created,
+    when any one switch is off, so a lane that is off leaves the state dir as on main. With no flip recorded the
+    writer reads the trailing 14 days, the n >= 60 close still applies and no 28-day close can fire. The window starts
+    at the flip (`since` defaults to it); `--since` is a formal read. Owner flip runbook: turn all four on, then send one request through the proxy to stamp the flip. At flip + 28 d a task group the proxy could serve (`task_groups` in `lane_a_identity.json`: `code`, `qa`, and `tech_op` when `technical_op` is allowlisted) that has no lane A row closes with a NOT INFORMATIVE row (`n_below_min`, n = 0); with no identity record the group set is unknown and such a group gets no row. Concurrent first requests run one write; after a failed write the proxy waits 60 s before the next try.
+  - The same evidence writes the same `source`. The arm's verdict rows (no `lane`) are never read.
+  - **Lane A verdicts and the arm's guard.** Lane A verdicts share `verdicts.jsonl` but are tagged `lane: "A"`: the
+    arm's D-20 `haiku_guard.shadow_trigger`, `shadow_frontier.verdict_summary` (the statusline and the session report)
+    skip them, so lane A cannot turn off the arm and a strong arm cannot hide a weak lane A. Lane A's own trigger is
+    `haiku_guard.lane_a_shadow_trigger` (acceptable below 26/30 at n >= 20 in 14 days, one per step), read by the
+    lane A breaker (lever `proxy_haiku`, task `lane_a`, PREREG-LANEA section 10): while closed, `admit` re-reads the
+    verdicts at most every 5 minutes in a worker thread, and a trip opens the breaker with the 24 h quality cooldown
+    (`shadow_quality:` reason). After a probe closes it only newer verdicts count (`quality_floor`, persisted).
+    `verdict_summary(lane="A")` is lane A's own summary; nothing mixes the two unlabeled.
+- **KPI separation, and what the S1 numerator now includes (D-285).** The S1 definition is unchanged: an action is in
+  the numerator iff it was served by a local / Haiku / very-cheap model, not redone, not escalated, and its lane
+  `(door, served_class, task_group)` is quality-sampled. A lane A step is a proxy action served by Haiku whose
+  `prev_tool_class` is `technical_op`, so its lane is `(proxy, haiku, tech_op)`; it enters the numerator only when
+  the lane's FINAL batch (`window_complete: true`, D-301) passes (n >= 60, gap <= 3 points, lower bound >= -10) and its
+  four identities still match the config (D-302; a final row is not age-capped).
+  **Lane-level caveat.** Sampling is per lane, not per lane A step: once the final batch passes, the whole lane
+  `(proxy, haiku, tech_op)` is quality-sampled (`offload_share.py`, `a["sampled"] = lane in sampled`), so any other
+  Haiku-served `tech_op` proxy action in the window (for example one where the client itself chose Haiku) joins the
+  numerator too. The S1 rule did not change in this PR and this was already true of any sampled lane; the prereg should
+  say it.
+  Before that it is in the denominator only, as before. `kpi` `offload` now has `lane_a` (the lane A actions,
+  `quality_sampled`, `lanes`) and `not_lane_a`; `action` = `lane_a` + `not_lane_a` in both `k` and `n`, so nothing is
+  counted twice. The persisted `daily_offload` rows are left as they are (no new key). The D-31 arm's Haiku turns stay in
+  `(proxy, haiku, qa|code)` and never enter the lane A line.
+- **Carry-ins from the #731 review.**
+  - *S1, header timeout.* A lane A serve waits `lane_a.header_timeout_s` (default 60, a placeholder, not measured;
+    range (0, 600]) for Haiku's response HEADERS; on a timeout the pinned model answers (`retried_original`). The
+    stream that follows keeps the shared client's read timeout. Non-lane calls are untouched.
+  - *S2, one failure direction.* A breaker that cannot decide does not serve: an existing state file that cannot be
+    read (corrupt, wrong key, locked) opens the breaker (`state_unreadable`, the 30 minute cooldown, then one probe)
+    and records `LR-FO-LANE-A-BREAKER-READ`, exactly as an internal `admit()` error denies and records
+    `LR-FO-LANE-A-BREAKER-ADMIT`. An absent file is a fresh start (closed). The cost: a lost 24 h redo-rate cooldown
+    is not restored.
+  - *N2.* A 401 or 413 from Haiku is returned to the client and is not a breaker failure (a bad token fails the
+    pinned model the same way); on a half-open probe it frees the probe slot.
+  - *N3.* `retried_original` covers 5xx and header timeouts as well as 4xx refusals. A failure MID-STREAM is not
+    retried (bytes have already left); it is fed to the breaker as `stream_error` and the row stays `served`.
+  - *N4.* The cache rule reuses the body check's context-size estimate: no second serialization of the body, with
+    the lane off or on (the reason a lane-off row gets is unchanged).
+  - *N5.* A half-open probe has an id; the late outcome of a probe that timed out cannot close or reopen the
+    breaker after a newer probe was admitted.
+  - *Trip visibility.* An open or half-open lane A breaker appears in `quality_breaker.open_classes()` as
+    `proxy_haiku:lane_a`, so `llm-router status`, `northstar` and the Stop-line (`breaker: N classes off`) show it.
+    Read-only: it reads `lane_a_breaker.json` and creates, writes and trips nothing.
 
 ### Key finding (1.2): per-turn switching does not pay; conversation-level might
 

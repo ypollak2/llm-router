@@ -2130,6 +2130,10 @@ def _offload_prd(days: float, allowed: frozenset[str], index, all_rows: list[dic
         caveats.append("no quality-sampled lane: lane_quality.jsonl holds no passing audit or shadow-pair batch "
                        f"in the {lane_quality.WINDOW_DAYS} days before the window end, so the action numerator is 0 by "
                        "rule and every row counts in the denominator only (PLAN v16 section 1.1)")
+    for (d, c, g), info in sorted(res["invalidated"].items()):
+        caveats.append(f"lane {d}/{c}/{g} is INVALIDATED: its final shadow-pair row (age {info['age_days']} d) was "
+                       f"stamped under a different {', '.join(info['mismatch'])}; a new window needs a prereg "
+                       "amendment (D-302), none is opened here, and the lane earns no credit")
     if "tech_op" not in out["by_task_type"]:
         caveats.append("no model-served technical op in window (technical_ops.jsonl is written from P2.1)")
     caveats += [
@@ -2153,6 +2157,11 @@ def _offload_prd(days: float, allowed: frozenset[str], index, all_rows: list[dic
     out["excluded"] = ex
     out["quality_sampled_lanes"] = [
         {"door": d, "served_class": c, "task_group": g, **info} for (d, c, g), info in sorted(res["sampled"].items())]
+    out["invalidated_lanes"] = [
+        {"door": d, "served_class": c, "task_group": g, **info} for (d, c, g), info in sorted(res["invalidated"].items())]
+    from llm_router import lane_a_shadow
+    cmp_id = res.get("compared_identity")
+    out["compared_identity"] = {"sha": lane_a_shadow.identity_sha(cmp_id), "identity": cmp_id}   # D-303
     out["window"] = window
     return out
 
@@ -2280,6 +2289,14 @@ def _offload_render_lines(off: dict) -> list[str]:
              one("Offload share, per human turn", off["turn"]),
              one("Spread (other Frontier subscription)", off["spread"])]
     lines += [f"      WARNING: {c}" for c in off["turn"].get("caveats", ())]
+    # D-302: a final lane A shadow-pair row never expires by age, so its age is printed
+    lines += [f"      final window {q['door']}/{q['served_class']}/{q['task_group']}: n={q['n']}, age {q['age_days']} d"
+              for q in off.get("quality_sampled_lanes", ()) if q.get("kind") == "shadow_pairs"]
+    lines += [f"      INVALIDATED window {q['door']}/{q['served_class']}/{q['task_group']}: age {q['age_days']} d, "
+              f"changed {', '.join(q['mismatch'])}" for q in off.get("invalidated_lanes", ())]
+    ci = off.get("compared_identity") or {}
+    if off.get("quality_sampled_lanes") or off.get("invalidated_lanes"):
+        lines.append(f"      S1 compared lane A identity sha: {ci.get('sha') or 'unknown (none recorded by the proxy)'}")
     lines += [f"      {c}" for c in off.get("caveats", ())]
     return lines
 

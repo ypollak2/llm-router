@@ -23,9 +23,25 @@ The decision path is in memory only: ``admit`` and ``record_*`` never touch the 
 (``lane_a_breaker.json``, 0600 through ``state_files``) is loaded once on the first ``admit`` in a
 worker thread and written by a coalesced background flush task in a worker thread, so a restart keeps an
 open breaker and nothing blocks the event loop. A load or write error is recorded with ``failopen`` and
-never raises. An unreadable state file reads closed; ``admit`` itself returns "not allowed" on any
-internal error, so a breaker that cannot decide does not serve. The breaker is built only when
-``lane_a.enabled`` is true in the YAML; a lane that is off creates no object, no file and no task.
+never raises.
+
+ONE failure direction (PR3, carry-in S2): a breaker that cannot decide does not serve. A state file that
+exists but cannot be read (corrupt, wrong key, locked, permission) opens the breaker (reason
+``state_unreadable``, the failure-trip cooldown, ``LR-FO-LANE-A-BREAKER-READ`` recorded), and so does an
+internal error in ``admit``. An ABSENT file is a fresh start and reads closed. The cost of failing safe: the
+24 h redo-rate cooldown of a lost file is not restored (the redo units are lost with it), so the lane probes
+again after 30 minutes. The breaker is built only when ``lane_a.enabled`` is true in the YAML; a lane that is
+off creates no object, no file and no task.
+
+QUALITY (D-301 / PREREG-LANEA section 10). The Frontier-shadow verdicts of lane A are this breaker's quality signal
+(``haiku_guard.lane_a_shadow_trigger``: acceptable below 26/30 at n >= 20 lane A pairs in 14 days), NOT the arm's D-20
+shadow trigger, which ignores lane A rows. While closed, ``admit`` re-reads them at most every ``QUALITY_POLL_S`` in a
+worker thread (a lane that is off has no breaker, so no read); a trip opens it like a redo-rate trip (reason
+``shadow_quality``, ``quality_cooldown_s``). After a probe closes it, only verdicts newer than that moment count
+(``quality_floor``), as for the arm's evidence floor.
+
+A half-open probe has an id (``probe_seq``). A late outcome of a probe whose id is no longer current (it timed
+out and a newer probe was admitted) is ignored, so it cannot close or reopen the breaker (PR3, N5).
 """
 from __future__ import annotations
 
@@ -44,6 +60,11 @@ STATE_FILE = "lane_a_breaker.json"
 KEY = "proxy_haiku:lane_a"
 CLOSED, OPEN, HALF_OPEN = "closed", "open", "half_open"
 _MAX_UNITS = 500
+QUALITY_POLL_S = 300.0
+_UNREADABLE = object()  # _read: the state file exists but cannot be used
+#: Failure kinds that say nothing about Haiku's quality or health, so they never count toward a trip (PR3, N2):
+#: a bad token (the pinned model fails the same way) and a request that is too large for any model.
+NOT_BREAKER_KINDS = frozenset({"http_401", "http_413"})
 
 # Failure kinds written to the breaker state (closed set; text-free).
 F_TIMEOUT = "timeout"
@@ -62,7 +83,11 @@ class LaneABreaker:
     """In-memory breaker with an asynchronous, coalesced flush. ``clock`` is wall time (persisted)."""
 
     def __init__(self, cfg: lane_a.BreakerConfig | None = None, path: Path | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 quality_fn: Callable[["LaneABreaker", float], str | None] | None = None) -> None:
+        self.quality_fn = quality_fn  # None: no shadow-quality watch (the breaker alone)
+        self.quality_floor: float | None = None
+        self._quality_at: float | None = None
         self.cfg = cfg or lane_a.BreakerConfig()
         self.path = path
         self.clock = clock
@@ -71,6 +96,7 @@ class LaneABreaker:
         self.cooldown_s = self.cfg.cooldown_s
         self.reason: str | None = None
         self.probe_at: float | None = None
+        self.probe_seq = 0  # id of the newest half-open probe (in memory only)
         self.failures: list[float] = []
         self.units: list[tuple[float, bool]] = []  # (ts, redo)
         self.events: list[dict] = []  # text-free: {ts, event, reason}, newest last, bounded
@@ -84,15 +110,20 @@ class LaneABreaker:
     def _file(self) -> Path:
         return self.path or state_path()
 
-    def _read(self) -> dict | None:
+    def _read(self):
+        """The saved state, ``None`` when there is no file (a fresh start), ``_UNREADABLE`` when there is a file
+        that cannot be used (the breaker then fails safe: open)."""
         try:
             raw = json.loads(self._file().read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
         except (OSError, ValueError) as exc:
             failopen.record("LR-FO-LANE-A-BREAKER-READ", exc)
-            return None
-        return raw if isinstance(raw, dict) and raw.get("key") == KEY else None
+            return _UNREADABLE
+        if isinstance(raw, dict) and raw.get("key") == KEY:
+            return raw
+        failopen.record("LR-FO-LANE-A-BREAKER-READ", ValueError("lane_a_breaker.json has the wrong shape or key"))
+        return _UNREADABLE
 
     def _apply(self, raw: dict) -> None:
         st = raw.get("state")
@@ -103,6 +134,7 @@ class LaneABreaker:
         cd = num(raw.get("cooldown_s"))
         self.cooldown_s = cd if cd is not None and cd > 0 else self.cfg.cooldown_s
         self.reason = raw.get("reason") if isinstance(raw.get("reason"), str) else None
+        self.quality_floor = num(raw.get("quality_floor"))
         self.probe_at = None  # a probe in flight before a restart is gone
         self.failures = [t for t in (num(x) for x in raw.get("failures") or []) if t is not None]
         self.units = [(t, bool(r)) for t, r in ((num(u[0]), u[1]) for u in raw.get("units") or []
@@ -114,7 +146,8 @@ class LaneABreaker:
     def _snapshot(self) -> dict:
         return {"version": 1, "key": KEY, "state": self.state, "opened_at": self.opened_at,
                 "cooldown_s": self.cooldown_s, "reason": self.reason, "failures": list(self.failures),
-                "units": [[t, r] for t, r in self.units[-_MAX_UNITS:]], "events": self.events[-50:]}
+                "units": [[t, r] for t, r in self.units[-_MAX_UNITS:]], "events": self.events[-50:],
+                "quality_floor": self.quality_floor}
 
     def _write(self, snap: dict) -> None:
         p = self._file()
@@ -139,7 +172,9 @@ class LaneABreaker:
             if self._loaded:
                 return
             raw = await asyncio.to_thread(self._read)
-            if raw is not None and not self._loaded:
+            if raw is _UNREADABLE and not self._loaded:
+                self._open("state_unreadable", self.cfg.cooldown_s)  # fail safe: a lane that cannot read its state waits
+            elif raw is not None and not self._loaded:
                 self._apply(raw)
             self._loaded = True
 
@@ -180,6 +215,7 @@ class LaneABreaker:
         self.state, self.opened_at, self.reason, self.probe_at = CLOSED, None, None, None
         self.failures.clear()
         self.units.clear()
+        self.quality_floor = self.clock()  # the verdicts that opened it cannot reopen it
         self._event("closed", "probe_passed")
         self._mark_dirty()
 
@@ -199,18 +235,39 @@ class LaneABreaker:
                 if self.probe_at is not None and now - self.probe_at < self.cfg.probe_timeout_s:
                     return False, False
                 self.probe_at = now
+                self.probe_seq += 1
                 return True, True
+            if self.quality_fn is not None and (self._quality_at is None or now - self._quality_at >= QUALITY_POLL_S):
+                self._quality_at = now
+                reason = await asyncio.to_thread(self.quality_fn, self, now)
+                if reason:
+                    self._open(f"shadow_quality:{reason}", self.cfg.quality_cooldown_s)
+                    return False, False
             return True, False
         except Exception as exc:  # noqa: BLE001 - a breaker that cannot decide does not serve
             failopen.record("LR-FO-LANE-A-BREAKER-ADMIT", exc)
             return False, False
 
-    def record_success(self, probe: bool = False) -> None:
+    def _stale(self, probe: bool, probe_id: int | None) -> bool:
+        """A probe outcome whose id is not the current probe's: a late outcome of a probe that timed out."""
+        return probe and probe_id is not None and probe_id != self.probe_seq
+
+    def record_success(self, probe: bool = False, probe_id: int | None = None) -> None:
+        if self._stale(probe, probe_id):
+            return
         if probe and self.state == HALF_OPEN:
             self._close()
 
-    def record_failure(self, kind: str, probe: bool = False) -> None:
+    def probe_inconclusive(self, probe_id: int | None) -> None:
+        """The current probe got an answer that says nothing about Haiku (NOT_BREAKER_KINDS): free the probe
+        slot so the next step probes, and change nothing else."""
+        if self.state == HALF_OPEN and probe_id is not None and probe_id == self.probe_seq:
+            self.probe_at = None
+
+    def record_failure(self, kind: str, probe: bool = False, probe_id: int | None = None) -> None:
         """A hard failure of a Haiku-served lane A step."""
+        if self._stale(probe, probe_id):
+            return
         now = self.clock()
         if probe and self.state == HALF_OPEN:
             self.failures.append(now)
@@ -314,6 +371,19 @@ def read_reply(status: int, buf: bytes, ctype: str) -> tuple[dict | None, str | 
 # ── the feed ─────────────────────────────────────────────────────────────────
 
 
+def shadow_quality_reason(breaker: "LaneABreaker", now: float) -> str | None:
+    """The default quality watch: ``haiku_guard.lane_a_shadow_trigger`` over the lane A verdict rows newer than the
+    breaker's evidence floor. The trigger's text when it tripped, else None. Runs in a worker thread."""
+    from llm_router.proxy import haiku_guard
+
+    since = now - haiku_guard.SHADOW_WINDOW_DAYS * 86400.0
+    if breaker.quality_floor is not None:
+        since = max(since, breaker.quality_floor)
+    trig = haiku_guard.lane_a_shadow_trigger(haiku_guard.read_jsonl(haiku_guard.shadow_verdicts_path()),
+                                             until=now, since=since)
+    return f"{trig['value']} ({trig['bar']})" if trig["tripped"] else None
+
+
 class LaneAFeed(FailureFeed):
     """``local_gate.FailureFeed`` whose settled outcomes go to the breaker in memory (the parent
     appends a unit to a file, which would block the loop)."""
@@ -331,7 +401,7 @@ class LaneARuntime:
 
     def __init__(self, cfg: lane_a.BreakerConfig, path: Path | None = None,
                  clock: Callable[[], float] = time.time) -> None:
-        self.breaker = LaneABreaker(cfg, path, clock)
+        self.breaker = LaneABreaker(cfg, path, clock, quality_fn=shadow_quality_reason)
         self.feed = LaneAFeed(self.breaker)
 
     def observe(self, body: dict, session_id: str | None) -> None:
@@ -340,21 +410,26 @@ class LaneARuntime:
         except Exception as exc:  # noqa: BLE001 - the feed never costs a request
             failopen.record("LR-FO-LANE-A-FEED-OBSERVE", exc)
 
-    def failure(self, kind: str, probe: bool) -> None:
+    def failure(self, kind: str, probe: bool, probe_id: int | None = None) -> None:
         try:
-            self.breaker.record_failure(kind, probe)
+            if kind in NOT_BREAKER_KINDS:
+                if probe:
+                    self.breaker.probe_inconclusive(probe_id)
+                return
+            self.breaker.record_failure(kind, probe, probe_id)
         except Exception as exc:  # noqa: BLE001
             failopen.record("LR-FO-LANE-A-FEED-FAILURE", exc)
 
     def reply(self, status: int, buf: bytes, ctype: str, *, session_id: str | None, model: str | None,
-              session_kind: str | None, probe: bool) -> str | None:
-        """Settle one Haiku-served reply. Returns the failure kind, or None."""
+              session_kind: str | None, probe: bool, probe_id: int | None = None) -> str | None:
+        """Settle one Haiku-served reply. Returns the failure kind, or None. A 401 or 413 is returned but not
+        counted (``NOT_BREAKER_KINDS``)."""
         try:
             message, kind = read_reply(status, buf, ctype)
             if kind is not None:
-                self.breaker.record_failure(kind, probe)
+                self.failure(kind, probe, probe_id)
                 return kind
-            self.breaker.record_success(probe)
+            self.breaker.record_success(probe, probe_id)
             if message is not None and model:
                 self.feed.note_served(session_id, "lane_a", model, message, session_kind)
             return None
@@ -367,16 +442,16 @@ class ServedStep:
     """One lane A step sent to Haiku: the callbacks ``server.forward`` makes about its outcome."""
 
     def __init__(self, runtime: LaneARuntime, *, probe: bool, session_id: str | None, model: str | None,
-                 session_kind: str | None) -> None:
-        self.rt, self.probe, self.session_id, self.model, self.session_kind = (
-            runtime, probe, session_id, model, session_kind)
+                 session_kind: str | None, probe_id: int | None = None) -> None:
+        self.rt, self.probe, self.session_id, self.model, self.session_kind, self.probe_id = (
+            runtime, probe, session_id, model, session_kind, probe_id)
 
     def failure(self, kind: str) -> None:
-        self.rt.failure(kind, self.probe)
+        self.rt.failure(kind, self.probe, self.probe_id)
 
     def reply(self, status: int, buf: bytes, ctype: str) -> str | None:
         return self.rt.reply(status, buf, ctype, session_id=self.session_id, model=self.model,
-                             session_kind=self.session_kind, probe=self.probe)
+                             session_kind=self.session_kind, probe=self.probe, probe_id=self.probe_id)
 
 
-__all__ = ["LaneABreaker", "LaneAFeed", "LaneARuntime", "ServedStep", "read_reply", "state_path"]
+__all__ = ["LaneABreaker", "LaneAFeed", "LaneARuntime", "ServedStep", "read_reply", "shadow_quality_reason", "state_path"]
