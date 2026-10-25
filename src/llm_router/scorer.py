@@ -74,9 +74,6 @@ def _quality_score_adjusted(
 ) -> float:
     """Quality score after applying local failure-rate penalty."""
     base_quality = get_quality_score(model_id, task_type)
-    if base_quality is None:
-        # Unknown quality contributes nothing: it ranks behind every measured model.
-        return 0.0
     failure_penalty = get_model_failure_penalty(model_id, task_type, failure_rates=failure_rates)
     return base_quality * (1.0 - failure_penalty)
 

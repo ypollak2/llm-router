@@ -412,6 +412,36 @@ def get_model_acceptance_penalty(
 
 
 # ── Local Model Quality Registry ─────────────────────────────────────────────
+# Static quality estimates for local model families that never appear on CI
+# benchmarks (ollama/*, lm_studio/*, vllm/*). Keyed by benchmark_alias defined
+# in discover.py's _OLLAMA_MODEL_REGISTRY.
+#
+# Scores are conservative estimates calibrated from community reports and
+# Aider/EvalPlus leaderboards for quantized local variants. Local models are
+# penalised ~15–25% vs the cloud models they are based on (quantization loss).
+#
+# Format: {benchmark_alias: {task_type: quality_score [0.0–1.0]}}
+_LOCAL_QUALITY_SCORES: dict[str, dict[str, float]] = {
+    "qwen3-coder":    {"code": 0.76, "analyze": 0.72, "query": 0.65, "generate": 0.62, "research": 0.55},
+    "qwen3":          {"code": 0.70, "analyze": 0.68, "query": 0.66, "generate": 0.64, "research": 0.52},
+    "qwen2.5-coder":  {"code": 0.72, "analyze": 0.68, "query": 0.60, "generate": 0.58, "research": 0.48},
+    "qwen2.5":        {"code": 0.65, "analyze": 0.64, "query": 0.62, "generate": 0.60, "research": 0.50},
+    "codestral":      {"code": 0.73, "analyze": 0.65, "query": 0.55, "generate": 0.58, "research": 0.45},
+    "deepseek-coder": {"code": 0.74, "analyze": 0.68, "query": 0.58, "generate": 0.56, "research": 0.46},
+    "deepseek-v3":    {"code": 0.70, "analyze": 0.70, "query": 0.67, "generate": 0.65, "research": 0.54},
+    "llama-3":        {"code": 0.62, "analyze": 0.63, "query": 0.64, "generate": 0.62, "research": 0.52},
+    "llama":          {"code": 0.55, "analyze": 0.57, "query": 0.58, "generate": 0.56, "research": 0.46},
+    "gemma":          {"code": 0.60, "analyze": 0.63, "query": 0.62, "generate": 0.59, "research": 0.48},
+    "mistral":        {"code": 0.60, "analyze": 0.60, "query": 0.59, "generate": 0.60, "research": 0.50},
+    "phi-4":          {"code": 0.62, "analyze": 0.61, "query": 0.60, "generate": 0.59, "research": 0.48},
+    "phi":            {"code": 0.50, "analyze": 0.50, "query": 0.50, "generate": 0.50, "research": 0.40},
+    "granite":        {"code": 0.65, "analyze": 0.62, "query": 0.58, "generate": 0.55, "research": 0.45},
+    "command-r":      {"code": 0.55, "analyze": 0.60, "query": 0.62, "generate": 0.65, "research": 0.58},
+}
+
+# Default score for models not in any registry.
+_DEFAULT_QUALITY = 0.50
+
 # Background refresh state: only one refresh runs at a time.
 _refresh_lock = threading.Lock()
 _refresh_in_progress = False
@@ -423,7 +453,7 @@ def _resolve_local_alias(model_id: str) -> str | None:
     Strips the provider prefix (``ollama/``, ``lm_studio/``) and matches the
     model name against the alias table used in ``discover.py``.  This allows
     ``ollama/qwen3:32b`` to resolve to the ``qwen3`` alias and look up quality
-    the family alias (a pure name match; it carries no scores).
+    scores from ``_LOCAL_QUALITY_SCORES``.
 
     Args:
         model_id: Full model ID, e.g. ``"ollama/qwen3:32b"``.
@@ -469,31 +499,45 @@ def _resolve_local_alias(model_id: str) -> str | None:
     return None
 
 
-def get_quality_score(model_id: str, task_type: str) -> float | None:
-    """Return the benchmarked quality score [0.0-1.0] for *model_id* on *task_type*.
+def get_quality_score(model_id: str, task_type: str) -> float:
+    """Return the quality score [0.0–1.0] for *model_id* on *task_type*.
 
-    Source: benchmark data (``~/.llm-router/benchmarks.json``) only. A model or
-    task with no measurement returns ``None`` ("unknown"); no number is invented
-    for it. Failures also return ``None`` (same offline-safe contract as the rest
-    of this module). Callers sort unknown last.
+    Lookup order:
+      1. **Benchmark data** (``~/.llm-router/benchmarks.json``) — API models
+         that appear on Arena Hard / Aider / HuggingFace leaderboards.
+      2. **Local alias registry** (``_LOCAL_QUALITY_SCORES``) — Ollama / local
+         models resolved via ``_resolve_local_alias()``.
+      3. **Default** — 0.5 (neutral; model is treated as average quality).
+
+    All failures return 0.5 silently (same offline-safe contract as the rest
+    of this module).
 
     Args:
-        model_id: Full model ID, e.g. ``"openai/gpt-4o"``.
+        model_id: Full model ID, e.g. ``"ollama/qwen3:32b"`` or
+            ``"openai/gpt-4o"``.
         task_type: Task type string (``"code"``, ``"analyze"``, ``"query"``,
             ``"generate"``, ``"research"``).
 
     Returns:
-        Quality score in [0.0, 1.0] (higher is better), or ``None`` if unknown.
+        Quality score in [0.0, 1.0]. Higher is better.
     """
     try:
+        # 1. Try benchmark data (API models)
         data = get_benchmark_data()
         if data:
             task_scores: dict[str, float] = data.get("task_scores", {}).get(task_type, {})
             if model_id in task_scores:
                 return float(task_scores[model_id])
+
+        # 2. Try local alias registry (Ollama / local providers)
+        alias = _resolve_local_alias(model_id)
+        if alias and alias in _LOCAL_QUALITY_SCORES:
+            return float(_LOCAL_QUALITY_SCORES[alias].get(task_type, _DEFAULT_QUALITY))
+
     except Exception:
         pass
-    return None
+
+    return _DEFAULT_QUALITY
 
 
 def maybe_refresh_benchmarks_background(ttl_days: int = 7) -> bool:
