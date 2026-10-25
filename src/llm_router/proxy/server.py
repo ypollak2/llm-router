@@ -60,7 +60,7 @@ from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import authority, failopen, local_models, prompt_key, shadow_frontier
 from llm_router import prefixes as user_prefixes
-from llm_router.proxy import haiku_arm, haiku_guard, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
+from llm_router.proxy import haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -422,6 +422,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             prefixes.update(row)
         except Exception as exc:  # noqa: BLE001 - the ledger row matters more than its cost fields
             failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
+        lane_a.ensure_fields(row)  # every continuation row, served or not, carries lane_a_reason/_conf
         ledger.write_row(row, cfg.ledger_path)
 
     def _budget_left(t0: float) -> float:
@@ -829,6 +830,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 decision = await tier_policy.decide(body, row.get("session_id"), sticky_view or sticky)
         except Exception as exc:  # noqa: BLE001 - fail-safe: forward unchanged
             row.update(served_model=body.get("model"), tier=None, tier_reason=REASON_DECISION_ERROR,
+                       lane_a_reason=lane_a.R_ERROR, lane_a_conf=None,
                        tier_proposed=None,
                        tier_switch=False, tier_switch_cost_usd=None, tier_complexity_score=None,
                        tier_detail=ledger.scrub_detail(f"{type(exc).__name__}: {exc}"),
@@ -846,6 +848,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    tier_detail=decision.detail,
                    tier_quota_pressure=decision.quota_pressure, tier_quota_state=decision.quota_state,
                    tier_decision_s=round(time.monotonic() - t0, 3))
+        if decision.lane_a_reason is not None:
+            # Lane A (proxy/lane_a.py): closed reason code + engine confidence; no request text.
+            row.update(lane_a_reason=decision.lane_a_reason, lane_a_conf=decision.lane_a_conf)
         if decision.arm is not None:
             # D-31 experiment arm: ids and enums only, never request text.
             row.update(tier_arm=decision.arm, tier_arm_assignment=decision.arm_assignment,
@@ -911,6 +916,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     if row.get("tier_arm_assignment") == haiku_arm.ASSIGNED:
                         # The arm's Haiku call was refused; the pinned model answered.
                         row["tier_arm_assignment"] = haiku_arm.TREATMENT_RETRIED
+                    if row.get("lane_a_reason") == lane_a.R_SERVED:
+                        row["lane_a_reason"] = lane_a.R_RETRIED  # Haiku refused the body; the pinned model answered
                 if on_retry is not None:
                     on_retry()
                 raw, body = original
@@ -1020,6 +1027,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row["tier_reason_proposed"] = proposed
             row.update(served_model=body.get("model"), tier=None, tier_switch=False,
                        tier_switch_cost_usd=None)
+            if row.get("lane_a_reason") == lane_a.R_SERVED:
+                row["lane_a_reason"] = lane_a.R_ELIGIBLE  # advise never serves: the step would have been eligible
         row["tier_reason"] = authority.ADVISE
         return await forward(request, raw, body, row)
 

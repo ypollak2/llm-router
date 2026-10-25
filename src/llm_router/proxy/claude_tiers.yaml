@@ -112,6 +112,19 @@ pinned_models: []
 # haiku_arm_share: 0.10
 # haiku_arm_eligible: [query/simple]   # optional task/complexity patterns (complexity may be *); default exactly this
 
+# Lane A (D-285, default OFF): Haiku for classifier-confident CONTINUATION steps (a step that
+# answers the results of the assistant's last tool calls) EVEN IF the requested model is in
+# pinned_models. Turn-first, sub-agent and harness steps stay on the pinned model. Serving needs
+# ALL of: `enabled: true` here, LLM_ROUTER_PROXY_LANE_A=on in the proxy's environment (read per
+# request: unset or `off` is the kill switch) and `haiku_rewrite: true`. `tau` is the minimum
+# engine confidence (a placeholder until pre-registered); `prev_tool_classes` is the allowlist of
+# what the last tool calls were (never edit / exec / agent). Whatever these say, every
+# continuation ledger row carries lane_a_reason and lane_a_conf (see proxy/lane_a.py).
+lane_a:
+  enabled: false
+  tau: 0.67
+  prev_tool_classes: [technical_op]
+
 # Quota-aware tiers: the higher of the Claude subscription's session and weekly
 # usage, read from the cached ~/.llm-router/usage.json (never a network call on
 # the proxy path), steps calls down as the quota fills, because Max quota

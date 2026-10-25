@@ -442,23 +442,10 @@ def _fallback(exc: BaseException, policy_version: str) -> Decision:
         policy_version=policy_version, engine_version=ENGINE_VERSION)
 
 
-def decide(text: str, *, ctx_digest: str = "", door: str, session_id: str | None = None,
-           task_id: str | None = None) -> Decision:
-    """The one decision. Sync, no LLM, no network, never raises on content.
-
-    ``door`` names the call site and must be one of ``DOORS``; it is NOT part
-    of the cache key or the result: every door gets the same Decision for the
-    same text (P1.6-a). ``session_id`` / ``task_id`` are accepted for the
-    decision ledger (P1.7) and do not affect the decision. The class (task_type, complexity,
-    tier, dims, capabilities) is computed on ``canonical_text(text)``; secrets and the cache key
-    use the raw text.
-
-    L3 here is the lexical model only. The ``complexity_knn`` vote the plan
-    also names embeds the prompt through Ollama, which is a model call on the
-    sync path, so it is not used (open question for the owner).
-    """
-    if door not in DOORS:
-        raise ValueError("unknown door %r; expected one of %s" % (door, ", ".join(DOORS)))
+def compute(text: str, *, ctx_digest: str = "") -> Decision:
+    """``decide`` without the decision-ledger write: the same Decision for the same text, no
+    side effect beyond the engine's own cache. For callers that only read the verdict (the
+    proxy's lane A confidence stamp, which must not add a ledger row per continuation)."""
     t0 = time.perf_counter()
     mode = _cache_mode()
     lex, cal, pv = None, {}, POLICY_ID
@@ -477,6 +464,27 @@ def decide(text: str, *, ctx_digest: str = "", door: str, session_id: str | None
     except Exception as exc:  # noqa: BLE001 — a classifier never stalls routing
         log.warning("engine: decide failed, abstaining: %s", exc)
         out = dataclasses.replace(_fallback(exc, pv), ms=(time.perf_counter() - t0) * 1000)
+    return out
+
+
+def decide(text: str, *, ctx_digest: str = "", door: str, session_id: str | None = None,
+           task_id: str | None = None) -> Decision:
+    """The one decision. Sync, no LLM, no network, never raises on content.
+
+    ``door`` names the call site and must be one of ``DOORS``; it is NOT part
+    of the cache key or the result: every door gets the same Decision for the
+    same text (P1.6-a). ``session_id`` / ``task_id`` are accepted for the
+    decision ledger (P1.7) and do not affect the decision. The class (task_type, complexity,
+    tier, dims, capabilities) is computed on ``canonical_text(text)``; secrets and the cache key
+    use the raw text.
+
+    L3 here is the lexical model only. The ``complexity_knn`` vote the plan
+    also names embeds the prompt through Ollama, which is a model call on the
+    sync path, so it is not used (open question for the owner).
+    """
+    if door not in DOORS:
+        raise ValueError("unknown door %r; expected one of %s" % (door, ", ".join(DOORS)))
+    out = compute(text, ctx_digest=ctx_digest)
     decision_ledger.record(out, door=door, text=text or "", session_id=session_id, task_id=task_id)  # P1.7; never raises
     return out
 
