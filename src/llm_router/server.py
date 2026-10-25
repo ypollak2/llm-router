@@ -495,7 +495,7 @@ def _start_map_poller() -> None:
     # Off switch: LLM_ROUTER_MAP_REDISCOVERY=0.
     try:
         from llm_router.map_rediscovery import maybe_start_poller
-        maybe_start_poller()
+        maybe_start_poller(entry="mcp")
     except Exception:
         pass
 
@@ -521,6 +521,8 @@ def main():
     except Exception:
         pass
     _start_map_poller()
+    from llm_router import state_files
+    state_files.harden_state()  # W0-4b / S7: 0600/0700 repair on EVERY start, never raises
     mcp.run()
 
 

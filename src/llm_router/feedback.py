@@ -10,8 +10,9 @@ All feedback is emitted as events and stored in SQLite for later retrieval.
 
 from __future__ import annotations
 
+from llm_router import state_files
+
 import json
-import sqlite3
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -236,7 +237,7 @@ class FeedbackStore:
 
     def _init_schema(self) -> None:
         """Create tables if they don't exist."""
-        with sqlite3.connect(self.db_path) as conn:
+        with state_files.connect_sqlite(self.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS routing_events (
                     timestamp REAL NOT NULL,
@@ -255,7 +256,7 @@ class FeedbackStore:
 
     def record_event(self, event: RoutingEvent) -> None:
         """Store one event to SQLite."""
-        with sqlite3.connect(self.db_path) as conn:
+        with state_files.connect_sqlite(self.db_path) as conn:
             conn.execute(
                 """
                 INSERT INTO routing_events
@@ -268,7 +269,7 @@ class FeedbackStore:
 
     def record_events(self, events: list[RoutingEvent]) -> None:
         """Batch store multiple events."""
-        with sqlite3.connect(self.db_path) as conn:
+        with state_files.connect_sqlite(self.db_path) as conn:
             conn.executemany(
                 """
                 INSERT INTO routing_events
@@ -281,7 +282,7 @@ class FeedbackStore:
 
     def get_session_events(self, session_id: str) -> list[RoutingEvent]:
         """Retrieve all events for a session in order."""
-        with sqlite3.connect(self.db_path) as conn:
+        with state_files.connect_sqlite(self.db_path) as conn:
             rows = conn.execute(
                 """
                 SELECT timestamp, session_id, event_type, elapsed_ms, data
@@ -305,7 +306,7 @@ class FeedbackStore:
 
     def recent_sessions(self, limit: int = 50) -> list[str]:
         """Get most recent N unique session IDs."""
-        with sqlite3.connect(self.db_path) as conn:
+        with state_files.connect_sqlite(self.db_path) as conn:
             rows = conn.execute(
                 """
                 SELECT session_id, MAX(timestamp) as last_event

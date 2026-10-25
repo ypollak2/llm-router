@@ -532,6 +532,13 @@ def owner_sample(rows, seed, n_others, recorded) -> list[str]:
     return list(dict.fromkeys(frontier + others))
 
 
+def _has_canonical_scoring(run_dir) -> bool:
+    """True when the tune log holds a canonical row (complete, owner pass done) for this run."""
+    from llm_router.redo_score import _read_tune_log, canonical_tune_set
+    log = _read_tune_log(paths.state_path("redo_validation", "tune_log.jsonl"))
+    return canonical_tune_set(log, Path(run_dir).name) is not None
+
+
 def _owner_sample_file(path, seed, others, *, replace):
     payload = json.dumps({"seed": seed, "others": others}) + "\n"
     temporary = None
@@ -603,6 +610,12 @@ def run_owner(options: argparse.Namespace, *, stdin=None, stdout=None) -> int:
         frontier = {row["pair_id"] for row in rows if row["stratum"] == "F"}
         others = [pair_id for pair_id in sample if pair_id not in frontier]
         if recorded is None or others != recorded:
+            if recorded is not None and _has_canonical_scoring(options.run_dir):
+                # Design section 3 step 3: spot checks are raised after the owner pass, before scoring. A
+                # changed sample after a canonical scoring would only fail the freeze with a wrong cause.
+                print("Refused: owner sample is fixed once a canonical tune scoring exists; void the "
+                      "run to change it.", file=stdout, flush=True)
+                return 2
             _owner_sample_file(sample_path, seed, others, replace=recorded is not None)
         random.Random(seed + 1).shuffle(sample)
         label_path = options.run_dir / "labels_owner.jsonl"
@@ -659,12 +672,23 @@ def run_owner(options: argparse.Namespace, *, stdin=None, stdout=None) -> int:
             print(f"read errors: {stats['errors']}", file=stdout)
         print(f"remaining: {remaining} of {total}", file=stdout, flush=True)
         if remaining == 0 and total > 0:
-            from llm_router.redo_score import OWNER_MIN_SPOT_CHECKS, write_owner_done
+            from llm_router.redo_score import OWNER_MIN_SPOT_CHECKS, owner_sample_state, write_owner_done
             record = write_owner_done(options.run_dir)
             if record is None:
-                print(f"owner pass NOT recorded complete: the owner sample holds {len(others)} S/R spot "
-                      f"checks; design section 3 needs at least {OWNER_MIN_SPOT_CHECKS}. Rerun --owner "
-                      f"with --others {OWNER_MIN_SPOT_CHECKS} or more.", file=stdout, flush=True)
+                available = len({row["pair_id"] for row in rows if row["stratum"] != "F"})
+                state = owner_sample_state(options.run_dir)
+                if state is None:
+                    why = ("owner_sample.json or manifest.jsonl is missing, malformed or inconsistent, so "
+                           "the sample cannot be verified")
+                elif available < OWNER_MIN_SPOT_CHECKS:
+                    why = (f"the manifest holds only {available} S/R pairs, so the owner sample holds "
+                           f"{state[0]} S/R spot checks and this run cannot reach the minimum of "
+                           f"{OWNER_MIN_SPOT_CHECKS} (design section 3)")
+                else:
+                    why = (f"the owner sample holds {state[0]} S/R spot checks; design section 3 needs at "
+                           f"least {OWNER_MIN_SPOT_CHECKS}; rerun --owner with --others "
+                           f"{OWNER_MIN_SPOT_CHECKS} or more ({available} S/R pairs available)")
+                print(f"owner pass NOT recorded complete: {why}.", file=stdout, flush=True)
             else:
                 print(f"owner pass complete: n_labelled={record['n_labelled']} "
                       f"spot_checks={record['others']}", file=stdout, flush=True)

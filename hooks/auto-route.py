@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 75
+# llm_router-hook-version: 77
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -62,6 +62,27 @@ except ImportError:  # llm_router is not importable on this host: no recorder, n
 
     def _hl_mark_main():
         return None
+
+# W0-4b / S7: state files created by this hook are 0600 from creation (a plain open() makes
+# 0666 & ~umask = 0644, readable by other local users). Stdlib only: the hook may run
+# where the llm_router package is not importable, so it cannot use llm_router.state_files.
+def _priv_open(path, mode="a", **kw):
+    return open(path, mode, opener=lambda p, f: os.open(p, f, 0o600), **kw)
+
+
+def _priv_write_text(path, data, encoding=None):
+    with _priv_open(path, "w", encoding=encoding) as fh:
+        return fh.write(data)
+
+
+def _priv_sqlite(path, **kw):
+    import sqlite3
+    try:
+        os.close(os.open(os.fspath(path), os.O_RDONLY | os.O_CREAT, 0o600))
+    except OSError:
+        pass  # sqlite3.connect below reports the real problem, as it did before
+    return sqlite3.connect(str(path), **kw)
+
 
 class _LazyUrllib:
     """``urllib.request`` on first use. Importing it at start-up drags in http.client
@@ -226,7 +247,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 75"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 77"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -575,8 +596,7 @@ def _get_pressure() -> dict[str, float]:
     # SQLite fallback — reads most recent claude_usage row
     db_path = _router_home() / "usage.db"
     try:
-        import sqlite3
-        conn = sqlite3.connect(str(db_path), timeout=1)
+        conn = _priv_sqlite(str(db_path), timeout=1)
         row = conn.execute(
             "SELECT messages_used, messages_limit FROM claude_usage ORDER BY timestamp DESC LIMIT 1"
         ).fetchone()
@@ -710,7 +730,7 @@ def _claim_usage_refresh_spawn(cooldown_s: float | None = None) -> bool:
             if age is not None and age < cooldown_s:
                 return False
             os.makedirs(str(_router_home()), exist_ok=True)
-            with open(path, "w") as f:
+            with _priv_open(path, "w") as f:
                 f.write(str(time.time()))
             return True
         except Exception:
@@ -732,7 +752,7 @@ def _claim_usage_refresh_spawn(cooldown_s: float | None = None) -> bool:
             age = _usage_refresh_marker_age()
             if age is not None and age < cooldown_s:
                 return False
-            with open(path, "w") as f:
+            with _priv_open(path, "w") as f:
                 f.write(str(time.time()))
             return True
     except Exception:
@@ -923,7 +943,7 @@ def _fetch_usage_inline() -> dict | None:
         state_dir = str(_router_home())
         os.makedirs(state_dir, exist_ok=True)
         tmp = _usage_json() + ".tmp"
-        with open(tmp, "w") as f:
+        with _priv_open(tmp, "w") as f:
             json.dump(result, f)
         os.replace(tmp, _usage_json())
         return result
@@ -1040,8 +1060,7 @@ def _log_quota_snapshot_sync(
     missing from `pressure`) must store NULL, not silently become 0.0.
     """
     try:
-        import sqlite3
-        conn = sqlite3.connect(db_path, timeout=5)
+        conn = _priv_sqlite(db_path, timeout=5)
         try:
             _ensure_quota_snapshots_pct_nullable(conn)
             conn.execute(
@@ -3479,7 +3498,7 @@ def _log_unrouted_turn(session_id: str, pending: dict) -> None:
     try:
         _router_dir().mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        with _enforcement_log_path().open("a", encoding="utf-8") as f:
+        with _priv_open(_enforcement_log_path(), "a", encoding="utf-8") as f:
             # chz-surface-ok: enforcement LOG record — must keep the LOGICAL name so log
             # analysis groups by task type, not by whichever tier was active.
             f.write(
@@ -4885,7 +4904,7 @@ def _bump_session_prompt_count(session_id: str) -> int:
             counts = dict(sorted(counts.items(), key=lambda kv: kv[1])[-50:])
             if session_id not in counts:
                 counts[session_id] = n
-        _prompt_counts().write_text(json.dumps(counts))
+        _priv_write_text(_prompt_counts(), json.dumps(counts))
     except Exception:
         pass
     return n
@@ -4987,7 +5006,7 @@ def _debug_log(msg: str) -> None:
     try:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
         _dlp = _debug_log_path()
-        with open(_dlp, "a") as f:
+        with _priv_open(_dlp, "a") as f:
             f.write(f"[{timestamp}] {msg}\n")
             f.flush()
             _dl_size = os.fstat(f.fileno()).st_size
@@ -5887,7 +5906,7 @@ def main() -> None:
                         spend_data = json.load(f)
                     spend_data["prompt_sequence"] = prompt_sequence
                     tmp = session_spend_path + ".tmp"
-                    with open(tmp, "w") as f:
+                    with _priv_open(tmp, "w") as f:
                         json.dump(spend_data, f)
                     os.replace(tmp, session_spend_path)
                 except Exception:

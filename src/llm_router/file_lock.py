@@ -63,8 +63,10 @@ def exclusive_lock(
     state = "unavailable"
     fh = None
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(lock_path, "a+")
+        from llm_router import state_files  # W0-4: lock files are state files (0600, dir 0700)
+
+        state_files.private_dir(lock_path.parent)
+        fh = state_files.open_private(lock_path, "a+")
         deadline = time.monotonic() + max(0.0, timeout)
         while True:
             try:

@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import threading
 import time
 import uuid
 from pathlib import Path
 from types import MappingProxyType
 
+from llm_router import state_files
 from llm_router.agents.base import AgentRoutingPolicy, AgentSession, SessionState
 from llm_router.agents.budget import (
     BudgetEnvelope,
@@ -219,7 +219,7 @@ class SessionStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         # check_same_thread=False lets the admin API share one SessionStore
         # across FastAPI worker threads (matches IdentityStore / QuotaTracker).
-        self._conn = sqlite3.connect(
+        self._conn = state_files.connect_sqlite(
             str(self.db_path), check_same_thread=check_same_thread,
         )
         # CHZ-AUD-003: serialize the read-modify-write in record_step (and other

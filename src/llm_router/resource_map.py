@@ -15,6 +15,7 @@ they will read.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import time
@@ -23,11 +24,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+log = logging.getLogger(__name__)
+
 SCHEMA = 1
 MAP_FILE_NAME = "resource_map.json"
 REFRESH_TTL_S = 300
 PROVENANCE = ("measured", "estimated", "default", "stale")
-TIMESTAMP_KEYS = frozenset({"generated_at", "as_of", "reset_at"})
+# "writer" (which process built the map) and "carried_from" vary per process like
+# a timestamp, so the two doors' byte comparison drops them too.
+TIMESTAMP_KEYS = frozenset({"generated_at", "as_of", "reset_at", "writer", "carried_from"})
+CARRY_MAX_AGE_S = 3600
 
 DEFAULT_CODEX_DAILY = 1000
 DEFAULT_GEMINI_DAILY = 1500
@@ -441,7 +447,42 @@ def build(inputs: MapInputs | None = None) -> dict:
         except Exception:
             policy = "balanced"
     _prioritise(rows, policy, now)
-    return {"schema": SCHEMA, "generated_at": _iso(now), "policy": policy, "resources": rows}
+    from llm_router.map_rediscovery import writer_identity
+    return {"schema": SCHEMA, "generated_at": _iso(now), "policy": policy, "resources": rows,
+            "writer": writer_identity()}
+
+
+def carry_connected(old: dict | None, new: dict, now: float,
+                    max_age_s: float = CARRY_MAX_AGE_S) -> dict:
+    """Keep a subscription row another writer saw connected within *max_age_s*
+    when this build only says it could not look (``seats.no_evidence``: the CLI
+    is not on this process's PATH, or its probe failed). The carried row keeps
+    the first sighting's time, so the carry ends and a real uninstall shows."""
+    from llm_router import seats as _seats
+
+    if not isinstance(old, dict):
+        return new
+    prev = {r.get("resource"): r for r in old.get("resources") or [] if isinstance(r, dict)}
+    rows = new.get("resources") or []
+    for i, row in enumerate(rows):
+        o = prev.get(row.get("resource"))
+        if (row.get("kind") != "subscription" or not isinstance(o, dict)
+                or o.get("status") != "connected"
+                or not _seats.no_evidence(row.get("status"), row.get("reason"))):
+            continue
+        seen = (o.get("carried_from") or {}).get("seen_at") or old.get("generated_at")
+        try:
+            age = now - datetime.fromisoformat(seen).timestamp()
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= age <= max_age_s:
+            continue
+        log.info(
+            "resource_map: keeping %s connected (seen %.0fs ago) over %r",
+            row.get("resource"), age, row.get("reason"))
+        rows[i] = {**o, "carried_from": {"seen_at": seen, "writer": old.get("writer"),
+                                         "new_reason": row.get("reason")}}
+    return new
 
 
 # ── file, doors ─────────────────────────────────────────────────────────────
@@ -511,7 +552,7 @@ def refresh_if_stale(inputs: MapInputs | None = None, *, path: Path | None = Non
             age = age_seconds(cur, now)
             if age is not None and 0 <= age <= max_age_s:
                 return cur
-        data = build(inputs)
+        data = carry_connected(cur, build(inputs), time.time() if now is None else now)
         try:
             _mr.record_changes(cur, data, source="refresh_if_stale",
                                now=time.time() if now is None else now,

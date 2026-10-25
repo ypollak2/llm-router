@@ -33,6 +33,7 @@ from typing import Any, Literal
 
 import logging
 
+from llm_router import state_files
 from llm_router.sqlite_wal import enable_wal
 
 from llm_router import paths
@@ -336,7 +337,7 @@ def _connect(path: Path | None = None) -> sqlite3.Connection:
     # 10s margin for the test to proceed after the lock clears. The relationship
     # is enforced by tests/test_sqlite_timeout_below_test_timeout.py — change one
     # of these numbers and that test tells you about the other.
-    conn = sqlite3.connect(str(p), timeout=_BUSY_TIMEOUT_S)
+    conn = state_files.connect_sqlite(str(p), timeout=_BUSY_TIMEOUT_S)
     # RED5-01 (P0): guarded. Second of three copies of the same cold-start bug —
     # see llm_router/sqlite_wal.py for why the bare form fails both by raising AND,
     # more dangerously, by returning a mode nobody checks.

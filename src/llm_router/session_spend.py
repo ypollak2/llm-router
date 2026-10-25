@@ -39,6 +39,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from llm_router import state_files
 from llm_router import paths
 
 def _detect_synthetic() -> bool:
@@ -142,7 +143,7 @@ def read_base_drift(
         if version is not None:
             where += " AND llm_router_version = ?"
             params.append(version)
-        with sqlite3.connect(str(db_path), timeout=2.0) as conn:
+        with state_files.connect_sqlite(str(db_path), create=False, timeout=2.0) as conn:
             row = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(call_count),0), "
                 "COALESCE(SUM(overridden_turns),0), "
@@ -339,7 +340,6 @@ class SessionSpend:
         session_id: str | None = None,
     ) -> None:
         """Append a row to ~/.llm-router/usage.db claude_usage table."""
-        import sqlite3
         db_path = _session_spend_file().parent / "usage.db"
         if not db_path.exists():
             return  # No DB → no cumulative tracking yet; cost.py creates on first use.
@@ -350,7 +350,7 @@ class SessionSpend:
             max(self.per_model, key=lambda m: self.per_model[m]["cost_usd"])
             if self.per_model else "subscription"
         )
-        with sqlite3.connect(str(db_path), timeout=2.0) as conn:
+        with state_files.connect_sqlite(str(db_path), timeout=2.0) as conn:
             # `session_id` is the newest column here (this migration) — a DB
             # this process hasn't reopened through `cost._get_db()` yet (which
             # runs migrations) may still lack it. `input_tokens`/`output_tokens`
@@ -535,7 +535,7 @@ class SessionSpend:
                 return
             db = _routing_outcomes_db()
             db.parent.mkdir(parents=True, exist_ok=True)
-            with sqlite3.connect(str(db), timeout=2.0) as conn:
+            with state_files.connect_sqlite(str(db), timeout=2.0) as conn:
                 conn.execute(
                     "CREATE TABLE IF NOT EXISTS session_outcomes ("
                     "session_key TEXT PRIMARY KEY, updated_at REAL, "
