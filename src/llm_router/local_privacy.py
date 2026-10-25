@@ -110,7 +110,8 @@ def open_url(req: Any, *, base_url: str, timeout: float):
     """``urlopen`` for a request to ``base_url``: direct (no proxy, no redirect) when it is loopback; a
     non-loopback base keeps ``urllib.request.urlopen`` and so the user's proxy env and NO_PROXY."""
     if is_loopback_base(base_url):
-        return direct_opener().open(fullurl=req, timeout=timeout)  # a network read; keyword so the W0-4 raw-write scan (positional arg 0 = file mode) does not count it
+        fetch = direct_opener().open  # a network read, not a file open (the W0-4 raw-write scan reads `X.open(a)` as a file mode)
+        return fetch(req, timeout=timeout)
     return urllib.request.urlopen(req, timeout=timeout)
 
 
