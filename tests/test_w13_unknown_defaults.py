@@ -25,12 +25,17 @@ def _is_num(node: ast.AST) -> bool:
         and not isinstance(node.value, bool)
 
 
-# Functions in user_routing_policy.py that turn quality/price into an order (the shape rules
-# apply here; the literal rule applies to the whole module).
-SCORING_FUNCTIONS = frozenset({"_load_quality_scores", "_policy_cost", "_sort_unknown_last", "_policy_quality"})
+# Functions in user_routing_policy.py that are NOT quality/cost scoring. Every other function
+# (including any helper added later) gets the shape rules, so a new scorer cannot escape the
+# scan by using a literal other than 0.5 / 0.4 / 0.001. Each entry needs a one-line reason.
+NON_SCORING_FUNCTIONS = {
+    "_round_robin_pick": "round-robin counter: _rr_counters.get(key, 0) is an index, not a score",
+    "_policy_quota_exhaustion": "quota pressure: pressure.get(provider, 0.0) means no pressure, not a score",
+    "_policy_dynamic": "quota pressure lookup in the sort key; orders by pressure, not quality/price",
+}
 
 
-def find_invented_defaults(src: str, scoring_functions: frozenset[str] | None = None) -> list[str]:
+def find_invented_defaults(src: str, allowlist: frozenset[str] | set[str] | dict = frozenset()) -> list[str]:
     """Scan a whole module for invented-default shapes; return one description per hit.
 
     Shapes: the guessed literals 0.5 / 0.4 / 0.001 anywhere (this also catches a named
@@ -38,9 +43,8 @@ def find_invented_defaults(src: str, scoring_functions: frozenset[str] | None = 
     numeric branch of ``<num> if v is None else ...`` / ``... if v is None else <num>``,
     and ``v or <num>``.
 
-    The literal rule covers the whole module. The shape rules cover ``scoring_functions``
-    only (every function when None): a round-robin counter's ``.get(key, 0)`` or a quota
-    pressure ``.get(p, 0.0)`` is not a quality/cost score.
+    The literal rule covers the whole module. The shape rules cover every function and all
+    module-level code except the functions named in ``allowlist``.
     """
     hits: list[str] = []
     tree = ast.parse(src)
@@ -48,11 +52,11 @@ def find_invented_defaults(src: str, scoring_functions: frozenset[str] | None = 
         if isinstance(node, ast.Constant) and isinstance(node.value, float) \
                 and node.value in _DEFAULT_VALUES:
             hits.append(f"literal {node.value} at line {node.lineno}")
-    scopes = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-              and (scoring_functions is None or n.name in scoring_functions)]
-    if scoring_functions is None:
-        scopes = [tree]
-    for node in (n for scope in scopes for n in ast.walk(scope)):
+    skipped: set[int] = set()
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name in allowlist:
+            skipped.update(id(n) for n in ast.walk(fn))
+    for node in (n for n in ast.walk(tree) if id(n) not in skipped):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and node.func.attr == "get" and len(node.args) == 2 and _is_num(node.args[1]):
             hits.append(f".get numeric default at line {node.lineno}")
@@ -66,7 +70,7 @@ def find_invented_defaults(src: str, scoring_functions: frozenset[str] | None = 
 
 def test_scan_finds_defaults_in_old_policy_fixture():
     # The fixture is a committed copy of the pre-change source: no git history needed.
-    hits = find_invented_defaults(OLD_POLICY.read_text(), SCORING_FUNCTIONS)
+    hits = find_invented_defaults(OLD_POLICY.read_text(), NON_SCORING_FUNCTIONS)
     assert len([h for h in hits if h.startswith("literal")]) == 3, hits  # 0.001, 0.5, 0.4
     assert any(".get numeric default" in h for h in hits), hits
 
@@ -76,13 +80,21 @@ def test_scan_finds_defaults_in_old_policy_fixture():
     "def f(v):\n    return 7 if v is None else v\n",
     "def f(d):\n    return d.get('k', 3)\n",
     "def f(v):\n    return v or 2\n",
+    # a NEW scoring helper with a literal other than 0.5/0.4/0.001 must not escape (mutant m7)
+    "def _policy_bonus(m):\n    return m.get('bonus', 0.3)\n",
 ])
 def test_scan_catches_mutant_shapes(mutant):
     assert find_invented_defaults(mutant), mutant
 
 
+def test_non_scoring_allowlist_has_no_stale_entries():
+    names = {n.name for n in ast.walk(ast.parse(POLICY.read_text()))
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert set(NON_SCORING_FUNCTIONS) <= names, set(NON_SCORING_FUNCTIONS) - names
+
+
 def test_no_invented_defaults_in_whole_policy_module():
-    assert find_invented_defaults(POLICY.read_text(), SCORING_FUNCTIONS) == []
+    assert find_invented_defaults(POLICY.read_text(), NON_SCORING_FUNCTIONS) == []
 
 
 # -- consumers: unknown -> None -------------------------------------------------
@@ -145,31 +157,37 @@ def test_unlisted_model_context_window_is_unknown():
 _CHAIN_MODELS = [
     "ollama/mystery-7b", "newvendor/unbenchmarked", "claude-sonnet-4-6",
     "ollama/qwen3-coder:30b", "openai/gpt-4o", "gemini/gemini-2.5-flash",
+    "weakvendor/weak-model",
 ]
+# weak-model has a MEASURED score below the neutral 0.5 that unknown models get from the
+# composite scorer today. It must stay BELOW the unknowns: a scorer that gave unknowns 0.0
+# (mutant m5b) would lift it above them while unknowns still sorted after the strong models.
 _CHAIN_BENCH = {"task_scores": {"code": {
-    "openai/gpt-4o": 0.85, "gemini/gemini-2.5-flash": 0.7, "claude-sonnet-4-6": 0.9}}}
-# Computed on origin/main (2c5a876e) with HOME isolated; hard-coded here.
-_PINNED_ORDER = {
-    "simple": ["claude-sonnet-4-6", "openai/gpt-4o", "ollama/qwen3-coder:30b",
-               "gemini/gemini-2.5-flash", "ollama/mystery-7b", "newvendor/unbenchmarked"],
-    "moderate": ["claude-sonnet-4-6", "openai/gpt-4o", "ollama/qwen3-coder:30b",
-                 "gemini/gemini-2.5-flash", "ollama/mystery-7b", "newvendor/unbenchmarked"],
-    "complex": ["claude-sonnet-4-6", "openai/gpt-4o", "ollama/qwen3-coder:30b",
-                "gemini/gemini-2.5-flash", "ollama/mystery-7b", "newvendor/unbenchmarked"],
-}
+    "openai/gpt-4o": 0.85, "gemini/gemini-2.5-flash": 0.7, "claude-sonnet-4-6": 0.9,
+    "weakvendor/weak-model": 0.2}}}
+_UNKNOWN = {"ollama/mystery-7b", "newvendor/unbenchmarked"}
+# Score groups, best first, computed on origin/main (9f4171ca) with HOME isolated; hard-coded
+# here. Only the two unknowns tie, so they are the only multi-member group.
+_PINNED_GROUPS = [
+    {"claude-sonnet-4-6"}, {"openai/gpt-4o"}, {"ollama/qwen3-coder:30b"},
+    {"gemini/gemini-2.5-flash"}, _UNKNOWN, {"weakvendor/weak-model"},
+]
+# Composite score of an unknown-quality model (and of the weak model), per complexity.
+_PINNED_UNKNOWN_SCORE = {"simple": 0.9, "moderate": 0.825, "complex": 0.725}
+_PINNED_WEAK_SCORE = {"simple": 0.84, "moderate": 0.72, "complex": 0.56}
 
 
-@pytest.mark.parametrize("complexity", sorted(_PINNED_ORDER))
+@pytest.mark.parametrize("complexity", sorted(_PINNED_UNKNOWN_SCORE))
 def test_default_chain_scoring_order_unchanged_vs_main(complexity, tmp_path, monkeypatch):
-    """score_all_models feeds chain_builder._build_dynamic_chain (always on). A known local
-    model (qwen3-coder) must still outrank an unknown local one, as on origin/main."""
+    """score_all_models feeds chain_builder._build_dynamic_chain (always on). Pins the score
+    groups exactly (a tied group cannot swap members with a neighbour) and the numeric score
+    of unknown vs weak-known models, so an unknown scored 0.0 goes red."""
     import asyncio
     from llm_router.scorer import score_all_models
     monkeypatch.setenv("HOME", str(tmp_path))
     with patch("llm_router.benchmarks.get_benchmark_data", return_value=_CHAIN_BENCH):
         scored = asyncio.run(score_all_models(list(reversed(_CHAIN_MODELS)), "code", complexity))
-    # Models with equal scores (the two unknowns tie) keep input order, so compare score groups:
-    # the order of distinct scores is pinned, members of a tie are compared as a set.
+    assert len(scored) == len(_CHAIN_MODELS)
     groups: list[set[str]] = []
     last = None
     for s in scored:
@@ -177,8 +195,10 @@ def test_default_chain_scoring_order_unchanged_vs_main(complexity, tmp_path, mon
             groups.append(set())
         groups[-1].add(s.model_id)
         last = s.score
-    pinned = _PINNED_ORDER[complexity]
-    assert [m for g in groups for m in sorted(g, key=pinned.index)] == pinned
-    qwen = next(s for s in scored if s.model_id == "ollama/qwen3-coder:30b")
-    mystery = next(s for s in scored if s.model_id == "ollama/mystery-7b")
-    assert qwen.score > mystery.score
+    assert groups == _PINNED_GROUPS
+    by_id = {s.model_id: s.score for s in scored}
+    for m in _UNKNOWN:
+        assert by_id[m] == pytest.approx(_PINNED_UNKNOWN_SCORE[complexity], abs=1e-6)
+    assert by_id["weakvendor/weak-model"] == pytest.approx(_PINNED_WEAK_SCORE[complexity], abs=1e-6)
+    assert by_id["ollama/qwen3-coder:30b"] > by_id["ollama/mystery-7b"]
+    assert by_id["ollama/mystery-7b"] > by_id["weakvendor/weak-model"]
