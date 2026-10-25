@@ -516,8 +516,9 @@ class FrontierShadow:
         if rows is None:  # unreadable: keep the phase we last read (fill at the very start)
             rate, phase = self._phase.get(group, lane_a_shadow.phase_for(0))
         else:
-            decided = lane_a_shadow.count_decided(rows, group, since=now - lane_a_shadow.WINDOW_DAYS * 86400.0,
-                                                  until=now)
+            decided = lane_a_shadow.count_decided(
+                rows, group, since=now - lane_a_shadow.WINDOW_DAYS * 86400.0, until=now,
+                identity_sha=lane_a_shadow.identity_sha(lane_a_shadow.current_identities()))
             rate, phase = lane_a_shadow.phase_for(decided)
             self._phase[group] = (rate, phase)
         job["rate"], job["rate_phase"] = rate, phase

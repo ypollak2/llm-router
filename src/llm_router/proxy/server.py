@@ -793,10 +793,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     flip_retry_at = 0.0        # after a failed write, no new attempt before this monotonic time
 
     async def stamp_flip() -> None:
-        """D-302: the owner flip is the FIRST request that sees all four lane A switches on (YAML ``lane_a.enabled``,
-        ``LLM_ROUTER_PROXY_LANE_A=on``, ``haiku_rewrite``, the shadow flag), eligible step or not. Any switch off:
-        nothing is read from or written to disk. With all four on, the same write also records the identities of
-        the policy THIS proxy loaded (D-303: ``lane_a_identity.json``), whatever file or flag it came from. The
+        """D-302: with the three serving switches on (YAML ``lane_a.enabled``, ``LLM_ROUTER_PROXY_LANE_A=on``,
+        ``haiku_rewrite``) the first request records the identities of the policy THIS proxy loaded (D-303:
+        ``lane_a_identity.json``), whatever file or flag it came from, eligible step or not; the owner flip needs
+        all four (the shadow flag too) and is written by the same call. Any serving switch off: nothing is read
+        from or written to disk. The
         write (first flip wins, 0600) runs in a worker thread, once per process, by one request at a time; after a
         failed write the next try waits ``LANE_A_FLIP_BACKOFF_S``. It never costs the call."""
         nonlocal flip_stamped, flip_busy, flip_retry_at

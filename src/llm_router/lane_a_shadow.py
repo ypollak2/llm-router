@@ -159,13 +159,19 @@ def judged_by_prereg(row: dict) -> bool:
             and row.get("judge_brief_sha256") == shadow_frontier.JUDGE_BRIEF_SHA256)
 
 
-def count_decided(rows: Iterable[dict], task_group: str, *, since: float, until: float) -> int:
+def count_decided(rows: Iterable[dict], task_group: str, *, since: float, until: float,
+                  identity_sha: str | None) -> int:
     """Decided lane A pairs of ``task_group`` among verdict ``rows`` stamped inside ``[since, until]``: one per
-    step, judged by the preregistered judge and brief (the same rows the quality writer counts)."""
+    step, judged by the preregistered judge and brief (the same rows the quality writer counts). PR4: only pairs
+    whose own ``identity_sha`` equals ``identity_sha`` (the identity the proxy recorded now) count, the writer's
+    predicate; legacy and other-policy pairs do not, so a new policy fills from 0. ``None`` (no record): 0."""
+    if not (isinstance(identity_sha, str) and identity_sha):
+        return 0
     cand = []
     for r in rows:
         ts = _ts(r.get("ts"))
-        if is_lane_a(r) and r.get("task_group") == task_group and ts is not None and since <= ts <= until:
+        if (is_lane_a(r) and r.get("task_group") == task_group and ts is not None and since <= ts <= until
+                and r.get("identity_sha") == identity_sha):
             cand.append(r)
     kept, _ = dedupe_steps(cand)
     return sum(1 for r in kept if has_tags(r) and is_decided(r) and judged_by_prereg(r))
