@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 76
+# llm_router-hook-version: 77
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -247,7 +247,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 76"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 77"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -3122,8 +3122,9 @@ def _classify_prompt_engine(text: str) -> dict | None:
     # Telemetry labels keep their old vocabulary: an abstain with some signal was
     # "heuristic-weak", with none "fallback" (the old layer 5, now an abstain).
     method = "heuristic" if not d.abstain else ("heuristic-weak" if d.confidence else "fallback")
+    # W0-1: the engine's own layer / confidence, stamped on the routing_decisions row.
     return {"task_type": d.task_type, "complexity": d.complexity, "method": method,
-            "abstain": d.abstain}
+            "abstain": d.abstain, "layer": d.layer, "confidence": d.confidence}
 
 
 def classify_prompt(text: str) -> dict | None:
@@ -5626,6 +5627,9 @@ def main() -> None:
         json.dump(_normalize_output_for_platform(output, hook_input), sys.stdout)
         sys.exit(0)
 
+    # W0-1: which layer classified this turn, and how sure it was (None = not measured).
+    _cls_layer = _cls_conf = None
+
     # ── Context-Aware Routing (v2.5) ─────────────────────────────────────────
     # Short continuation prompts inherit the prior turn's route — instant, free.
     last_route = _load_last_route(session_id) if session_id else None
@@ -5686,6 +5690,7 @@ def main() -> None:
             complexity = result["complexity"]
             method     = result["method"]
             tool       = tool_for_task(task_type)
+            _cls_layer, _cls_conf = result.get("layer") or result["method"], result.get("confidence")
 
             # ── v6.1: Check for learned routing overrides ─────────────────────────────
             learned_routes = _load_learned_routes()
@@ -5700,6 +5705,7 @@ def main() -> None:
 
     if _forced:
         method = f"prefix:{_forced}"
+        _cls_layer, _cls_conf = "prefix", None
 
     # ── Claude Code routing: Always use MCP tools (free-first chain) ──────────
     # v6.11.1: Prioritize Ollama → Codex → OpenAI → Gemini over subscription Sonnet
@@ -6523,6 +6529,7 @@ def main() -> None:
                             complexity=complexity,
                             classifier_type=method,
                             session_id=session_id,
+                            layer=_cls_layer, confidence=_cls_conf,
                         )
                     except Exception as _exc:
                         from llm_router import failopen as _fo

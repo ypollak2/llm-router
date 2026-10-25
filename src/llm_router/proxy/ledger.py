@@ -306,6 +306,12 @@ def write_row(row: dict, path: Path | None = None) -> None:
     for k, v in ENGINE_FIELD_DEFAULTS.items():
         if row.get(k) is None:
             row[k] = v
+    # W0-1: the proxy ledger stamps inventory_sig HERE, at write time, not at decision time; the
+    # signature is keyed on the map token so it lags the decision only if the map changed in between.
+    if row.get("inventory_sig") is None:
+        from llm_router import decision_stamp
+
+        row["inventory_sig"] = decision_stamp.inventory_sig()
     try:
         state_files.private_dir(target.parent)
         with state_files.open_private(target, "a", encoding="utf-8") as fh:
