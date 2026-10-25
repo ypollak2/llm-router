@@ -19,6 +19,7 @@ from rich.console import Group
 from llm_router.ui.theme import PALETTE, progress_bar
 
 from llm_router import paths
+from llm_router.state_files import connect_sqlite
 
 
 def _as_pct(value) -> Optional[float]:
@@ -177,9 +178,7 @@ class PremiumStatusCommand:
             # Top models inline
             top_models_text = "  Top models:  "
             try:
-                import sqlite3
-
-                conn = sqlite3.connect(str(self.db_path))
+                conn = connect_sqlite(str(self.db_path), create=False)
                 rows = conn.execute(
                     "SELECT final_model as model, COUNT(*) as n "
                     f"FROM routing_decisions WHERE success=1 AND {real_decision_sql(conn)} "

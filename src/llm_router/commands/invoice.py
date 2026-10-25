@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import argparse
 import os
-import sqlite3
 import sys
 from datetime import datetime, timezone
 
 from llm_router import paths
+from llm_router.state_files import connect_sqlite
 
 # Provider -> ingestor module attribute. Each exposes pull_monthly_invoice(period=...).
 _PROVIDERS = ("anthropic", "openai", "gemini")
@@ -41,7 +41,7 @@ def _llm_router_tally(provider: str, month: str) -> tuple[float, int]:
     signalling a degraded local lookup rather than crashing.
     """
     try:
-        conn = sqlite3.connect(_usage_db_path())
+        conn = connect_sqlite(_usage_db_path(), create=False)
         try:
             row = conn.execute(
                 "SELECT COALESCE(SUM(cost_usd), 0), COUNT(*) FROM usage "

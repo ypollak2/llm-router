@@ -1773,6 +1773,13 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
         exit_code = 1
     print()
 
+    # W0-4c: doctor creates files of its own (seats.json, the state dir) during the checks above,
+    # AFTER the harden at the top. On a fresh HOME that left them 0644/0755 until the next run.
+    _late = state_files.harden_state()
+    if _late and (_late["files_fixed"] or _late["dirs_fixed"]):
+        print(f"state modes: tightened {_late['files_fixed']} file(s), {_late['dirs_fixed']} dir(s) to 0600/0700")
+        print()
+
     return exit_code, issues
 
 

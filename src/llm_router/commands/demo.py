@@ -7,6 +7,7 @@ import sqlite3
 import sys
 
 from llm_router import paths
+from llm_router.state_files import connect_sqlite
 
 
 # ── ANSI helpers (respect NO_COLOR / non-tty) ─────────────────────────────────
@@ -95,7 +96,7 @@ def _load_real_routing_history(db_path: str, limit: int = 8) -> list[tuple]:
     missing or table has no external calls.
     """
     try:
-        conn = sqlite3.connect(db_path)
+        conn = connect_sqlite(db_path, create=False)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT prompt, task_type, complexity, model, cost_usd, provider, "
