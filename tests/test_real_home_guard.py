@@ -113,3 +113,47 @@ def test_autouse_fixture_fails_a_test_whose_refusal_was_swallowed(fake_real):
         pass  # swallowed, as a fail-open handler would
     with pytest.raises(AssertionError, match="real state"):
         next(gen)
+
+
+def test_dir_fd_removals_resolve_against_the_fd_not_the_cwd(fake_real, tmp_path, monkeypatch):
+    """``shutil.rmtree`` / ``TemporaryDirectory`` cleanup remove entries with ``dir_fd`` and the
+    audit event carries a BARE NAME. Resolved against the CWD, a clone living under ``~/.claude``
+    (CWD inside the protected dir) flagged that cleanup as a real-state write (5 errors in
+    tests/test_proxy_lane_a_breaker.py golden tests, clone under ~/.claude/jobs). A removal that
+    really is under the protected dir must still be refused."""
+    import tempfile
+
+    llm, claude = fake_real
+    monkeypatch.chdir(claude)  # the CWD is inside the protected dir, like the clone was
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    before = len(g.VIOLATIONS)
+
+    with tempfile.TemporaryDirectory(dir=elsewhere) as td:
+        (Path(td) / "sub").mkdir()
+        (Path(td) / "sub" / "f.txt").write_text("x")
+        (Path(td) / "top.txt").write_text("x")
+    assert not Path(td).exists()  # cleanup ran
+    assert g.VIOLATIONS[before:] == [], "temp-dir cleanup was flagged as a real-state write"
+
+    # an unresolvable dir_fd is not flagged either
+    g.audit("os.remove", ("somefile", 987654))
+    assert g.VIOLATIONS[before:] == []
+
+    # a real removal under the protected dir is still refused and recorded
+    victim = claude / "settings.json"
+    g.PROTECTED_WRITE.clear()  # create it legitimately, as above
+    victim.write_text("x")
+    g.PROTECTED_WRITE.extend([llm, claude])
+    with pytest.raises(PermissionError):
+        os.remove(victim)
+    assert victim.exists() and g.VIOLATIONS[-1][0] == "os.remove"
+
+    # ... including by bare name relative to a dir_fd that IS the protected dir
+    dfd = os.open(claude, os.O_RDONLY)
+    try:
+        with pytest.raises(PermissionError):
+            os.remove("settings.json", dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    assert victim.exists()

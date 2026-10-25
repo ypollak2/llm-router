@@ -102,6 +102,48 @@ def _inside(path: object, roots: list[Path], *, resolve_links: bool) -> bool:
     return False
 
 
+def _dir_fd_base(dir_fd: int) -> str | None:
+    """Directory that ``dir_fd`` refers to, or None when it cannot be resolved.
+
+    Linux: ``/proc/self/fd/N`` is a symlink to the directory. macOS: ``/dev/fd/N`` is not a
+    symlink, so ask the kernel with ``F_GETPATH``. Neither raises an audit event."""
+    try:
+        base = os.readlink(f"/proc/self/fd/{dir_fd}")
+    except OSError:
+        base = None
+    if base is None:
+        try:
+            import fcntl
+
+            base = fcntl.fcntl(dir_fd, fcntl.F_GETPATH, b"\0" * 1024).split(b"\0", 1)[0].decode()
+        except (ImportError, AttributeError, OSError, ValueError):
+            try:
+                base = os.readlink(f"/dev/fd/{dir_fd}")
+            except OSError:
+                return None
+    return base if base.startswith("/") else None
+
+
+def _event_path(path: object, dir_fd: object) -> object:
+    """The path an ``os.remove`` / ``os.rmdir`` / ``os.mkdir`` / ``os.rename`` event acts on.
+
+    With ``dir_fd`` (``shutil.rmtree``, ``TemporaryDirectory`` cleanup) the event carries a
+    BARE NAME relative to that directory; ``abspath`` would resolve it against the CWD, and a
+    clone living under ``~/.claude`` then flagged temp-dir cleanup as a real-state write. Join
+    it to the directory the fd refers to; if that cannot be resolved, return None (not flagged).
+    """
+    if dir_fd is None or not isinstance(dir_fd, int) or dir_fd < 0:
+        return path
+    try:
+        raw = os.fsdecode(path)  # type: ignore[arg-type]
+    except TypeError:
+        return None
+    if os.path.isabs(raw):
+        return raw  # dir_fd is ignored for an absolute path
+    base = _dir_fd_base(dir_fd)
+    return None if base is None else os.path.join(base, raw)
+
+
 def _is_write(mode: object, flags: object) -> bool:
     if isinstance(mode, str) and any(c in mode for c in "wax+"):
         return True
@@ -126,11 +168,20 @@ def audit(event: str, args: tuple) -> None:
         if _inside(args[0], PROTECTED_SQLITE, resolve_links=True):
             _refuse("sqlite3.connect", args[0])
     elif event in ("os.remove", "os.rmdir", "os.mkdir", "os.truncate"):
-        if _inside(args[0], PROTECTED_WRITE, resolve_links=False):
-            _refuse(event, args[0])
-    elif event == "os.rename":  # also os.replace and shutil.move
-        for target in args[:2]:  # source AND destination: atomic writes rename INTO the dir
-            if _inside(target, PROTECTED_WRITE, resolve_links=False):
+        # layouts: remove/rmdir (path, dir_fd); mkdir (path, mode, dir_fd); truncate (path, length)
+        dir_fd = None
+        if event in ("os.remove", "os.rmdir") and len(args) > 1:
+            dir_fd = args[1]
+        elif event == "os.mkdir" and len(args) > 2:
+            dir_fd = args[2]
+        target = _event_path(args[0], dir_fd)
+        if target is not None and _inside(target, PROTECTED_WRITE, resolve_links=False):
+            _refuse(event, target)
+    elif event == "os.rename":  # also os.replace and shutil.move: (src, dst, src_dir_fd, dst_dir_fd)
+        fds = (args[2] if len(args) > 2 else None, args[3] if len(args) > 3 else None)
+        for name, dir_fd in zip(args[:2], fds):  # source AND destination: atomic writes rename INTO the dir
+            target = _event_path(name, dir_fd)
+            if target is not None and _inside(target, PROTECTED_WRITE, resolve_links=False):
                 _refuse(event, target)
 
 
