@@ -249,7 +249,7 @@ def read_ge3(items_path, split_path, opus_path, sonnet_path, drops: Counter, joi
 
 
 def _read_keyed(rows, flag, label_path, label_flag, key_field, tier_field, set_of, drops: Counter,
-                join: str = "key") -> list[dict]:
+                join: str = "text_sha") -> list[dict]:
     """join "key": a label row joins by key_field. join "text_sha": a label row {text_sha, ...} joins to the item
     whose S.text_sha(text) equals it; a row that matches no item shows up only as a missing label."""
     by_sha = join == "text_sha"
@@ -284,7 +284,8 @@ def _e2_set(split) -> str | None:
 def read_e2(sample_path, label_path, key_field: str, tier_field: str, drops: Counter, join: str = "text_sha") -> list[dict]:
     """E2 (p_eval work/sample.jsonl {text, split, session_id, timestamp}): split "calibration" -> e2_cal, the
     held-out names (as E1) -> e2_ho, any other split dropped and counted (`e2_unknown_split`). Labels: any
-    file whose rows carry key_field and tier_field (may be the sample file itself)."""
+    file whose rows carry key_field and tier_field; the sample file itself only under join "key" (its rows carry
+    no text_sha, so the default text_sha join matches 0 of them)."""
     return _read_keyed(read_rows(sample_path, "e2_sample"), "e2", label_path, "e2_opus_labels", key_field,
                        tier_field, _e2_set, drops, join)
 
@@ -400,6 +401,13 @@ def ledger_requested(ledger_path, need: set) -> dict:
     return joined
 
 
+def _ts_differ(a_ts, b_ts) -> bool:
+    """Two timestamps name different instants: compared as parsed UTC values (cls_dev_lib.parse_utc, so "Z" and
+    "+00:00" agree); when either does not parse, the raw strings are compared."""
+    pa_, pb_ = D.parse_utc(a_ts), D.parse_utc(b_ts)
+    return pa_ != pb_ if pa_ is not None and pb_ is not None else a_ts != b_ts
+
+
 def recover(items: list[dict], index, ledger_path, tier_name, counts: Counter) -> None:
     """Fill a missing session_id / timestamp from the record joined by sha256(text), earliest record wins (the
     literal PREREG 1.3 (2) rule; the item's own values win; session_from_record / timestamp_from_record disclose
@@ -420,7 +428,7 @@ def recover(items: list[dict], index, ledger_path, tier_name, counts: Counter) -
             if not it["session_id"] and rec["session_id"]:
                 it["session_id"] = rec["session_id"]
                 counts["session_from_record"] += 1
-                if it["timestamp"] and rec["timestamp"] != it["timestamp"]:
+                if it["timestamp"] and rec["timestamp"] and _ts_differ(it["timestamp"], rec["timestamp"]):
                     counts["session_from_record_ts_mismatch"] += 1  # disclosure only
             if not it["timestamp"] and rec["timestamp"]:
                 it["timestamp"] = rec["timestamp"]
@@ -535,8 +543,10 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
     if ub & allow:
         raise Refuse("refusing: --timestamp-upper-bound-from-mtime and --allow-missing-timestamps both name %s"
                      % ",".join(sorted(ub & allow)))
+    # PREREG-CLS-DEV 1.1/1.3: GE3's existing Sonnet labels are reused for all GE3 items, so a GE3 run without
+    # --ge3-sonnet-labels is refused here, before any source is read or any output written.
     has_ge3 = _need(a, ("ge3_items", "ge3_split", "ge3_opus_labels", "ge3_sonnet_labels"),
-                    ("ge3_items", "ge3_split", "ge3_opus_labels"))
+                    ("ge3_items", "ge3_split", "ge3_opus_labels", "ge3_sonnet_labels"))
     has_e2 = _need(a, ("e2_sample", "e2_opus_labels"), ("e2_sample", "e2_opus_labels"))
     has_e1 = _need(a, ("e1_tasks", "e1_opus_labels"), ("e1_tasks", "e1_opus_labels"))
     has_p17d = _need(a, ("p17d_items", "p17d_labels"), ("p17d_items", "p17d_labels"))
@@ -564,7 +574,7 @@ def run_attach(a, *, mods: dict | None = None) -> dict:
         items += read_p17d(a.p17d_items, a.p17d_labels, drops["p17d"], item_key=mods.get("item_key"))
 
     checks = [(fam, "opus", fam, given) for fam, given in (("ge3", has_ge3), ("e2", has_e2), ("e1", has_e1))]
-    checks.append(("ge3", "sonnet", "ge3_sonnet", has_ge3 and bool(a.ge3_sonnet_labels)))
+    checks.append(("ge3", "sonnet", "ge3_sonnet", has_ge3))
     for fam, field, name, given in checks:
         if not given:
             continue
@@ -737,16 +747,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ge3-items", help="gt500 items.jsonl")
     p.add_argument("--ge3-split", help="gt500 split.json")
     p.add_argument("--ge3-opus-labels", help="gt500 work/labels_opus.jsonl {text_sha, tier} (default join; {id, tier} with --ge3-label-join key)")
-    p.add_argument("--ge3-sonnet-labels", help="gt500 work/labels_sonnet.jsonl {text_sha, tier} (default join; {id, tier} with --ge3-label-join key)")
+    p.add_argument("--ge3-sonnet-labels", help="gt500 work/labels_sonnet.jsonl {text_sha, tier} (default join; {id, tier} with --ge3-label-join key); "
+                                               "required with --ge3-items (PREREG-CLS-DEV 1.1: the Sonnet labels are reused)")
     p.add_argument("--ge3-label-join", choices=JOINS, default="text_sha",
                    help="text_sha (default): label rows carry {text_sha} (PREREG 1.3 (4)); key: opt-in, rows carry the item id")
     p.add_argument("--e2-sample", help="p_eval work/sample.jsonl")
-    p.add_argument("--e2-opus-labels", help="E2 Opus labels (may be the sample file itself)")
+    p.add_argument("--e2-opus-labels", help="E2 Opus labels; an inline label file (the sample file itself) needs "
+                                            "--e2-label-join key (and --e2-label-tier truth when its label field is truth)")
     p.add_argument("--e2-label-key", default="id", help="field joining E2 rows and label rows (default id)")
     p.add_argument("--e2-label-join", choices=JOINS, default="text_sha", help="see --ge3-label-join")
     p.add_argument("--e2-label-tier", default="tier", help="tier field of an E2 label row (default tier)")
     p.add_argument("--e1-tasks", help="local-classifier tasks_local.json")
-    p.add_argument("--e1-opus-labels", help="E1 Opus labels (may be the tasks file itself)")
+    p.add_argument("--e1-opus-labels", help="E1 Opus labels; an inline label file (the tasks file itself) needs "
+                                            "--e1-label-join key (and --e1-label-tier truth when its label field is truth)")
     p.add_argument("--e1-label-key", default="id", help="field joining E1 rows and label rows (default id)")
     p.add_argument("--e1-label-join", choices=JOINS, default="text_sha", help="see --ge3-label-join")
     p.add_argument("--e1-label-tier", default="tier", help="tier field of an E1 label row (default tier)")
