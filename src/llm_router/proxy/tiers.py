@@ -132,6 +132,7 @@ or the file ``--tier-policy`` / ``LLM_ROUTER_PROXY_TIER_POLICY`` names), never f
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -300,6 +301,18 @@ def tier_model(name: str, path: str | Path | None = None) -> str | None:
     except (OSError, ValueError, TypeError, ImportError):
         return None
     return tier.model if tier is not None else None
+
+
+def _pure_rules(text: str) -> dict:
+    from llm_router.proxy import backends
+
+    return backends.tier_classify_pure(text)
+
+
+def _pure_engine(text: str):
+    from llm_router import engine
+
+    return engine.compute(text, cache=False)
 
 
 async def _default_classify(text: str) -> dict:
@@ -848,7 +861,7 @@ class ClaudeTierPolicy:
             if not is_main_thread(body):
                 return out(lane_a.R_NOT_MAIN_THREAD)
             try:
-                skind = session_kind.kind_of(session_id)
+                skind = await asyncio.to_thread(session_kind.kind_of, session_id)  # tag-file read
             except Exception:  # noqa: BLE001 - unknown kind: not organic
                 skind = "unknown"
             if skind not in haiku_arm.ORGANIC_KINDS:
@@ -864,10 +877,12 @@ class ClaudeTierPolicy:
                 return out(lane_a.R_NO_HAIKU_TIER)
             text = tier_text(body)
             with phases("classify"):
-                rules = await (classify or self._classify or _default_classify)(text)
-                from llm_router import engine
-
-                dec = engine.compute(text) if text else None
+                # Side-effect free (PR1 repair): no shadow row, no decision cache or ledger row, no
+                # Ollama embed, no classifier_health write, no sqlite on the event loop. An explicit
+                # ``classify`` (the test seam) is honoured; the knn wrapper never is.
+                seam = classify or (None if self.complexity_knn else self._classify)
+                rules = await seam(text) if seam is not None else await asyncio.to_thread(_pure_rules, text)
+                dec = await asyncio.to_thread(_pure_engine, text) if text else None
             conf = lane_a.clean_conf(dec.confidence) if dec is not None else None
             if dec is None or conf is None or dec.layer == "fallback":
                 return out(lane_a.R_CONF_UNAVAILABLE)

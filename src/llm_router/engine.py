@@ -442,12 +442,13 @@ def _fallback(exc: BaseException, policy_version: str) -> Decision:
         policy_version=policy_version, engine_version=ENGINE_VERSION)
 
 
-def compute(text: str, *, ctx_digest: str = "") -> Decision:
-    """``decide`` without the decision-ledger write: the same Decision for the same text, no
-    side effect beyond the engine's own cache. For callers that only read the verdict (the
-    proxy's lane A confidence stamp, which must not add a ledger row per continuation)."""
+def compute(text: str, *, ctx_digest: str = "", cache: bool = True) -> Decision:
+    """``decide`` without the decision-ledger write: the same Decision for the same text. For
+    callers that only read the verdict (the proxy's lane A confidence stamp, which must not add
+    a ledger row per continuation). ``cache=False`` also skips the decision cache (no sqlite
+    file, no LRU entry), so the call has no side effect at all."""
     t0 = time.perf_counter()
-    mode = _cache_mode()
+    mode = _cache_mode() if cache else "off"
     lex, cal, pv = None, {}, POLICY_ID
     try:
         lex, cal = _lexical(), _calibration()

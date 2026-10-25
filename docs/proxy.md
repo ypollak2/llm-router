@@ -577,9 +577,29 @@ No offload or saving figure is claimed; none has been measured.
   | `breaker_open_reserved` | reserved for the breaker PR; nothing writes it yet |
   | `error` | the lane raised; the step was forwarded as sent |
 
-  The share of `eligible` rows among continuation rows on a pinned model measures how much traffic lane A could take.
+  The share of `eligible` rows among continuation rows on a pinned model measures how much traffic lane A could take
+  (`s_A`). **Denominator:** continuation rows whose reason is neither `off` nor `not_pinned` (those two mean the lane
+  never looked at the step). **`off` vs `eligible`:** `off` = the lane was not evaluated at all (tiers off, advise
+  authority, an unknown model, a decision timeout); `eligible` = it was evaluated, every gate passed and a switch is
+  off. So a lane that is switched off reads `eligible`, not `off`.
+- **The gates have no side effect (repair round 1).** With the lane off the gates classify with the rules
+  classifier alone (`backends.tier_classify_pure`) and `engine.compute(text, cache=False)`, both run in a worker
+  thread. They write no `engine_shadow.jsonl` row, no decision-ledger row (also in `LLM_ROUTER_ENGINE_MODE=decide`),
+  no `decide_cache.sqlite` and no `classifier_health` row, and make no Ollama embed even with `complexity_knn: true`
+  (the lane ignores that wrapper), and nothing blocks the event loop. The only new state is the two ledger keys.
+  `tests/test_proxy_lane_a.py` compares the state dir after 100 steps, with `complexity_knn` on and off, in shadow
+  and decide mode.
+- **Confidence is quantised.** The engine's L1 confidence is `score/(score+2)`: 0.600 (score 3), 0.6667 (4),
+  0.714 (5), 0.75 (6), 0.778 (7). The shipped `tau` 0.67 is a placeholder (the pre-registration sets it): it sits
+  just above the score-4 bin, so short one-line questions read `low_conf` and the `eligible` set is the longer,
+  multi-question prompts. Read `s_A` as that, not as "share of simple prompts". Tested at the shipped value.
+- **One verdict per turn.** The verdict comes from the newest human prompt, so every continuation step of one turn
+  shares the same reason and confidence. `s_A` per step is clustered by turn and says nothing about how hard the
+  continuation step itself is.
+- **A bad `lane_a:` block stops the whole tier policy loading** (it raises, it does not just disable the lane).
 - **Not in this PR:** the breaker and failure feed, the Frontier shadow sampler and lane tags, the quality writer, and
-  a cache-switch-cost rule. Until those land, nothing should flip the switches.
+  a cache-switch-cost rule. **PR2 adds the 5xx/429 fallback and the breaker; nothing should flip the switches
+  before then** (until PR2 a Haiku 5xx, 429 or timeout has no fallback; only a 4xx is retried on the pinned model).
 
 ### Key finding (1.2): per-turn switching does not pay; conversation-level might
 

@@ -527,6 +527,20 @@ async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool
     return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": model}
 
 
+def tier_classify_pure(text: str) -> dict:
+    """``tier_classify``'s result from the rules classifier alone, with NO side effect: no
+    ``engine_door`` call (so no shadow row, no decide-mode ledger row, no decision cache) and
+    no model call. Sync and CPU-only. For lane A (``proxy.lane_a``), which classifies
+    continuation steps that stay pinned when the lane is off."""
+    from llm_router import map_reader
+    from llm_router.classify import GATEWAY_POLICY, classify_signals
+
+    sig = classify_signals(text, GATEWAY_POLICY, capabilities=False)
+    task, cx = sig.task_type.value, sig.complexity.value
+    chain = _chain_cache.get((task, cx, map_reader.token())) or []
+    return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": None}
+
+
 async def choose_model(text: str, pinned: str | None, *, anthropic: bool = False,
                        needs=None) -> dict:
     """``{"task_type", "complexity", "chain_head", "model"}``; ``model`` is None

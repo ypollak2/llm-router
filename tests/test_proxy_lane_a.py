@@ -455,6 +455,11 @@ def test_every_proxy_continuation_ledger_write_sets_both_fields():
     stamp = [ln for ln, name in order if name == "lane_a.ensure_fields"]
     out = [ln for ln, name in order if name == "ledger.write_row"]
     assert stamp and out and stamp[0] < out[0]
+    # Unconditional: both calls are statements of ``write``'s own body (not under an if/try/with/
+    # loop), and the stamp comes first, so no path reaches write_row without it.
+    top = [ast.unparse(st.value.func) for st in write.body if isinstance(st, ast.Expr) and isinstance(st.value, ast.Call)]
+    assert "lane_a.ensure_fields" in top and "ledger.write_row" in top, top
+    assert top.index("lane_a.ensure_fields") < top.index("ledger.write_row")
 
 
 def test_ensure_fields_stamps_both_keys_on_every_continuation_path():
@@ -464,3 +469,197 @@ def test_ensure_fields_stamps_both_keys_on_every_continuation_path():
         row = {"step_class": "continuation", **pre}
         lane_a.ensure_fields(row)
         assert set(("lane_a_reason", "lane_a_conf")) <= set(row)
+
+
+# ── repair round 1: the lane's gates are side-effect free (SHOULD-1, SHOULD-2) ─
+
+import os  # noqa: E402
+import socket  # noqa: E402
+import sqlite3  # noqa: E402
+import time  # noqa: E402
+
+OFF_LANE = LANE_ON | {"enabled": False}
+
+
+def _state_files() -> dict[str, int]:
+    root = Path(os.environ["LLM_ROUTER_HOME"])
+    return {str(p.relative_to(root)): p.stat().st_size for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _no_model_calls(monkeypatch) -> list:
+    """Any embed / network / sqlite attempt is recorded (and the socket one refused)."""
+    from llm_router import classifier_health, complexity_knn
+
+    seen: list = []
+
+    async def knn(text):
+        seen.append("complexity_knn.complexity_score")
+
+    def refuse(*a, **k):
+        seen.append("socket")
+        raise OSError("network refused in test")
+
+    def health(*a, **k):
+        seen.append("classifier_health.record_agreement")
+
+    monkeypatch.setattr(complexity_knn, "complexity_score", knn)
+    monkeypatch.setattr(classifier_health, "record_agreement", health)
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    return seen
+
+
+@pytest.mark.parametrize("knn", [False, True])
+@pytest.mark.parametrize("mode", ["shadow", "decide"])
+async def test_lane_off_gates_write_no_state_and_make_no_model_call(monkeypatch, knn, mode):
+    """100 pinned continuation steps, lane off, haiku_rewrite on: the gates run (the engine is
+    consulted every time) yet the state dir gets no file: no engine_shadow.jsonl row, no
+    decide_cache.sqlite, no decision-ledger row, no classifier_health write, no embed."""
+    monkeypatch.setenv("LLM_ROUTER_ENGINE_MODE", mode)
+    monkeypatch.delenv("LLM_ROUTER_DECIDE_CACHE", raising=False)  # the sqlite default
+    seen = _no_model_calls(monkeypatch)
+    computes: list = []
+    real = engine.compute
+    monkeypatch.setattr(engine, "compute", lambda *a, **k: computes.append(k) or real(*a, **k))
+    policy = _policy(OFF_LANE, complexity_knn=knn)
+    before, lru = _state_files(), len(engine._lru)
+    reasons = set()
+    for i in range(100):
+        d = await policy.decide(_body("what does function f%d do, how does it fail, and what does it return?" % i),
+                                "sess-lane-a", Stickiness())  # the real classifier: no stub
+        reasons.add(d.lane_a_reason)
+        assert d.served_model == OPUS
+    if hasattr(engine, "shadow_drain"):
+        engine.shadow_drain(timeout=10)
+    assert len(computes) == 100 and all(c.get("cache") is False for c in computes)
+    assert reasons & {lane_a.R_ELIGIBLE, lane_a.R_LOW_CONF}, reasons  # the gates really ran
+    assert seen == [], seen
+    assert _state_files() == before == {}
+    assert len(engine._lru) == lru  # not even the in-memory decision cache
+
+
+async def test_lane_gates_touch_no_sqlite_and_no_loop_blocking_io(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("sqlite on the lane path")
+
+    monkeypatch.setattr(sqlite3, "connect", boom)
+    policy = _policy(OFF_LANE)
+    for i in range(5):
+        d = await policy.decide(_body("what is a mutex %d, and how does it differ from a semaphore?" % i),
+                                "sess-lane-a", Stickiness())
+        assert d.lane_a_reason in (lane_a.R_ELIGIBLE, lane_a.R_LOW_CONF)
+
+
+@pytest.mark.timing
+async def test_lane_gates_do_not_stall_on_a_held_decide_cache_lock():
+    """Another process (the hooks) holding the old decide cache's write lock used to stall one
+    cold request ~358 ms. The lane no longer touches that file: p95 < 5 ms with the lock held."""
+    path = Path(os.environ["LLM_ROUTER_HOME"]) / "decide_cache.sqlite"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    holder = sqlite3.connect(path, isolation_level=None)
+    holder.execute("PRAGMA journal_mode=WAL")
+    holder.execute("CREATE TABLE IF NOT EXISTS decisions (k TEXT PRIMARY KEY, v TEXT NOT NULL, ts REAL NOT NULL)")
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        policy = _policy(OFF_LANE)
+        await policy.decide(_body(), "sess-lane-a", Stickiness())  # warm lazy artifacts
+        ms = []
+        for i in range(100):
+            b = _body("what does function g%d do, how does it fail, and what does it return?" % i)
+            t = time.perf_counter()
+            await policy.decide(b, "sess-lane-a", Stickiness())
+            ms.append((time.perf_counter() - t) * 1000)
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert sorted(ms)[94] < 5.0, sorted(ms)[-6:]
+
+
+def test_compute_writes_no_ledger_row_and_decide_is_compute_plus_one_row(monkeypatch):
+    from llm_router import decision_ledger
+
+    rows: list = []
+    monkeypatch.setattr(decision_ledger, "record", lambda *a, **k: rows.append((a, k)))
+    c = engine.compute("what is a mutex?", cache=False)
+    assert rows == []
+    d = engine.decide("what is a mutex?", door="proxy")
+    assert len(rows) == 1
+    same = ("task_type", "tier", "complexity", "confidence", "abstain", "reason", "dims", "policy_version")
+    assert all(getattr(c, k) == getattr(d, k) for k in same)
+
+
+def test_compute_without_cache_leaves_no_cache_entry_or_file(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_DECIDE_CACHE", raising=False)
+    n = len(engine._lru)
+    engine.compute("a prompt nobody has cached %s" % time.time(), cache=False)
+    assert len(engine._lru) == n and "decide_cache.sqlite" not in "".join(_state_files())
+
+
+# ── repair round 1: the SHIPPED tau (SHOULD-3) ───────────────────────────────
+
+def _shipped_policy() -> pt.ClaudeTierPolicy:
+    raw = yaml.safe_load(pt.DEFAULT_POLICY_PATH.read_text())
+    raw.update({"haiku_rewrite": True, "pinned_models": [OPUS]})  # lane_a block left exactly as shipped
+    return pt.ClaudeTierPolicy.from_dict(raw)
+
+
+async def test_shipped_tau_separates_score_4_from_score_5_plus(monkeypatch):
+    """Engine L1 confidence is quantised: score/(score+2) = 0.600, 0.6667 (4), 0.714 (5), 0.75, 0.778 ...
+    The shipped tau (a placeholder the prereg will set) must sit between the score-4 and score-5 bins,
+    so a later engine change cannot silently zero the eligible share."""
+    shipped = _shipped_policy().lane_a.tau
+    assert shipped == lane_a.DEFAULT_TAU == yaml.safe_load(pt.DEFAULT_POLICY_PATH.read_text())["lane_a"]["tau"]
+    assert 4 / 6 < shipped <= 5 / 7
+    policy = _shipped_policy()
+    score4 = ["what does this function do?", "what is a mutex?"]
+    score5_plus = ["what does this function do, how does it handle errors, and what does it return when the input is empty?",
+                   "what is the difference between a process and a thread, and how does the scheduler treat each of them?",
+                   "what does this code do? how does the loop terminate? what is the return type?"]
+    for text in score4:
+        d = await policy.decide(_body(text), "sess-lane-a", Stickiness())
+        assert (d.lane_a_reason, d.lane_a_conf) == (lane_a.R_LOW_CONF, pytest.approx(4 / 6, abs=1e-5)), text
+    for text in score5_plus:
+        d = await policy.decide(_body(text), "sess-lane-a", Stickiness())
+        assert d.lane_a_reason == lane_a.R_ELIGIBLE and d.lane_a_conf >= 5 / 7 - 1e-5, text
+
+
+# ── repair round 1: tiers on, lane off, byte-identical on every path (SHOULD-4) ──
+
+class PlainUpstream:
+    """A non-streaming JSON upstream: 200 message, 200 tool_use message, or an error status."""
+
+    def __init__(self, status=200, tool_use=False):
+        self.requests: list[httpx.Request] = []
+        self.status, self.tool_use = status, tool_use
+
+    @staticmethod
+    def _json(status, obj):  # streamed, as the proxy relays raw upstream bytes
+        return httpx.Response(status, stream=httpx.ByteStream(json.dumps(obj).encode()),
+                              headers={"content-type": "application/json"})
+
+    def __call__(self, request):
+        self.requests.append(request)
+        if self.status >= 400:
+            return self._json(self.status, {"type": "error", "error": {"type": "api_error", "message": "x"}})
+        content = ([{"type": "tool_use", "id": "toolu_2", "name": "Read", "input": {"file_path": "/work/b.py"}}]
+                   if self.tool_use else [{"type": "text", "text": "ok"}])
+        return self._json(200, {"id": "msg_1", "type": "message", "role": "assistant", "model": OPUS,
+                                         "content": content, "stop_reason": "tool_use" if self.tool_use else "end_turn",
+                                         "usage": {"input_tokens": 5, "output_tokens": 1}})
+
+
+@pytest.mark.parametrize("case", ["non_stream", "upstream_4xx", "upstream_5xx", "tool_use_continuation"])
+async def test_tiers_on_lane_off_is_byte_identical_on_every_path(tmp_path, monkeypatch, case):
+    monkeypatch.setenv(lane_a.ENV_SWITCH, "on")  # env on, YAML off: still not serving
+    status, tool_use = {"upstream_4xx": (400, False), "upstream_5xx": (503, False)}.get(case, (200, case.startswith("tool")))
+    body = _body()
+    body["stream"] = False
+    out = {}
+    for name, lane in (("ref", None), ("off", OFF_LANE)):
+        up = PlainUpstream(status, tool_use)
+        d = tmp_path / name
+        d.mkdir()
+        resp = await _post(_app(d, _raw(lane), up), copy.deepcopy(body))
+        out[name] = ([r.content for r in up.requests], resp.status_code, resp.content)
+    assert out["off"] == out["ref"]
+    assert out["off"][1] == status
+    assert json.loads(out["off"][0][0])["model"] == OPUS  # never rewritten to Haiku

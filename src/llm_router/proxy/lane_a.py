@@ -14,8 +14,13 @@ measure the eligible share without serving anything:
 ``lane_a_conf``    the engine's confidence on the newest human prompt, or null. Never invented.
 
 ``eligible`` means every gate passed and a switch is off: the step stays on the pinned model.
-``off`` means the lane was not evaluated (no tier policy, advise authority, a step served
-elsewhere). This module holds no model name: the served model is the policy's ``haiku`` tier.
+``off`` means the lane was not evaluated at all (no tier policy, advise authority, a step served
+elsewhere), so a lane switched off reads ``eligible``, not ``off``. The eligible share ``s_A`` is
+``eligible / (continuation rows whose reason is not off and not not_pinned)``. The gates are side-effect
+free: rules classifier + ``engine.compute(cache=False)`` in a worker thread, no shadow/ledger/cache write,
+no model call. The verdict is on the newest human prompt, so the steps of one turn share it. A bad
+``lane_a:`` YAML block raises and stops the tier policy loading. This module holds no model name: the
+served model is the policy's ``haiku`` tier.
 """
 from __future__ import annotations
 
