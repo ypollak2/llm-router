@@ -47,6 +47,7 @@ from llm_router.terminal_style import (
 )
 
 from llm_router import paths
+from llm_router.state_files import connect_sqlite
 
 
 def get_usage_db_path() -> Path:
@@ -73,7 +74,7 @@ def fetch_routing_decisions(
         return []
 
     try:
-        conn = sqlite3.connect(db_path)
+        conn = connect_sqlite(db_path, create=False)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 

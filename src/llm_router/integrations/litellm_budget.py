@@ -93,6 +93,7 @@ async def get_litellm_spend(provider: str | None = None) -> dict[str, float]:
         query += " GROUP BY provider_key"
 
         from llm_router.aiosqlite_util import mark_worker_daemon
+        # deliberately raw: foreign LiteLLM db -- llm_router does not own this file, so it must not chmod it.
         _conn = aiosqlite.connect(db_path)
         mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
         async with _conn as db:
@@ -142,6 +143,7 @@ async def get_litellm_budget_cap(provider: str, user: str | None = None) -> floa
     try:
         import aiosqlite
         from llm_router.aiosqlite_util import mark_worker_daemon
+        # deliberately raw: foreign LiteLLM db -- llm_router does not own this file, so it must not chmod it.
         _conn = aiosqlite.connect(db_path)
         mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
         async with _conn as db:
