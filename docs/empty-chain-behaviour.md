@@ -53,7 +53,9 @@ The extra tokens mean:
 - `real_spawn`: subagent delegation (`_try_direct_subagent`) returns `None`, so the real subagent is spawned.
 - `forwarded_policy_kept` for `local_mode`: the pin is held to the filter as in `choose_model`; a pin the filter excludes keeps the call on Claude (`model: None`, empty `chain_head`).
 
-Native `/route` (the gateway endpoint) refuses image parts in `prompt` and the Ollama-style `images` field with the same HTTP 400 as the other gateway routes; `messages` there is history and is flattened, never refused (D-165 (4)). The zero-dependency `route_server` has no image refusal.
+Native `/route` (the gateway endpoint) refuses image parts in `prompt` and the Ollama-style `images` field with the same HTTP 400 as the other gateway routes; `messages` there is history and is flattened, never refused (D-165 (4)). The zero-dependency `route_server` refuses the same requests with the same HTTP 400 and text (F33); the shared helpers live in `route_server.py`.
+
+Pinned local model, small window (known limit, not changed): the `local_mode` filter compares the irreducible tokens only (system prompt, newest user turn, tool schemas), as everywhere. A pinned local model whose context window is known to be small therefore passes the filter whenever those tokens fit, and the call is forwarded to it with the untrimmed request body: nothing on the `--serve local-agent` pinned path trims or packs the history to the pin's window. Only a pin whose window is smaller than the irreducible tokens is kept on Claude.
 
 Chains the map must not empty:
 

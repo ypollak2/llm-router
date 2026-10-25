@@ -641,6 +641,32 @@ def _fallback(exc: BaseException, policy_version: str) -> Decision:
         policy_version=policy_version, engine_version=ENGINE_VERSION)
 
 
+def compute(text: str, *, ctx_digest: str = "", cache: bool = True) -> Decision:
+    """``decide`` without the decision-ledger write: the same Decision for the same text. For
+    callers that only read the verdict (the proxy's lane A confidence stamp, which must not add
+    a ledger row per continuation). ``cache=False`` also skips the decision cache (no sqlite
+    file, no LRU entry), so the call has no side effect at all."""
+    t0 = time.perf_counter()
+    mode = _cache_mode() if cache else "off"
+    lex, cal, pv = None, {}, POLICY_ID
+    try:
+        lex, cal = _lexical(), _calibration()
+        pv = _policy_version(lex, cal)
+        key = _cache_key(text or "", pv, ctx_digest)
+        hit = _cache_get(key, mode)
+        if hit is not None:
+            out = dataclasses.replace(hit, layer="cache", dims=dict(hit.dims) if hit.dims else hit.dims,
+                                      ms=(time.perf_counter() - t0) * 1000)
+        else:
+            d = _compute(text or "", lex, cal, pv)
+            _cache_put(key, d, mode)
+            out = dataclasses.replace(d, ms=(time.perf_counter() - t0) * 1000)
+    except Exception as exc:  # noqa: BLE001 — a classifier never stalls routing
+        log.warning("engine: decide failed, abstaining: %s", exc)
+        out = dataclasses.replace(_fallback(exc, pv), ms=(time.perf_counter() - t0) * 1000)
+    return out
+
+
 def decide(text: str, *, ctx_digest: str = "", door: str, session_id: str | None = None,
            task_id: str | None = None) -> Decision:
     """The one decision. Sync, no LLM, no network, never raises on content.
@@ -658,24 +684,7 @@ def decide(text: str, *, ctx_digest: str = "", door: str, session_id: str | None
     """
     if door not in DOORS:
         raise ValueError("unknown door %r; expected one of %s" % (door, ", ".join(DOORS)))
-    t0 = time.perf_counter()
-    mode = _cache_mode()
-    lex, cal, pv = None, {}, POLICY_ID
-    try:
-        lex, cal = _lexical(), _calibration()
-        pv = _policy_version(lex, cal)
-        key = _cache_key(text or "", pv, ctx_digest)
-        hit = _cache_get(key, mode)
-        if hit is not None:
-            out = dataclasses.replace(hit, layer="cache", dims=dict(hit.dims) if hit.dims else hit.dims,
-                                      ms=(time.perf_counter() - t0) * 1000)
-        else:
-            d = _compute(text or "", lex, cal, pv)
-            _cache_put(key, d, mode)
-            out = dataclasses.replace(d, ms=(time.perf_counter() - t0) * 1000)
-    except Exception as exc:  # noqa: BLE001 — a classifier never stalls routing
-        log.warning("engine: decide failed, abstaining: %s", exc)
-        out = dataclasses.replace(_fallback(exc, pv), ms=(time.perf_counter() - t0) * 1000)
+    out = compute(text, ctx_digest=ctx_digest)
     decision_ledger.record(out, door=door, text=text or "", session_id=session_id, task_id=task_id)  # P1.7; never raises
     return out
 

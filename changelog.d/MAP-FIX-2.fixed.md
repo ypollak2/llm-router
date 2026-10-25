@@ -1,0 +1,1 @@
+MAP-FIX-2: a test pins the carry window of MAP-FIX-1 to the first sighting of a missing CLI: repeated blind polls less than 1 h apart no longer keep a seat connected past 1 h after it was last really seen (test only, no source change).
