@@ -108,7 +108,7 @@ the reading of the canary.
    | `request_user_input` | on | no | `[tools.experimental_request_user_input] enabled = false` | `spec_plan.rs:1169-1176`; `core/src/config/mod.rs:2713-2719` |
    | `update_plan` | off | no | n/a | `core/src/config/mod.rs:2721-2726` |
    | `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource` | off: only with a configured MCP server, and the fresh home has none | n/a | n/a | `spec_plan.rs:1132-1134` |
-   | code-mode `exec`/`wait` | on: the catalog entry has `tool_mode = code_mode_only` | no: the V8 runtime exposes only `tools`, `ALL_TOOLS`, `text`, `image`, `store`, `load`, `notify`, `yield_control`, `exit`, and no file access; it reaches only the registered tools above | n/a | `code-mode-runtime/src/runtime/globals.rs:36-48` |
+   | code-mode `exec`/`wait` | on: the catalog entry has `tool_mode = code_mode_only` | no: the V8 runtime's globals (`tools`, `ALL_TOOLS`, `text`, `image`, `audio`, `generatedImage`, `store`, `load`, `notify`, `yield_control`, `exit`, `setTimeout`, `clearTimeout`) include no file access; it reaches only the registered tools above | n/a | `code-mode-runtime/src/runtime/globals.rs:36-48` |
    | skill `list`/`read` | off: needs a cloud skill provider or resolved executor roots | no local arbitrary path (catalog entries only) | n/a | `ext/skills/src/tools/mod.rs:66-72` |
 
    The model-catalog values (`tool_mode`, `multi_agent_version`, `apply_patch_tool_type`, `use_responses_lite`) are
@@ -215,6 +215,9 @@ the reading of the canary.
   (`login/src/auth/storage.rs:222-229`), and the in-process refresh lock does not cover a second process. If the
   login is lost, recover with `codex login` in the main home (item 4). If the owner logs out of the main home, CLS
   Codex calls fail as non-zero exit (24).
+* **Refreshed model catalog.** The catalog values used above (`tool_mode`, `multi_agent_version`,
+  `apply_patch_tool_type`, `use_responses_lite`) are the bundled ones; a catalog refreshed from the service may differ.
+  The disable keys do not depend on the catalog, and the canary runs at every start and resume.
 * **Evidence, not proof.** See "What changes" item 8.
 
 ## What does NOT change
