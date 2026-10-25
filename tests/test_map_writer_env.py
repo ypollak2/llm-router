@@ -297,6 +297,7 @@ def test_relative_path_entry_is_not_recorded(state, tmp_path, monkeypatch):
     assert not (state / seats.CLI_PATH_FILE).exists()
 
 
+@pytest.mark.timing
 def test_busy_lock_skips_the_write_without_blocking(state, tmp_path):
     """MAP-FIX-2b: learning is best-effort. With the lock held by someone else,
     find_cli returns quickly and cli_path.json is left alone."""
