@@ -55,6 +55,17 @@ ENV_SWITCH = "LLM_ROUTER_MAP_REDISCOVERY"
 _OFF = ("0", "off", "false", "no")
 
 
+_ENTRY: str | None = None   # set by the entry point that owns this process's poller
+
+
+def writer_identity() -> dict:
+    """Who wrote a map or a change line: pid, entry point, and a short hash of
+    PATH (two writers with different PATHs see different CLIs; MAP-FIX)."""
+    path = os.environ.get("PATH", "")
+    return {"pid": os.getpid(), "entry": _ENTRY or Path(sys.argv[0]).name or "python",
+            "path_sig": hashlib.sha256(path.encode()).hexdigest()[:12]}
+
+
 def _enabled() -> bool:
     return os.environ.get(ENV_SWITCH, "").strip().lower() not in _OFF
 
@@ -219,7 +230,9 @@ def record_changes(old: dict | None, new: dict, *, source: str, now: float,
     path = path or _home() / CHANGES_FILE
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        block = "".join(json.dumps({"ts": _iso(now), "source": source, **e}, sort_keys=True) + "\n"
+        writer = writer_identity()
+        block = "".join(json.dumps({"ts": _iso(now), "source": source, "writer": writer, **e},
+                                   sort_keys=True) + "\n"
                         for e in events)
         with open(path, "a") as f:
             f.write(block)           # one write: a poll's events are never split
@@ -288,7 +301,7 @@ def poll(*, inputs: Any = None, now: float | None = None, http_get: Callable | N
             return []
         if inputs is not None:
             inputs.now = now
-        data = rm.build(inputs)
+        data = rm.carry_connected(cur, rm.build(inputs), now)
         rm.write_map(data, map_path)
         events = record_changes(cur, data, source=",".join(reasons), now=now,
                                 path=(map_path.parent if map_path is not None else sdir) / CHANGES_FILE)
@@ -461,7 +474,11 @@ def stop_default_poller(timeout: float = 10.0) -> bool:
     return not p._thread.is_alive()
 
 
-def maybe_start_poller() -> Poller | None:
+def maybe_start_poller(entry: str | None = None) -> Poller | None:
+    """*entry* names this process in ``writer`` fields (``mcp``, ``proxy``)."""
+    global _ENTRY
+    if entry:
+        _ENTRY = entry
     try:
         return start_poller() if _enabled() else None
     except Exception:  # noqa: BLE001
@@ -469,6 +486,11 @@ def maybe_start_poller() -> Poller | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    global _ENTRY
+    # Under `python -m` this module is __main__; resource_map.build() reads the
+    # writer from the imported llm_router.map_rediscovery, so name both.
+    from llm_router import map_rediscovery as _canonical
+    _ENTRY = _canonical._ENTRY = _ENTRY or _canonical._ENTRY or "hook-once"
     try:
         if "--once" in (sys.argv[1:] if argv is None else argv) and _enabled():
             poll()

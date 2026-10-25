@@ -495,7 +495,7 @@ def _start_map_poller() -> None:
     # Off switch: LLM_ROUTER_MAP_REDISCOVERY=0.
     try:
         from llm_router.map_rediscovery import maybe_start_poller
-        maybe_start_poller()
+        maybe_start_poller(entry="mcp")
     except Exception:
         pass
 
