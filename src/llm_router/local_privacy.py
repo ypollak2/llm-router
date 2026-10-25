@@ -160,7 +160,7 @@ def contains_secret(*parts: Any) -> bool:
 
 def stays_local(model: object, api_base: str | None = None) -> bool:
     """An Ollama model on a loopback daemon whose name is not an Ollama cloud model (``-cloud`` / ``:cloud``: the
-    daemon forwards those to ollama.com)."""
+    daemon forwards those to Ollama's cloud)."""
     from llm_router.resolver.inventory import is_ollama_cloud_model
     return direct_ollama(model, api_base) and not is_ollama_cloud_model(model)
 
