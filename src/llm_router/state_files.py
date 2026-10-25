@@ -18,7 +18,7 @@ Fixing writers one by one has failed before, so this module is the single place 
   writers that are not routed through this module yet. :func:`harden_state` runs on EVERY
   doctor run and server start (W0-4b: a once-only marker left every later 0644 file wide
   forever; a full pass over 3,000 files costs 0.04 s when every file needs a chmod and 0.008 s when none does;
-  scripts/bench_harden_state.py, 2026-10-25). Never follows a symlink, never touches
+  scripts/time_harden_state.py, 2026-10-25). Never follows a symlink, never touches
   anything outside the root, records COUNTS only (no file names, no content).
 """
 

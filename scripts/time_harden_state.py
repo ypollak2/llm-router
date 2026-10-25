@@ -1,6 +1,6 @@
 """Time ``state_files.harden_state`` on a synthetic tree (W0-4c: source of the RETENTION number).
 
-Usage: ``python scripts/bench_harden_state.py [N_FILES] [REPEATS]``  (defaults 3000, 5)
+Usage: ``python scripts/time_harden_state.py [N_FILES] [REPEATS]``  (defaults 3000, 5)
 
 Builds N_FILES files at 0644 in 30 directories (0755) under a temporary LLM_ROUTER_HOME, then times
 ``harden_state()``: the first pass (all files need a chmod) and the repeat passes (nothing to change,
