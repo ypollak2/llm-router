@@ -124,6 +124,18 @@ lane_a:
   enabled: false
   tau: 0.67
   prev_tool_classes: [technical_op]
+  # PR2 (all optional; the values shown are the defaults, chosen conservatively, not measured):
+  # max_switch_usd: 0.05   # cache rule: a step not yet on Haiku this turn needs an estimated prefix re-write below this
+  # max_consecutive: 6     # loop guard: lane A steps in a row inside one human turn
+  # breaker:               # proxy/lane_a_breaker.py
+  #   trip_failures: 5     # hard Haiku failures inside window_s open the breaker
+  #   window_s: 600
+  #   cooldown_s: 1800     # open -> half-open (24 h, quality_cooldown_s, after a redo-rate trip)
+  #   quality_cooldown_s: 86400
+  #   probe_timeout_s: 120
+  #   redo_min_n: 30       # haiku_guard.MIN_N
+  #   redo_max: 0.15       # haiku_guard.MAX_REDO
+  #   redo_window_days: 7  # haiku_guard.WINDOW_DAYS
 
 # Quota-aware tiers: the higher of the Claude subscription's session and weekly
 # usage, read from the cached ~/.llm-router/usage.json (never a network call on

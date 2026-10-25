@@ -151,6 +151,7 @@ async def test_on_and_eligible_serves_the_haiku_tier(monkeypatch):
 
 async def test_served_model_comes_from_the_policy_not_the_code(monkeypatch):
     monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
+    monkeypatch.setattr(pt, "switch_cost_usd", lambda model, tokens: 0.0)  # no price for a made-up model
     raw = _raw()
     for t in raw["tiers"]:
         if t["name"] == "haiku":
@@ -266,9 +267,9 @@ async def test_no_haiku_tier_stays_pinned(monkeypatch):
 
 def test_every_reason_constant_is_in_the_closed_set():
     consts = {v for k, v in vars(lane_a).items() if k.startswith("R_") and isinstance(v, str)}
-    assert consts == set(lane_a.REASONS) and len(consts) == 19
-    # reached above: all but the reserved breaker code (a later PR) and the not-evaluated default
-    # ``off`` (test_row_without_a_tier_decision_is_off)
+    assert consts == set(lane_a.REASONS) and len(consts) == 22
+    # reached by a test: all but the not-evaluated default ``off`` (test_row_without_a_tier_decision_is_off);
+    # the PR2 codes (breaker_open_reserved, switch_cost_high, consecutive_cap, knn_veto) in test_proxy_lane_a_breaker.py
 
 
 # ── the proxy: off is byte-identical; the ledger always carries the fields ───
@@ -550,28 +551,50 @@ async def test_lane_gates_touch_no_sqlite_and_no_loop_blocking_io(monkeypatch):
 
 
 @pytest.mark.timing
-async def test_lane_gates_do_not_stall_on_a_held_decide_cache_lock():
-    """Another process (the hooks) holding the old decide cache's write lock used to stall one
-    cold request ~358 ms. The lane no longer touches that file: p95 < 5 ms with the lock held."""
+async def test_lane_gates_do_not_stall_on_a_held_decide_cache_lock(monkeypatch):
+    """Another process (the hooks) holding the old decide cache's write lock used to stall one cold
+    request ~358 ms. The lane no longer touches that file. Non-vacuous (carry-in from the #727 review):
+    everything is warmed BEFORE the lock is taken, ``engine._conn`` raises if anything reaches the cache
+    (a cache-on regression then shows as ``conf_unavailable``), and a 1 ms ticker measures loop lag."""
+    import asyncio
+
+    policy = _policy(OFF_LANE)
+    for i in range(3):  # warm the lazy artifacts (lexical model, calibration) before the lock
+        await policy.decide(_body("what does function w%d do, how does it fail, and what does it return?" % i),
+                            "sess-lane-a", Stickiness())
     path = Path(os.environ["LLM_ROUTER_HOME"]) / "decide_cache.sqlite"
     path.parent.mkdir(parents=True, exist_ok=True)
     holder = sqlite3.connect(path, isolation_level=None)
     holder.execute("PRAGMA journal_mode=WAL")
     holder.execute("CREATE TABLE IF NOT EXISTS decisions (k TEXT PRIMARY KEY, v TEXT NOT NULL, ts REAL NOT NULL)")
     holder.execute("BEGIN IMMEDIATE")
+    reached: list = []
+    monkeypatch.setattr(engine, "_conn", lambda *a, **k: reached.append(1) or (_ for _ in ()).throw(OSError("cache")))
+    lag, stop = [], False
+
+    async def ticker():
+        last = time.perf_counter()
+        while not stop:
+            await asyncio.sleep(0.001)
+            now = time.perf_counter()
+            lag.append((now - last) * 1000)
+            last = now
+
+    task = asyncio.create_task(ticker())
+    reasons = set()
     try:
-        policy = _policy(OFF_LANE)
-        await policy.decide(_body(), "sess-lane-a", Stickiness())  # warm lazy artifacts
-        ms = []
-        for i in range(100):
-            b = _body("what does function g%d do, how does it fail, and what does it return?" % i)
-            t = time.perf_counter()
-            await policy.decide(b, "sess-lane-a", Stickiness())
-            ms.append((time.perf_counter() - t) * 1000)
+        for i in range(60):
+            d = await policy.decide(_body("what does function g%d do, how does it fail, and what does it return?" % i),
+                                    "sess-lane-a", Stickiness())
+            reasons.add(d.lane_a_reason)
     finally:
+        stop = True
+        await task
         holder.execute("ROLLBACK")
         holder.close()
-    assert sorted(ms)[94] < 5.0, sorted(ms)[-6:]
+    assert reached == [], "the lane reached the decide cache"
+    assert reasons <= {lane_a.R_ELIGIBLE, lane_a.R_LOW_CONF} and reasons, reasons
+    assert lag and max(lag) < 150.0, max(lag)  # the old stall was 358 ms in one request
 
 
 def test_compute_writes_no_ledger_row_and_decide_is_compute_plus_one_row(monkeypatch):
