@@ -144,11 +144,27 @@ def test_non_loopback_ollama_base_url_gets_no_urlopen_with_the_text(e2e, monkeyp
     assert [u for u, d in sent if SECRET.encode() in d or "embeddings" in u] == []
 
 
+class _RecordingOpener:
+    """Stands in for ``local_privacy.direct_opener()`` (LC-12h: a loopback embedding request goes through it)."""
+
+    def __init__(self, got):
+        self.got = got
+
+    def open(self, req, *a, **k):
+        self.got.append(req if isinstance(req, str) else req.full_url)
+        raise OSError("blocked in test")
+
+
+def _record_direct(monkeypatch, got):
+    from llm_router import local_privacy
+    monkeypatch.setattr(local_privacy, "direct_opener", lambda: _RecordingOpener(got))
+
+
 def test_the_cache_still_works_off_the_pass_only_path(e2e, monkeypatch):
     """The skip is scoped: outside a pass-only call the same cache reaches the embedding endpoint."""
     from llm_router import semantic_cache
     got: list[str] = []
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, *a, **k: got.append(req.full_url) or (_ for _ in ()).throw(OSError()))
+    _record_direct(monkeypatch, got)
     assert semantic_cache._get_embedding(SECRET, "http://127.0.0.1:9") is None
     assert got == ["http://127.0.0.1:9/api/embeddings"]
     token = er.set_pass_only_dispatch(True)
@@ -163,7 +179,7 @@ def test_the_cache_still_works_off_the_pass_only_path(e2e, monkeypatch):
 def test_semantic_classify_embedding_is_skipped_on_the_pass_only_path(monkeypatch):
     from llm_router import semantic_classify
     got: list[str] = []
-    monkeypatch.setattr(urllib.request, "urlopen", lambda req, *a, **k: got.append(req.full_url) or (_ for _ in ()).throw(OSError()))
+    _record_direct(monkeypatch, got)
     token = er.set_pass_only_dispatch(True)
     try:
         assert semantic_classify._embed_ollama(SECRET, "http://127.0.0.1:9") is None

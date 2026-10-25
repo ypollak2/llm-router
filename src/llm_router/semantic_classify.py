@@ -107,9 +107,9 @@ def _embed_ollama(text: str, base_url: str) -> list[float] | None:
     Synchronous ``urllib`` with a short timeout, no extra deps. Returns ``None``
     on any error so the caller treats it as "backend unavailable" and abstains.
     """
-    from llm_router import eligibility_routing
-    if eligibility_routing.pass_only_dispatch_active():
-        return None  # LC-12g / D-277: defense in depth; user text never goes out by urllib on a local-only text job
+    from llm_router import local_privacy
+    if local_privacy.private_dispatch_active():
+        return None  # LC-12g / LC-12h: defense in depth; user text never goes out by urllib on a private dispatch
     try:
         import urllib.request  # lazy: http.client + email parser, ~8 ms, only when a backend is called
 
@@ -120,7 +120,8 @@ def _embed_ollama(text: str, base_url: str) -> list[float] | None:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=_EMBED_TIMEOUT_S) as resp:
+        # LC-12h: a loopback base goes direct (no proxy env, no redirect); another host keeps urlopen.
+        with local_privacy.open_url(req, base_url=base_url, timeout=_EMBED_TIMEOUT_S) as resp:
             data = json.loads(resp.read())
             emb = data.get("embedding")
             return emb if isinstance(emb, list) and emb else None

@@ -1289,6 +1289,24 @@ def _hermetic_reachability(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_local_privacy():
+    """LC-12h: ``local_privacy.ensure_ollama_model_info`` writes a loopback Ollama model's entry into LiteLLM's
+    process-wide ``litellm.model_cost`` once per process. Left in place, a test that called ``providers.call_llm``
+    for ``ollama/m`` made every later test see that model as already known (found in one combined run)."""
+    yield
+    import sys
+    lp = sys.modules.get("llm_router.local_privacy")
+    if lp is None:
+        return
+    cost = getattr(sys.modules.get("litellm"), "model_cost", None)
+    for key in list(lp._info_written):
+        if isinstance(cost, dict):
+            cost.pop(key, None)
+    lp._info_written.clear()
+    lp._info_attempted.clear()
+
+
+@pytest.fixture(autouse=True)
 def _restore_redactor_registry():
     """Snapshot and restore `plugins.redaction._REDACTORS` around every test.
 

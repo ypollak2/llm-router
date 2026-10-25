@@ -356,6 +356,11 @@ def _secret_names(text: str) -> list[str]:
     return names
 
 
+def secret_names(text: str) -> list[str]:
+    """The secret shapes found in ``text`` (names only, never the secret). LC-12h: the secret door reads this."""
+    return _secret_names(text)
+
+
 def guard(text: str, *, door: str, local_model_healthy: bool, ctx_digest: str = "",
           session_id: str | None = None, task_id: str | None = None) -> Decision:
     """``decide`` plus D-28 enforcement, shaped like a door's call: returns the

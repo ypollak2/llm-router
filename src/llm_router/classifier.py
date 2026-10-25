@@ -170,6 +170,12 @@ async def classify_complexity(
             set_span_attributes(span, sanitization_failed=True, sanitization_error=str(e))
             return _fallback_result(f"prompt sanitization failed: {e}")
 
+        # LC-12h / D-28 A: the classifier models are cloud models; a prompt with a secret is not sent to them.
+        from llm_router import local_privacy
+        if local_privacy.contains_secret(prompt):
+            set_span_attributes(span, fallback_reason="secret_local_only")
+            return _fallback_result("prompt contains a secret; not sent to a classifier model")
+
         # Check cache first
         cache = get_cache()
         cached = await cache.get(sanitized_prompt, quality_mode, min_model)

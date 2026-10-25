@@ -514,7 +514,8 @@ def _passed_lane(m_bare: str, job: str, digests: dict[str, str], now: float, eli
 
 def _ollama_base() -> str:
     """The daemon LiteLLM sends the generation to: ``OLLAMA_API_BASE``, else ``http://localhost:11434``."""
-    return os.environ.get("OLLAMA_API_BASE", "").strip() or "http://localhost:11434"
+    from llm_router import local_privacy
+    return local_privacy.ollama_api_base()
 
 
 def _live_tags() -> Any | None:

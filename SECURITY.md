@@ -44,9 +44,28 @@ Please include:
 
 **Multi-provider routing:**
 When you route a task, your prompt is sent to:
-1. **Local Ollama** (if configured) — stays on your machine
+1. **Local Ollama** (if configured) — stays on your machine when the Ollama endpoint (`OLLAMA_API_BASE`, else `http://localhost:11434`) is loopback. Since LC-12h the router's calls to a loopback daemon ignore `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (LiteLLM honoured them even for `localhost`). An endpoint you point at another host, or a loopback port that forwards elsewhere (`ssh -L`, a local reverse proxy), sends the prompt there.
 2. **Your configured providers** (OpenAI, Gemini, etc.) — governed by their privacy policies
 3. **Not** to llm-router servers — we don't run servers
+
+**Prompts that contain a secret (LC-12h, D-28 A):**
+When the router is handed a prompt in which a high-precision secret shape is found (API keys of the major
+providers, GitHub/Slack tokens, AWS key ids, private-key blocks, JWTs, bearer tokens, passwords in URLs, long
+assigned literals; `engine.secret_names`), it sends that prompt only to Ollama models on a loopback daemon
+(`-cloud` models excluded), or refuses the call when there is none. That call also skips the semantic cache
+and the judge queue, gets no emergency fallback to the budget chain, may not switch to a non-local model on
+overflow, and the LLM complexity classifier is not called for it. Doors: `route_and_call` (the `llm_*` MCP
+tools, the gateway), `route_and_stream` and the `llm_stream` tool. Limits:
+- The **Claude Code proxy** (`llm-router proxy`) only logs a secret (D-28 A); it does not reroute.
+- llm-router controls only what it forwards: a prompt typed into Claude Code (or another host) has already
+  gone to that host's model.
+- Agent delegation (`llm_act` delegate / `llm_delegate`, which runs CLI agents such as Codex) does not go
+  through this door.
+- The scan reads the request's own text (prompt, system prompt, caller context, messages), not session
+  history the router injects afterwards, and it misses secrets that match none of its shapes.
+- Other urllib requests to Ollama that llm-router makes outside routing (model discovery, warm-up, the
+  watchdog, the session-end context summary) still follow urllib's proxy env when one is set.
+Details and measurements: [docs/local-check-routing.md](docs/local-check-routing.md) ("HTTP proxy environment").
 
 **Encryption Status:**
 - ✅ API keys in transit: TLS (1.2+) to providers

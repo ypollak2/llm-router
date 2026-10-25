@@ -685,6 +685,7 @@ async def llm_stream(
 
     # Determine model to use
     if model:
+        chain = [model]
         target_model = model
     else:
         chain = get_model_chain(
@@ -692,6 +693,15 @@ async def llm_stream(
             is_subscription_mode=config.llm_router_claude_subscription,
         )
         target_model = chain[0] if chain else "gemini/gemini-2.5-flash"
+
+    # LC-12h / D-28 A: a prompt with a secret streams from a loopback local model only, or not at all.
+    from llm_router import local_privacy
+    _secret = local_privacy.contains_secret(prompt, system_prompt)
+    if _secret:
+        _local = local_privacy.local_only_chain(chain)
+        if not _local:
+            return f"Error: {local_privacy.secret_refusal_reason()}"
+        target_model = _local[0]
 
     messages: list[dict[str, str]] = []
     if system_prompt:
@@ -709,6 +719,7 @@ async def llm_stream(
         messages,
         temperature=temperature,
         max_tokens=max_tokens,
+        private=_secret,
     ):
         if chunk.startswith("\n[META]"):
             meta = _json.loads(chunk[7:])
