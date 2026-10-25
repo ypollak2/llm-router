@@ -561,13 +561,47 @@ def _owner_label_count(content: bytes) -> int:
     return len(ids)
 
 
-def write_owner_done(run_dir: Path) -> dict:
-    """Record the owner labelling pass of ``run_dir`` as complete: ``owner_done.json`` holds counts and the
-    sha256 of ``labels_owner.jsonl`` at that moment (no pair id, no text). An explicit marker, because the
-    owner may agree with the judge on every pair. Atomic replace; a later owner label makes it stale."""
+# Design P36C-DESIGN.md section 3 step 2: the owner labels every F pair "plus 20 random S/R pairs for the
+# recall side". The marker needs at least that many S/R spot checks in the owner sample.
+OWNER_MIN_SPOT_CHECKS = 20
+OWNER_SAMPLE_FILE = "owner_sample.json"
+
+
+def owner_sample_state(run_dir: Path) -> tuple[int, str] | None:
+    """``(others, digest)`` of the owner sample of ``run_dir`` NOW: the number of S/R spot checks recorded in
+    ``owner_sample.json`` and the sha256 over the sorted ids of the whole sample (every F pair of the
+    manifest plus those spot checks, one per line). None when either file is missing or malformed."""
+    try:
+        saved = json.loads((run_dir / OWNER_SAMPLE_FILE).read_text(encoding="utf-8"))
+        rows = [json.loads(line) for line in
+                (run_dir / "manifest.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, ValueError):
+        return None
+    others = saved.get("others") if isinstance(saved, dict) else None
+    if (not isinstance(others, list) or not all(isinstance(item, str) for item in others)
+            or len(set(others)) != len(others) or not all(isinstance(row, dict) for row in rows)):
+        return None
+    frontier = {row.get("pair_id") for row in rows if row.get("stratum") == "F"}
+    if not all(isinstance(item, str) for item in frontier) or frontier.intersection(others):
+        return None
+    sample = sorted(frontier | set(others))
+    return len(others), hashlib.sha256("\n".join(sample).encode("utf-8")).hexdigest()
+
+
+def write_owner_done(run_dir: Path) -> dict | None:
+    """Record the owner labelling pass of ``run_dir`` as complete: ``owner_done.json`` holds counts, the
+    sha256 of ``labels_owner.jsonl`` and the digest of the owner sample at that moment (no pair id, no
+    text). An explicit marker, because the owner may agree with the judge on every pair. Writes nothing and
+    returns None when the owner sample holds fewer than ``OWNER_MIN_SPOT_CHECKS`` S/R spot checks. The
+    caller checks that every sampled pair is labelled. Atomic replace; a later owner label or a changed
+    owner sample (a larger ``--others``) makes it stale."""
+    state = owner_sample_state(run_dir)
+    if state is None or state[0] < OWNER_MIN_SPOT_CHECKS:
+        return None
     content = (run_dir / OWNER_LABEL_FILE).read_bytes()
     record = dict(n_labelled=_owner_label_count(content),
-                  labels_owner_sha256=hashlib.sha256(content).hexdigest())
+                  labels_owner_sha256=hashlib.sha256(content).hexdigest(),
+                  others=state[0], owner_sample_sha256=state[1])
     temporary = run_dir / (OWNER_DONE_FILE + ".tmp")
     with open(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w",
               encoding="utf-8", newline="\n") as stream:
@@ -579,16 +613,25 @@ def write_owner_done(run_dir: Path) -> dict:
 
 
 def owner_done_valid(run_dir: Path) -> bool:
-    """The owner pass is recorded complete AND ``labels_owner.jsonl`` is still the file it recorded."""
+    """The owner pass is recorded complete, ``labels_owner.jsonl`` is still the file it recorded, the
+    marker holds at least ``OWNER_MIN_SPOT_CHECKS`` spot checks, and the owner sample is still the one it
+    recorded (a sample extended by a larger ``--others`` is not covered by an older marker)."""
     try:
         record = json.loads((run_dir / OWNER_DONE_FILE).read_text(encoding="utf-8"))
         content = (run_dir / OWNER_LABEL_FILE).read_bytes()
     except (OSError, ValueError):
         return False
-    return (isinstance(record, dict) and type(record.get("n_labelled")) is int
+    if not isinstance(record, dict):
+        return False
+    state = owner_sample_state(run_dir)
+    return (type(record.get("n_labelled")) is int
             and record["n_labelled"] > 0
             and record["n_labelled"] == _owner_label_count(content)
-            and record.get("labels_owner_sha256") == hashlib.sha256(content).hexdigest())
+            and record.get("labels_owner_sha256") == hashlib.sha256(content).hexdigest()
+            and type(record.get("others")) is int
+            and record["others"] >= OWNER_MIN_SPOT_CHECKS
+            and state is not None
+            and (record["others"], record.get("owner_sample_sha256")) == state)
 
 
 def _f1(row: dict):
@@ -745,7 +788,8 @@ def _check_labels_on_disk(selected: dict, tune_run: str) -> None:
     names = selected.get("label_names")
     allowed = {OWNER_LABEL_FILE, JUDGE_LABEL_FILE}
     changed = TuneFreezeRefused(
-        "labels_changed", "Refused: labels on disk changed since canonical scoring; re-score or void.")
+        "labels_changed", "Refused: labels on disk changed since canonical scoring; restore the original "
+        "label files or void the run.")
     if (not isinstance(names, list) or not names or not set(names) <= allowed
             or OWNER_LABEL_FILE not in names):
         raise changed

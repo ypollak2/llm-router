@@ -268,7 +268,14 @@ def write_labels(run, sids, labels, name="labels_owner.jsonl", source="owner"):
                  label=lab, source=source) for n, lab in labels.items()]
     (run / name).write_text("".join(json.dumps(r) + "\n" for r in rows))
     if name == score.OWNER_LABEL_FILE and rows:
-        score.write_owner_done(run)  # the explicit owner-pass-complete marker
+        record_owner_done(run)  # the explicit owner-pass-complete marker
+
+
+def record_owner_done(run, others=score.OWNER_MIN_SPOT_CHECKS):
+    """Write a synthetic owner sample with ``others`` S/R spot checks, then the owner-pass marker."""
+    (run / score.OWNER_SAMPLE_FILE).write_text(json.dumps(
+        dict(seed=360, others=[f"spot{i:012d}" for i in range(others)])) + "\n")
+    return score.write_owner_done(run)
 
 
 @pytest.fixture
@@ -330,7 +337,8 @@ def test_tune_score_is_repeatable_and_owner_overrides_judge(tuned):
     assert first["overall"] == second["overall"] and counts(first["overall"]) == (3, 2, 1)
     assert not (run / "test.used").exists()
     assert sorted(p.name for p in run.iterdir()) == [
-        "frozen.json", "labels_judge.jsonl", "labels_owner.jsonl", "manifest.jsonl", "owner_done.json"]
+        "frozen.json", "labels_judge.jsonl", "labels_owner.jsonl", "manifest.jsonl", "owner_done.json",
+        "owner_sample.json"]
 
 
 def test_labels_flag_replaces_default_label_files(tuned, tmp_path):
