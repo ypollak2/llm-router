@@ -188,7 +188,7 @@ def _ollama_window_candidates(model: str, current_window: int | None) -> list[st
 def _pass_only_text_job() -> bool:
     """LC-12g: True inside a pass-only ``llm_text_job`` (``LLM_ROUTER_LOCAL_TEXT_JOBS`` unset, D-277)."""
     from llm_router import eligibility_routing
-    return eligibility_routing._require_passed_first.get()
+    return eligibility_routing.pass_only_dispatch_active()  # the router's own predicate, set for the dispatch
 
 
 async def _direct_ollama_handler(timeout):

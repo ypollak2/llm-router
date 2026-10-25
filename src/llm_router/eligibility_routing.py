@@ -341,6 +341,31 @@ def _pass_only_refusal(code: str, exc: BaseException) -> None:
             f"the eligibility step failed ({type(exc).__name__}); local-only routing refuses") from exc
 
 
+def pass_only_call(exempt_reason: str | None) -> bool:
+    """LC-12g: THE pass-only predicate (flag unset, D-277): a text-job route (``TEXT_JOB_REASON``) inside
+    ``llm_text_job``'s :func:`set_require_passed_first`. The router computes it once per call; everything
+    below the router reads :func:`pass_only_dispatch_active`."""
+    return exempt_reason == TEXT_JOB_REASON and _require_passed_first.get()
+
+
+#: Set by the router for the dispatch of a call where :func:`pass_only_call` is true, so ``providers`` and
+#: ``semantic_cache`` (which do not see ``eligibility_exempt_reason``) apply the router's own predicate.
+_pass_only_dispatch: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "llm_router_pass_only_dispatch", default=False)
+
+
+def pass_only_dispatch_active() -> bool:
+    return _pass_only_dispatch.get()
+
+
+def set_pass_only_dispatch(on: bool) -> contextvars.Token:
+    return _pass_only_dispatch.set(bool(on))
+
+
+def reset_pass_only_dispatch(token: contextvars.Token) -> None:
+    _pass_only_dispatch.reset(token)
+
+
 def set_require_passed_first() -> contextvars.Token:
     """Flag unset: the router must lead the text-job chain with a passed local model, or raise
     :class:`PassedModelNotInChain`. Reset with the token."""

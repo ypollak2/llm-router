@@ -157,17 +157,26 @@ def test_finding_litellm_sends_loopback_ollama_text_through_the_proxy(servers, m
     assert _carried_text(ollama) == []
 
 
+class _pass_only:
+    """The state the router sets for a pass-only dispatch: llm_text_job's ContextVar and the router's own marker
+    (providers read the marker, so the two modules apply the router's one predicate)."""
+
+    def __enter__(self):
+        self.t1, self.t2 = er.set_require_passed_first(), er.set_pass_only_dispatch(True)
+
+    def __exit__(self, *a):
+        er.reset_pass_only_dispatch(self.t2)
+        er.reset_require_passed_first(self.t1)
+
+
 def _call(model="ollama/m"):
     return asyncio.run(providers.call_llm(model, [{"role": "user", "content": SECRET}]))
 
 
 def test_pass_only_call_goes_direct_to_ollama_not_the_proxy(servers):
     proxy, ollama = servers
-    token = er.set_require_passed_first()
-    try:
+    with _pass_only():
         resp = _call()
-    finally:
-        er.reset_require_passed_first(token)
     assert "(ollama)" in resp.content
     assert _carried_text(ollama) == ["/api/generate"]
     assert _carried_text(proxy) == []                          # the text never reached the proxy
@@ -186,17 +195,21 @@ def test_direct_client_is_per_call_and_closed(monkeypatch):
     with pytest.raises(RuntimeError):
         _call()                                                # flag ContextVar not set: unchanged
     assert "client" not in seen[-1]
-    token = er.set_require_passed_first()
+    token = er.set_require_passed_first()                      # the ContextVar alone is not the router's predicate
     try:
+        with pytest.raises(RuntimeError):
+            _call()
+    finally:
+        er.reset_require_passed_first(token)
+    assert "client" not in seen[1]
+    with _pass_only():
         with pytest.raises(RuntimeError):
             _call()
         with pytest.raises(RuntimeError):
             _call("anthropic/claude-sonnet-5")                 # not Ollama: unchanged
-    finally:
-        er.reset_require_passed_first(token)
-    direct = seen[1]["client"].client
+    direct = seen[2]["client"].client
     assert direct._trust_env is False and direct.follow_redirects is False and direct.is_closed
-    assert "client" not in seen[2]
+    assert "client" not in seen[3]
 
 
 # ----------------------------------------------------------------------------- 3. PACK_OVERFLOW model switch
@@ -227,12 +240,9 @@ def switching(monkeypatch, world):
 
 
 def test_pass_only_overflow_switch_is_refused_before_any_model_call(switching):
-    token = er.set_require_passed_first()
-    try:
+    with _pass_only():
         with pytest.raises(er.OverflowSwitchRefused, match="bigger:70b"):
             _call(LOCAL)
-    finally:
-        er.reset_require_passed_first(token)
     assert switching == []
     assert er.fail_closed_counts() == {er.FC_OVERFLOW_SWITCH: 1}
 

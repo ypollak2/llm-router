@@ -407,10 +407,18 @@ REQUEST_HAS_TOOLS: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
+def _pass_only_text_job() -> bool:
+    """LC-12g: the router's pass-only predicate for this dispatch (a local-only ``llm_text_job``)."""
+    from llm_router import eligibility_routing
+    return eligibility_routing.pass_only_dispatch_active()
+
+
 def _cache_disabled() -> bool:
     """C-03: a per-request off switch. There was none."""
     if CALLER_SYSTEM_PROMPT.get() or REQUEST_HAS_TOOLS.get():
         return True
+    if _pass_only_text_job():
+        return True  # LC-12g / D-277: no embedding POST of the user's text, no replay of a cloud answer
     val = os.getenv("LLM_ROUTER_SEMANTIC_CACHE", "").strip().lower()
     return val in ("0", "off", "false", "no", "disable", "disabled")
 
@@ -438,6 +446,8 @@ def _get_embedding(text: str, base_url: str) -> list[float] | None:
     Returns:
         Flat list of floats, or None if Ollama is unreachable or returns an error.
     """
+    if _pass_only_text_job():
+        return None  # LC-12g: defense in depth; urllib honours HTTP_PROXY and does not check loopback
     try:
         payload = json.dumps({"model": "nomic-embed-text", "prompt": text}).encode()
         req = urllib.request.Request(

@@ -145,6 +145,12 @@ def enqueue_for_grading(
     """
     if routing_decision_id is None:
         return False
+    from llm_router import eligibility_routing
+    if eligibility_routing.pass_only_dispatch_active():
+        # LC-12g / D-277: a local-only text job's prompt (the user's diff) is never queued. The drain sends a
+        # queued prompt to another model through LiteLLM's shared client (proxy env), or to Haiku when
+        # LLM_ROUTER_JUDGE_HAIKU_FALLBACK is on.
+        return False
     from llm_router import judge_sampler
     if not judge_sampler.pick(door):
         return False

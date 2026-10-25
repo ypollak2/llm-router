@@ -107,6 +107,9 @@ def _embed_ollama(text: str, base_url: str) -> list[float] | None:
     Synchronous ``urllib`` with a short timeout, no extra deps. Returns ``None``
     on any error so the caller treats it as "backend unavailable" and abstains.
     """
+    from llm_router import eligibility_routing
+    if eligibility_routing.pass_only_dispatch_active():
+        return None  # LC-12g / D-277: defense in depth; user text never goes out by urllib on a local-only text job
     try:
         import urllib.request  # lazy: http.client + email parser, ~8 ms, only when a backend is called
 
