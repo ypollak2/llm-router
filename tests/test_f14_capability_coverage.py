@@ -108,8 +108,8 @@ def _stream_events(chain, prompt, monkeypatch, *, fail_providers=True):
     try:
         asyncio.run(go())
     except Exception as exc:  # noqa: BLE001 - the caller asserts on it
-        # An exhausted chain also raises after its ``route.aborted`` event (the generator
-        # falls through to a stray ``raise ValueError("Unknown media task type")``; pre-existing).
+        # The filter-emptied chain raises before any event. (An exhausted chain no longer
+        # raises after its ``route.aborted`` event: F33.)
         return attempted, exc, events
     return attempted, None, events
 
