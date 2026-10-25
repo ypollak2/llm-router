@@ -346,8 +346,9 @@ _ASSIGN = re.compile(
 #: and entropy and no placeholder look, a PEM private-key block with a body, a bearer token with entropy, a
 #: database URL whose password is not a common word, and a JWT that decodes to real-looking claims (not the jwt.io
 #: sample or a test fixture). ``assigned_literal`` (any quoted 20-char mixed literal after "token =") is LOG-ONLY:
-#: counted, never refused. Whatever a line, or the two lines above it, labels as an example (``.env.example``,
-#: sample, placeholder, dummy, fake) is never high either: :func:`_labelled_example`.
+#: counted, never refused. Whatever a line, or the two lines above it, labels with a filename or config cue
+#: (``.env.example``, ``example.env``, "sample config", a ``.example`` / ``.sample`` / ``.template`` path) is never
+#: high either: :func:`_labelled_example`. Free-text words ("fake", "dummy", "placeholder") are not cues.
 HIGH_PRECISION = frozenset({"anthropic_key", "openrouter_key", "openai_key", "google_key", "aws_key_id",
                             "github_token", "slack_token", "private_key", "bearer_token", "db_url_password", "jwt"})
 #: What a person reads in a refusal (the category, never the value).
@@ -359,6 +360,9 @@ SECRET_LABELS = {
     "assigned_literal": "assigned secret literal",
 }
 
+# VALUE-based exemptions (not label-based): the token set below and ``_PLACEHOLDER_SUBSTR`` look at the value itself,
+# so a real secret that contains "example" or "dummy" (or any listed word) is exempt. Known residual, documented in
+# SECURITY.md; behaviour deliberately unchanged.
 _PLACEHOLDER_TOKENS = frozenset({
     "your", "yours", "example", "examples", "sample", "dummy", "fake", "test", "tests", "testing", "demo",
     "placeholder", "changeme", "change", "replace", "redacted", "insert", "here", "todo", "foo", "bar", "xxx",

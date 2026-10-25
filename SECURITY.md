@@ -62,7 +62,7 @@ a line, or up to two lines under a line, that carries a filename or config cue (
 `.env.template` / `example.env`, "sample config" / "example env", or a path ending `.example` / `.sample` /
 `.template`) is not refused either: the cue is the author's statement that it is an example, so a real secret next to
 such a cue is exempt too (residual: anyone can type the cue). Free-text words (`fake`, `dummy`, `placeholder`, "not a
-real", "for illustration") are not cues and exempt nothing: `fake? no. <key>` is refused. Every exemption is counted
+real", "for illustration") are not cues and exempt nothing: `fake? no. <key>` is refused. Separate residual: the placeholder-value exemptions look at the value itself (a stopword list and substrings such as `example`, `dummy`, `placeholder`, `changeme`), so a real secret that happens to contain one of those words is exempt. Every exemption is counted
 as `exempted_by_label:<category>`. Quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a
 counter and the category, never the value) and never refused. `engine.secret_findings` is the detector; its quantifiers
 are bounded and it scans long text in overlapping windows, so it is linear in the text and misses nothing at a
