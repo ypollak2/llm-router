@@ -6697,5 +6697,6 @@ async def route_and_stream(
             "outcome": "internal_error",
             "detail": f"Internal routing error: {str(e)[:200]}",
         }
-
-    raise ValueError(f"Unknown media task type: {task_type}")
+    # F33: every abort path above has yielded its ``route.aborted`` event; the generator
+    # simply ends. (It used to fall through to ``raise ValueError("Unknown media task
+    # type")``, which hid the abort behind a stray exception for the caller.)

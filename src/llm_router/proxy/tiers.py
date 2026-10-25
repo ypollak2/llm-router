@@ -132,6 +132,7 @@ or the file ``--tier-policy`` / ``LLM_ROUTER_PROXY_TIER_POLICY`` names), never f
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -140,13 +141,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from llm_router import session_kind
-from llm_router.proxy import escalation, haiku_arm
+from llm_router.proxy import escalation, haiku_arm, lane_a
 from llm_router.proxy import quota_pressure as quota_pressure_mod
 from llm_router.proxy.cache_cost import ConvState, Stickiness, conversation_key, switch_cost_usd
 from llm_router.proxy.translate import HAIKU55_MAX_OUTPUT_TOKENS, haiku_is_legacy
 from llm_router.proxy.steps import (
-    STEP_HARNESS_TURN, STEP_SUBAGENT_TURN, STEP_TURN_FIRST, has_client_tools, is_first_call, non_system,
-    step_kind, tier_text, user_pinned_model,
+    STEP_CONTINUATION, STEP_HARNESS_TURN, STEP_SUBAGENT_FIRST, STEP_SUBAGENT_TURN, STEP_TURN_FIRST, has_client_tools,
+    is_first_call, is_main_thread, non_system, prev_tool_class, step_kind, tier_text, user_pinned_model,
 )
 
 DEFAULT_POLICY_PATH = Path(__file__).with_name("claude_tiers.yaml")
@@ -257,10 +258,17 @@ class TierDecision:
     # computed it (P0.9-e: computed at most once, and only then); None = not computed.
     # The proxy reuses it for the ledger's ``tier_haiku_block`` instead of a second pass.
     haiku_block: str | None = None
+<<<<<<< HEAD
     # W0-1: which classifier layer decided the class, and its confidence (None = not measured, or
     # the call never reached the classifier). Written to the ledger as cls_layer / cls_confidence.
     cls_layer: str | None = None
     cls_confidence: float | None = None
+=======
+    # Lane A (``proxy/lane_a.py``): the closed reason and the engine confidence (or None) for a
+    # continuation step on a pinned model. None = the lane was not evaluated for this decision.
+    lane_a_reason: str | None = None
+    lane_a_conf: float | None = None
+>>>>>>> origin/main
 
     @property
     def rewritten(self) -> bool:
@@ -300,6 +308,18 @@ def tier_model(name: str, path: str | Path | None = None) -> str | None:
     except (OSError, ValueError, TypeError, ImportError):
         return None
     return tier.model if tier is not None else None
+
+
+def _pure_rules(text: str) -> dict:
+    from llm_router.proxy import backends
+
+    return backends.tier_classify_pure(text)
+
+
+def _pure_engine(text: str):
+    from llm_router import engine
+
+    return engine.compute(text, cache=False)
 
 
 async def _default_classify(text: str) -> dict:
@@ -609,7 +629,8 @@ class ClaudeTierPolicy:
                  conversation_level: bool = False, classify=None,
                  complexity_knn: bool = False, haiku_rewrite: bool = False,
                  haiku_fold_system: bool = False, quota_pressure: dict | None = None, quota=None,
-                 haiku_arm_share: float = 0.0, haiku_arm_eligible=None) -> None:
+                 haiku_arm_share: float = 0.0, haiku_arm_eligible=None,
+                 lane_a_config: lane_a.LaneAConfig | None = None) -> None:
         if not tiers:
             raise ValueError("tier policy has no tiers")
         self.tiers = tiers
@@ -651,6 +672,9 @@ class ClaudeTierPolicy:
         # Read once at load: changing it needs a proxy restart.
         self.haiku_arm_share = haiku_arm.parse_share(haiku_arm_share)
         self.haiku_arm_eligible = haiku_arm.parse_eligible(haiku_arm_eligible)
+        # Lane A: Haiku for confident continuation steps despite ``pinned_models``. Needs this
+        # YAML key AND ``LLM_ROUTER_PROXY_LANE_A=on`` AND ``haiku_rewrite`` to serve (default off).
+        self.lane_a = lane_a_config or lane_a.LaneAConfig()
         self._classify = with_complexity_knn(classify) if complexity_knn else classify
         # Quota pressure step (``quota_pressure:`` in the policy YAML). ``quota``
         # is a ``() -> QuotaReading`` hook for tests; the default reads the
@@ -700,7 +724,8 @@ class ClaudeTierPolicy:
                    haiku_fold_system=data.get("haiku_fold_system", False),
                    quota_pressure=data.get("quota_pressure"), quota=quota,
                    haiku_arm_share=data.get("haiku_arm_share"),
-                   haiku_arm_eligible=data.get("haiku_arm_eligible"))
+                   haiku_arm_eligible=data.get("haiku_arm_eligible"),
+                   lane_a_config=lane_a.parse_config(data.get("lane_a")))
 
     @classmethod
     def load(cls, path: str | Path | None = None, *, conversation_level: bool = False,
@@ -827,9 +852,87 @@ class ClaudeTierPolicy:
             return None
         return cap
 
+    async def _lane_a(self, body: dict, session_id: str | None, classify, requested: str | None, req_tier: Tier,
+                      phases: _Phases, block: "_HaikuBlock | None") -> "lane_a.LaneAOutcome":
+        """Lane A on a ``pinned_models`` request: why the step stays pinned, or that it may be
+        served on the Haiku tier. The gates run in this order (first failure wins) WHETHER OR NOT
+        a switch is on, so the ledger measures the eligible share with serving off; the switches
+        (YAML ``lane_a.enabled``, env ``LLM_ROUTER_PROXY_LANE_A``, ``haiku_rewrite``) are read last.
+        Never raises: any error is reason ``error`` and the step stays pinned."""
+        out = lane_a.LaneAOutcome
+        try:
+            kind = step_kind(body)
+            if kind != STEP_CONTINUATION:
+                return out(lane_a.R_PINNED_TURN if kind in (STEP_TURN_FIRST, STEP_SUBAGENT_FIRST,
+                                                           STEP_SUBAGENT_TURN, STEP_HARNESS_TURN)
+                           else lane_a.R_NOT_CONTINUATION)
+            if not has_client_tools(body):
+                return out(lane_a.R_NOT_CONTINUATION)
+            if not is_main_thread(body):
+                return out(lane_a.R_NOT_MAIN_THREAD)
+            try:
+                skind = await asyncio.to_thread(session_kind.kind_of, session_id)  # tag-file read
+            except Exception:  # noqa: BLE001 - unknown kind: not organic
+                skind = "unknown"
+            if skind not in haiku_arm.ORGANIC_KINDS:
+                return out(lane_a.R_SESSION_KIND)
+            if escalation.explicit_pin(body) is not None or user_pinned_model(body):
+                return out(lane_a.R_PINNED_BY_USER)
+            if escalation.correction_signal(body) is not None:
+                return out(lane_a.R_CORRECTION)
+            if prev_tool_class(body) not in self.lane_a.prev_tool_classes:
+                return out(lane_a.R_NOT_ALLOWLISTED)
+            haiku = self.by_name.get("haiku")
+            if haiku is None or self.rank[req_tier.name] <= self.rank[haiku.name]:
+                return out(lane_a.R_NO_HAIKU_TIER)
+            text = tier_text(body)
+            with phases("classify"):
+                # Side-effect free (PR1 repair): no shadow row, no decision cache or ledger row, no
+                # Ollama embed, no classifier_health write, no sqlite on the event loop. An explicit
+                # ``classify`` (the test seam) is honoured; the knn wrapper never is.
+                seam = classify or (None if self.complexity_knn else self._classify)
+                rules = await seam(text) if seam is not None else await asyncio.to_thread(_pure_rules, text)
+                dec = await asyncio.to_thread(_pure_engine, text) if text else None
+            conf = lane_a.clean_conf(dec.confidence) if dec is not None else None
+            if dec is None or conf is None or dec.layer == "fallback":
+                return out(lane_a.R_CONF_UNAVAILABLE)
+            # L1 only (a cache hit counts when it was an L1 verdict); abstain or below tau is low.
+            if not str(dec.reason).startswith("L1 ") or dec.abstain or conf < self.lane_a.tau:
+                return out(lane_a.R_LOW_CONF, conf)
+            task, cx = rules.get("task_type"), rules.get("complexity")
+            tier = self.tier_for(task, cx)
+            if (dec.tier != "haiku" or tier is None or tier.name != "haiku"
+                    or (dec.task_type, dec.complexity) != (task, cx)):
+                return out(lane_a.R_ENGINE_DISAGREE, conf)
+            if not self._haiku_body_ok(body, block):
+                return out(lane_a.R_HAIKU_BODY, conf)
+            if not (self.lane_a.enabled and lane_a.env_on() and self.haiku_rewrite):
+                return out(lane_a.R_ELIGIBLE, conf)
+            return out(lane_a.R_SERVED, conf, True, task, cx, list(rules.get("chain_head") or [])[:4])
+        except Exception:  # noqa: BLE001 - lane A never costs a call: stay pinned
+            return out(lane_a.R_ERROR)
+
     async def _pinned_or_arm(self, body: dict, session_id: str | None, classify, requested: str | None,
                              req_tier: Tier, phases: _Phases,
                              block: "_HaikuBlock | None" = None) -> TierDecision:
+        """A ``pinned_models`` request: lane A may serve a confident continuation step on Haiku
+        (default off); otherwise the request goes to the D-31 arm (``_pinned_arm_or_keep``), and
+        the lane's reason and confidence ride on the decision either way."""
+        lane = await self._lane_a(body, session_id, classify, requested, req_tier, phases, block)
+        if lane.serve:
+            haiku = self.by_name["haiku"]
+            return TierDecision(requested, haiku.model, haiku.name, REASON_HAIKU_REWRITE, switched=True,
+                                task_type=lane.task_type, complexity=lane.complexity,
+                                body_rewrite=REWRITE_HAIKU, proposed_tier=haiku.name,
+                                chain_head=lane.chain_head, lane_a_reason=lane.reason,
+                                lane_a_conf=lane.conf)
+        decision = await self._pinned_arm_or_keep(body, session_id, classify, requested, req_tier, phases, block)
+        decision.lane_a_reason, decision.lane_a_conf = lane.reason, lane.conf
+        return decision
+
+    async def _pinned_arm_or_keep(self, body: dict, session_id: str | None, classify, requested: str | None,
+                                  req_tier: Tier, phases: _Phases,
+                                  block: "_HaikuBlock | None" = None) -> TierDecision:
         """A ``pinned_models`` request: kept, unless the D-31 arm takes the turn.
 
         The hash decides first, so the classifier runs only for the in-bucket turns
@@ -1001,6 +1104,9 @@ class ClaudeTierPolicy:
         finally:
             engine_door.unbind_session(bound)
         decision.quota_pressure, decision.quota_state = reading.pressure, reading.state
+        if decision.lane_a_reason is None and self.tier_of(decision.requested_model) is not None \
+                and _canonical(decision.requested_model) not in self.pinned:
+            decision.lane_a_reason = lane_a.R_NOT_PINNED  # lane A only ever applies to a pinned model
         decision.phases_ms = phases.ms
         decision.haiku_block = block.reason
         return decision

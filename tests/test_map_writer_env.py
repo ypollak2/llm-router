@@ -222,3 +222,33 @@ def test_carry_recent_for_the_rescan_path():
     assert seats.carry_recent(blind, prior, now).claude.status == "connected"
     old = seats.Seats(claude=seats.Seat(kind="claude.ai"), detected_at=iso(now - 7200))
     assert seats.carry_recent(blind, old, now) is blind
+
+
+def test_repeated_carries_keep_the_first_sighting_as_anchor(state, tmp_path):
+    """MAP-FIX-2: the 1 h window is anchored at the FIRST sighting. Blind polls 40 min
+    apart must not each restart it: the seat is still carried before t0+1h and is
+    reported absent at t0+80 min although the previous carry (t0+40 min) is <1 h old."""
+    seen = seats.Seats(claude=seats.Seat(kind="claude.ai", plan="max"))
+    blind = seats.Seats(claude=seats.Seat(reason="claude CLI not found"))
+    t0 = time.time() - 6 * 3600
+    mp = state / "resource_map.json"
+
+    def claude_row():
+        return {r["resource"]: r for r in resource_map.load_map(mp)["resources"]}["claude"]
+
+    _poll(seen, tmp_path, t0, [])
+    _poll(blind, tmp_path, t0 + 40 * 60, OR_KEY)               # carry 1, 40 min after sighting
+    first = claude_row()
+    assert first["status"] == "connected"
+    anchor = first["carried_from"]["seen_at"]
+
+    _poll(blind, tmp_path, t0 + 59 * 60, [])                   # carry 2, still inside the window
+    second = claude_row()
+    assert second["status"] == "connected"
+    assert second["carried_from"]["seen_at"] == anchor, "carry moved the anchor"
+    assert not [e for e in _changes(state) if e["event"] == "status"]
+
+    _poll(blind, tmp_path, t0 + 80 * 60, OR_KEY)               # 80 min after sighting, 21 min after carry 2
+    assert claude_row()["status"] == "absent"
+    status = [(e["resource"], e["after"]) for e in _changes(state) if e["event"] == "status"]
+    assert status == [("claude", "absent")]
