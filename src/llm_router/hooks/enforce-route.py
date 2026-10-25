@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 23
+# llm_router-hook-version: 24
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -88,6 +88,13 @@ try:
     _apply_dotenv()
 except Exception:
     pass
+
+# W0-4b / S7: state files created by this hook are 0600 from creation (a plain open() makes
+# 0666 & ~umask = 0644, readable by other local users). Stdlib only: the hook may run
+# where the llm_router package is not importable, so it cannot use llm_router.state_files.
+def _priv_open(path, mode="a", **kw):
+    return open(path, mode, opener=lambda p, f: os.open(p, f, 0o600), **kw)
+
 
 def _router_home():
     """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
@@ -1111,7 +1118,7 @@ def _read_pending(session_id: str) -> dict | None:
             try:
                 _router_dir().mkdir(parents=True, exist_ok=True)
                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                with _log_path().open("a", encoding="utf-8") as f:
+                with _priv_open(_log_path(), "a", encoding="utf-8") as f:
                     f.write(
                         f"[{ts}] PENDING EXPIRED session={session_id[:12]} "
                         f"ttl={_PENDING_TTL}s\n"
@@ -1232,7 +1239,7 @@ def _log_violation(
     try:
         _router_dir().mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        with _log_path().open("a", encoding="utf-8") as f:
+        with _priv_open(_log_path(), "a", encoding="utf-8") as f:
             # chz-surface-ok: violation LOG record — logical names keep history comparable.
             f.write(
                 f"[{ts}] VIOLATION session={session_id[:12]} "
@@ -1665,7 +1672,7 @@ def main() -> None:
             try:
                 _router_dir().mkdir(parents=True, exist_ok=True)
                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                with _log_path().open("a", encoding="utf-8") as f:
+                with _priv_open(_log_path(), "a", encoding="utf-8") as f:
                     f.write(
                         f"[{ts}] SHAPE_OVERRIDE session={session_id[:12]} "
                         f"method={pending.get('method')} task={pending.get('task_type')} "
@@ -1703,7 +1710,7 @@ def main() -> None:
                 try:
                     _router_dir().mkdir(parents=True, exist_ok=True)
                     ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                    with _log_path().open("a", encoding="utf-8") as f:
+                    with _priv_open(_log_path(), "a", encoding="utf-8") as f:
                         f.write(
                             f"[{ts}] FS_EXEMPT session={session_id[:12]} "
                             f"task={_fs_task} reason=needs_local_tools\n"
@@ -1733,7 +1740,7 @@ def main() -> None:
         try:
             _router_dir().mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            with _log_path().open("a", encoding="utf-8") as f:
+            with _priv_open(_log_path(), "a", encoding="utf-8") as f:
                 f.write(
                     f"[{ts}] ROUTER_CLI_EXEMPT session={session_id[:12]} "
                     f"task={pending.get('task_type', '')} "
@@ -1775,7 +1782,7 @@ def main() -> None:
             try:
                 _router_dir().mkdir(parents=True, exist_ok=True)
                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                with _log_path().open("a", encoding="utf-8") as f:
+                with _priv_open(_log_path(), "a", encoding="utf-8") as f:
                     f.write(
                         f"[{ts}] LOCAL_BASH_EXEMPT session={session_id[:12]} "
                         f"task={_lb_task} reason=non_routable_local_command\n"
@@ -1809,7 +1816,7 @@ def main() -> None:
             try:
                 _router_dir().mkdir(parents=True, exist_ok=True)
                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
-                with _log_path().open("a", encoding="utf-8") as f:
+                with _priv_open(_log_path(), "a", encoding="utf-8") as f:
                     f.write(
                         f"[{ts}] NATIVE_LOCAL_EXEMPT session={session_id[:12]} "
                         f"task={_em_task} tool={tool_name} reason=local_file_op\n"
@@ -1926,7 +1933,7 @@ def main() -> None:
         try:
             _router_dir().mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            with _log_path().open("a", encoding="utf-8") as f:
+            with _priv_open(_log_path(), "a", encoding="utf-8") as f:
                 # Record WHY it fired (verb + cue/obj) for post-incident audit.
                 f.write(
                     f"[{ts}] DELEGATE_ROUTE session={session_id[:12]} "
@@ -2085,7 +2092,7 @@ def main() -> None:
         try:
             _router_dir().mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            with _log_path().open("a", encoding="utf-8") as f:
+            with _priv_open(_log_path(), "a", encoding="utf-8") as f:
                 f.write(
                     f"[{ts}] AUTO-PIVOT (loop) session={session_id[:12]} "
                     f"tool={tool_name} count={loop_detected['count']}\n"
@@ -2110,7 +2117,7 @@ def main() -> None:
         try:
             _router_dir().mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            with _log_path().open("a", encoding="utf-8") as f:
+            with _priv_open(_log_path(), "a", encoding="utf-8") as f:
                 f.write(
                     f"[{ts}] AUTO-PIVOT (trap) session={session_id[:12]} "
                     f"tool={tool_name} same_turn_blocks={_same_tool_blocks}\n"
@@ -2132,7 +2139,7 @@ def main() -> None:
         try:
             _router_dir().mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            with _log_path().open("a", encoding="utf-8") as f:
+            with _priv_open(_log_path(), "a", encoding="utf-8") as f:
                 f.write(
                     f"[{ts}] AUTO-PIVOT (count) session={session_id[:12]} "
                     f"violations={violation_count}\n"

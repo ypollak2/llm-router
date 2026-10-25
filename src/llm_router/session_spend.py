@@ -143,7 +143,7 @@ def read_base_drift(
         if version is not None:
             where += " AND llm_router_version = ?"
             params.append(version)
-        with state_files.connect_sqlite(str(db_path), timeout=2.0) as conn:
+        with state_files.connect_sqlite(str(db_path), create=False, timeout=2.0) as conn:
             row = conn.execute(
                 "SELECT COUNT(*), COALESCE(SUM(call_count),0), "
                 "COALESCE(SUM(overridden_turns),0), "

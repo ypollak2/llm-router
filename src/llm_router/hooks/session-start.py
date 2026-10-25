@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 42
+# llm_router-hook-version: 43
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -94,6 +94,26 @@ except ImportError:
         return os.environ.get("LLM_ROUTER_AUTO_BENCHMARK_FETCH", "").strip().lower() in (
             "1", "on", "true", "yes",
         )
+
+# W0-4b / S7: state files created by this hook are 0600 from creation (a plain open() makes
+# 0666 & ~umask = 0644, readable by other local users). Stdlib only: the hook may run
+# where the llm_router package is not importable, so it cannot use llm_router.state_files.
+def _priv_open(path, mode="a", **kw):
+    return open(path, mode, opener=lambda p, f: os.open(p, f, 0o600), **kw)
+
+
+def _priv_write_text(path, data, encoding=None):
+    with _priv_open(path, "w", encoding=encoding) as fh:
+        return fh.write(data)
+
+
+def _priv_sqlite(path, **kw):
+    try:
+        os.close(os.open(os.fspath(path), os.O_RDONLY | os.O_CREAT, 0o600))
+    except OSError:
+        pass  # sqlite3.connect below reports the real problem, as it did before
+    return sqlite3.connect(str(path), **kw)
+
 
 def _router_home():
     """Router state dir, resolved per call so LLM_ROUTER_HOME is honoured.
@@ -513,9 +533,9 @@ def _reset_session_stats() -> None:
     Initialize routing lineage tracking (new decisions only)."""
     os.makedirs(_state_dir(), exist_ok=True)
     try:
-        with open(_session_start_file(), "w") as f:
+        with _priv_open(_session_start_file(), "w") as f:
             f.write(str(time.time()))
-        with open(_session_id_file(), "w") as f:
+        with _priv_open(_session_id_file(), "w") as f:
             f.write(str(uuid.uuid4()))
     except OSError:
         pass
@@ -542,7 +562,7 @@ def _reset_session_stats() -> None:
             "gates_failed": 0,
         }
         tmp = _session_spend_file() + ".tmp"
-        with open(tmp, "w") as f:
+        with _priv_open(tmp, "w") as f:
             json.dump(fresh, f, indent=2)
         os.replace(tmp, _session_spend_file())
     except OSError:
@@ -560,7 +580,7 @@ def _reset_stale_health() -> None:
     """Write a stale-reset marker so the router process resets stale circuit breakers."""
     reset_file = os.path.join(_state_dir(), "reset_stale.flag")
     try:
-        with open(reset_file, "w") as f:
+        with _priv_open(reset_file, "w") as f:
             f.write(str(time.time()))
     except OSError:
         pass
@@ -789,7 +809,7 @@ def _record_settings_observe(session_id) -> None:
         pass
     except (OSError, ValueError):
         row["base_url_present"] = None  # unreadable: unknown, not absent
-    with open(os.path.join(state, "settings_writes.jsonl"), "a") as fh:
+    with _priv_open(os.path.join(state, "settings_writes.jsonl"), "a") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
 
 
@@ -960,9 +980,9 @@ def _refresh_claude_usage() -> str:
             }
             
             try:
-                with open(usage_path, "w") as f:
+                with _priv_open(usage_path, "w") as f:
                     json.dump(snapshot, f)
-                with open(snap_path, "w") as f:
+                with _priv_open(snap_path, "w") as f:
                     json.dump(snapshot, f)
             except OSError:
                 pass
@@ -999,9 +1019,9 @@ def _refresh_claude_usage() -> str:
     }
     
     try:
-        with open(usage_path, "w") as f:
+        with _priv_open(usage_path, "w") as f:
             json.dump(fallback, f)
-        with open(snap_path, "w") as f:
+        with _priv_open(snap_path, "w") as f:
             json.dump(fallback, f)
     except OSError:
         pass
@@ -1109,7 +1129,7 @@ def _claim_usage_refresh_spawn(cooldown_s: float) -> bool:
             if age is not None and age < cooldown_s:
                 return False
             os.makedirs(_state_dir(), exist_ok=True)
-            with open(path, "w") as f:
+            with _priv_open(path, "w") as f:
                 f.write(str(time.time()))
             return True
         except Exception:
@@ -1124,7 +1144,7 @@ def _claim_usage_refresh_spawn(cooldown_s: float) -> bool:
             age = _usage_refresh_marker_age()
             if age is not None and age < cooldown_s:
                 return False
-            with open(path, "w") as f:
+            with _priv_open(path, "w") as f:
                 f.write(str(time.time()))
             return True
     except Exception:
@@ -1304,7 +1324,7 @@ def _write_session_baseline(cached: object) -> None:
         }
     try:
         os.makedirs(_state_dir(), exist_ok=True)
-        with open(os.path.join(_state_dir(), "session_start_cc_pct.json"), "w") as f:
+        with _priv_open(os.path.join(_state_dir(), "session_start_cc_pct.json"), "w") as f:
             json.dump(snapshot, f)
     except OSError:
         pass
@@ -1526,7 +1546,7 @@ def _weekly_digest() -> str:
         return ""
 
     try:
-        conn = sqlite3.connect(_db_path())
+        conn = _priv_sqlite(_db_path())
         rows = conn.execute(
             """
             SELECT provider,
@@ -1573,7 +1593,7 @@ def _weekly_digest() -> str:
 
         # Record shown
         try:
-            with open(_weekly_digest_file(), "w") as f:
+            with _priv_open(_weekly_digest_file(), "w") as f:
                 f.write(str(time.time()))
         except OSError:
             pass
@@ -1598,7 +1618,7 @@ def _latency_hint() -> str:
     if not os.path.exists(_db_path()):
         return ""
     try:
-        conn = sqlite3.connect(_db_path())
+        conn = _priv_sqlite(_db_path())
         rows = conn.execute(
             """
             SELECT model, AVG(latency_ms) as p50, COUNT(*) as n
@@ -2042,7 +2062,7 @@ def _maybe_reindex_okf_bg(cwd: str | None = None) -> None:
 
     try:
         os.makedirs(os.path.dirname(stamp), exist_ok=True)
-        with open(stamp, "w") as fh:
+        with _priv_open(stamp, "w") as fh:
             fh.write(str(time.time()))
     except OSError:
         pass
@@ -2060,7 +2080,7 @@ def _maybe_reindex_okf_bg(cwd: str | None = None) -> None:
     if _detached_spawn_disabled():
         return
     try:
-        with open(log, "w") as errfh:
+        with _priv_open(log, "w") as errfh:
             subprocess.Popen(
                 [sys.executable, "-c", script],
                 cwd=root,
@@ -2171,7 +2191,7 @@ def _maybe_update_pull_routing_rules() -> None:
         # Record check time
         try:
             Path(_state_dir()).mkdir(parents=True, exist_ok=True)
-            _check_file.write_text(str(_now))
+            _priv_write_text(_check_file, str(_now))
         except OSError:
             pass
 
@@ -2223,7 +2243,7 @@ def _write_cached_hints(hints: str) -> None:
         path = _hints_cache_path()
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        with _priv_open(tmp, "w", encoding="utf-8") as f:
             json.dump({"ts": time.time(), "hints": hints}, f)
         os.replace(tmp, path)
     except Exception:  # noqa: BLE001 -- next session simply shows no hints

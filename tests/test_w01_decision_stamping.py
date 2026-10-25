@@ -135,6 +135,46 @@ def test_a_capability_or_window_change_changes_the_sig(tmp_path):
     assert all(sigs) and len(set(sigs)) == 4, sigs
 
 
+def test_a_kind_change_changes_the_sig(tmp_path):
+    sigs = []
+    for kind in ("local", "subscription", "api"):
+        p = _caps_map(tmp_path, ["completion", "tools"], 8192)
+        data = json.loads(p.read_text())
+        data["resources"][0]["kind"] = kind
+        p.write_text(json.dumps(data))
+        decision_stamp.reset_cache()
+        sigs.append(decision_stamp.inventory_sig(p, db_path=tmp_path / "usage.db"))
+    assert all(sigs) and len(set(sigs)) == 3, sigs
+    snap = decision_stamp.resolve_inventory(sigs[1], db_path=tmp_path / "usage.db")
+    assert snap["rows"][0]["kind"] == "subscription"
+
+
+def test_a_locked_db_costs_under_300ms_and_the_snapshot_is_retried_after_unlock(tmp_path):
+    from llm_router import failopen
+
+    db = tmp_path / "usage.db"
+    sqlite3.connect(db).close()
+    p = _caps_map(tmp_path, ["completion", "tools"], 8192)
+    decision_stamp.reset_cache()
+    seen = []
+    real = failopen.record
+    with patch.object(failopen, "record", lambda code, exc=None, *a, **k: (seen.append(code), real(code, exc, *a, **k))[1]):
+        locker = sqlite3.connect(db, isolation_level=None)
+        locker.execute("BEGIN EXCLUSIVE")
+        try:
+            t0 = time.monotonic()
+            sig = decision_stamp.inventory_sig(p, db_path=db)
+            elapsed = time.monotonic() - t0
+        finally:
+            locker.execute("ROLLBACK")
+            locker.close()
+    assert sig and elapsed < 0.3, elapsed
+    assert "W01-SNAPSHOT" in seen
+    assert decision_stamp.resolve_inventory(sig, db_path=db) is None  # not written while locked
+    assert decision_stamp.inventory_sig(p, db_path=db) == sig  # same process, not cached: retried
+    assert decision_stamp.resolve_inventory(sig, db_path=db) is not None
+
+
 # ── inventory_snapshots: a sig resolves to the inventory it hashed ───────────────────────────────
 
 
@@ -148,7 +188,7 @@ def test_an_old_sig_still_resolves_after_the_map_changed(tmp_path):
     assert new_sig != old_sig
     old = decision_stamp.resolve_inventory(old_sig, db_path=db)
     new = decision_stamp.resolve_inventory(new_sig, db_path=db)
-    assert old["rows"] == [{"chain_id": "ollama/a", "status": "connected", "effective_priority": 1,
+    assert old["rows"] == [{"chain_id": "ollama/a", "kind": "local", "status": "connected", "effective_priority": 1,
                             "tools": True, "vision": False, "window": 8192}]
     assert (new["rows"][0]["tools"], new["rows"][0]["window"]) == (False, 4096)
     assert old["policy"] == "balanced"

@@ -63,6 +63,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from llm_router import paths
+from llm_router import state_files
 
 __all__ = [
     "PreExecutionResult",
@@ -131,7 +132,7 @@ def _handle_routing_distribution(_prompt: str) -> str | None:
     if not db.is_file():
         return None
     try:
-        conn = sqlite3.connect(str(db))
+        conn = state_files.connect_sqlite(db, create=False)
         rows = conn.execute(
             "SELECT complexity, final_model, COALESCE(cost_usd,0) "
             "FROM routing_decisions "

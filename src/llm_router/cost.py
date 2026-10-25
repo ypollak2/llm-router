@@ -36,6 +36,7 @@ from llm_router.savings import net_saved
 
 from llm_router import paths
 from llm_router.call_identity import note_ledger_write as _ci_note_write
+from llm_router import state_files
 
 
 def _detect_synthetic() -> bool:
@@ -1191,7 +1192,7 @@ async def _get_db() -> aiosqlite.Connection:
     # interpreter alive forever — this was the hang-at-exit bug. Daemon
     # threads cannot block exit; WAL journaling keeps the DB file safe even
     # if such a leaked thread is killed mid-write.
-    _conn = aiosqlite.connect(str(config.llm_router_db_path))
+    _conn = state_files.connect_aiosqlite(config.llm_router_db_path)
     # Mark the worker daemon *before* awaiting (the thread hasn't started yet).
     _mark_worker_daemon(_conn)
     db = await _conn

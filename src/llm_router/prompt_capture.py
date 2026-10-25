@@ -58,6 +58,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from llm_router import state_files
+
 # The scrubber lives with the ground-truth tooling; import defensively so a
 # packaging layout that omits `scripts/` disables capture instead of breaking
 # the router. Capture is never important enough to fail a request.
@@ -163,8 +165,7 @@ def _record_outcome(outcome: str, reason: str, *, route_id: str | None = None,
     _counters[outcome] = _counters.get(outcome, 0) + 1
     try:
         path = outcome_log_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
+        with state_files.open_private(path, "a", encoding="utf-8") as fh:  # W0-4b: 0600 from creation
             fh.write(json.dumps({
                 "ts": time.time(), "outcome": outcome, "reason": reason,
                 "route_id": route_id, "task_type": task_type,
@@ -303,13 +304,12 @@ def capture(
             record["extra"] = extra
 
         path = capture_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
         # One lock and one append per record. Appends under the POSIX
         # atomic-write size are not interleaved by other processes, and the
         # lock covers threads within this one.
         with _lock:
-            with path.open("a", encoding="utf-8") as fh:
+            with state_files.open_private(path, "a", encoding="utf-8") as fh:  # W0-4b: 0600 from creation
                 fh.write(line)
 
         # Assess Ground Truth eligibility while the state still exists. This is

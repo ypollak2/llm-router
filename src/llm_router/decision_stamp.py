@@ -51,6 +51,9 @@ _SNAPSHOT_DDL = (
     "sig TEXT PRIMARY KEY, first_seen_ts TEXT NOT NULL, body_json TEXT NOT NULL)"
 )
 
+#: Seconds a snapshot write may wait on a locked usage.db (the stamp is on the routing path).
+_SNAPSHOT_TIMEOUT = 0.2
+
 _lock = threading.Lock()
 _cache: dict = {"key": None, "token": None, "sig": None}
 
@@ -69,7 +72,7 @@ def _body_of(data: dict) -> dict:
         cid = r.get("chain_id")
         pair = caps.get(cid)
         rows.append({"chain_id": str(cid), "status": str(r.get("status")),
-                     "effective_priority": r.get("effective_priority"),
+                     "kind": r.get("kind"), "effective_priority": r.get("effective_priority"),
                      "tools": pair[0] if pair else None, "vision": pair[1] if pair else None,
                      "window": window.get(cid)})
     rows.sort(key=lambda x: (x["chain_id"], x["status"]))
@@ -96,7 +99,7 @@ def _store_snapshot(sig: str, body: dict, db_path=None) -> None:
     """INSERT the snapshot once (a SELECT first, so a known signature costs no write lock)."""
     from llm_router import state_files
 
-    conn = state_files.connect_sqlite(_db_file(db_path), timeout=2.0)
+    conn = state_files.connect_sqlite(_db_file(db_path), timeout=_SNAPSHOT_TIMEOUT)
     try:
         conn.execute(_SNAPSHOT_DDL)
         if conn.execute("SELECT 1 FROM inventory_snapshots WHERE sig = ?", (sig,)).fetchone() is None:
@@ -150,6 +153,7 @@ def inventory_sig(path=None, db_path=None) -> str | None:
             from llm_router import failopen
 
             failopen.record("W01-SNAPSHOT", exc)
+            return sig  # not cached: the next call retries the snapshot
         with _lock:
             _cache.update(key=key, token=token, sig=sig)
         return sig
