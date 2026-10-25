@@ -54,6 +54,7 @@ def _snapshot_dir():
 # retired $15/$75 Opus 3 tier. The claim was true of the *method* and false of
 # the implementation — and it is the headline metric, so it was wrong by 3x.
 from llm_router import pricing as _pricing  # noqa: E402
+from llm_router import state_files  # noqa: E402
 
 _opus_price = _pricing.price_for("opus")
 OPUS_INPUT_PER_M = _opus_price.input if _opus_price else 0.0
@@ -221,7 +222,7 @@ def snapshot(db_path: Path | None = None) -> Snapshot:
             usage=TableSnapshot(0, 0.0, 0, 0),
         )
 
-    conn = sqlite3.connect(str(db))
+    conn = state_files.connect_sqlite(db, create=False)
     try:
         return Snapshot(
             schema=SNAPSHOT_SCHEMA,

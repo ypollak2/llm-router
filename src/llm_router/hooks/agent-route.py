@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 24
+# llm_router-hook-version: 25
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -82,6 +82,27 @@ except ImportError:  # llm_router is not importable on this host: no recorder, n
 
     def _hl_mark_main():
         return None
+
+
+# W0-4b / S7: state files created by this hook are 0600 from creation (a plain open() makes
+# 0666 & ~umask = 0644, readable by other local users). Stdlib only: the hook may run
+# where the llm_router package is not importable, so it cannot use llm_router.state_files.
+def _priv_open(path, mode="a", **kw):
+    return open(path, mode, opener=lambda p, f: os.open(p, f, 0o600), **kw)
+
+
+def _priv_write_text(path, data, encoding=None):
+    with _priv_open(path, "w", encoding=encoding) as fh:
+        return fh.write(data)
+
+
+def _priv_sqlite(path, **kw):
+    import sqlite3
+    try:
+        os.close(os.open(os.fspath(path), os.O_RDONLY | os.O_CREAT, 0o600))
+    except OSError:
+        pass  # sqlite3.connect below reports the real problem, as it did before
+    return sqlite3.connect(str(path), **kw)
 
 
 # ── Registered-tool surface (CHZ-SURF-01) ────────────────────────────────────
@@ -428,7 +449,7 @@ def _log_hook_error(message: str, session_id: str = "") -> None:
                  "error": message[:200]}
         if session_id:
             entry["context"] = {"session_id": session_id}
-        with (home / "hook_errors.log").open("a", encoding="utf-8") as fh:
+        with _priv_open(home / "hook_errors.log", "a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry) + "\n")
     except Exception:  # noqa: BLE001 -- logging must never break a spawn
         pass
@@ -661,7 +682,7 @@ def _append_agent_calls_ledger(entry: dict) -> None:
                 if isinstance(ts, (int, float)) and ts >= cutoff:
                     kept.append(line)
         kept.append(json.dumps(entry))
-        f.write_text("\n".join(kept) + "\n")
+        _priv_write_text(f, "\n".join(kept) + "\n")
         try:
             os.chmod(f, 0o600)
         except OSError:
@@ -700,7 +721,7 @@ def _record_north_star_unit(lever: str, *, model: str, outcome: str, **meta) -> 
         }
         f = _north_star_ledger_file()
         f.parent.mkdir(parents=True, exist_ok=True)
-        with f.open("a") as fh:
+        with _priv_open(f, "a") as fh:
             fh.write(json.dumps(entry) + "\n")
         try:
             os.chmod(f, 0o600)
@@ -771,7 +792,7 @@ def _log_agent_call(subagent_type: str, prompt: str, decision: str) -> None:
     # Write back owner-only.
     # 🥷 Backslash-Security: using vibe-coding rules for File Upload Security
     calls_file.parent.mkdir(parents=True, exist_ok=True)
-    calls_file.write_text(json.dumps({
+    _priv_write_text(calls_file, json.dumps({
         "calls": history,
         "version": 1,
     }))
@@ -868,7 +889,7 @@ def _initialize_session_budget() -> float:
 
     # An empty HOME has no ~/.llm-router yet; 0700 matches the repo state-dir convention.
     budget_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    budget_file.write_text(json.dumps({
+    _priv_write_text(budget_file, json.dumps({
         "session_id": _get_session_id(),
         "initial": initial_budget,
         "remaining": initial_budget,
@@ -904,7 +925,7 @@ def _decrement_budget_provisional(estimated_cost: float) -> None:
     data["provisional_spend"] = new_provisional
     data["timestamp"] = time.time()
 
-    budget_file.write_text(json.dumps(data))
+    _priv_write_text(budget_file, json.dumps(data))
 
 
 def _get_remaining_budget() -> float:
@@ -963,8 +984,7 @@ def _get_claude_pressure() -> float:
     # Layer 2: SQLite fallback — reads most recent claude_usage row
     db_path = _router_home() / "usage.db"
     try:
-        import sqlite3
-        conn = sqlite3.connect(str(db_path), timeout=1)
+        conn = _priv_sqlite(str(db_path), timeout=1)
         row = conn.execute(
             "SELECT messages_used, messages_limit FROM claude_usage "
             "ORDER BY timestamp DESC LIMIT 1"
@@ -2001,7 +2021,7 @@ def _codex_subagent_budget_increment() -> None:
     data["date"] = today
     try:
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps(data))
+        _priv_write_text(f, json.dumps(data))
     except OSError as exc:
         try:
             from llm_router import failopen

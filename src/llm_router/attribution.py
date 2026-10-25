@@ -56,6 +56,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from llm_router import state_files
 
 
 class AttributionStatus(str, Enum):
@@ -217,7 +218,7 @@ def routing_attribution(
     `since_sql` is a SQL expression rather than a bound value because the existing
     surfaces express their windows that way; it is NOT caller-supplied user input.
     """
-    conn = sqlite3.connect(str(db_path))
+    conn = state_files.connect_sqlite(db_path, create=False)
     conn.row_factory = sqlite3.Row
     try:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(routing_decisions)")}

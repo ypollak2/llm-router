@@ -1420,6 +1420,9 @@ def cmd_proxy(argv: list[str]) -> int:
 
     import uvicorn
 
+    from llm_router import state_files
+    state_files.harden_state()  # W0-4b / S7: 0600/0700 repair on every proxy start, never raises
+
     steps = ",".join(sorted(cfg.steps)) or "off (pass-through only)"
     print(f"llm-router proxy -> http://{a.host}:{a.port}  steps={steps}  "
           f"hedge={cfg.hedge_s}s  budget={cfg.step_budget_s}s  "

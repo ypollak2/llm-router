@@ -36,6 +36,7 @@ from llm_router.routing_hints import detect_spend_anomaly, log_routing_decision
 
 from llm_router import paths
 from llm_router.logging import get_logger
+from llm_router import state_files
 
 log = get_logger("llm_router.budget")
 
@@ -480,14 +481,13 @@ async def _get_provider_monthly_spend(provider: str) -> float:
     Returns 0.0 if the DB doesn't exist or the query fails.
     """
     try:
-        import aiosqlite
         db_path = get_config().llm_router_db_path
         # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
         exists = await asyncio.to_thread(Path(db_path).exists)
         if not exists:
             return 0.0
         from llm_router.aiosqlite_util import mark_worker_daemon
-        _conn = aiosqlite.connect(db_path)
+        _conn = state_files.connect_aiosqlite(db_path, create=False)
         mark_worker_daemon(_conn)  # CHZ-PY-004: before __aenter__ starts the worker
         async with _conn as db:
             cursor = await db.execute(
