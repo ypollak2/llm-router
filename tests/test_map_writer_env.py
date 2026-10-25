@@ -252,3 +252,46 @@ def test_repeated_carries_keep_the_first_sighting_as_anchor(state, tmp_path):
     assert claude_row()["status"] == "absent"
     status = [(e["resource"], e["after"]) for e in _changes(state) if e["event"] == "status"]
     assert status == [("claude", "absent")]
+
+
+def test_concurrent_learners_both_survive(state, tmp_path, monkeypatch):
+    """MAP-FIX-2b N1: two processes teaching different dirs at once keep both entries.
+    Both are forced to read cli_path.json before either writes (a lost update on an
+    unlocked read-modify-write); under the lock the second read waits for the first write."""
+    import threading
+    gate = threading.Barrier(2, timeout=1.0)
+    real_read = seats._read_learned
+    local = threading.local()
+
+    def racing_read():
+        data = real_read()
+        if not getattr(local, "done", False):      # only the first read per thread races
+            local.done = True
+            try:
+                gate.wait()
+            except threading.BrokenBarrierError:
+                pass
+        return data
+
+    monkeypatch.setattr(seats, "_read_learned", racing_read)
+    a, b = tmp_path / "a" / "claude", tmp_path / "b" / "codex"
+    for exe in (a, b):
+        _exe(exe, "#!/bin/sh\n")
+    now = time.time()
+    ts = [threading.Thread(target=seats._learn, args=(n, str(p), now))
+          for n, p in (("claude", a), ("codex", b))]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    monkeypatch.setattr(seats, "_read_learned", real_read)
+    assert set(seats.learned_dirs(now)) == {str(a.parent), str(b.parent)}
+
+
+def test_relative_path_entry_is_not_recorded(state, tmp_path, monkeypatch):
+    """MAP-FIX-2b N2: a hit through a relative PATH entry depends on this process's cwd;
+    it is found for this process but never written to the shared cli_path.json."""
+    _exe(tmp_path / "rel" / "claude", "#!/bin/sh\n")
+    monkeypatch.chdir(tmp_path)
+    found = seats.find_cli("claude", env={"PATH": "rel"}, now=time.time())
+    assert found is not None                                   # this process still finds it
+    assert seats.learned_dirs() == []
+    assert not (state / seats.CLI_PATH_FILE).exists()
