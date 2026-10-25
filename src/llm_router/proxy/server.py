@@ -447,6 +447,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 # still held to the capability filter, as in choose_model: a pin KNOWN to
                 # lack what the request needs (tools array, images, window) keeps the call
                 # on Claude (model None, forwarded as policy_kept).
+                # F33: the window check counts irreducible tokens only. A pin with a known
+                # small window that passes is forwarded the UNTRIMMED body; this path does
+                # not trim history (docs/empty-chain-behaviour.md).
                 pin_ok = needs is None or bool(capability_filter.filter_chain([cfg.model], needs))
                 choice = {"task_type": "local_agent", "complexity": "pinned",
                           "chain_head": [cfg.model] if pin_ok else [],
