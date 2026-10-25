@@ -284,14 +284,27 @@ def haiku_units(rows: list[dict], *, since: float, until: float, kinds: frozense
     ours = {r.get("msg_id") for r in rows
             if isinstance(r.get("msg_id"), str) and is_haiku_served(r)
             and (r.get("tier_reason") == "haiku_rewrite" or r.get("tier_arm_assignment") == "treatment")}
+    # Lane A (PR2): its steps are continuations, which ``turn_units`` leaves out, so the probe was
+    # blind to them. A continuation row the proxy served on Haiku for lane A joins the units.
+    lane = {r.get("msg_id") for r in rows
+            if isinstance(r.get("msg_id"), str) and is_haiku_served(r) and r.get("lane_a_reason") == "served"
+            and r.get("step_class") == "continuation" and r.get("tier_reason") == "haiku_rewrite"}
     out = []
-    for u in osh.turn_units(built["units"]):
-        if u["class"] != osh.CLASS_HAIKU or not since <= u["ts"] <= until or u.get("msg_id") not in ours:
+    for u in built["units"]:
+        if u["class"] != osh.CLASS_HAIKU or not since <= u["ts"] <= until:
+            continue
+        is_turn = u.get("first", True)
+        if is_turn and u.get("msg_id") not in ours:
+            continue
+        if not is_turn and u.get("msg_id") not in lane:
             continue
         outcome = "redo" if u["redone"] else ("unknown" if u["window_open"] else "used")
-        out.append({"ts": datetime.fromtimestamp(u["ts"], tz=timezone.utc).isoformat(),
-                    "lever": "proxy_haiku", "task_type": "haiku", "model": u.get("model"),
-                    "outcome": outcome})
+        unit = {"ts": datetime.fromtimestamp(u["ts"], tz=timezone.utc).isoformat(),
+                "lever": "proxy_haiku", "task_type": "haiku", "model": u.get("model"),
+                "outcome": outcome}
+        if not is_turn:
+            unit["lane"] = "A"
+        out.append(unit)
     return out
 
 

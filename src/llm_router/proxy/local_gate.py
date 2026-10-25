@@ -289,6 +289,13 @@ class FailureFeed:
         while len(self._pending) > _MAX_PENDING:
             self._pending.popitem(last=False)
 
+    def _emit(self, pend: _Pending, outcome: str) -> None:
+        """One settled outcome becomes a breaker unit (a subclass may keep it in memory instead)."""
+        lever, task = breaker_class(pend.lane)
+        _append_unit({"ts": datetime.now(timezone.utc).isoformat(), "lever": lever, "task_type": task,
+                      "model": pend.model, "outcome": outcome, "kind": "techop_local",
+                      "session_kind": pend.session_kind}, self.path)
+
     def observe(self, body: dict, session_id: str | None) -> list[str]:
         """Called for every later request of the session. Returns the ``used`` / ``redo``
         outcomes this call settled (usually none)."""
@@ -312,10 +319,7 @@ class FailureFeed:
             else:
                 continue
             pending.remove(pend)
-            lever, task = breaker_class(pend.lane)
-            _append_unit({"ts": datetime.now(timezone.utc).isoformat(), "lever": lever, "task_type": task,
-                          "model": pend.model, "outcome": outcome, "kind": "techop_local",
-                          "session_kind": pend.session_kind}, self.path)
+            self._emit(pend, outcome)
             settled.append(outcome)
         if not pending:
             del self._pending[session_id]
