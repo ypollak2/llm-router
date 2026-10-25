@@ -114,7 +114,7 @@ copies do not outlive their TTL). This file lists the history files that have a 
 
 | Item | Value |
 |---|---|
-| Rows | `c` (refusal code: `CHZ-FC-ROUTER-TEXT-JOB-ELIGIBILITY`, `CHZ-FC-ROUTER-TEXT-JOB-CUT-CHECK` or, LC-12f, `CHZ-FC-ROUTER-TEXT-JOB-LIVE-CHECK`), `ts`, and `e` (exception class name, when an exception caused the refusal). No prompt text, no model name, no path. |
+| Rows | `c` (refusal code: `CHZ-FC-ROUTER-TEXT-JOB-ELIGIBILITY`, `CHZ-FC-ROUTER-TEXT-JOB-CUT-CHECK` or, LC-12f, `CHZ-FC-ROUTER-TEXT-JOB-LIVE-CHECK`, or, LC-12g, `CHZ-FC-PROVIDERS-TEXT-JOB-OVERFLOW-SWITCH`), `ts`, and `e` (exception class name, when an exception caused the refusal). No prompt text, no model name, no path. |
 | Writer | `eligibility_routing.record_fail_closed`, called when a local-only (`LLM_ROUTER_LOCAL_TEXT_JOBS` unset) `llm_text_job` is refused because its eligibility step or cut-site check raised, or (LC-12f) because the pre-dispatch read of the model's live `/api/tags` row did not match its pass. Best-effort: a failed write is recorded with `failopen` code `CHZ-FO-FAIL-CLOSED-UNRECORDED`, and the refusal still happens. |
 | Kept | Two generations of 256 KiB via `capped_log` (`eligibility_routing.FC_MAX_BYTES`): `<name>` and `<name>.1` (older). The oldest generation is dropped on rotation; a generation can exceed the cap by one row. |
 | Why 256 KiB | A row is about 80 bytes, so about 3,000 rows per generation. Each row is a crash; more than that in 7 days is one recurring bug, and the count only needs to be non-zero. |

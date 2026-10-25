@@ -164,7 +164,8 @@ def _write_cache(models: list[str]) -> None:
             entry = dict(existing.get(key, {
                 "model_id": key, "provider": "ollama", "provider_tier": "local",
             }))
-            entry.update({k: v for k, v in _last_probe_meta.get(name, {}).items() if v is not None})
+            # LC-12g: digest is written even when None, so a row without one clears a stale digest.
+            entry.update({k: v for k, v in _last_probe_meta.get(name, {}).items() if v is not None or k == "digest"})
             merged[key] = entry
         data["models"] = merged
         data["cached_at"] = time.time()

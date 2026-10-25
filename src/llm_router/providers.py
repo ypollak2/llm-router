@@ -185,6 +185,26 @@ def _ollama_window_candidates(model: str, current_window: int | None) -> list[st
         return []
 
 
+def _pass_only_text_job() -> bool:
+    """LC-12g: True inside a pass-only ``llm_text_job`` (``LLM_ROUTER_LOCAL_TEXT_JOBS`` unset, D-277)."""
+    from llm_router import eligibility_routing
+    return eligibility_routing._require_passed_first.get()
+
+
+async def _direct_ollama_handler(timeout):
+    """LC-12g: a LiteLLM handler for ONE call whose httpx client ignores proxy env and never follows a redirect.
+
+    LiteLLM's shared client honours HTTP(S)_PROXY / ALL_PROXY for ``localhost`` too when NO_PROXY is unset
+    (both its aiohttp and httpx transports), so the text could reach a proxy. Returns (handler, client to close).
+    """
+    import httpx
+    from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+    handler = AsyncHTTPHandler(timeout=timeout)
+    await handler.close()  # the default client it built (env proxies honoured) is never used
+    handler.client = direct = httpx.AsyncClient(trust_env=False, timeout=timeout, follow_redirects=False)
+    return handler, direct
+
+
 def _ollama_think_enabled() -> bool:
     """Whether Ollama's native <think> reasoning mode should stay ON.
 
@@ -310,6 +330,7 @@ async def call_llm(
     _quirk = get_quirk(provider_from_model(model))
     kwargs["model"] = _quirk.transform_model_name(kwargs["model"])
     kwargs = _quirk.transform_request(kwargs)
+    _pass_only_local = model.startswith("ollama/") and _pass_only_text_job()
 
     if model.startswith("ollama/"):
         # Refuse to send what Ollama would silently truncate from the front. If
@@ -322,6 +343,12 @@ async def call_llm(
                            model=kwargs["model"], site="providers.call_llm",
                            candidates=_ollama_window_candidates(kwargs["model"], kwargs.get("num_ctx")))
         cached_messages = kwargs["messages"] = pack.trim_to()["messages"]
+        if pack.action == "bigger_window" and _pass_only_local:
+            # LC-12g: the other model has no pass and got no live check; refuse, never switch.
+            from llm_router import eligibility_routing as _er
+            _er.record_fail_closed(_er.FC_OVERFLOW_SWITCH)
+            raise _er.OverflowSwitchRefused(
+                f"the input does not fit {old_model}; the overflow switch to {pack.model} is refused")
         if pack.action == "bigger_window":
             from llm_router import failopen
             model = kwargs["model"] = pack.model
@@ -338,16 +365,23 @@ async def call_llm(
     # cap raises AttemptCapExceeded (not a timeout: no LOCAL-TIMEOUT-1 cooldown).
     from llm_router.mcp_door import AttemptCapExceeded, attempt_cap_s
     _attempt_cap = attempt_cap_s(model)
-    if _attempt_cap is not None:
-        try:
-            response = await asyncio.wait_for(
-                litellm.acompletion(**kwargs),  # llm_router: direct-ok (router provider layer)
-                timeout=_attempt_cap,
-            )
-        except TimeoutError as exc:
-            raise AttemptCapExceeded(model, _attempt_cap) from exc
-    else:
-        response = await litellm.acompletion(**kwargs)  # llm_router: direct-ok (router provider layer)
+    _direct = await _direct_ollama_handler(config.request_timeout) if _pass_only_local else None
+    if _direct is not None:
+        kwargs["client"] = _direct[0]  # LC-12g: this call only; no global proxy or env change
+    try:
+        if _attempt_cap is not None:
+            try:
+                response = await asyncio.wait_for(
+                    litellm.acompletion(**kwargs),  # llm_router: direct-ok (router provider layer)
+                    timeout=_attempt_cap,
+                )
+            except TimeoutError as exc:
+                raise AttemptCapExceeded(model, _attempt_cap) from exc
+        else:
+            response = await litellm.acompletion(**kwargs)  # llm_router: direct-ok (router provider layer)
+    finally:
+        if _direct is not None:
+            await _direct[1].aclose()
     elapsed_ms = (time.monotonic() - start) * 1000
 
     content = extract_content(response.choices[0].message)

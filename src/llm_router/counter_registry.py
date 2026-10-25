@@ -407,7 +407,8 @@ def _read_text_job_fail_closed() -> CounterReading:
     in the last 7 days (LC-12e / LC-12f).
 
     Windowed (``eligibility_routing.FC_WINDOW_S``) so one old crash does not alarm forever; the store is
-    capped (``capped_log``). An unreadable store is UNKNOWN, never 0.
+    capped (``capped_log``). An unreadable or unparseable store is UNKNOWN, never 0, and alarming (LC-12g),
+    as ``fail_open_events`` and ``interception_gaps`` treat theirs: a refusal count nobody can read is not quiet.
     """
     try:
         from llm_router.eligibility_routing import FC_WINDOW_S, fail_closed_counts
@@ -416,7 +417,7 @@ def _read_text_job_fail_closed() -> CounterReading:
         if counts is None:
             why = _fc_store_unreadable()
             if why:
-                return CounterReading(None, unknown_reason=f"fail-closed store unreadable ({why})")
+                return CounterReading(None, alarming=True, unknown_reason=f"fail-closed store unreadable ({why})")
             return CounterReading(None, alarming=True, unknown_reason="fail-closed store present but unparseable")
         total = sum(counts.values())
         days = FC_WINDOW_S / 86400

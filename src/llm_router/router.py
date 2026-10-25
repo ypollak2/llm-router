@@ -4418,7 +4418,7 @@ async def _dispatch_model_loop(
     raise RuntimeError(
         f"All models failed for {task_type.value}/{profile.value}. "
         f"Last error: {last_error}.{chain_summary}{setup_hint}"
-    )
+    ) from last_error  # LC-12g: llm_text_job reads an OverflowSwitchRefused cause
 
 
 #: R15. Reported stop reasons that mean the generation did not complete
@@ -5270,8 +5270,8 @@ async def route_and_call(
                     _leads = (bool(_tj_ctx) and not is_ollama_cloud_model(_pass_model)
                               and _er.passed_model_leads([_pass_model], _tj_ctx[0], _tj_ctx[1], time.time()))
                     # LC-12f: the discovery cache can lag an `ollama cp` of a cloud model onto the passed name
-                    # by up to its TTL; one localhost GET of the live `/api/tags` row closes that window for
-                    # the path that sends user text.
+                    # by up to its TTL; one localhost GET of the live `/api/tags` row narrows that window, for
+                    # the path that sends user text, to the milliseconds between this check and the generate call.
                     _live_why = (await asyncio.to_thread(_er.live_check_refusal, _pass_model, _tj_ctx[0], time.time())
                                  if _leads else None)
                 except _er.EligibilityStepFailed:  # already counted by the helper; the cause text stays accurate

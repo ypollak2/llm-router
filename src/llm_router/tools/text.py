@@ -1185,7 +1185,8 @@ async def llm_text_job(
                     eligibility_exempt_reason=eligibility_routing.TEXT_JOB_REASON,  # F112 / D-242
                 )
             except Exception as exc:
-                refused = isinstance(exc, eligibility_routing.PassedModelNotInChain)
+                overflow = isinstance(exc.__cause__, eligibility_routing.OverflowSwitchRefused)  # LC-12g
+                refused = overflow or isinstance(exc, eligibility_routing.PassedModelNotInChain)
                 trace = [] if refused else (getattr(exc, "chain_attempts", None) or [])
                 if not refused:
                     try:
@@ -1206,6 +1207,8 @@ async def llm_text_job(
                          if isinstance(exc, eligibility_routing.EligibilityStepFailed)
                          else f"the passed local model no longer matches its pass for {job} ({exc})"
                          if isinstance(exc, eligibility_routing.LiveCheckRefused)
+                         else f"the input does not fit the passed local model for {job}, and switching to an "
+                              "unpassed model is refused" if overflow
                          else f"the passed local model is not in the router's chain for {job}" if refused
                          else f"local-only routing did not complete ({type(exc).__name__})")
                 return (
