@@ -12,17 +12,14 @@ Loopback fakes only; no real Ollama, no model, no network.
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 import time
-import urllib.request
 
 import litellm
 import pytest
 
 import llm_router.config as config_module
 from llm_router import local_privacy, providers
-from tests.test_lc12g import PROXY_VARS
 from tests.test_lc12h import _isolated, _ollama_answer, _Server, CTX_LEN  # noqa: F401  (autouse fixture)
 
 MSG = [{"role": "user", "content": "hello"}]

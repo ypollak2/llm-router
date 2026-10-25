@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from llm_router import engine, local_privacy
+from llm_router import local_privacy
 from tests import secret_fixtures as fx
 from tests.test_lc12h_repair3 import high
 
