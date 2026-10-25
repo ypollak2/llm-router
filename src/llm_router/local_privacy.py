@@ -387,9 +387,11 @@ def _model_info_entry(bare: str, show: Any) -> dict[str, Any]:
 
 
 def _install_model_info(litellm: Any, bare: str, entry: dict[str, Any]) -> None:
-    """Put ``entry`` in LiteLLM's model map under ``ollama/<bare>`` and refresh its lower-case index."""
+    """Put ``entry`` in LiteLLM's model map under ``ollama/<bare>`` and ``ollama_chat/<bare>`` (LiteLLM maps a model by
+    its provider, so an ``ollama_chat/`` model needs its own key and provider) and refresh its lower-case index."""
     litellm.model_cost[f"ollama/{bare}"] = entry
-    _info_written.add(f"ollama/{bare}")
+    litellm.model_cost[f"ollama_chat/{bare}"] = {**entry, "litellm_provider": "ollama_chat"}
+    _info_written.update((f"ollama/{bare}", f"ollama_chat/{bare}"))
     invalidate = getattr(litellm.utils, "_invalidate_model_cost_lowercase_map", None)
     if callable(invalidate):
         invalidate()
@@ -417,7 +419,8 @@ def ensure_ollama_model_info(model: str, api_base: str | None = None) -> None:
     try:
         import litellm
         base, bare = ollama_api_base(api_base), _bare(model)
-        names = {bare.lower(), f"ollama/{bare}".lower(), f"ollama_chat/{bare}".lower()}
+        prefix = "ollama_chat/" if model.startswith("ollama_chat/") else "ollama/"
+        names = {bare.lower(), f"{prefix}{bare}".lower()}  # the key LiteLLM maps THIS model by
         key = (base, bare)
         wait_for: threading.Event | None = None
         with _info_lock:
@@ -460,7 +463,7 @@ def ensure_ollama_model_info(model: str, api_base: str | None = None) -> None:
             with _info_lock:
                 if key is not None:
                     _info_attempted.setdefault(key, (time.monotonic(), False))
-                if f"ollama/{bare}" not in litellm.model_cost:
+                if f"ollama/{bare}" not in litellm.model_cost or f"ollama_chat/{bare}" not in litellm.model_cost:
                     _install_model_info(litellm, bare, _info_entries.get(key) or _model_info_entry(bare, None))
         except Exception:  # noqa: BLE001
             pass

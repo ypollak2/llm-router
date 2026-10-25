@@ -147,3 +147,15 @@ def test_three_callers_leave_nothing_in_flight(slow):
     out, with_entry = _concurrent_calls(slow, 3)
     assert with_entry == [True] * 3 and slow.proxy.seen == []
     assert not local_privacy._info_inflight
+
+
+@pytest.mark.parametrize("model", ["ollama/m", "ollama_chat/m"])
+def test_litellm_finds_the_entry_for_either_prefix_and_never_looks_the_model_up(slow, model, monkeypatch):
+    from litellm.llms.ollama.common_utils import OllamaModelInfo
+    slow.gate.set()
+    local_privacy.ensure_ollama_model_info(model)
+    looked_up = []
+    monkeypatch.setattr(OllamaModelInfo, "get_runtime_model_info",
+                        lambda self, m, *a, **k: looked_up.append(m))
+    assert litellm.get_model_info(model)["max_tokens"] == CTX_LEN   # the post-call logging / cost path
+    assert looked_up == [] and slow.proxy.seen == []
