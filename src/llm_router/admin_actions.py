@@ -33,13 +33,13 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
+from llm_router import state_files
 from llm_router import paths
 
 
@@ -73,7 +73,7 @@ class AdminActionLog:
             or (paths.state_path("admin_actions.db"))
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(
+        self._conn = state_files.connect_sqlite(
             str(self.db_path), check_same_thread=check_same_thread
         )
         self._conn.executescript(_SCHEMA)

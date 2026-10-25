@@ -6,8 +6,9 @@ row and is FAIL-OPEN — telemetry must never break or block a delegation.
 """
 from __future__ import annotations
 
+from llm_router import state_files
+
 import os
-import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -161,7 +162,7 @@ async def _default_recorder(payload: dict[str, Any]) -> None:
     try:
         path = _db_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(path))
+        conn = state_files.connect_sqlite(str(path))
         try:
             conn.execute(_SAVINGS_DDL)
             conn.execute(

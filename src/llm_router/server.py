@@ -521,6 +521,8 @@ def main():
     except Exception:
         pass
     _start_map_poller()
+    from llm_router import state_files
+    state_files.migrate_once()  # W0-4 / S7: one-time 0600/0700 repair, marker-guarded, never raises
     mcp.run()
 
 

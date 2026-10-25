@@ -33,6 +33,8 @@ core can import it without dragging in FastAPI / Pydantic.
 """
 from __future__ import annotations
 
+from llm_router import state_files
+
 import os
 import sqlite3
 import threading
@@ -119,7 +121,7 @@ class RuntimeProviderRegistry:
         self._cached_version: int = 0
         if db_path is not None:
             db_path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(
+            self._conn = state_files.connect_sqlite(
                 str(db_path), check_same_thread=check_same_thread
             )
             self._conn.executescript(_SCHEMA)

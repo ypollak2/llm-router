@@ -218,7 +218,7 @@ import statistics
 import time
 from pathlib import Path
 
-from llm_router import paths
+from llm_router import paths, state_files
 from llm_router.proxy.loop_guard import REASON_LOOP_GUARD
 
 LEDGER_NAME = "proxy_calls.jsonl"
@@ -299,8 +299,8 @@ def write_row(row: dict, path: Path | None = None) -> None:
         if row.get(k) is None:
             row[k] = v
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("a", encoding="utf-8") as fh:
+        state_files.private_dir(target.parent)
+        with state_files.open_private(target, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, default=str) + "\n")
     except OSError as exc:
         from llm_router import failopen

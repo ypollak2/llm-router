@@ -121,3 +121,12 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Reads | `eligibility_routing.fail_closed_counts` (the `text_job_fail_closed` counter in `llm-router doctor`) tail-reads each generation to its cap and counts rows with `ts` at or after the cutoff (now minus 7 days, `FC_WINDOW_S`), so one old crash does not alarm forever. A store with lines but no valid row reads as unknown ("present but unparseable"), never 0; a generation that cannot be opened (e.g. a permission error) reads as unknown ("unreadable"). |
 | File mode | Files are created 0600, including the new live file after rotation. |
 | Concurrency | Append takes no lock: one `O_APPEND` write. Rotation uses a non-blocking lock on the sidecar `text_job_fail_closed.jsonl.lock` (empty, created on the first rotation and kept); a writer that cannot take it skips rotation. |
+
+## File modes of every state file (W0-4, PRD S7)
+
+| Item | Value |
+|---|---|
+| Rule | Every file under `LLM_ROUTER_HOME` (`paths.state_path`) is 0600 and every directory 0700, whatever the umask. SQLite `-wal`, `-shm` and `-journal` files take the mode of the main database file, which is created at 0600 first (`state_files.connect_sqlite`). |
+| Helper | `llm_router.state_files`: `open_private`, `private_dir`, `ensure_private_file`, `connect_sqlite`. A new writer under the state directory uses these, not a bare `open(..., "a")`. `tests/test_w04_state_file_modes.py::test_raw_state_writes_ratchet` freezes the legacy raw writers per file (`tests/w04_raw_write_baseline.json`); the count may only go down. |
+| Older files | `state_files.migrate_once` runs from `llm-router doctor` and the MCP server start. It tightens existing files to 0600 and directories to 0700 once; the marker `.modes_migrated_v1` holds counts only (no names, no content). Symlinks are skipped, never followed, and nothing outside the state directory is changed. A file written at a wider mode after the marker exists is not repaired until the writer is routed through the helper; delete the marker to run the repair again. |
+| Not covered | Writers listed in the baseline (they create files at the umask default until routed), and files other tools place under the state directory. |

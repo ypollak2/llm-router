@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from llm_router import state_files
 from llm_router.budget_envelope import BudgetEnvelope, BudgetEnvelopeManager
 from llm_router.budget_key import BudgetKey
 from llm_router.logging import get_logger
@@ -258,7 +259,7 @@ class SqliteBudgetBackend:
         # mode so BEGIN IMMEDIATE is honoured exactly. With the default
         # ("deferred"), Python's sqlite3 wrapper may issue its own BEGIN
         # before ours.
-        self._conn = sqlite3.connect(
+        self._conn = state_files.connect_sqlite(
             str(self.db_path), isolation_level=None, check_same_thread=False
         )
         self._conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
