@@ -312,7 +312,7 @@ ADVERSARIAL_48K = {
     "private-key-header": "-----BEGIN PRIVATE KEY-----" * 1_770,
     "aws-example-repeat": "AKIAIOSFODNN7EXAMPLE " * 2_280,
     "placeholder-line": "ghp_" + "x" * 48_000,
-    "labelled-many": ("# .env.example\nAPI_KEY=" + "A1b2" * 10 + "\n") * 1_000,
+    "labelled-many": ("# .env.example\nAPI_KEY=" + "A1b2" * 10 + "\n") * 750,
 }
 
 

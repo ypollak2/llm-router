@@ -36,6 +36,7 @@ from tests.test_lc12c import GOOD, LOCAL, e2e  # noqa: F401
 from tests.test_lc12g import PROXY_VARS, REAL_CALL_TEXT, SECRET, FakeServer, _SwitchingPack
 from tests.test_lc8_routing import BARE
 
+_PRISTINE_MODEL_COST = frozenset(litellm.model_cost)  # at import (collection), before any test of this worker runs
 #: A GitHub-token shape (engine.secret_findings: high-precision "github_token"), random, drawn at test time.
 TOKEN = secret_fixtures.real_shaped("github_token", 1)
 CLOUD = "openai/gpt-4o"
@@ -101,6 +102,11 @@ def _isolated(monkeypatch):
     for k in list(os.environ):
         if k.upper() in PROXY_VARS:
             monkeypatch.delenv(k)
+    # Model-map entries an earlier test of the same xdist worker left behind make ``ensure_ollama_model_info`` treat a
+    # model as catalogued, so LiteLLM looked it up itself, through the fake proxy (CI, -n auto). Start from the map
+    # as it was when this module was imported.
+    for k in set(litellm.model_cost) - _PRISTINE_MODEL_COST:
+        del litellm.model_cost[k]
     env, cfg, cost_keys = dict(os.environ), config_module._config, set(litellm.model_cost)
     local_privacy._info_attempted.clear()
     urllib.request._opener = None
