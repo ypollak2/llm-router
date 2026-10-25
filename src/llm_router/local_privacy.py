@@ -139,7 +139,23 @@ def private_dispatch_active() -> bool:
 # ── the secret door ──────────────────────────────────────────────────────────
 
 class SecretLocalOnlyRefused(engine.SecretLocalOnlyError):
-    """A prompt with a secret, and no loopback local model to send it to: not sent anywhere."""
+    """A prompt with a secret, and no loopback local model to send it to: not sent anywhere.
+
+    ``hits`` are the :class:`SecretHit` (category and place, never the value); :meth:`body` is the typed error a
+    gateway returns with its 422."""
+
+    def __init__(self, message: str, hits: Any = ()) -> None:
+        super().__init__(message)
+        self.hits = tuple(hits)
+
+    @property
+    def categories(self) -> list[str]:
+        return sorted({h.label for h in self.hits})
+
+    def body(self) -> dict[str, Any]:
+        return {"error": {"type": "secret_local_only_refused", "code": "secret_local_only_refused",
+                          "message": str(self), "categories": self.categories,
+                          "places": sorted({h.where for h in self.hits}), "remedy": OVERRIDE_HINT}}
 
 
 class PrivateEndpointRefused(RuntimeError):
@@ -221,8 +237,34 @@ def contains_secret(*parts: Any) -> bool:
 
 #: The per-request override: a prompt that starts with ``cloud:`` is sent as ordinary cloud traffic even though it
 #: holds a secret. Same family as the ``claude:`` / ``native:`` redo prefixes; stripped before anything reads the text.
+#: Doors with no prompt prefix to type use the flag: ``allow_cloud=True`` (``route_and_call``, the SDK), the body field
+#: ``allow_cloud`` (``/route``) or the header ``X-LLM-Router-Allow-Cloud: 1`` (the gateway).
 _OVERRIDE_RE = re.compile(r"^\s*cloud\s*:\s*", re.IGNORECASE)
-OVERRIDE_HINT = "start the prompt with `cloud:`"
+OVERRIDE_HEADER = "X-LLM-Router-Allow-Cloud"
+OVERRIDE_HINT = ("start the prompt with `cloud:` (gateway: header `X-LLM-Router-Allow-Cloud: 1`; "
+                 "SDK / route_and_call: `allow_cloud=True`)")
+
+#: Set for one gateway request by the middleware that read :data:`OVERRIDE_HEADER`.
+_request_allow_cloud: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "llm_router_request_allow_cloud", default=False)
+
+
+def set_request_allow_cloud(on: bool) -> contextvars.Token:
+    return _request_allow_cloud.set(bool(on))
+
+
+def reset_request_allow_cloud(token: contextvars.Token) -> None:
+    _request_allow_cloud.reset(token)
+
+
+def header_allows_cloud(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def override_requested(*, prefix: bool = False, flag: bool = False) -> bool:
+    """True when this request carries the override: the ``cloud:`` prefix, the ``allow_cloud`` flag, or the
+    gateway header (read into the request context)."""
+    return bool(prefix or flag or _request_allow_cloud.get())
 
 
 def split_override(prompt: str | None) -> tuple[str | None, bool]:
@@ -237,9 +279,6 @@ def split_override(prompt: str | None) -> tuple[str | None, bool]:
 def refusal_message(hits: list[SecretHit], *, model_override: str | None = None, why: str | None = None) -> str:
     """The refusal text: categories and places, never a value, and the three ways forward."""
     found = "; ".join(f"{h.label} ({h.where})" for h in hits) or "secret-shaped text"
-    history_only = bool(hits) and all(h.where.startswith("earlier turn") for h in hits)
-    cause = (" The secret is only in the conversation history, not in your current prompt "
-             f"({', '.join(sorted({h.where for h in hits}))})." if history_only else "")
     if why:
         pass
     elif model_override:
@@ -248,7 +287,7 @@ def refusal_message(hits: list[SecretHit], *, model_override: str | None = None,
         why = "the configured Ollama endpoint is not loopback"
     else:
         why = "no local model is available for it"
-    return (f"Refused: this request contains what looks like a secret: {found}.{cause} Nothing was sent to a cloud "
+    return (f"Refused: this request contains what looks like a secret: {found}. Nothing was sent to a cloud "
             f"model ({why}). To proceed: install or start a local model (`llm-router local-check`), remove the "
             f"secret, or override for this request ({OVERRIDE_HINT}; the override is logged as a count only).")
 

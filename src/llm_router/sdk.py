@@ -18,6 +18,7 @@ Router's ``budget_usd`` is spent.
 from __future__ import annotations
 
 import asyncio
+import functools
 import math
 import threading
 from dataclasses import dataclass
@@ -33,6 +34,18 @@ __all__ = ["BudgetExceeded", "RouteResult", "Router", "RoutingError", "route"]
 
 class RoutingError(RuntimeError):
     """All models in the chain failed to produce a response."""
+
+
+@functools.lru_cache(maxsize=1)
+def _secret_refusal_class():
+    """``SecretRefused``: a :class:`RoutingError` that is also a ``local_privacy.SecretLocalOnlyRefused`` (category
+    and place on ``.hits`` / ``.categories``), so a caller can catch either. Built on first use: ``import llm_router``
+    stays cheap."""
+    from llm_router.local_privacy import SecretLocalOnlyRefused
+
+    class SecretRefused(RoutingError, SecretLocalOnlyRefused):
+        """LC-12h: the request holds a secret and no loopback local model is in the chain; nothing was sent."""
+    return SecretRefused
 
 
 @dataclass(frozen=True)
@@ -129,7 +142,7 @@ class Router:
 
     def run(self, prompt: str, *, context: str | None = None, task: str | None = None,
             parent: str | None = None, tier: str | None = None,
-            messages: list[dict] | None = None) -> RouteResult:
+            messages: list[dict] | None = None, allow_cloud: bool = False) -> RouteResult:
         """Route one prompt and return the answer + routing metadata.
 
         ``context`` is extra system context for the model. ``task`` is the caller's task id for
@@ -139,16 +152,23 @@ class Router:
         :func:`route`). ``parent`` (the parent session, for agent lineage) is accepted but not
         recorded yet: lineage lands in A.3. Raises :class:`BudgetExceeded` when the budget is spent
         and :class:`RoutingError` when the chain is exhausted.
+
+        A request that holds a high-precision secret (LC-12h) runs on a loopback local model only; with none in the
+        chain it raises a :class:`RoutingError` that names the category and the remedy. ``allow_cloud=True`` (or the
+        prompt prefix ``cloud:``) sends it as ordinary traffic; only ``prompt`` and ``context`` are scanned, not
+        ``messages``.
         """
         del parent  # A.3 records lineage; accepted now so callers can pass it
-        return self._call(prompt, context=context, task=task, tier=tier, messages=messages)
+        return self._call(prompt, context=context, task=task, tier=tier, messages=messages,
+                          allow_cloud=allow_cloud)
 
     async def arun(self, prompt: str, *, context: str | None = None, task: str | None = None,
                    parent: str | None = None, tier: str | None = None,
-                   messages: list[dict] | None = None) -> RouteResult:
+                   messages: list[dict] | None = None, allow_cloud: bool = False) -> RouteResult:
         """``run`` in a worker thread: the event loop keeps running while the model answers."""
         return await asyncio.to_thread(self.run, prompt, context=context, task=task,
-                                       parent=parent, tier=tier, messages=messages)
+                                       parent=parent, tier=tier, messages=messages,
+                                       allow_cloud=allow_cloud)
 
     def _check_budget(self) -> None:
         with self._lock:
@@ -163,7 +183,7 @@ class Router:
                 self._budget = self._budget.consume(max(0.0, float(cost_usd or 0.0)))
 
     def _call(self, prompt: str, *, context: str | None = None, task: str | None = None,
-              tier: str | None = None, messages: list[dict] | None = None,
+              tier: str | None = None, messages: list[dict] | None = None, allow_cloud: bool = False,
               task_type: str | None = None, complexity: str | None = None,
               timeout: int = 150) -> RouteResult:
         from llm_router import call_identity
@@ -181,7 +201,7 @@ class Router:
         with call_identity.scope(self.session_id, task_id=task) as (task_id, _trace):
             result = _route(prompt, task_type=task_type, complexity=complexity, timeout=timeout,
                             session_id=self.session_id, task_id=task_id, messages=messages,
-                            context=context)
+                            context=context, allow_cloud=allow_cloud)
         self._consume(result.cost_usd)
         return result
 
@@ -189,7 +209,7 @@ class Router:
 def route(prompt: str, *, task_type: str | None = None,
           complexity: str | None = None, timeout: int = 150,
           session_id: str | None = None, task_id: str | None = None,
-          messages: list[dict] | None = None) -> RouteResult:
+          messages: list[dict] | None = None, allow_cloud: bool = False) -> RouteResult:
     """Route one prompt through LLM Router and return the answer + routing metadata.
 
     A shim over :class:`Router` (no budget): ``Router(session=session_id)`` routes the call.
@@ -214,7 +234,7 @@ def route(prompt: str, *, task_type: str | None = None,
     """
     return Router(session=session_id)._call(
         prompt, task=task_id, messages=messages, task_type=task_type,
-        complexity=complexity, timeout=timeout)
+        complexity=complexity, timeout=timeout, allow_cloud=allow_cloud)
 
 
 def _decide(prompt: str, *, session_id: str | None = None,
@@ -335,7 +355,7 @@ def _pack_kwargs(prompt: str, messages: list[dict] | None, chain,
                           "agent_context": agent_context}
 
 
-def _secret_door(prompt: str, messages: list[dict] | None, context: str | None):
+def _secret_door(prompt: str, messages: list[dict] | None, context: str | None, allow_cloud: bool = False):
     """LC-12h / D-28 A for the SDK door: ``(prompt without the `cloud:` override, chain filter)``.
 
     A request with a high-precision secret may only run on a loopback, non-cloud Ollama model (the chain filter
@@ -343,7 +363,10 @@ def _secret_door(prompt: str, messages: list[dict] | None, context: str | None):
     refused with the category and the remedy. The `cloud:` prefix overrides, logged as a count."""
     from llm_router import local_privacy as lp
     prompt, override = lp.split_override(prompt)
-    hits = lp.scan_secrets(prompt, None, context, messages)
+    override = lp.override_requested(prefix=override, flag=allow_cloud)
+    # Only the new request and the explicit ``context`` are scanned, never ``messages`` (earlier turns): see SECURITY.md.
+    del messages
+    hits = lp.scan_secrets(prompt, None, context)
     if not hits:
         return prompt, lambda chain: chain
     if override:
@@ -359,20 +382,21 @@ def _secret_door(prompt: str, messages: list[dict] | None, context: str | None):
         if not kept:
             for h in hits:
                 lp.count_secret_event("refused", h.label)
-            raise RoutingError(lp.refusal_message(
-                hits, why=None if loopback else "the configured Ollama endpoint is not loopback"))
+            raise _secret_refusal_class()(lp.refusal_message(
+                hits, why=None if loopback else "the configured Ollama endpoint is not loopback"), hits)
         return kept
     return prompt, only_local
 
 
 def _route(prompt: str, *, task_type: str | None, complexity: str | None,
            timeout: int, session_id: str, task_id: str = "",
-           messages: list[dict] | None = None, context: str | None = None) -> RouteResult:
+           messages: list[dict] | None = None, context: str | None = None,
+           allow_cloud: bool = False) -> RouteResult:
     # Lazy imports keep ``import llm_router`` cheap.
     from llm_router.hooks.chain_builder import build_chain, get_current_pressure, needs_claude_tools
     from llm_router.hooks.direct_executor import execute_agent, execute_chain
 
-    prompt, _door = _secret_door(prompt, messages, context)
+    prompt, _door = _secret_door(prompt, messages, context, allow_cloud)
 
     decision = None
     if not task_type or not complexity:

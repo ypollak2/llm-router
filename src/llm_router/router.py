@@ -4584,6 +4584,9 @@ async def route_and_call(
     # with a fallback (llm_text_job, llm_edit) names itself here; the F106 failed-lane filter
     # then keeps the chain and only records ``eligibility_bypassed``. Never an MCP parameter.
     eligibility_exempt_reason: str | None = None,
+    # LC-12h repair 1: the secret door's per-request override as a flag (the ``cloud:`` prompt prefix and the gateway
+    # header do the same). The override is counted by category only.
+    allow_cloud: bool = False,
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -4712,6 +4715,7 @@ async def route_and_call(
     # LC-12h: the per-request secret override (`cloud:` prefix) is read and stripped before anything sees the text.
     from llm_router import local_privacy as _lp
     prompt, _secret_override = _lp.split_override(prompt)
+    _secret_override = _lp.override_requested(prefix=_secret_override, flag=allow_cloud)
     correlation_id = uuid4().hex[:8]
     # Phase 0.5 (Option A sidecar bridge): when the hook minted a directive id
     # for this turn (threaded down from an MCP door), the BILLABLE-ROW
@@ -5316,7 +5320,9 @@ async def route_and_call(
         # LC-12h / D-28 A: the secret door, after every chain transform (none can add a cloud entry back). A prompt
         # with a secret goes to loopback, non-cloud local models only, or nowhere; the dispatch below is then private
         # (no semantic cache, no judge queue, no emergency fallback, direct client, overflow kept local).
-        _secret_hits = _lp.scan_secrets(prompt, system_prompt, caller_context, messages)
+        # Only the NEW request and what this call attached are scanned, never ``messages`` (earlier turns): each was
+        # scanned when it was the new request, and one past secret must not refuse every later turn. SECURITY.md.
+        _secret_hits = _lp.scan_secrets(prompt, system_prompt, caller_context)
         _secret_private = bool(_secret_hits)
         if _secret_private and _secret_override:
             for _h in _secret_hits:
@@ -5329,8 +5335,7 @@ async def route_and_call(
                 for _h in _secret_hits:
                     _lp.count_secret_event("refused", _h.label)
                 await _release_reservation_if_held()
-                raise _lp.SecretLocalOnlyRefused(_lp.refusal_message(
-                    _secret_hits, model_override=model_override if _pinned_cloud else None))
+                raise _lp.refusal(_secret_hits, model_override=model_override if _pinned_cloud else None)
             models_to_try = _local_chain
         _private = _pass_only or _secret_private
 
@@ -6393,6 +6398,7 @@ async def route_and_stream(
     max_wall_clock_seconds: float | None = None,
     deadline_monotonic: float | None = None,
     idempotency_key: str | None = None,
+    allow_cloud: bool = False,  # LC-12h repair 1: the secret door's per-request override (see route_and_call)
 ) -> AsyncIterator[RouterStreamEvent]:
     """Stream a request to the best available model, yielding structured events.
 
@@ -6449,6 +6455,7 @@ async def route_and_stream(
     config = get_config()
     from llm_router import local_privacy as _lp_ov
     prompt, _secret_override = _lp_ov.split_override(prompt)  # LC-12h: the `cloud:` override, stripped first
+    _secret_override = _lp_ov.override_requested(prefix=_secret_override, flag=allow_cloud)
     correlation_id = uuid4().hex[:8]
     seq = 0  # Event counter
 
@@ -6547,7 +6554,7 @@ async def route_and_stream(
         if not models_to_try:
             for _h in _secret_hits:
                 _lp.count_secret_event("refused", _h.label)
-            raise _lp.SecretLocalOnlyRefused(_lp.refusal_message(_secret_hits))
+            raise _lp.refusal(_secret_hits)
 
     # ── Emit route.started event ──────────────────────────────────────────
     seq += 1

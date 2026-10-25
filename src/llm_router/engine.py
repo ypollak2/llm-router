@@ -343,11 +343,13 @@ _ASSIGN = re.compile(
     re.I)
 
 #: The shapes that may refuse a call (LC-12h repair, PR #721 review): a real provider key prefix with enough length
-#: and entropy and no placeholder look, a PEM private-key block with a body, a bearer token with entropy, and a
-#: database URL whose password is not a common word. ``jwt`` (test fixtures are JWTs by shape) and
-#: ``assigned_literal`` (any quoted 20-char mixed literal after "token =") are LOG-ONLY: counted, never refused.
+#: and entropy and no placeholder look, a PEM private-key block with a body, a bearer token with entropy, a
+#: database URL whose password is not a common word, and a JWT that decodes to real-looking claims (not the jwt.io
+#: sample or a test fixture). ``assigned_literal`` (any quoted 20-char mixed literal after "token =") is LOG-ONLY:
+#: counted, never refused. Whatever a line, or the two lines above it, labels as an example (``.env.example``,
+#: sample, placeholder, dummy, fake) is never high either: :func:`_labelled_example`.
 HIGH_PRECISION = frozenset({"anthropic_key", "openrouter_key", "openai_key", "google_key", "aws_key_id",
-                            "github_token", "slack_token", "private_key", "bearer_token", "db_url_password"})
+                            "github_token", "slack_token", "private_key", "bearer_token", "db_url_password", "jwt"})
 #: What a person reads in a refusal (the category, never the value).
 SECRET_LABELS = {
     "anthropic_key": "Anthropic API key", "openrouter_key": "OpenRouter API key", "openai_key": "OpenAI API key",
@@ -426,6 +428,61 @@ def _entropy(s: str) -> float:
     return -sum(c / n * math.log2(c / n) for c in (s.count(ch) for ch in set(s)))
 
 
+#: A label near a value that says the value is an example: ``.env.example``, "sample config", "placeholder", ...
+_EXAMPLE_LABEL = re.compile(
+    r"\.env\.(?:example|sample|template)|\b(?:example|sample)\.env\b|\bplaceholders?\b|\bdummy\b|\bfake\b|"
+    r"\b(?:example|sample)\s+(?:env|config|configuration|credentials?|keys?|tokens?|secrets?|values?|file|output)\b|"
+    r"\bnot\s+a\s+real\b|\bfor\s+illustration\b", re.I)
+
+
+def _labelled_example(text: str, start: int, end: int) -> bool:
+    """True when the line holding ``text[start:end]``, or one of the two lines above it (a fence or heading), is
+    labelled as an example, sample or placeholder. The label is the author's statement that the value is not real;
+    it exempts a real-looking value on purpose. Bounded to 300 characters before and 200 after the value."""
+    window_start = text.rfind("\n", 0, start) + 1
+    for _ in range(2):
+        window_start = text.rfind("\n", 0, max(0, window_start - 1)) + 1
+    line_end = text.find("\n", end)
+    lo, hi = max(window_start, start - 300), min(len(text) if line_end < 0 else line_end, end + 200)
+    return bool(_EXAMPLE_LABEL.search(text, lo, hi))
+
+
+_JWT_DUMMY_CLAIM = re.compile(
+    r"^(?:1234567890|123456|123|1|0|john doe|jane doe|me|you|subject|sub|"
+    r"(?:user|demo|test\w*|admin|alice|bob|foo|bar|baz|fake\w*|dummy\w*|sample\w*|example\w*)[-_. ]?\d{0,4})$", re.I)
+_JWT_ID_CLAIMS = ("sub", "name", "email", "preferred_username", "username", "user", "user_id", "uid", "id", "iss", "aud")
+_JWT_IO_SIGNATURE = "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+
+
+def _b64json(part: str) -> dict | None:
+    import base64
+    try:
+        out = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+    except Exception:  # noqa: BLE001 - not base64 / not JSON: not a decodable token
+        return None
+    return out if isinstance(out, dict) else None
+
+
+def _dummy_claim(value: str) -> bool:
+    v = value.strip().lower()
+    return bool(_JWT_DUMMY_CLAIM.match(v) or "@example." in v or v.endswith("example.com") or re.search(r"\btest", v)
+                or "example" in v or "fixture" in v)
+
+
+def _jwt_is_real(token: str) -> bool:
+    """A JWT that may be a live credential: three decodable parts, a random-looking signature that is not the jwt.io
+    sample, not ``alg: none``, and identity claims that are not all test/demo values. The shape alone is how every
+    test fixture looks; that was the reviewer's 20/20."""
+    header, payload, signature = token.split(".")
+    head, body = _b64json(header), _b64json(payload)
+    if head is None or body is None or str(head.get("alg", "")).lower() == "none":
+        return False
+    if signature.startswith(_JWT_IO_SIGNATURE) or _is_placeholder(signature) or not _random_looking(signature, bits=3.0, distinct=12):
+        return False
+    ids = [str(body[k]) for k in _JWT_ID_CLAIMS if isinstance(body.get(k), (str, int))]
+    return not (ids and all(_dummy_claim(v) for v in ids))
+
+
 #: Text is scanned in windows so no input shape costs more than a window's worth of regex work; consecutive windows
 #: overlap by more than the longest possible match (jwt: 3 x 512 + 2; bearer 8 + 512; everything else shorter), so a
 #: secret straddling a window edge is whole in the next one. Nothing is skipped: the whole text is scanned.
@@ -464,6 +521,8 @@ def secret_findings(text: str) -> dict[str, bool]:
                     high = _pem_block_is_real(text, offset + m.end())  # the body may lie past this window
                 elif name == "db_url_password":
                     high = _db_password_is_real(m.group(1), m.group(2))
+                elif name == "jwt":
+                    high = _jwt_is_real(m.group(0))
                 elif name == "bearer_token":
                     value = m.group(0).split(None, 1)[1].rstrip("=")
                     high = not value.startswith("eyJ") and not _is_placeholder(value) and _random_looking(value)
@@ -472,6 +531,8 @@ def secret_findings(text: str) -> dict[str, bool]:
                     body = _KEY_PREFIX.sub("", value, count=1)
                     high = not _is_placeholder(value) and _random_looking(
                         body, bits=3.0 if name == "aws_key_id" else 3.5, distinct=9 if name == "aws_key_id" else 12)
+                if high and _labelled_example(window, m.start(), m.end()):
+                    high = False  # the author labelled it an example (.env.example, sample, placeholder, ...)
                 if high:
                     found[name] = True
         if "assigned_literal" not in found:

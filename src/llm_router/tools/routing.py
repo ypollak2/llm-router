@@ -697,6 +697,7 @@ async def llm_stream(
     # LC-12h / D-28 A: a prompt with a secret streams from a loopback local model only, or not at all.
     from llm_router import local_privacy
     prompt, _override = local_privacy.split_override(prompt)  # the `cloud:` prefix, stripped first
+    _override = local_privacy.override_requested(prefix=_override)
     _hits = local_privacy.scan_secrets(prompt, system_prompt)
     _secret = bool(_hits) and not _override  # an overridden request is ordinary traffic, not a private dispatch
     if _hits and _override:
