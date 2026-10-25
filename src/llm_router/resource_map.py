@@ -317,6 +317,12 @@ def _ctx_from_info(info: Any) -> int | None:
     return None
 
 
+def context_window_limit(window: int | None) -> int | str:
+    """A model's reported context window, or ``unknown``. ``local_models.DEFAULT_NUM_CTX``
+    is the size we request, never a window we know the model has."""
+    return window if isinstance(window, int) and not isinstance(window, bool) and window > 0 else UNKNOWN
+
+
 def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
     from llm_router import local_models
 
@@ -371,6 +377,7 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
             limits={
                 "num_ctx": local_models.num_ctx(name),
                 "max_context": _ctx_from_info(show.get("model_info")),
+                "context_window": context_window_limit(_ctx_from_info(show.get("model_info"))),
                 "parameter_size": details.get("parameter_size"),
                 "size_bytes": m.get("size"),
             },

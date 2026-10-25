@@ -135,41 +135,46 @@ def _policy_local_first(chain: list[str]) -> list[str]:
 
 
 def _policy_cost(chain: list[str]) -> list[str]:
-    """Sort by cost per output token, cheapest first.
+    """Sort by cost per output token, cheapest first; unknown price sorts last.
 
-    Uses LiteLLM's model_cost dict when available; falls back to a tiered
-    heuristic for providers not in the dict (e.g. local/subscription models).
+    Uses LiteLLM's model_cost dict when available. A model with no listed price
+    is unknown (``None``), not an invented number: it goes behind every priced model.
     """
     try:
         from litellm import model_cost as _lm_cost
     except ImportError:
         _lm_cost = {}
 
-    def _cost_key(model: str) -> float:
+    def _cost_key(model: str) -> float | None:
         # Local/subscription models are free
         if _provider_from_model(model) in _FREE_PROVIDERS:
             return 0.0
         # LiteLLM uses bare model names (without provider prefix)
         bare = model.split("/", 1)[-1]
         entry = _lm_cost.get(bare) or _lm_cost.get(model) or {}
-        return float(entry.get("output_cost_per_token", 0.001))
+        price = entry.get("output_cost_per_token")
+        return float(price) if isinstance(price, (int, float)) and not isinstance(price, bool) else None
 
-    return sorted(chain, key=_cost_key)
+    return _sort_unknown_last(chain, _cost_key, reverse=False)
+
+
+def _sort_unknown_last(chain: list[str], key, *, reverse: bool) -> list[str]:
+    """Stable sort by ``key``; models whose key is ``None`` keep their order, after all known."""
+    known = [(key(m), m) for m in chain]
+    ranked = sorted((kv for kv in known if kv[0] is not None), key=lambda kv: kv[0], reverse=reverse)
+    return [m for _, m in ranked] + [m for k, m in known if k is None]
 
 
 def _policy_quality(chain: list[str], task_type: str = "query") -> list[str]:
-    """Sort by quality score for *task_type*, highest first."""
+    """Sort by quality score for *task_type*, highest first; unknown sorts last."""
     scores = _load_quality_scores()
 
-    def _quality_key(model: str) -> float:
-        # Local models get a moderate score (better than unknown, worse than top APIs)
-        if _provider_from_model(model) in _FREE_PROVIDERS:
-            return 0.5
+    def _quality_key(model: str) -> float | None:
         bare = model.split("/", 1)[-1]
         task_scores = scores.get(model) or scores.get(bare) or {}
-        return task_scores.get(task_type, 0.4)
+        return task_scores.get(task_type)
 
-    return sorted(chain, key=_quality_key, reverse=True)
+    return _sort_unknown_last(chain, _quality_key, reverse=True)
 
 
 def _policy_quota_exhaustion(chain: list[str]) -> list[str]:
