@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from unittest.mock import patch
 
 from llm_router.scorer import score_model, score_all_models
 from llm_router.types import COMPLEXITY_WEIGHTS, ModelCapability, ProviderTier, TaskType
