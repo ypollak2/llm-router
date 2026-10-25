@@ -37,7 +37,9 @@ NEVER_CLASSES = frozenset({tool_classes.EDIT, tool_classes.EXEC, tool_classes.AG
 
 R_SERVED = "served"
 R_ELIGIBLE = "eligible"
-R_RETRIED = "retried_original"  # served on Haiku, Haiku refused the body (4xx), the pinned model answered
+#: Served on Haiku, then the pinned model answered the client's own bytes instead: Haiku refused the body (4xx), or
+#: answered a 5xx / timed out on the response headers (PR2). A mid-stream failure is NOT retried (bytes already left).
+R_RETRIED = "retried_original"
 R_OFF = "off"
 R_NOT_PINNED = "not_pinned"
 R_NOT_CONTINUATION = "not_continuation"
@@ -71,6 +73,13 @@ REASONS = (R_SERVED, R_RETRIED, R_ELIGIBLE, R_OFF, R_NOT_PINNED, R_NOT_CONTINUAT
 #: WINDOW_DAYS) and prereg section 10.
 DEFAULT_MAX_SWITCH_USD = 0.05
 DEFAULT_MAX_CONSECUTIVE = 6
+#: PR3 (carry-in S1): how long a lane A serve may wait for Haiku's RESPONSE HEADERS before the pinned model is
+#: tried. The shared upstream client waits up to 600 s for them, which would hold a stuck Haiku call for ten
+#: minutes before the fallback. 60 s is a conservative PLACEHOLDER (not measured); the prereg owner sets it.
+DEFAULT_HEADER_TIMEOUT_S = 60.0
+#: ``ledger`` row tag of a step lane A served: ``lane == "A"``. The Frontier shadow pairs, the verdict rows and the
+#: KPI split read it. The D-31 arm and every other row carry no ``lane`` key.
+LANE_TAG = "A"
 
 
 @dataclass(frozen=True)
@@ -121,6 +130,7 @@ class LaneAConfig:
     max_switch_usd: float = DEFAULT_MAX_SWITCH_USD  # cache rule: estimated prefix re-write cost ceiling
     max_consecutive: int = DEFAULT_MAX_CONSECUTIVE  # loop guard: lane A steps in a row inside one turn
     breaker: BreakerConfig = BreakerConfig()
+    header_timeout_s: float = DEFAULT_HEADER_TIMEOUT_S  # PR3: wait for Haiku's response headers (placeholder)
 
 
 def parse_config(raw: object) -> LaneAConfig:
@@ -130,7 +140,8 @@ def parse_config(raw: object) -> LaneAConfig:
         return LaneAConfig()
     if not isinstance(raw, dict):
         raise ValueError(f"lane_a must be a mapping, got {raw!r}")
-    unknown = set(raw) - {"enabled", "tau", "prev_tool_classes", "max_switch_usd", "max_consecutive", "breaker"}
+    unknown = set(raw) - {"enabled", "tau", "prev_tool_classes", "max_switch_usd", "max_consecutive", "breaker",
+                          "header_timeout_s"}
     if unknown:
         raise ValueError(f"lane_a: unknown key(s) {sorted(map(str, unknown))}")
     enabled = raw.get("enabled", False)
@@ -153,8 +164,11 @@ def parse_config(raw: object) -> LaneAConfig:
     cap = raw.get("max_consecutive", DEFAULT_MAX_CONSECUTIVE)
     if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
         raise ValueError(f"lane_a.max_consecutive must be an integer >= 1, got {cap!r}")
+    hdr = raw.get("header_timeout_s", DEFAULT_HEADER_TIMEOUT_S)
+    if isinstance(hdr, bool) or not isinstance(hdr, (int, float)) or not 0 < float(hdr) <= 600:
+        raise ValueError(f"lane_a.header_timeout_s must be a number in (0, 600], got {hdr!r}")
     return LaneAConfig(enabled, float(tau), tuple(dict.fromkeys(classes)), float(sw), cap,
-                       _parse_breaker(raw.get("breaker")))
+                       _parse_breaker(raw.get("breaker")), float(hdr))
 
 
 def env_on() -> bool:
@@ -175,6 +189,7 @@ class LaneAOutcome:
     complexity: str | None = None
     chain_head: list = field(default_factory=list)
     probe: bool = False  # served as the breaker's half-open probe
+    probe_id: int | None = None  # the breaker's id for that probe (PR3, N5)
     key: str | None = None  # conversation key and turn signature (a hash), for the turn memory
     sig: str = ""
 
@@ -198,6 +213,11 @@ def ensure_fields(row: dict) -> None:
         return
     row["lane_a_reason"] = clean_reason(row.get("lane_a_reason", R_OFF))
     row["lane_a_conf"] = clean_conf(row.get("lane_a_conf"))
+    # PR3 lane tag: only a step Haiku really answered. A retried step (the pinned model answered) and every
+    # lane-off row carry no ``lane`` key, so a lane that is off adds nothing to the ledger.
+    if row["lane_a_reason"] == R_SERVED and row.get("tier_reason") == "haiku_rewrite" \
+            and row.get("served_model") != row.get("requested_model"):
+        row["lane"] = LANE_TAG
 
 
 class TurnMemory:

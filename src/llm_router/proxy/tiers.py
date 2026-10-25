@@ -262,6 +262,9 @@ class TierDecision:
     # continuation step on a pinned model. None = the lane was not evaluated for this decision.
     lane_a_reason: str | None = None
     lane_a_conf: float | None = None
+    # PR3 (N5): which half-open probe this serve is (``LaneABreaker.probe_seq``), so a late outcome of a
+    # probe that timed out cannot settle the next one. None = not a probe.
+    lane_a_probe_id: int | None = None
 
     @property
     def rewritten(self) -> bool:
@@ -364,16 +367,19 @@ class _HaikuBlock:
     is a pure function of the body, so computing it lazily and once changes no
     decision."""
 
-    __slots__ = ("_body", "_fold", "_model", "_phases", "reason")
+    __slots__ = ("_body", "_fold", "_model", "_phases", "reason", "tokens")
 
     def __init__(self, body: dict, fold_system: bool, phases: "_Phases", model: str | None = None) -> None:
         self._body, self._fold, self._model, self._phases = body, fold_system, model, phases
         self.reason: str | None = None
+        # The chars/4 context estimate the check made on the way, or None when it stopped before it (a
+        # media / tools block). Lane A's cache rule reuses it instead of serializing the body again (PR3 N4).
+        self.tokens: int | None = None
 
     def __call__(self) -> str:
         if self.reason is None:
             with self._phases("haiku_checks"):
-                self.reason = haiku_block_reason(self._body, fold_system=self._fold, model=self._model)
+                self.reason, self.tokens = _haiku_block(self._body, self._fold, self._model)
         return self.reason
 
 
@@ -533,18 +539,24 @@ def haiku_block_reason(body: dict, *, fold_system: bool = False, model: str | No
     ``temperature`` != 1, ``top_p`` != 0.99, any ``top_k``, or ends on an assistant turn
     (prefill) is ``params``: each is a 400 there (migration guide, "Remove sampling
     parameters", "Replace assistant prefill")."""
+    return _haiku_block(body, fold_system, model)[0]
+
+
+def _haiku_block(body: dict, fold_system: bool, model: str | None) -> tuple[str, int | None]:
+    """``(haiku_block_reason, context token estimate)``; the estimate is None when a check before it decided."""
     legacy = haiku_is_legacy(model)
     if legacy and not fold_system and _has_mid_conversation_system_message(body):
-        return HAIKU_BLOCK_SYSTEM_MESSAGE
+        return HAIKU_BLOCK_SYSTEM_MESSAGE, None
     if _has_media(body):
-        return HAIKU_BLOCK_MEDIA
+        return HAIKU_BLOCK_MEDIA, None
     if not _only_custom_tools(body):
-        return HAIKU_BLOCK_BUILTIN_TOOLS
+        return HAIKU_BLOCK_BUILTIN_TOOLS, None
     if not legacy and _has_haiku55_rejected_params(body):
-        return HAIKU_BLOCK_PARAMS
-    if _approx_context_tokens(body) > (HAIKU_MAX_CONTEXT_TOKENS if legacy else haiku55_context_limit(body)):
-        return HAIKU_BLOCK_CONTEXT
-    return HAIKU_BLOCK_NONE
+        return HAIKU_BLOCK_PARAMS, None
+    tokens = _approx_context_tokens(body)
+    if tokens > (HAIKU_MAX_CONTEXT_TOKENS if legacy else haiku55_context_limit(body)):
+        return HAIKU_BLOCK_CONTEXT, tokens
+    return HAIKU_BLOCK_NONE, tokens
 
 
 def _has_haiku55_rejected_params(body: dict) -> bool:
@@ -926,7 +938,10 @@ class ClaudeTierPolicy:
             if run >= self.lane_a.max_consecutive:
                 return done(lane_a.R_CONSEC_CAP, conf)
             if run == 0:  # not on Haiku yet this turn: the prefix would be written again there
-                cost = switch_cost_usd(haiku.model, _approx_context_tokens(body))
+                # PR3 (N4): the body check above already estimated the context size; reuse it, so no second
+                # serialization of the whole body runs on the loop (also with the lane off).
+                ctx = block.tokens if block is not None and block.tokens is not None else _approx_context_tokens(body)
+                cost = switch_cost_usd(haiku.model, ctx)
                 if cost is None or cost >= self.lane_a.max_switch_usd:
                     return done(lane_a.R_SWITCH_COST, conf)
             if not self._lane_on():
@@ -944,6 +959,8 @@ class ClaudeTierPolicy:
                 return done(lane_a.R_BREAKER_OPEN, conf)
             o = done(lane_a.R_SERVED, conf, True, task, cx, list(rules.get("chain_head") or [])[:4])
             o.probe = probe
+            # No await between admit() and here: probe_seq is the id admit() just issued.
+            o.probe_id = self.lane_runtime.breaker.probe_seq if probe else None
             return o
         except Exception:  # noqa: BLE001 - lane A never costs a call: stay pinned
             return out(lane_a.R_ERROR)
@@ -963,7 +980,8 @@ class ClaudeTierPolicy:
                                 task_type=lane.task_type, complexity=lane.complexity,
                                 body_rewrite=REWRITE_HAIKU, proposed_tier=haiku.name,
                                 chain_head=lane.chain_head, lane_a_reason=lane.reason,
-                                lane_a_conf=lane.conf, detail=lane_a.DETAIL_PROBE if lane.probe else None)
+                                lane_a_conf=lane.conf, detail=lane_a.DETAIL_PROBE if lane.probe else None,
+                                lane_a_probe_id=lane.probe_id)
         decision = await self._pinned_arm_or_keep(body, session_id, classify, requested, req_tier, phases, block)
         decision.lane_a_reason, decision.lane_a_conf = lane.reason, lane.conf
         return decision

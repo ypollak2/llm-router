@@ -31,6 +31,13 @@ CAPS (all enforced here; OD-4 = A):
 * at most one replay in flight; each replay is bounded by ``REPLAY_TIMEOUT_S`` and
   ``MAX_REPLY_BYTES``. The forwarded response is never awaited on any of this.
 
+LANE A (PR3). A step that lane A served (``lane_a_reason == served``) is passed here with a ``lane`` context.
+It is replayed under ``lane_a_shadow``'s rules instead of the arm's: the deterministic key, a fill phase of 100%
+until 60 decided pairs per task group and then 2%, and its own bucket (12 calls, 400k input tokens per UTC day)
+INSIDE the global caps above (skip reason ``lane_a_bucket``). Its ledger, pair and verdict rows carry ``lane``,
+``task_group``, ``rate_phase`` and ``session_id`` / ``msg_count``; the arm's rows carry none of these. With no
+``lane`` context (the lane is off, or the step was not lane A's) nothing here changes.
+
 FILES, under ``<state dir>/shadow_frontier/``:
 
 * ``ledger.jsonl``: one row per considered Haiku turn (sampled or skipped, with the reason,
@@ -66,7 +73,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from llm_router import failopen, paths
+from llm_router import failopen, lane_a_shadow, paths
 from llm_router.proxy import haiku_guard
 from llm_router.proxy.steps import _text_of, newest_human_text, non_system
 from llm_router.proxy.translate import parse_sse_usage
@@ -113,6 +120,8 @@ R_CAP_CALLS = "cap_calls"
 R_CAP_TOKENS = "cap_tokens"
 R_SIZE_UNKNOWN = "size_unknown"
 R_NOT_SAMPLED = "not_sampled"
+R_LANE_BUCKET = lane_a_shadow.R_LANE_BUCKET
+R_NO_KEY = lane_a_shadow.R_NO_KEY
 
 JUDGE_BRIEF = (
     "You review two answers to the same developer request. They are labelled A and B in a "
@@ -126,6 +135,8 @@ JUDGE_BRIEF = (
     'Output only one JSON object: {"acceptable_A": true|false|null, "acceptable_B": '
     'true|false|null, "cannot_judge": true|false}'
 )
+#: Lane A verdict rows store this, so a verdict made under a different brief is recognisable (prereg section 6).
+JUDGE_BRIEF_SHA256 = hashlib.sha256(JUDGE_BRIEF.encode("utf-8")).hexdigest()
 
 
 # ── switch, paths, small IO ─────────────────────────────────────────────────
@@ -397,6 +408,18 @@ async def replay_http(client, url: str, headers: dict, content: bytes, *,
         await resp.aclose()
 
 
+LANE_KEYS = ("lane", "task_group", "rate_phase", "rate", "session_id", "msg_count", "prev_tool_class", "conf")
+
+
+def _lane_fields(job: dict) -> dict:
+    """The lane A tags of a job (empty for the arm and for any step lane A did not serve). Text-free."""
+    lane = job.get("lane")
+    if not isinstance(lane, dict):
+        return {}
+    merged = {**lane, "rate": job.get("rate"), "rate_phase": job.get("rate_phase")}
+    return {k: merged.get(k) for k in LANE_KEYS}
+
+
 class FrontierShadow:
     """One per proxy process. ``maybe_sample`` is called after the cheap reply is complete;
     it only schedules a task and returns, so the forwarded response never waits on it."""
@@ -408,12 +431,14 @@ class FrontierShadow:
         self._usage_path = usage_path
         self._busy = False
         self._tasks: set[asyncio.Task] = set()
+        self._phase: dict[str, tuple[float, str]] = {}  # lane A: the last readable phase per task group
 
     def maybe_sample(self, request_body: bytes, served_model: str | None, requested_model: str | None,
                      door: str, task_id: str | None, *, replay: ReplayFn, cheap_status: int = 200,
-                     cheap_reply: bytes = b"", cheap_ctype: str = "", cheap_usage: dict | None = None
-                     ) -> asyncio.Task | None:
-        """Schedule the background job for one cheap-served call. Never raises, never awaits."""
+                     cheap_reply: bytes = b"", cheap_ctype: str = "", cheap_usage: dict | None = None,
+                     lane: dict | None = None) -> asyncio.Task | None:
+        """Schedule the background job for one cheap-served call. Never raises, never awaits. ``lane``: the
+        lane A context of a step lane A served (``lane_a_shadow.context_from_row``), else None."""
         owns = False
         try:
             if not enabled():
@@ -423,7 +448,8 @@ class FrontierShadow:
                 self._busy = owns = True
             job = dict(raw=request_body, served=served_model, requested=requested_model, door=door,
                        task_id=task_id or uuid.uuid4().hex, replay=replay, cheap_status=cheap_status,
-                       cheap_reply=cheap_reply, cheap_ctype=cheap_ctype, cheap_usage=cheap_usage)
+                       cheap_reply=cheap_reply, cheap_ctype=cheap_ctype, cheap_usage=cheap_usage,
+                       lane=lane if isinstance(lane, dict) and lane.get("lane") == lane_a_shadow.LANE_TAG else None)
             task = asyncio.get_running_loop().create_task(self._run(job, pre, owns))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
@@ -454,16 +480,44 @@ class FrontierShadow:
         quota = quota_skip(now, self._usage_path)
         if quota is not None:
             return quota
-        calls, tokens = day_spend(day)
+        calls, tokens = day_spend(day)  # global: every replay, lane A or arm
         if calls >= MAX_CALLS_PER_DAY:
             return R_CAP_CALLS
+        lane = job.get("lane")
+        if lane is not None:
+            lane_calls, lane_tokens = lane_a_shadow.lane_day_spend(_read_rows(ledger_path()), day)
+            if lane_calls >= lane_a_shadow.BUCKET_CALLS_PER_DAY:
+                return R_LANE_BUCKET
         if est is None:
             return R_SIZE_UNKNOWN
-        if tokens + math.ceil(est * ADMIT_SAFETY) > MAX_INPUT_TOKENS_PER_DAY:
+        need = math.ceil(est * ADMIT_SAFETY)
+        if tokens + need > MAX_INPUT_TOKENS_PER_DAY:
             return R_CAP_TOKENS
+        if lane is not None:
+            if lane_tokens + need > lane_a_shadow.BUCKET_INPUT_TOKENS_PER_DAY:
+                return R_LANE_BUCKET
+            return self._lane_sample_gate(now, job, lane)
         if self._rng() >= sample_rate(now):
             return R_NOT_SAMPLED
         return None
+
+    def _lane_sample_gate(self, now: float, job: dict, lane: dict) -> str | None:
+        """Lane A's sampling decision: the deterministic key against the fill / steady rate of its task group.
+        Records the rate and phase on ``job`` so the ledger and the pair row say which one applied."""
+        group = lane.get("task_group")
+        rows = lane_a_shadow.read_verdict_rows(verdicts_path())
+        if rows is None:  # unreadable: keep the phase we last read (fill at the very start)
+            rate, phase = self._phase.get(group, lane_a_shadow.phase_for(0))
+        else:
+            decided = lane_a_shadow.count_decided(rows, group, since=now - lane_a_shadow.WINDOW_DAYS * 86400.0,
+                                                  until=now)
+            rate, phase = lane_a_shadow.phase_for(decided)
+            self._phase[group] = (rate, phase)
+        job["rate"], job["rate_phase"] = rate, phase
+        u = lane_a_shadow.sample_key(lane.get("session_id"), lane.get("msg_count"))
+        if u is None:
+            return R_NO_KEY
+        return None if u < rate else R_NOT_SAMPLED
 
     async def _run(self, job: dict, pre: str | None, owns: bool) -> None:
         try:
@@ -473,6 +527,8 @@ class FrontierShadow:
                     "served": job["served"], "requested": job["requested"], "body_sha": body_sha(job["raw"]),
                     "est_input_tokens": est}
             reason = pre or await asyncio.to_thread(self._gate, now, base["day"], job, est)
+            if job.get("lane") is not None:
+                base.update(_lane_fields(job))
             if reason is not None:
                 await asyncio.to_thread(_append_private, ledger_path(),
                                         dict(base, outcome=OUT_SKIPPED, reason=reason))
@@ -515,7 +571,7 @@ class FrontierShadow:
             "ts": base["ts"], "task_id": base["task_id"], "door": base["door"], "served": base["served"],
             "requested": base["requested"], "body_sha": base["body_sha"],
             "request_context": request_context(body), "cheap_response": cheap_text,
-            "frontier_response": text})
+            "frontier_response": text, **_lane_fields(job)})
         prune_pairs(base["ts"])
 
 
@@ -648,9 +704,13 @@ def judge_pending(*, run: Callable[[str, str], dict] = claude_judge, rng: Callab
         if calls_today >= JUDGE_MAX_CALLS_PER_DAY:
             summary["status"] = R_CAP_CALLS
             break
-        cheap_first = rng() < 0.5
+        lane_pair = lane_a_shadow.is_lane_a(pair)
+        # A lane A pair is shown in an order derived from its id (prereg section 6): a re-judge cannot flip it.
+        cheap_first = (lane_a_shadow.pair_order_key(pair.get("task_id")) < 0.5) if lane_pair else rng() < 0.5
         row = {"ts": round(clock(), 3), "day": day, "task_id": pair.get("task_id"),
                "body_sha": pair.get("body_sha"), "judge_model": JUDGE_MODEL}
+        if lane_pair:
+            row["lane"] = lane_a_shadow.LANE_TAG
         calls_today += 1
         tried.add(pair.get("task_id"))
         try:
@@ -674,7 +734,10 @@ def judge_pending(*, run: Callable[[str, str], dict] = claude_judge, rng: Callab
             "body_sha": pair.get("body_sha"), "served": pair.get("served"), "requested": pair.get("requested"),
             "acceptable": verdict[cheap_key], "frontier_acceptable": verdict[frontier_key],
             "cannot_judge": verdict["cannot_judge"], "judge_model": JUDGE_MODEL,
-            "cheap_label": "A" if cheap_first else "B"})
+            "cheap_label": "A" if cheap_first else "B",
+            # Lane A only: the tags the quality writer needs, and the brief the verdict was made under.
+            **({**{k: pair.get(k) for k in LANE_KEYS}, "judge_brief_sha256": JUDGE_BRIEF_SHA256}
+               if lane_pair else {})})
         summary["verdicts"] += 1
         summary["cannot_judge"] += 1 if verdict["cannot_judge"] else 0
     return summary
@@ -715,7 +778,16 @@ def main(argv: list[str] | None = None) -> int:
                                  description="GE4 Frontier shadow: blind A/B judge over stored pairs.")
     ap.add_argument("command", choices=["judge"])
     ap.parse_args(argv)
-    print(json.dumps(judge_pending(), indent=2))
+    summary = judge_pending()
+    # Lane A: hand the judged pairs to S1 (``lane_quality.jsonl``). A no-op without lane A verdict rows; a
+    # failure here never fails the judge run.
+    try:
+        from llm_router import lane_quality_writer
+
+        summary["lane_quality"] = lane_quality_writer.write_all()
+    except Exception as exc:  # noqa: BLE001 - the judge result stands
+        failopen.record("LR-FO-LANE-QUALITY-WRITER", exc)
+    print(json.dumps(summary, indent=2))
     return 0
 
 

@@ -185,7 +185,10 @@ wilson95, n_sessions, largest_session_share, window}`.
 | `offload.spread` | k = actions another Frontier subscription served (Codex gpt-5.5, gpt-6, Gemini Pro); n = all actions; never in a numerator (D-24) | as `action` |
 
 `by_lane` splits `action` by `(door, served_class, task_group)`; `by_task_type` by task group (`qa`, `code`,
-`tech_op`); `quality_sampled_lanes` lists the lanes that passed. "Very cheap" = a local provider, or an input
+`tech_op`); `quality_sampled_lanes` lists the lanes that passed. `offload.lane_a` / `offload.not_lane_a` split `action`
+by the proxy ledger's `lane: "A"` tag (steps lane A served on Haiku, D-285): `action` = `lane_a` + `not_lane_a` in k and n,
+so lane A is never counted twice; the S1 rule is unchanged, so lane A reaches the numerator only when its lane
+`(proxy, haiku, tech_op)` has a passing `shadow_pairs` batch (written by `lane_quality_writer`). "Very cheap" = a local provider, or an input
 price at or below the highest Haiku entry of `pricing.py` (`pricing.haiku_input_rate()`; unknown models are not
 cheap). Not actions: side calls, deterministic filtering (`served_by=local_filter`), raw passthrough, technical
 ops under 4 KB, semantic-cache hits, rows of non-organic sessions. A lane is quality-sampled when its latest

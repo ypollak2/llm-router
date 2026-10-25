@@ -156,12 +156,45 @@ async def test_state_survives_a_restart_and_is_private(tmp_path):
     assert await third.admit() == (True, True)  # half-open persisted; the probe in flight before the restart is gone
 
 
-async def test_corrupt_state_reads_closed_and_wrong_key_is_ignored(tmp_path):
+async def test_unreadable_state_opens_the_breaker_and_records_a_failopen_code(tmp_path, monkeypatch):
+    """PR3 S2: ONE failure direction. A state file that exists but cannot be used (corrupt, wrong key, locked)
+    fails safe like an internal admit() error: the lane does not serve. An ABSENT file is a fresh start."""
+    codes = []
+    real = lb.failopen.record
+    monkeypatch.setattr(lb.failopen, "record", lambda code, exc, *a, **k: codes.append(code) or real(code, exc, *a, **k))
+    f = tmp_path / "lane_a_breaker.json"
+    for content in ("{not json", json.dumps({"key": "other", "state": "open"}), json.dumps([1, 2]), ""):
+        codes.clear()
+        f.write_text(content)
+        b = _breaker(tmp_path)
+        assert await b.admit() == (False, False), content
+        assert b.state == lb.OPEN and b.reason == "state_unreadable"
+        assert "LR-FO-LANE-A-BREAKER-READ" in codes
+        await b.flush()
+        assert json.loads(f.read_text())["state"] == "open"  # the bad file is replaced by a real open state
+    # a locked / unreadable file is the same direction
+    f.write_text(json.dumps({"key": lb.KEY, "state": "closed"}))
+    os.chmod(f, 0)
+    try:
+        if not os.access(f, os.R_OK):  # (root can read it anyway)
+            codes.clear()
+            assert await _breaker(tmp_path).admit() == (False, False)
+            assert "LR-FO-LANE-A-BREAKER-READ" in codes
+    finally:
+        os.chmod(f, 0o600)
+    # absent file: a fresh start, closed, and nothing recorded
+    f.unlink()
+    codes.clear()
+    assert await _breaker(tmp_path).admit() == (True, False) and codes == []
+
+
+async def test_unreadable_state_probes_again_after_the_cooldown(tmp_path):
+    clk = Clock()
     (tmp_path / "lane_a_breaker.json").write_text("{not json")
-    b = _breaker(tmp_path)
-    assert await b.admit() == (True, False)
-    (tmp_path / "lane_a_breaker.json").write_text(json.dumps({"key": "other", "state": "open"}))
-    assert await _breaker(tmp_path).admit() == (True, False)
+    b = _breaker(tmp_path, clk)
+    assert await b.admit() == (False, False)
+    clk.t += BR.cooldown_s + 1
+    assert await b.admit() == (True, True)  # half-open: one probe, then the normal rules
 
 
 async def test_no_blocking_io_on_the_event_loop(tmp_path):
@@ -479,7 +512,7 @@ async def test_5xx_429_and_timeout_retry_the_pinned_model_once(tmp_path, monkeyp
     monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
     fed = []
     real = lb.LaneABreaker.record_failure
-    monkeypatch.setattr(lb.LaneABreaker, "record_failure", lambda self, k, probe=False: fed.append(k) or real(self, k, probe))
+    monkeypatch.setattr(lb.LaneABreaker, "record_failure", lambda self, k, probe=False, probe_id=None: fed.append(k) or real(self, k, probe, probe_id))
     up = Upstream(fault)
     resp = await _post(_app(tmp_path, _raw(), up), _body())
     assert resp.status_code == 200
@@ -538,7 +571,7 @@ async def test_bad_haiku_replies_are_fed_to_the_breaker(tmp_path, monkeypatch, r
     monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
     fed = []
     real = lb.LaneABreaker.record_failure
-    monkeypatch.setattr(lb.LaneABreaker, "record_failure", lambda self, k, probe=False: fed.append(k) or real(self, k, probe))
+    monkeypatch.setattr(lb.LaneABreaker, "record_failure", lambda self, k, probe=False, probe_id=None: fed.append(k) or real(self, k, probe, probe_id))
 
     def up(request):
         return httpx.Response(200, stream=httpx.ByteStream(reply), headers={"content-type": SSE})

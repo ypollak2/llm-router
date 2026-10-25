@@ -455,6 +455,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
                       "role": role_of(r) if step in _BEGINS_TURN_KINDS or step in _SUBAGENT_STEPS else None,
                       "model": r.get("served_model") or r.get("requested_model"),
                       "task_type": r.get("tier_task_type"), "prev_tool_class": r.get("prev_tool_class"),
+                      "lane": r.get("lane"),
                       "kept": isinstance(r.get("msg_id"), str) and r["msg_id"] in band_kept})
         if r.get("tier_reason") in ESCALATION_REASONS:
             n_escalations += 1
@@ -643,6 +644,7 @@ DOOR_PROXY, DOOR_SUBAGENT, DOOR_MCP, DOOR_DIRECT, DOOR_TECHOP, DOOR_HOOK = (
 SC_LOCAL, SC_HAIKU, SC_CHEAP, SC_SPREAD, SC_PAID = "local", "haiku", "very_cheap", "spread", "paid"
 OFFLOADED_CLASSES = frozenset({SC_LOCAL, SC_HAIKU, SC_CHEAP})
 TG_QA, TG_CODE, TG_TECH = "qa", "code", "tech_op"
+LANE_A_TAG = "A"            # the proxy ledger's ``lane`` value for a step lane A served (proxy.lane_a.LANE_TAG)
 TECHOP_MIN_BYTES = 4096     # PLAN P2.1 task 3: smaller outputs are passed through, never condensed
 TECHOP_FILE = "technical_ops.jsonl"
 _SPREAD_RE = None
@@ -796,6 +798,9 @@ def action_units(since: float, until: float, *, proxy_rows: list[dict] | None = 
 
 def _action_base(u: dict) -> dict:
     return {"ts": u["ts"], "session_id": u.get("session_id"), "first": bool(u.get("first")),
+            # PR3: the ledger's lane tag ("A" = a step lane A served on Haiku; else None), so the KPI can split
+            # lane A out. It changes no lane tuple and no numerator rule.
+            "lane_tag": u.get("lane") if u.get("lane") == LANE_A_TAG else None,
             "orphan": u.get("role") == ROLE_ORPHAN,
             "redone": bool(u.get("redone")), "window_open": bool(u.get("window_open"))}
 
@@ -844,8 +849,17 @@ def summarize_actions(actions: list[dict], window: dict | None = None) -> dict:
     for a in actions:
         by_lane.setdefault(a["lane"], []).append(a)
         by_group.setdefault(a["task_group"], []).append(a)
+    lane_a = [a for a in actions if a.get("lane_tag") == LANE_A_TAG]
+    not_lane_a = [a for a in actions if a.get("lane_tag") != LANE_A_TAG]
     return {
         "action": line(actions),
+        # PR3 (D-285): lane A serves, counted on their own and NOT a second count: ``action`` = ``lane_a`` +
+        # ``not_lane_a`` (k and n both add up). Their lane is (proxy, haiku, <task_group>) like any other Haiku
+        # step; ``quality_sampled`` says whether that lane passed its ``lane_quality`` batch, which is what lets
+        # them into the S1 numerator.
+        "lane_a": {**line(lane_a), "quality_sampled": (all(a["sampled"] for a in lane_a) if lane_a else None),
+                   "lanes": sorted({"/".join(a["lane"]) for a in lane_a})},
+        "not_lane_a": line(not_lane_a),
         "call": line([a for a in actions if a["door"] in (DOOR_PROXY, DOOR_SUBAGENT)]),
         "spread": line(actions, "spread"),
         "by_lane": [{"door": d, "served_class": c, "task_group": g, "quality_sampled": rows[0]["sampled"],
