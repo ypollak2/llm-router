@@ -110,7 +110,8 @@ async def eval_ollama_model(model: str, task_type: str = "reasoning") -> Optiona
             headers={"Content-Type": "application/json"},
         )
         
-        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+        from llm_router import local_privacy
+        with local_privacy.open_url(req, base_url=OLLAMA_URL, timeout=OLLAMA_TIMEOUT) as resp:
             result = json_lib.loads(resp.read())
             response = result.get("message", {}).get("content", "")
             latency_ms = (time.time() - start) * 1000

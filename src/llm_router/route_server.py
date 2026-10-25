@@ -126,6 +126,15 @@ def invalid_request_message(exc: ValueError) -> str:
     return f"{type(exc).__name__}: invalid request"
 
 
+def secret_refusal_body(exc: BaseException) -> dict:
+    """The typed 4xx body for a request the secret door refused: category and remedy, never the secret."""
+    body = getattr(exc, "body", None)
+    if callable(body):
+        return body()
+    return {"error": {"type": "secret_local_only_refused", "code": "secret_local_only_refused",
+                      "message": str(exc), "categories": [], "places": [], "remedy": ""}}
+
+
 async def route_payload_async(payload: dict) -> dict:
     """Run one routing call through LLM Router's FULL router and return a JSON-able
     result. This is the single routing core shared by both HTTP surfaces — this
@@ -191,6 +200,9 @@ async def route_payload_async(payload: dict) -> dict:
                 project_root=payload.get("project_root") or None,
                 messages=messages,
                 context_door="gateway",
+                # LC-12h repair 1: the secret door's per-request override (body field; the gateway also reads the
+                # X-LLM-Router-Allow-Cloud header into the request context).
+                allow_cloud=payload.get("allow_cloud") is True,
                 **({"tools": tools, "tool_choice": tool_choice} if tools else {}),
             )
     finally:
@@ -404,6 +416,9 @@ def make_handler():
                 self._send(400, {"error": invalid_request_message(e)})
             except Exception as e:                      # routing / provider failure
                 _client_failure("route failed", e)
+                from llm_router.engine import SecretLocalOnlyError
+                if isinstance(e, SecretLocalOnlyError):  # LC-12h: policy refusal; category + remedy, 422 not 502
+                    return self._send(422, secret_refusal_body(e))
                 self._send(502, {"error": "{}: routing failed".format(type(e).__name__)})
 
         def log_message(self, *_a):                     # quiet by default

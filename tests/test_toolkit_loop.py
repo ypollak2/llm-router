@@ -17,7 +17,7 @@ from llm_router.toolkit.adapters.ollama import AdapterError, AdapterReply
 from llm_router.toolkit.loop import Budgets, run_task, tree_fingerprint
 from tests.toolkit_fixtures import PY_DIR, digest, make_source
 
-pytestmark = pytest.mark.timeout(180)
+pytestmark = [pytest.mark.timeout(180), pytest.mark.usefixtures("open_url_via_urlopen")]
 SANDBOX_OK = sandbox.prove_sandbox().proven
 needs_sandbox = pytest.mark.skipif(not SANDBOX_OK, reason="sandbox not proven")
 

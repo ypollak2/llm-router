@@ -165,6 +165,13 @@ def _get_ollama_url() -> str:
     return _validated_ollama_url(raw)
 
 
+def _ollama_open(req, timeout):
+    """``urlopen`` for a request to the Ollama daemon: direct (no proxy env, no redirect) when it is loopback
+    (LC-12h: these requests carry the prompt), the user's proxy policy for a remote daemon."""
+    from llm_router import local_privacy
+    return local_privacy.open_url(req, base_url=_get_ollama_url(), timeout=timeout)
+
+
 def ollama_is_alive(timeout: float = 0.5) -> bool:
     """0.5s pre-flight: HEAD /api/tags to confirm Ollama is reachable.
 
@@ -180,7 +187,7 @@ def ollama_is_alive(timeout: float = 0.5) -> bool:
         # true: the URL comes from LLM_ROUTER_OLLAMA_URL/OLLAMA_BASE_URL, which a
         # cloned repo's .env can set. A suppression resting on a false premise
         # is worse than no suppression, because it stops anyone re-checking.
-        with urllib.request.urlopen(req, timeout=timeout):  # nosec B310
+        with _ollama_open(req, timeout):  # nosec B310
             return True
     except Exception:
         return False
@@ -197,7 +204,7 @@ def available_ollama_models(timeout: float = 0.5) -> set[str] | None:
     try:
         ollama_url = _get_ollama_url()
         req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 — URL validated by _get_ollama_url (not localhost-only: a remote Ollama is supported)
+        with _ollama_open(req, timeout) as resp:  # nosec B310 — URL validated by _get_ollama_url (not localhost-only: a remote Ollama is supported)
             data = json.loads(resp.read())
         return {m.get("name", "") for m in data.get("models", []) if m.get("name")}
     except Exception:
@@ -346,7 +353,7 @@ def call_ollama(
     truncated = False
     context_truncated = False
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310 — URL validated by _get_ollama_url (not localhost-only: a remote Ollama is supported)
+        with _ollama_open(req, timeout) as resp:  # nosec B310 — URL validated by _get_ollama_url (not localhost-only: a remote Ollama is supported)
             for raw in resp:
                 if not raw.strip():
                     continue

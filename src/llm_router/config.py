@@ -59,7 +59,9 @@ def probe_ollama(base_url: str) -> bool:
     if _ollama_reachable_cache is not None and (now - _ollama_cache_time) < _OLLAMA_PROBE_TTL:
         return _ollama_reachable_cache
     try:
-        with urllib.request.urlopen(f"{base_url}/api/tags", timeout=1):
+        from llm_router import local_privacy
+        # LC-12h: a loopback daemon is probed direct (no proxy env); another host keeps urlopen.
+        with local_privacy.open_url(f"{base_url}/api/tags", base_url=base_url, timeout=1):
             _ollama_reachable_cache = True
     except Exception:
         _ollama_reachable_cache = False

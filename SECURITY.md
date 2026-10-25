@@ -44,9 +44,82 @@ Please include:
 
 **Multi-provider routing:**
 When you route a task, your prompt is sent to:
-1. **Local Ollama** (if configured) — stays on your machine
+1. **Local Ollama** (if configured) — stays on your machine when the Ollama endpoint (`OLLAMA_API_BASE`, else `http://localhost:11434`) is loopback. Since LC-12h the router's prompt-carrying calls to a loopback daemon ignore `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` (LiteLLM honoured them even for `localhost`). An endpoint you point at another host, or a loopback port that forwards elsewhere (`ssh -L`, a local reverse proxy), sends the prompt there. LiteLLM's own model-info lookup (`POST /api/show`, which would carry the model name, the daemon URL and `OLLAMA_API_KEY`) is made impossible, not just unlikely: `local_privacy.ensure_ollama_model_info` puts a failure-shaped entry in `litellm.model_cost` before its own direct fetch, makes concurrent callers for the same model wait for that fetch (at most the 2 s fetch timeout plus 1 s), and re-inserts the entry if it is missing on any later call (a cost-map reload). Residual: if that insert itself raises (counted as `CHZ-FO-LOCAL-PRIVACY-MODEL-INFO` in failopen), LiteLLM does its own lookup.
 2. **Your configured providers** (OpenAI, Gemini, etc.) — governed by their privacy policies
 3. **Not** to llm-router servers — we don't run servers
+
+**Prompts that contain a secret (LC-12h, D-28 A):**
+When the router is handed a request in which a high-precision secret is found, it sends that request only to
+Ollama models on a loopback daemon (`-cloud` models excluded), or refuses it when there is none. "High
+precision" means a real-looking value, not a shape alone: a provider key prefix (Anthropic, OpenAI, OpenRouter,
+Google, GitHub, Slack, AWS `AKIA`/`ASIA`) with enough length and entropy, a PEM private-key block with a body,
+a bearer token with entropy, a database URL whose password is not a common word, or a JWT that decodes to real-looking claims. Obvious placeholders are
+not refused: AWS documentation keys (`...EXAMPLE`), runs of `x` / `*` / `0` / `.`, `YOUR_...` / `<...>` /
+`${...}` / `changeme` / `placeholder` / `dummy` / `test` values (a value that is itself shaped like one), sequential typing, URL passwords equal to the
+user name or in a short common-word list (`postgres:postgres@`, `user:password@`, `admin:admin@`), the jwt.io sample
+and JWTs whose identity claims are all test/demo values (or `alg: none`, or whose signature is a placeholder). A value on
+a line, or up to two lines under a line, that carries a filename or config cue (`.env.example` / `.env.sample` /
+`.env.template` / `example.env`, "sample config" / "example env", or a path ending `.example` / `.sample` /
+`.template`) is not refused either: the cue is the author's statement that it is an example, so a real secret next to
+such a cue is exempt too (residual: anyone can type the cue). Free-text words (`fake`, `dummy`, `placeholder`, "not a
+real", "for illustration") are not cues and exempt nothing: `fake? no. <key>` is refused. Separate residual: the placeholder-value exemptions look at the value itself (a stopword list and substrings such as `example`, `dummy`, `placeholder`, `changeme`), so a real secret that happens to contain one of those words is exempt. Every exemption is counted
+as `exempted_by_label:<category>`. Quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a
+counter and the category, never the value) and never refused. `engine.secret_findings` is the detector; its quantifiers
+are bounded and it scans long text in overlapping windows, so it is linear in the text and misses nothing at a
+window edge. A refused call skips the semantic cache and the judge queue, gets no emergency fallback to the budget
+chain, may not switch to a non-local model on overflow, and the LLM complexity classifier is not called for it.
+Doors: `route_and_call` (the `llm_*` MCP tools, the gateway), `route_and_stream`, the `llm_stream` tool and the
+SDK (`llm_router.sdk.route`, whose Ollama leg also goes direct).
+- **The scan reads** the new request: the prompt, the system prompt and the caller context of this one call. **Not**
+  earlier turns of the conversation (`messages`): each was scanned when it was the new request, and scanning them again
+  made one past secret refuse every later turn. The price: a real secret in turn 3 that the caller overrode (or that a
+  host sent on its own) is replayed to a cloud model in turn 4 as history, and the door does not see it. It is
+  counted, not blocked: each request whose `messages` hold a high-precision secret shape adds
+  `history_secret_shape:<category>` (category only, never the value) to `local_privacy.secret_counts`. The
+  `tool_calls` arguments of assistant messages are not read by that count or by any scan (only `content` text is).
+- **The refusal** names the category and the place, never the value, and the way forward: start a local model
+  (`llm-router local-check`), remove the secret, or override. The gateway answers HTTP 422 with that text (a 5xx
+  would invite retries) with a typed body, `{"error": {"type": "secret_local_only_refused", "categories": [...],
+  "places": [...], "remedy": ...}}`; the MCP tools return the message as the tool error; the SDK raises a
+  `RoutingError` that is also a `SecretLocalOnlyRefused`.
+- **Override, per request:** start the prompt with `cloud:` (stripped before anything reads the text, but only when the request holds a secret; with no secret the prompt is left exactly as typed), or pass the
+  flag where a prefix cannot be typed: `allow_cloud=True` (`route_and_call`, `sdk.route` / `Router.run`), the body field
+  `"allow_cloud": true` (`/route`) or the header `X-LLM-Router-Allow-Cloud: 1` (gateway). The
+  request then routes as ordinary traffic, and the override is counted (`overridden:<category>`), category only. An explicit
+  cloud `model` on a secret request is refused unless the prefix is present; it is no longer silently replaced by
+  a local model.
+Limits:
+- The **Claude Code proxy** (`llm-router proxy`) only logs a secret (D-28 A); it does not reroute. Its local-model
+  backend uses a shared httpx client that follows proxy env (open, see the table).
+- The **Claude Code hooks' direct-execution path** (`hooks/auto-route.py` -> `execute_chain`) is not behind this
+  door (open). Only `sdk.route` is.
+- llm-router controls only what it forwards: a prompt typed into Claude Code (or another host) has already
+  gone to that host's model.
+- Agent delegation (`llm_act` delegate / `llm_delegate`, which runs CLI agents such as Codex) does not go
+  through this door.
+- The scan reads the request's own text, not session history the router injects afterwards, and it does not
+  catch secrets that match none of its shapes, or low-entropy secrets (a dictionary-word database password).
+
+**Ollama requests made with urllib or a shared httpx client** (every site found by `grep urlopen` and
+`httpx` under `src/llm_router`; status as of LC-12h repair 1). "fixed" = goes through `local_privacy.open_url`: no
+proxy env, no redirect, for a loopback daemon; a remote daemon keeps the user's proxy policy. "open" = still follows
+the proxy env when one is set.
+
+| Site | Carries | Status |
+|---|---|---|
+| `context_summary.py` (`_generate`, session-end summary) | conversation text | fixed |
+| `hooks/auto-route.py` (`classify_with_ollama`, first 500 chars of a prompt) | prompt text | fixed (hook v78) |
+| `hooks/direct_executor.py` (`call_ollama`, `ollama_is_alive`, `available_ollama_models`) | prompt text, probes | fixed |
+| `toolkit/adapters/ollama.py` | agent messages | fixed |
+| `hooks/playwright-compress.py` | page snapshot text | fixed (hook v5) |
+| `model_evaluator.py` | synthetic benchmark prompt | fixed |
+| `hooks/agent_loop.py` | agent messages | fixed |
+| `agentic/react.py` | agent messages | fixed |
+| `local_classifier.py` (`_post`, eval harness only) | classifier input | fixed |
+| `hooks/tool_intercept.py` (`describe_image`) | image bytes | fixed |
+| `proxy/server.py` (local-model backend on the shared httpx client; warm-up `httpx.post`) | prompt text | open |
+| `context_summary.py`, `model_discovery.py`, `discover.py`, `ollama_watchdog.py`, `warm.py`, `local_context_guard.py`, `quickstart.py`, `seats.py`, `commands/doctor.py`, `commands/verify.py`, `commands/pi.py`, `resolver/inventory.py`, `resource_map.py`, `runtime_offer.py`, `service_manager.py`, `model_pull.py`, `discovery_rescan.py`, `local_platforms.py` (`/api/tags`, `/api/ps`, `/api/show`, `/api/version`, pulls) | model names and health only, no user text | open |
+Details and measurements: [docs/local-check-routing.md](docs/local-check-routing.md) ("HTTP proxy environment").
 
 **Encryption Status:**
 - ✅ API keys in transit: TLS (1.2+) to providers

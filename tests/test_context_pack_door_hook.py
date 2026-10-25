@@ -11,7 +11,7 @@ from uuid import uuid4
 
 import pytest
 
-pytestmark = pytest.mark.usefixtures("qa_routing_on")
+pytestmark = pytest.mark.usefixtures("qa_routing_on", "open_url_via_urlopen")
 
 HOOK = Path(__file__).resolve().parents[1] / "hooks" / "auto-route.py"
 PROMPT = "What does the retry logic in this repo do?"

@@ -185,24 +185,31 @@ def _ollama_window_candidates(model: str, current_window: int | None) -> list[st
         return []
 
 
-def _pass_only_text_job() -> bool:
-    """LC-12g: True inside a pass-only ``llm_text_job`` (``LLM_ROUTER_LOCAL_TEXT_JOBS`` unset, D-277)."""
-    from llm_router import eligibility_routing
-    return eligibility_routing.pass_only_dispatch_active()  # the router's own predicate, set for the dispatch
+def _private_refusals(model: str, api_base: str | None, pack, old_model: str, *, pass_only: bool,
+                      private: bool) -> None:
+    """LC-12g / LC-12h: the refusals of a private (local-only) Ollama call, before any request.
 
-
-async def _direct_ollama_handler(timeout):
-    """LC-12g: a LiteLLM handler for ONE call whose httpx client ignores proxy env and never follows a redirect.
-
-    LiteLLM's shared client honours HTTP(S)_PROXY / ALL_PROXY for ``localhost`` too when NO_PROXY is unset
-    (both its aiohttp and httpx transports), so the text could reach a proxy. Returns (handler, client to close).
+    * the model is not an Ollama model, or its daemon is not loopback: the text would leave the machine
+      (:class:`local_privacy.PrivateEndpointRefused`);
+    * PACK_OVERFLOW would switch models: on a pass-only text job always refused (the other model has no pass and
+      got no live check); on the secret door refused only when the switch leaves the local set (not loopback, or an
+      Ollama cloud model).
     """
-    import httpx
-    from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
-    handler = AsyncHTTPHandler(timeout=timeout)
-    await handler.close()  # the default client it built (env proxies honoured) is never used
-    handler.client = direct = httpx.AsyncClient(trust_env=False, timeout=timeout, follow_redirects=False)
-    return handler, direct
+    from llm_router import eligibility_routing as _er
+    from llm_router import local_privacy
+    if private and not local_privacy.stays_local(model, api_base):  # a cloud model, or a remote daemon
+        raise local_privacy.PrivateEndpointRefused(
+            f"{model} is not a local model on a loopback Ollama daemon ({local_privacy.ollama_api_base(api_base)}); "
+            "local-only call refused")
+    if pack is None or pack.action != "bigger_window":
+        return
+    if pass_only:
+        _er.record_fail_closed(_er.FC_OVERFLOW_SWITCH)
+        raise _er.OverflowSwitchRefused(
+            f"the input does not fit {old_model}; the overflow switch to {pack.model} is refused")
+    if private and not local_privacy.stays_local(pack.model, api_base):
+        raise _er.OverflowSwitchRefused(
+            f"the input does not fit {old_model}; the overflow switch to {pack.model} would leave this machine")
 
 
 def _ollama_think_enabled() -> bool:
@@ -330,7 +337,13 @@ async def call_llm(
     _quirk = get_quirk(provider_from_model(model))
     kwargs["model"] = _quirk.transform_model_name(kwargs["model"])
     kwargs = _quirk.transform_request(kwargs)
-    _pass_only_local = model.startswith("ollama/") and _pass_only_text_job()
+    from llm_router import eligibility_routing as _er
+    from llm_router import local_privacy
+    # LC-12h: one predicate for the private paths (the pass-only text job and the secret door).
+    _private = local_privacy.private_dispatch_active()
+    _pass_only = _private and _er.pass_only_dispatch_active()
+    if _private:
+        _private_refusals(model, kwargs.get("api_base"), None, model, pass_only=_pass_only, private=True)
 
     if model.startswith("ollama/"):
         # Refuse to send what Ollama would silently truncate from the front. If
@@ -343,12 +356,9 @@ async def call_llm(
                            model=kwargs["model"], site="providers.call_llm",
                            candidates=_ollama_window_candidates(kwargs["model"], kwargs.get("num_ctx")))
         cached_messages = kwargs["messages"] = pack.trim_to()["messages"]
-        if pack.action == "bigger_window" and _pass_only_local:
-            # LC-12g: the other model has no pass and got no live check; refuse, never switch.
-            from llm_router import eligibility_routing as _er
-            _er.record_fail_closed(_er.FC_OVERFLOW_SWITCH)
-            raise _er.OverflowSwitchRefused(
-                f"the input does not fit {old_model}; the overflow switch to {pack.model} is refused")
+        if _private:
+            _private_refusals(kwargs["model"], kwargs.get("api_base"), pack, old_model,
+                              pass_only=_pass_only, private=True)
         if pack.action == "bigger_window":
             from llm_router import failopen
             model = kwargs["model"] = pack.model
@@ -365,9 +375,12 @@ async def call_llm(
     # cap raises AttemptCapExceeded (not a timeout: no LOCAL-TIMEOUT-1 cooldown).
     from llm_router.mcp_door import AttemptCapExceeded, attempt_cap_s
     _attempt_cap = attempt_cap_s(model)
-    _direct = await _direct_ollama_handler(config.request_timeout) if _pass_only_local else None
-    if _direct is not None:
-        kwargs["client"] = _direct[0]  # LC-12g: this call only; no global proxy or env change
+    # LC-12h: every Ollama call to a loopback daemon goes direct (LC-12g did this for the pass-only path only).
+    _direct = None
+    if local_privacy.direct_ollama(kwargs["model"], kwargs.get("api_base")):
+        await asyncio.to_thread(local_privacy.ensure_ollama_model_info, kwargs["model"], kwargs.get("api_base"))
+        _direct = await local_privacy.direct_handler(config.request_timeout)
+        kwargs["client"] = _direct[0]  # this call only; no global proxy or env change
     try:
         if _attempt_cap is not None:
             try:
@@ -528,6 +541,7 @@ async def call_llm_stream_events(
     temperature: float | None = None,
     max_tokens: int | None = None,
     extra_params: dict | None = None,
+    private: bool = False,
 ) -> AsyncIterator[ProviderStreamEvent]:
     """Stream an LLM response via LiteLLM, yielding structured provider events.
 
@@ -545,6 +559,8 @@ async def call_llm_stream_events(
         temperature: Sampling temperature override. Uses config default if None.
         max_tokens: Max output tokens override. Uses config default if None.
         extra_params: Provider-specific parameters passed through to LiteLLM.
+        private: LC-12h: the caller's secret door made this call local-only (also implied by the router's
+            private-dispatch marker). A non-local model or a switch off the local set is refused.
 
     Yields:
         ProviderStreamEvent dicts with:
@@ -600,6 +616,12 @@ async def call_llm_stream_events(
     _quirk = get_quirk(provider_from_model(model))
     kwargs["model"] = _quirk.transform_model_name(kwargs["model"])
     kwargs = _quirk.transform_request(kwargs)
+    from llm_router import eligibility_routing as _er
+    from llm_router import local_privacy
+    _private = private or local_privacy.private_dispatch_active()  # LC-12h: same refusals as call_llm()
+    _pass_only = _private and _er.pass_only_dispatch_active()
+    if _private:
+        _private_refusals(model, kwargs.get("api_base"), None, model, pass_only=_pass_only, private=True)
 
     if model.startswith("ollama/"):
         # Same preflight as call_llm(): trim first, then try a validated larger
@@ -611,6 +633,9 @@ async def call_llm_stream_events(
                            model=kwargs["model"], site="providers.call_llm_stream_events",
                            candidates=_ollama_window_candidates(kwargs["model"], kwargs.get("num_ctx")))
         cached_messages = kwargs["messages"] = pack.trim_to()["messages"]
+        if _private:
+            _private_refusals(kwargs["model"], kwargs.get("api_base"), pack, old_model,
+                              pass_only=_pass_only, private=True)
         if pack.action == "bigger_window":
             from llm_router import failopen
             model = kwargs["model"] = pack.model
@@ -621,6 +646,24 @@ async def call_llm_stream_events(
         check_overflow({"messages": cached_messages}, num_ctx=kwargs.get("num_ctx"),
                        model=kwargs["model"], site="providers.call_llm_stream_events")
 
+    # LC-12h: a loopback Ollama stream goes direct, like call_llm(); the client lives until the stream ends.
+    _direct = None
+    if local_privacy.direct_ollama(kwargs["model"], kwargs.get("api_base")):
+        await asyncio.to_thread(local_privacy.ensure_ollama_model_info, kwargs["model"], kwargs.get("api_base"))
+        _direct = await local_privacy.direct_handler(config.request_timeout)
+        kwargs["client"] = _direct[0]
+    try:
+        async for event in _stream_events(kwargs, model, messages, cached_messages, start):
+            yield event
+    finally:
+        if _direct is not None:
+            await _direct[1].aclose()
+
+
+async def _stream_events(kwargs: dict, model: str, messages: list[dict[str, str]], cached_messages,
+                         start: float) -> AsyncIterator[ProviderStreamEvent]:
+    """The body of :func:`call_llm_stream_events` from the LiteLLM call on (split out so the direct client of a
+    loopback Ollama stream is closed in one ``finally``)."""
     response = await litellm.acompletion(**kwargs)  # llm_router: direct-ok (router provider layer)
 
     collected_content: list[str] = []
@@ -710,6 +753,7 @@ async def call_llm_stream(
     temperature: float | None = None,
     max_tokens: int | None = None,
     extra_params: dict | None = None,
+    private: bool = False,
 ) -> AsyncIterator[str]:
     """Stream an LLM response via LiteLLM, yielding content chunks (compatibility wrapper).
 
@@ -745,6 +789,7 @@ async def call_llm_stream(
         temperature=temperature,
         max_tokens=max_tokens,
         extra_params=extra_params,
+        private=private,
     ):
         if event["type"] == "delta":
             # Yield content chunks as-is

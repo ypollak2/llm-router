@@ -66,8 +66,12 @@ def test_get_embedding_parses_response():
     mock_resp.__exit__ = MagicMock(return_value=False)
     mock_resp.read = MagicMock(return_value=json.dumps({"embedding": embedding}).encode())
 
-    with patch("urllib.request.urlopen", return_value=mock_resp):
+    # LC-12h: a loopback base goes through local_privacy's direct (no-proxy) opener, not urlopen.
+    opener = MagicMock()
+    opener.open = MagicMock(return_value=mock_resp)
+    with patch("llm_router.local_privacy.direct_opener", return_value=opener):
         result = _get_embedding("hello", "http://localhost:11434")
+    assert opener.open.call_args.args[0].full_url == "http://localhost:11434/api/embeddings"
 
     assert result == embedding
 

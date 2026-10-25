@@ -687,6 +687,7 @@ async def llm_stream(
 
     # Determine model to use
     if model:
+        chain = [model]
         target_model = model
     else:
         chain = get_model_chain(
@@ -694,6 +695,24 @@ async def llm_stream(
             is_subscription_mode=config.llm_router_claude_subscription,
         )
         target_model = chain[0] if chain else "gemini/gemini-2.5-flash"
+
+    # LC-12h / D-28 A: a prompt with a secret streams from a loopback local model only, or not at all.
+    from llm_router import local_privacy
+    prompt, _override = local_privacy.split_override(prompt, system_prompt)  # the `cloud:` prefix, stripped first
+    _override = local_privacy.override_requested(prefix=_override)
+    _hits = local_privacy.scan_secrets(prompt, system_prompt)
+    _secret = bool(_hits) and not _override  # an overridden request is ordinary traffic, not a private dispatch
+    if _hits and _override:
+        for _h in _hits:
+            local_privacy.count_secret_event("overridden", _h.label)
+    elif _hits:
+        _local = local_privacy.local_only_chain(chain)
+        _pinned = bool(model) and not local_privacy.stays_local(model)
+        if not _local or _pinned:
+            for _h in _hits:
+                local_privacy.count_secret_event("refused", _h.label)
+            return "Error: " + local_privacy.refusal_message(_hits, model_override=model if _pinned else None)
+        target_model = _local[0]
 
     messages: list[dict[str, str]] = []
     if system_prompt:
@@ -711,6 +730,7 @@ async def llm_stream(
         messages,
         temperature=temperature,
         max_tokens=max_tokens,
+        private=_secret,
     ):
         if chunk.startswith("\n[META]"):
             meta = _json.loads(chunk[7:])

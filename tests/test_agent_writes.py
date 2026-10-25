@@ -251,7 +251,7 @@ def test_the_catastrophic_blocklist_still_runs_first(repo):
 
 # ── the loop's wall clock ────────────────────────────────────────────────────
 
-def test_the_loop_stops_when_its_budget_is_spent(monkeypatch, tmp_path):
+def test_the_loop_stops_when_its_budget_is_spent(monkeypatch, tmp_path, open_url_via_urlopen):
     """15 iterations at a 60s per-call timeout is a 15-minute worst case, and the
     loop runs in UserPromptSubmit before the user sees anything. The per-call
     timeout does not bound the loop; this does."""
@@ -272,7 +272,7 @@ def test_the_loop_stops_when_its_budget_is_spent(monkeypatch, tmp_path):
 
 
 @pytest.mark.timing
-def test_an_exhausted_budget_after_real_work_reports_partial(monkeypatch, tmp_path):
+def test_an_exhausted_budget_after_real_work_reports_partial(monkeypatch, tmp_path, open_url_via_urlopen):
     """Partial work is worth returning; a stall is not. The difference is whether
     any tool actually ran."""
     import llm_router.hooks.agent_loop as loop

@@ -5,6 +5,9 @@ from llm_router import local_models
 from llm_router.toolkit.adapters import ollama as O
 
 
+pytestmark = pytest.mark.usefixtures("open_url_via_urlopen")
+
+
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     for k in ("LLM_ROUTER_OLLAMA_NUM_CTX", "LLM_ROUTER_LOCAL_NUM_CTX", "LLM_ROUTER_AGENT_NUM_CTX"):

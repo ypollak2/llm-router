@@ -17,6 +17,8 @@ import pytest
 
 from llm_router.hooks.agent_loop import _num_ctx
 
+pytestmark = pytest.mark.usefixtures("open_url_via_urlopen")  # LC-12h: Ollama requests go through local_privacy.open_url
+
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):

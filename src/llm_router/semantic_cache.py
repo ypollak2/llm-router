@@ -408,9 +408,9 @@ REQUEST_HAS_TOOLS: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 
 def _pass_only_text_job() -> bool:
-    """LC-12g: the router's pass-only predicate for this dispatch (a local-only ``llm_text_job``)."""
-    from llm_router import eligibility_routing
-    return eligibility_routing.pass_only_dispatch_active()
+    """LC-12g / LC-12h: a private dispatch: a local-only ``llm_text_job`` or a prompt the secret door kept local."""
+    from llm_router import local_privacy
+    return local_privacy.private_dispatch_active()
 
 
 def _cache_disabled() -> bool:
@@ -418,7 +418,7 @@ def _cache_disabled() -> bool:
     if CALLER_SYSTEM_PROMPT.get() or REQUEST_HAS_TOOLS.get():
         return True
     if _pass_only_text_job():
-        return True  # LC-12g / D-277: no embedding POST of the user's text, no replay of a cloud answer
+        return True  # LC-12g / D-277 / LC-12h: no embedding POST of the user's text, no replay of a cloud answer
     val = os.getenv("LLM_ROUTER_SEMANTIC_CACHE", "").strip().lower()
     return val in ("0", "off", "false", "no", "disable", "disabled")
 
@@ -447,7 +447,7 @@ def _get_embedding(text: str, base_url: str) -> list[float] | None:
         Flat list of floats, or None if Ollama is unreachable or returns an error.
     """
     if _pass_only_text_job():
-        return None  # LC-12g: defense in depth; urllib honours HTTP_PROXY and does not check loopback
+        return None  # LC-12g / LC-12h: defense in depth; the base may name another host
     try:
         payload = json.dumps({"model": "nomic-embed-text", "prompt": text}).encode()
         req = urllib.request.Request(
@@ -456,7 +456,9 @@ def _get_embedding(text: str, base_url: str) -> list[float] | None:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        from llm_router import local_privacy
+        # LC-12h: a loopback base goes direct (no proxy env, no redirect); another host keeps urlopen.
+        with local_privacy.open_url(req, base_url=base_url, timeout=3) as resp:
             data = json.loads(resp.read())
             return data.get("embedding")
     except Exception as exc:

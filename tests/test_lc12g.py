@@ -184,32 +184,32 @@ def test_pass_only_call_goes_direct_to_ollama_not_the_proxy(servers):
 
 
 def test_direct_client_is_per_call_and_closed(monkeypatch):
-    """Pass-only: a fresh handler with trust_env=False and no redirects, closed after the call. Otherwise: none."""
+    """A fresh handler with trust_env=False and no redirects per loopback Ollama call, closed after it. LC-12h: on
+    every path, not only the pass-only one; a non-Ollama model gets none, and is refused on the pass-only path."""
+    from llm_router import local_privacy
     seen: list[dict] = []
 
     async def acompletion(**kw):
         seen.append(kw)
         raise RuntimeError("stop here")
     monkeypatch.setattr(litellm, "acompletion", acompletion)
+    monkeypatch.setattr(local_privacy, "ensure_ollama_model_info", lambda *a, **k: None)
     monkeypatch.setenv("LLM_ROUTER_OLLAMA_NUM_CTX", "8192")
     with pytest.raises(RuntimeError):
-        _call()                                                # flag ContextVar not set: unchanged
-    assert "client" not in seen[-1]
-    token = er.set_require_passed_first()                      # the ContextVar alone is not the router's predicate
-    try:
-        with pytest.raises(RuntimeError):
-            _call()
-    finally:
-        er.reset_require_passed_first(token)
-    assert "client" not in seen[1]
+        _call()                                                # ordinary path: direct too (LC-12h)
     with _pass_only():
         with pytest.raises(RuntimeError):
             _call()
-        with pytest.raises(RuntimeError):
-            _call("anthropic/claude-sonnet-5")                 # not Ollama: unchanged
-    direct = seen[2]["client"].client
-    assert direct._trust_env is False and direct.follow_redirects is False and direct.is_closed
-    assert "client" not in seen[3]
+        with pytest.raises(local_privacy.PrivateEndpointRefused):
+            _call("anthropic/claude-sonnet-5")                 # not Ollama: refused before any call
+    with pytest.raises(RuntimeError):
+        _call("anthropic/claude-sonnet-5")                     # not Ollama, ordinary path: no client
+    assert len(seen) == 3
+    for kw in seen[:2]:
+        direct = kw["client"].client
+        assert direct._trust_env is False and direct.follow_redirects is False and direct.is_closed
+    assert seen[0]["client"] is not seen[1]["client"]
+    assert "client" not in seen[2]
 
 
 # ----------------------------------------------------------------------------- 3. PACK_OVERFLOW model switch

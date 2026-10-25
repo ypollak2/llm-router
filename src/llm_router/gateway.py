@@ -167,7 +167,14 @@ async def _guard_cross_origin(request, call_next):
         _check_gateway_auth(request.headers)
     except HTTPException as exc:
         return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
-    return await call_next(request)
+    # LC-12h repair 1: the secret door's per-request override as a header, read by the router for this request.
+    from llm_router import local_privacy
+    token = local_privacy.set_request_allow_cloud(
+        local_privacy.header_allows_cloud(request.headers.get(local_privacy.OVERRIDE_HEADER)))
+    try:
+        return await call_next(request)
+    finally:
+        local_privacy.reset_request_allow_cloud(token)
 
 
 def _classify(prompt: str) -> tuple[str, str]:
@@ -367,14 +374,36 @@ def _retry_after_s(exc: BaseException) -> int | None:
     return int(secs) + (secs > int(secs)) if 0 < secs <= 3600 else None
 
 
+class SecretRefusedHTTP(HTTPException):
+    """A 422 for a request the secret door refused (LC-12h): the request is what is refused, not the gateway that
+    failed. ``body`` is the typed error (``type``, ``categories``, ``remedy``; never the secret); the streaming
+    endpoints read ``detail`` (the message) for their error frame."""
+
+    def __init__(self, body: dict) -> None:
+        super().__init__(status_code=422, detail=body["error"]["message"])
+        self.body = body
+
+
+@app.exception_handler(SecretRefusedHTTP)
+async def _secret_refused_handler(_request, exc: SecretRefusedHTTP):
+    from starlette.responses import JSONResponse
+    return JSONResponse(exc.body, status_code=exc.status_code)
+
+
 def _routing_failure(exc: Exception) -> HTTPException:
     """The client-facing error for a failed route (F76). The client gets the exception CLASS
     and a fixed message, never the provider's text (it can echo the prompt); the scrubbed
     detail goes to the local log only."""
+    from llm_router.engine import SecretLocalOnlyError
     from llm_router.route_server import _client_failure
 
     limited = _rate_limit_cause(exc)
     _client_failure("routing failed", exc)
+    if isinstance(exc, SecretLocalOnlyError):
+        # LC-12h: a policy refusal, not an upstream failure: 422 (change the request and resend; a 5xx invites
+        # retries). The text names the secret's category and place, never its value, and the three ways forward.
+        from llm_router.route_server import secret_refusal_body
+        return SecretRefusedHTTP(secret_refusal_body(exc))
     if limited is None:
         return HTTPException(status_code=502, detail=f"{type(exc).__name__}: routing failed")
     secs = _retry_after_s(limited)

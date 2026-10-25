@@ -18,6 +18,8 @@ from llm_router import local_context_guard as lcg
 from llm_router import context_tags, local_models, pack_overflow
 from llm_router.paths import is_isolated
 
+pytestmark = pytest.mark.usefixtures("open_url_via_urlopen")  # LC-12h: Ollama requests go through local_privacy.open_url
+
 MODEL = "qwen3-coder:30b"
 WINDOW = 2048
 

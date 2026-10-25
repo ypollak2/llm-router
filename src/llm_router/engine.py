@@ -39,7 +39,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from llm_router import capped_log, decision_ledger, failopen, ml_lexical, prompt_key
 from llm_router.classify import GATEWAY_POLICY, _score_categories, classify_signals
@@ -319,26 +319,112 @@ def _reason(s: str) -> str:
     return s if len(s) <= 120 else s[:119] + "…"
 
 
-#: High-precision secret shapes only (PLAN task 4, FP first). The scrubber's
-#: ``SECRET_PATTERNS`` redacts liberally ("password=x", "Bearer auth") and over-fires
-#: on coding prompts; blocking or localising a turn needs a stricter test.
+#: Secret shapes. Every quantifier is bounded, so a scan is linear in the text (a 48k-char run of ``[a-z0-9+.-]``
+#: took 1.6 s with the unbounded ``db_url_password`` scheme; LC-12h repair). Which shapes may REFUSE a call is
+#: ``HIGH_PRECISION`` below; the rest are counted by category (``local_privacy``) and nothing more.
 _SECRET_SHAPES = {
-    "anthropic_key": re.compile(r"\bsk-ant-[A-Za-z0-9_-]{32,}"),
+    "anthropic_key": re.compile(r"\bsk-ant-[A-Za-z0-9_-]{32,256}"),
     # Listed before openai_key; openai_key excludes this exact shape so one key yields one name.
     "openrouter_key": re.compile(r"\bsk-or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-])"),
-    "openai_key": re.compile(r"\bsk-(?!or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-]))(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{32,}"),
-    "google_key": re.compile(r"\bAIza[0-9A-Za-z_-]{35,}"),
+    "openai_key": re.compile(r"\bsk-(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-]))(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]{0,300}\d)(?=[A-Za-z0-9_-]{0,300}[A-Za-z])[A-Za-z0-9_-]{32,256}"),
+    "google_key": re.compile(r"\bAIza[0-9A-Za-z_-]{35,128}"),
     "aws_key_id": re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
-    "github_token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})"),
-    "slack_token": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}"),
-    "private_key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
-    "bearer_token": re.compile(r"\bBearer\s+(?=[A-Za-z0-9._~+/-]*\d)[A-Za-z0-9._~+/-]{30,}=*"),
-    "db_url_password": re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s:/@]+:(?![$<{])[^\s@/]{8,}@[\w.-]+", re.I),
+    "github_token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{50,255})"),
+    "slack_token": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,256}"),
+    "private_key": re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----"),
+    "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}"),
+    "bearer_token": re.compile(r"\bBearer\s{1,8}(?=[A-Za-z0-9._~+/-]{0,300}\d)[A-Za-z0-9._~+/-]{30,512}=*"),
+    "db_url_password": re.compile(
+        r"\b[a-z][a-z0-9+.-]{0,31}://([^\s:/@]{1,64}):(?![$<{])([^\s@/]{8,128})@[\w.-]{1,255}", re.I),
 }
 #: ``api_key = "<literal>"`` style assignment of a quoted, high-entropy literal.
 _ASSIGN = re.compile(
-    r"\b(?:api[_-]?key|secret|token|passw(?:or)?d|auth)[\w-]*[\"']?\s*[:=]\s*[\"']([A-Za-z0-9+/=_-]{20,})[\"']", re.I)
+    r"\b(?:api[_-]?key|secret|token|passw(?:or)?d|auth)[\w-]{0,40}[\"']?\s{0,8}[:=]\s{0,8}[\"']([A-Za-z0-9+/=_-]{20,512})[\"']",
+    re.I)
+
+#: The shapes that may refuse a call (LC-12h repair, PR #721 review): a real provider key prefix with enough length
+#: and entropy and no placeholder look, a PEM private-key block with a body, a bearer token with entropy, a
+#: database URL whose password is not a common word, and a JWT that decodes to real-looking claims (not the jwt.io
+#: sample or a test fixture). ``assigned_literal`` (any quoted 20-char mixed literal after "token =") is LOG-ONLY:
+#: counted, never refused. Whatever a line, or the two lines above it, labels with a filename or config cue
+#: (``.env.example``, ``example.env``, "sample config", a ``.example`` / ``.sample`` / ``.template`` path) is never
+#: high either: :func:`_labelled_example`. Free-text words ("fake", "dummy", "placeholder") are not cues.
+HIGH_PRECISION = frozenset({"anthropic_key", "openrouter_key", "openai_key", "google_key", "aws_key_id",
+                            "github_token", "slack_token", "private_key", "bearer_token", "db_url_password", "jwt"})
+#: What a person reads in a refusal (the category, never the value).
+SECRET_LABELS = {
+    "anthropic_key": "Anthropic API key", "openrouter_key": "OpenRouter API key", "openai_key": "OpenAI API key",
+    "google_key": "Google API key", "aws_key_id": "AWS access key", "github_token": "GitHub token",
+    "slack_token": "Slack token", "private_key": "private key block", "jwt": "JWT",
+    "bearer_token": "bearer token", "db_url_password": "database URL password",
+    "assigned_literal": "assigned secret literal",
+}
+
+# VALUE-based exemptions (not label-based): the token set below and ``_PLACEHOLDER_SUBSTR`` look at the value itself,
+# so a real secret that contains "example" or "dummy" (or any listed word) is exempt. Known residual, documented in
+# SECURITY.md; behaviour deliberately unchanged.
+_PLACEHOLDER_TOKENS = frozenset({
+    "your", "yours", "example", "examples", "sample", "dummy", "fake", "test", "tests", "testing", "demo",
+    "placeholder", "changeme", "change", "replace", "redacted", "insert", "here", "todo", "foo", "bar", "xxx",
+    "token", "key", "secret", "password", "passwd", "none", "null", "undefined", "mock", "fixture", "temp", "tmp"})
+_PLACEHOLDER_SUBSTR = ("changeme", "placeholder", "example", "dummy", "redacted", "yourkey", "yourtoken",
+                       "your_", "your-", "replace_me", "replaceme", "insert", "xxxxxxxx")
+_COMMON_PASSWORDS = frozenset({
+    "password", "passw0rd", "password1", "password123", "pass", "passwd", "secret", "secrets", "postgres",
+    "mysql", "root", "rootpassword", "admin", "administrator", "adminpassword", "user", "username", "mypassword",
+    "mysecret", "changeme", "example", "test", "testing", "testpass", "testpassword", "dev", "devpassword",
+    "localpass", "localhost", "guest", "default", "letmein", "qwerty", "qwertyuiop", "12345678", "123456789",
+    "1234567890", "redis", "mongo", "mongodb", "rabbitmq", "secretpassword", "dbpassword", "dbpass",
+    "supersecret", "foobarbaz", "hunter2", "welcome", "welcome1", "p@ssw0rd", "p@ssword"})
+_KEY_PREFIX = re.compile(r"^(?:sk-ant-|sk-or-v1-|sk-(?:proj-|svcacct-)?|AIza|gh[pousr]_|github_pat_|xox[baprs]-)")
+_FILLER_RUN = re.compile(r"[xX*0.]{8,}")
+
+
+def _sequential(s: str) -> bool:
+    """8+ consecutive ascending or descending characters (``01234567``, ``abcdefgh``): a typed placeholder."""
+    run = 1
+    for i in range(1, len(s)):
+        step = ord(s[i]) - ord(s[i - 1])
+        run = run + 1 if (step == 1 and s[i].isalnum() and s[i - 1].isalnum()) else 1
+        if run >= 8:
+            return True
+    return False
+
+
+def _is_placeholder(value: str) -> bool:
+    """True for an obviously fake value: documentation keys, filler runs, ``YOUR_...`` / ``<...>`` / ``${...}``,
+    ``changeme``-style words, sequential typing."""
+    low = value.lower()
+    if _FILLER_RUN.search(value) or _sequential(value):
+        return True
+    if "<" in value or ">" in value or "${" in value or "{{" in value:
+        return True
+    if any(sub in low for sub in _PLACEHOLDER_SUBSTR):
+        return True
+    # whole delimiter-separated words only: a random key never splits into "key" or "test"
+    return any(tok in _PLACEHOLDER_TOKENS for tok in re.split(r"[_\-. :/]+", low) if tok)
+
+
+def _random_looking(body: str, *, bits: float = 3.5, distinct: int = 10) -> bool:
+    return len(set(body)) >= distinct and _entropy(body) >= bits
+
+
+def _pem_block_is_real(text: str, end: int) -> bool:
+    """A PEM private-key header followed by a base64 body that is not filler (not a bare header in a question)."""
+    tail = text[end:end + 4096]
+    body = tail.split("-----END", 1)[0]
+    body = "".join(body.split())
+    return len(body) >= 40 and re.fullmatch(r"[A-Za-z0-9+/=]+", body) is not None and not _is_placeholder(body) \
+        and _random_looking(body, bits=3.0, distinct=12)
+
+
+def _db_password_is_real(user: str, password: str) -> bool:
+    low = password.lower()
+    if low == user.lower() or low in _COMMON_PASSWORDS or _is_placeholder(password):
+        return False
+    mixed = ((any(c.isdigit() for c in password) and any(c.isalpha() for c in password))
+             or (any(c.isupper() for c in password) and any(c.islower() for c in password)))
+    return mixed and _random_looking(password, bits=3.3, distinct=8)
 
 
 def _entropy(s: str) -> float:
@@ -346,14 +432,138 @@ def _entropy(s: str) -> float:
     return -sum(c / n * math.log2(c / n) for c in (s.count(ch) for ch in set(s)))
 
 
+#: A filename or config cue near a value that says the value is an example: ``.env.example`` / ``.env.sample`` /
+#: ``example.env``, "sample config" / "example env file", or a path ending ``.example`` / ``.sample`` /
+#: ``.template``. Free-text words ("fake", "dummy", "placeholder", "not a real", "for illustration") are NOT cues:
+#: anyone can write them next to a real key (#721 review, round 2), so they exempt nothing.
+_EXAMPLE_LABEL = re.compile(
+    r"\.env\.(?:example|sample|template)\b|\b(?:example|sample)\.env\b|"
+    r"\b(?:example|sample)\s+(?:env|config|configuration)\b|"
+    r"[\w./-]+\.(?:example|sample|template)(?![\w-]|\.\w)", re.I)
+
+
+def _labelled_example(text: str, start: int, end: int) -> bool:
+    """True when the line holding ``text[start:end]``, or one of the two lines above it (a fence or heading), carries
+    a filename/config example cue (:data:`_EXAMPLE_LABEL`). The cue is the author's statement that the value is not
+    real; it exempts a real-looking value on purpose, and the door counts every exemption
+    (``exempted_by_label:<label>``). Bounded to 300 characters before and 200 after the value."""
+    window_start = text.rfind("\n", 0, start) + 1
+    for _ in range(2):
+        window_start = text.rfind("\n", 0, max(0, window_start - 1)) + 1
+    line_end = text.find("\n", end)
+    lo, hi = max(window_start, start - 300), min(len(text) if line_end < 0 else line_end, end + 200)
+    return bool(_EXAMPLE_LABEL.search(text, lo, hi))
+
+
+_JWT_DUMMY_CLAIM = re.compile(
+    r"^(?:1234567890|123456|123|1|0|john doe|jane doe|me|you|subject|sub|"
+    r"(?:user|demo|test\w*|admin|alice|bob|foo|bar|baz|fake\w*|dummy\w*|sample\w*|example\w*)[-_. ]?\d{0,4})$", re.I)
+_JWT_ID_CLAIMS = ("sub", "name", "email", "preferred_username", "username", "user", "user_id", "uid", "id", "iss", "aud")
+_JWT_IO_SIGNATURE = "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+
+
+def _b64json(part: str) -> dict | None:
+    import base64
+    try:
+        out = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+    except Exception:  # noqa: BLE001 - not base64 / not JSON: not a decodable token
+        return None
+    return out if isinstance(out, dict) else None
+
+
+def _dummy_claim(value: str) -> bool:
+    v = value.strip().lower()
+    return bool(_JWT_DUMMY_CLAIM.match(v) or "@example." in v or v.endswith("example.com") or re.search(r"\btest", v)
+                or "example" in v or "fixture" in v)
+
+
+def _jwt_is_real(token: str) -> bool:
+    """A JWT that may be a live credential: three decodable parts, a random-looking signature that is not the jwt.io
+    sample, not ``alg: none``, and identity claims that are not all test/demo values. The shape alone is how every
+    test fixture looks; that was the reviewer's 20/20."""
+    header, payload, signature = token.split(".")
+    head, body = _b64json(header), _b64json(payload)
+    if head is None or body is None or str(head.get("alg", "")).lower() == "none":
+        return False
+    if signature.startswith(_JWT_IO_SIGNATURE) or _is_placeholder(signature) or not _random_looking(signature, bits=3.0, distinct=12):
+        return False
+    ids = [str(body[k]) for k in _JWT_ID_CLAIMS if isinstance(body.get(k), (str, int))]
+    return not (ids and all(_dummy_claim(v) for v in ids))
+
+
+#: Text is scanned in windows so no input shape costs more than a window's worth of regex work; consecutive windows
+#: overlap by more than the longest possible match (jwt: 3 x 512 + 2; bearer 8 + 512; everything else shorter), so a
+#: secret straddling a window edge is whole in the next one. Nothing is skipped: the whole text is scanned.
+_SCAN_WINDOW = 16384
+_SCAN_OVERLAP = 2048
+
+
+def _windows(text: str):
+    n = len(text)
+    if n <= _SCAN_WINDOW:
+        yield 0, text
+        return
+    step = _SCAN_WINDOW - _SCAN_OVERLAP
+    for start in range(0, n, step):
+        yield start, text[start:start + _SCAN_WINDOW]
+        if start + _SCAN_WINDOW >= n:
+            return
+
+
+def secret_findings(text: str, on_exempt: Callable[[str], None] | None = None) -> dict[str, bool]:
+    """``{shape name: is_high}`` for the secret shapes in ``text`` (names only, never the secret).
+
+    ``is_high`` is True when some match of a ``HIGH_PRECISION`` shape is a real-looking value: not a placeholder
+    (``AKIA...EXAMPLE``, ``ghp_xxxx...``, ``YOUR_API_KEY_HERE``, ``postgres:postgres@``), long and random enough.
+    ``on_exempt(name)`` is called for each real-looking match a filename/config label exempted (the door counts them).
+    Linear in ``len(text)``."""
+    found: dict[str, bool] = {}
+    for offset, window in _windows(text):
+        for name, pat in _SECRET_SHAPES.items():
+            for m in pat.finditer(window):
+                if found.get(name):
+                    break  # already high: nothing more to learn from this shape
+                found.setdefault(name, False)
+                if name not in HIGH_PRECISION:
+                    break
+                if name == "private_key":
+                    high = _pem_block_is_real(text, offset + m.end())  # the body may lie past this window
+                elif name == "db_url_password":
+                    high = _db_password_is_real(m.group(1), m.group(2))
+                elif name == "jwt":
+                    high = _jwt_is_real(m.group(0))
+                elif name == "bearer_token":
+                    value = m.group(0).split(None, 1)[1].rstrip("=")
+                    high = not value.startswith("eyJ") and not _is_placeholder(value) and _random_looking(value)
+                else:
+                    value = m.group(0)
+                    body = _KEY_PREFIX.sub("", value, count=1)
+                    high = not _is_placeholder(value) and _random_looking(
+                        body, bits=3.0 if name == "aws_key_id" else 3.5, distinct=9 if name == "aws_key_id" else 12)
+                if high and _labelled_example(window, m.start(), m.end()):
+                    high = False  # a filename/config cue labels it an example (.env.example, sample config, ...)
+                    if on_exempt is not None:
+                        on_exempt(name)
+                if high:
+                    found[name] = True
+        if "assigned_literal" not in found:
+            for m in _ASSIGN.finditer(window):
+                lit = m.group(1)
+                if any(c.isdigit() for c in lit) and any(c.isalpha() for c in lit) and _entropy(lit) >= 3.3:
+                    found["assigned_literal"] = False
+                    break
+    return found
+
+
 def _secret_names(text: str) -> list[str]:
-    names = [name for name, pat in _SECRET_SHAPES.items() if pat.search(text)]
-    for m in _ASSIGN.finditer(text):
-        lit = m.group(1)
-        if any(c.isdigit() for c in lit) and any(c.isalpha() for c in lit) and _entropy(lit) >= 3.3:
-            names.append("assigned_literal")
-            break
-    return names
+    return list(secret_findings(text))
+
+
+def secret_names(text: str) -> list[str]:
+    """The secret shapes found in ``text`` (names only, never the secret), placeholders included: the engine's
+    ``local_only`` signal and the CLS pipeline read this. The secret door (``local_privacy``) reads
+    :func:`secret_findings` instead, which separates the shapes that may refuse a call."""
+    return _secret_names(text)
 
 
 def guard(text: str, *, door: str, local_model_healthy: bool, ctx_digest: str = "",

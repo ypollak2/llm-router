@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 77
+# llm_router-hook-version: 78
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -247,7 +247,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 77"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 78"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -2783,6 +2783,16 @@ OLLAMA_MODELS = _DISCOVERED_OLLAMA          # empty = no local model; classify_w
 OLLAMA_CODE_MODELS = _DISCOVERED_OLLAMA_VALIDATED
 
 
+def _ollama_open(req, base_url, timeout):
+    """LC-12h: a request that carries prompt text goes to a loopback Ollama direct (no HTTP proxy env, no redirect);
+    a remote daemon, or a host without the llm_router package, keeps urlopen and so the user's proxy policy."""
+    try:
+        from llm_router.local_privacy import open_url
+    except ImportError:
+        return urllib.request.urlopen(req, timeout=timeout)
+    return open_url(req, base_url=base_url, timeout=timeout)
+
+
 def classify_with_ollama(text: str) -> str | None:
     """Classify using local Ollama. Tries primary model, falls back to smaller.
 
@@ -2824,7 +2834,7 @@ def classify_with_ollama(text: str) -> str | None:
                 data=body,
                 headers={"Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+            with _ollama_open(req, OLLAMA_URL, OLLAMA_TIMEOUT) as resp:
                 result = json.loads(resp.read())
                 content = result.get("message", {}).get("content", "")
                 category = _extract_category(content)

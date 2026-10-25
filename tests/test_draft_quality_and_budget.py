@@ -17,6 +17,8 @@ import pytest
 from llm_router.grounding import draft_is_memorable
 from llm_router.hooks import direct_executor as de
 
+pytestmark = pytest.mark.usefixtures("open_url_via_urlopen")  # LC-12h: Ollama requests go through local_privacy.open_url
+
 
 class TestSystemPromptStatesTheSituation:
     """The prompt used to say "displayed directly in the user's terminal", which

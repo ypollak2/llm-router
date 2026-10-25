@@ -13,6 +13,7 @@ import time
 import urllib.request
 from dataclasses import dataclass, field
 
+from llm_router import local_privacy
 from llm_router.local_context_guard import (
     ContextOverflow,
     check_overflow,
@@ -231,7 +232,7 @@ class OllamaAdapter:
                                      headers={"Content-Type": "application/json"})
         t0 = time.monotonic()
         try:
-            with urllib.request.urlopen(req, timeout=max(1.0, timeout_s)) as resp:
+            with local_privacy.open_url(req, base_url=self.base_url, timeout=max(1.0, timeout_s)) as resp:
                 result = json.loads(resp.read())
         except Exception as exc:  # noqa: BLE001
             raise AdapterError(f"llm_unreachable: {type(exc).__name__}: {exc}") from exc

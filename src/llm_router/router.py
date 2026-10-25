@@ -3936,22 +3936,22 @@ async def _dispatch_model_loop(
 
         except Exception as e:
             from llm_router.eligibility_routing import OverflowSwitchRefused as _OverflowRefused
-            if isinstance(e, _OverflowRefused):
+            from llm_router.local_privacy import PrivateEndpointRefused as _EndpointRefused
+            if isinstance(e, (_OverflowRefused, _EndpointRefused)):
                 # LC-12g: a policy refusal, not a provider fault. No health failure (two would bench the
-                # daemon), no attempt_failed row, no "failed ... trying next"; the pass-only chain has one
-                # model, so the walk stops. llm_text_job reads the cause off the exhaustion error.
-                await _notify(ctx, "warning", f"{model}: the input does not fit and switching to an unpassed "
-                                              "model is refused - local-only job stops here")
+                # daemon), no attempt_failed row, no "failed ... trying next"; the walk stops. llm_text_job
+                # reads the cause off the exhaustion error. LC-12h: nor a chain error (no fallback occurred).
+                await _notify(ctx, "warning", f"{model}: local-only call refused ({e}) - stops here")
                 route_log.warning(
                     "routing_policy_refusal",
                     correlation_id=correlation_id,
                     model=model,
                     provider=provider,
                     error_type=type(e).__name__,
-                    fallback_reason="overflow_switch_refused",
+                    fallback_reason=("overflow_switch_refused" if isinstance(e, _OverflowRefused)
+                                     else "private_endpoint_refused"),
                 )
                 last_error = e
-                chain_errors.append((model, f"{type(e).__name__}: {e}"))
                 break
             _note_local_timeout(model, e)  # LOCAL-TIMEOUT-1
             if model.startswith("ollama/") and _is_timeout_error(e):
@@ -4079,15 +4079,17 @@ async def _dispatch_model_loop(
     # ── Emergency fallback: try BUDGET chain when primary chain exhausts ────
     # LC-12b / D-277: a pass-routed text job (flag unset) never walks the BUDGET chain, which can hold paid
     # cloud models; the primary chain is the passed local model alone, so exhausting it is the end.
-    from llm_router import eligibility_routing
+    # LC-12h: nor does a call the secret door made local-only (the BUDGET chain can hold cloud models).
+    from llm_router import eligibility_routing, local_privacy
     _pass_only_call = eligibility_routing.pass_only_call(eligibility_exempt_reason)
-    if _pass_only_call and _would_fall_back:
+    _secret_call = local_privacy.secret_dispatch_active()
+    if (_pass_only_call or _secret_call) and _would_fall_back:
         route_log.info(
             "emergency_fallback_skipped",
             correlation_id=correlation_id,
-            reason="pass_only_text_job",
+            reason="pass_only_text_job" if _pass_only_call else "secret_local_only",
         )
-    if _would_fall_back and not _local_override and not _pass_only_call:
+    if _would_fall_back and not _local_override and not _pass_only_call and not _secret_call:
         await _notify(
             ctx, "warning",
             f"⚠️  {profile.value} chain exhausted — trying budget models as fallback"
@@ -4592,6 +4594,9 @@ async def route_and_call(
     # with a fallback (llm_text_job, llm_edit) names itself here; the F106 failed-lane filter
     # then keeps the chain and only records ``eligibility_bypassed``. Never an MCP parameter.
     eligibility_exempt_reason: str | None = None,
+    # LC-12h repair 1: the secret door's per-request override as a flag (the ``cloud:`` prompt prefix and the gateway
+    # header do the same). The override is counted by category only.
+    allow_cloud: bool = False,
 ) -> LLMResponse:
     """Route a request to the best available model and return the response.
 
@@ -4717,6 +4722,10 @@ async def route_and_call(
     """
     config = get_config()
     skip_causes.begin()  # F23: fresh per-call list of passed-over entries
+    # LC-12h: the per-request secret override (`cloud:` prefix) is read and stripped before anything sees the text.
+    from llm_router import local_privacy as _lp
+    prompt, _secret_override = _lp.split_override(prompt, system_prompt, caller_context)
+    _secret_override = _lp.override_requested(prefix=_secret_override, flag=allow_cloud)
     correlation_id = uuid4().hex[:8]
     # Phase 0.5 (Option A sidecar bridge): when the hook minted a directive id
     # for this turn (threaded down from an MCP door), the BILLABLE-ROW
@@ -5318,6 +5327,29 @@ async def route_and_call(
                     f"the passed local model is not in the final {task_type.value} chain")
             models_to_try = [_pass_model]
 
+        # LC-12h / D-28 A: the secret door, after every chain transform (none can add a cloud entry back). A prompt
+        # with a secret goes to loopback, non-cloud local models only, or nowhere; the dispatch below is then private
+        # (no semantic cache, no judge queue, no emergency fallback, direct client, overflow kept local).
+        # Only the NEW request and what this call attached are scanned, never ``messages`` (earlier turns): each was
+        # scanned when it was the new request, and one past secret must not refuse every later turn. SECURITY.md.
+        _secret_hits = _lp.scan_secrets(prompt, system_prompt, caller_context)
+        _lp.note_history_secrets(messages)
+        _secret_private = bool(_secret_hits)
+        if _secret_private and _secret_override:
+            for _h in _secret_hits:
+                _lp.count_secret_event("overridden", _h.label)
+            _secret_private = False  # the caller asked for this request to go as ordinary traffic
+        if _secret_private:
+            _local_chain = _lp.local_only_chain(models_to_try)
+            _pinned_cloud = bool(model_override) and not _lp.stays_local(model_override)
+            if not _local_chain or _pinned_cloud:
+                for _h in _secret_hits:
+                    _lp.count_secret_event("refused", _h.label)
+                await _release_reservation_if_held()
+                raise _lp.refusal(_secret_hits, model_override=model_override if _pinned_cloud else None)
+            models_to_try = _local_chain
+        _private = _pass_only or _secret_private
+
         if not models_to_try:
             set_span_attributes(
                 route_span,
@@ -5416,7 +5448,8 @@ async def route_and_call(
         # LC-12g / D-277: never on a pass-only text job. The check embeds the prompt through Ollama's
         # /api/embeddings (urllib: honours HTTP_PROXY, no loopback check), and a hit could return an
         # answer a cloud model wrote, which breaks "the local model alone".
-        if task_type not in MEDIA_TASK_TYPES and not model_override and not _pass_only:
+        # LC-12h: nor on the secret door (same two reasons: the embedding POST, and a cached cloud answer).
+        if task_type not in MEDIA_TASK_TYPES and not model_override and not _private:
             try:
                 from llm_router import semantic_cache
                 cached = await semantic_cache.check(prompt, task_type, key=_semantic_key)
@@ -5811,7 +5844,13 @@ async def route_and_call(
             _LEDGER_SESSION_OVERRIDE.set(agent_session_id) if agent_session_id else None
         )
         # LC-12g: providers and semantic_cache read the router's pass-only predicate for this dispatch.
+        # LC-12h: and the secret door's marker (local_privacy.private_dispatch_active reads both). Set here, not where
+        # `_pass_only` is computed: between there and this line are early returns and raises (the cache-hit fast
+        # path, the refusals), and route_and_call runs in its caller's task, so a set without a finally spanning
+        # all of them would leak the marker into the caller. The one network step in between, the semantic cache
+        # check, is skipped on both private paths (`not _private` above).
         _po_tok = _er.set_pass_only_dispatch(_pass_only)
+        _sd_tok = _lp.set_secret_dispatch(_secret_private)
         try:
             if _effective_timeout is not None and _effective_timeout > 0:
                 response = await asyncio.wait_for(
@@ -5906,9 +5945,11 @@ async def route_and_call(
         finally:
             # CHZ-AUD-A-02: always clear the ledger session override so it cannot
             # leak into a later route on this task (nested/sequential calls).
+            # LC-12h: reset in reverse order of the sets (secret, pass-only, then the ledger override).
+            _lp.reset_secret_dispatch(_sd_tok)
+            _er.reset_pass_only_dispatch(_po_tok)
             if _led_tok is not None:
                 _LEDGER_SESSION_OVERRIDE.reset(_led_tok)
-            _er.reset_pass_only_dispatch(_po_tok)
         # RED1-5-02: do NOT release _pending_spend here. This line is reached only
         # after `_dispatch_model_loop` returned a successful response, and every
         # success return in that loop already released the reservation exactly once
@@ -6368,6 +6409,7 @@ async def route_and_stream(
     max_wall_clock_seconds: float | None = None,
     deadline_monotonic: float | None = None,
     idempotency_key: str | None = None,
+    allow_cloud: bool = False,  # LC-12h repair 1: the secret door's per-request override (see route_and_call)
 ) -> AsyncIterator[RouterStreamEvent]:
     """Stream a request to the best available model, yielding structured events.
 
@@ -6422,6 +6464,9 @@ async def route_and_stream(
         WallClockExceeded: Wall-clock timeout during dispatch.
     """
     config = get_config()
+    from llm_router import local_privacy as _lp_ov
+    prompt, _secret_override = _lp_ov.split_override(prompt, system_prompt, caller_context)  # LC-12h: the `cloud:` override, stripped first
+    _secret_override = _lp_ov.override_requested(prefix=_secret_override, flag=allow_cloud)
     correlation_id = uuid4().hex[:8]
     seq = 0  # Event counter
 
@@ -6507,6 +6552,21 @@ async def route_and_stream(
             "a model that supports them; LLM_ROUTER_CAPABILITY_ROUTING=0 turns the filter off."
         )
 
+    # LC-12h / D-28 A: the secret door, as in route_and_call: loopback local models only, or refused.
+    from llm_router import local_privacy as _lp
+    _secret_hits = _lp.scan_secrets(prompt, system_prompt, caller_context)
+    _secret_private = bool(_secret_hits)
+    if _secret_private and _secret_override:
+        for _h in _secret_hits:
+            _lp.count_secret_event("overridden", _h.label)
+        _secret_private = False
+    if _secret_private:
+        models_to_try = _lp.local_only_chain(models_to_try)
+        if not models_to_try:
+            for _h in _secret_hits:
+                _lp.count_secret_event("refused", _h.label)
+            raise _lp.refusal(_secret_hits)
+
     # ── Emit route.started event ──────────────────────────────────────────
     seq += 1
     yield {
@@ -6566,6 +6626,7 @@ async def route_and_stream(
                     messages=_stream_msgs,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    private=_secret_private,
                 ):
                     if provider_event["type"] == "delta":
                         # On first delta: emit attempt.committed (commit barrier)

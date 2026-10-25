@@ -335,7 +335,8 @@ def _post(model: str, assembled: str, timeout: float) -> str:
         url, data = f"{_base_url()}/api/chat", _payload(model, assembled)
     req = urllib.request.Request(url, data=json.dumps(data).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local URL
+    from llm_router import local_privacy
+    with local_privacy.open_url(req, base_url=_base_url(), timeout=timeout) as resp:  # noqa: S310 - local URL
         raw = resp.read()
     if backend() == "systemone":
         return raw.decode()  # the whole body: decision_classifier.parse_answer reads the answers
