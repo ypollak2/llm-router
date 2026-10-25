@@ -298,6 +298,10 @@ def write_row(row: dict, path: Path | None = None) -> None:
     for k, v in ENGINE_FIELD_DEFAULTS.items():
         if row.get(k) is None:
             row[k] = v
+    if row.get("inventory_sig") is None:  # W0-1: cached signature of the resource map, no file read when warm
+        from llm_router import decision_stamp
+
+        row["inventory_sig"] = decision_stamp.inventory_sig()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("a", encoding="utf-8") as fh:

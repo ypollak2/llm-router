@@ -153,6 +153,9 @@ def test_every_call_into_the_cost_writers_passes_the_field():
         kws = {k.arg for k in call.keywords}
         assert {"reason_code", "session_id"} <= kws, kws
         reason = next(k.value for k in call.keywords if k.arg == "reason_code")
+        if isinstance(reason, ast.Name):  # W0-1: one local feeds both reason_code and the stamped reason
+            reason = next(n.value for n in ast.walk(ast.parse((_REPO / "src/llm_router/router.py").read_text()))
+                          if isinstance(n, ast.Assign) and any(getattr(t, "id", None) == reason.id for t in n.targets))
         assert "REASON_" in ast.unparse(reason)  # a fallback code, never bare .get()
     assert seen_usage >= 6 and seen_routing >= 2
 

@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- W0-1: every routing decision row carries `layer`, `confidence`, `reason` and `inventory_sig`, so "routes to an
+  ineligible model" and the `llm-router why` layer become countable. Evidence: 2,717 `routing_decisions` rows,
+  `layer` and `inventory_sig` empty on all of them (independent audit, 2026-10-25). New `decision_stamp` module;
+  writers stamped: `router.route_and_call` (MCP tools and the gateway), the failed-call row in `cost`,
+  `hooks.savings_logger.log_direct_to_db` (hook, agent-route, SDK) and the proxy ledger (`cls_layer`,
+  `cls_confidence`, `cls_reason`, `inventory_sig`). `layer` is the engine layer (`L1`/`L3`/`cache`/`fallback`),
+  else the classifier label (`heuristic`, `llm`, `cached`, `override`, `prefix`, a fast-path name, `rules`,
+  `knn`), or `unhinted` when the caller named the task. `confidence` is the classifier's own number and NULL
+  when it has none (override, fallback, unhinted, prefix, 0.0): never fabricated. `inventory_sig` is
+  sha256[:12] of the resource map's connected set, priority order and policy (not quota or timestamps), cached
+  for 30 s, so a warm call does no file I/O; NULL when there is no usable map. Rows written before this change
+  stay NULL. Not stamped: the lineage store's separate `routing_decisions` table and `model_tracking.jsonl`.
 - P3.6-c PR3d (review of PR #708): a tune scoring is canonical only after the owner labelling pass is recorded
   complete (`redo-label --owner` writes counts-only `owner_done.json`: `n_labelled` and the sha256 of
   `labels_owner.jsonl`); earlier scorings (e.g. judge-only) print F1, log `owner_done: false` and lock nothing, so

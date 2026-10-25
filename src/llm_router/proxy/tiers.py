@@ -257,6 +257,10 @@ class TierDecision:
     # computed it (P0.9-e: computed at most once, and only then); None = not computed.
     # The proxy reuses it for the ledger's ``tier_haiku_block`` instead of a second pass.
     haiku_block: str | None = None
+    # W0-1: which classifier layer decided the class, and its confidence (None = not measured, or
+    # the call never reached the classifier). Written to the ledger as cls_layer / cls_confidence.
+    cls_layer: str | None = None
+    cls_confidence: float | None = None
 
     @property
     def rewritten(self) -> bool:
@@ -419,7 +423,10 @@ def with_complexity_knn(base=None):
 
         # P3.6-b: both live deciders answered; one text-free row {ts, rules_tier, knn_tier, source}
         classifier_health.record_agreement(choice.get("complexity"), ks.needs_frontier)
-        choice["complexity"] = complexity_knn.frontier_complexity(choice.get("complexity"), ks.needs_frontier)
+        moved = complexity_knn.frontier_complexity(choice.get("complexity"), ks.needs_frontier)
+        if moved != choice.get("complexity"):
+            choice["layer"], choice["confidence"] = "knn", None  # W0-1: the kNN score decided the tier
+        choice["complexity"] = moved
         choice["complexity_score"] = round(ks.score, 4)
         return choice
 
@@ -899,7 +906,8 @@ class ClaudeTierPolicy:
                             proposed_tier=haiku.name, arm=haiku_arm.ARM_NAME,
                             arm_assignment=haiku_arm.ASSIGNED, arm_reason=haiku_arm.WHY_MATCHED + matched,
                             arm_bucket=bucket, arm_turn=turn_id,
-                            chain_head=list(choice.get("chain_head") or [])[:4])
+                            chain_head=list(choice.get("chain_head") or [])[:4],
+                            cls_layer=choice.get("layer"), cls_confidence=choice.get("confidence"))
 
     def decide_unclassified(self, body: dict, session_id: str | None, sticky: Stickiness) -> TierDecision:
         """The decision for a call the proxy could not label (``step_class == unknown``,
@@ -968,7 +976,7 @@ class ClaudeTierPolicy:
                   else REASON_EXPLICIT_PREFIX_PIN)
         return TierDecision(requested, target.model, target.name, reason,
                             switched=_canonical(target.model) != _canonical(requested),
-                            body_rewrite=rewrite)
+                            body_rewrite=rewrite, cls_layer="prefix")
 
     async def decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                      classify=None) -> TierDecision:
@@ -1183,4 +1191,5 @@ class ClaudeTierPolicy:
                             body_rewrite=body_rewrite,
                             task_type=task, complexity=cx, chain_head=list(choice.get("chain_head") or [])[:4],
                             complexity_score=choice.get("complexity_score"), detail=detail,
-                            proposed_tier=proposed)
+                            proposed_tier=proposed,
+                            cls_layer=choice.get("layer"), cls_confidence=choice.get("confidence"))

@@ -2815,6 +2815,18 @@ async def _finalize_successful_route(
     from llm_router.quality_feedback import is_skip_marker as _is_skip_marker
     _skipped = skip_causes.entries_so_far()
     _failed_before = [m for m in chain_attempts if m != model and not _is_skip_marker(m)]
+    # W0-1: layer / confidence / reason / inventory_sig on every row. An unhinted call named its own
+    # task, so no classifier layer ran (``unhinted``, confidence NULL); otherwise the engine's layer
+    # when it decided, else the classifier label. A confidence the classifier did not measure is NULL.
+    _stamp_reason = _cd.get("reason_code") or (
+        REASON_CACHE_HIT if ledger_outcome == "cache_hit"
+        else REASON_ROUTER_UNHINTED if _unhinted else REASON_ROUTER_CHAIN
+    )
+    from llm_router import decision_stamp as _stamp
+
+    _stamp_kw = _stamp.stamp("unhinted" if _unhinted else _cd.get("classifier_type"),
+                             None if _unhinted else _cd.get("classifier_confidence"),
+                             _stamp_reason, layer=None if _unhinted else _cd.get("layer"))
     try:
         from llm_router import call_identity as _call_identity
 
@@ -2876,10 +2888,7 @@ async def _finalize_successful_route(
             output_tokens=response.output_tokens,
             cost_usd=response.cost_usd,
             latency_ms=response.latency_ms,
-            reason_code=_cd.get("reason_code") or (
-                REASON_CACHE_HIT if ledger_outcome == "cache_hit"
-                else REASON_ROUTER_UNHINTED if _unhinted else REASON_ROUTER_CHAIN
-            ),
+            reason_code=_stamp_reason,
             correlation_id=correlation_id,
             response=response.content,
             requested_complexity=_cd.get("requested_complexity"),
@@ -2899,6 +2908,7 @@ async def _finalize_successful_route(
             served_by_last_resort=skip_causes.served_by_last_resort(
                 response.provider, _cd.get("task_type", task_type.value), _skipped, _failed_before),
             door=_call_identity.current_door(),  # P3.1-2: judge sampler door tag
+            **_stamp_kw,
         )
         if classification_data:
             if response.provider in {"claude_subscription", "subscription", "anthropic", "claude"}:

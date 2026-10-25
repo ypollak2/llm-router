@@ -1587,6 +1587,7 @@ async def log_route_error(
     # reason_code starts ``error_``, which every routing-metric reader excludes.
     try:
         from llm_router import call_identity as _ci
+        from llm_router import decision_stamp as _decision_stamp
 
         await log_routing_decision(
             prompt="",
@@ -1613,6 +1614,8 @@ async def log_route_error(
             correlation_id=correlation_id,
             session_id=_ci.call_session_id(),
             tool_use_id=_ci.tool_use_id(),
+            # W0-1: no classifier ran for a failed call; the reason and the inventory are known.
+            **_decision_stamp.stamp("unhinted", None, reason),
         )
     except Exception as _rd_err:  # noqa: BLE001 — the usage row above already stands
         import logging
