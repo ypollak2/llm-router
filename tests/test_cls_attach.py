@@ -386,7 +386,8 @@ def test_record_recovery_fills_e1_and_requested(tmp_path, capsys):
     ])
     ledger = wjsonl(tmp_path / "proxy_calls.jsonl", [{"msg_id": "m1", "requested_model": "claude-haiku-4-5"},
                                                      {"msg_id": "m9", "requested_model": "claude-opus-5-5"}])
-    files = {k: w["files"][k] for k in ("ge3_items", "ge3_split", "ge3_opus_labels", "e1_tasks", "e1_opus_labels")}
+    files = {k: w["files"][k] for k in ("ge3_items", "ge3_split", "ge3_opus_labels", "ge3_sonnet_labels", "e1_tasks",
+                                        "e1_opus_labels")}
     w2 = dict(w, files=files)
     argv = attach_argv(w2, extra=["--claude-root", str(claude), "--gt-scripts", str(tmp_path / "unused"),
                                   "--ledger", str(ledger)])
@@ -623,9 +624,11 @@ def _sha_world(tmp_path, n=20, n_joined=20):
     return f, cls
 
 
-def _ge3_argv(f, cls, name, opus, *extra):
+def _ge3_argv(f, cls, name, opus, *extra, sonnet=None):
+    """--ge3-sonnet-labels is required (S-1); by default the Opus label file stands in for it (same keys, same join)."""
     return ["attach", "--cls-root", str(cls), "--out", str(cls / "dev" / name), "--ge3-items", str(f["ge3_items"]),
-            "--ge3-split", str(f["split"]), "--ge3-opus-labels", str(f[opus])] + list(extra)
+            "--ge3-split", str(f["split"]), "--ge3-opus-labels", str(f[opus]),
+            "--ge3-sonnet-labels", str(f[sonnet or opus])] + list(extra)
 
 
 def _e1_argv(f, cls, name, opus, *extra):
@@ -668,17 +671,17 @@ def test_ge3_sonnet_zero_join_refused(tmp_path, capsys):
     f, cls = _sha_world(tmp_path)
     # Opus labels by text_sha join; Sonnet labels keyed by id join 0 items under the default: refused before any write
     out = cls / "dev" / "s"
-    assert A.main(_ge3_argv(f, cls, "s", "g_sha", "--ge3-sonnet-labels", str(f["g_id"]))) == 2
+    assert A.main(_ge3_argv(f, cls, "s", "g_sha", sonnet="g_id")) == 2
     cap = capsys.readouterr()
     assert ("Refused: label file for ge3_sonnet joined 0 items (check --ge3-label-join and the key field)" in cap.err
             and SENTINEL not in cap.err and cap.out == "" and not out.exists())
     # Sonnet labels by text_sha: accepted, and a partial join (4 of 20) warns, naming ge3_sonnet
-    assert A.main(_ge3_argv(f, cls, "s_ok", "g_sha", "--ge3-sonnet-labels", str(f["g_sha"]))) == 0
+    assert A.main(_ge3_argv(f, cls, "s_ok", "g_sha", sonnet="g_sha")) == 0
     assert "label file for" not in capsys.readouterr().err
     few = wjsonl(tmp_path / "few.jsonl", [{"text_sha": S.text_sha(txt(100 + i, "ge3 sha item")), "tier": "sonnet"}
                                           for i in range(4)])
     f["few"] = few
-    assert A.main(_ge3_argv(f, cls, "s_few", "g_sha", "--ge3-sonnet-labels", str(few))) == 0
+    assert A.main(_ge3_argv(f, cls, "s_few", "g_sha", sonnet="few")) == 0
     assert "WARNING: label file for ge3_sonnet joined 4 of 20 items (20 percent, below 50)" in capsys.readouterr().err
 
 
@@ -689,6 +692,68 @@ def test_session_from_record_ts_mismatch_counted():
     c = A.Counter()
     A.recover([same, diff], ({}, {S.text_sha("x y z"): rec}), None, lambda m: None, c)
     assert c["session_from_record"] == 2 and c["session_from_record_ts_mismatch"] == 1
+
+
+def test_ge3_without_sonnet_labels_refused_before_any_read(tmp_path, capsys):
+    """S-1 (#710 review): PREREG-CLS-DEV reuses GE3's Sonnet labels for all GE3 items, so --ge3-items without
+    --ge3-sonnet-labels refuses (exit 2), names flags only, and reads and writes nothing."""
+    f, cls = _sha_world(tmp_path)
+    out = cls / "dev" / "nosonnet"
+    argv = ["attach", "--cls-root", str(cls), "--out", str(out), "--ge3-items", str(f["ge3_items"]),
+            "--ge3-split", str(f["split"]), "--ge3-opus-labels", str(f["g_sha"])]
+    assert A.main(argv) == 2
+    cap = capsys.readouterr()
+    assert "--ge3-sonnet-labels" in cap.err and cap.out == "" and not out.exists()
+    assert SENTINEL not in cap.err and SM not in cap.err and str(tmp_path) not in cap.err
+    # refused before any read: a missing items file gives the same flag refusal, not an unreadable-file one
+    argv_missing = list(argv)
+    argv_missing[argv_missing.index("--ge3-items") + 1] = str(tmp_path / "absent.jsonl")
+    assert A.main(argv_missing) == 2
+    err = capsys.readouterr().err
+    assert "--ge3-sonnet-labels" in err and "unreadable" not in err and not out.exists()
+    # with the Sonnet labels the same run is accepted
+    assert A.main(argv + ["--ge3-sonnet-labels", str(f["g_sha"])]) == 0
+
+
+def test_inline_label_file_needs_key_join(tmp_path, capsys):
+    """N-1: an inline label file (the sample/tasks file itself) joins 0 items under the default text_sha join and is
+    refused; with --<set>-label-join key (and --<set>-label-tier truth) it is accepted. The help says so."""
+    sample, _ = synth_items(20, 0, tmp_path)
+    inline = wjsonl(tmp_path / "inline.jsonl", [dict(r, truth="opus") for r in read_rows_jsonl(sample)])
+    cls = tmp_path / "cls"
+    (cls / "dev").mkdir(parents=True)
+    base = ["attach", "--cls-root", str(cls), "--e2-sample", str(inline), "--e2-opus-labels", str(inline),
+            "--e2-label-tier", "truth"]
+    assert A.main(base + ["--out", str(cls / "dev" / "a")]) == 2
+    assert "label file for e2 joined 0 items" in capsys.readouterr().err
+    assert A.main(base + ["--out", str(cls / "dev" / "b"), "--e2-label-join", "key"]) == 0
+    capsys.readouterr()
+    sub = A.build_parser()._subparsers._group_actions[0].choices["attach"]
+    helps = {a.dest: a.help for a in sub._actions}
+    for fam in ("e2", "e1"):
+        assert "may be the" not in helps[fam + "_opus_labels"]
+        assert "--%s-label-join key" % fam in helps[fam + "_opus_labels"]
+        assert "--%s-label-tier truth" % fam in helps[fam + "_opus_labels"]
+    # _read_keyed's own default join matches the CLI default (text_sha): inline rows join 0 without "key"
+    rows = read_rows_jsonl(inline)
+    items = A._read_keyed(rows, "e2", inline, "e2_opus_labels", "id", "truth", A._e2_set, A.Counter())
+    assert len(items) == 20 and all(x["opus"] is None for x in items)
+
+
+def test_ts_mismatch_compares_parsed_utc_and_skips_empty_record_ts():
+    """N-2: "Z" and "+00:00" name the same instant (no mismatch); a record with no timestamp is not compared."""
+    mk = lambda ts: {"text": "x y z", "timestamp": ts, "session_id": None, "requested": None, "requested_basis": None}  # noqa: E731
+    sha = S.text_sha("x y z")
+    for rec_ts, item_ts, want in (("2026-09-01T00:00:00Z", "2026-09-01T00:00:00+00:00", 0),
+                                  ("2026-09-01T02:00:00+02:00", "2026-09-01T00:00:00Z", 0),
+                                  ("", "2026-09-01T00:00:00Z", 0),
+                                  ("2026-09-01T00:00:00Z", "2026-09-01T00:00:01Z", 1)):
+        rec = {"session_id": S2, "timestamp": rec_ts, "msg_id": None, "served_model": None}
+        c = A.Counter()
+        it = mk(item_ts)
+        A.recover([it], ({}, {sha: rec}), None, lambda m: None, c)
+        assert c["session_from_record"] == 1 and c["session_from_record_ts_mismatch"] == want, (rec_ts, item_ts)
+        assert it["timestamp"] == item_ts                                    # the item's own timestamp is kept
 
 
 def test_ge3_text_sha_join(tmp_path):
