@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from llm_router import state_files
 from llm_router.sqlite_wal import enable_wal
 
 SCHEMA_VERSION = 1
@@ -200,7 +201,7 @@ class TraceStore:
 
     def _connect(self) -> sqlite3.Connection:
         self.root.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.root / "traces.sqlite"))
+        conn = state_files.connect_sqlite(str(self.root / "traces.sqlite"))
         conn.row_factory = sqlite3.Row
         # M-06 / the sqlite_wal adoption gap. `busy_timeout` governs how long the
         # journal_mode PRAGMA itself waits for its exclusive lock, so setting it

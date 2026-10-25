@@ -26,6 +26,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+from llm_router import state_files
 from llm_router.compaction import compact_structural
 from llm_router.context_optimizer import ContextOptimizationResult, optimize_context
 from llm_router.okf import _KNOWLEDGE_CTX_RE
@@ -288,14 +289,13 @@ def _secure_db_perms(path: Path) -> None:
 def _open_session_db(db_path: Path) -> "sqlite3.Connection":
     """Open usage.db for the session-summary sink with 0600 perms +
     secure_delete so TTL purges physically remove secret bytes."""
-    import sqlite3
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     if not db_path.exists():
         db_path.touch(mode=0o600)
     else:
         _secure_db_perms(db_path)
-    conn = sqlite3.connect(str(db_path), timeout=5)
+    conn = state_files.connect_sqlite(str(db_path), timeout=5)
     conn.execute("PRAGMA busy_timeout=3000")
     # CHZ-AUD-D-04 (sibling): zero freed pages on DELETE so the TTL purge below
     # physically removes redacted-but-still-sensitive summary bytes.
@@ -509,7 +509,6 @@ async def get_recent_session_summaries(limit: int = 3) -> list[dict]:
         message_count, task_types. Ordered newest first.
     """
     import asyncio
-    import sqlite3
 
     db_path = _get_db_path()
     # Offload synchronous Path.exists() to thread pool to avoid blocking event loop
@@ -519,7 +518,7 @@ async def get_recent_session_summaries(limit: int = 3) -> list[dict]:
 
     _ensure_session_table(db_path)
 
-    conn = sqlite3.connect(str(db_path))
+    conn = state_files.connect_sqlite(str(db_path))
     try:
         rows = conn.execute(
             """SELECT summary, session_start, session_end, message_count, task_types

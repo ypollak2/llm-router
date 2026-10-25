@@ -1036,6 +1036,12 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     Returns:
         (exit_code, issues) where exit_code is 0 for success, 1 for failure
     """
+    from llm_router import state_files
+
+    _modes = state_files.migrate_once()  # W0-4 / S7: one-time 0600/0700 repair of older state files
+    if _modes and (_modes["files_fixed"] or _modes["dirs_fixed"]):
+        print(f"state modes: tightened {_modes['files_fixed']} file(s), {_modes['dirs_fixed']} dir(s) to 0600/0700")
+
     if host:
         _run_doctor_host(host)
         # Fall through to also run the full general checks

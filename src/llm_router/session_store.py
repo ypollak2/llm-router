@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_router.compaction import collapse_whitespace, dedup_sections
+from llm_router import state_files
 from llm_router.file_lock import exclusive_lock
 from llm_router.paths import llm_router_home
 
@@ -264,7 +265,7 @@ def _session_project_root(session_id: str) -> str | None:
             return None
         root = _repo_root_of(cwd)
         try:
-            pin.parent.mkdir(parents=True, exist_ok=True)
+            state_files.private_dir(pin.parent)
             # Atomic publish: write a private temp file, then os.link it to the pin path. link()
             # fails with FileExistsError if a winner exists, and a reader never sees a partial file.
             fd, tmp = tempfile.mkstemp(dir=str(pin.parent), prefix=".pin_", suffix=".tmp")
@@ -396,7 +397,7 @@ def _pointer_path() -> Path:
 
 def _write_json_atomic(path: Path, data: dict) -> None:
     """Write JSON to *path* via a same-directory temp file + atomic rename."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    state_files.private_dir(path.parent)
     fd, tmp_path = tempfile.mkstemp(
         dir=str(path.parent),
         prefix=f".{path.name}.",
@@ -749,7 +750,7 @@ def record_event(
                 # before the lock, adoption can still skip this shard (counted by
                 # _note_lock_timeout; `llm-router sessions merge` recovers it).
                 path = _session_path(session_id)
-            path.parent.mkdir(parents=True, exist_ok=True)
+            state_files.private_dir(path.parent)
             with exclusive_lock(_lock_path(path)) as locked:
                 if not locked:
                     _note_lock_timeout("session append")
@@ -807,7 +808,7 @@ def record_event(
 def _spill_to_archive(path: Path, lines: list[str]) -> None:
     """Append *lines* (original order) to the archive file of the session log at *path*, fsynced."""
     dest = path.parent / "archive" / path.name
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    state_files.private_dir(dest.parent)
     from llm_router.paths import private_opener
     with open(dest, "ab", opener=private_opener) as out:
         if out.tell() > 0:
@@ -1254,9 +1255,9 @@ def merge_session_shards(
                 return report
             merged = _collect(usable)
             report["events"] = len(merged)
-            target.parent.mkdir(parents=True, exist_ok=True)
+            state_files.private_dir(target.parent)
             tmp = target.with_suffix(".jsonl.merging")
-            with tmp.open("w", encoding="utf-8") as fh:
+            with state_files.open_private(tmp, "w", encoding="utf-8") as fh:
                 for line in merged:
                     fh.write(line + "\n")
                 fh.flush()
@@ -1309,9 +1310,9 @@ def archive_session(session_id: str | None) -> None:
                 return
             if not path.exists():
                 return
-            dest.parent.mkdir(parents=True, exist_ok=True)
+            state_files.private_dir(dest.parent)
             if dest.exists():
-                with open(dest, "ab") as out, open(path, "rb") as src:
+                with state_files.open_private(dest, "ab") as out, open(path, "rb") as src:
                     if out.tell() > 0:
                         with open(dest, "rb") as rf:
                             rf.seek(-1, os.SEEK_END)
@@ -1347,7 +1348,7 @@ def restore_session(session_id: str | None) -> bool:
                 return False
             if not arch.exists():
                 return False
-            path.parent.mkdir(parents=True, exist_ok=True)
+            state_files.private_dir(path.parent)
             data = arch.read_bytes()
             if data and not data.endswith(b"\n"):
                 data += b"\n"

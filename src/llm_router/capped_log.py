@@ -45,7 +45,9 @@ def append(path: Path, data: bytes, max_bytes: int, backups: int = 1) -> None:
         fd = os.open(path, flags, 0o600)
     except FileNotFoundError:
         # Cold path only: the state directory does not exist yet.
-        path.parent.mkdir(parents=True, exist_ok=True)
+        from llm_router import state_files  # W0-4: directories we create are 0700
+
+        state_files.private_dir(path.parent)
         fd = os.open(path, flags, 0o600)
     try:
         os.write(fd, data)
