@@ -149,6 +149,7 @@ def test_a_kind_change_changes_the_sig(tmp_path):
     assert snap["rows"][0]["kind"] == "subscription"
 
 
+@pytest.mark.timing
 def test_a_locked_db_costs_under_300ms_and_the_snapshot_is_retried_after_unlock(tmp_path):
     from llm_router import failopen
 
