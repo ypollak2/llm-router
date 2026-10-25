@@ -1204,6 +1204,8 @@ async def llm_text_job(
                 record_text_job_outcome(job=job, model=model, status=STATUS_FALLBACK, attempts=tried)
                 cause = (f"the local-only eligibility step failed for {job} ({type(exc.__cause__).__name__ if exc.__cause__ else 'error'})"
                          if isinstance(exc, eligibility_routing.EligibilityStepFailed)
+                         else f"the passed local model no longer matches its pass for {job} ({exc})"
+                         if isinstance(exc, eligibility_routing.LiveCheckRefused)
                          else f"the passed local model is not in the router's chain for {job}" if refused
                          else f"local-only routing did not complete ({type(exc).__name__})")
                 return (

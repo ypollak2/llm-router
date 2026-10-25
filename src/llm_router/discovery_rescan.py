@@ -205,6 +205,8 @@ def rescan(force=False, *, probe=probe_tags, detect=None, now=None,
             if models[name] != old_models[name]
         )
         if fingerprint != old.get("ollama_fp") or not model_discovery._cache_path().is_file():
+            # LC-12f: avoid a fresh cached_at trusting the old digest and missing remote flag after a digest change.
+            model_discovery.remember_tags_rows(tags)
             model_discovery._write_cache([
                 name for name in models if model_discovery._is_completion_model(name)
             ])

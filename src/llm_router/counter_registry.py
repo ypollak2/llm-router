@@ -385,8 +385,26 @@ def _read_judge_sampler() -> CounterReading:
         return CounterReading(None, unknown_reason=type(exc).__name__)
 
 
+def _fc_store_unreadable() -> str | None:
+    """LC-12f: distinguish an unreadable fail-closed store from an unparseable one."""
+    from llm_router import paths
+    from llm_router.eligibility_routing import FC_STORE_NAME
+
+    base = paths.state_path(FC_STORE_NAME)
+    for gen in (base.with_name(base.name + ".1"), base):
+        try:
+            with open(gen, "rb"):
+                pass
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return type(exc).__name__
+    return None
+
+
 def _read_text_job_fail_closed() -> CounterReading:
-    """Local-only text jobs refused because their eligibility step crashed, in the last 7 days (LC-12e).
+    """Local-only text jobs refused fail-closed (eligibility step crashed, or the pre-dispatch live check refused)
+    in the last 7 days (LC-12e / LC-12f).
 
     Windowed (``eligibility_routing.FC_WINDOW_S``) so one old crash does not alarm forever; the store is
     capped (``capped_log``). An unreadable store is UNKNOWN, never 0.
@@ -396,6 +414,9 @@ def _read_text_job_fail_closed() -> CounterReading:
 
         counts = fail_closed_counts()
         if counts is None:
+            why = _fc_store_unreadable()
+            if why:
+                return CounterReading(None, unknown_reason=f"fail-closed store unreadable ({why})")
             return CounterReading(None, alarming=True, unknown_reason="fail-closed store present but unparseable")
         total = sum(counts.values())
         days = FC_WINDOW_S / 86400

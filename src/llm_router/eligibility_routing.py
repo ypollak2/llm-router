@@ -232,6 +232,12 @@ class PassedModelNotInChain(RuntimeError):
     routable passed Ollama model first. Raised before any model is called, so no cloud model serves the job."""
 
 
+class LiveCheckRefused(PassedModelNotInChain):
+    """LC-12f: the pre-dispatch read of the model's live ``/api/tags`` row no longer matches its pass
+    (digest changed, remote metadata, model gone, or the daemon did not answer); the text job is refused
+    before any model call."""
+
+
 class EligibilityStepFailed(PassedModelNotInChain):
     """LC-12e: the local-only eligibility step itself raised; the text job is refused (fail closed), not routed."""
 
@@ -240,6 +246,8 @@ class EligibilityStepFailed(PassedModelNotInChain):
 FC_STORE_NAME = "text_job_fail_closed.jsonl"
 FC_ELIGIBILITY_STEP = "CHZ-FC-ROUTER-TEXT-JOB-ELIGIBILITY"
 FC_CUT_CHECK = "CHZ-FC-ROUTER-TEXT-JOB-CUT-CHECK"
+FC_LIVE_CHECK = "CHZ-FC-ROUTER-TEXT-JOB-LIVE-CHECK"
+LIVE_CHECK_TIMEOUT_S = 2.0
 #: Cap per generation (``capped_log``, two generations); a row is ~80 bytes, so ~3,000 rows each.
 FC_MAX_BYTES = 256 * 1024
 #: The doctor counts refusals of the last 7 days: one old crash does not alarm forever.
@@ -471,10 +479,65 @@ def _passed_lane(m_bare: str, job: str, digests: dict[str, str], now: float, eli
     return lane, source, None
 
 
+def _live_tags() -> Any | None:
+    """The user's Ollama daemon's ``/api/tags`` answer, or None. The daemon is the one LiteLLM sends the
+    generation to (``OLLAMA_API_BASE``, else ``http://localhost:11434``); a non-loopback endpoint is refused."""
+    from llm_router.local_check import runtimes as rt
+    base = os.environ.get("OLLAMA_API_BASE", "").strip() or "http://localhost:11434"
+    try:
+        ok, data = rt._fetch(base, "GET", "/api/tags", timeout=LIVE_CHECK_TIMEOUT_S)
+    except rt.RuntimeError_:  # a non-loopback daemon: the text would leave the machine
+        return None
+    return data if ok else None
+
+
+def live_check_refusal(model: str, job: str, now: float) -> str | None:
+    """LC-12f: pre-dispatch check of a pass-only text job, right before the passed model is called.
+
+    One GET of ``/api/tags`` to the user's own (loopback) Ollama daemon, with a short timeout.
+    Returns None when the live row still matches the pass, else "ollama did not answer" (error,
+    timeout or non-loopback endpoint: fail closed), "model not listed", "remote metadata"
+    (``ollama_remote_marker`` on the row), "digest changed" (a local-check lane's stored
+    ``model_digest`` differs from the live row's digest, normalised to the adapters' ``sha256:``
+    prefix), or "no passed lane". A pre-registered lane is keyed by name, not digest, so only
+    the remote check applies to it. Unexpected errors raise; the cut site turns them into
+    EligibilityStepFailed.
+    """
+    head, _, bare = model.partition("/")
+    if head != "ollama":
+        return "no passed lane"
+    from llm_router.local_check import display, routing as lr
+
+    e = lr.entry(bare, job)
+    lane, source, _ = _passed_lane(bare, job, display.inventory()[1], now, None, (e or {}).get("source"))
+    if lane is None:
+        return "no passed lane"
+    data = _live_tags()
+    if not isinstance(data, dict) or not isinstance(data.get("models"), list):
+        return "ollama did not answer"
+    rows = [m for m in data["models"] if isinstance(m, dict)]
+    names = set(lr.candidates(bare))
+    row = next((m for m in rows if m.get("name") in names or m.get("model") in names), None)
+    if row is None:
+        return "model not listed"
+    from llm_router.resolver.inventory import ollama_remote_marker
+
+    if ollama_remote_marker(row, None):
+        return "remote metadata"
+    if source == "local_check":
+        live = row.get("digest")
+        if isinstance(live, str) and live and not live.startswith("sha256:"):
+            live = "sha256:" + live
+        if not isinstance(live, str) or not live or live != lane.get("model_digest"):
+            return "digest changed"
+    return None
+
+
 def _routable(m: str, job: str, input_len: int, digests, ctx_for, think, eligibility, routing, now: float) -> bool:
     """True iff ``ollama/<bare>`` ``m`` has a passed lane for ``job`` that clears every guard of ``prefer_passed``.
 
     An Ollama cloud model (``-cloud`` / ``:cloud`` tag) is never routable: its prompts leave the machine (LC-12e).
+    A model whose cached discovery entry says ``remote: true`` is never routable either (LC-12f).
     """
     from llm_router.local_check import routing as lr
     from llm_router.resolver.inventory import is_ollama_cloud_model
@@ -482,6 +545,10 @@ def _routable(m: str, job: str, input_len: int, digests, ctx_for, think, eligibi
     if is_ollama_cloud_model(m):
         return False
     if not sep or head != "ollama" or not lr.is_enabled(bare, job, path=routing):
+        return False
+    from llm_router.local_check import display
+    if display.cached_remote(bare):  # LC-12f: discovery saw remote_host / remote_model for this name
+        skip_causes.note(m, skip_causes.NOT_PREFERRED, lane=job, detail="remote_cached")
         return False
     e = lr.entry(bare, job, path=routing)
     lane, source, withheld = _passed_lane(bare, job, digests, now, eligibility, (e or {}).get("source"))
