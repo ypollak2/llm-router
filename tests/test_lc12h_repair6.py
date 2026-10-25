@@ -9,6 +9,7 @@ has no ``litellm.model_cost`` entry. The ``_reset_local_privacy`` fixture remove
 teardown, so the carried task ran in a later test and did its own lookup against that test's proxy.
 
 Here the carried-over task is made on purpose (enqueued, loop closed before the worker runs), so the race is gone.
+Repair 5: the guard discards the worker's pending tasks (no awaiting on a private loop, which poisoned xdist workers).
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ async def _enqueue_late_logging_task(api_base: str) -> None:
     GLOBAL_LOGGING_WORKER.enqueue(late())
 
 
-def test_a_late_logging_task_finds_the_entry_even_after_the_test_teardown(servers):
+def test_a_late_logging_task_is_discarded_at_the_test_teardown(servers):  # noqa: F811 (imported fixture)
     proxy, ollama = servers
     bare = MODEL.split("/", 1)[1]
     local_privacy._install_model_info(litellm, bare, local_privacy._model_info_entry(bare, None))
