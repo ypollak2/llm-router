@@ -649,7 +649,7 @@ No offload or saving figure is claimed; none has been measured.
 Everything below is inert unless lane A actually SERVED a step: with the lane off there is no sampler, no shadow call,
 no `shadow_frontier/` file, no `lane_quality.jsonl` and no `lane` key on any row (`tests/test_lane_a_pr3.py` compares
 the state dir and replays the frozen main golden with `LLM_ROUTER_SHADOW_FRONTIER=on` too). The shadow runs with
-`LLM_ROUTER_SHADOW_FRONTIER=on` (OD-4 = A) on top of the lane A switches. Owner flip runbook: turn all four on, then send one request through the proxy to stamp the flip.
+`LLM_ROUTER_SHADOW_FRONTIER=on` (OD-4 = A) on top of the lane A switches. Owner flip runbook: turn all four on, then send one request through the proxy to stamp the flip. At flip + 28 d a task group the proxy could serve (`task_groups` in `lane_a_identity.json`: `code`, `qa`, and `tech_op` when `technical_op` is allowlisted) that has no lane A row closes with a NOT INFORMATIVE row (`n_below_min`, n = 0); with no identity record the group set is unknown and such a group gets no row. Concurrent first requests run one write; after a failed write the proxy waits 60 s before the next try.
 
 - **Lane tag.** The ledger row of a step Haiku answered for lane A carries `lane: "A"` (with `tier_reason:
   haiku_rewrite`, `lane_a_reason: served`). A retried step (`retried_original`, the pinned model answered), the D-31
@@ -705,10 +705,20 @@ the state dir and replays the frozen main golden with `LLM_ROUTER_SHADOW_FRONTIE
   - **A final row does not age out, and four identities invalidate it (D-302).** The S1 28 day read cap applies to
     audit batches only; credit from a final `shadow_pairs` row does not expire by age, and `kpi` prints each final
     row's age in days (`quality_sampled_lanes[].age_days`). Each row is stamped with `identity`: `lane_a_model` (the
-    `haiku` tier's model), `judge_brief_sha`, `prompt_set_sha` (the sha of lane A's `prev_tool_classes` and `tau`) and
-    `breaker_sha` (the `lane_a.breaker` thresholds). S1 ignores a final row whose stamp differs from the config in
-    force on any of the four (or has no stamp) and reports the lane under `invalidated_lanes` (with a caveat); nothing
-    opens a new window by itself, that needs a prereg amendment. Nothing else invalidates a final row.
+    `haiku` tier's model), `judge_brief_sha`, `prompt_set_sha` and
+    `breaker_sha` (the `lane_a.breaker` thresholds). **Prompt set** (pending prereg confirmation: confirmed by the
+    D-302 refinement) = sha of the `prev_tool_classes` allowlist + `tau` + any text-adding rewrite setting; the only
+    such setting is `haiku_fold_system` (it wraps mid-conversation system text in `<system-reminder>`); the default
+    Haiku rewrite adds no system prompt or template text. **The identity is the PROXY's (D-303).** The proxy computes
+    the four values from the policy it loaded at startup (`--tier-policy FILE`, the env path or the bundled one) and,
+    at the flip point (all four switches on), records them in `lane_a_identity.json` (state dir, 0600, replaced
+    at each proxy start; lane off writes nothing) and in the flip row. The writer stamps final rows from that record
+    and writes nothing, reporting `identity_unknown`, when none is recorded (the window stays open). S1 ignores a
+    final row whose stamp differs from the proxy's most recent recorded identity on any of the four (or has no
+    stamp) and reports the lane under `invalidated_lanes` (with a caveat); `kpi` prints and returns the compared
+    identity's sha (`compared_identity`) next to it. Validity is computed on every read, never latched: a reverted
+    change restores credit (D-303). The window itself never reopens; a new one needs a prereg amendment. Nothing else
+    invalidates a final row.
   - **Owner flip (D-302).** The flip is the FIRST PROXY REQUEST that sees all four switches on: YAML
     `lane_a.enabled`, `LLM_ROUTER_PROXY_LANE_A=on`, `haiku_rewrite` and the shadow flag, whether or not that step is
     eligible. It is recorded on that request in `lane_a_flip.json` in the state dir (`{flip_ts, switches, source}`,
@@ -716,7 +726,7 @@ the state dir and replays the frozen main golden with `LLM_ROUTER_SHADOW_FRONTIE
     the four values the request saw, so the flip can be audited. It is never written, and no directory is created,
     when any one switch is off, so a lane that is off leaves the state dir as on main. With no flip recorded the
     writer reads the trailing 14 days, the n >= 60 close still applies and no 28-day close can fire. The window starts
-    at the flip (`since` defaults to it); `--since` is a formal read. Owner flip runbook: turn all four on, then send one request through the proxy to stamp the flip.
+    at the flip (`since` defaults to it); `--since` is a formal read. Owner flip runbook: turn all four on, then send one request through the proxy to stamp the flip. At flip + 28 d a task group the proxy could serve (`task_groups` in `lane_a_identity.json`: `code`, `qa`, and `tech_op` when `technical_op` is allowlisted) that has no lane A row closes with a NOT INFORMATIVE row (`n_below_min`, n = 0); with no identity record the group set is unknown and such a group gets no row. Concurrent first requests run one write; after a failed write the proxy waits 60 s before the next try.
   - The same evidence writes the same `source`. The arm's verdict rows (no `lane`) are never read.
   - **Lane A verdicts and the arm's guard.** Lane A verdicts share `verdicts.jsonl` but are tagged `lane: "A"`: the
     arm's D-20 `haiku_guard.shadow_trigger`, `shadow_frontier.verdict_summary` (the statusline and the session report)

@@ -47,6 +47,8 @@ def home(tmp_path, monkeypatch):
 @pytest.fixture
 def on(home, monkeypatch):
     monkeypatch.setenv(sf.ENV_FLAG, "on")
+    # D-303: the writer and S1 read the identities the PROXY recorded; here it ran with the bundled policy
+    lane_a_shadow.record_identity(lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None)))
     return home
 
 
@@ -664,6 +666,14 @@ def _kpi_rows():
     return rows
 
 
+@pytest.fixture(autouse=False)
+def proxy_identity(home):
+    """D-303: the identities the proxy recorded (here the bundled policy's)."""
+    ident = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None))
+    lane_a_shadow.record_identity(ident)
+    return ident
+
+
 def _units(rows, quality):
     return osh.action_units(SINCE, UNTIL, proxy_rows=rows, mcp_rows=[], techops=[], edit_rows=[],
                             kind_of=lambda sid, stamp: "organic", quality_rows=quality, outcome_redos=[])
@@ -690,7 +700,7 @@ def test_lane_a_is_counted_on_its_own_line_and_never_twice():
     assert arm[0]["lane"] == ("proxy", "haiku", "qa") and arm[0]["lane_tag"] is None
 
 
-def test_a_passing_writer_batch_puts_lane_a_in_the_s1_numerator_and_s1_is_otherwise_unchanged():
+def test_a_passing_writer_batch_puts_lane_a_in_the_s1_numerator_and_s1_is_otherwise_unchanged(proxy_identity):
     with_batch = _units(_kpi_rows(), [_audit_row("tech_op")])
     s = osh.summarize_actions(with_batch["actions"])
     assert s["lane_a"]["k"] == 3 and s["lane_a"]["quality_sampled"] is True and s["action"]["k"] == 3
@@ -707,7 +717,7 @@ def test_a_passing_writer_batch_puts_lane_a_in_the_s1_numerator_and_s1_is_otherw
     assert other["lane_a"]["k"] == 0 and other["lane_a"]["quality_sampled"] is False
 
 
-def test_the_persisted_daily_offload_row_schema_is_left_alone():
+def test_the_persisted_daily_offload_row_schema_is_left_alone(proxy_identity):
     """``daily_offload`` rows are the preregistered S1 evidence; PR3 adds no key to them (the split lives in
     ``kpi`` ``offload`` only)."""
     from llm_router import daily_offload
@@ -1596,3 +1606,156 @@ async def test_nit_1_a_replay_without_a_sha_leaves_replay_body_sha_none_and_void
     verdict = _verdict(1, served_body_sha=pair["served_body_sha"] or "served-sha", replay_body_sha=None)
     t = lqw.tally([verdict], since=0, until=NOW + 1)["tech_op"]
     assert t["n"] == 0 and t["excluded"] == {"body_sha_mismatch": 1}
+
+
+# ── repair round 3 (D-303): the proxy's own recorded identity, the writer, S1 ───────────────────────────────────
+
+def _spy_flip(monkeypatch, fail_first=0):
+    calls = []
+    orig = lane_a_shadow.maybe_record_flip
+
+    def wrapped(*a, **k):
+        calls.append(k)
+        if len(calls) <= fail_first:
+            raise OSError("disk")
+        return orig(*a, **k)
+    monkeypatch.setattr(lane_a_shadow, "maybe_record_flip", wrapped)
+    return calls
+
+
+async def test_off_then_on_in_the_same_process_still_stamps_the_flip(home, tmp_path, monkeypatch):
+    """SHOULD-2: the in-memory flag must not latch while a switch is off (the shadow is attached at startup, the
+    env switch turns on later)."""
+    monkeypatch.setenv(sf.ENV_FLAG, "on")
+    app = _app(tmp_path, _raw(), UpstreamU())
+    await _post(app, _body(sid="a"))
+    assert not lane_a_shadow.flip_path().exists() and not lane_a_shadow.identity_path().exists()
+    monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
+    await _post(app, _body(sid="b"))
+    assert lane_a_shadow.read_flip() is not None and lane_a_shadow.read_identity_row() is not None
+
+
+async def test_a_proxy_started_with_its_own_tier_policy_stamps_that_policy_and_s1_gives_credit(
+        home, tmp_path, monkeypatch):
+    """SHOULD-3 / D-303: ``--tier-policy FILE`` is invisible to the writer and S1 (other processes); the proxy
+    records the identities it loaded and both use that record, not the bundled policy or an env path."""
+    monkeypatch.setenv(sf.ENV_FLAG, "on")
+    monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
+    monkeypatch.delenv("LLM_ROUTER_PROXY_TIER_POLICY", raising=False)
+    lane = {**LANE_ON, "tau": 0.9}
+    app = _app(tmp_path, _raw(lane), UpstreamU())
+    await _post(app, _body(continuation=False, sid="s1"))
+    mine = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.from_dict(_raw(lane)))
+    bundled = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None))
+    assert mine != bundled and lane_a_shadow.current_identities() == mine
+    assert lane_a_shadow.read_flip_row()["identity"] == mine
+    assert stat.S_IMODE(lane_a_shadow.identity_path().stat().st_mode) == 0o600
+    t = time.time() + 1
+    _write_verdicts(_pairs(60, 60, ts=t))
+    out = lqw.write_all(now=t + 500)
+    assert out["written"] == 1
+    (row,) = lane_quality.read_rows()
+    assert row["identity"] == mine
+    sampled, invalid = lane_quality.sampled_report([row], t + 600)
+    assert sampled and not invalid
+    # the same row judged against the bundled policy would be invalid: the recorded identity is what decides
+    assert lane_quality.sampled_report([row], t + 600, bundled)[1]
+
+
+def test_the_writer_writes_nothing_and_reports_identity_unknown_when_the_proxy_recorded_none(home, monkeypatch):
+    """SHOULD-1: no final row with ``identity: null``, and the window is not burnt."""
+    monkeypatch.setenv(sf.ENV_FLAG, "on")
+    _write_verdicts(_pairs(60, 60))
+    out = lqw.write_all(now=NOW)
+    assert out["written"] == 0 and out["groups"]["tech_op"]["status"] == "identity_unknown"
+    assert lane_quality.read_rows() == []
+    lane_a_shadow.record_identity(lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None)))
+    out = lqw.write_all(now=NOW)                      # the window is still open: it closes now
+    assert out["written"] == 1 and lane_quality.read_rows()[0]["identity"] is not None
+
+
+def test_an_unreadable_identity_record_is_unknown_too(home):
+    lane_a_shadow.identity_path().parent.mkdir(parents=True, exist_ok=True)
+    lane_a_shadow.identity_path().write_text("{not json")
+    assert lane_a_shadow.current_identities() is None
+    lane_a_shadow.identity_path().write_text(json.dumps({"identity": {"lane_a_model": "x"}}))
+    assert lane_a_shadow.current_identities() is None
+
+
+def test_prompt_set_sha_covers_the_only_text_adding_rewrite_setting(home):
+    """SHOULD-4: ``haiku_fold_system`` (legacy Haiku only) is the one opt-in text change to a Haiku request."""
+    legacy = {"haiku_model": "claude-haiku-4-5-20251001"}
+    off = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.from_dict(_raw(**legacy, haiku_fold_system=False)))
+    on_ = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.from_dict(_raw(**legacy, haiku_fold_system=True)))
+    assert off["prompt_set_sha"] != on_["prompt_set_sha"]
+    assert {k for k in off if off[k] != on_[k]} == {"prompt_set_sha"}
+
+
+async def test_concurrent_first_requests_run_one_write(home, tmp_path, monkeypatch):
+    """NIT-1: an in-flight flag, so one thread does the write."""
+    monkeypatch.setenv(sf.ENV_FLAG, "on")
+    monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
+    calls = _spy_flip(monkeypatch)
+    app = _app(tmp_path, _raw(), UpstreamU())
+    rs = await asyncio.gather(*[_post(app, _body(sid=f"c{i}", continuation=False)) for i in range(12)])
+    assert all(r.status_code == 200 for r in rs)
+    assert len(calls) == 1 and lane_a_shadow.read_flip() is not None
+
+
+async def test_after_a_failed_write_the_proxy_backs_off_then_retries(home, tmp_path, monkeypatch):
+    from llm_router.proxy import server as ps
+
+    monkeypatch.setenv(sf.ENV_FLAG, "on")
+    monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
+    calls = _spy_flip(monkeypatch, fail_first=1)
+    app = _app(tmp_path, _raw(), UpstreamU())
+    for i in range(5):                                # a persistent error must not spawn a thread per request
+        assert (await _post(app, _body(sid=f"f{i}", continuation=False))).status_code == 200
+    assert len(calls) == 1 and not lane_a_shadow.flip_path().exists()
+    monkeypatch.setattr(ps, "LANE_A_FLIP_BACKOFF_S", 0.0)
+    app = _app(tmp_path, _raw(), UpstreamU())         # a fresh process with no backoff pending retries and writes
+    await _post(app, _body(sid="g", continuation=False))
+    assert lane_a_shadow.read_flip() is not None
+
+
+def test_at_flip_plus_28_days_a_known_group_with_no_lane_a_row_gets_a_not_informative_row(home):
+    """NIT-2: the known groups come from the proxy's recorded identity record."""
+    pt_ = pt.ClaudeTierPolicy.load(None)
+    lane_a_shadow.record_identity(lane_a_shadow.identities_of(pt_), lane_a_shadow.task_groups_of(pt_))
+    flip = NOW - 29 * DAYS
+    lane_a_shadow.record_flip(flip)
+    _write_verdicts(_pairs(60, 60, ts=flip + DAYS))
+    assert lqw.write_all(now=flip + 10 * DAYS)["written"] == 1 and len(lane_quality.read_rows()) == 1
+    out = lqw.write_all(now=NOW)                      # past 28 d
+    rows = {r["task_group"]: r for r in lane_quality.read_rows()}
+    assert set(rows) == {"tech_op", "code", "qa"}
+    for g in ("code", "qa"):
+        assert (rows[g]["window_complete"], rows[g]["informative"], rows[g]["not_informative_reason"], rows[g]["n"]) \
+            == (True, False, "n_below_min", 0)
+        assert out["groups"][g]["status"] == "not_informative"
+    assert lane_quality.sampled_report(list(rows.values()), NOW)[0].keys() == {("proxy", "haiku", "tech_op")}
+
+
+def test_with_no_recorded_group_set_a_group_with_no_row_gets_no_row(home):
+    lane_a_shadow.record_identity(lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None)))
+    flip = NOW - 29 * DAYS
+    lane_a_shadow.record_flip(flip)
+    _write_verdicts(_pairs(60, 60, ts=flip + DAYS))
+    lqw.write_all(now=NOW)
+    assert {r["task_group"] for r in lane_quality.read_rows()} == {"tech_op"}
+
+
+def test_an_invalidated_row_is_valid_again_when_the_proxy_identity_returns(home):
+    """D-303: validity is computed at read time from the proxy's recorded identity, never latched."""
+    ident = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None))
+    lane_a_shadow.record_identity(ident)
+    _write_verdicts(_pairs(60, 60))
+    lqw.write_all(now=NOW)
+    rows = lane_quality.read_rows()
+    assert lane_quality.sampled_report(rows, NOW + 1)[0]
+    lane_a_shadow.record_identity({**ident, "lane_a_model": "claude-haiku-9"})          # the proxy restarts changed
+    sampled, invalid = lane_quality.sampled_report(rows, NOW + 1)
+    assert not sampled and list(invalid.values())[0]["mismatch"] == ["lane_a_model"]
+    lane_a_shadow.record_identity(ident)                                                 # and is reverted
+    sampled, invalid = lane_quality.sampled_report(rows, NOW + 1)
+    assert sampled and not invalid

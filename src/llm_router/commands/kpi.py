@@ -2159,6 +2159,9 @@ def _offload_prd(days: float, allowed: frozenset[str], index, all_rows: list[dic
         {"door": d, "served_class": c, "task_group": g, **info} for (d, c, g), info in sorted(res["sampled"].items())]
     out["invalidated_lanes"] = [
         {"door": d, "served_class": c, "task_group": g, **info} for (d, c, g), info in sorted(res["invalidated"].items())]
+    from llm_router import lane_a_shadow
+    cmp_id = res.get("compared_identity")
+    out["compared_identity"] = {"sha": lane_a_shadow.identity_sha(cmp_id), "identity": cmp_id}   # D-303
     out["window"] = window
     return out
 
@@ -2291,6 +2294,9 @@ def _offload_render_lines(off: dict) -> list[str]:
               for q in off.get("quality_sampled_lanes", ()) if q.get("kind") == "shadow_pairs"]
     lines += [f"      INVALIDATED window {q['door']}/{q['served_class']}/{q['task_group']}: age {q['age_days']} d, "
               f"changed {', '.join(q['mismatch'])}" for q in off.get("invalidated_lanes", ())]
+    ci = off.get("compared_identity") or {}
+    if off.get("quality_sampled_lanes") or off.get("invalidated_lanes"):
+        lines.append(f"      S1 compared lane A identity sha: {ci.get('sha') or 'unknown (none recorded by the proxy)'}")
     lines += [f"      {c}" for c in off.get("caveats", ())]
     return lines
 

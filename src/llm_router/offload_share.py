@@ -760,7 +760,9 @@ def action_units(since: float, until: float, *, proxy_rows: list[dict] | None = 
     built = build_units(proxy_rows, mcp_rows, now=now, days=days, kind_of=kind_of, allowed=allowed,
                         band_redone=band_redone, outcome_redos=list(outcome_redos or ()),
                         edit_rows=edit_rows or (), thread_of=thread_of)
-    sampled, invalidated = lane_quality.sampled_report(quality_rows, now)
+    from llm_router import lane_a_shadow
+    compared = lane_a_shadow.current_identities()   # D-303: the proxy's recorded identity, what S1 compares to
+    sampled, invalidated = lane_quality.sampled_report(quality_rows, now, compared)
 
     actions: list[dict] = []
     for u in built["units"]:
@@ -793,7 +795,8 @@ def action_units(since: float, until: float, *, proxy_rows: list[dict] | None = 
     excluded = {"side_call": built["side_call_excluded"], "untagged": built["untagged"],
                 "other_kind": built["other_kind"], "local_no_session": built["local_no_session"],
                 "local_failed": built["local_failed"], **tech_ex}
-    return {"actions": actions, "excluded": excluded, "sampled": sampled, "invalidated": invalidated, "built": built}
+    return {"actions": actions, "excluded": excluded, "sampled": sampled, "invalidated": invalidated, "compared_identity": compared,
+            "built": built}
 
 
 def _action_base(u: dict) -> dict:

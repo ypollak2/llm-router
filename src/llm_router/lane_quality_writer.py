@@ -179,7 +179,9 @@ def batch_row(task_group: str, counts: dict, *, now: float, since: float, until:
       n < 60 (``n_below_min``) or the share is above 20% (``cannot_judge_share``).
 
     Only a final row is counted by S1, and a NOT INFORMATIVE one earns no credit. Every row is stamped with the four
-    ``identity`` values (default: the config in force) that D-302 ties a final row's validity to."""
+    ``identity`` values (default: the identities the proxy recorded, D-303) that D-302 ties a final row's validity
+    to. When those are unknown there is no row: ``(None, "identity_unknown")``, so nothing is written and the window
+    is not closed."""
     from llm_router import eligibility
 
     n, cj = counts["n"], counts["cannot_judge"]
@@ -197,6 +199,9 @@ def batch_row(task_group: str, counts: dict, *, now: float, since: float, until:
     else:
         return None, "n_below_min"
     informative = why is None
+    identity = identity if identity is not None else lane_a_shadow.current_identities()
+    if identity is None:
+        return None, "identity_unknown"
     # The source names the evidence, not the window it was found in.
     digest = hashlib.sha256(
         ("\n".join(sorted(counts["ids"])) + f"\n{counts['k_a']}/{counts['k_f']}").encode("utf-8")).hexdigest()[:16]
@@ -206,7 +211,7 @@ def batch_row(task_group: str, counts: dict, *, now: float, since: float, until:
            "k_laneA": counts["k_a"], "k_frontier": counts["k_f"], "cannot_judge": cj,
            "cannot_judge_share": round(share, 4), "excluded": dict(sorted(counts.get("excluded", {}).items())),
            "window_complete": final, "informative": informative, "close_reason": close, "not_informative_reason": why,
-           "identity": identity if identity is not None else lane_a_shadow.current_identities(),
+           "identity": identity,
            "flip_ts": flip, "since": since, "until": until}
     if not final:
         row["diagnostic"] = True
@@ -227,7 +232,8 @@ def write_all(*, now: float | None = None, since: float | None = None, until: fl
               dry_run: bool = False, verdicts: Path | None = None, out: Path | None = None) -> dict:
     """Write the FINAL row of each task group whose window closes now (see ``batch_row``). Returns a summary
     ``{"groups": {task_group: {...counts, "status", "grade"}}, "written": int}``. Creates no file when there is no
-    lane A verdict row, and none under ``dry_run``. The window start is the owner flip (``lane_a_shadow.read_flip``)
+    lane A verdict row (except the NOT INFORMATIVE rows of the proxy's known task groups at flip + 28 d), none under
+    ``dry_run``, and no row (status ``identity_unknown``) while the proxy has recorded no identity (D-303). The window start is the owner flip (``lane_a_shadow.read_flip``)
     when recorded, else the trailing 14 days; an explicit ``since`` overrides it. The window END is always clamped to
     ``flip + 28 d`` (D-302): a pair after day 28 never counts."""
     now = time.time() if now is None else now
@@ -239,13 +245,21 @@ def write_all(*, now: float | None = None, since: float | None = None, until: fl
         since = flip if flip is not None else until - lane_a_shadow.WINDOW_DAYS * 86400.0
     rows = _read_jsonl(verdicts or _verdicts_path())
     groups = tally(rows, since=since, until=until, flip=flip)
+    identity_row = lane_a_shadow.read_identity_row()
+    if flip is not None and identity_row is not None and until >= flip + lane_a_shadow.FINAL_WINDOW_DAYS * 86400.0:
+        # NIT-2: at flip + 28 d a task group the proxy could serve but that has no lane A row still closes
+        # NOT INFORMATIVE (n = 0). The groups come from the proxy's recorded identity; with none recorded the
+        # group set is unknown and a group with no row gets no row.
+        for g in identity_row.get("task_groups") or ():
+            if isinstance(g, str) and g:
+                groups.setdefault(g, {"n": 0, "k_a": 0, "k_f": 0, "cannot_judge": 0, "excluded": {}, "ids": []})
     target = out or paths.state_path(lane_quality.FILE)
     existing = lane_quality.read_rows(target) if groups else []
     closed = closed_groups(existing)
     summary: dict = {"groups": {}, "written": 0, "diagnostic": 0, "since": since, "until": until, "flip_ts": flip}
     from llm_router import eligibility
 
-    identity = lane_a_shadow.current_identities() if groups else None
+    identity = identity_row["identity"] if identity_row is not None else None
 
     for name, counts in sorted(groups.items()):
         info = {k: counts[k] for k in ("n", "k_a", "k_f", "cannot_judge", "excluded")}

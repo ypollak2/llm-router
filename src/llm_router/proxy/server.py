@@ -114,6 +114,7 @@ OKF_ATTACH_TIMEOUT_S = 2.0
 
 ANTHROPIC_UPSTREAM = "https://api.anthropic.com"
 DEFAULT_PORT = 8787
+LANE_A_FLIP_BACKOFF_S = 60.0  # after a failed flip/identity write, wait this long before the next try
 DEFAULT_STEP_BUDGET_S = 30.0
 DEFAULT_NUM_CTX = local_models.DEFAULT_NUM_CTX
 #: Replies remembered for Message Threads continues (STEP-SIDECALL-1). Two ids per human turn at most.
@@ -775,24 +776,34 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     frontier = shadow_frontier.FrontierShadow() if shadow_frontier.enabled() else None
 
     flip_stamped = False
+    flip_busy = False          # a write is in flight: concurrent first requests do not spawn another thread
+    flip_retry_at = 0.0        # after a failed write, no new attempt before this monotonic time
 
     async def stamp_flip() -> None:
         """D-302: the owner flip is the FIRST request that sees all four lane A switches on (YAML ``lane_a.enabled``,
         ``LLM_ROUTER_PROXY_LANE_A=on``, ``haiku_rewrite``, the shadow flag), eligible step or not. Any switch off:
-        nothing is read from or written to disk. The write (first wins, 0600) runs in a worker thread, once per
-        process; it never costs the call."""
-        nonlocal flip_stamped
-        if flip_stamped or tier_policy is None or frontier is None:
+        nothing is read from or written to disk. With all four on, the same write also records the identities of
+        the policy THIS proxy loaded (D-303: ``lane_a_identity.json``), whatever file or flag it came from. The
+        write (first flip wins, 0600) runs in a worker thread, once per process, by one request at a time; after a
+        failed write the next try waits ``LANE_A_FLIP_BACKOFF_S``. It never costs the call."""
+        nonlocal flip_stamped, flip_busy, flip_retry_at
+        if flip_stamped or flip_busy or tier_policy is None or frontier is None:
             return
         try:
             seen = dict(yaml_enabled=bool(tier_policy.lane_a.enabled), env_on=lane_a.env_on(),
                         haiku_rewrite=bool(tier_policy.haiku_rewrite), shadow_on=shadow_frontier.enabled())
-            if not all(seen.values()):
+            if not all(seen.values()) or time.monotonic() < flip_retry_at:
                 return
-            await asyncio.to_thread(lane_a_shadow.maybe_record_flip, time.time(), **seen)
+            flip_busy = True
+            await asyncio.to_thread(lane_a_shadow.maybe_record_flip, time.time(), **seen,
+                                    identity=lane_a_shadow.identities_of(tier_policy),
+                                    task_groups=lane_a_shadow.task_groups_of(tier_policy))
             flip_stamped = True
         except Exception as exc:  # noqa: BLE001 - evidence bookkeeping must never cost the call
+            flip_retry_at = time.monotonic() + LANE_A_FLIP_BACKOFF_S
             failopen.record("LR-FO-LANE-A-FLIP", exc)
+        finally:
+            flip_busy = False
 
     def frontier_on_reply(request: Request, raw: bytes, row: dict, inner, lane: dict | None = None):
         """Wrap ``inner`` (the local-shadow callback, or None) so that, once the Haiku reply

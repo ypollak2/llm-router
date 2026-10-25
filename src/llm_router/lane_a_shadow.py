@@ -56,6 +56,8 @@ R_STEP_SEEN = "step_seen"
 FINAL_WINDOW_PAIRS = 60
 FINAL_WINDOW_DAYS = 28
 FLIP_FILE = "lane_a_flip.json"
+#: D-303: the identities the PROXY is running with, written once per process at the flip point (all four switches on).
+IDENTITY_FILE = "lane_a_identity.json"
 #: D-302: the four switches whose joint "on" is the owner flip, and the four identities that keep a final row valid.
 FLIP_SWITCHES = ("yaml_enabled", "env_on", "haiku_rewrite", "shadow_on")
 IDENTITY_KEYS = ("lane_a_model", "judge_brief_sha", "prompt_set_sha", "breaker_sha")
@@ -199,7 +201,7 @@ def read_flip() -> float | None:
     return _ts(raw.get("flip_ts")) if raw is not None else None
 
 
-def record_flip(now: float, switches: dict | None = None) -> bool:
+def record_flip(now: float, switches: dict | None = None, identity: dict | None = None) -> bool:
     """Record ``now`` as the owner flip time if none is recorded yet (first write wins, 0600 through
     ``state_files``), with the ``switches`` the request saw, so the flip can be audited. Blocking I/O: call it
     through ``to_thread`` from the event loop. True when this call wrote it. Use :func:`maybe_record_flip` from the
@@ -211,7 +213,7 @@ def record_flip(now: float, switches: dict | None = None) -> bool:
     p = flip_path()
     if p.exists():
         return False
-    row = {"flip_ts": round(now, 3), "switches": switches,
+    row = {"flip_ts": round(now, 3), "switches": switches, "identity": identity,
            "source": "first proxy request that saw all four lane A switches on"}
     try:
         with state_files.open_private(p, "x", encoding="utf-8") as fh:
@@ -221,15 +223,58 @@ def record_flip(now: float, switches: dict | None = None) -> bool:
     return True
 
 
-def maybe_record_flip(now: float, *, yaml_enabled: bool, env_on: bool, haiku_rewrite: bool, shadow_on: bool) -> bool:
+def identity_path() -> Path:
+    from llm_router import paths
+
+    return paths.state_path(IDENTITY_FILE)
+
+
+def record_identity(identity: dict, task_groups: Iterable[str] = (), now: float | None = None) -> None:
+    """Write the identities the proxy runs with (D-303) to ``lane_a_identity.json``, replacing the last one (0600
+    through ``state_files``, atomic rename). Blocking I/O: call it through ``to_thread``. Called only by
+    :func:`maybe_record_flip`, i.e. only when all four switches are on."""
+    import json
+    import os
+    import time
+
+    from llm_router import state_files
+
+    p = identity_path()
+    tmp = p.with_name(p.name + ".tmp")
+    row = {"identity": identity, "task_groups": sorted(set(task_groups)),
+           "recorded_ts": round(time.time() if now is None else now, 3)}
+    with state_files.open_private(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, sort_keys=True))
+    os.replace(tmp, p)
+
+
+def read_identity_row() -> dict | None:
+    """The proxy's most recently recorded identity row, or None (no file, unreadable, or not the four keys)."""
+    import json
+
+    try:
+        raw = json.loads(identity_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    ident = raw.get("identity") if isinstance(raw, dict) else None
+    if not isinstance(ident, dict) or any(not isinstance(ident.get(k), str) or not ident.get(k) for k in IDENTITY_KEYS):
+        return None
+    return raw
+
+
+def maybe_record_flip(now: float, *, yaml_enabled: bool, env_on: bool, haiku_rewrite: bool, shadow_on: bool,
+                      identity: dict | None = None, task_groups: Iterable[str] = ()) -> bool:
     """D-302: the owner flip is the first proxy request that sees ``lane_a.enabled`` (YAML), the env switch,
     ``haiku_rewrite`` and the shadow flag all on, whether or not that step is eligible. Writes nothing (no file, no
-    directory) when any one is off. True when this call wrote the flip."""
+    directory) when any one is off. With all on it also records the proxy's own ``identity`` (D-303) in
+    ``lane_a_identity.json`` and in the flip row. True when this call wrote the flip."""
     seen = {"yaml_enabled": bool(yaml_enabled), "env_on": bool(env_on), "haiku_rewrite": bool(haiku_rewrite),
             "shadow_on": bool(shadow_on)}
     if not all(seen.values()):
         return False
-    return record_flip(now, seen)
+    if identity is not None:
+        record_identity(identity, task_groups, now)
+    return record_flip(now, seen, identity)
 
 
 def final_groups(rows: Iterable[dict]) -> set[str]:
@@ -243,8 +288,15 @@ def final_groups(rows: Iterable[dict]) -> set[str]:
 
 def identities_of(policy: Any) -> dict:
     """The four identities a final row is valid for (D-302): the lane A model (the ``haiku`` tier's model), the
-    judge brief sha, the prompt set lane A serves (the allowlisted step classes and the confidence floor) and the
-    breaker thresholds. A change to any of them ends the window's credit."""
+    judge brief sha, the prompt set and the breaker thresholds. A change to any of them ends the window's credit.
+
+    Prompt set (pending prereg confirmation: confirmed by the D-302 refinement) = sha of ``prev_tool_classes`` (the
+    allowlisted step classes) + ``tau`` (the confidence floor) + any text-adding rewrite setting. The only such
+    setting is ``haiku_folds_system`` (``translate.for_haiku`` wraps mid-conversation system text in a
+    ``<system-reminder>`` block); the default Haiku rewrite adds no system prompt or template text.
+
+    The proxy computes this from the policy it LOADED (``--tier-policy`` or env or bundled) and records it
+    (:func:`record_identity`); the writer and S1 read that record, never a policy file (D-303)."""
     import dataclasses
     import json
 
@@ -256,21 +308,36 @@ def identities_of(policy: Any) -> dict:
         return hashlib.sha256(json.dumps(obj, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
     return {"lane_a_model": policy.haiku_model, "judge_brief_sha": shadow_frontier.JUDGE_BRIEF_SHA256,
-            "prompt_set_sha": sha({"prev_tool_classes": sorted(cfg.prev_tool_classes), "tau": cfg.tau}),
+            "prompt_set_sha": sha({"prev_tool_classes": sorted(cfg.prev_tool_classes), "tau": cfg.tau,
+                                   "haiku_folds_system": bool(policy.haiku_folds_system)}),
             "breaker_sha": sha(dataclasses.asdict(cfg.breaker))}
 
 
+def task_groups_of(policy: Any) -> list[str]:
+    """The task groups lane A can serve under ``policy``: ``tech_op`` when ``technical_op`` is allowlisted, plus
+    ``code`` and ``qa`` (any other allowlisted class can carry either task type)."""
+    from llm_router import offload_share
+
+    groups = {offload_share.TG_CODE, offload_share.TG_QA}
+    if "technical_op" in policy.lane_a.prev_tool_classes:
+        groups.add(offload_share.TG_TECH)
+    return sorted(groups)
+
+
 def current_identities() -> dict | None:
-    """The identities of the tier policy in force (``LLM_ROUTER_PROXY_TIER_POLICY``, else the bundled one), or
-    None when it cannot be read (then no final row can be shown valid)."""
-    import os
+    """The identities the proxy most recently recorded it is running with (D-303), or None when none is recorded or
+    it cannot be read (then no final row can be written or shown valid). It does not re-read any policy file."""
+    row = read_identity_row()
+    return dict(row["identity"]) if row is not None else None
 
-    from llm_router.proxy import tiers
 
-    try:
-        return identities_of(tiers.ClaudeTierPolicy.load(os.environ.get("LLM_ROUTER_PROXY_TIER_POLICY") or None))
-    except (OSError, ValueError, TypeError, ImportError, AttributeError):
+def identity_sha(identity: dict | None) -> str | None:
+    """A short sha of an identity, for reports (None when the identity is unknown)."""
+    import json
+
+    if identity is None:
         return None
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
 def identity_mismatch(stamped: Any, current: dict | None) -> list[str]:

@@ -424,8 +424,10 @@ def test_s1_report_prints_the_age_of_each_final_lane_a_row_and_reports_an_invali
     stamped identities no longer match is reported as invalidated, not counted."""
     from llm_router import lane_a_shadow
 
-    ident = lane_a_shadow.current_identities()
-    assert ident is not None
+    from llm_router.proxy import tiers as pt
+
+    ident = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None))
+    lane_a_shadow.record_identity(ident)      # D-303: what the proxy recorded is what S1 compares with
     final = {"ts": UNTIL - 40 * 86400.0, "door": "proxy", "served_class": "haiku", "task_group": "tech_op",
              "kind": "shadow_pairs", "n": 64, "gap_pts": 1.0, "newcombe_lb": -5.0, "source": "fixture",
              "window_complete": True, "informative": True, "identity": ident}
@@ -441,3 +443,39 @@ def test_s1_report_prints_the_age_of_each_final_lane_a_row_and_reports_an_invali
     assert "final window proxy/haiku/tech_op: n=64, age 40.0 d" in text
     assert "INVALIDATED window proxy/haiku/qa: age 50.0 d, changed breaker_sha" in text
     assert any("INVALIDATED" in c and "prereg amendment" in c for c in off["caveats"])
+
+
+def _final_row(ident, **kw):
+    return {"ts": UNTIL - 5 * 86400.0, "door": "proxy", "served_class": "haiku", "task_group": "tech_op",
+            "kind": "shadow_pairs", "n": 64, "gap_pts": 1.0, "newcombe_lb": -5.0, "source": "fixture",
+            "window_complete": True, "informative": True, "identity": ident, **kw}
+
+
+def test_s1_shows_the_identity_sha_it_compared_against_and_credit_returns_when_the_identity_returns(
+        _scorecard_env, monkeypatch):
+    """D-303: validity is computed at read time (never latched) and the report names the identity it compared."""
+    from llm_router import lane_a_shadow
+    from llm_router.proxy import tiers as pt
+
+    ident = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None))
+    fx.write_jsonl(paths.state_path("lane_quality.jsonl"), [_final_row(ident)])
+    monkeypatch.setattr(ns, "local_shadow_units", lambda days=30, db_path=None, **kw: iter(()))
+
+    def s1():
+        return kpi.compute_scorecard(since=SINCE, until=UNTIL)["offload"]
+
+    off = s1()                                   # nothing recorded: unknown identity, no credit
+    assert off["compared_identity"] == {"sha": None, "identity": None} and off["invalidated_lanes"]
+    assert "unknown" in "\n".join(kpi._offload_render_lines(off))
+
+    lane_a_shadow.record_identity({**ident, "breaker_sha": "changed"})      # the proxy ran with another config
+    off = s1()
+    assert off["invalidated_lanes"] and not off["quality_sampled_lanes"]
+    assert off["compared_identity"]["sha"] == lane_a_shadow.identity_sha({**ident, "breaker_sha": "changed"})
+
+    lane_a_shadow.record_identity(ident)                                    # the change is reverted
+    off = s1()
+    assert off["quality_sampled_lanes"] and not off["invalidated_lanes"]    # credit is back, nothing latched
+    sha = lane_a_shadow.identity_sha(ident)
+    assert off["compared_identity"] == {"sha": sha, "identity": ident}
+    assert f"S1 compared lane A identity sha: {sha}" in "\n".join(kpi._offload_render_lines(off))
