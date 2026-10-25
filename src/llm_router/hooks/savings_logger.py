@@ -362,6 +362,9 @@ def log_direct_to_db(
     profile: str = "balanced",
     session_id: str = "",
     door: str | None = None,
+    layer: str | None = None,
+    confidence: float | None = None,
+    reason: str | None = None,
 ) -> None:
     """Persist a successful DIRECT routing into the ``usage`` and
     ``routing_decisions`` tables of ``~/.llm-router/usage.db``.
@@ -374,10 +377,15 @@ def log_direct_to_db(
     MCP path's ``cost.log_usage`` / ``cost.log_routing_decision`` do, so
     DIRECT-routed turns become visible everywhere the MCP path is.
 
+    W0-1: ``layer`` / ``confidence`` / ``reason`` are the classifier's, when the caller has them (the
+    engine Decision's layer and confidence); ``layer`` falls back to the ``classifier_type`` label and
+    ``reason`` to ``direct``. A confidence the caller did not pass stays NULL.
+
     Fire-and-forget — never raises. The routing hook stays snappy and robust
     even if the DB is locked or the import graph changes.
     """
     try:
+        from llm_router import decision_stamp as _decision_stamp
         from llm_router.call_identity import ledger_session_id as _ledger_session_id
         from llm_router.call_identity import scope as _call_identity_scope
         from llm_router.cost import (
@@ -485,6 +493,7 @@ def log_direct_to_db(
                 cost_usd=cost_usd,
                 latency_ms=latency_ms,
                 reason_code="direct",
+                **_decision_stamp.stamp(classifier_type, confidence, reason or "direct", layer=layer),
                 # CHZ-JUDGE-QUEUE cause (a): this call used to omit `response=`
                 # entirely, so cost.log_routing_decision's `if success and
                 # response:` judge-queue trigger never fired for a single

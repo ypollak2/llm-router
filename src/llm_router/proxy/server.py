@@ -844,6 +844,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    tier_switch=decision.switched, tier_switch_cost_usd=decision.switch_cost_usd,
                    tier_task_type=decision.task_type, tier_complexity=decision.complexity,
                    tier_complexity_score=decision.complexity_score,
+                   # W0-1: the layer / confidence / reason the engine fields carry (NULL = not decided
+                   # by a classifier layer, or no confidence measured).
+                   cls_layer=decision.cls_layer, cls_confidence=decision.cls_confidence,
+                   cls_reason=decision.reason,
                    # decision.detail is always one of our own fixed reason
                    # strings (escalation.REASON_*), never free text off the
                    # request, so it needs no scrubbing — unlike the error

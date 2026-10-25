@@ -131,6 +131,21 @@ def _calls(path: Path, names: set[str]) -> list[ast.Call]:
     return hits
 
 
+def _the_binding_feeding(path: Path, call: ast.Call, name: str) -> ast.expr:
+    """The value assigned to ``name`` in the function that contains ``call``. Fails when that function
+    assigns it zero or several times (ambiguous: which one feeds the call?). It never looks at an
+    assignment to the same identifier elsewhere in the file."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.lineno <= call.lineno <= (n.end_lineno or n.lineno)]
+    assert funcs, f"{path.name}:{call.lineno} is not inside a function"
+    func = min(funcs, key=lambda n: (n.end_lineno or 0) - n.lineno)  # the innermost
+    values = [n.value for n in ast.walk(func)
+              if isinstance(n, ast.Assign) and any(getattr(t, "id", None) == name for t in n.targets)]
+    assert len(values) == 1, f"{path.name}:{call.lineno} {name!r} is assigned {len(values)} times in {func.name}"
+    return values[0]
+
+
 def test_every_call_into_the_cost_writers_passes_the_field():
     usage_names = {"log_usage", "_cost_log_usage"}
     routing_names = {"_cost_log_routing_decision"}
@@ -153,6 +168,8 @@ def test_every_call_into_the_cost_writers_passes_the_field():
         kws = {k.arg for k in call.keywords}
         assert {"reason_code", "session_id"} <= kws, kws
         reason = next(k.value for k in call.keywords if k.arg == "reason_code")
+        if isinstance(reason, ast.Name):  # W0-1: one local feeds both reason_code and the stamped reason
+            reason = _the_binding_feeding(_REPO / "src/llm_router/router.py", call, reason.id)
         assert "REASON_" in ast.unparse(reason)  # a fallback code, never bare .get()
     assert seen_usage >= 6 and seen_routing >= 2
 

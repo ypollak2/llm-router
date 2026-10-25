@@ -212,6 +212,9 @@ class ClassificationResult:
     # (which don't pass these) valid.
     capabilities: CapabilityRequirement = field(default_factory=CapabilityRequirement)
     relevant_context: RelevantContext | None = None
+    # W0-1: the engine layer that decided (``L1`` / ``L3`` / ``cache`` / ``fallback``), None when
+    # the rules classified. Stamped on the routing_decisions row as ``layer``.
+    layer: str | None = None
 
     @property
     def shadow_tier(self) -> str | None:
