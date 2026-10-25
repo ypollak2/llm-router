@@ -258,17 +258,15 @@ class TierDecision:
     # computed it (P0.9-e: computed at most once, and only then); None = not computed.
     # The proxy reuses it for the ledger's ``tier_haiku_block`` instead of a second pass.
     haiku_block: str | None = None
-<<<<<<< HEAD
     # W0-1: which classifier layer decided the class, and its confidence (None = not measured, or
     # the call never reached the classifier). Written to the ledger as cls_layer / cls_confidence.
     cls_layer: str | None = None
     cls_confidence: float | None = None
-=======
+
     # Lane A (``proxy/lane_a.py``): the closed reason and the engine confidence (or None) for a
     # continuation step on a pinned model. None = the lane was not evaluated for this decision.
     lane_a_reason: str | None = None
     lane_a_conf: float | None = None
->>>>>>> origin/main
 
     @property
     def rewritten(self) -> bool:
