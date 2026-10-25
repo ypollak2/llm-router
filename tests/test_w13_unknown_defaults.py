@@ -25,26 +25,39 @@ def _is_num(node: ast.AST) -> bool:
         and not isinstance(node.value, bool)
 
 
-# Functions in user_routing_policy.py that are NOT quality/cost scoring. Every other function
-# (including any helper added later) gets the shape rules, so a new scorer cannot escape the
-# scan by using a literal other than 0.5 / 0.4 / 0.001. Each entry needs a one-line reason.
-NON_SCORING_FUNCTIONS = {
-    "_round_robin_pick": "round-robin counter: _rr_counters.get(key, 0) is an index, not a score",
-    "_policy_quota_exhaustion": "quota pressure: pressure.get(provider, 0.0) means no pressure, not a score",
-    "_policy_dynamic": "quota pressure lookup in the sort key; orders by pressure, not quality/price",
+# Exact (top-level function, source segment) pairs that are allowed to look like a numeric
+# default. Why pairs and not whole functions: skipping a function skipped its nested defs too,
+# so `pressure.get(..., 0.3)` in _policy_dynamic's nested _quota, or `_rr_counters.get(key, 0)
+# or 0`, passed. A pair allows only the expression that exists today; any other default in the
+# same function is flagged, and a pair whose text no longer occurs fails the stale check.
+# Each entry needs a one-line reason.
+ALLOWED_DEFAULT_EXPRESSIONS = {
+    ("_round_robin_pick", "_rr_counters.get(key, 0)"):
+        "round-robin counter: 0 is a start index, not a score",
+    ("_policy_quota_exhaustion", "pressure.get(_provider_from_model(m), 0.0)"):
+        "quota pressure: 0.0 means no pressure, not a score",
+    ("_policy_dynamic", "pressure.get(_provider_from_model(m), 0.0)"):
+        "quota pressure lookup in the sort key; orders by pressure, not quality/price",
 }
+# Module-level numeric constants in (0, 1) read by a function. Empty: main has none.
+ALLOWED_MODULE_CONSTANTS: dict[str, str] = {}
 
 
-def find_invented_defaults(src: str, allowlist: frozenset[str] | set[str] | dict = frozenset()) -> list[str]:
+def _top_level_functions(tree: ast.Module):
+    return [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+
+def find_invented_defaults(src: str, allowed: dict | frozenset | set = frozenset(),
+                           allowed_constants: dict | frozenset | set = frozenset()) -> list[str]:
     """Scan a whole module for invented-default shapes; return one description per hit.
 
-    Shapes: the guessed literals 0.5 / 0.4 / 0.001 anywhere (this also catches a named
-    constant such as ``_FALLBACK = 0.5``), a numeric default in ``.get(k, <num>)``, a
-    numeric branch of ``<num> if v is None else ...`` / ``... if v is None else <num>``,
-    and ``v or <num>``.
+    Shapes: the guessed literals 0.5 / 0.4 / 0.001 anywhere, a numeric default in
+    ``.get(k, <num>)``, a numeric branch of ``<num> if v is None else ...`` /
+    ``... if v is None else <num>``, ``v or <num>``, and a module-level numeric constant
+    in (0, 1) that any function reads (``_FALLBACK = 0.3`` used bare escapes the shapes).
 
-    The literal rule covers the whole module. The shape rules cover every function and all
-    module-level code except the functions named in ``allowlist``.
+    Every function, nested defs included, gets the shape rules. A shape hit is suppressed
+    only when its (outermost function name, exact source text) is in ``allowed``.
     """
     hits: list[str] = []
     tree = ast.parse(src)
@@ -52,25 +65,39 @@ def find_invented_defaults(src: str, allowlist: frozenset[str] | set[str] | dict
         if isinstance(node, ast.Constant) and isinstance(node.value, float) \
                 and node.value in _DEFAULT_VALUES:
             hits.append(f"literal {node.value} at line {node.lineno}")
-    skipped: set[int] = set()
-    for fn in ast.walk(tree):
-        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name in allowlist:
-            skipped.update(id(n) for n in ast.walk(fn))
-    for node in (n for n in ast.walk(tree) if id(n) not in skipped):
+    owner: dict[int, str] = {}
+    for fn in _top_level_functions(tree):
+        for n in ast.walk(fn):
+            owner[id(n)] = fn.name
+    for node in ast.walk(tree):
+        shape = None
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and node.func.attr == "get" and len(node.args) == 2 and _is_num(node.args[1]):
-            hits.append(f".get numeric default at line {node.lineno}")
-        if isinstance(node, ast.IfExp) and (_is_num(node.body) or _is_num(node.orelse)):
-            hits.append(f"numeric ternary branch at line {node.lineno}")
-        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or) \
+            shape = ".get numeric default"
+        elif isinstance(node, ast.IfExp) and (_is_num(node.body) or _is_num(node.orelse)):
+            shape = "numeric ternary branch"
+        elif isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or) \
                 and any(_is_num(v) for v in node.values[1:]):
-            hits.append(f"`or <num>` default at line {node.lineno}")
+            shape = "`or <num>` default"
+        if shape and (owner.get(id(node)), ast.get_source_segment(src, node)) not in allowed:
+            hits.append(f"{shape} at line {node.lineno}: {ast.get_source_segment(src, node)!r}")
+    consts = {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and _is_num(n.value) and 0 < n.value.value < 1:
+            for t in n.targets:
+                if isinstance(t, ast.Name) and t.id not in allowed_constants:
+                    consts[t.id] = n.lineno
+    for fn in _top_level_functions(tree):
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in consts:
+                hits.append(f"module constant {n.id} (line {consts[n.id]}) read in {fn.name} "
+                            f"at line {n.lineno}")
     return hits
 
 
 def test_scan_finds_defaults_in_old_policy_fixture():
     # The fixture is a committed copy of the pre-change source: no git history needed.
-    hits = find_invented_defaults(OLD_POLICY.read_text(), NON_SCORING_FUNCTIONS)
+    hits = find_invented_defaults(OLD_POLICY.read_text(), ALLOWED_DEFAULT_EXPRESSIONS)
     assert len([h for h in hits if h.startswith("literal")]) == 3, hits  # 0.001, 0.5, 0.4
     assert any(".get numeric default" in h for h in hits), hits
 
@@ -82,19 +109,39 @@ def test_scan_finds_defaults_in_old_policy_fixture():
     "def f(v):\n    return v or 2\n",
     # a NEW scoring helper with a literal other than 0.5/0.4/0.001 must not escape (mutant m7)
     "def _policy_bonus(m):\n    return m.get('bonus', 0.3)\n",
+    # module constant read bare: no shape matches, only the constant rule catches it
+    "_FALLBACK = 0.3\ndef f(q):\n    return q if q is not None else _FALLBACK\n",
 ])
 def test_scan_catches_mutant_shapes(mutant):
     assert find_invented_defaults(mutant), mutant
 
 
-def test_non_scoring_allowlist_has_no_stale_entries():
-    names = {n.name for n in ast.walk(ast.parse(POLICY.read_text()))
-             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    assert set(NON_SCORING_FUNCTIONS) <= names, set(NON_SCORING_FUNCTIONS) - names
+def test_allowlist_has_no_stale_entries():
+    """Every allowed (function, expression) pair must still occur in that function."""
+    src = POLICY.read_text()
+    fns = {f.name: f for f in _top_level_functions(ast.parse(src))}
+    stale = []
+    for fname, seg in ALLOWED_DEFAULT_EXPRESSIONS:
+        fn = fns.get(fname)
+        segs = {ast.get_source_segment(src, n) for n in ast.walk(fn)} if fn else set()
+        if seg not in segs:
+            stale.append((fname, seg))
+    assert not stale, stale
+
+
+def test_scan_does_not_skip_nested_defs_of_allowed_functions():
+    src = ("def _policy_dynamic(chain):\n    def _quota(m):\n"
+           "        return pressure.get(m, 0.3)\n    return _quota\n")
+    assert find_invented_defaults(src, ALLOWED_DEFAULT_EXPRESSIONS)
+    ok = ("def _round_robin_pick(c):\n    return _rr_counters.get(key, 0)\n")
+    assert find_invented_defaults(ok, ALLOWED_DEFAULT_EXPRESSIONS) == []
+    assert find_invented_defaults("def _round_robin_pick(c):\n    return _rr_counters.get(key, 0) or 0\n",
+                                  ALLOWED_DEFAULT_EXPRESSIONS)
 
 
 def test_no_invented_defaults_in_whole_policy_module():
-    assert find_invented_defaults(POLICY.read_text(), NON_SCORING_FUNCTIONS) == []
+    assert find_invented_defaults(POLICY.read_text(), ALLOWED_DEFAULT_EXPRESSIONS,
+                                  ALLOWED_MODULE_CONSTANTS) == []
 
 
 # -- consumers: unknown -> None -------------------------------------------------
@@ -179,7 +226,9 @@ _PINNED_WEAK_SCORE = {"simple": 0.84, "moderate": 0.72, "complex": 0.56}
 
 @pytest.mark.parametrize("complexity", sorted(_PINNED_UNKNOWN_SCORE))
 def test_default_chain_scoring_order_unchanged_vs_main(complexity, tmp_path, monkeypatch):
-    """score_all_models feeds chain_builder._build_dynamic_chain (always on). Pins the score
+    """DESIGN: this pin fails on any legitimate weight retune; update the pin with the retune.
+
+    score_all_models feeds chain_builder._build_dynamic_chain (always on). Pins the score
     groups exactly (a tied group cannot swap members with a neighbour) and the numeric score
     of unknown vs weak-known models, so an unknown scored 0.0 goes red."""
     import asyncio
