@@ -53,24 +53,33 @@ When the router is handed a request in which a high-precision secret is found, i
 Ollama models on a loopback daemon (`-cloud` models excluded), or refuses it when there is none. "High
 precision" means a real-looking value, not a shape alone: a provider key prefix (Anthropic, OpenAI, OpenRouter,
 Google, GitHub, Slack, AWS `AKIA`/`ASIA`) with enough length and entropy, a PEM private-key block with a body,
-a bearer token with entropy, or a database URL whose password is not a common word. Obvious placeholders are
+a bearer token with entropy, a database URL whose password is not a common word, or a JWT that decodes to real-looking claims. Obvious placeholders are
 not refused: AWS documentation keys (`...EXAMPLE`), runs of `x` / `*` / `0` / `.`, `YOUR_...` / `<...>` /
 `${...}` / `changeme` / `placeholder` / `dummy` / `test` values, sequential typing, URL passwords equal to the
-user name or in a short common-word list (`postgres:postgres@`, `user:password@`, `admin:admin@`). JWTs and
-quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a counter
-and the category, never the value) and never refused. `engine.secret_findings` is the detector; its quantifiers
+user name or in a short common-word list (`postgres:postgres@`, `user:password@`, `admin:admin@`), the jwt.io sample
+and JWTs whose identity claims are all test/demo values (or `alg: none`, or whose signature is a placeholder). A value on
+a line, or under a line, labelled `.env.example` / `.env.sample` / sample / placeholder / dummy / fake is not refused
+either: the label is the author's statement that it is an example (so a real secret directly under such a label is
+exempt too). Quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a
+counter and the category, never the value) and never refused. `engine.secret_findings` is the detector; its quantifiers
 are bounded and it scans long text in overlapping windows, so it is linear in the text and misses nothing at a
 window edge. A refused call skips the semantic cache and the judge queue, gets no emergency fallback to the budget
 chain, may not switch to a non-local model on overflow, and the LLM complexity classifier is not called for it.
 Doors: `route_and_call` (the `llm_*` MCP tools, the gateway), `route_and_stream`, the `llm_stream` tool and the
 SDK (`llm_router.sdk.route`, whose Ollama leg also goes direct).
-- **The scan reads** the prompt, the system prompt, caller context and every message of the conversation
-  history. A refusal that comes only from history says so and names the turn ("AWS access key (earlier turn 3)").
+- **The scan reads** the new request: the prompt, the system prompt and the caller context of this one call. **Not**
+  earlier turns of the conversation (`messages`): each was scanned when it was the new request, and scanning them again
+  made one past secret refuse every later turn. The price: a real secret in turn 3 that the caller overrode (or that a
+  host sent on its own) is replayed to a cloud model in turn 4 as history, and the door does not see it.
 - **The refusal** names the category and the place, never the value, and the way forward: start a local model
   (`llm-router local-check`), remove the secret, or override. The gateway answers HTTP 422 with that text (a 5xx
-  would invite retries), the MCP tools return it as the tool error.
-- **Override, per request:** start the prompt with `cloud:` (stripped before anything reads the text). The
-  request then routes as ordinary traffic, and the override is counted (`overridden:<category>`). An explicit
+  would invite retries) with a typed body, `{"error": {"type": "secret_local_only_refused", "categories": [...],
+  "places": [...], "remedy": ...}}`; the MCP tools return the message as the tool error; the SDK raises a
+  `RoutingError` that is also a `SecretLocalOnlyRefused`.
+- **Override, per request:** start the prompt with `cloud:` (stripped before anything reads the text), or pass the
+  flag where a prefix cannot be typed: `allow_cloud=True` (`route_and_call`, `sdk.route` / `Router.run`), the body field
+  `"allow_cloud": true` (`/route`) or the header `X-LLM-Router-Allow-Cloud: 1` (gateway). The
+  request then routes as ordinary traffic, and the override is counted (`overridden:<category>`), category only. An explicit
   cloud `model` on a secret request is refused unless the prefix is present; it is no longer silently replaced by
   a local model.
 Limits:
@@ -93,7 +102,7 @@ the proxy env when one is set.
 | Site | Carries | Status |
 |---|---|---|
 | `context_summary.py` (`_generate`, session-end summary) | conversation text | fixed |
-| `hooks/auto-route.py` (`classify_with_ollama`, first 500 chars of a prompt) | prompt text | fixed (hook v75) |
+| `hooks/auto-route.py` (`classify_with_ollama`, first 500 chars of a prompt) | prompt text | fixed (hook v77) |
 | `hooks/direct_executor.py` (`call_ollama`, `ollama_is_alive`, `available_ollama_models`) | prompt text, probes | fixed |
 | `toolkit/adapters/ollama.py` | agent messages | fixed |
 | `hooks/playwright-compress.py` | page snapshot text | fixed (hook v5) |

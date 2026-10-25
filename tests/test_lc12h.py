@@ -221,13 +221,9 @@ def test_b_secret_route_is_local_only_without_cache_or_judge(routed, monkeypatch
     assert SECRET not in _judge_queue() and TOKEN not in _judge_queue()
 
 
-def test_b_secret_in_a_message_or_system_prompt_also_routes_local(routed):
+def test_b_secret_in_the_system_prompt_also_routes_local(routed):
     routed.state["chain"] = [CLOUD, LOCAL]
     _route(f"hello {SECRET}", system_prompt=f"use {TOKEN}")
-    _drain()
-    assert routed.state["tried"] == [LOCAL]
-    routed.state["tried"].clear()
-    _route(f"hello {SECRET}", messages=[{"role": "user", "content": [{"type": "text", "text": TOKEN}]}])
     _drain()
     assert routed.state["tried"] == [LOCAL]
 

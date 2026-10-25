@@ -1,7 +1,8 @@
 """LC-12h repair 1 (PR #721 review): the secret door refuses precisely, recoverably, and everywhere.
 
 * precision: a fixture corpus (placeholders, ordinary coding prompts, random real-shaped secrets) generated at test time;
-* the refusal names the category and the place (current prompt / earlier turn N), never the value, and says what to do;
+* the refusal names the category and the place (current prompt, system prompt, caller context), never the value, and
+  says what to do; earlier turns are not scanned (repair 3);
 * the per-request override (`cloud:` prefix) is logged by count only; the gateway answers 422, the MCP tool errors;
 * the SDK door; the scan is linear (ReDoS) and whole (windows overlap); the marker is reset; /api/show is retried;
 * every prompt-carrying Ollama urllib call routes through ``local_privacy.open_url``.
@@ -58,7 +59,7 @@ def test_real_shaped_secrets_are_refused_with_their_category(kind):
 
 
 def test_log_only_shapes_are_counted_by_category_and_never_refused():
-    jwt = fx.jwt_fixtures()[0]
+    jwt = fx.jwt_fixtures()[0]                                  # the jwt.io sample: a JWT by shape, not a credential
     assigned = 'api_key = "' + fx.real_shaped("github_token", 5)[4:] + '"'
     assert local_privacy.scan_secrets(f"fixture {jwt} and {assigned}") == []
     counts = dict(local_privacy.secret_counts)
@@ -71,13 +72,10 @@ def test_refusal_names_category_place_and_remedy_never_the_value(e2e):
     key = fx.real_shaped("aws_key_id", 3)
     e2e.state["chain"] = [CLOUD]
     with pytest.raises(local_privacy.SecretLocalOnlyRefused) as info:
-        _route("write a test for the uploader", messages=[
-            {"role": "user", "content": "hello"},
-            {"role": "user", "content": f"my key is {key}"}])
+        _route(f"write a test for the uploader, my key is {key}")
     msg = str(info.value)
     assert key not in msg and "AKIA" not in msg
-    assert "AWS access key (earlier turn 2)" in msg
-    assert "only in the conversation history" in msg                 # history-only: says so, names the turn
+    assert "AWS access key (current prompt)" in msg
     assert "llm-router local-check" in msg and "remove the secret" in msg and "`cloud:`" in msg
     assert e2e.state["tried"] == []
     assert local_privacy.secret_counts == {"refused:AWS access key": 1}
@@ -88,7 +86,6 @@ def test_current_prompt_refusal_says_current_prompt(e2e):
     with pytest.raises(local_privacy.SecretLocalOnlyRefused) as info:
         _route(f"use {fx.real_shaped('github_token', 2)}")
     assert "GitHub token (current prompt)" in str(info.value)
-    assert "only in the conversation history" not in str(info.value)
 
 
 def test_placeholder_in_history_does_not_poison_later_turns(e2e):
@@ -157,17 +154,18 @@ def test_gateway_answers_422_with_the_message(e2e, monkeypatch):
     e2e.state["chain"] = [CLOUD]
     key = fx.real_shaped("github_token", 6)
     client = TestClient(gateway.app, base_url="http://127.0.0.1")
-    body = {"model": "auto", "messages": [{"role": "user", "content": f"token {key}"},
+    body = {"model": "auto", "messages": [{"role": "user", "content": "hello"},
                                           {"role": "assistant", "content": "ok"},
-                                          {"role": "user", "content": "now what?"}]}
+                                          {"role": "user", "content": f"token {key}"}]}
     r = client.post("/v1/chat/completions", json=body)
     assert r.status_code == 422
-    detail = r.json()["detail"]
-    assert "GitHub token (earlier turn 1)" in detail and "llm-router local-check" in detail and key not in r.text
-    assert e2e.state["tried"] == []
+    err = r.json()["error"]
+    assert "GitHub token (current prompt)" in err["message"] and "llm-router local-check" in err["message"]
+    assert err["type"] == "secret_local_only_refused" and err["categories"] == ["GitHub token"]
+    assert key not in r.text and e2e.state["tried"] == []
     # streaming: the error frame carries the same text
     r = client.post("/v1/chat/completions", json={**body, "stream": True})
-    assert "earlier turn 1" in r.text and '"code":"422"' in r.text and key not in r.text
+    assert "current prompt" in r.text and '"code":"422"' in r.text and key not in r.text
 
 
 # ---------------------------------------------------------------------------------------------- 4. SDK door
@@ -207,12 +205,12 @@ def test_sdk_door_cuts_the_chain_to_local_models(monkeypatch):
     assert local_privacy.secret_counts == {"overridden:GitHub token": 1}
 
 
-def test_sdk_door_refuses_without_a_local_model_and_in_history(monkeypatch):
+def test_sdk_door_refuses_without_a_local_model(monkeypatch):
     de = __import__("llm_router.hooks.direct_executor", fromlist=["ModelSpec"])
     sdk, seen, _de = _sdk_world(monkeypatch, [de.ModelSpec("gemini", "gemini-2.5-flash")])
     with pytest.raises(sdk.RoutingError) as info:
-        _call_sdk(sdk, "next question", messages=[{"role": "user", "content": fx.real_shaped("aws_key_id", 2)}])
-    assert "AWS access key (earlier turn 1)" in str(info.value) and seen == []
+        _call_sdk(sdk, f"next question, key {fx.real_shaped('aws_key_id', 2)}")
+    assert "AWS access key (current prompt)" in str(info.value) and seen == []
 
 
 def test_sdk_door_refuses_a_non_loopback_ollama(monkeypatch):

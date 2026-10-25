@@ -15,9 +15,13 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from llm_router.hooks import agent_loop
 from llm_router.hooks.direct_executor import DirectResult, ModelSpec
 from llm_router.hooks.response_formatter import format_direct_response, format_echo_context
+
+pytestmark = pytest.mark.usefixtures("open_url_via_urlopen")  # LC-12h: Ollama requests go through local_privacy.open_url
 
 M = ModelSpec(provider="ollama", model="qwen3-coder:30b")
 

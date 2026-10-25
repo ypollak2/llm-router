@@ -230,6 +230,12 @@ def scan_secrets(prompt: Any = None, system_prompt: Any = None, caller_context: 
     return hits
 
 
+def refusal(hits: list[SecretHit], **kw: Any) -> SecretLocalOnlyRefused:
+    """The refusal for a request with a high-precision secret and no loopback local model (``kw``: see
+    :func:`refusal_message`): the message and the hits, so a door can answer with the typed body."""
+    return SecretLocalOnlyRefused(refusal_message(hits, **kw), hits)
+
+
 def contains_secret(*parts: Any) -> bool:
     """True when any text in ``parts`` (strings, or message lists) holds a high-precision secret."""
     return bool(scan_secrets(messages=[{"content": t} for part in parts for t in _texts(part)]))

@@ -22,7 +22,7 @@ import pytest
 from llm_router.hooks import agent_loop
 
 # Exercises the Q&A routing machinery, which is off by default (LLM_ROUTER_QA_ROUTING).
-pytestmark = pytest.mark.usefixtures("qa_routing_on")
+pytestmark = pytest.mark.usefixtures("qa_routing_on", "open_url_via_urlopen")  # LC-12h
 
 READ_TOOLS = {"read_file", "list_files", "search_files"}
 

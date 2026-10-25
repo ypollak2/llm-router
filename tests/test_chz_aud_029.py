@@ -46,6 +46,7 @@ def test_ollama_classifier_logs_swallowed_error(hook, monkeypatch):
     def _boom(*args, **kwargs):
         raise ConnectionError("ollama unreachable")
 
+    monkeypatch.setattr(hook, "_ollama_open", lambda req, base_url, timeout: _boom(req, timeout=timeout))  # LC-12h
     monkeypatch.setattr(hook.urllib.request, "urlopen", _boom)
 
     result = hook.classify_with_ollama("write a python function")
@@ -94,6 +95,7 @@ def test_ollama_classifier_success_logs_nothing(hook, monkeypatch):
 
             return json.dumps({"message": {"content": "code"}}).encode()
 
+    monkeypatch.setattr(hook, "_ollama_open", lambda req, base_url, timeout: _Resp())  # LC-12h
     monkeypatch.setattr(hook.urllib.request, "urlopen", lambda *a, **k: _Resp())
     monkeypatch.setattr(hook, "_extract_category", lambda c: "code")
 

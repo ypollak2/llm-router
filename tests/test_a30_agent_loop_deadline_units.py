@@ -17,11 +17,15 @@ Two properties close it, both measured on the values actually received:
 from __future__ import annotations
 
 import json
+
+import pytest
 import time
 from unittest.mock import patch
 
 from llm_router.hooks import agent_loop
 from llm_router.hooks.direct_executor import ModelSpec, execute_agent
+
+pytestmark = pytest.mark.usefixtures("open_url_via_urlopen")  # LC-12h: Ollama requests go through local_privacy.open_url
 
 
 def test_execute_agent_hands_the_loop_a_duration_not_an_instant():

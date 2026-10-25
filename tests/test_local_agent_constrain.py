@@ -23,6 +23,8 @@ from llm_router.hooks import direct_executor as de
 from llm_router.local_agent import proxy_step
 from llm_router.local_agent.constrain import EDIT_PAIRS_SCHEMA, is_format_rejection, with_edit_format
 
+pytestmark = pytest.mark.usefixtures("open_url_via_urlopen")  # LC-12h: Ollama requests go through local_privacy.open_url
+
 VALID = [{"file": "a.py", "old_string": "return n", "new_string": "return n + 1",
           "description": "off by one"}]
 

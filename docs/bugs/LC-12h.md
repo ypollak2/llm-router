@@ -37,3 +37,16 @@ status: fixed in this change
 - **Test.** `tests/test_lc12h_repair.py`: 0 refusals on 31 placeholders and 260 ordinary prompts, refusals on 250
   random real-shaped secrets (10 kinds x 25 seeds), the marker test, the SDK test, the straddle and ReDoS tests.
   Rule: a shape that logs is not a shape that refuses; a refusal needs a measured placeholder corpus first.
+
+### Repair 3 (owner's merge on top of repair 2)
+
+- **Symptom / gap.** Repair 2 scanned every earlier turn (a real secret in turn 3 refused turn 30), had no label-based
+  exemption (`.env.example` blocks), treated every JWT as log-only (a real session token passed), offered the override
+  only as a prompt prefix, and answered the gateway's 422 with a bare string; its tests faked Ollama through
+  `urllib.request.urlopen` while the code now used `open_url` (CI red).
+- **Fix.** `local_privacy.scan_secrets` is called with the new request only (router, stream, SDK);
+  `engine._labelled_example`, `engine._jwt_is_real`; `allow_cloud` flag, `/route` body field and
+  `X-LLM-Router-Allow-Cloud` header; typed 422 body (`SecretLocalOnlyRefused.body`); the tests that fake the network
+  use the `open_url_via_urlopen` fixture; hook versions rebased onto main (auto-route 77).
+- **Test.** `tests/test_lc12h_repair3.py`. Rule: a door scans the new turn only and says so in its docs; a shape that
+  every test fixture also has (JWT) must be told apart by what it decodes to, not dropped.
