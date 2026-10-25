@@ -55,7 +55,9 @@ The extra tokens mean:
 
 Native `/route` (the gateway endpoint) refuses image parts in `prompt` and the Ollama-style `images` field with the same HTTP 400 as the other gateway routes; `messages` there is history and is flattened, never refused (D-165 (4)). The zero-dependency `route_server` refuses the same requests with the same HTTP 400 and text (F33); the shared helpers live in `route_server.py`.
 
-Pinned local model, small window (known limit, not changed): the `local_mode` filter compares the irreducible tokens only (system prompt, newest user turn, tool schemas), as everywhere. A pinned local model whose context window is known to be small therefore passes the filter whenever those tokens fit, and the call is forwarded to it with the untrimmed request body: nothing on the `--serve local-agent` pinned path trims or packs the history to the pin's window. Only a pin whose window is smaller than the irreducible tokens is kept on Claude.
+Pinned local model, small window (known limit, not changed): the `local_mode` filter compares the irreducible tokens only (system prompt, newest user turn, tool schemas), as everywhere. The rule is `needs.tokens > WINDOW_MARGIN * caps.window` with `WINDOW_MARGIN = 0.9` (`src/llm_router/capability_filter.py:44` and `:276`): a pin is dropped (the call stays on Claude) only when the irreducible tokens exceed 0.9 x the model's context window. A pin whose window is unknown (`caps.window is None`) always passes that check. A pinned local model whose window is known to be small therefore passes whenever those tokens fit, and the call is forwarded to it with the untrimmed request body: nothing on the `--serve local-agent` pinned path trims or packs the history to the pin's window.
+
+Consequence of the untrimmed forward: when the request exceeds the pinned Ollama model's `num_ctx`, Ollama's OpenAI-compatible `/v1` endpoint can silently drop leading messages. It still returns 200, and `truncate: false` is ignored there. This is known Ollama behaviour, not something llm-router detects.
 
 Chains the map must not empty:
 

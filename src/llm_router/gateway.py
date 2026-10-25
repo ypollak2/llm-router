@@ -902,8 +902,8 @@ def _refuse_tools_if_present(tools, tool_choice=None) -> None:
 from llm_router.route_server import (  # noqa: E402,F401
     _BARE_PART_TYPES,
     _IMAGE_PART_TYPES,
-    _has_image,
-    _newest_user_turn,
+    has_image,
+    newest_user_turn,
 )
 from llm_router.route_server import IMAGES_UNSUPPORTED as _IMAGES_UNSUPPORTED  # noqa: E402
 
@@ -915,7 +915,7 @@ def _refuse_images_if_present(*values) -> None:
     Called with the messages, the Responses ``input`` or the Ollama ``images`` field of
     every completion endpoint; `tests/test_r10_refuse_what_cannot_be_served.py` and
     `tests/test_p24_empty_chain_table.py` discover the routes."""
-    if any(_has_image(_newest_user_turn(v)) for v in values):
+    if any(has_image(newest_user_turn(v)) for v in values):
         raise HTTPException(status_code=400, detail=_IMAGES_UNSUPPORTED)
 
 
