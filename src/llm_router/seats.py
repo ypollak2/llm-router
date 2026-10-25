@@ -59,6 +59,7 @@ LEARN_NAMES = ("claude", "codex", "gemini", "gh", "node", "ollama")
 INTERPRETERS = ("node",)
 LEARNED_MAX_AGE_S = 7 * 24 * 3600
 LEARN_REFRESH_S = 3600
+LEARN_LOCK_TIMEOUT_S = 0.5
 # Generic install locations (user-local bin, Homebrew on Apple silicon, the
 # classic /usr/local). Searched after the learned dirs; never user-specific.
 FALLBACK_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -265,7 +266,7 @@ def _learn(name: str, found: str, now: float) -> None:
     under an exclusive lock so two processes cannot lose each other's entry."""
     if not os.path.isabs(found):
         return
-    d = os.path.dirname(found)
+    d = os.path.normpath(os.path.dirname(found))
 
     def fresh(dirs: dict) -> bool:
         entry = dirs.get(d) if isinstance(dirs.get(d), dict) else {}
@@ -278,7 +279,9 @@ def _learn(name: str, found: str, now: float) -> None:
     path = _cli_path_file()
     try:
         from llm_router.file_lock import exclusive_lock
-        with exclusive_lock(path.with_name(path.name + ".lock")):
+        with exclusive_lock(path.with_name(path.name + ".lock"), timeout=LEARN_LOCK_TIMEOUT_S) as locked:
+            if not locked:              # best-effort: the next sighting re-learns
+                return
             dirs = _read_learned()
             if fresh(dirs):
                 return

@@ -295,3 +295,27 @@ def test_relative_path_entry_is_not_recorded(state, tmp_path, monkeypatch):
     assert found is not None                                   # this process still finds it
     assert seats.learned_dirs() == []
     assert not (state / seats.CLI_PATH_FILE).exists()
+
+
+def test_busy_lock_skips_the_write_without_blocking(state, tmp_path):
+    """MAP-FIX-2b: learning is best-effort. With the lock held by someone else,
+    find_cli returns quickly and cli_path.json is left alone."""
+    from llm_router.file_lock import exclusive_lock
+    exe = _exe(tmp_path / "bin" / "claude", "#!/bin/sh\n")
+    lock = state / (seats.CLI_PATH_FILE + ".lock")
+    with exclusive_lock(lock) as held:
+        assert held
+        import threading
+        out = {}
+
+        def other():                     # flock conflicts across open files, even in one process
+            t = time.monotonic()
+            out["found"] = seats.find_cli("claude", env={"PATH": str(exe.parent)}, now=time.time())
+            out["dt"] = time.monotonic() - t
+
+        th = threading.Thread(target=other)
+        th.start()
+        th.join(10)
+    assert out["found"] == str(exe)
+    assert out["dt"] < 2.0, out["dt"]
+    assert not (state / seats.CLI_PATH_FILE).exists()

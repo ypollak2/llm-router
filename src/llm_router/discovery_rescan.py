@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from llm_router import model_discovery, paths, seats
@@ -232,6 +232,10 @@ def rescan(force=False, *, probe=probe_tags, detect=None, now=None,
             or cached_seats.is_stale(now)
             or seat_fingerprint(cached_seats) != seat_fp):
         seats.save_seats(detected)
+    elif detected is not raw and seat_fingerprint(cached_seats) != seat_fp:
+        # A seat was carried, but another one changed: persist the merged result
+        # with the OLD detected_at so the carry still ends an hour after its sighting.
+        seats.save_seats(replace(detected, detected_at=cached_seats.detected_at))
     keys = key_names_present(environ)
     result.keys_added = sorted(set(keys) - set(old.get("key_names", [])))
     result.keys_removed = sorted(set(old.get("key_names", [])) - set(keys))
