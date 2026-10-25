@@ -457,7 +457,9 @@ def cmd_redo_label(args: list[str]) -> int:
         description="Label redo pairs privately. Judge mode requires --model-id.",
         epilog="""Spend caps (--max-calls / --max-usd) are cumulative and persisted per run.
 To label more owner pairs, rerun --owner with a larger --others; the sample is
-extended and earlier labels are kept.
+extended and earlier labels are kept. The owner pass is recorded complete only
+when the sample holds at least 20 S/R spot checks (design section 3); an
+extended sample needs a new complete pass.
 --force-quota overrides quota pauses, including unknown or stale quota.
 --force-streak overrides the rejected-streak guard.
 --force-unresolved overrides only the unresolved-fraction guard.
@@ -469,7 +471,7 @@ The unresolved F-pair rule is never waived.
     mode.add_argument("--judge", action="store_true")
     parser.add_argument("--projects-dir", type=Path, default=northstar.claude_projects_dir())
     parser.add_argument("--seed", type=int)
-    parser.add_argument("--others", type=int, default=20)
+    parser.add_argument("--others", type=int, default=20)  # = redo_score.OWNER_MIN_SPOT_CHECKS
     parser.add_argument("--max-calls", type=int, default=DEFAULT_MAX_CALLS)
     parser.add_argument("--max-usd", type=float, default=DEFAULT_MAX_USD)
     parser.add_argument("--model-id")
@@ -657,9 +659,15 @@ def run_owner(options: argparse.Namespace, *, stdin=None, stdout=None) -> int:
             print(f"read errors: {stats['errors']}", file=stdout)
         print(f"remaining: {remaining} of {total}", file=stdout, flush=True)
         if remaining == 0 and total > 0:
-            from llm_router.redo_score import write_owner_done
+            from llm_router.redo_score import OWNER_MIN_SPOT_CHECKS, write_owner_done
             record = write_owner_done(options.run_dir)
-            print(f"owner pass complete: n_labelled={record['n_labelled']}", file=stdout, flush=True)
+            if record is None:
+                print(f"owner pass NOT recorded complete: the owner sample holds {len(others)} S/R spot "
+                      f"checks; design section 3 needs at least {OWNER_MIN_SPOT_CHECKS}. Rerun --owner "
+                      f"with --others {OWNER_MIN_SPOT_CHECKS} or more.", file=stdout, flush=True)
+            else:
+                print(f"owner pass complete: n_labelled={record['n_labelled']} "
+                      f"spot_checks={record['others']}", file=stdout, flush=True)
         return 0
     except Exception as exc:
         print(type(exc).__name__, file=stdout, flush=True)

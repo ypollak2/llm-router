@@ -11,6 +11,7 @@ from tests.test_redo_tune import (
     env,  # noqa: F401 -- pytest fixture dependency
     log_rows,
     planted,
+    record_owner_done,
     run_sample,
     score_tune,
     sessions,
@@ -18,7 +19,8 @@ from tests.test_redo_tune import (
     write_labels,
 )
 
-CHANGED = "Refused: labels on disk changed since canonical scoring; re-score or void.\n"
+CHANGED = ("Refused: labels on disk changed since canonical scoring; restore the original label files "
+           "or void the run.\n")
 
 
 @pytest.fixture
@@ -132,7 +134,46 @@ def test_owner_done_marker_holds_counts_and_a_digest_only(study):
     env, run, sids, owner = study
     owner_pass(run, sids, owner)
     record = json.loads((run / score.OWNER_DONE_FILE).read_text())
-    assert set(record) == {"n_labelled", "labels_owner_sha256"} and record["n_labelled"] == len(owner)
+    assert set(record) == {"n_labelled", "labels_owner_sha256", "others", "owner_sample_sha256"}
+    assert record["n_labelled"] == len(owner) and record["others"] == score.OWNER_MIN_SPOT_CHECKS
+
+
+def test_marker_needs_the_spot_check_minimum(study):
+    """Design section 3 step 2: every F pair plus 20 S/R spot checks; fewer completes no owner pass."""
+    env, run, sids, owner = study
+    write_labels(run, sids, owner)
+    (run / score.OWNER_DONE_FILE).unlink()
+    assert record_owner_done(run, score.OWNER_MIN_SPOT_CHECKS - 1) is None
+    assert not (run / score.OWNER_DONE_FILE).exists() and not score.owner_done_valid(run)
+    assert record_owner_done(run, score.OWNER_MIN_SPOT_CHECKS) is not None
+    assert score.owner_done_valid(run)
+
+
+def test_marker_with_too_few_spot_checks_is_invalid(study):
+    env, run, sids, owner = study
+    owner_pass(run, sids, owner)
+    path = run / score.OWNER_DONE_FILE
+    record = json.loads(path.read_text())
+    path.write_text(json.dumps(dict(record, others=score.OWNER_MIN_SPOT_CHECKS - 1)) + "\n")
+    assert not score.owner_done_valid(run)          # below the minimum, and no longer the recorded sample
+    sample_path = run / score.OWNER_SAMPLE_FILE
+    saved = json.loads(sample_path.read_text())
+    sample_path.write_text(json.dumps(dict(saved, others=saved["others"][:-1])) + "\n")
+    others, digest = score.owner_sample_state(run)
+    path.write_text(json.dumps(dict(record, others=others, owner_sample_sha256=digest)) + "\n")
+    assert not score.owner_done_valid(run)          # matches the shrunk sample, still below the minimum
+
+
+def test_changed_owner_sample_invalidates_the_marker(study):
+    env, run, sids, owner = study
+    owner_pass(run, sids, owner)
+    assert score.owner_done_valid(run)
+    sample_path = run / score.OWNER_SAMPLE_FILE
+    saved = json.loads(sample_path.read_text())
+    sample_path.write_text(json.dumps(dict(saved, others=saved["others"] + ["extra0000000000"])) + "\n")
+    assert not score.owner_done_valid(run)
+    sample_path.unlink()
+    assert not score.owner_done_valid(run)
 
 
 def test_v3c_same_error_is_linear_and_bounded():

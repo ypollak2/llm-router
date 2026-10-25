@@ -11,6 +11,7 @@ from tests.test_redo_tune import (
     env,  # noqa: F401 -- pytest fixture dependency
     log_rows,
     planted,
+    record_owner_done,
     run_sample,
     score_tune,
     sessions,
@@ -295,7 +296,7 @@ def test_exploit_route_d_second_tune_run_refused_then_void_needs_full_rescoring(
         json.dumps(dict(pair_id=hashlib.sha256(f"{sid}|{k}|{salt}".encode()).hexdigest()[:16],
                         label="redo" if k == 1 else "not_redo", source="owner")) + "\n"
         for sid in second for k in (1, 2)))
-    score.write_owner_done(t2)
+    record_owner_done(t2)
     assert score_tune(env, "v3b", "t1") == 2                # the voided run cannot be scored
     capsys.readouterr()
     for candidate in ("v2", "v3b"):

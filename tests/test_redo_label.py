@@ -683,13 +683,37 @@ def test_owner_sanitizes_terminal_controls(make_run):
 
 
 def test_owner_done_marker_only_after_the_whole_pass(make_run):
-    run = make_run(n=4)
-    rc, _ = run_tui(owner_args(), ["n", "q"], run.env)
+    run = make_run(n=30)                          # 10 F pairs and 20 S/R pairs
+    rc, _ = run_tui(owner_args(20), ["n", "q"], run.env)
     assert rc == 0 and not (run.run_dir / "owner_done.json").exists()
-    rc, _ = run_tui(owner_args(), ["n"] * 3, run.env)
-    assert rc == 0
+    rc, output = run_tui(owner_args(20), ["n"] * 29, run.env)
+    assert rc == 0 and b"owner pass complete: n_labelled=30 spot_checks=20" in output
     record = json.loads((run.run_dir / "owner_done.json").read_text())
-    assert set(record) == {"n_labelled", "labels_owner_sha256"} and record["n_labelled"] == 4
+    assert set(record) == {"n_labelled", "labels_owner_sha256", "others", "owner_sample_sha256"}
+    assert record["n_labelled"] == 30 and record["others"] == 20
+
+
+@pytest.mark.parametrize("others", [0, 1])
+def test_owner_pass_without_the_spot_check_minimum_writes_no_marker(make_run, others):
+    """Design section 3 step 2: every F pair plus 20 S/R spot checks. --others 0 or 1 labels the F pairs
+    but records no complete owner pass."""
+    run = make_run(n=30)
+    rc, output = run_tui(owner_args(others), ["n"] * (10 + others), run.env)
+    assert rc == 0 and len(owner_rows(run)) == 10 + others
+    assert b"owner pass NOT recorded complete" in output
+    assert not (run.run_dir / "owner_done.json").exists()
+
+
+def test_raised_others_invalidates_the_old_marker(make_run):
+    from llm_router import redo_score as score
+    run = make_run(n=45)                          # 15 F pairs and 30 S/R pairs
+    assert run_tui(owner_args(20), ["n"] * 35, run.env)[0] == 0
+    assert score.owner_done_valid(run.run_dir)
+    assert run_tui(owner_args(25), ["q"], run.env)[0] == 0      # sample extended, nothing labelled
+    assert not score.owner_done_valid(run.run_dir)
+    rc, output = run_tui(owner_args(25), ["n"] * 5, run.env)    # the extended sample is labelled
+    assert rc == 0 and b"spot_checks=25" in output
+    assert score.owner_done_valid(run.run_dir)
 
 
 def test_state_contains_metadata_only_and_private_label_files(make_run):

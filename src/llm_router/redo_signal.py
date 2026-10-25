@@ -130,8 +130,10 @@ _REDO_PHRASE_RE_V3C = re.compile(
 # The trailing "same error" form is its own pattern so it can be bounded (review of PR #708: its
 # end-of-prompt lookahead rescanned the rest of the text at every start, near-quadratic on a huge
 # repetitive prompt). It must start in the first FAILURE_WINDOW chars and end within
-# V3C_TRAILING_MAX_WORDS words of the end, so a text longer than FAILURE_WINDOW + V3C_SAME_ERROR_TAIL_CAP
-# chars cannot match it (only six words longer than the cap could); it is skipped there, not truncated.
+# V3C_TRAILING_MAX_WORDS words of the end. A text longer than FAILURE_WINDOW + V3C_SAME_ERROR_TAIL_CAP
+# chars is skipped there, not truncated. The cap is a cost bound, not a proof that no longer text can
+# match: a trailing word has no length bound (``\w+``), so a longer text whose phrase is followed by a
+# few very long words could match and is missed by design.
 V3C_SAME_ERROR_TAIL_CAP = 2000
 _SAME_ERROR_RE_V3C = re.compile(
     r"\b(?:still (?:getting|seeing|having)|i (?:still )?get|i'm (?:still )?getting|i am (?:still )?getting)"
