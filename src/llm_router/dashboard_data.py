@@ -45,6 +45,7 @@ from typing import Literal
 from llm_router import pricing as _pricing
 
 from llm_router import paths
+from llm_router.state_files import connect_sqlite
 from llm_router.savings import (
     ELIGIBLE_TURN_PRED_SQL,
     REALIZED_MODE,
@@ -450,7 +451,7 @@ def query_primary_metric(
     if not db.exists():
         return empty
 
-    conn = sqlite3.connect(str(db))
+    conn = connect_sqlite(str(db), create=False)
     try:
         if not _table_exists(conn, _JSONL_TABLE):
             return empty
@@ -509,7 +510,7 @@ def query_daily(
                           "unverified": 0.0}
         return daily[day]
 
-    conn = sqlite3.connect(str(db))
+    conn = connect_sqlite(str(db), create=False)
     try:
         # RED8-01: these were hardcoded at $15/$75 — the retired Opus 3 rate,
         # 3x the real one — and this read path feeds ~26 reporting surfaces, so
@@ -673,7 +674,7 @@ def query_model_distribution(
     where = f"timestamp >= datetime('now', '-{int(days)} days')"
     model_counts: dict[str, int] = {}
 
-    conn = sqlite3.connect(str(db))
+    conn = connect_sqlite(str(db), create=False)
     try:
         # Legacy usage table — keyed by 'model'
         if _table_exists(conn, _LEGACY_TABLE):
@@ -717,7 +718,7 @@ def audit_sources(
         return []
 
     where = _window_sql(window)
-    conn = sqlite3.connect(str(db))
+    conn = connect_sqlite(str(db), create=False)
     out: list[DataSourceAudit] = []
     try:
         for table in (_LEGACY_TABLE, *_PLATFORM_TABLES, _JSONL_TABLE):
@@ -820,7 +821,7 @@ def query_realized_savings(
         return empty
 
     try:
-        conn = sqlite3.connect(str(db))
+        conn = connect_sqlite(str(db), create=False)
         try:
             if not _table_exists(conn, "execution_events"):
                 return empty
@@ -922,7 +923,7 @@ def query_model_savings(
     where = _window_sql(window)
     cond = f"({cond}) AND COALESCE(is_simulated, 1) = 0 AND {where}"
 
-    conn = sqlite3.connect(str(db))
+    conn = connect_sqlite(str(db), create=False)
     conn.row_factory = sqlite3.Row
     try:
         if not _table_exists(conn, _JSONL_TABLE):

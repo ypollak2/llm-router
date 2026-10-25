@@ -42,6 +42,7 @@ from pathlib import Path
 from llm_router.logging import get_logger
 
 from llm_router import paths
+from llm_router.state_files import connect_sqlite
 
 log = get_logger("llm_router.quota_savings")
 
@@ -195,7 +196,7 @@ def _sum_saved_usd_since(db_path: Path, since: datetime) -> float | None:
     if not db_path.exists():
         return None
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = connect_sqlite(str(db_path), create=False)
         try:
             since_iso = since.strftime("%Y-%m-%d %H:%M:%S")
             cur = conn.execute(
@@ -292,7 +293,7 @@ def _sum_cost_usd_since_for_provider(
     if not db_path.exists():
         return 0.0
     try:
-        conn = sqlite3.connect(str(db_path))
+        conn = connect_sqlite(str(db_path), create=False)
         try:
             since_iso = since.strftime("%Y-%m-%d %H:%M:%S")
             cur = conn.execute(
