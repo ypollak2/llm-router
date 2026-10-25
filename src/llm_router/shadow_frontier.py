@@ -412,7 +412,7 @@ async def replay_http(client, url: str, headers: dict, content: bytes, *,
 
 
 LANE_KEYS = ("lane", "task_group", "rate_phase", "rate", "session_id", "msg_count", "prev_tool_class", "conf",
-             "served_body_sha", "replay_body_sha")
+             "served_body_sha", "replay_body_sha", "identity_sha")
 
 
 def _lane_fields(job: dict) -> dict:

@@ -711,9 +711,14 @@ the state dir and replays the frozen main golden with `LLM_ROUTER_SHADOW_FRONTIE
     such setting is `haiku_fold_system` (it wraps mid-conversation system text in `<system-reminder>`); the default
     Haiku rewrite adds no system prompt or template text. **The identity is the PROXY's (D-303).** The proxy computes
     the four values from the policy it loaded at startup (`--tier-policy FILE`, the env path or the bundled one) and,
-    at the flip point (all four switches on), records them in `lane_a_identity.json` (state dir, 0600, replaced
-    at each proxy start; lane off writes nothing) and in the flip row. The writer stamps final rows from that record
-    and writes nothing, reporting `identity_unknown`, when none is recorded (the window stays open). S1 ignores a
+    whenever lane A can serve (`lane_a.enabled`, `LLM_ROUTER_PROXY_LANE_A=on` and `haiku_rewrite`; the shadow flag
+    does not matter, so a restart with the shadow off and a changed policy still refreshes the record), records them
+    in `lane_a_identity.json` (state dir, 0600, replaced at each proxy start; any of those three off writes nothing)
+    and, at the flip point (all four switches), in the flip row. Each sampled pair carries `identity_sha`, the sha of
+    the identities of the proxy that served it (PR4); the writer counts only pairs whose `identity_sha` equals the
+    stamp it writes and reports the rest as `excluded.identity_mismatch` (a pair with none, `identity_missing`), so
+    pairs collected under one policy never count under another after a restart. The writer stamps final rows from
+    that record and writes nothing, reporting `identity_unknown`, when none is recorded (the window stays open). S1 ignores a
     final row whose stamp differs from the proxy's most recent recorded identity on any of the four (or has no
     stamp) and reports the lane under `invalidated_lanes` (with a caveat); `kpi` prints and returns the compared
     identity's sha (`compared_identity`) next to it. Validity is computed on every read, never latched: a reverted

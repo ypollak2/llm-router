@@ -78,11 +78,15 @@ def _ledger() -> list[dict]:
     return haiku_guard.read_jsonl(sf.ledger_path())
 
 
+# PR4: every pair carries the identity_sha of the proxy that sampled it; the tests' proxy runs the bundled policy
+BUNDLED_SHA = lane_a_shadow.identity_sha(lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None)))
+
+
 def _verdict(i, *, group="tech_op", a=True, f=True, cj=False, ts=None, phase="fill", lane="A", **kw):
     row = {"ts": NOW - 100 - i if ts is None else ts, "task_id": f"t{i}", "acceptable": None if cj else a,
            "frontier_acceptable": None if cj else f, "cannot_judge": cj, "judge_model": "sonnet",
            "judge_brief_sha256": sf.JUDGE_BRIEF_SHA256, "lane": lane, "task_group": group, "rate_phase": phase,
-           "served_body_sha": "sha-x", "replay_body_sha": "sha-x"}
+           "served_body_sha": "sha-x", "replay_body_sha": "sha-x", "identity_sha": BUNDLED_SHA}
     row.update(kw)
     if lane is None:
         for k in ("lane", "task_group", "rate_phase", "judge_brief_sha256", "served_body_sha", "replay_body_sha"):
@@ -256,7 +260,8 @@ def test_a_lane_context_exists_only_for_a_step_lane_a_served():
               "tier_task_type": "query", "lane_a_conf": 0.7}
     ctx = lane_a_shadow.context_from_row(served, body)
     assert ctx == {"lane": "A", "session_id": "s", "msg_count": 3, "task_group": "tech_op",
-                   "prev_tool_class": "technical_op", "conf": 0.7, "served_body_sha": None}
+                   "prev_tool_class": "technical_op", "conf": 0.7, "served_body_sha": None,
+                   "identity_sha": None}
     for reason in (None, "eligible", "retried_original", "off", "breaker_open_reserved", "error", "low_conf"):
         assert lane_a_shadow.context_from_row(dict(served, lane_a_reason=reason), body) is None, reason
     assert "prompt" not in json.dumps(ctx).lower() and CANARY_PROMPT not in json.dumps(ctx)
@@ -972,7 +977,7 @@ def test_reading_the_trip_changes_no_file(home):
 def _lane_pair(i, **kw):
     return _pair(f"J{i}", lane="A", task_group="tech_op", rate_phase="fill", rate=1.0, session_id=f"s{i}",
                  msg_count=i, conf=0.7, prev_tool_class="technical_op", served_body_sha="sha-x",
-                 replay_body_sha="sha-x", **kw)
+                 replay_body_sha="sha-x", identity_sha=BUNDLED_SHA, **kw)
 
 
 def _judge(run, pairs):
@@ -1651,7 +1656,7 @@ async def test_a_proxy_started_with_its_own_tier_policy_stamps_that_policy_and_s
     assert lane_a_shadow.read_flip_row()["identity"] == mine
     assert stat.S_IMODE(lane_a_shadow.identity_path().stat().st_mode) == 0o600
     t = time.time() + 1
-    _write_verdicts(_pairs(60, 60, ts=t))
+    _write_verdicts([{**r, "identity_sha": lane_a_shadow.identity_sha(mine)} for r in _pairs(60, 60, ts=t)])
     out = lqw.write_all(now=t + 500)
     assert out["written"] == 1
     (row,) = lane_quality.read_rows()
@@ -1759,3 +1764,79 @@ def test_an_invalidated_row_is_valid_again_when_the_proxy_identity_returns(home)
     lane_a_shadow.record_identity(ident)                                                 # and is reverted
     sampled, invalid = lane_quality.sampled_report(rows, NOW + 1)
     assert sampled and not invalid
+
+
+# ---- PR4: per-pair identity (SHOULD-A) and the identity record without the shadow (SHOULD-B) ----
+
+def test_pairs_collected_under_policy_a_earn_nothing_after_a_restart_under_policy_b(home, monkeypatch):
+    monkeypatch.setenv(sf.ENV_FLAG, "on")
+    ident_a = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None))
+    ident_b = {**ident_a, "prompt_set_sha": "b" * 16}
+    lane_a_shadow.record_identity(ident_a)
+    t = time.time() + 1
+    _write_verdicts([{**r, "identity_sha": lane_a_shadow.identity_sha(ident_a)} for r in _pairs(60, 60, ts=t)])
+    lane_a_shadow.record_identity(ident_b)               # the proxy restarts with policy B before the writer runs
+    out = lqw.write_all(now=t + 500)
+    assert out["written"] == 0 and not lane_quality.read_rows()
+    g = out["groups"]["tech_op"]
+    assert g["n"] == 0 and g["excluded"] == {"identity_mismatch": 60}
+    assert lane_a_shadow.identity_sha(ident_a) != lane_a_shadow.identity_sha(ident_b)
+
+
+def test_a_legacy_pair_without_an_identity_sha_is_excluded_as_identity_missing(on):
+    t = time.time() + 1
+    rows = [{k: v for k, v in r.items() if k != "identity_sha"} for r in _pairs(60, 60, ts=t)]
+    _write_verdicts(rows)
+    out = lqw.write_all(now=t + 500)
+    assert out["written"] == 0 and out["groups"]["tech_op"]["excluded"] == {"identity_missing": 60}
+
+
+def test_a_window_that_spans_a_restart_counts_only_the_pairs_of_the_stamped_identity(on):
+    t = time.time() + 1
+    rows = _pairs(60, 60, ts=t)
+    _write_verdicts([{**r, "identity_sha": "f" * 16} if i < 30 else r for i, r in enumerate(rows)])
+    out = lqw.write_all(now=t + 500)
+    assert out["written"] == 0 and out["groups"]["tech_op"]["n"] == 30
+    assert out["groups"]["tech_op"]["excluded"] == {"identity_mismatch": 30}
+
+
+def test_a_served_pair_context_carries_the_identity_sha_through_to_the_verdict_fields():
+    row = {"lane_a_reason": lane_a.R_SERVED, "session_id": "s", "tier_task_type": "code", "prev_tool_class": "x"}
+    ctx = lane_a_shadow.context_from_row(row, {"messages": []}, "abc123")
+    assert ctx["identity_sha"] == "abc123" and "identity_sha" in sf.LANE_KEYS
+    assert sf._lane_fields({"lane": ctx, "rate": 1, "rate_phase": "fill"})["identity_sha"] == "abc123"
+
+
+@pytest.mark.parametrize("lane_cfg,env,expect", [(LANE_ON, "on", True), (OFF_LANE, "on", False), (LANE_ON, None, False)])
+async def test_with_the_shadow_off_the_identity_record_is_refreshed_whenever_lane_a_serving_is_on(
+        home, tmp_path, monkeypatch, lane_cfg, env, expect):
+    monkeypatch.delenv(sf.ENV_FLAG, raising=False)
+    if env:
+        monkeypatch.setenv(lane_a.ENV_SWITCH, env)
+    stale = {**lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None)), "breaker_sha": "old"}
+    if expect:
+        lane_a_shadow.record_identity(stale)
+    app = _app(tmp_path, _raw({**lane_cfg, "tau": 0.9}), UpstreamU())
+    await _post(app, _body(continuation=False, sid="a"))
+    assert not lane_a_shadow.flip_path().exists()                       # the FLIP still needs the shadow
+    if expect:
+        mine = lane_a_shadow.identities_of(pt.ClaudeTierPolicy.from_dict(_raw({**lane_cfg, "tau": 0.9})))
+        assert lane_a_shadow.current_identities() == mine != stale
+    else:
+        assert not lane_a_shadow.identity_path().exists()               # lane off: nothing written
+
+
+async def test_a_restart_with_the_shadow_off_and_a_changed_policy_invalidates_the_old_final_row(
+        home, tmp_path, monkeypatch):
+    monkeypatch.delenv(sf.ENV_FLAG, raising=False)
+    monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
+    lane_a_shadow.record_identity(lane_a_shadow.identities_of(pt.ClaudeTierPolicy.load(None)))
+    t = time.time() + 1
+    _write_verdicts(_pairs(60, 60, ts=t))
+    assert lqw.write_all(now=t + 500)["written"] == 1
+    (row,) = lane_quality.read_rows()
+    assert lane_quality.sampled_report([row], t + 600)[0]
+    app = _app(tmp_path, _raw({**LANE_ON, "tau": 0.9}), UpstreamU())    # restart: shadow off, policy changed
+    await _post(app, _body(continuation=False, sid="a"))
+    sampled, invalid = lane_quality.sampled_report([row], t + 600)
+    assert not sampled and invalid

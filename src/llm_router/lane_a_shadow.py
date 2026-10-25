@@ -232,7 +232,11 @@ def identity_path() -> Path:
 def record_identity(identity: dict, task_groups: Iterable[str] = (), now: float | None = None) -> None:
     """Write the identities the proxy runs with (D-303) to ``lane_a_identity.json``, replacing the last one (0600
     through ``state_files``, atomic rename). Blocking I/O: call it through ``to_thread``. Called only by
-    :func:`maybe_record_flip`, i.e. only when all four switches are on."""
+    :func:`maybe_record_flip`, i.e. only when the three serving switches are on.
+
+    Overwriting on every start is safe because each pair carries the ``identity_sha`` of the proxy that sampled it
+    (``context_from_row``) and the writer counts only pairs equal to the stamp (PR4): a pair collected under an
+    older record can never be credited to a newer one."""
     import json
     import os
     import time
@@ -266,14 +270,20 @@ def maybe_record_flip(now: float, *, yaml_enabled: bool, env_on: bool, haiku_rew
                       identity: dict | None = None, task_groups: Iterable[str] = ()) -> bool:
     """D-302: the owner flip is the first proxy request that sees ``lane_a.enabled`` (YAML), the env switch,
     ``haiku_rewrite`` and the shadow flag all on, whether or not that step is eligible. Writes nothing (no file, no
-    directory) when any one is off. With all on it also records the proxy's own ``identity`` (D-303) in
-    ``lane_a_identity.json`` and in the flip row. True when this call wrote the flip."""
+    directory) when any one of the three SERVING switches (yaml, env, haiku_rewrite) is off.
+
+    PR4 (D-303): the proxy's ``identity`` is recorded in ``lane_a_identity.json`` whenever lane A can SERVE (the
+    three serving switches), regardless of the shadow flag, so a restart with the shadow off and a changed policy
+    still refreshes the record (S1 then invalidates the old final row). The flip itself (and its row) still needs
+    all four switches. True when this call wrote the flip."""
     seen = {"yaml_enabled": bool(yaml_enabled), "env_on": bool(env_on), "haiku_rewrite": bool(haiku_rewrite),
             "shadow_on": bool(shadow_on)}
-    if not all(seen.values()):
+    if not (seen["yaml_enabled"] and seen["env_on"] and seen["haiku_rewrite"]):
         return False
     if identity is not None:
         record_identity(identity, task_groups, now)
+    if not seen["shadow_on"]:
+        return False
     return record_flip(now, seen, identity)
 
 
@@ -369,8 +379,9 @@ def task_group_of(task_type: Any, prev_tool_class: Any) -> str:
     return offload_share._task_group(task_type, prev_tool_class)
 
 
-def context_from_row(row: dict, body: dict) -> dict | None:
-    """The lane context of a served step, or None when lane A did not serve it. Text-free: ids, a count, labels."""
+def context_from_row(row: dict, body: dict, identity_sha: str | None = None) -> dict | None:
+    """The lane context of a served step, or None when lane A did not serve it. Text-free: ids, a count, labels.
+    ``identity_sha``: sha of the identities of the proxy that served it (PR4), stamped on the pair at sample time."""
     from llm_router.proxy import lane_a
 
     if row.get("lane_a_reason") != lane_a.R_SERVED:
@@ -380,7 +391,8 @@ def context_from_row(row: dict, body: dict) -> dict | None:
     return {"lane": LANE_TAG, "session_id": row.get("session_id"), "served_body_sha": row.get("lane_a_body_sha"),
             "msg_count": len(msgs) if isinstance(msgs, list) else None,
             "task_group": task_group_of(row.get("tier_task_type"), prev),
-            "prev_tool_class": prev, "conf": lane_a.clean_conf(row.get("lane_a_conf"))}
+            "prev_tool_class": prev, "conf": lane_a.clean_conf(row.get("lane_a_conf")),
+            "identity_sha": identity_sha}
 
 
 def utc_day(ts: float) -> str:
