@@ -133,6 +133,7 @@ or the file ``--tier-policy`` / ``LLM_ROUTER_PROXY_TIER_POLICY`` names), never f
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import re
@@ -355,6 +356,10 @@ class _Phases:
         self.ms[name] = self.ms.get(name, 0.0) + ms
 
 
+#: Where ``_approx_context_tokens`` leaves its result while a ``_HaikuBlock`` runs the body check (PR3, N4).
+_CTX_SINK: "contextvars.ContextVar[list[int] | None]" = contextvars.ContextVar("lr_ctx_sink", default=None)
+
+
 class _HaikuBlock:
     """``haiku_block_reason`` of one request body, computed at most once per decision
     and only when the decision actually consults the Haiku tier, timed into the
@@ -378,8 +383,14 @@ class _HaikuBlock:
 
     def __call__(self) -> str:
         if self.reason is None:
-            with self._phases("haiku_checks"):
-                self.reason, self.tokens = _haiku_block(self._body, self._fold, self._model)
+            sink: list[int] = []
+            token = _CTX_SINK.set(sink)
+            try:
+                with self._phases("haiku_checks"):
+                    self.reason = haiku_block_reason(self._body, fold_system=self._fold, model=self._model)
+            finally:
+                _CTX_SINK.reset(token)
+            self.tokens = sink[-1] if sink else None
         return self.reason
 
 
@@ -539,24 +550,18 @@ def haiku_block_reason(body: dict, *, fold_system: bool = False, model: str | No
     ``temperature`` != 1, ``top_p`` != 0.99, any ``top_k``, or ends on an assistant turn
     (prefill) is ``params``: each is a 400 there (migration guide, "Remove sampling
     parameters", "Replace assistant prefill")."""
-    return _haiku_block(body, fold_system, model)[0]
-
-
-def _haiku_block(body: dict, fold_system: bool, model: str | None) -> tuple[str, int | None]:
-    """``(haiku_block_reason, context token estimate)``; the estimate is None when a check before it decided."""
     legacy = haiku_is_legacy(model)
     if legacy and not fold_system and _has_mid_conversation_system_message(body):
-        return HAIKU_BLOCK_SYSTEM_MESSAGE, None
+        return HAIKU_BLOCK_SYSTEM_MESSAGE
     if _has_media(body):
-        return HAIKU_BLOCK_MEDIA, None
+        return HAIKU_BLOCK_MEDIA
     if not _only_custom_tools(body):
-        return HAIKU_BLOCK_BUILTIN_TOOLS, None
+        return HAIKU_BLOCK_BUILTIN_TOOLS
     if not legacy and _has_haiku55_rejected_params(body):
-        return HAIKU_BLOCK_PARAMS, None
-    tokens = _approx_context_tokens(body)
-    if tokens > (HAIKU_MAX_CONTEXT_TOKENS if legacy else haiku55_context_limit(body)):
-        return HAIKU_BLOCK_CONTEXT, tokens
-    return HAIKU_BLOCK_NONE, tokens
+        return HAIKU_BLOCK_PARAMS
+    if _approx_context_tokens(body) > (HAIKU_MAX_CONTEXT_TOKENS if legacy else haiku55_context_limit(body)):
+        return HAIKU_BLOCK_CONTEXT
+    return HAIKU_BLOCK_NONE
 
 
 def _has_haiku55_rejected_params(body: dict) -> bool:
@@ -619,7 +624,11 @@ def _approx_context_tokens(body: dict) -> int:
 
     parts = [json.dumps(body.get("messages") or []), json.dumps(body.get("system") or ""),
              json.dumps(body.get("tools") or [])]
-    return estimate_tokens("".join(parts))
+    n = estimate_tokens("".join(parts))
+    sink = _CTX_SINK.get()
+    if sink is not None:
+        sink.append(n)  # a ``_HaikuBlock`` is watching: it keeps the estimate for lane A's cache rule
+    return n
 
 
 class ClaudeTierPolicy:

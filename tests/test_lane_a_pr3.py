@@ -864,12 +864,14 @@ async def test_the_context_size_is_estimated_once_per_decision(home, monkeypatch
     assert len(calls) == 1, "the cache rule must reuse the body check's estimate, not serialize the body again"
 
 
-def test_haiku_block_reason_is_unchanged_and_exposes_its_estimate():
+def test_the_haiku_block_keeps_the_context_estimate_its_check_made():
     body = _body()
-    reason, tokens = pt._haiku_block(body, False, None)
-    assert reason == pt.haiku_block_reason(body) == pt.HAIKU_BLOCK_NONE and tokens == pt._approx_context_tokens(body)
+    block = pt._HaikuBlock(body, False, pt._Phases(), None)
+    assert block.tokens is None
+    assert block() == pt.HAIKU_BLOCK_NONE and block.tokens == pt._approx_context_tokens(body)
     media = _body(extra_user=[{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "x"}}])
-    assert pt._haiku_block(media, False, None) == (pt.HAIKU_BLOCK_MEDIA, None)
+    blocked = pt._HaikuBlock(media, False, pt._Phases(), None)
+    assert blocked() == pt.HAIKU_BLOCK_MEDIA and blocked.tokens is None        # stopped before the estimate
 
 
 # ── carry-in N5: a late probe outcome with a stale id ────────────────────────
