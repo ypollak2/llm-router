@@ -533,7 +533,8 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
         else:
             print(_yellow("  no seat found — routed calls will bill an API key; log in to Claude Code, Codex, or start Ollama"))
         _maybe_enable_claude_subscription(_found)
-    except Exception:  # noqa: BLE001 -- install must not fail on a probe
+    except Exception as e:  # noqa: BLE001 -- install must not fail on a probe
+        print(_dim(f"  seat detection failed: {e}"))  # as doctor does: say it, then go on
         try:
             _maybe_enable_claude_subscription(None)
         except Exception:  # noqa: BLE001 -- see above
