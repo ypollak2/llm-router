@@ -155,7 +155,7 @@ def test_seat_present_upgrade_only_appends_the_subscription_flag(tmp_path, monke
     monkeypatch.setattr("llm_router.discover.get_cached_ollama_models", lambda: [])
     monkeypatch.setattr(ap, "detect_services", lambda: {
         "claude_subscription": True, "claude_quota_remaining": 10.0, "ollama_available": False})
-    found = SimpleNamespace(claude=SimpleNamespace(present=True), summary_line=lambda: "claude",
+    found = SimpleNamespace(claude=SimpleNamespace(present=True), summary_line=lambda **_k: "claude",
                             free_bucket=lambda: ["claude"])
     monkeypatch.setattr(seats, "refresh_seats", lambda *a, **k: found)
     _pin_host_detection(monkeypatch, root)

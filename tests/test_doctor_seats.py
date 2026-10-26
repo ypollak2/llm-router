@@ -144,7 +144,9 @@ def test_doctor_marks_a_carried_seat_and_shows_this_process_verdict(monkeypatch,
     """MAP-FIX-2c: a doctor that cannot find the claude CLI saves the seat another
     process saw connected 10 min ago (the carry), but must not print it as a plain
     green "connected": it names the carry, its own verdict and when the carry ends.
-    A seat this process sees connected itself prints exactly as before."""
+    A seat this process sees connected itself prints exactly as before.
+    MAP-FIX-2d: the time shown is the carry anchor (detected_at, shared by every
+    seat), not a last sighting; and the free-bucket line marks the carried seat too."""
     _patch_home(monkeypatch, tmp_path)
     monkeypatch.delenv("LLM_ROUTER_SUBSCRIPTION_PROVIDER", raising=False)
     t0 = S.time.time() - 600
@@ -161,7 +163,9 @@ def test_doctor_marks_a_carried_seat_and_shows_this_process_verdict(monkeypatch,
     assert len(claude) == 1
     ends = (seen + timedelta(seconds=S.CARRY_MAX_AGE_S)).isoformat(timespec="seconds")
     assert ("carried: this process sees 'claude CLI not found'; "
-            f"last seen {seen.isoformat(timespec='seconds')}, carry ends {ends})") in claude[0]
+            f"carry anchored {seen.isoformat(timespec='seconds')}, carry ends {ends})") in claude[0]
+    assert "last seen" not in claude[0]
     assert claude[0].startswith(doc._warn(""))                # warning-styled, not the green tick
     assert doc._ok(f"{'Codex':<11}{codex.label()}") in lines   # not carried: unchanged line
     assert S.load_seats().claude.status == "connected"         # the carry is still saved
+    assert doc._ok("free bucket: claude (carried), codex") in lines

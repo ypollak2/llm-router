@@ -899,11 +899,13 @@ def _seats_report() -> list[str]:
                 # MAP-FIX-2c: saved as connected because another process saw it
                 # within the hour; this process itself could not find or probe it.
                 # carry_for_save only carries when detected_at parses, so this does too.
-                seen = datetime.fromisoformat(seats.detected_at)
-                ends = seen + timedelta(seconds=_seats.CARRY_MAX_AGE_S)
+                # detected_at is the carry anchor, not this seat's last sighting: one
+                # timestamp covers every seat, so a seat probed later is not reflected.
+                anchor = datetime.fromisoformat(seats.detected_at)
+                ends = anchor + timedelta(seconds=_seats.CARRY_MAX_AGE_S)
                 lines.append(_warn(
                     f"{text} (carried: this process sees '{carried[key].reason}'; "
-                    f"last seen {seen.isoformat(timespec='seconds')}, "
+                    f"carry anchored {anchor.isoformat(timespec='seconds')}, "
                     f"carry ends {ends.isoformat(timespec='seconds')})"
                 ))
             elif seat.plan_stale:
@@ -920,7 +922,7 @@ def _seats_report() -> list[str]:
 
     bucket = sorted(seats.free_bucket())
     if bucket:
-        lines.append(_ok(f"free bucket: {', '.join(bucket)}"))
+        lines.append(_ok(f"free bucket: {_seats.mark_carried(bucket, carried)}"))
     else:
         lines.append(_warn(
             "no seat found -- every routed call is billed to an API key; "
