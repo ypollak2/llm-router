@@ -522,23 +522,29 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
             )
 
     # ── Seats: which subscriptions are logged in (drives the free bucket) ──
+    # Three steps, each with its own label, so a failure names what failed (MAP-FIX-2f).
+    # None of them may fail install: say it, as doctor does, then go on.
+    _found = None
     try:
         from llm_router import seats as _seats
         _carried: dict = {}
         _found = _seats.refresh_seats(carried=_carried)
-        print(f"\n{_bold('  Seats')}  {_found.summary_line(carried=_carried)}")
-        _bucket = sorted(_found.free_bucket())
-        if _bucket:
-            print(f"  free bucket: {_seats.mark_carried(_bucket, _carried)}")
-        else:
-            print(_yellow("  no seat found — routed calls will bill an API key; log in to Claude Code, Codex, or start Ollama"))
-        _maybe_enable_claude_subscription(_found)
     except Exception as e:  # noqa: BLE001 -- install must not fail on a probe
-        print(_dim(f"  seat detection failed: {e}"))  # as doctor does: say it, then go on
+        print(_warn(f"seat detection failed: {e}"))
+    if _found is not None:
         try:
-            _maybe_enable_claude_subscription(None)
-        except Exception:  # noqa: BLE001 -- see above
-            pass
+            print(f"\n{_bold('  Seats')}  {_found.summary_line(carried=_carried)}")
+            _bucket = sorted(_found.free_bucket())
+            if _bucket:
+                print(f"  free bucket: {_seats.mark_carried(_bucket, _carried)}")
+            else:
+                print(_yellow("  no seat found — routed calls will bill an API key; log in to Claude Code, Codex, or start Ollama"))
+        except Exception as e:  # noqa: BLE001 -- see above
+            print(_warn(f"seat summary failed: {e}"))
+    try:
+        _maybe_enable_claude_subscription(_found)
+    except Exception as e:  # noqa: BLE001 -- see above
+        print(_warn(f"Claude subscription setup failed: {e}"))
 
     _daily_schedule_step(interactive=interactive, flags=flags, schedule=schedule)
 

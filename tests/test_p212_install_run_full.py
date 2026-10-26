@@ -180,3 +180,36 @@ def test_seat_detection_failure_is_reported_and_install_completes(sandbox, monke
     out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
     assert "  seat detection failed: refresh_seats() got an unexpected keyword argument 'x'" in out
     assert "LLM Router installed globally." in out
+
+
+def test_subscription_failure_is_not_labelled_seat_detection(sandbox, monkeypatch, capsys):
+    """MAP-FIX-2f: the seats try block also covered `_maybe_enable_claude_subscription`,
+    so its failure printed "seat detection failed". It now names the step that failed."""
+    def broken(found):
+        raise RuntimeError("env write refused")
+    monkeypatch.setattr(install, "_maybe_enable_claude_subscription", broken)
+
+    assert install.run_full(interactive=False) == ["Claude Code"]
+
+    out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+    assert "seat detection failed" not in out
+    assert "  Seats  test seats" in out
+    assert "  ⚠  Claude subscription setup failed: env write refused" in out
+    assert "LLM Router installed globally." in out
+
+
+def test_seat_summary_failure_is_not_labelled_seat_detection(sandbox, monkeypatch, capsys):
+    """MAP-FIX-2f: detection succeeded but printing the summary failed; the subscription
+    step still sees the detected seats."""
+    found = SimpleNamespace(summary_line=lambda **_k: 1 / 0, free_bucket=lambda: [])
+    monkeypatch.setattr(seats, "refresh_seats", lambda **_k: found)
+    got = []
+    monkeypatch.setattr(install, "_maybe_enable_claude_subscription", got.append)
+
+    assert install.run_full(interactive=False) == ["Claude Code"]
+
+    out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+    assert "seat detection failed" not in out
+    assert "  ⚠  seat summary failed: division by zero" in out
+    assert got == [found]
+    assert "LLM Router installed globally." in out
