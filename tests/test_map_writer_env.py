@@ -9,6 +9,7 @@ every binary is a fake in tmp_path.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -320,3 +321,71 @@ def test_busy_lock_skips_the_write_without_blocking(state, tmp_path):
     assert out["found"] == str(exe)
     assert out["dt"] < 2.0, out["dt"]
     assert not (state / seats.CLI_PATH_FILE).exists()
+
+
+def _iso(t: float) -> str:
+    return seats.datetime.fromtimestamp(t, tz=seats.timezone.utc).isoformat()
+
+
+def _blind_refresh(home: Path, now: float) -> seats.Seats:
+    """refresh_seats from a process that sees no CLI (the launchd-shaped writer)."""
+    return seats.refresh_seats(home=home, runner=lambda _a, _t: None, which=lambda _n: None,
+                               env={}, opener=_no_http, now=now)
+
+
+def test_refresh_without_the_cli_carries_a_recent_connected_seat(state, tmp_path):
+    """MAP-FIX-2c: refresh_seats (doctor, install, the stale-cache hook path) saved its own
+    verdict with detected_at=now, so a process that cannot see the CLI overwrote a seat
+    another writer saw connected minutes ago. It now carries it like the rescan does,
+    keeping the sighting's detected_at, and writes the not-found verdict after an hour."""
+    t0 = time.time() - 6 * 3600
+    seats.save_seats(seats.Seats(claude=seats.Seat(kind="claude.ai", plan="max"),
+                                 detected_at=_iso(t0)), tmp_path)
+
+    for dt in (10 * 60, 50 * 60):                              # two blind refreshes inside the hour
+        got = _blind_refresh(tmp_path, t0 + dt)
+        saved = seats.load_seats(tmp_path)
+        assert got.claude.status == saved.claude.status == "connected", dt
+        assert saved.detected_at == _iso(t0), "a carried save moved the anchor"
+
+    _blind_refresh(tmp_path, t0 + 61 * 60)                     # past CARRY_MAX_AGE_S from the sighting
+    saved = seats.load_seats(tmp_path)
+    assert saved.claude.status != "connected"
+    assert saved.claude.reason == "claude CLI not found"
+    assert saved.detected_at == _iso(t0 + 61 * 60)
+
+
+@pytest.mark.parametrize("err, writes, recorded", [
+    (errno.EAGAIN, False, []),                                 # busy: skip, the next sighting re-learns
+    (errno.ENOLCK, True, ["CHZ-FO-CLI-PATH-LOCK"]),            # no locking (NFS home): write, count it
+])
+def test_learn_tells_a_busy_lock_from_no_locking(err, writes, recorded, state, tmp_path, monkeypatch):
+    """MAP-FIX-2c: exclusive_lock yields False both when another process holds the lock
+    and when the filesystem has no locking. Only the first may skip the write; on the
+    second, skipping disabled learning for good."""
+    from types import SimpleNamespace
+
+    from llm_router import failopen, file_lock
+
+    def flock(_fd, _op):
+        raise OSError(err, os.strerror(err))
+
+    monkeypatch.setattr(file_lock, "fcntl", SimpleNamespace(flock=flock, LOCK_EX=2, LOCK_NB=4, LOCK_UN=8))
+    monkeypatch.setattr(seats, "LEARN_LOCK_TIMEOUT_S", 0.0)
+    codes: list[str] = []
+    monkeypatch.setattr(failopen, "record", lambda code, *_a, **_k: codes.append(code))
+    exe = _exe(tmp_path / "bin" / "claude", "#!/bin/sh\n")
+
+    assert seats.find_cli("claude", env={"PATH": str(exe.parent)}, now=time.time()) == str(exe)
+    assert (str(exe.parent) in seats.learned_dirs()) is writes
+    assert codes == recorded
+
+
+def test_learned_dir_is_normalised(state, tmp_path):
+    """A PATH entry with `..` is stored as the dir it names, so two spellings of one
+    dir do not make two entries."""
+    _exe(tmp_path / "bin" / "claude", "#!/bin/sh\n")
+    (tmp_path / "sub").mkdir()
+    entry = os.path.join(str(tmp_path), "sub", "..", "bin")
+    assert seats.find_cli("claude", env={"PATH": entry}, now=time.time())
+    assert seats.learned_dirs() == [str(tmp_path / "bin")]

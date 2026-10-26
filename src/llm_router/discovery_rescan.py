@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 import time
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from llm_router import model_discovery, paths, seats
@@ -218,9 +218,10 @@ def rescan(force=False, *, probe=probe_tags, detect=None, now=None,
     raw = detect() if detect is not None else seats.detect_seats(timeout=2.0)
     cached_seats = seats.load_seats()
     # A process that cannot see a CLI must not undo another's recent "connected".
-    # A carried result is not saved, so seats.json keeps its own detected_at and
-    # the carry ends CARRY_MAX_AGE_S after the last real sighting.
-    detected = seats.carry_recent(raw, cached_seats, now)
+    # A carried result keeps seats.json's detected_at (the sighting), and is saved
+    # only when another seat changed, so the carry ends CARRY_MAX_AGE_S after the
+    # first sighting however often blind processes rescan.
+    detected = seats.carry_for_save(raw, cached_seats, now)
     summary = _seat_state(detected)
     seat_fp = seat_fingerprint(detected)
     old_summary = old.get("seat_state")
@@ -234,8 +235,8 @@ def rescan(force=False, *, probe=probe_tags, detect=None, now=None,
         seats.save_seats(detected)
     elif detected is not raw and seat_fingerprint(cached_seats) != seat_fp:
         # A seat was carried, but another one changed: persist the merged result
-        # with the OLD detected_at so the carry still ends an hour after its sighting.
-        seats.save_seats(replace(detected, detected_at=cached_seats.detected_at))
+        # (it carries the OLD detected_at, so the carry still ends on time).
+        seats.save_seats(detected)
     keys = key_names_present(environ)
     result.keys_added = sorted(set(keys) - set(old.get("key_names", [])))
     result.keys_removed = sorted(set(old.get("key_names", [])) - set(keys))
