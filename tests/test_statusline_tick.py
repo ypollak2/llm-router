@@ -498,3 +498,49 @@ def test_quota_without_updated_at_falls_back_to_file_mtime(tmp_path):
     assert tick._quota(fresh, fresh["updated_at"] + 10, 300.0) == "Claude 5h 12% wk 41% sonnet 3%"
     os.utime(f, (NOW - 7200, NOW - 7200))
     assert tick._quota(tick.read_usage(str(tmp_path)), NOW, 300.0).endswith(" (stale 2h)")
+
+
+# ── NFR statusline p95: the tick runs under the interpreter the refresher cached ──
+
+def _recording_python(tmp_path: Path) -> tuple[Path, Path]:
+    """An absolute-path 'interpreter' that records its argv and then runs the real one."""
+    log = tmp_path / "tick_py_argv"
+    shim = tmp_path / "shim_python"
+    shim.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexec "{sys.executable}" "$@"\n')
+    shim.chmod(0o755)
+    return shim, log
+
+
+@pytest.mark.parametrize("mode", ["fast", "both"])
+def test_tick_uses_the_cached_interpreter_not_bare_python3(tmp_path, mode):
+    """Call-count guard (not a wall-clock one): a bare `python3` may be an interpreter with
+    no .pyc for its stdlib, where the tick's `import json` costs ~25 ms of a ~46 ms tick
+    (macOS CLT 3.9). The interpreter in .statusline_python line 1 is used instead."""
+    shim, log = _recording_python(tmp_path)
+    state = tmp_path / ".llm-router"
+    state.mkdir(exist_ok=True)
+    (state / ".statusline_python").write_text(f"{shim}\n0\nfull\n")
+    out, _ = _run({**_env(tmp_path, "true", fast=False), "LLM_ROUTER_STATUSLINE": mode})
+    calls = [ln for ln in log.read_text().splitlines() if "statusline_tick" in ln]
+    assert len(calls) == 1 and calls[0].startswith("-I -S "), (mode, log.read_text())
+    assert any(ln.startswith("llm-router · ") for ln in out.splitlines()), out
+
+
+@pytest.mark.parametrize("content", ["", "python3\n", "/no/such/python\n", "relative/python\n"])
+def test_tick_falls_back_to_python3_when_the_cached_interpreter_is_unusable(tmp_path, content):
+    state = tmp_path / ".llm-router"
+    state.mkdir(exist_ok=True)
+    (state / ".statusline_python").write_text(content)
+    out, _ = _run({**_env(tmp_path, "true", fast=False), "LLM_ROUTER_STATUSLINE": "fast"})
+    assert out.startswith("llm-router · "), out
+
+
+def test_tick_output_is_identical_with_and_without_the_cached_interpreter(tmp_path):
+    shim, _ = _recording_python(tmp_path)
+    state = tmp_path / ".llm-router"
+    state.mkdir(exist_ok=True)
+    (state / "usage.json").write_text(json.dumps({**_USAGE, "updated_at": time.time()}))
+    without, _ = _run(_env(tmp_path, "true"))
+    (state / ".statusline_python").write_text(f"{shim}\n0\nfull\n")
+    with_cached, _ = _run(_env(tmp_path, "true"))
+    assert with_cached == without and without.startswith("llm-router · ")
