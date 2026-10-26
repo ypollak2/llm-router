@@ -7,6 +7,7 @@ receive ``None`` and sort unknown last.
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,26 +21,43 @@ OLD_POLICY = ROOT / "tests/fixtures/w13_old_user_routing_policy.txt"  # policy s
 _DEFAULT_VALUES = {0.5, 0.4, 0.001}
 
 
+def _num_value(node: ast.AST) -> float | None:
+    """Value of a numeric literal, signed ones included (``-1.0`` is a UnaryOp); bools are not numbers."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        v = _num_value(node.operand)
+        return None if v is None else (-v if isinstance(node.op, ast.USub) else v)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
+            and not isinstance(node.value, bool):
+        return node.value
+    return None
+
+
 def _is_num(node: ast.AST) -> bool:
-    return isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
-        and not isinstance(node.value, bool)
+    return _num_value(node) is not None
 
 
-# Exact (top-level function, source segment) pairs that are allowed to look like a numeric
-# default. Why pairs and not whole functions: skipping a function skipped its nested defs too,
-# so `pressure.get(..., 0.3)` in _policy_dynamic's nested _quota, or `_rr_counters.get(key, 0)
-# or 0`, passed. A pair allows only the expression that exists today; any other default in the
-# same function is flagged, and a pair whose text no longer occurs fails the stale check.
-# Each entry needs a one-line reason.
-ALLOWED_DEFAULT_EXPRESSIONS = {
+def _expr_dump(seg: str) -> str:
+    return ast.dump(ast.parse(seg, mode="eval").body)
+
+
+# Allowed (top-level function, expression) pairs that may look like a numeric default, with the
+# exact number of times each occurs in that function, and a one-line reason. Why pairs and not
+# whole functions: skipping a function skipped its nested defs too, so `pressure.get(..., 0.3)` in
+# _policy_dynamic's nested _quota, or `_rr_counters.get(key, 0) or 0`, passed. Why a count: a pair
+# without one let a second copy of an allowed expression (reused as a quality score) pass. The
+# expression is compared by ast.dump, so reformatting it is neither a new hit nor a stale entry.
+ALLOWED_DEFAULT_EXPRESSIONS: dict[tuple[str, str], tuple[int, str]] = {
     ("_round_robin_pick", "_rr_counters.get(key, 0)"):
-        "round-robin counter: 0 is a start index, not a score",
+        (1, "round-robin counter: 0 is a start index, not a score"),
     ("_policy_quota_exhaustion", "pressure.get(_provider_from_model(m), 0.0)"):
-        "quota pressure: 0.0 means no pressure, not a score",
+        (2, "quota pressure: 0.0 means no pressure, not a score (normal and depleted filters)"),
     ("_policy_dynamic", "pressure.get(_provider_from_model(m), 0.0)"):
-        "quota pressure lookup in the sort key; orders by pressure, not quality/price",
+        (1, "quota pressure lookup in the sort key; orders by pressure, not quality/price"),
 }
-# Module-level numeric constants in (0, 1) read by a function. Empty: main has none.
+# Module-level names bound to a number in [-1, 1] (bare, annotated, tuple-unpacked or inside a
+# container) that a function reads, with a reason each. Empty: main has none. 0 and 1 are in the
+# range on purpose (a fallback quality of 0 or 1 is as invented as 0.3); main had no module-level
+# 0/1 to exclude when this was decided, so add a reasoned entry here if a counter ever needs one.
 ALLOWED_MODULE_CONSTANTS: dict[str, str] = {}
 
 
@@ -47,18 +65,43 @@ def _top_level_functions(tree: ast.Module):
     return [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
 
 
-def find_invented_defaults(src: str, allowed: dict | frozenset | set = frozenset(),
+def _bindings(target: ast.AST, value: ast.AST):
+    """Yield (name, bound value expression) for one assignment target, unpacking tuples."""
+    if isinstance(target, ast.Name):
+        yield target.id, value
+    elif isinstance(target, ast.Starred):
+        yield from _bindings(target.value, value)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        elts = value.elts if isinstance(value, (ast.Tuple, ast.List)) else None
+        paired = elts is not None and len(elts) == len(target.elts) \
+            and not any(isinstance(e, ast.Starred) for e in (*elts, *target.elts))
+        for i, t in enumerate(target.elts):
+            yield from _bindings(t, elts[i] if paired else value)
+
+
+def _holds_unit_number(value: ast.AST) -> bool:
+    """True when the expression is, or contains (dict/tuple/list/set/call), a number in [-1, 1]."""
+    return any(v is not None and -1 <= v <= 1 for v in map(_num_value, ast.walk(value)))
+
+
+def find_invented_defaults(src: str, allowed: dict | None = None,
                            allowed_constants: dict | frozenset | set = frozenset()) -> list[str]:
     """Scan a whole module for invented-default shapes; return one description per hit.
 
-    Shapes: the guessed literals 0.5 / 0.4 / 0.001 anywhere, a numeric default in
-    ``.get(k, <num>)``, a numeric branch of ``<num> if v is None else ...`` /
-    ``... if v is None else <num>``, ``v or <num>``, and a module-level numeric constant
-    in (0, 1) that any function reads (``_FALLBACK = 0.3`` used bare escapes the shapes).
+    Shapes: the guessed literals 0.5 / 0.4 / 0.001 anywhere, a numeric (signed included)
+    default in ``.get(k, <num>)`` or ``getattr(o, name, <num>)``, a numeric branch of
+    ``<num> if v is None else ...`` / ``... if v is None else <num>``, ``v or <num>``, and a
+    module-level name bound to a number in [-1, 1] that any function reads (``_FALLBACK = 0.3``
+    used bare escapes the shapes), whether assigned plainly, annotated, tuple-unpacked or
+    inside a container such as ``{"quality": 0.3}``.
 
-    Every function, nested defs included, gets the shape rules. A shape hit is suppressed
-    only when its (outermost function name, exact source text) is in ``allowed``.
+    Every function, nested defs included, gets the shape rules. A shape hit is suppressed only
+    when its (outermost function name, expression) is in ``allowed`` (a dict of
+    ``(fn, expr) -> (count, reason)``), and only while that function holds exactly ``count``
+    copies of it: one more or one fewer is a hit.
     """
+    allowed = allowed or {}
+    allowed_keys = {(fn, _expr_dump(seg)): (count, seg) for (fn, seg), (count, _r) in allowed.items()}
     hits: list[str] = []
     tree = ast.parse(src)
     for node in ast.walk(tree):
@@ -66,27 +109,48 @@ def find_invented_defaults(src: str, allowed: dict | frozenset | set = frozenset
                 and node.value in _DEFAULT_VALUES:
             hits.append(f"literal {node.value} at line {node.lineno}")
     owner: dict[int, str] = {}
+    fn_names = set()
     for fn in _top_level_functions(tree):
+        fn_names.add(fn.name)
         for n in ast.walk(fn):
             owner[id(n)] = fn.name
+    seen: Counter = Counter()
     for node in ast.walk(tree):
         shape = None
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                 and node.func.attr == "get" and len(node.args) == 2 and _is_num(node.args[1]):
             shape = ".get numeric default"
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == "getattr" and len(node.args) == 3 and _is_num(node.args[2]):
+            shape = "getattr numeric default"
         elif isinstance(node, ast.IfExp) and (_is_num(node.body) or _is_num(node.orelse)):
             shape = "numeric ternary branch"
         elif isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or) \
                 and any(_is_num(v) for v in node.values[1:]):
             shape = "`or <num>` default"
-        if shape and (owner.get(id(node)), ast.get_source_segment(src, node)) not in allowed:
+        if not shape:
+            continue
+        key = (owner.get(id(node)), ast.dump(node))
+        if key in allowed_keys:
+            seen[key] += 1
+        else:
             hits.append(f"{shape} at line {node.lineno}: {ast.get_source_segment(src, node)!r}")
+    for key, (count, seg) in allowed_keys.items():
+        if key[0] in fn_names and seen[key] != count:
+            hits.append(f"allowed expression {seg!r} occurs {seen[key]} times in {key[0]}, "
+                        f"allowlist expects {count}")
     consts = {}
     for n in tree.body:
-        if isinstance(n, ast.Assign) and _is_num(n.value) and 0 < n.value.value < 1:
-            for t in n.targets:
-                if isinstance(t, ast.Name) and t.id not in allowed_constants:
-                    consts[t.id] = n.lineno
+        if isinstance(n, ast.Assign):
+            targets, value = n.targets, n.value
+        elif isinstance(n, ast.AnnAssign) and n.value is not None:
+            targets, value = [n.target], n.value
+        else:
+            continue
+        for t in targets:
+            for name, bound in _bindings(t, value):
+                if name not in allowed_constants and _holds_unit_number(bound):
+                    consts[name] = n.lineno
     for fn in _top_level_functions(tree):
         for n in ast.walk(fn):
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in consts:
@@ -111,22 +175,82 @@ def test_scan_finds_defaults_in_old_policy_fixture():
     "def _policy_bonus(m):\n    return m.get('bonus', 0.3)\n",
     # module constant read bare: no shape matches, only the constant rule catches it
     "_FALLBACK = 0.3\ndef f(q):\n    return q if q is not None else _FALLBACK\n",
+    # W1-3d: annotated (the module's own style for globals), unpacked, container, 0/1 constants
+    "_Q: float = 0.3\ndef f(q):\n    return q if q is not None else _Q\n",
+    "_A, _Q = 0.9, 0.3\ndef f(q):\n    return q if q is not None else _Q\n",
+    "(_A, _Q) = [0.9, 0.3]\ndef f(q):\n    return q if q is not None else _Q\n",
+    "_DEFAULTS = {'quality': 0.3}\ndef f(d):\n    return d.get('quality', _DEFAULTS['quality'])\n",
+    "_DEFAULTS = {'quality': 0.3}\ndef f(d):\n    return d.get('q') or _DEFAULTS.get('quality')\n",
+    "_W: tuple[float, ...] = (0.3, 0.7)\ndef f(q):\n    return q if q is not None else _W[0]\n",
+    "_W = [0.3]\ndef f(q):\n    return q if q is not None else _W[0]\n",
+    "_DEFAULTS = dict(quality=0.3)\ndef f(d):\n    return d.get('q') or _DEFAULTS['quality']\n",
+    "_Q = 0\ndef f(q):\n    return q if q is not None else _Q\n",
+    "_Q: float = 1.0\ndef f(q):\n    return q if q is not None else _Q\n",
+    "_Q = -1.0\ndef f(q):\n    return q if q is not None else _Q\n",
+    # W1-3d: signed literals were a UnaryOp, not a Constant; getattr defaults had no shape
+    "def _policy_x(s, k):\n    return s.get(k, -1.0)\n",
+    "def f(v):\n    return v or -1\n",
+    "def f(v):\n    return -1 if v is None else v\n",
+    "def f(m):\n    return getattr(m, 'q', 0.3)\n",
+    "def f(m):\n    return getattr(m, 'q', -1.0)\n",
 ])
 def test_scan_catches_mutant_shapes(mutant):
     assert find_invented_defaults(mutant), mutant
 
 
+def test_scan_ignores_non_numeric_module_bindings():
+    """The constant rule must not fire on the module's real globals (strings, sets, None, {})."""
+    src = ("_FREE = frozenset({'ollama'})\n_ORDER = ['ollama', 'codex']\n_cache: dict | None = None\n"
+           "_counters: dict[frozenset, int] = {}\n_NAME, _Q = 'x', 0.3\n_BIG = 1500\n"
+           "def f(m):\n    return (m in _FREE, _ORDER, _cache, _counters, _NAME, _BIG)\n")
+    assert find_invented_defaults(src) == []
+    # the same unpacking flags the numeric half once it is read
+    assert find_invented_defaults(src + "def g():\n    return _Q\n") == [
+        "module constant _Q (line 5) read in g at line 10"]
+
+
+def test_allowed_constants_suppress_only_the_named_constant():
+    src = "_A, _Q = 0.9, 0.3\ndef f(q):\n    return _A if q is None else _Q\n"
+    assert len(find_invented_defaults(src)) == 2
+    assert find_invented_defaults(src, allowed_constants={"_A": "reason"}) == [
+        "module constant _Q (line 1) read in f at line 3"]
+    assert find_invented_defaults(src, allowed_constants={"_A": "r", "_Q": "r"}) == []
+
+
+def test_allowed_expression_count_is_exact():
+    one = "def _round_robin_pick(c):\n    return _rr_counters.get(key, 0)\n"
+    assert find_invented_defaults(one, ALLOWED_DEFAULT_EXPRESSIONS) == []
+    two = ("def _round_robin_pick(c):\n    i = _rr_counters.get(key, 0)\n"
+           "    return i, _rr_counters.get(key, 0)\n")
+    assert find_invented_defaults(two, ALLOWED_DEFAULT_EXPRESSIONS) == [
+        "allowed expression '_rr_counters.get(key, 0)' occurs 2 times in _round_robin_pick, "
+        "allowlist expects 1"]
+    seg = "pressure.get(_provider_from_model(m), 0.0)"
+    body = "def _policy_quota_exhaustion(chain):\n" + "".join(
+        f"    x{i} = [m for m in chain if {seg} < 0.85]\n" for i in range(3))
+    assert find_invented_defaults(body, ALLOWED_DEFAULT_EXPRESSIONS)  # 3 copies, 2 allowed
+    two_copies = "\n".join(body.splitlines()[:3]) + "\n"
+    assert find_invented_defaults(two_copies, ALLOWED_DEFAULT_EXPRESSIONS) == []
+    one_copy = "\n".join(body.splitlines()[:2]) + "\n"
+    assert find_invented_defaults(one_copy, ALLOWED_DEFAULT_EXPRESSIONS)  # 1 copy, 2 allowed
+
+
+def test_allowed_expression_matches_by_ast_not_text():
+    reformatted = "def _round_robin_pick(c):\n    return _rr_counters.get( key,0 )\n"
+    assert find_invented_defaults(reformatted, ALLOWED_DEFAULT_EXPRESSIONS) == []
+
+
 def test_allowlist_has_no_stale_entries():
-    """Every allowed (function, expression) pair must still occur in that function."""
+    """Every allowed (function, expression) pair must occur in that function exactly `count` times."""
     src = POLICY.read_text()
     fns = {f.name: f for f in _top_level_functions(ast.parse(src))}
-    stale = []
-    for fname, seg in ALLOWED_DEFAULT_EXPRESSIONS:
+    wrong = []
+    for (fname, seg), (count, _reason) in ALLOWED_DEFAULT_EXPRESSIONS.items():
         fn = fns.get(fname)
-        segs = {ast.get_source_segment(src, n) for n in ast.walk(fn)} if fn else set()
-        if seg not in segs:
-            stale.append((fname, seg))
-    assert not stale, stale
+        found = sum(ast.dump(n) == _expr_dump(seg) for n in ast.walk(fn)) if fn else 0
+        if found != count:
+            wrong.append((fname, seg, found, count))
+    assert not wrong, wrong
 
 
 def test_scan_does_not_skip_nested_defs_of_allowed_functions():
