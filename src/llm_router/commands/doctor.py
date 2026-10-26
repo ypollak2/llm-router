@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple, Optional
 
@@ -878,22 +879,34 @@ def _tool_surface_phantoms() -> list[str]:
 
 def _seats_report() -> list[str]:
     """Detect seats (3 s budget), persist them, and render one line per seat."""
+    carried: dict = {}
     try:
         from llm_router import seats as _seats
-        seats = _seats.refresh_seats()
+        seats = _seats.refresh_seats(carried=carried)
     except Exception as e:  # noqa: BLE001 -- doctor must never crash on a probe
         return [_warn(f"seat detection failed: {e}")]
 
     lines: list[str] = []
-    for name, seat in (
-        ("Claude", seats.claude),
-        ("Codex", seats.codex),
-        ("Gemini CLI", seats.gemini),
-        ("Ollama", seats.ollama),
+    for key, name, seat in (
+        ("claude", "Claude", seats.claude),
+        ("codex", "Codex", seats.codex),
+        ("gemini", "Gemini CLI", seats.gemini),
+        ("ollama", "Ollama", seats.ollama),
     ):
         if seat.present:
             text = f"{name:<11}{seat.label()}"
-            if seat.plan_stale:
+            if key in carried:
+                # MAP-FIX-2c: saved as connected because another process saw it
+                # within the hour; this process itself could not find or probe it.
+                # carry_for_save only carries when detected_at parses, so this does too.
+                seen = datetime.fromisoformat(seats.detected_at)
+                ends = seen + timedelta(seconds=_seats.CARRY_MAX_AGE_S)
+                lines.append(_warn(
+                    f"{text} (carried: this process sees '{carried[key].reason}'; "
+                    f"last seen {seen.isoformat(timespec='seconds')}, "
+                    f"carry ends {ends.isoformat(timespec='seconds')})"
+                ))
+            elif seat.plan_stale:
                 lines.append(_warn(
                     f"{text} -- the plan claim in the login token is past its window; "
                     "login still works, so it still counts as a seat"

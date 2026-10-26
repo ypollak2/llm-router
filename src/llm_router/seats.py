@@ -263,7 +263,9 @@ def _learn(name: str, found: str, now: float) -> None:
 
     A relative hit (a relative PATH entry, resolved against this process's cwd)
     is not recorded: other processes have other cwds. The read-modify-write runs
-    under an exclusive lock so two processes cannot lose each other's entry."""
+    under an exclusive lock so two processes cannot lose each other's entry; a busy
+    lock skips the write, and a filesystem without locking writes unlocked (counted
+    as fail-open ``CHZ-FO-CLI-PATH-LOCK``)."""
     if not os.path.isabs(found):
         return
     d = os.path.normpath(os.path.dirname(found))
@@ -278,10 +280,15 @@ def _learn(name: str, found: str, now: float) -> None:
         return
     path = _cli_path_file()
     try:
+        from llm_router import failopen
         from llm_router.file_lock import exclusive_lock
-        with exclusive_lock(path.with_name(path.name + ".lock"), timeout=LEARN_LOCK_TIMEOUT_S) as locked:
-            if not locked:              # best-effort: the next sighting re-learns
-                return
+        status: dict = {}
+        with exclusive_lock(path.with_name(path.name + ".lock"), timeout=LEARN_LOCK_TIMEOUT_S,
+                            status=status) as locked:
+            if not locked and status.get("state") == "held":
+                return                  # busy: best-effort, the next sighting re-learns
+            if not locked:              # no locking here (e.g. ENOLCK on NFS): write unlocked
+                failopen.record("CHZ-FO-CLI-PATH-LOCK", detail=str(status.get("state")))
             dirs = _read_learned()
             if fresh(dirs):
                 return
@@ -299,7 +306,6 @@ def _learn(name: str, found: str, now: float) -> None:
                     os.unlink(tmp)
                 raise
     except OSError as exc:
-        from llm_router import failopen
         failopen.record("CHZ-FO-CLI-PATH-WRITE", exc)
 
 
@@ -370,6 +376,14 @@ def carry_recent(new: "Seats", prior: "Seats | None", now: float,
             log.info("seats: keeping %s connected (seen %.0fs ago) over %r", name, age, cur.reason)
             keep[name] = old
     return replace(new, **keep) if keep else new
+
+
+def carry_for_save(new: "Seats", prior: "Seats | None", now: float) -> "Seats":
+    """:func:`carry_recent` for a writer of seats.json. A result that carried a seat
+    keeps *prior*'s ``detected_at`` (the sighting), so repeated blind saves cannot
+    move it and the carry ends ``CARRY_MAX_AGE_S`` after that sighting."""
+    out = carry_recent(new, prior, now)
+    return new if out is new else replace(out, detected_at=prior.detected_at)
 
 
 def _first_line(text: str) -> str:
@@ -595,8 +609,16 @@ def load_seats(home: Path | None = None) -> Seats | None:
         return None
 
 
-def refresh_seats(home: Path | None = None, **kw) -> Seats:
-    """Detect and persist. The one call install, doctor and the hook share."""
-    seats = detect_seats(home=home, **kw)
+def refresh_seats(home: Path | None = None, *, carried: dict | None = None, **kw) -> Seats:
+    """Detect and persist. The one call install, doctor and the hook share.
+    Like the rescan, a seat another writer saw connected within the last hour is
+    carried over this process's "could not look" verdict (:func:`carry_for_save`).
+    Pass a dict as *carried* to get ``{name: this process's own Seat}`` per carried seat."""
+    now = time.time() if kw.get("now") is None else kw["now"]
+    raw = detect_seats(home=home, **{**kw, "now": now})
+    seats = carry_for_save(raw, load_seats(home), now)
+    if carried is not None:
+        carried.update({n: getattr(raw, n) for n in ("claude", "codex", "gemini")
+                        if getattr(seats, n) != getattr(raw, n)})
     save_seats(seats, home)
     return seats
