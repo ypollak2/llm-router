@@ -387,6 +387,33 @@ def test_plain_install_wires_codex_when_detected(home, monkeypatch, capsys):
     assert "Every Claude Code and Codex CLI session" in out
 
 
+def test_plain_install_marks_a_carried_seat(home, monkeypatch, capsys):
+    """MAP-FIX-2d: an install that cannot find the claude CLI saves the seat another
+    process saw connected 10 min ago (the carry). The Seats summary and the free-bucket
+    line mark it "(carried)"; the codex seat it sees itself prints as before."""
+    import time
+    from datetime import datetime, timezone
+
+    from llm_router import host_detect, seats as S
+    monkeypatch.setattr("llm_router.install_hooks.install", lambda force=False: ["claude ok"])
+    monkeypatch.setattr("llm_router.install_hooks.install_claw_code", lambda: [])
+    monkeypatch.setattr("llm_router.install_hooks.claw_code_settings_path", lambda: None)
+    monkeypatch.setattr("llm_router.install_hooks.check_api_keys", lambda: [])
+    monkeypatch.setattr(host_detect, "detect_hosts", lambda **kw: {})
+    seen = datetime.fromtimestamp(time.time() - 600, tz=timezone.utc).isoformat()
+    codex = S.Seat(kind="chatgpt", plan="pro")
+    S.save_seats(S.Seats(claude=S.Seat(kind="claude.ai", plan="max"), codex=codex, detected_at=seen))
+    blind = S.Seats(claude=S.Seat(reason="claude CLI not found"), codex=codex,
+                    detected_at=datetime.now(timezone.utc).isoformat())
+    monkeypatch.setattr(S, "detect_seats", lambda **_kw: blind)
+
+    install._run_install([])
+    out = capsys.readouterr().out
+    assert "claude=claude.ai(max) (carried) · codex=chatgpt(pro) · " in out
+    assert "free bucket: claude (carried), codex" in out
+    assert S.load_seats().claude.status == "connected"         # the carry is still saved
+
+
 def test_plain_install_skips_codex_with_no_hosts_or_when_absent(home, monkeypatch, capsys):
     from llm_router import host_detect
     monkeypatch.setattr("llm_router.install_hooks.install", lambda force=False: [])

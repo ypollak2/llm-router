@@ -524,11 +524,12 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
     # ── Seats: which subscriptions are logged in (drives the free bucket) ──
     try:
         from llm_router import seats as _seats
-        _found = _seats.refresh_seats()
-        print(f"\n{_bold('  Seats')}  {_found.summary_line()}")
+        _carried: dict = {}
+        _found = _seats.refresh_seats(carried=_carried)
+        print(f"\n{_bold('  Seats')}  {_found.summary_line(carried=_carried)}")
         _bucket = sorted(_found.free_bucket())
         if _bucket:
-            print(f"  free bucket: {', '.join(_bucket)}")
+            print(f"  free bucket: {_seats.mark_carried(_bucket, _carried)}")
         else:
             print(_yellow("  no seat found — routed calls will bill an API key; log in to Claude Code, Codex, or start Ollama"))
         _maybe_enable_claude_subscription(_found)

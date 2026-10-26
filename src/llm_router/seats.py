@@ -45,7 +45,7 @@ import urllib.request
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Collection, Iterable
 
 log = logging.getLogger(__name__)
 
@@ -173,11 +173,13 @@ class Seats:
             out.add("gemini_cli")
         return frozenset(out)
 
-    def summary_line(self) -> str:
-        return (
-            f"claude={self.claude.label()} · codex={self.codex.label()} · "
-            f"gemini={self.gemini.label()} · ollama={self.ollama.label()}"
-        )
+    def summary_line(self, carried: Collection[str] = ()) -> str:
+        """One line per seat. A name in *carried* (see :func:`refresh_seats`) is
+        marked "(carried)": saved as connected, though this process could not see it."""
+        def one(name: str) -> str:
+            mark = " (carried)" if name in carried else ""
+            return f"{name}={getattr(self, name).label()}{mark}"
+        return " · ".join(one(n) for n in ("claude", "codex", "gemini", "ollama"))
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -288,7 +290,9 @@ def _learn(name: str, found: str, now: float) -> None:
             if not locked and status.get("state") == "held":
                 return                  # busy: best-effort, the next sighting re-learns
             if not locked:              # no locking here (e.g. ENOLCK on NFS): write unlocked
-                failopen.record("CHZ-FO-CLI-PATH-LOCK", detail=str(status.get("state")))
+                why = status.get("errno")   # ENOLCK (no locking) vs EACCES (read-only dir)...
+                failopen.record("CHZ-FO-CLI-PATH-LOCK",
+                                detail=f"{status.get('state')} ({why})" if why else str(status.get("state")))
             dirs = _read_learned()
             if fresh(dirs):
                 return
@@ -360,6 +364,17 @@ def no_evidence(status: str | None, reason: str | None) -> bool:
     the CLI was not found on this process's PATH, or its probe failed."""
     reason = reason or ""
     return status != "connected" and (reason.endswith(NOT_FOUND_SUFFIX) or "CLI probe " in reason)
+
+
+# The free-bucket provider name of each seat that can be carried.
+_CARRIED_PROVIDER = {"claude": "claude", "codex": "codex", "gemini": "gemini_cli"}
+
+
+def mark_carried(bucket: Iterable[str], carried: Collection[str]) -> str:
+    """*bucket* (free-bucket provider names) joined for display, with the provider of
+    each seat in *carried* marked "(carried)"."""
+    marked = {_CARRIED_PROVIDER[n] for n in carried if n in _CARRIED_PROVIDER}
+    return ", ".join(f"{p} (carried)" if p in marked else p for p in bucket)
 
 
 def carry_recent(new: "Seats", prior: "Seats | None", now: float,
@@ -618,7 +633,9 @@ def refresh_seats(home: Path | None = None, *, carried: dict | None = None, **kw
     raw = detect_seats(home=home, **{**kw, "now": now})
     seats = carry_for_save(raw, load_seats(home), now)
     if carried is not None:
+        # Identity, not ==: a carry swaps in prior's Seat object, and Seat equality
+        # ignores status/reason, so a value check could miss a carried seat.
         carried.update({n: getattr(raw, n) for n in ("claude", "codex", "gemini")
-                        if getattr(seats, n) != getattr(raw, n)})
+                        if getattr(seats, n) is not getattr(raw, n)})
     save_seats(seats, home)
     return seats

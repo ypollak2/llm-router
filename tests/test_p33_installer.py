@@ -35,7 +35,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(install_hooks, "claw_code_settings_path", lambda: None)
     monkeypatch.setattr(install_hooks, "check_api_keys", lambda: ["keys"])
     monkeypatch.setattr(seats, "refresh_seats",
-                        lambda: SimpleNamespace(summary_line=lambda: "seats", free_bucket=lambda: []))
+                        lambda **_k: SimpleNamespace(summary_line=lambda **_k: "seats", free_bucket=lambda: []))
     monkeypatch.setattr(install, "_maybe_enable_claude_subscription", lambda found: None)
     return h
 

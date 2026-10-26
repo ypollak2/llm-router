@@ -381,6 +381,76 @@ def test_learn_tells_a_busy_lock_from_no_locking(err, writes, recorded, state, t
     assert codes == recorded
 
 
+def test_lock_failopen_detail_names_the_errno(state, tmp_path, monkeypatch):
+    """MAP-FIX-2d: CHZ-FO-CLI-PATH-LOCK said "unavailable" for every cause, so a
+    read-only state dir (EACCES opening the lock file) was logged like a filesystem
+    with no locking (ENOLCK from flock). The detail now names the errno."""
+    from types import SimpleNamespace
+
+    from llm_router import failopen, file_lock, state_files
+
+    details: dict[str, str] = {}
+
+    def run(label: str) -> None:
+        recorded: list[str] = []
+        monkeypatch.setattr(failopen, "record",
+                            lambda code, *_a, detail="", **_k: recorded.append(f"{code}:{detail}"))
+        exe = _exe(tmp_path / label / "claude", "#!/bin/sh\n")
+        assert seats.find_cli("claude", env={"PATH": str(exe.parent)}, now=time.time()) == str(exe)
+        assert (str(exe.parent) in seats.learned_dirs()) is True   # wrote unlocked
+        assert len(recorded) == 1
+        details[label] = recorded[0]
+
+    def flock(_fd, _op):
+        raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+    with monkeypatch.context() as m:
+        m.setattr(file_lock, "fcntl", SimpleNamespace(flock=flock, LOCK_EX=2, LOCK_NB=4, LOCK_UN=8))
+        run("nolck")
+
+    def open_private(*_a, **_k):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+    with monkeypatch.context() as m:
+        m.setattr(state_files, "open_private", open_private)
+        run("acces")
+
+    assert details["nolck"] == "CHZ-FO-CLI-PATH-LOCK:unavailable (ENOLCK)"
+    assert details["acces"] == "CHZ-FO-CLI-PATH-LOCK:unavailable (EACCES)"
+
+
+def test_exclusive_lock_status_errno_is_additive(tmp_path):
+    """MAP-FIX-2d: status["state"] keeps its values; status["errno"] names the errno
+    only when an OSError made locking unavailable, else None."""
+    from llm_router.file_lock import exclusive_lock
+    lock = tmp_path / "x.lock"
+    st: dict = {}
+    with exclusive_lock(lock, timeout=0, status=st) as got:
+        assert got and st == {"state": "acquired", "errno": None}
+        held: dict = {}
+        with exclusive_lock(lock, timeout=0, status=held) as got2:
+            assert not got2 and held == {"state": "held", "errno": None}
+    (tmp_path / "f").write_text("x")       # a file where the lock's parent dir should be
+    st = {}
+    with exclusive_lock(tmp_path / "f" / "x.lock", timeout=0, status=st) as got3:
+        assert not got3 and st == {"state": "unavailable", "errno": "ENOTDIR"}
+
+
+def test_refresh_reports_a_carry_by_identity_not_equality(state, tmp_path, monkeypatch):
+    """MAP-FIX-2d: Seat equality ignores status and reason, so a blind verdict that keeps
+    the kind and plan (status installed_not_connected, reason "CLI not found") equals the
+    connected seat it is carried over. refresh_seats must still report it as carried."""
+    t0 = time.time() - 600
+    seats.save_seats(seats.Seats(claude=seats.Seat(kind="claude.ai", plan="max"),
+                                 detected_at=_iso(t0)), tmp_path)
+    blind = seats.Seat(kind="claude.ai", plan="max", status="installed_not_connected",
+                       reason="claude CLI not found")
+    monkeypatch.setattr(seats, "detect_seats",
+                        lambda **_kw: seats.Seats(claude=blind, detected_at=_iso(time.time())))
+    carried: dict = {}
+    out = seats.refresh_seats(tmp_path, carried=carried)
+    assert out.claude.status == "connected"
+    assert carried == {"claude": blind} and carried["claude"].status == "installed_not_connected"
+
+
 def test_learned_dir_is_normalised(state, tmp_path):
     """A PATH entry with `..` is stored as the dir it names, so two spellings of one
     dir do not make two entries."""

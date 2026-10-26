@@ -57,10 +57,14 @@ def exclusive_lock(
 
     A ``False`` yield is ambiguous (held by another process, or locking
     unavailable). Pass a dict as *status* to tell them apart: it gets
-    ``status["state"]`` = ``"acquired"``, ``"held"`` or ``"unavailable"``.
+    ``status["state"]`` = ``"acquired"``, ``"held"`` or ``"unavailable"``, and
+    ``status["errno"]``: for ``"unavailable"``, the name of the errno that made
+    locking unavailable (``"ENOLCK"``, ``"EACCES"``, ...) when an OSError did,
+    else ``None``.
     """
     locked = False
     state = "unavailable"
+    err: int | None = None
     fh = None
     try:
         from llm_router import state_files  # W0-4: lock files are state files (0600, dir 0700)
@@ -81,6 +85,7 @@ def exclusive_lock(
                 if exc.errno in _CONTENDED:
                     state = "held"
                 else:
+                    err = exc.errno
                     break
                 if time.monotonic() >= deadline:
                     break
@@ -89,10 +94,14 @@ def exclusive_lock(
                 # Locking primitive unavailable/unsupported: degrade to
                 # unlocked rather than raising.
                 break
-    except Exception:
+    except Exception as exc:
         locked = False
+        if isinstance(exc, OSError):
+            err = exc.errno
     if status is not None:
         status["state"] = state
+        status["errno"] = (errno.errorcode.get(err, str(err))
+                           if state == "unavailable" and err is not None else None)
     try:
         yield locked
     finally:

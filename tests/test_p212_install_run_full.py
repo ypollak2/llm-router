@@ -65,7 +65,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(install_hooks, "check_api_keys", lambda: ["test provider keys"])
     monkeypatch.setattr(
         seats, "refresh_seats",
-        lambda: SimpleNamespace(summary_line=lambda: "test seats", free_bucket=lambda: []),
+        lambda **_k: SimpleNamespace(summary_line=lambda **_k: "test seats", free_bucket=lambda: []),
     )
     monkeypatch.setattr(install, "_maybe_enable_claude_subscription", lambda found: None)
     return tmp_path, calls
