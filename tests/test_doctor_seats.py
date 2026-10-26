@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+from datetime import timedelta
 
 from llm_router import seats as S
 from llm_router.commands import doctor as doc
@@ -137,3 +138,30 @@ def test_seats_json_shape_is_stable(tmp_path):
     data = json.loads((tmp_path / ".llm-router" / "seats.json").read_text())
     assert set(data) == {"claude", "codex", "gemini", "ollama", "copilot", "api_keys", "detected_at"}
     assert set(data["claude"]) == {"kind", "plan", "plan_stale", "models", "status", "reason"}
+
+
+def test_doctor_marks_a_carried_seat_and_shows_this_process_verdict(monkeypatch, tmp_path):
+    """MAP-FIX-2c: a doctor that cannot find the claude CLI saves the seat another
+    process saw connected 10 min ago (the carry), but must not print it as a plain
+    green "connected": it names the carry, its own verdict and when the carry ends.
+    A seat this process sees connected itself prints exactly as before."""
+    _patch_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("LLM_ROUTER_SUBSCRIPTION_PROVIDER", raising=False)
+    t0 = S.time.time() - 600
+    seen = S.datetime.fromtimestamp(t0, tz=S.timezone.utc)
+    codex = S.Seat(kind="chatgpt", plan="plus")
+    S.save_seats(S.Seats(claude=S.Seat(kind="claude.ai", plan="max"), codex=codex,
+                         detected_at=seen.isoformat()))
+    blind = S.Seats(claude=S.Seat(reason="claude CLI not found"), codex=codex,
+                    detected_at=S.datetime.now(S.timezone.utc).isoformat())
+    monkeypatch.setattr(S, "detect_seats", lambda **_kw: blind)
+
+    lines = doc._seats_report()
+    claude = [line for line in lines if "claude.ai(max)" in line]
+    assert len(claude) == 1
+    ends = (seen + timedelta(seconds=S.CARRY_MAX_AGE_S)).isoformat(timespec="seconds")
+    assert ("carried: this process sees 'claude CLI not found'; "
+            f"last seen {seen.isoformat(timespec='seconds')}, carry ends {ends})") in claude[0]
+    assert claude[0].startswith(doc._warn(""))                # warning-styled, not the green tick
+    assert doc._ok(f"{'Codex':<11}{codex.label()}") in lines   # not carried: unchanged line
+    assert S.load_seats().claude.status == "connected"         # the carry is still saved

@@ -609,11 +609,16 @@ def load_seats(home: Path | None = None) -> Seats | None:
         return None
 
 
-def refresh_seats(home: Path | None = None, **kw) -> Seats:
+def refresh_seats(home: Path | None = None, *, carried: dict | None = None, **kw) -> Seats:
     """Detect and persist. The one call install, doctor and the hook share.
     Like the rescan, a seat another writer saw connected within the last hour is
-    carried over this process's "could not look" verdict (:func:`carry_for_save`)."""
+    carried over this process's "could not look" verdict (:func:`carry_for_save`).
+    Pass a dict as *carried* to get ``{name: this process's own Seat}`` per carried seat."""
     now = time.time() if kw.get("now") is None else kw["now"]
-    seats = carry_for_save(detect_seats(home=home, **{**kw, "now": now}), load_seats(home), now)
+    raw = detect_seats(home=home, **{**kw, "now": now})
+    seats = carry_for_save(raw, load_seats(home), now)
+    if carried is not None:
+        carried.update({n: getattr(raw, n) for n in ("claude", "codex", "gemini")
+                        if getattr(seats, n) != getattr(raw, n)})
     save_seats(seats, home)
     return seats
