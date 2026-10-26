@@ -1087,4 +1087,6 @@ A prompt that starts with `local:`, `claude:`, `opus:`, `sonnet:`, `haiku:` or `
 | Proxy | forwarded, prefix stripped | pins that tier | served locally only with `--serve local-agent`, else forwarded unchanged | forwarded unchanged (no backend) |
 | MCP `llm()` | one-line "handle it yourself" | runs the API tier, or the same note in subscription mode | runs the first installed local model, or refuses | runs a Codex model, or refuses |
 
+At the proxy, `local:` forces that one step only, together with the tool-loop calls that follow it (they still carry the same newest prompt). It does not change the conversation's pin: the next prompt without a prefix is routed as if the prefix had never been used. A conversation pinned to Claude stays on Claude. A conversation whose first prompt was `local:` and was served locally is pinned local, as it would be without the prefix. After a refused `local:` first prompt nothing is stored, so the next prompt without a prefix goes to Claude. A conversation whose start this proxy did not see goes to Claude.
+
 P2.7-a is conditional-partial: 6/6 at the hook, 4/6 at the proxy. Unknown prefixes (`gpt:`) are ignored. Text whose first line begins with `Claude:`, `Local:`, `Opus:` and so on (a pasted dialogue, for example) is read as a prefix: put some text before it, or rephrase.
