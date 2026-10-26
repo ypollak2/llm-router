@@ -459,3 +459,43 @@ def test_learned_dir_is_normalised(state, tmp_path):
     entry = os.path.join(str(tmp_path), "sub", "..", "bin")
     assert seats.find_cli("claude", env={"PATH": entry}, now=time.time())
     assert seats.learned_dirs() == [str(tmp_path / "bin")]
+
+
+def test_exclusive_lock_status_reflects_the_last_error(tmp_path, monkeypatch):
+    """MAP-FIX-2e: flock reported a held lock (EAGAIN), then a retry failed with ENOLCK.
+    The status said "held" with errno None, so seats._learn skipped a write that it
+    should make when locking is unavailable. The last error now decides."""
+    from types import SimpleNamespace
+
+    from llm_router import file_lock
+
+    errs = iter([errno.EAGAIN, errno.ENOLCK])
+
+    def flock(_fd, _op):
+        e = next(errs)
+        raise OSError(e, os.strerror(e))
+
+    monkeypatch.setattr(file_lock, "fcntl", SimpleNamespace(flock=flock, LOCK_EX=2, LOCK_NB=4, LOCK_UN=8))
+    monkeypatch.setattr(file_lock, "_IS_WINDOWS", False)
+    st: dict = {}
+    with file_lock.exclusive_lock(tmp_path / "x.lock", timeout=5.0, status=st) as got:
+        assert not got and st == {"state": "unavailable", "errno": "ENOLCK"}
+    assert next(errs, None) is None        # both errors were consumed: the retry happened
+
+
+def test_exclusive_lock_windows_eacces_is_still_held(tmp_path, monkeypatch):
+    """MAP-FIX-2e guard: msvcrt.locking raises EACCES when another process holds the
+    byte; that stays "held", not "unavailable"."""
+    from types import SimpleNamespace
+
+    from llm_router import file_lock
+
+    def locking(_fd, _mode, _n):
+        raise OSError(errno.EACCES, os.strerror(errno.EACCES))
+
+    monkeypatch.setattr(file_lock, "_IS_WINDOWS", True)
+    monkeypatch.setattr(file_lock, "msvcrt", SimpleNamespace(locking=locking, LK_NBLCK=2, LK_UNLCK=0),
+                        raising=False)
+    st: dict = {}
+    with file_lock.exclusive_lock(tmp_path / "x.lock", timeout=0, status=st) as got:
+        assert not got and st == {"state": "held", "errno": None}

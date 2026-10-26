@@ -85,6 +85,9 @@ def exclusive_lock(
                 if exc.errno in _CONTENDED:
                     state = "held"
                 else:
+                    # A later non-contention error wins over an earlier "held":
+                    # the final status reflects the last error seen.
+                    state = "unavailable"
                     err = exc.errno
                     break
                 if time.monotonic() >= deadline:

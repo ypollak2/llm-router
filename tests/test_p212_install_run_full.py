@@ -166,3 +166,17 @@ def test_cli_delegates_with_interactive_guidance(sandbox, monkeypatch):
     )
     install._run_install(["--no-hosts"])
     assert calls == [{"interactive": True, "flags": ["--no-hosts"]}]
+
+
+def test_seat_detection_failure_is_reported_and_install_completes(sandbox, monkeypatch, capsys):
+    """MAP-FIX-2e: the seats block swallowed every exception silently, even a TypeError
+    from a wrong call. It now prints one notice, as doctor does, and install goes on."""
+    def broken(**_k):
+        raise TypeError("refresh_seats() got an unexpected keyword argument 'x'")
+    monkeypatch.setattr(seats, "refresh_seats", broken)
+
+    assert install.run_full(interactive=False) == ["Claude Code"]
+
+    out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+    assert "  seat detection failed: refresh_seats() got an unexpected keyword argument 'x'" in out
+    assert "LLM Router installed globally." in out
