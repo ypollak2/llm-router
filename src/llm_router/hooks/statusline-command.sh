@@ -112,6 +112,19 @@ _sl_mode="${_sl_mode%%[[:space:]]*}"
 # -S: the tick is stdlib-only, and skipping site saves ~8 ms a tick.
 _tick="${0%/*}/llm_router_statusline_tick.py"
 [ -f "$_tick" ] || _tick="${0%/*}/../statusline_tick.py"
+# NFR statusline p95: the tick is stdlib-only, but a bare `python3` can be an
+# interpreter with no .pyc for its stdlib (macOS Command Line Tools 3.9), where
+# `import json` recompiles re/enum/sre_* on every call (~25 ms of a ~46 ms tick,
+# measured). The interpreter the segment refresher already probed and cached
+# (first line of .statusline_python, an absolute path) has them; use it when it
+# is executable, else python3 as before. Pure bash: one `read`, no process.
+_tick_py="python3"
+if [ -r "$HOME/.llm-router/.statusline_python" ]; then
+    IFS= read -r _tick_cand < "$HOME/.llm-router/.statusline_python"
+    case "$_tick_cand" in
+        /*) [ -f "$_tick_cand" ] && [ -x "$_tick_cand" ] && _tick_py="$_tick_cand" ;;
+    esac
+fi
 if [ "$_sl_mode" = "fast" ]; then
     if [ -f "$_tick" ] && command -v python3 >/dev/null 2>&1; then
         # A timed call cannot exec (the EXIT trap would never run). It reads the
@@ -119,10 +132,10 @@ if [ "$_sl_mode" = "fast" ]; then
         if [ -n "$_slt_t0" ]; then
             _slt_phase="fast"
             input=$(cat)
-            printf '%s' "$input" | python3 -I -S "$_tick"
+            printf '%s' "$input" | "$_tick_py" -I -S "$_tick"
             exit $?
         fi
-        exec python3 -I -S "$_tick"
+        exec "$_tick_py" -I -S "$_tick"
     fi
 fi
 
@@ -563,5 +576,5 @@ fi
 # both: the fast line goes second. Its stdin is /dev/null (the full part above
 # already consumed the session JSON); the tick reads caches only and never waits.
 if [ "$_sl_mode" = "both" ] && [ -f "$_tick" ] && command -v python3 >/dev/null 2>&1; then
-    python3 -I -S "$_tick" </dev/null
+    "$_tick_py" -I -S "$_tick" </dev/null
 fi
