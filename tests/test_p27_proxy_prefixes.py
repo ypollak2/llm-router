@@ -321,3 +321,18 @@ async def test_a_served_local_step_mid_conversation_with_an_unseen_start_stores_
     _, _, row = await post(turns("explain this", "local: do it", "and the rest"))
     assert row["decision"] == "forwarded" and row["reason"] == "conversation_started_on_claude"
     assert len(backend.calls) == 1 and len(seen) == 1
+
+
+async def test_a_failed_local_first_turn_stores_no_pin(tmp_path, monkeypatch):
+    # LOCAL-PIN-2: the refusal after a failed local attempt (try_serve returns
+    # None), not only the refusal decide_local makes before any attempt.
+    post, seen, backend, _ = await door(tmp_path, monkeypatch, local=True)
+    backend.exc = RuntimeError("boom")  # a plain failure: does not trip backend health
+    response, _, row = await post(turns("local: do it"))
+    assert row["prefix_outcome"] == "refused:backend_error" and len(backend.calls) == 1
+    assert "`local:` refused: backend_error; not sent to Claude." in response.text and not seen
+    assert row["local_mode"]["pin"] is None and row["local_mode"]["forced"] is True
+    backend.exc = None
+    _, _, row = await post(turns("local: do it", "and the rest"))
+    assert row["decision"] == "forwarded" and row["reason"] == "conversation_started_on_claude"
+    assert len(backend.calls) == 1 and len(seen) == 1
