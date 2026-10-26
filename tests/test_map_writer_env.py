@@ -483,6 +483,26 @@ def test_exclusive_lock_status_reflects_the_last_error(tmp_path, monkeypatch):
     assert next(errs, None) is None        # both errors were consumed: the retry happened
 
 
+def test_exclusive_lock_non_oserror_after_held_is_unavailable(tmp_path, monkeypatch):
+    """MAP-FIX-2f: flock said the lock was held (EAGAIN), then a retry raised a
+    non-OSError. The status stayed "held"; the last error now decides here too."""
+    from types import SimpleNamespace
+
+    from llm_router import file_lock
+
+    errs = iter([OSError(errno.EAGAIN, os.strerror(errno.EAGAIN)), RuntimeError("no flock")])
+
+    def flock(_fd, _op):
+        raise next(errs)
+
+    monkeypatch.setattr(file_lock, "fcntl", SimpleNamespace(flock=flock, LOCK_EX=2, LOCK_NB=4, LOCK_UN=8))
+    monkeypatch.setattr(file_lock, "_IS_WINDOWS", False)
+    st: dict = {}
+    with file_lock.exclusive_lock(tmp_path / "x.lock", timeout=5.0, status=st) as got:
+        assert not got and st == {"state": "unavailable", "errno": None}
+    assert next(errs, None) is None        # both errors were consumed: the retry happened
+
+
 def test_exclusive_lock_windows_eacces_is_still_held(tmp_path, monkeypatch):
     """MAP-FIX-2e guard: msvcrt.locking raises EACCES when another process holds the
     byte; that stays "held", not "unavailable"."""

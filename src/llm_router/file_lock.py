@@ -95,7 +95,9 @@ def exclusive_lock(
                 time.sleep(_POLL_INTERVAL_SECONDS)
             except Exception:
                 # Locking primitive unavailable/unsupported: degrade to
-                # unlocked rather than raising.
+                # unlocked rather than raising. Like a non-contention OSError,
+                # this wins over an earlier "held" (no errno to report).
+                state = "unavailable"
                 break
     except Exception as exc:
         locked = False
