@@ -657,9 +657,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_NOT_ELIGIBLE)
             return None
         key = conversation_key(body, row.get("session_id"))
+        # A `local:` step is decided as if pinned local, but the stored pin is
+        # left alone: the prefix forces this one step, never the conversation.
         pinned = local_mode.PIN_LOCAL if force else lm.pin_of(key)
-        if force:
-            lm.set_pin(key, local_mode.PIN_LOCAL)
         started_elsewhere = not force and pinned is None and not is_first_call(body)
         if started_elsewhere:
             # Never migrate a conversation already on Claude (or one this
