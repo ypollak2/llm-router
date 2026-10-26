@@ -649,17 +649,20 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    served_stop_reason=message["stop_reason"])
         return message
 
-    async def local_step(body: dict, row: dict, *, force=False) -> dict | None:
+    async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served
-        message, or ``None`` after writing the reason and the egress notice."""
+        message, or ``None`` after writing the reason and the egress notice.
+        ``key_body`` is the unstripped request a forced step keys its pin on,
+        so every turn of the conversation shares one key."""
         row["serve_mode"] = local_mode.SERVE_LOCAL_AGENT
         if not local_mode.is_agent_turn(body):
             row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_NOT_ELIGIBLE)
             return None
-        key = conversation_key(body, row.get("session_id"))
+        key = conversation_key(key_body or body, row.get("session_id"))
         # A `local:` step is decided as if pinned local, but the stored pin is
         # left alone: the prefix forces this one step, never the conversation.
-        pinned = local_mode.PIN_LOCAL if force else lm.pin_of(key)
+        stored = lm.pin_of(key)
+        pinned = local_mode.PIN_LOCAL if force else stored
         started_elsewhere = not force and pinned is None and not is_first_call(body)
         if started_elsewhere:
             # Never migrate a conversation already on Claude (or one this
@@ -673,7 +676,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=payload))
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
-        row["local_mode"] = dict(decision.as_row(), pin=pinned)
+        row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
+        if force:
+            row["local_mode"]["forced"] = True
         message = None
         if decision.local:
             if pinned is None:
@@ -683,6 +688,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if message is not None:
                 if force:
                     row["prefix_outcome"] = "served_local"
+                    if stored is None and is_first_call(body):
+                        # What the unforced path stores for a conversation's
+                        # served first call; a refusal stores nothing.
+                        lm.set_pin(key, local_mode.PIN_LOCAL)
+                        row["local_mode"]["pin"] = local_mode.PIN_LOCAL
                 return message
             if force:
                 return refuse_local(row, row.get("reason") or "validation")
@@ -1248,7 +1258,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         bypass_local = ov is not None and ov.is_claude
         if lm is not None and not bypass_local:
             message = await local_step(
-                stripped_body or body if force_local else body, row, force=force_local)
+                stripped_body or body if force_local else body, row, force=force_local, key_body=body)
             if message is not None:
                 if force_local:
                     prefix_outcome(row["prefix_outcome"])

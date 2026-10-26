@@ -268,6 +268,7 @@ async def test_local_prefix_serves_one_step_and_the_claude_pin_holds(tmp_path, m
     assert row["reason"] == "conversation_started_on_claude" and len(seen) == 1
     response, _, row = await post(turns("explain this", "and the next part", "local: do it"))
     assert row["prefix_outcome"] == "served_local" and len(backend.calls) == 1
+    assert row["local_mode"]["pin"] == "claude" and row["local_mode"]["forced"] is True
     _, _, row = await post(turns("explain this", "and the next part", "local: do it", "and the rest"))
     assert len(backend.calls) == 1 and len(seen) == 2
     assert row["decision"] == "forwarded" and row["reason"] == "pinned_claude"
@@ -292,3 +293,21 @@ async def test_an_unforced_local_decision_still_pins_the_conversation_local(tmp_
     _, _, row = await post(turns("explain this", "and the next part"))
     assert row["decision"] == "served" and row["local_mode"]["pin"] == "local"
     assert len(backend.calls) == 2 and not seen
+
+
+async def test_a_local_first_turn_pins_local_as_the_unforced_path_would(tmp_path, monkeypatch):
+    post, seen, backend, _ = await door(tmp_path, monkeypatch, local=True)
+    _, _, row = await post(turns("local: do it"))
+    assert row["prefix_outcome"] == "served_local" and row["local_mode"]["pin"] == "local"
+    _, _, row = await post(turns("local: do it", "and the rest"))
+    assert row["decision"] == "served" and row["local_mode"]["pin"] == "local"
+    assert "forced" not in row["local_mode"] and len(backend.calls) == 2 and not seen
+
+
+async def test_a_refused_local_first_turn_stores_no_pin(tmp_path, monkeypatch):
+    post, seen, backend, _ = await door(tmp_path, monkeypatch, local=True, killed=True)
+    _, _, row = await post(turns("local: do it"))
+    assert row["prefix_outcome"] == "refused:kill_switch" and row["local_mode"]["pin"] is None
+    (tmp_path / "kill").unlink()
+    _, _, row = await post(turns("local: do it", "and the rest"))
+    assert row["reason"] == "conversation_started_on_claude" and not backend.calls and len(seen) == 1
