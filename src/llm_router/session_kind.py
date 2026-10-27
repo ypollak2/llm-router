@@ -224,6 +224,23 @@ def _tag_path(session_id: str) -> Path:
     return paths.state_path(f"session_kind_{_safe(session_id)}.json")
 
 
+def _hook_host() -> str | None:
+    """The CLI running this hook process (``claude_code`` / ``codex`` / ``gemini``), or
+    ``None`` when nothing says. Read from the running script's path the way
+    ``hook_latency`` stamps its rows (``codex-auto-route.py`` names Codex). The tag's
+    ``host`` lets the S3 quota reader keep only Claude Code sessions
+    (``quota_samples._is_claude_code_tag``); with no host the reader falls back to the
+    session id's UUID version. Never raises."""
+    try:
+        import sys
+
+        from llm_router.hook_latency import detect_host
+
+        return detect_host(sys.argv[0] if sys.argv else "")
+    except Exception:  # noqa: BLE001 - an unknown host omits the field
+        return None
+
+
 def tag_session(session_id: str | None, cwd: str | None, *, env: dict | None = None) -> str | None:
     """Classify and persist this session's kind, unless it already has one: the
     first tag wins (see the module docstring), and the existing kind is returned.
@@ -242,9 +259,12 @@ def tag_session(session_id: str | None, cwd: str | None, *, env: dict | None = N
     try:
         path = _tag_path(session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"session_id": session_id, "kind": kind, "cwd": cwd,
-                                    "entrypoint": entrypoint, "ts": time.time()}),
-                        encoding="utf-8")
+        tag = {"session_id": session_id, "kind": kind, "cwd": cwd,
+               "entrypoint": entrypoint, "ts": time.time()}
+        host = _hook_host()
+        if host:
+            tag["host"] = host
+        path.write_text(json.dumps(tag), encoding="utf-8")
         _FOUND[str(path)] = kind
     except Exception as exc:  # noqa: BLE001 - telemetry must never block a session
         # Not silent (T-14): an untagged session shows up as its own bucket in the

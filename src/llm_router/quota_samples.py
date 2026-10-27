@@ -31,6 +31,7 @@ import math
 import os
 import random
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -189,8 +190,34 @@ def _read_jsonl(path: Path) -> tuple[list[dict], int]:
     return rows, skipped
 
 
+def _is_claude_code_tag(tag: dict, session_id: str) -> bool:
+    """Whether a ``session_kind_<sid>.json`` tag belongs to a Claude Code session.
+
+    Why: S3 is the main model's (Claude's) quota burn. Quota rows come from
+    :func:`append_session_sample`, called by session-start and Stop; in Claude Code both
+    run. Codex sessions are tagged too -- ``codex-auto-route.py`` calls
+    ``session_kind.tag_session`` -- but never burn Claude quota and, with the
+    ``~/.codex/hooks.json`` install, never get a row, so a Codex tag in the denominator
+    can never be covered. (A Codex *plugin* install runs session-start.py on Codex
+    SessionStart and can write a start row with no stop row; the rows path below does
+    not apply this filter yet.)
+
+    A tag that names its ``host`` is kept only when the host is ``claude_code``. A tag
+    without one (every tag written before the field existed, and Codex's older
+    installed hook) is dropped when the session id is a version-7 UUID: Codex thread ids
+    are UUIDv7, Claude Code session ids are UUIDv4. Anything else is kept, as before."""
+    host = tag.get("host")
+    if isinstance(host, str) and host:
+        return host == "claude_code"
+    try:
+        return uuid.UUID(str(session_id)).version != 7
+    except (ValueError, AttributeError, TypeError):
+        return True
+
+
 def _tagged_sessions(since: float, until: float) -> dict[str, str]:
-    """session_id -> kind for every session tagged (session start) inside the window."""
+    """session_id -> kind for every Claude Code session tagged (session start) inside
+    the window (see :func:`_is_claude_code_tag`)."""
     out: dict[str, str] = {}
     home = paths.llm_router_home()
     try:
@@ -209,6 +236,8 @@ def _tagged_sessions(since: float, until: float) -> dict[str, str]:
         ts = _num(tag.get("ts")) if isinstance(tag, dict) else None
         sid = tag.get("session_id") if isinstance(tag, dict) else None
         if ts is None or not sid or not since <= ts <= until:
+            continue
+        if not _is_claude_code_tag(tag, str(sid)):
             continue
         out[str(sid)] = str(tag.get("kind") or "")
     return out
