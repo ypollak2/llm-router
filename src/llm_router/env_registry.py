@@ -573,6 +573,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "TOGETHER_API_KEY": ("provider_credential", "config.py", 1),
     "XAI_API_KEY": ("provider_credential", "config.py", 1),
     "COHERE_API_KEY": ("provider_credential", "config.py", 1),
+    "FAL_KEY": ("provider_credential", "config.py", 1),
+    "STABILITY_API_KEY": ("provider_credential", "config.py", 1),
+    "ELEVENLABS_API_KEY": ("provider_credential", "config.py", 1),
+    "RUNWAY_API_KEY": ("provider_credential", "config.py", 1),
+    "REPLICATE_API_TOKEN": ("provider_credential", "config.py", 1),
     # ── test_only  (1) ──
     "PYTEST_CURRENT_TEST": ("test_only", "config.py", 4),
 }
@@ -627,9 +632,9 @@ PUBLIC: dict[str, PublicSetting] = {
         ),
         PublicSetting(
             "LLM_ROUTER_ENFORCE",
-            "enum: smart | hard | soft | shadow | off",
+            "enum: smart | hard | advise | suggest | soft | shadow | off",
             "smart",
-            "How strongly the hooks hold tool calls until a prompt is routed. off and shadow never block.",
+            "How strongly the hooks hold tool calls until a prompt is routed; off, shadow, advise, suggest and soft never block. The environment variable wins; otherwise the session file, repo config (.llm_router.yml) or ~/.llm-router/routing.yaml decide.",
         ),
         PublicSetting(
             "LLM_ROUTER_HOME",
@@ -665,7 +670,7 @@ PUBLIC: dict[str, PublicSetting] = {
             "PROVIDER_API_KEYS",
             "secret strings",
             "unset",
-            "Provider API keys. Set the ones you have; a provider with no key is skipped.",
+            "Provider API keys (text and media providers). Set the ones you have; a provider with no key is skipped.",
             members=(
                 "OPENAI_API_KEY",
                 "GEMINI_API_KEY",
@@ -678,6 +683,11 @@ PUBLIC: dict[str, PublicSetting] = {
                 "XAI_API_KEY",
                 "COHERE_API_KEY",
                 "OPENROUTER_API_KEY",
+                "FAL_KEY",
+                "STABILITY_API_KEY",
+                "ELEVENLABS_API_KEY",
+                "RUNWAY_API_KEY",
+                "REPLICATE_API_TOKEN",
             ),
         ),
     )

@@ -217,7 +217,7 @@ redirects and copies that write outside the project root are refused by a static
 tripwire, not a sandbox; an OS sandbox is 16.1. A command the tripwire
 cannot judge (an interpreter one-liner, `sudo`, a `$(...)`) returns
 `needs_approval`, but approval is not wired anywhere yet, so both command paths
-treat it as refused and do not run it. How to turn it off, and the full analysis:
+treat it as refused and do not run it. How to turn it off, and the full analysis (see [SECURITY.md, section "what it actually grants"](SECURITY.md#llm_router_direct_execution--what-it-actually-grants)):
 **[SECURITY.md](SECURITY.md)**.
 
 Self-audits are published in **[audit/](audit/)** and

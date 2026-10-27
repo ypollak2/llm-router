@@ -127,6 +127,11 @@ _INDIRECT_READS = frozenset({
     "TOGETHER_API_KEY",
     "XAI_API_KEY",
     "COHERE_API_KEY",
+    "FAL_KEY",
+    "STABILITY_API_KEY",
+    "ELEVENLABS_API_KEY",
+    "RUNWAY_API_KEY",
+    "REPLICATE_API_TOKEN",
 })
 
 
@@ -233,6 +238,7 @@ def test_load_bearing_vars_are_present(name):
 _REPO = _SRC.parent.parent
 _DOC = _REPO / "docs" / "configuration.md"
 _README = _REPO / "README.md"
+_ENV_EXAMPLE = _REPO / ".env.example"
 _NAME_RE = r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b"
 
 
@@ -273,7 +279,9 @@ def test_docs_are_generated_from_the_registry():
 def test_no_internal_name_is_documented():
     public = env_registry.public_names()
     leaked = {}
-    for path in (_README, _DOC):
+    for path in (_README, _DOC, _ENV_EXAMPLE):
+        # An empty scan passes everything: each file must yield at least one name.
+        assert _doc_names(path), f"{path.name}: scanner found no env names"
         hit = (_doc_names(path) & env_registry.registered_names()) - public
         if hit:
             leaked[path.name] = sorted(hit)
