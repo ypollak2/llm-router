@@ -483,6 +483,34 @@ def test_coverage_keeps_a_malformed_session_id_as_before(home, sid):
     assert cov["sessions"] == (1 if sid else 0)
 
 
+def test_rows_path_drops_a_codex_session_with_only_a_start_row(home):
+    """(e) P37G: a Codex plugin install writes a start row (organic stamp, UUIDv7 id) and
+    no stop row; it must not enter the coverage denominator through the rows path."""
+    _write_samples(home, [
+        _s(V4, "start", NOW, 10, 40), _s(V4, "stop", NOW + 60, 11, 40),
+        _s(V7, "start", NOW + 5, 11, 40),
+    ])
+    r = qs.quota_burn(NOW - 1, NOW + 1000)
+    cov = r["coverage"]
+    assert (cov["sessions"], cov["covered"], cov["rate"]) == (1, 1, 1.0)
+    assert r["samples"]["sessions_not_claude_code"] == 1
+    assert r["samples"]["sessions_other_kind"] == 0 and r["samples"]["sessions_untagged"] == 0
+
+
+def test_rows_path_reads_the_host_from_a_tag_outside_the_window(home):
+    """(f) Rows carry no host; the session's own tag supplies it, as on the tag path:
+    host=claude_code keeps a v7 id, host=codex drops a v4 id."""
+    _write_samples(home, [
+        _s(V7, "start", NOW, 10, 40), _s(V7, "stop", NOW + 60, 11, 40),
+        _s(V4B, "start", NOW, 10, 40),
+    ])
+    _host_tag(home, V7, NOW - 5000, "claude_code")
+    _host_tag(home, V4B, NOW - 5000, "codex")
+    r = qs.quota_burn(NOW - 1, NOW + 1000)
+    assert (r["coverage"]["sessions"], r["coverage"]["covered"]) == (1, 1)
+    assert r["samples"]["sessions_not_claude_code"] == 1
+
+
 def _clear_host_env(monkeypatch):
     for var in ("CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE", "CODEX_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
         monkeypatch.delenv(var, raising=False)
