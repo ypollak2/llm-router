@@ -308,6 +308,45 @@ def check_prereg_file_problems(G, R):
         assert G.prereg_file_problems(pf, good, pin_present=False), "edited file must refuse even without a pin"
 
 
+def _pinned_tree(root, R, manifests):
+    """A tree whose prereg pins one item file and every manifest by hash (all matching)."""
+    import hashlib
+    item = pathlib.Path(root) / "items" / "a.jsonl"
+    item.parent.mkdir(parents=True, exist_ok=True)
+    item.write_text('{"id": "x1"}\n')
+    lines = [f"ITEM_SHA256_items/a.jsonl={hashlib.sha256(item.read_bytes()).hexdigest()}"]
+    lines += [f"MANIFEST_SHA256_{sid}={R.manifest_sha256(m)}" for sid, m in sorted(manifests.items())]
+    pf = pathlib.Path(root) / "PREREG-P32.md"
+    pf.write_text("# prereg\n\n```text P32-CONSTANTS\nLABEL=x\n" + "\n".join(lines) + "\n```\n")
+    return pf, item
+
+
+def check_prereg_pin_problems(G, R):
+    import tempfile
+    m, _, _ = _perf(R)
+    with tempfile.TemporaryDirectory() as t:
+        root = pathlib.Path(t)
+        pf, item = _pinned_tree(root, R, {"perf": m})
+        assert G.prereg_pin_problems(pf, root, {"perf": m}) == []                        # all pins match
+        item.write_text('{"id": "x1", "label": "edited"}\n')                           # item drifted
+        bad = G.prereg_pin_problems(pf, root, {"perf": m})
+        assert len(bad) == 1 and "items/a.jsonl" in bad[0] and "expected" in bad[0] and "actual" in bad[0], bad
+        item.unlink()                                                                    # item deleted
+        bad = G.prereg_pin_problems(pf, root, {"perf": m})
+        assert len(bad) == 1 and "items/a.jsonl" in bad[0] and "missing" in bad[0], bad
+        pf, item = _pinned_tree(root, R, {"perf": m})
+        other = R.make_manifest("perf", "performance", 61, _ids("perf", 61))            # manifest drifted
+        assert any("perf" in x and "differs" in x for x in G.prereg_pin_problems(pf, root, {"perf": other}))
+        assert any("perf" in x and "missing" in x for x in G.prereg_pin_problems(pf, root, {}))
+        text = pf.read_text()
+        pf.write_text(text.replace("```text P32-CONSTANTS", "```text"))                # no constants block
+        assert G.prereg_pin_problems(pf, root, {"perf": m})
+        pf.write_text("\n".join(x for x in text.splitlines() if not x.startswith("ITEM_SHA256_")))
+        assert G.prereg_pin_problems(pf, root, {"perf": m}), "no item pins checks nothing: must refuse"
+        pf.write_text(text.replace("LABEL=x", "LABEL=x\nLABEL=y"))                    # duplicate key
+        assert G.prereg_pin_problems(pf, root, {"perf": m})
+
+
 CHECKS = {fn.__name__: fn for fn in (
     check_perf_4pt_drop_blocks, check_perf_exactly_3pt_passes, check_perf_2pt_drop_passes,
     check_perf_improvement_and_offset_pass, check_perf_pairs_by_id_not_position,
@@ -316,7 +355,7 @@ CHECKS = {fn.__name__: fn for fn in (
     check_n_checks_inside_the_comparator, check_missing_set_and_no_manifests_not_informative,
     check_wrong_sha_not_informative, check_non_bool_values_not_informative,
     check_pin_consistent_fixture_still_passes, check_pin_refusals, check_fidelity_bar, check_stability_bar, check_skip_policy,
-    check_prereg_file_problems,
+    check_prereg_file_problems, check_prereg_pin_problems,
 )}
 
 
@@ -327,7 +366,7 @@ def test_check_green_on_the_real_gate(name, G, R):
 
 def test_checks_found_something():
     # an empty table would pass everything
-    assert len(CHECKS) >= 19
+    assert len(CHECKS) >= 20
 
 
 # ── statistics ────────────────────────────────────────────────────────────────
@@ -462,12 +501,12 @@ def test_cli_missing_candidate_file_is_not_informative(G, tmp_path, capsys):
     assert rc == 2
 
 
-def test_cli_prereg_file_hash_and_missing(G, R, tmp_path, capsys):
+def test_cli_prereg_file_hash_and_missing(G, R, tmp_path, capsys, monkeypatch):
     import hashlib
     _write_case(R, tmp_path, cand_fail=range(2))
-    pf = tmp_path / "PREREG-P32.md"
-    pf.write_text("frozen text")
-    good = hashlib.sha256(b"frozen text").hexdigest()
+    monkeypatch.chdir(tmp_path)                                            # pinned item paths are cwd-relative
+    pf, _ = _pinned_tree(tmp_path, R, R.load_manifests(tmp_path / "manifests"))
+    good = hashlib.sha256(pf.read_bytes()).hexdigest()
     (tmp_path / "PREREG.sha256").write_text(f"{good}  PREREG-P32.md\n")
     (tmp_path / "PIN.json").write_text(json.dumps(R.make_pin(
         R.load_manifests(tmp_path / "manifests"), SHA_B, good)))
@@ -479,6 +518,33 @@ def test_cli_prereg_file_hash_and_missing(G, R, tmp_path, capsys):
     pf.unlink()                                                            # pin present, file missing
     assert _cli(G, tmp_path, "--sha", SHA_A, "--prereg-file", str(pf)) == 2
     assert "missing but a pin exists" in capsys.readouterr().out
+
+
+def _cli_pinned_case(R, tmp_path):
+    import hashlib
+    _write_case(R, tmp_path, cand_fail=range(2))
+    pf, item = _pinned_tree(tmp_path, R, R.load_manifests(tmp_path / "manifests"))
+    good = hashlib.sha256(pf.read_bytes()).hexdigest()
+    (tmp_path / "PREREG.sha256").write_text(f"{good}  PREREG-P32.md\n")
+    (tmp_path / "PIN.json").write_text(json.dumps(R.make_pin(
+        R.load_manifests(tmp_path / "manifests"), SHA_B, good)))
+    return pf, item
+
+
+def test_cli_prereg_item_pins_fail_closed(G, R, tmp_path, capsys, monkeypatch):
+    """PREREG-P32 §10 step 1: pinned items must be byte-identical at the RC. The prereg file, its
+    sidecar and the pin all agree here, so only the item hash can refuse."""
+    monkeypatch.chdir(tmp_path)
+    pf, item = _cli_pinned_case(R, tmp_path)
+    assert _cli(G, tmp_path, "--sha", SHA_A, "--prereg-file", str(pf)) == 0      # (a) every pin matches
+    assert "eval gate: PASS" in capsys.readouterr().out
+    item.write_text('{"id": "x1", "label": "edited after freeze"}\n')          # (b) one item altered
+    assert _cli(G, tmp_path, "--sha", SHA_A, "--prereg-file", str(pf)) == 2
+    out = capsys.readouterr().out
+    assert "pinned item items/a.jsonl sha256 differs" in out and "expected" in out and "actual" in out, out
+    item.unlink()                                                                  # (c) pinned file missing
+    assert _cli(G, tmp_path, "--sha", SHA_A, "--prereg-file", str(pf)) == 2
+    assert "pinned item items/a.jsonl is missing" in capsys.readouterr().out
 
 
 # ── --skip-quality policy: CLI + shell wiring ─────────────────────────────────
