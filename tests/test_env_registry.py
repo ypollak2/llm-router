@@ -117,6 +117,16 @@ _INDIRECT_READS = frozenset({
     "LLM_ROUTER_STATUSLINE",
     # Same script: the sampled statusline timing row (PLAN v16 P0.9-c).
     "LLM_ROUTER_STATUSLINE_TIMING",
+    # P3.8-a: public settings read ONLY through pydantic RouterConfig (field name ==
+    # env name, case-insensitive), which the literal-arg scan cannot see.
+    # test_every_public_name_is_registered_and_read checks each against model_fields.
+    "LLM_ROUTER_MONTHLY_BUDGET",
+    "ANTHROPIC_API_KEY",
+    "MISTRAL_API_KEY",
+    "GROQ_API_KEY",
+    "TOGETHER_API_KEY",
+    "XAI_API_KEY",
+    "COHERE_API_KEY",
 })
 
 
@@ -214,3 +224,83 @@ def test_load_bearing_vars_are_present(name):
     public-bind opt-in. If either silently vanished, the registry would still be
     'complete' by the scan test alone."""
     assert env_registry.category_of(name) == "llm_router"
+
+
+# ── P3.8-a: the public config surface (D-23) ─────────────────────────────────
+# ~400 names are read; at most 10 are documented. docs/configuration.md is
+# generated from env_registry.PUBLIC, and nothing else may be documented.
+
+_REPO = _SRC.parent.parent
+_DOC = _REPO / "docs" / "configuration.md"
+_README = _REPO / "README.md"
+_NAME_RE = r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b"
+
+
+def _doc_names(path: Path) -> set[str]:
+    import re
+
+    return set(re.findall(_NAME_RE, path.read_text(encoding="utf-8")))
+
+
+def test_public_count_is_at_most_ten():
+    assert env_registry.PUBLIC, "PUBLIC is empty -- an empty set passes every bound"
+    # A grouped row (members=...) counts as ONE setting.
+    assert len(env_registry.PUBLIC) <= env_registry.MAX_PUBLIC == 10
+
+
+def test_docs_table_lists_exactly_the_public_names():
+    text = _DOC.read_text(encoding="utf-8")
+    table = text.split("<!-- BEGIN GENERATED -->")[1].split("<!-- END GENERATED -->")[0]
+    import re
+
+    in_table = set(re.findall(_NAME_RE, table)) - {"PROVIDER_API_KEYS"}
+    assert in_table == set(env_registry.public_names())
+    rows = [ln for ln in table.splitlines() if ln.startswith("| ") and "---" not in ln][1:]
+    assert len(rows) == len(env_registry.PUBLIC)
+
+
+def test_docs_are_generated_from_the_registry():
+    import subprocess
+    import sys
+
+    r = subprocess.run(
+        [sys.executable, str(_REPO / "scripts" / "gen_config_docs.py"), "--check"],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_no_internal_name_is_documented():
+    public = env_registry.public_names()
+    leaked = {}
+    for path in (_README, _DOC):
+        hit = (_doc_names(path) & env_registry.registered_names()) - public
+        if hit:
+            leaked[path.name] = sorted(hit)
+    assert not leaked, (
+        "non-public env names appear in user docs; link to docs/configuration.md "
+        f"instead: {leaked}"
+    )
+
+
+def test_every_public_name_is_registered_and_read():
+    from llm_router.config import RouterConfig
+
+    reads = _env_reads_in_source()
+    fields = set(RouterConfig.model_fields)
+    for s in env_registry.PUBLIC.values():
+        for name in (s.members or (s.name,)) + s.aliases:
+            assert name in env_registry.registered_names(), f"{name} not in ENV_REGISTRY"
+            assert name in reads or name.lower() in fields, (
+                f"{name} is documented but neither an AST read nor a RouterConfig field"
+            )
+
+
+def test_the_mutation_an_eleventh_public_setting_fails_the_count(monkeypatch):
+    extra = {
+        f"LLM_ROUTER_FAKE_{i}": env_registry.PublicSetting(f"LLM_ROUTER_FAKE_{i}", "x", "x", "x")
+        for i in range(env_registry.MAX_PUBLIC + 1 - len(env_registry.PUBLIC))
+    }
+    monkeypatch.setattr(env_registry, "PUBLIC", {**env_registry.PUBLIC, **extra})
+    with pytest.raises(AssertionError):
+        test_public_count_is_at_most_ten()

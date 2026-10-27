@@ -44,7 +44,19 @@ CATEGORIES
 
 from __future__ import annotations
 
-__all__ = ["ENV_REGISTRY", "CATEGORIES", "registered_names", "category_of"]
+from dataclasses import dataclass
+
+__all__ = [
+    "ENV_REGISTRY",
+    "CATEGORIES",
+    "registered_names",
+    "category_of",
+    "PUBLIC",
+    "PublicSetting",
+    "MAX_PUBLIC",
+    "is_public",
+    "public_names",
+]
 
 CATEGORIES = frozenset(
     {"llm_router", "provider_credential", "external_tool", "platform", "test_only"}
@@ -552,6 +564,15 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "NO_COLOR": ("platform", "commands/budget.py", 16),
     "PATH": ("platform", "statusline_tick.py", 1),
     "XDG_CONFIG_HOME": ("platform", "install_hooks.py", 1),
+    # ── read only via pydantic RouterConfig (field name == env name, case-insensitive);
+    #    the literal-arg AST scan cannot see them. See _INDIRECT_READS in the test. ──
+    "LLM_ROUTER_MONTHLY_BUDGET": ("llm_router", "config.py", 1),
+    "ANTHROPIC_API_KEY": ("provider_credential", "config.py", 1),
+    "MISTRAL_API_KEY": ("provider_credential", "config.py", 1),
+    "GROQ_API_KEY": ("provider_credential", "config.py", 1),
+    "TOGETHER_API_KEY": ("provider_credential", "config.py", 1),
+    "XAI_API_KEY": ("provider_credential", "config.py", 1),
+    "COHERE_API_KEY": ("provider_credential", "config.py", 1),
     # ── test_only  (1) ──
     "PYTEST_CURRENT_TEST": ("test_only", "config.py", 4),
 }
@@ -564,3 +585,119 @@ def registered_names() -> frozenset[str]:
 def category_of(name: str) -> str | None:
     entry = ENV_REGISTRY.get(name)
     return entry[0] if entry else None
+
+
+# ── Public config surface (PLAN v16 P3.8-a, D-23) ────────────────────────────
+#: At most this many documented user settings. The ~400 other names in
+#: ENV_REGISTRY stay internal and undocumented; deleting them is deferred (16.1).
+MAX_PUBLIC = 10
+
+
+@dataclass(frozen=True)
+class PublicSetting:
+    """One documented user setting. ``docs/configuration.md`` is generated from these.
+
+    ``members`` makes a grouped row (e.g. provider API keys): the row counts as ONE
+    setting, and every member name must itself be in ``ENV_REGISTRY``.
+    """
+
+    name: str
+    type: str
+    default: str
+    description: str
+    aliases: tuple[str, ...] = ()
+    members: tuple[str, ...] = ()
+
+
+PUBLIC: dict[str, PublicSetting] = {
+    s.name: s
+    for s in (
+        PublicSetting(
+            "LLM_ROUTER_COST_PROFILE",
+            "enum: budget | balanced | premium | reasoning | quota_balanced | subscription_local",
+            "balanced",
+            "Cost/quality tier that picks the model chain. Unrecognised values fall back to balanced with one warning.",
+            aliases=("LLM_ROUTER_PROFILE",),
+        ),
+        PublicSetting(
+            "LLM_ROUTER_MONTHLY_BUDGET",
+            "float (USD)",
+            "20.0",
+            "Monthly spend cap in US dollars.",
+        ),
+        PublicSetting(
+            "LLM_ROUTER_ENFORCE",
+            "enum: smart | hard | soft | shadow | off",
+            "smart",
+            "How strongly the hooks hold tool calls until a prompt is routed. off and shadow never block.",
+        ),
+        PublicSetting(
+            "LLM_ROUTER_HOME",
+            "path",
+            "~/.llm-router",
+            "Directory for all llm-router state (usage database, traces, caches).",
+        ),
+        PublicSetting(
+            "LLM_ROUTER_BLOCK_PROVIDERS",
+            "comma-separated provider names",
+            "empty (nothing blocked)",
+            "Providers removed from routing entirely, e.g. codex,gemini_cli,openai,anthropic,ollama.",
+        ),
+        PublicSetting(
+            "LLM_ROUTER_LOG_LEVEL",
+            "logging level name",
+            "INFO",
+            "Log verbosity (DEBUG, INFO, WARNING, ERROR).",
+        ),
+        PublicSetting(
+            "LLM_ROUTER_CLAUDE_SUBSCRIPTION",
+            "bool (1 | true | yes | on)",
+            "off",
+            "Declares a flat-rate Claude subscription so savings are computed against it, not per-token prices.",
+        ),
+        PublicSetting(
+            "OLLAMA_BASE_URL",
+            "URL",
+            "http://localhost:11434",
+            "Ollama server used for local models.",
+        ),
+        PublicSetting(
+            "PROVIDER_API_KEYS",
+            "secret strings",
+            "unset",
+            "Provider API keys. Set the ones you have; a provider with no key is skipped.",
+            members=(
+                "OPENAI_API_KEY",
+                "GEMINI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "PERPLEXITY_API_KEY",
+                "MISTRAL_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "GROQ_API_KEY",
+                "TOGETHER_API_KEY",
+                "XAI_API_KEY",
+                "COHERE_API_KEY",
+                "OPENROUTER_API_KEY",
+            ),
+        ),
+    )
+}
+
+
+def public_names() -> frozenset[str]:
+    """Every documented env name: single settings, their aliases, and group members.
+
+    ``PROVIDER_API_KEYS`` is a row label, not a variable, so it is not included.
+    """
+    out: set[str] = set()
+    for s in PUBLIC.values():
+        if s.members:
+            out.update(s.members)
+        else:
+            out.add(s.name)
+        out.update(s.aliases)
+    return frozenset(out)
+
+
+def is_public(name: str) -> bool:
+    return name in public_names()
