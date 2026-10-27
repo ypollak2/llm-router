@@ -135,16 +135,67 @@ def _formatter_check_only(cmd: str, args: list[str]) -> bool:
     return True
 
 
+def _mask_quoted(text: str) -> str | None:
+    """``text`` with every character that shell syntax cannot see replaced by ``x`` (same length).
+
+    Hidden: the inside and the quote marks of ``'...'``, the inside of ``"..."`` (except a
+    backtick, a ``$`` and a ``(`` or ``{`` right after it, which still substitute there), and a backslash with the character it
+    escapes outside single quotes. ``None`` when a quote is unbalanced or the text ends in a
+    lone backslash: the caller then treats the command as ``exec``.
+    """
+    out: list[str] = []
+    quote = ""
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            out.append("x")
+            if c == "'":
+                quote = ""
+        elif c == "\\":
+            if i + 1 >= n:
+                return None
+            out.append("xx")
+            i += 1
+        elif quote == '"':
+            keep = c in "`$" or (c in "({" and i > 0 and text[i - 1] == "$")
+            out.append(c if keep else "x")
+            if c == '"':
+                quote = ""
+        else:
+            if c in "'\"":
+                quote = c
+                out.append("x")
+            else:
+                out.append(c)
+        i += 1
+    return None if quote else "".join(out)
+
+
 def classify_bash(command: Any) -> str:
-    """``technical_op`` when every part of ``command`` only reads, else ``exec``."""
+    """``technical_op`` when every part of ``command`` only reads, else ``exec``.
+
+    Operators and redirections count only outside quotes: ``rg "a|b" src`` is one reader.
+    """
     if not isinstance(command, str) or not command.strip():
         return EXEC
-    text = _SAFE_REDIRECT.sub(" ", command).strip()
-    if any(tok in text for tok in (">", "`", "$(", "<(")):
+    masked = _mask_quoted(command)
+    if masked is None:
         return EXEC
-    if re.search(r"(?<![&|])&(?![&>])", text):           # background job
+    # Blank harmless redirections in both views, keeping offsets aligned.
+    for m in reversed(list(_SAFE_REDIRECT.finditer(masked))):
+        a, b = m.span()
+        masked = masked[:a] + " " * (b - a) + masked[b:]
+        command = command[:a] + " " * (b - a) + command[b:]
+    if any(tok in masked for tok in (">", "`", "$(", "<(")):
         return EXEC
-    parts = _SPLIT.split(text)
+    if re.search(r"(?<![&|])&(?![&>])", masked):         # background job
+        return EXEC
+    parts, start = [], 0
+    for m in _SPLIT.finditer(masked):
+        parts.append(command[start:m.start()])
+        start = m.end()
+    parts.append(command[start:])
     if any(not p.strip() for p in parts):
         return EXEC
     return TECHNICAL_OP if all(_segment_is_read_only(p) for p in parts) else EXEC

@@ -143,3 +143,49 @@ def test_a_step_is_a_technical_op_only_when_every_tool_it_answers_is_one():
     assert tc.step_tool_class([("Read", {}), ("Edit", {})]) == tc.EDIT
     assert tc.step_tool_class([("WebFetch", {}), ("Agent", {})]) == tc.AGENT
     assert tc.step_tool_class([("mcp__x__y", {})]) == tc.OTHER
+
+
+@pytest.mark.parametrize("command", [
+    'rg "x|y" src',
+    r'grep -n "a\|b" f | head',
+    "grep -n 'a|b' f",
+    'rg "a;b" src',
+    'grep ">" f',
+    "grep '>>' f | wc -l",
+    'rg "a && b" src',
+    r"grep a\|b f",
+    'grep "x" f 2>&1',
+    'grep "2>&1" f',
+])
+def test_operators_inside_quotes_are_arguments_not_syntax(command):
+    assert tc.classify_bash(command) == tc.TECHNICAL_OP
+
+
+@pytest.mark.parametrize("command", [
+    "cat > f <<EOF",
+    "echo x | tee f",
+    "sed -i s/a/b/ f",
+    "grep a f > out",
+    'grep "a" f > out',
+    'grep "a|b" f > out',
+    "ls; rm x",
+    'ls "a;b"; rm x',
+    'grep "unbalanced f',
+    "grep 'unbalanced f",
+    "grep a\\",
+    'echo "$(rm x)"',
+    'echo "`rm x`"',
+    'ls "$(rm -rf y)"',
+    'cat "$(touch z)"',
+    'ls "${x:=$(rm y)}"',
+    'ls "${x:=`rm y`}"',
+    'ls "$((1+$(rm x)))"',
+    "grep $'a\\'; rm x' f",
+    "grep a f &",
+])
+def test_real_syntax_and_malformed_input_stay_exec(command):
+    assert tc.classify_bash(command) == tc.EXEC
+
+
+def test_plain_parameter_expansion_in_double_quotes_stays_a_reader():
+    assert tc.classify_bash('ls "${x}"') == tc.TECHNICAL_OP
