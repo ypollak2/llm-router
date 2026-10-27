@@ -110,6 +110,8 @@ tests/hook_rendering/
 # and versioned release-evidence packs, which are permanent records, not working notes)
 /docs/*
 !/docs/BENCHMARKS.md
+# Generated from env_registry.PUBLIC (P3.8-a); tests and README depend on it.
+!/docs/configuration.md
 !/docs/releases/
 !/docs/releases/**
 # Bug entries, one file each (BUGS-1): /docs/* would keep them out of every clone.

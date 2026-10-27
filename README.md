@@ -20,8 +20,8 @@
 
 <p align="center">
   <sub><b>One caveat:</b> routed answers are advisory by default — Claude still takes the
-  turn unless <code>LLM_ROUTER_ZERO_CLAUDE=1</code>. By default some tool calls wait until a
-  prompt is routed; <code>LLM_ROUTER_ENFORCE=off</code> turns that off. Draft-rate and
+  turn unless you opt in to zero-Claude mode. By default some tool calls wait until a
+  prompt is routed; <code>LLM_ROUTER_ENFORCE=off</code> turns that off (all user settings: <a href="docs/configuration.md">docs/configuration.md</a>). Draft-rate and
   acceptance figures live in <a href="docs/MEASUREMENT.md">docs/MEASUREMENT.md</a>, with
   their n, window and conditions.</sub>
 </p>
@@ -144,7 +144,7 @@ draft from a free/local model first, then walks up the chain toward paid
 models only if needed.
 
 The draft is **advisory** — handed to Claude as an unverified hint, not a turn
-replacement, unless `LLM_ROUTER_ZERO_CLAUDE=1` is set. Enforcement acts at the
+replacement, unless you opt in to zero-Claude mode. Enforcement acts at the
 tool-call level: `smart` (default) holds selected tool calls until the prompt
 is routed; `off` disables that. Full modes and per-host overrides:
 **[guide/GETTING_STARTED.md](guide/GETTING_STARTED.md)**.
@@ -175,8 +175,8 @@ is routed; `off` disables that. Full modes and per-host overrides:
 
 ## Reference
 
-The default MCP surface shows **12 front-door tools**; `LLM_ROUTER_SLIM=off`
-shows everything registered.
+The default MCP surface shows **12 front-door tools**; an opt-out shows everything registered
+(see [docs/configuration.md](docs/configuration.md) for user settings).
 
 | Topic | What | Guide |
 |-------|------|-------|
@@ -225,7 +225,7 @@ Self-audits are published in **[audit/](audit/)** and
 **[docs/repo_goals/AUDIT-2026-09-25.md](docs/repo_goals/AUDIT-2026-09-25.md)**
 (13 met, 6 partial, 1 not met), including negative results.
 
-**Ground Truth accumulation** (opt-in, `LLM_ROUTER_GROUND_TRUTH=1`) builds a
+**Ground Truth accumulation** (opt-in) builds a
 corpus of replayable routing decisions instead of unlinked telemetry; off by
 default since it's the only part that writes prompt text to disk. Details:
 **[guide/GROUND_TRUTH.md](guide/GROUND_TRUTH.md)**.
