@@ -175,7 +175,17 @@ def test_operators_inside_quotes_are_arguments_not_syntax(command):
     "grep a\\",
     'echo "$(rm x)"',
     'echo "`rm x`"',
+    'ls "$(rm -rf y)"',
+    'cat "$(touch z)"',
+    'ls "${x:=$(rm y)}"',
+    'ls "${x:=`rm y`}"',
+    'ls "$((1+$(rm x)))"',
+    "grep $'a\\'; rm x' f",
     "grep a f &",
 ])
 def test_real_syntax_and_malformed_input_stay_exec(command):
     assert tc.classify_bash(command) == tc.EXEC
+
+
+def test_plain_parameter_expansion_in_double_quotes_stays_a_reader():
+    assert tc.classify_bash('ls "${x}"') == tc.TECHNICAL_OP

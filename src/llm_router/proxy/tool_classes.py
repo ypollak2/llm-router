@@ -139,7 +139,7 @@ def _mask_quoted(text: str) -> str | None:
     """``text`` with every character that shell syntax cannot see replaced by ``x`` (same length).
 
     Hidden: the inside and the quote marks of ``'...'``, the inside of ``"..."`` (except a
-    backtick or ``$``, which still substitute there), and a backslash with the character it
+    backtick, a ``$`` and a ``(`` or ``{`` right after it, which still substitute there), and a backslash with the character it
     escapes outside single quotes. ``None`` when a quote is unbalanced or the text ends in a
     lone backslash: the caller then treats the command as ``exec``.
     """
@@ -158,7 +158,8 @@ def _mask_quoted(text: str) -> str | None:
             out.append("xx")
             i += 1
         elif quote == '"':
-            out.append(c if c in "`$" else "x")
+            keep = c in "`$" or (c in "({" and i > 0 and text[i - 1] == "$")
+            out.append(c if keep else "x")
             if c == '"':
                 quote = ""
         else:
