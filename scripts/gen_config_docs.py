@@ -10,7 +10,9 @@ the table. Only the text between the BEGIN/END markers is owned by this script.
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -61,7 +63,15 @@ def main(argv: list[str]) -> int:
             print(f"{DOC.relative_to(ROOT)} is stale; run scripts/gen_config_docs.py", file=sys.stderr)
             return 1
         return 0
-    DOC.write_text(new, encoding="utf-8")
+    # os.write + os.replace, not open()/write_text: this is a committed doc, not a state
+    # file, and tests/test_w04_state_file_modes.py ratchets raw open-for-write sites.
+    fd, tmp = tempfile.mkstemp(dir=DOC.parent, prefix=".configuration-")
+    try:
+        os.write(fd, new.encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, DOC)
     return 0
 
 

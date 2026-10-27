@@ -210,14 +210,15 @@ llm-router service, no account required. A **grounding check**
 (`src/llm_router/grounding.py`) discards any draft citing a file or function
 absent from its context and the indexed repo, falling through to Claude.
 
-Direct execution is default on — a local model gets `write_file`,
+`LLM_ROUTER_DIRECT_EXECUTION` is default on — a local model gets `write_file`,
 `edit_file` and `run_command` under a confined, allowlisted path, and none of
 that stops targeted deletes, `git push --force`, or exfiltration. Shell
 redirects and copies that write outside the project root are refused by a static
 tripwire, not a sandbox; an OS sandbox is 16.1. A command the tripwire
 cannot judge (an interpreter one-liner, `sudo`, a `$(...)`) returns
 `needs_approval`, but approval is not wired anywhere yet, so both command paths
-treat it as refused and do not run it. How to turn it off, and the full analysis (see [SECURITY.md, section "what it actually grants"](SECURITY.md#llm_router_direct_execution--what-it-actually-grants)):
+treat it as refused and do not run it. Turn it off
+with `LLM_ROUTER_DIRECT_EXECUTION=false`. Full analysis:
 **[SECURITY.md](SECURITY.md)**.
 
 Self-audits are published in **[audit/](audit/)** and

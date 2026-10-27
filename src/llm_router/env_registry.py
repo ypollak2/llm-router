@@ -667,6 +667,12 @@ PUBLIC: dict[str, PublicSetting] = {
             "Ollama server used for local models.",
         ),
         PublicSetting(
+            "LLM_ROUTER_DIRECT_EXECUTION",
+            "bool (1 | true | yes | on = enabled; any other value disables)",
+            "true",
+            "Security switch. On by default: a local model gets write_file, edit_file and run_command under a confined, allowlisted path. Set to false to turn it off. See the README and SECURITY.md for what it grants.",
+        ),
+        PublicSetting(
             "PROVIDER_API_KEYS",
             "secret strings",
             "unset",
