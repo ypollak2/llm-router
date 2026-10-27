@@ -193,11 +193,14 @@ def _read_jsonl(path: Path) -> tuple[list[dict], int]:
 def _is_claude_code_tag(tag: dict, session_id: str) -> bool:
     """Whether a ``session_kind_<sid>.json`` tag belongs to a Claude Code session.
 
-    Why: S3 is the main model's (Claude's) quota burn, and only the Claude Code hooks
-    write quota rows (:func:`append_session_sample`, from session-start / Stop). Codex
-    sessions are tagged too -- ``codex-auto-route.py`` calls ``session_kind.tag_session``
-    -- but never burn Claude quota and never get a row, so counting them sank the
-    P3.7-a coverage to 4/18 for 2026-10-20..27 (all 14 misses were Codex threads).
+    Why: S3 is the main model's (Claude's) quota burn. Quota rows come from
+    :func:`append_session_sample`, called by session-start and Stop; in Claude Code both
+    run. Codex sessions are tagged too -- ``codex-auto-route.py`` calls
+    ``session_kind.tag_session`` -- but never burn Claude quota and, with the
+    ``~/.codex/hooks.json`` install, never get a row, so a Codex tag in the denominator
+    can never be covered. (A Codex *plugin* install runs session-start.py on Codex
+    SessionStart and can write a start row with no stop row; the rows path below does
+    not apply this filter yet.)
 
     A tag that names its ``host`` is kept only when the host is ``claude_code``. A tag
     without one (every tag written before the field existed, and Codex's older
