@@ -551,6 +551,10 @@ async def test_5xx_on_a_non_lane_a_call_is_not_retried(tmp_path, monkeypatch):
 
 async def test_failures_through_the_proxy_trip_the_breaker_and_the_next_step_stays_pinned(tmp_path, monkeypatch):
     monkeypatch.setenv(lane_a.ENV_SWITCH, "on")
+    breakers = set()
+    real = lb.LaneABreaker.record_failure
+    monkeypatch.setattr(lb.LaneABreaker, "record_failure",
+                        lambda self, k, probe=False, probe_id=None: breakers.add(self) or real(self, k, probe, probe_id))
     up = Upstream(503)
     app = _app(tmp_path, _raw(), up)
     for i in range(5):
@@ -562,10 +566,12 @@ async def test_failures_through_the_proxy_trip_the_breaker_and_the_next_step_sta
     assert [r["lane_a_reason"] for r in rows] == [lane_a.R_RETRIED] * 5 + [lane_a.R_BREAKER_OPEN]
     # positive control for the side-effect tests: a lane that is ON and trips does persist, privately
     f = Path(os.environ["LLM_ROUTER_HOME"]) / "lane_a_breaker.json"
-    for _ in range(100):
-        if f.exists():
-            break
-        await asyncio.sleep(0.02)
+    # The breaker writes asynchronously and coalesced: failures 1-4 already wrote "closed" snapshots, so the file
+    # exists before the trip's "open" snapshot lands. Wait for that background write itself, not for the file (CI
+    # flake). Awaiting the proxy's own flush task, not ``flush()``, keeps this a control of the background persist.
+    (breaker,) = breakers
+    assert breaker._flush_task is not None
+    await breaker._flush_task
     assert json.loads(f.read_text())["state"] == "open" and stat.S_IMODE(f.stat().st_mode) == 0o600
 
 
