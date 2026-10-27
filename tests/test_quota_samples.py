@@ -433,6 +433,91 @@ def test_coverage_denominator_override_with_no_samples(home):
     assert (cov["sessions"], cov["covered"]) == (1, 0)
 
 
+# ── P3.7-a: the S3 denominator counts Claude Code sessions only ───────────────
+# Codex tags its sessions through codex-auto-route.py but never writes a quota row and
+# never burns Claude quota. Codex thread ids are UUIDv7; Claude Code session ids UUIDv4.
+
+V4 = "0f8e2c4a-1b2c-4d3e-8f4a-5b6c7d8e9f01"
+V4B = "1a2b3c4d-5e6f-4a7b-9c8d-0e1f2a3b4c5d"
+V7 = "019a1b2c-3d4e-7f50-8a1b-2c3d4e5f6a7b"
+
+
+def _host_tag(home: Path, sid: str, ts: float, host: str, kind: str = "organic") -> None:
+    (home / f"session_kind_{sid}.json").write_text(
+        json.dumps({"session_id": sid, "kind": kind, "ts": ts, "host": host}))
+
+
+def test_coverage_drops_a_uuid7_tag_without_host(home):
+    """(a) One Claude Code session with rows, one Codex thread without: 1/1, not 1/2."""
+    _write_samples(home, [_s(V4, "start", NOW, 10, 40), _s(V4, "stop", NOW + 60, 11, 40)])
+    _tag(home, V4, NOW)
+    _tag(home, V7, NOW)
+    cov = qs.quota_burn(NOW - 1, NOW + 1000)["coverage"]
+    assert (cov["sessions"], cov["covered"], cov["rate"]) == (1, 1, 1.0)
+
+
+def test_coverage_drops_a_tag_whose_host_is_codex(home):
+    """(b) The host field wins over the id: a v4 id tagged by Codex is not counted."""
+    _write_samples(home, [_s(V4, "start", NOW, 10, 40), _s(V4, "stop", NOW + 60, 11, 40)])
+    _tag(home, V4, NOW)
+    _host_tag(home, V4B, NOW, "codex")
+    cov = qs.quota_burn(NOW - 1, NOW + 1000)["coverage"]
+    assert (cov["sessions"], cov["covered"]) == (1, 1)
+
+
+def test_coverage_keeps_a_tag_whose_host_is_claude_code(home):
+    """(c) host=claude_code is counted, even with no rows and even on a v7 id."""
+    _write_samples(home, [_s(V4, "start", NOW, 10, 40), _s(V4, "stop", NOW + 60, 11, 40)])
+    _tag(home, V4, NOW)
+    _host_tag(home, V4B, NOW, "claude_code")
+    _host_tag(home, V7, NOW, "claude_code")
+    cov = qs.quota_burn(NOW - 1, NOW + 1000)["coverage"]
+    assert (cov["sessions"], cov["covered"]) == (3, 1)
+
+
+@pytest.mark.parametrize("sid", ["not-a-uuid", "019a1b2c-3d4e-7f50", "", 12345])
+def test_coverage_keeps_a_malformed_session_id_as_before(home, sid):
+    """(d) An id that is not a UUID is treated as today: counted (a falsy id is skipped)."""
+    (home / "session_kind_odd.json").write_text(json.dumps({"session_id": sid, "kind": "organic", "ts": NOW}))
+    cov = qs.quota_burn(NOW - 1, NOW + 1000)["coverage"]
+    assert cov["sessions"] == (1 if sid else 0)
+
+
+def _clear_host_env(monkeypatch):
+    for var in ("CLAUDE_CODE_ENTRYPOINT", "CLAUDECODE", "CODEX_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT"):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.mark.parametrize("script, host", [
+    ("/Users/x/.codex/hooks/codex-auto-route.py", "codex"),
+    ("/Users/x/.claude/hooks/session-start.py", "claude_code"),
+    ("/opt/bin/some-runner", None),
+])
+def test_tag_session_records_the_hook_host(home, monkeypatch, script, host):
+    """The writer stamps the running hook's host; an unknown host omits the field."""
+    from llm_router import session_kind
+
+    _clear_host_env(monkeypatch)
+    monkeypatch.setattr(sys, "argv", [script])
+    session_kind.tag_session(V4, "/Users/x/app", env={})
+    tag = json.loads((home / f"session_kind_{V4}.json").read_text())
+    assert tag["kind"] == "organic"
+    assert tag.get("host") == host and (("host" in tag) == (host is not None))
+
+
+def test_codex_tag_written_by_tag_session_is_not_in_the_denominator(home, monkeypatch):
+    from llm_router import session_kind
+
+    _clear_host_env(monkeypatch)
+    _write_samples(home, [_s(V4, "start", NOW, 10, 40), _s(V4, "stop", NOW + 60, 11, 40)])
+    _tag(home, V4, NOW)
+    monkeypatch.setattr(sys, "argv", ["/Users/x/.codex/hooks/codex-auto-route.py"])
+    monkeypatch.setattr(session_kind.time, "time", lambda: NOW)
+    session_kind.tag_session(V4B, "/Users/x/app", env={})
+    cov = qs.quota_burn(NOW - 1, NOW + 1000)["coverage"]
+    assert (cov["sessions"], cov["covered"]) == (1, 1)
+
+
 def test_wilson_bounds_are_exact_at_the_edges():
     assert qs._wilson(0, 7)[0] == 0.0
     assert qs._wilson(7, 7)[1] == 1.0
