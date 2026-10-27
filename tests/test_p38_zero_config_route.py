@@ -1,15 +1,23 @@
-"""P3.8-a: a fresh HOME with no config reaches a defined routing outcome, offline.
+"""P3.8-a: a fresh HOME with no config, offline.
 
-Finding recorded by this test (main @ 84cb0798): with no provider key, no Ollama, no
-Codex and no subscription there is NO selectable backend. ``route_and_call`` raises
-``NoRoutableModelsError`` ("Configured providers: none ... run `llm-router doctor`")
-before any backend is called. That is the documented no-backend outcome and is what
-leg 1 asserts. A control run with exactly one provider key proves the same harness
-does route (so the zero-config assertion is not vacuous).
+Two explicit cases (HOME and cwd empty, every router/provider variable stripped, no config file):
 
-Leg 2 runs the real CLI in a subprocess on the same empty HOME with sockets blocked.
-``doctor`` is not used: on a fresh HOME it exits 1 (hooks not installed) and probes
-Ollama on :11434. ``config`` is offline and exits 0.
+A. ZERO CONFIG + ONE KEYLESS BACKEND INSTALLED -> the request routes exactly once to it.
+   The Codex CLI is the keyless backend, faked as installed (``router.is_codex_available``)
+   with a fake ``router.run_codex``. This is the row "a fresh HOME with no config routes one
+   request". Codex, the Gemini CLI and Ollama are all detected with zero config.
+B. ZERO CONFIG + NOTHING INSTALLED -> ``NoRoutableModelsError`` with a ``llm-router doctor`` hint,
+   before any backend call.
+
+The Claude subscription route is NOT zero-config: it needs ``llm_router_claude_subscription``,
+which defaults to False and is set by ``llm-router install`` (NFR-CFG gap, config.py).
+
+The availability checks are patched on ``llm_router.router`` explicitly (router.py binds the
+names at import, so patching ``llm_router.codex_agent`` is a no-op), not left to the autouse
+``_hermetic_host_state`` in tests/conftest.py. Files outside the tmp HOME are guarded by
+conftest's ``_real_home_untouched`` audit; this file adds no tautological tmp-dir check.
+
+The CLI test is a smoke test of the entry point on an empty HOME, not routing evidence.
 """
 from __future__ import annotations
 
@@ -23,10 +31,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from llm_router.codex_agent import CodexResult
 from llm_router.env_registry import ENV_REGISTRY
 from llm_router.types import LLMResponse, TaskType
 
 _CATEGORIES = {"llm_router", "provider_credential", "external_tool"}
+_EXTRA = {"OPENAI_API_BASE"}
 
 
 def _config_env_names() -> set[str]:
@@ -46,18 +56,13 @@ def _config_env_names() -> set[str]:
 
 def _strip_names() -> set[str]:
     reg = {k for k, (cat, _m, _n) in ENV_REGISTRY.items() if cat in _CATEGORIES}
-    return reg | _config_env_names()
-
-
-def _tree(root: Path) -> set[Path]:
-    return {p for p in root.rglob("*")}
+    return reg | _config_env_names() | _EXTRA
 
 
 @pytest.fixture
 def bare(tmp_path, monkeypatch):
-    """Empty HOME + empty cwd, every router/provider variable removed, sockets recorded and refused."""
+    """Empty HOME + empty cwd, every router/provider variable removed, all network refused."""
     names = _strip_names()
-    assert "OPENAI_API_KEY" in names and "OLLAMA_BASE_URL" in names, "premise: the strip list was built"
     for n in names:
         monkeypatch.delenv(n, raising=False)
     for n in [k for k in os.environ if k.startswith("LLM_ROUTER_")]:
@@ -71,37 +76,49 @@ def bare(tmp_path, monkeypatch):
     monkeypatch.setenv("APPDATA", str(home / "AppData"))
     monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData"))
     monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
+    # The strip deleted these; keep them explicit rather than relying on conftest's autouse.
+    monkeypatch.setenv("LLM_ROUTER_SEATS_AUTO", "off")
+    monkeypatch.setenv("LLM_ROUTER_ALLOW_STUBS", "1")
     monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     monkeypatch.chdir(cwd)
 
-    attempts: list[object] = []
+    attempts: list[str] = []
 
-    def _refuse(*a, **k):
-        attempts.append(a[:2])
-        raise OSError("network is disabled in the zero-config test")
+    def _refuse(name):
+        def f(*a, **k):
+            attempts.append(f"{name}{a[:2]!r}")
+            raise OSError("network is disabled in the zero-config test")
+        return f
 
-    monkeypatch.setattr(socket, "create_connection", _refuse)
-    monkeypatch.setattr(socket.socket, "connect", _refuse)
-    monkeypatch.setattr(socket.socket, "connect_ex", _refuse)
+    monkeypatch.setattr(socket, "create_connection", _refuse("create_connection"))
+    monkeypatch.setattr(socket, "getaddrinfo", _refuse("getaddrinfo"))
+    monkeypatch.setattr(socket.socket, "connect", _refuse("connect"))
+    monkeypatch.setattr(socket.socket, "connect_ex", _refuse("connect_ex"))
+    monkeypatch.setattr(asyncio.base_events.BaseEventLoop, "getaddrinfo", _refuse("loop.getaddrinfo"))
 
     import llm_router.config as config_module
 
     config_module._config = None
-    yield home, cwd, attempts
+    yield attempts
     config_module._config = None
 
 
 @pytest.fixture
-def fake_backend():
-    resp = LLMResponse(content="Mock response", model="openai/gpt-4o-mini", input_tokens=10,
-                       output_tokens=5, cost_usd=0.0, latency_ms=1.0, provider="openai")
-    call = AsyncMock(return_value=resp)
+def fakes(monkeypatch):
+    """Fake every dispatch path; availability is set per case. Returns (api_call, codex_run)."""
+    import llm_router.router as router_module
+
+    api = AsyncMock(return_value=LLMResponse(content="api", model="x/y", input_tokens=1, output_tokens=1,
+                                              cost_usd=0.0, latency_ms=1.0, provider="openai"))
+    codex = AsyncMock(return_value=CodexResult(content="Mock codex answer", model="gpt-5.5",
+                                               exit_code=0, duration_sec=0.01))
     tracker = MagicMock()
     tracker.is_healthy.return_value = True
-    with patch("llm_router.providers.call_llm", call), \
-         patch("llm_router.codex_agent.is_codex_available", return_value=False), \
-         patch("llm_router.router.get_tracker", return_value=tracker):
-        yield call
+    monkeypatch.setattr(router_module, "get_tracker", lambda *a, **k: tracker)
+    monkeypatch.setattr(router_module, "run_codex", codex)
+    monkeypatch.setattr(router_module, "is_gemini_cli_available", lambda: False)
+    with patch("llm_router.providers.call_llm", api):
+        yield api, codex
 
 
 def _route(prompt="What is 2 + 2?"):
@@ -112,43 +129,39 @@ def _route(prompt="What is 2 + 2?"):
 
 def test_strip_list_is_derived_not_hand_written():
     names = _strip_names()
-    assert len(names) > 100, len(names)  # non-empty set would pass everything
-    assert {"ANTHROPIC_API_KEY", "GEMINI_API_KEY", "LLM_ROUTER_ENFORCE"} <= names
+    assert len(names) > 100, len(names)  # an empty set would pass everything
+    assert {"ANTHROPIC_API_KEY", "GEMINI_API_KEY", "LLM_ROUTER_ENFORCE", "OPENAI_API_BASE"} <= names
 
 
-def test_zero_config_route_has_a_defined_no_backend_outcome(bare, fake_backend):
+def test_A_zero_config_with_one_keyless_backend_routes_once(bare, fakes, monkeypatch):
+    import llm_router.router as router_module
+
+    api, codex = fakes
+    monkeypatch.setattr(router_module, "is_codex_available", lambda: True)
+    out = _route()
+    assert codex.call_count == 1, "the keyless backend was called exactly once"
+    assert api.call_count == 0, "no keyed provider was used"
+    assert out.provider == "codex" and out.model.startswith("codex/"), out.model
+    assert codex.call_args.kwargs["model"] in out.model  # the selected model is the one dispatched
+    assert out.content == "Mock codex answer"
+    assert bare == [], f"network touched: {bare}"
+
+
+def test_B_zero_config_nothing_installed_fails_with_a_doctor_hint(bare, fakes, monkeypatch):
+    import llm_router.router as router_module
     from llm_router.router import NoRoutableModelsError
 
-    home, cwd, attempts = bare
-    before_home, before_cwd = _tree(home), _tree(cwd)
+    api, codex = fakes
+    monkeypatch.setattr(router_module, "is_codex_available", lambda: False)
     with pytest.raises(NoRoutableModelsError) as ei:
         _route()
     msg = str(ei.value)
     assert "Configured providers: none" in msg and "llm-router doctor" in msg, msg
-    # (b) nothing selected, nothing called
-    assert fake_backend.call_count == 0
-    # (c) only files under the tmp HOME / cwd were created
-    created = (_tree(home) - before_home) | (_tree(cwd) - before_cwd)
-    assert all(str(p).startswith(str(home.parent)) for p in created), created
-    # (d) zero real network: every attempt was refused by the harness, and none escaped it
-    # (attempts may be local probes such as Ollama on :11434; the fake refused them)
-    assert all(not isinstance(a, BaseException) for a in attempts)
+    assert api.call_count == 0 and codex.call_count == 0
 
 
-def test_control_one_provider_key_routes_exactly_once(bare, fake_backend, monkeypatch):
-    """Same harness, one key: proves the zero-config refusal above is the no-key case, not a broken harness."""
-    home, _cwd, attempts = bare
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
-    monkeypatch.setenv("LLM_ROUTER_ALLOW_STUBS", "1")
-    out = _route()
-    assert fake_backend.call_count == 1
-    assert out.content == "Mock response" and out.model == "openai/gpt-4o-mini"
-    called = fake_backend.call_args
-    assert "openai/gpt-4o-mini" in [*called.args, *called.kwargs.values()], called  # a model was selected
-    assert all(str(p).startswith(str(home.parent)) for p in _tree(home))
-
-
-def test_cli_config_on_fresh_home_exits_zero_offline(tmp_path):
+def test_cli_smoke_config_on_fresh_home_exits_zero_offline(tmp_path):
+    """CLI smoke test of the entry point on an empty HOME (not routing evidence)."""
     home = tmp_path / "home"
     cwd = tmp_path / "cwd"
     sc = tmp_path / "sc"
@@ -157,7 +170,7 @@ def test_cli_config_on_fresh_home_exits_zero_offline(tmp_path):
     (sc / "sitecustomize.py").write_text(
         "import socket\n"
         "def _b(*a, **k):\n    raise RuntimeError('NETBLOCK')\n"
-        "socket.create_connection = _b\nsocket.socket.connect = _b\n")
+        "socket.create_connection = _b\nsocket.socket.connect = _b\nsocket.socket.connect_ex = _b\n")
     src = str(Path(__file__).resolve().parents[1] / "src")
     env = {"HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(home), "LOCALAPPDATA": str(home),
            "LLM_ROUTER_HOME": str(home / ".llm-router"), "PATH": "/usr/bin:/bin",
