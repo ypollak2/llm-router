@@ -258,6 +258,7 @@ def test_other_kpis_are_byte_identical_to_the_pre_o3_golden():
     full = [ln for ln in full if ln not in off_lines]
     full = [ln for ln in full if not ln.startswith(("proxy_rows_24h:", "WARN proxy ledger", "  ledger ",  # P3.4-A: ledger_view line
                                                     "  judge ",  # P3.1-6: judge quality section (informational)
+                                                    "  ineligible routes (",  # W1-2/UN-08: new informational line, time-dependent, outside "kpis"
                                                     "semantic cache (= result cache)"))]
     # P0.9-g: the sync-hook wall/live gate lines are new and outside "kpis"; not in the golden.
     from llm_router import hook_wall
