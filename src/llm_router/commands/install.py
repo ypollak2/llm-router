@@ -790,6 +790,10 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
                 except Exception as exc:  # noqa: BLE001 -- see claude-code above
                     rows[host_id] = _host_failed(host_id, label, "files", exc)
                     continue
+                if host_actions and host_actions[0].startswith("SKIP "):
+                    rows[host_id] = not_wired_row(host_actions[0][len("SKIP "):])
+                    print(f"  {host_id}: detected, not wired: {rows[host_id]['reason']}")
+                    continue
                 for a in host_actions:
                     ok = a.lstrip().startswith("✓")
                     print(f"  {_green('✓') if ok else _dim('·')}  {a.lstrip('✓ ').strip()}")
@@ -1866,16 +1870,40 @@ def _install_opencode_files() -> list[str]:
     return actions
 
 
-def _gemini_event_list(value) -> list:
-    """The hook list for one Gemini hooks.json event. Older installs wrote an event as a
-    toggle dict (``"PostToolUse": {"enabled": true}``) that carries no command; that shape
-    becomes an empty list (a dict holding a ``command`` becomes one entry), so the merge
-    can append. A list is returned unchanged; anything else is not ours and also resets."""
+_GEMINI_EVENTS = ("SessionStart", "PostToolUse", "UserPromptSubmit", "SessionEnd")
+_GEMINI_USER_DISABLED = "user disabled (legacy enabled:false)"
+
+
+def _gemini_event_list(value) -> tuple[list, str | None]:
+    """The hook list for one Gemini hooks.json event, plus a note when the value was reset.
+    Older installs wrote an event as a toggle dict (``"PostToolUse": {"enabled": true}``)
+    that carries no command: it becomes ``[]`` (a dict holding a ``command`` becomes one
+    entry, ``enabled`` dropped). A list is returned unchanged. Any other shape is reset to
+    ``[]`` with a note; the caller backs the original file up first."""
     if isinstance(value, list):
-        return value
-    if isinstance(value, dict) and value.get("command"):
-        return [{k: v for k, v in value.items() if k != "enabled"}]
-    return []
+        return value, None
+    if isinstance(value, dict):
+        if value.get("command"):
+            return [{k: v for k, v in value.items() if k != "enabled"}], None
+        if set(value) <= {"enabled"}:
+            return [], None
+    return [], "reset non-list {event} (backed up)"
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    """Temp file in the same directory, fsync, os.replace; the file's mode is kept."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if path.exists():
+            shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _install_gemini_cli_files() -> list[str]:
@@ -1970,9 +1998,18 @@ def _install_gemini_cli_files() -> list[str]:
         # Merge if missing
         try:
             current = _json.loads(hooks_json.read_text())
+            original_text = hooks_json.read_text()
             hooks = current.setdefault("hooks", {})
-            for _event in ("SessionStart", "PostToolUse", "UserPromptSubmit", "SessionEnd"):
-                hooks[_event] = _gemini_event_list(hooks.get(_event))
+            if any(isinstance(v, dict) and v.get("enabled") is False for v in hooks.values()):
+                # The user switched the hooks off by hand; honour it, register nothing.
+                actions.insert(0, f"SKIP {_GEMINI_USER_DISABLED}")
+                actions.append(f"  {hooks_json}: enabled:false -- hooks left unregistered")
+                actions += _append_routing_rules(ext_dir / "INSTRUCTIONS.md", "gemini-cli-rules.md")
+                return actions
+            for _event in _GEMINI_EVENTS:
+                hooks[_event], _note = _gemini_event_list(hooks.get(_event))
+                if _note:
+                    actions.append("  " + _note.format(event=_event))
 
             # SessionStart
             start_hooks = hooks.setdefault("SessionStart", [])
@@ -2002,7 +2039,15 @@ def _install_gemini_cli_files() -> list[str]:
                 end_hooks.append({"matcher": "*", "command": end_hook_dest})
                 actions.append("✓ Added SessionEnd hook to Gemini CLI")
             
-            hooks_json.write_text(_json.dumps(current, indent=2))
+            new_text = _json.dumps(current, indent=2)
+            if _json.loads(new_text) != _json.loads(original_text):
+                from llm_router.install_hooks import _backup_before_overwrite
+                backup = _backup_before_overwrite(hooks_json)
+                if backup is None:
+                    actions.append(f"  Could not back up {hooks_json}; left unchanged")
+                else:
+                    _write_text_atomic(hooks_json, new_text)
+                    actions.append(f"✓ Backed up {hooks_json} to {backup}")
         except Exception as e:
             actions.append(f"  Could not update {hooks_json}: {e}")
 

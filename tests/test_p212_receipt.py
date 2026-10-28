@@ -303,3 +303,61 @@ def test_gemini_current_shape_hooks_json_is_unchanged_by_reinstall(home):
     receipt = install.run_full(interactive=False).receipt
     assert receipt["hosts"]["gemini-cli"]["status"] == "wired"
     assert json.loads(hj.read_text()) == json.loads(before)
+
+
+def _gemini_hj(home: Path) -> Path:
+    hj = home / ".gemini" / "extensions" / "llm_router" / "hooks" / "hooks.json"
+    hj.parent.mkdir(parents=True)
+    return hj
+
+
+def test_gemini_enabled_false_is_honoured(home):
+    _add_host(home, "gemini-cli")
+    hj = _gemini_hj(home)
+    original = json.dumps({"hooks": {"PostToolUse": {"enabled": False}}})
+    hj.write_text(original)
+
+    receipt = install.run_full(interactive=False).receipt
+
+    row = receipt["hosts"]["gemini-cli"]
+    assert row["status"] == "not_wired" and row["reason"] == "user disabled (legacy enabled:false)", row
+    assert install.receipt_failures(receipt) == []
+    assert hj.read_text() == original
+
+
+def test_gemini_unknown_event_shape_is_reset_with_notice_and_backup(home):
+    _add_host(home, "gemini-cli")
+    hj = _gemini_hj(home)
+    original = json.dumps({"hooks": {"SessionEnd": "oops", "PostToolUse": {"enabled": True}}})
+    hj.write_text(original)
+
+    actions = install._install_gemini_cli_files()
+
+    assert any("reset non-list SessionEnd (backed up)" in a for a in actions), actions
+    assert not any("reset non-list PostToolUse" in a for a in actions)  # a known toggle: no notice
+    assert hj.with_suffix(".json.bak").read_bytes() == original.encode()
+    assert isinstance(json.loads(hj.read_text())["hooks"]["SessionEnd"], list)
+    assert not list(hj.parent.glob("*.tmp"))
+
+
+def test_gemini_legacy_command_dict_becomes_one_entry(home):
+    _add_host(home, "gemini-cli")
+    hj = _gemini_hj(home)
+    hj.write_text(json.dumps({"hooks": {"BeforeTool": {"enabled": True, "command": "/u/x.sh"}}}))
+    install._install_gemini_cli_files()
+    doc = json.loads(hj.read_text())
+    assert doc["hooks"]["BeforeTool"] == {"enabled": True, "command": "/u/x.sh"}  # not ours: untouched
+
+    hj.write_text(json.dumps({"hooks": {"PostToolUse": {"enabled": True, "command": "/u/x.sh"}}}))
+    install._install_gemini_cli_files()
+    ptu = json.loads(hj.read_text())["hooks"]["PostToolUse"]
+    assert ptu[0] == {"command": "/u/x.sh"} and len(ptu) == 2, ptu
+
+
+def test_gemini_rewrite_backs_up_the_original_bytes(home):
+    _add_host(home, "gemini-cli")
+    hj = _gemini_hj(home)
+    original = '{"hooks": {"PostToolUse": {"enabled": true}}}'
+    hj.write_text(original)
+    install._install_gemini_cli_files()
+    assert hj.with_suffix(".json.bak").read_bytes() == original.encode()
