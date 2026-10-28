@@ -198,9 +198,9 @@ def _is_claude_code_tag(tag: dict, session_id: str) -> bool:
     run. Codex sessions are tagged too -- ``codex-auto-route.py`` calls
     ``session_kind.tag_session`` -- but never burn Claude quota and, with the
     ``~/.codex/hooks.json`` install, never get a row, so a Codex tag in the denominator
-    can never be covered. (A Codex *plugin* install runs session-start.py on Codex
-    SessionStart and can write a start row with no stop row; the rows path below does
-    not apply this filter yet.)
+    can never be covered. A Codex *plugin* install runs session-start.py on Codex
+    SessionStart and can write a start row with no stop row, so the rows path in
+    :func:`quota_burn` applies the same rule (:func:`_row_session_is_claude_code`).
 
     A tag that names its ``host`` is kept only when the host is ``claude_code``. A tag
     without one (every tag written before the field existed, and Codex's older
@@ -241,6 +241,25 @@ def _tagged_sessions(since: float, until: float) -> dict[str, str]:
             continue
         out[str(sid)] = str(tag.get("kind") or "")
     return out
+
+
+def _row_session_is_claude_code(session_id: str, tagged: dict[str, str]) -> bool:
+    """:func:`_is_claude_code_tag` for a session seen only through its quota rows.
+
+    Rows carry no ``host`` field, so the session's own tag file supplies it when one
+    exists (a tag outside the window, or one the tag path already dropped); with no
+    tag the rule falls back to the session id (UUIDv7 = Codex). A session the tag path
+    kept is Claude Code by definition."""
+    if session_id in tagged:
+        return True
+    tag: Any = {}
+    try:
+        from llm_router import session_kind
+
+        tag = json.loads(session_kind._tag_path(session_id).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - a missing/corrupt tag leaves the id rule
+        tag = {}
+    return _is_claude_code_tag(tag if isinstance(tag, dict) else {}, session_id)
 
 
 def _kind_for(session_id: str, rows: list[dict], tagged: dict[str, str]) -> str | None:
@@ -339,7 +358,11 @@ def _line(per_session: list[dict], label: str) -> dict[str, Any]:
 
 
 def quota_burn(since: float, until: float, *, include_research: bool = False) -> dict[str, Any]:
-    """The ``kpi --quota-burn`` result for the absolute window ``[since, until]``."""
+    """The ``kpi --quota-burn`` result for the absolute window ``[since, until]``.
+
+    Only Claude Code sessions count, on both the tag path (:func:`_tagged_sessions`) and
+    the rows path; a rows-only session that is not Claude Code is counted in
+    ``samples.sessions_not_claude_code`` and kept out of every line and the coverage."""
     allowed = {"organic", "research"} if include_research else {"organic"}
     samples, skipped = _read_jsonl(paths.state_path(SAMPLES_NAME))
     tagged = _tagged_sessions(since, until)
@@ -356,12 +379,15 @@ def quota_burn(since: float, until: float, *, include_research: bool = False) ->
 
     measured, estimated = [], []
     n_measured_rows = n_stale_rows = 0
-    excluded_kind = untagged = 0
+    excluded_kind = untagged = not_claude_code = 0
     with_start = with_stop = covered = 0
     # The denominator resolves kind exactly as the loop below does (owner override,
     # then tag): a tagged-organic session the owner moved to research is not organic.
     sessions = {sid for sid in tagged if _kind_for(sid, [], tagged) in allowed}
     for sid, rows in by_session.items():
+        if not _row_session_is_claude_code(sid, tagged):
+            not_claude_code += 1
+            continue
         kind = _kind_for(sid, rows, tagged)
         if kind is None:
             untagged += 1
@@ -401,7 +427,8 @@ def quota_burn(since: float, until: float, *, include_research: bool = False) ->
         "measured": m_line,
         "estimated": _line(estimated, "estimated"),
         "samples": {"measured": n_measured_rows, "stale": n_stale_rows, "skipped": skipped,
-                    "sessions_untagged": untagged, "sessions_other_kind": excluded_kind},
+                    "sessions_untagged": untagged, "sessions_other_kind": excluded_kind,
+                    "sessions_not_claude_code": not_claude_code},
         "coverage": {"sessions": n_sessions, "with_start": with_start, "with_stop": with_stop,
                      "covered": covered, "rate": covered / n_sessions if n_sessions else None,
                      "wilson_lo": lo, "wilson_hi": hi},
