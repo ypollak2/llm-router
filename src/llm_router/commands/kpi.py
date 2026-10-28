@@ -1294,6 +1294,18 @@ def _prd_sql_records(cutoff: float | None, until: float | None
     return records, no_column, unreadable
 
 
+def _ineligible_routes(days: float, now_ts: float, win: "_Window | None") -> dict | None:
+    """W1-2 / UN-08 counter (read-only); None when it cannot run (fail-open, recorded)."""
+    try:
+        from llm_router import ineligible_routes
+        return (ineligible_routes.compute(since=win.since, until=win.until) if win is not None
+                else ineligible_routes.compute(days=days, until=now_ts))
+    except Exception as exc:  # noqa: BLE001 - a report line must never break the scorecard
+        from llm_router import failopen
+        failopen.record("W12-INELIGIBLE", exc)
+        return None
+
+
 def _identity_share(organic: list[dict]) -> dict:
     """P1.10-a, per writer: organic rows carrying a session_id AND a REAL task_id (NULL and
     ``gen-`` stand-ins count as missing), over ALL organic rows of the window (no merge-date
@@ -2722,6 +2734,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         "judge": _judge_quality(days, now_ts, win),
         # PLAN v16 P1.10-a: per-writer share of rows with session_id and a real task_id. Outside "kpis".
         "identity": identity_r,
+        # PLAN v16 W1-2 / UN-08: routes to a model not eligible at decision time. Outside "kpis".
+        "ineligible_routes": _ineligible_routes(days, now_ts, win),
         "verify_shadow": _verify_shadow(unit_list, win),
         # Informational only: not in "kpis", so not in _ORDER, --health or NS/D1/D2.
         "local_shadow": _local_shadow_summary(days, win),
@@ -2885,6 +2899,9 @@ def render_scorecard(data: dict) -> str:
         from llm_router import judge_view
 
         lines += judge_view.render_lines(data["judge"])
+    if data.get("ineligible_routes") is not None:
+        from llm_router import ineligible_routes
+        lines.append(f"  {ineligible_routes.render_line(data['ineligible_routes'])}")
     if data.get("o3") is not None:
         lines += _o3_render_lines(data["o3"])
     if data.get("offload") is not None:

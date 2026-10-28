@@ -1494,6 +1494,16 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     for line in _floor_report():
         print(f"  {line}")
 
+    print(f"\n{_bold('  Routing eligibility (W1-2)')}")
+    try:
+        from llm_router import ineligible_routes
+        _inelig = ineligible_routes.compute(days=7.0)
+        print(f"  {ineligible_routes.render_line(_inelig)}")
+        if _inelig["organic_ineligible"]:
+            issues.append(f"{_inelig['organic_ineligible']} organic route(s) to a model not eligible at decision time")
+    except Exception as e:  # noqa: BLE001 -- doctor must never crash on a report line
+        print(f"  {_warn(f'ineligible-route counter failed: {e}')}")
+
     _local_text_jobs_section()
 
     print(f"\n{_bold('  Provider API keys')}")
