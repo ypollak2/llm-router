@@ -18,6 +18,7 @@ told about.
 from __future__ import annotations
 
 import ast
+import os
 import re
 from pathlib import Path
 
@@ -184,8 +185,9 @@ def _cell(raw: str) -> str:
     return (m.group(1) if m else raw).replace("\\|", "|")
 
 
-def _table(first_header: str, *more: str) -> list[list[str]]:
-    """Rows of the section's table whose header row starts with these cells."""
+def _table(first_header: str, *more: str, raw: bool = False) -> list[list[str]]:
+    """Rows of the section's table whose header row starts with these cells
+    (cells unwrapped by `_cell`, or as written when *raw*)."""
     want = [first_header, *more]
     rows: list[list[str]] = []
     inside = False
@@ -198,7 +200,7 @@ def _table(first_header: str, *more: str) -> list[list[str]]:
             inside = True
             continue
         if inside and not set(line) <= set("|-: "):
-            rows.append([_cell(c) for c in cells])
+            rows.append([c.strip() if raw else _cell(c) for c in cells])
     return rows
 
 
@@ -215,7 +217,17 @@ def _by_design_rows():
 
 
 def _gap_rows():
-    return [(r[0], r[1], r[2]) for r in _table("lane", "configuration", "command", "why it runs")]
+    """(lane, configuration, command): one per lane a row names (`llm_act`, `toolkit`)."""
+    out = []
+    for r in _table("lane", "configuration", "command", "effect", raw=True):
+        for lane in re.findall(r"`([^`]+)`", r[0]):
+            out.append((lane, _cell(r[1]), _cell(r[2])))
+    return out
+
+
+def _fill(cmd: str, w: dict) -> str:
+    """The gaps table writes `{OUT}` (outside the root) and `{HOME}`."""
+    return cmd.replace("{OUT}", str(w["outside"])).replace("{HOME}", str(w["home"]))
 
 
 @pytest.fixture
@@ -250,9 +262,17 @@ def contract_world(tmp_path, monkeypatch):
         ran.append(parsed)
         return "[recorded, not run]"
 
+    def refuse_to_execute(*a, **k):
+        # Not AssertionError: a gap xfail (raises=AssertionError) must not absorb it.
+        raise RuntimeError("a lane reached Popen/os.system: this test would have executed it")
+
     monkeypatch.setattr(_sp, "run", record_run)
     monkeypatch.setattr(kit, "run_pipelines", record_pipelines)
-    return {"root": root, "outside": outside, "base": base, "ran": ran}
+    # Fail closed: if a refactor moves a lane off the two recorded calls, nothing
+    # runs for real; the test errors instead.
+    monkeypatch.setattr(_sp, "Popen", refuse_to_execute)
+    monkeypatch.setattr(os, "system", refuse_to_execute)
+    return {"root": root, "outside": outside, "base": base, "home": home, "ran": ran}
 
 
 def _use_config(monkeypatch, config: str) -> None:
@@ -296,6 +316,8 @@ def test_contract_section_exists_with_every_table():
     assert len(_file_rows()) >= 4, _file_rows()
     assert _by_design_rows(), "the runs-by-design table is gone"
     assert _gap_rows(), "the known-gaps table is gone; if every gap is fixed, delete this line"
+    assert {lane for lane, _c, _cmd in _gap_rows()} <= set(LANES), _gap_rows()
+    assert {c for _l, c, _cmd in _gap_rows()} <= set(CONFIGS), _gap_rows()
     lanes_named = {r[0] for r in _table("lane", "entry point", "code")}
     assert lanes_named == set(LANES), lanes_named
 
@@ -375,7 +397,7 @@ def test_known_gap_is_refused(contract_world, monkeypatch, lane, config, cmd):
     """Strict xfail: each documented gap really runs. A fix XPASSes and fails here,
     so the row has to move out of the known-gaps table in the same change."""
     _use_config(monkeypatch, config)
-    executed, out = _run_command(lane, cmd, contract_world)
+    executed, out = _run_command(lane, _fill(cmd, contract_world), contract_world)
     assert not executed, f"{lane} ({config}) ran {cmd!r}"
 
 

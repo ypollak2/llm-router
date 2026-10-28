@@ -314,8 +314,11 @@ When llm-router maintainers report a security vulnerability:
 
 ## Local action safety contract (refuse-only)
 
-**v16 is refuse-only.** The router never runs a destructive local action on your
-behalf, and there is **no approval flow in v16**: nothing asks you "run this?",
+**In v16 the contract is not yet met; the gaps below are known and tracked
+(SAFEFIX).**
+
+**v16 is refuse-only.** The contract is that the router never runs a destructive
+local action on your behalf, and there is **no approval flow in v16**: nothing asks you "run this?",
 so nothing can be approved. A command the policy cannot clear is refused, and the
 model is told it was not run. An approval prompt is planned for 16.x
 (owner decision D-321, 2026-10-28, which amends NFR-SAFE from "destructive needs
@@ -393,19 +396,42 @@ symlinks followed; a `~` path is refused rather than expanded:
 - `llm_act` refuses `bash` and `write_file` outright when no project root is known
   (read-only mode, P0.13), and runs a regex blocklist (`_bash_block_reason`) for
   `rm -r`/`-f`, credential paths, environment dumps and network tools before
-  `check_action`.
-- `llm_local_task` writes nothing by default: `LLM_ROUTER_AGENT_WRITES=propose`
-  returns the edit as a diff and leaves the file unchanged; `off` refuses it
-  (`src/llm_router/hooks/agent_writes.py`, `guard`). Its commands pass an
-  inspection allowlist first (`guard_command`, below). Under `propose` and `off`
-  that also refuses `python -c`, `node -e`, `sed -i` and `find -delete`.
+  `check_action`. **`llm_act` is a denylist lane:** a program that is on neither
+  the blocklist nor the destructive table runs (`crontab -r`, `killall`,
+  `unlink`, `srm`, `diskutil eraseDisk` in the gaps table below).
+- `llm_local_task`'s **file tools** write nothing by default:
+  `LLM_ROUTER_AGENT_WRITES=propose` returns the edit as a diff and leaves the file
+  unchanged; `off` refuses it (`src/llm_router/hooks/agent_writes.py`, `guard`).
+  Its `run_command` is a different matter. It passes an inspection allowlist
+  (`guard_command`, below) and `check_action`, and then runs. This lane is the one
+  behind `LLM_ROUTER_DIRECT_EXECUTION`, which is on by default, so the
+  allowed-program gaps below apply to it in the default configuration. Under
+  `propose` and `off` the allowlist also refuses the literal flags `python -c`,
+  `node -e`, `sed -i` and `find -delete`. It does not refuse `python3 -m timeit
+  "<code>"`, which runs the same code.
 - `toolkit` works on a copy of the project, allows bash only when the OS sandbox is
   available, and has its own program allowlist (`ALLOWED_PROGRAMS`).
 
 **This is a tripwire, not a sandbox.** Static reading of a command line cannot see
-what a permitted program does on its own: a test runner, `go run`, `cargo run` or
-`git -c core.pager=…` runs the repository's code. Reads outside the root and
-network use are not part of this contract. An OS-level write sandbox is 16.1.
+what a permitted program does on its own. Reads outside the root and network use
+are not part of this contract. An OS-level write sandbox is 16.1. The classes it
+misses, each pinned with examples in the gaps table:
+
+- **Denylist lane.** On `llm_act` any program that is not on the destructive table
+  or the regex blocklist runs.
+- **An allowed program's own output, delete or exec flags are not read.** Examples:
+  `sort -o`, `tree -o`, `git diff --output=`, `go build -o`, `git archive -o`,
+  `pytest --basetemp=` (pytest runs `rm -rf` on that directory), `rg --pre`
+  (runs a command on every file it searches), and `git -c core.pager=` /
+  `git -c alias.x='!…'`, which run any command the model writes.
+- **`python -m <module>` is not an interpreter one-liner to the tripwire.**
+  `python3 -m timeit` evaluates code, and `python3 -m tarfile -e` /
+  `python3 -m zipfile -e` extract archives anywhere.
+- **Git plumbing outside the two git tables runs.** Examples: `read-tree`,
+  `checkout-index`, `update-ref`, `reflog expire`, `filter-branch`,
+  `submodule deinit`, `worktree remove` and `rm`.
+- **Tools that delete outside the root by their own design.** Examples:
+  `cargo uninstall`, `go clean -modcache`.
 
 Runs by design (the same reach as the lane's own file tools, or the point of the
 lane):
@@ -418,21 +444,67 @@ lane):
 | `llm_local_task` | `pytest -q` |
 
 **Known gaps: destructive commands that still run.** Measured 2026-10-28 against
-the real executors with the execution step replaced by a recorder. Each row is
-pinned as a strict expected failure in `tests/test_security_docs_match_the_code.py`,
-so a fix fails that test until the row moves out of this table.
+the real executors, with the execution step replaced by a recorder. The rows are
+examples of the classes above; they do not list every command in those classes.
+In a command, `{OUT}` is a directory outside the project root and `{HOME}` is the
+home directory. Each row, on each lane it names, is pinned as a strict expected
+failure in `tests/test_security_docs_match_the_code.py`. A fix therefore fails that
+test until the row moves out of this table. Tracked for repair as SAFEFIX.
 
-| lane | configuration | command | why it runs |
+| lane | configuration | command | effect |
 |---|---|---|---|
 | `llm_act` | default | `find . -delete` | deletes every file under the root; `rm -r` is refused but `find -delete` is not on the destructive table |
 | `llm_act` | default | `tar -xf a.tar -C /` | extracts outside the root; the tripwire does not read `tar -C` |
 | `llm_act` | default | `unzip a.zip -d /tmp` | extracts outside the root; the tripwire does not read `unzip -d` |
 | `llm_act` | default | `kill -9 1` | a process signal is not a write, so nothing checks it |
 | `llm_act` | default | `pkill python` | a process signal is not a write, so nothing checks it |
-| `llm_local_task` | default | `git rm -r src` | `git rm` is on neither git table; deletes tracked files under the root |
+| `llm_act` | default | `killall Finder` | kills processes by name |
+| `llm_act` | default | `crontab -r` | deletes the user's crontab |
+| `llm_act` | default | `launchctl bootout gui/501` | ends the user's login session |
+| `llm_act` | default | `diskutil eraseDisk JHFS+ x disk2` | erases a disk |
+| `llm_act` | default | `security delete-keychain login.keychain` | deletes the login keychain |
+| `llm_act` | default | `defaults delete com.apple.dock` | deletes an application's preferences |
+| `llm_act` | default | `srm -rf src` | recursive delete; the `\brm` regex does not match `srm` |
+| `llm_act` | default | `trash src` | recursive delete |
+| `llm_act` | default | `unlink {HOME}/.zshrc` | deletes a file outside the root, although `rm` of it is refused |
+| `llm_act` | default | `rmdir {OUT}` | deletes a directory outside the root |
+| `llm_act`, `llm_local_task` | default | `pytest --basetemp={OUT}` | pytest runs `rm -rf` on the basetemp directory, outside the root |
+| `llm_act`, `llm_local_task` | default | `python3 -m pytest --basetemp={OUT}` | the same, through `python -m` |
+| `llm_act`, `llm_local_task` | default | `pytest --basetemp=~/Documents` | the same, on a directory in the home directory |
+| `llm_act`, `llm_local_task`, `toolkit` | default | `rg --pre rm x .` | runs `rm FILE` on every file searched, deleting the tree (toolkit: its sandboxed copy) |
+| `llm_act`, `llm_local_task` | default | `python3 -m timeit -n1 "__import__('shutil').rmtree('src')"` | inline code that gets past the interpreter one-liner refusal |
+| `llm_act`, `llm_local_task` | default | `python3 -m timeit -s "import shutil" "shutil.rmtree('src')"` | inline code that gets past the interpreter one-liner refusal |
+| `llm_act`, `llm_local_task` | default | `python3 -m json.tool a.txt {HOME}/.zshrc` | overwrites a file outside the root |
+| `llm_act`, `llm_local_task` | default | `sort -o {HOME}/.zshrc a.txt` | overwrites a file outside the root |
+| `llm_act`, `llm_local_task` | default | `uniq a.txt {HOME}/.zshrc` | overwrites a file outside the root |
+| `llm_act`, `llm_local_task` | default | `tree -o {HOME}/.zshrc` | overwrites a file outside the root |
+| `llm_act`, `llm_local_task` | default | `git diff --output={HOME}/.zshrc` | overwrites a file outside the root |
+| `llm_act`, `llm_local_task` | default | `go build -o {HOME}/.zshrc .` | overwrites a file outside the root |
+| `llm_act`, `llm_local_task` | default | `git archive -o {OUT}/x.tar HEAD` | writes a file outside the root |
+| `llm_act`, `llm_local_task` | default | `python3 -m tarfile -e a.tar {HOME}` | extracts outside the root |
+| `llm_act`, `llm_local_task` | default | `python3 -m zipfile -e a.zip {OUT}` | extracts outside the root |
+| `llm_act`, `llm_local_task` | default | `git read-tree --reset -u HEAD` | discards working-tree changes, the same effect as the refused `git reset --hard` |
+| `llm_act`, `llm_local_task` | default | `git checkout-index -a -f` | overwrites working-tree changes |
+| `llm_act`, `llm_local_task` | default | `git --work-tree={OUT} checkout-index -a -f` | writes the index out to a directory outside the root |
+| `llm_act`, `llm_local_task` | default | `git update-ref -d refs/heads/main` | deletes a branch ref |
+| `llm_act`, `llm_local_task` | default | `git reflog expire --expire=now --all` | destroys the reflog, the usual recovery path |
+| `llm_act`, `llm_local_task` | default | `git filter-branch -f --tree-filter true HEAD` | rewrites history |
+| `llm_act`, `llm_local_task` | default | `git submodule deinit -f --all` | removes submodule working trees |
+| `llm_act`, `llm_local_task` | default | `git worktree remove --force {OUT}` | deletes a directory outside the root |
+| `llm_act`, `llm_local_task` | default | `git rm -q -r src` | recursive delete of tracked files |
+| `llm_act`, `llm_local_task` | default | `git rm --recursive src` | recursive delete of tracked files |
+| `llm_local_task` | default | `git rm -r src` | recursive delete of tracked files; `git rm` is on neither git table (`llm_act`'s regex catches only this spelling) |
+| `llm_local_task` | default | `git -C {OUT} rm -r x` | deletes files outside the root |
+| `llm_local_task` | default | `git -c alias.x='!rm -rf src' x` | runs any command the model writes |
+| `llm_local_task` | default | `git -c core.pager='rm -rf src' log` | runs any command the model writes |
+| `llm_act`, `llm_local_task` | default | `cargo uninstall ripgrep` | deletes a binary from `~/.cargo/bin`, outside the root |
+| `llm_act`, `llm_local_task` | default | `go clean -modcache` | deletes the Go module cache, outside the root |
 | `llm_local_task` | `LLM_ROUTER_AGENT_WRITES=apply` | `find . -delete` | the `find -delete` refusal applies only while writes are not applied |
 | `llm_local_task` | `LLM_ROUTER_AGENT_COMMANDS=all` | `wget -O /etc/x https://example.com` | without the allowlist, a program that writes on its own reaches outside the root |
 | `llm_local_task` | `LLM_ROUTER_AGENT_COMMANDS=all` | `rsync -a --delete . /tmp/x` | without the allowlist, a program that writes on its own reaches outside the root |
+
+The `toolkit` `rg --pre` row is low impact: the toolkit runs bash only under the OS
+sandbox, on a copy of the project.
 
 **Out of scope.** Work delegated to an external agent CLI (`codex exec`, from
 `src/llm_router/agentic/adapters.py` and `src/llm_router/codex_agent.py`) runs
