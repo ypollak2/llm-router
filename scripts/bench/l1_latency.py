@@ -54,6 +54,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# M-02: this is benchmark traffic, not usage (decide() writes a decision-ledger row per call).
+os.environ.setdefault("LLM_ROUTER_SYNTHETIC", "1")
+
 REPO = Path(__file__).resolve().parents[2]
 P95_BAR_MS = 50.0
 SEEDS = ("101", "202", "303", "404")
@@ -170,7 +173,7 @@ def _run_worker(args, seed: str) -> dict:
         for var, path in (("LLM_ROUTER_ENGINE_LEXICAL", args.lexical), ("LLM_ROUTER_ENGINE_CALIBRATION", args.calibration)):
             if path:
                 env[var] = str(path)
-        env.update(HOME=home, LLM_ROUTER_HOME=home, LLM_ROUTER_DECIDE_CACHE="off", PYTHONHASHSEED=seed,
+        env.update(HOME=home, LLM_ROUTER_HOME=home, LLM_ROUTER_SYNTHETIC="1", LLM_ROUTER_DECIDE_CACHE="off", PYTHONHASHSEED=seed,
                    PYTHONPATH=os.pathsep.join(filter(None, [str(REPO / "src"), env.get("PYTHONPATH", "")])))
         cmd = [sys.executable, os.path.abspath(__file__), "--worker", "--corpus", str(args.corpus), "--n", str(args.n),
                "--id-field", args.id_field, "--text-field", args.text_field, "--engine-spec", args.engine_spec,
