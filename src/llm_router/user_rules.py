@@ -14,9 +14,11 @@ and which a hook can read with ``json.loads`` and no PyYAML::
 
 Stdlib-only (plus ``paths``, ``file_lock`` and ``failopen``), no PyYAML. Round A
 stores and validates rules. Round B (UN-01) reads them: ``map_reader.apply_to_chain``
-applies ``ban`` and ``order`` rules (:func:`apply_rules`) at every door that builds a
-chain, and ``resource_map`` ranks by ``order`` rules. ``cap`` and ``local_only`` are
-stored but not yet applied.
+applies ``ban`` and ``order`` rules (:func:`apply_rules`) at read time at every door
+that builds a chain (the resource map does not bake them in, so removing a rule takes
+effect at once). Unvalidated local models (P0.15) are appended after the rules run:
+a ban removes them, but an order rule does not move them. ``cap`` and ``local_only``
+are stored but not yet applied.
 """
 
 from __future__ import annotations

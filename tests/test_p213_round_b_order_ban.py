@@ -154,15 +154,43 @@ def test_damaged_rules_file_is_fail_open(monkeypatch):
     assert map_reader.apply_to_chain(BASE) == BASE
 
 
-def test_resource_map_priority_follows_order_rules():
+def _put_local_first_map():
+    """A fresh local-first map built the way the writer builds it (``_prioritise``), so any
+    rule baked into ``effective_priority`` at build time would show up in the file."""
+    import time
+
     from llm_router import resource_map as rm
-    rows = [{"chain_id": c, "status": "connected", "capabilities": ["generate"]} for c in BASE]
-    rm._prioritise(rows, "balanced", 0.0)
-    assert [r["effective_priority"] for r in rows] == [1, 2, 3]
+    rows = [{"resource": c, "kind": k, "chain_id": c, "status": "connected", "capabilities": ["generate"],
+             "quota": {}} for c, k in ((LOCAL, "local"), ("gemini/api", "api"), ("openai/api", "api"))]
+    rm._prioritise(rows, "local-first", 0.0)
+    rm.write_map({"schema": rm.SCHEMA, "policy": "local-first", "resources": rows,
+                  "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())})
+
+
+def test_rule_removal_under_a_non_balanced_fresh_map_restores_the_order():
     store("openai before ollama")
-    rows = [{"chain_id": c, "status": "connected", "capabilities": ["generate"]} for c in BASE]
-    rm._prioritise(rows, "balanced", 0.0)
-    assert {r["chain_id"]: r["effective_priority"] for r in rows}[OAI] == 1
+    _put_local_first_map()                          # map built WHILE the rule exists
+    assert map_reader.apply_to_chain(BASE)[0] == OAI
+    user_rules.write_rules([])                      # map file NOT rebuilt
+    assert map_reader.apply_to_chain(BASE) == [LOCAL, GEM, OAI]
+
+
+async def test_ban_that_empties_the_chain_gives_the_no_route_result(doors):
+    router_chain, hook_chain, proxy_chain = doors
+    store("no ollama", "no gemini", "no openai")
+    assert await router_chain() == []
+    assert await proxy_chain() == []
+    assert hook_chain() == [] or "ollama" not in provs(hook_chain())
+
+
+def test_ban_rule_with_missing_keys_is_fail_open_and_recorded(monkeypatch):
+    from llm_router import failopen
+
+    seen = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: seen.append(code))
+    user_rules.write_rules([{"id": "p1", "kind": "ban", "text": "hand edited"}])   # no "target"
+    assert map_reader.apply_to_chain(BASE) == BASE
+    assert "CHZ-FO-USER-RULES-READ" in seen
 
 
 @pytest.mark.xfail(strict=True, reason="proxy/tiers.py — owned by the lane-A/tiers session: a Claude-model "
