@@ -71,6 +71,11 @@ def test_every_wired_host_is_at_the_new_hook_version(upgraded):
         compared += 1
     assert compared >= 20, compared
     print(f"upgrade: {compared} hook files at the packaged version")
+    rows = wired.receipt["hosts"]  # P212-1: the receipt agrees with the files on disk
+    for host in ("claude-code", "codex", "gemini-cli"):
+        bundled = {src: ih._hook_version(ih._HOOKS_SRC / src) for src in install._receipt_hook_files(host)}
+        assert rows[host]["status"] == "wired" and rows[host]["hook_version"] == bundled and bundled, host
+    assert install.read_receipt() == wired.receipt
 
 
 def test_user_keys_in_host_configs_survive(upgraded):
