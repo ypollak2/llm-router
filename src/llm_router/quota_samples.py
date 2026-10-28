@@ -471,7 +471,9 @@ def baseline_start_ts() -> float | None:
     """When the baseline week starts, ASSUMED to be the first ORGANIC row of
     ``quota_samples.jsonl``: the earliest ``ts`` among rows of sessions that resolve to kind
     ``organic`` (the filter :func:`quota_burn` applies by default), not the earliest row of any
-    kind, so synthetic/benchmark rows cannot move it. ``quota_samples.jsonl`` is never pruned, so
+    kind, so synthetic/benchmark rows cannot move it. Only Claude Code sessions count
+    (:func:`_row_session_is_claude_code`, as in :func:`quota_burn`), so a Codex plugin start row
+    cannot move it either. ``quota_samples.jsonl`` is never pruned, so
     the answer does not move when ``quota_history.jsonl`` is pruned at 30 days (which is why that
     file is not read here). The plan starts the baseline at the GE6 deploy; the deploy is not
     recorded in the repo, so this is an assumption and the report labels it so. None when no
@@ -483,7 +485,7 @@ def baseline_start_ts() -> float | None:
         if sid and r.get("kind") in KINDS:
             by_session.setdefault(str(sid), []).append(r)
     firsts = [min(float(r["ts"]) for r in srows) for sid, srows in by_session.items()
-              if _kind_for(sid, srows, {}) == "organic"]
+              if _kind_for(sid, srows, {}) == "organic" and _row_session_is_claude_code(sid, {})]
     return min(firsts) if firsts else None
 
 
@@ -620,7 +622,8 @@ def render_quota_burn(r: dict[str, Any]) -> str:
             + (" | n_sessions < 30: indicative only" if m["n_sessions"] < 30 else ""))
     s, c, h = r["samples"], r["coverage"], r["history"]
     lines.append(f"  samples: measured {s['measured']}, stale {s['stale']}, skipped {s['skipped']}, "
-                 f"untagged sessions {s['sessions_untagged']}, other-kind sessions {s['sessions_other_kind']}")
+                 f"untagged sessions {s['sessions_untagged']}, other-kind sessions {s['sessions_other_kind']}, "
+                 f"not-Claude-Code sessions {s['sessions_not_claude_code']}")
     if c["sessions"]:
         lines.append(f"  coverage: {c['covered']}/{c['sessions']} sessions with start+stop samples "
                      f"({_f(c['rate'] * 100, 1)}%, Wilson {_f(c['wilson_lo'] * 100, 1)}-"

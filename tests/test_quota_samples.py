@@ -497,6 +497,17 @@ def test_rows_path_drops_a_codex_session_with_only_a_start_row(home):
     assert r["samples"]["sessions_other_kind"] == 0 and r["samples"]["sessions_untagged"] == 0
 
 
+def test_text_report_shows_the_not_claude_code_count(home):
+    """P37H: the default text report prints ``sessions_not_claude_code`` next to its
+    siblings, so the sessions the rows path dropped are visible without ``--json``."""
+    _write_samples(home, [
+        _s(V4, "start", NOW, 10, 40), _s(V4, "stop", NOW + 60, 11, 40),
+        _s(V7, "start", NOW + 5, 11, 40),
+    ])
+    text = qs.render_quota_burn(qs.quota_burn(NOW - 1, NOW + 1000))
+    assert "not-Claude-Code sessions 1" in text
+
+
 def test_rows_path_reads_the_host_from_a_tag_outside_the_window(home):
     """(f) Rows carry no host; the session's own tag supplies it, as on the tag path:
     host=claude_code keeps a v7 id, host=codex drops a v4 id."""
