@@ -234,7 +234,9 @@ def test_untagged_sessions_with_pairs_still_make_a_tagging_gap(transcripts, monk
     monkeypatch.setattr(
         session_kind, "tag_kind_of", lambda sid: "organic" if sid == SID else None)
     assert sample.cmd_redo_sample(["--census"]) == 0
-    lines = capsys.readouterr().out.splitlines()
+    output = capsys.readouterr().out
+    assert PROMPT not in output and ANSWER not in output  # untagged text is read, never printed
+    lines = output.splitlines()
     assert "organic_pairs_eligible: 1" in lines
     gate = next(i for i, line in enumerate(lines) if line.startswith("N_F="))
     assert "NO-GO (tagging_gap) -- next step: fix session tagging" in lines[gate]

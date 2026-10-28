@@ -11,8 +11,8 @@ streamed) excludes the session; else organic evidence makes it organic; else it 
 Disagreeing sources exclude the session (excluded_by_evidence). An unreadable or corrupt
 overrides file, tag file, sidecar or ledger refuses the run with counts only. The census
 then reports the ledger and backfill sidecar states and untagged counts by cause (tag,
-ledger and sidecar facets); with the flag off it prints what it printed before. Run directories are 0700 and files
-are 0600.
+ledger and sidecar facets); with the flag off it prints none of those include-untagged
+keys. Run directories are 0700 and files are 0600.
 """
 from __future__ import annotations
 
