@@ -1295,7 +1295,7 @@ def _prd_sql_records(cutoff: float | None, until: float | None
 
 
 def _ineligible_routes(days: float, now_ts: float, win: "_Window | None") -> dict | None:
-    """W1-2 / UN-08 counter (read-only); None when it cannot run (fail-open, recorded)."""
+    """W1-2 / UN-08 counter (read-only). A failure is an error result that renders "not evaluable"."""
     try:
         from llm_router import ineligible_routes
         return (ineligible_routes.compute(since=win.since, until=win.until) if win is not None
@@ -1303,7 +1303,9 @@ def _ineligible_routes(days: float, now_ts: float, win: "_Window | None") -> dic
     except Exception as exc:  # noqa: BLE001 - a report line must never break the scorecard
         from llm_router import failopen
         failopen.record("W12-INELIGIBLE", exc)
-        return None
+        from llm_router import ineligible_routes
+        t1 = win.until if win is not None else now_ts
+        return ineligible_routes.error_result(t1 - days * 86400, t1, f"counter failed: {type(exc).__name__}")
 
 
 def _identity_share(organic: list[dict]) -> dict:

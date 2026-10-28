@@ -89,29 +89,48 @@ def _ts(raw: Any) -> float | None:
     return None
 
 
-def _open_ro(db: Path) -> sqlite3.Connection:
-    """``mode=ro``; a WAL db with no -shm cannot be opened that way (SQLite must create the -shm), so,
-    only when no non-empty -wal file exists (nothing unmerged to miss), read the main file ``immutable=1``."""
+def _file_sig(db: Path) -> tuple:
+    """(exists, size, mtime_ns) of the db, its -wal and its -shm: what must not move during an immutable read."""
+    out = []
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            st = Path(str(db) + suffix).stat()
+            out.append((True, st.st_size, st.st_mtime_ns))
+        except OSError:
+            out.append((False, 0, 0))
+    return tuple(out)
+
+
+def _open_ro(db: Path, *, allow_immutable: bool = True) -> tuple[sqlite3.Connection, bool]:
+    """``(connection, immutable)``. ``mode=ro``; a WAL db with no -shm cannot be opened that way (SQLite
+    must create the -shm), so, only when no non-empty -wal file exists, read the main file ``immutable=1``
+    (the caller then verifies nothing moved during the read). Never rw / rwc."""
+    con = None
     try:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2.0)
         con.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        immutable = False
     except sqlite3.OperationalError:
+        if con is not None:
+            con.close()
         wal = Path(str(db) + "-wal")
-        if wal.exists() and wal.stat().st_size > 0:
+        if not allow_immutable or (wal.exists() and wal.stat().st_size > 0):
             raise
         con = sqlite3.connect(f"file:{db}?immutable=1", uri=True, timeout=2.0)
         con.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        immutable = True
     con.execute("PRAGMA query_only = ON")
-    return con
+    return con, immutable
 
 
-def _read_db(db: Path, since: float, until: float) -> tuple[dict[str, dict], list[dict], str | None]:
+def _read_db(db: Path, since: float, until: float, retry: bool = False) -> tuple[dict[str, dict], list[dict], str | None]:
     """(snapshots by sig, decision rows in window, error). Opened read-only (:func:`_open_ro`);
     a db that cannot be opened that way is reported unreadable (not evaluable), never opened for writing."""
     if not db.exists():
         return {}, [], None
     try:
-        con = _open_ro(db)
+        before = _file_sig(db)
+        con, immutable = _open_ro(db, allow_immutable=not retry)
         try:
             tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             snaps: dict[str, dict] = {}
@@ -140,9 +159,14 @@ def _read_db(db: Path, since: float, until: float) -> tuple[dict[str, dict], lis
                     rows.append({"model": d.get("final_model"), "provider": d.get("final_provider"),
                                  "sig": d.get("inventory_sig"), "session": d.get("session_id"),
                                  "door": door, "real": d.get("is_real") != 0, "stamp": None})
-            return snaps, rows, None
         finally:
             con.close()
+        if immutable and _file_sig(db) != before:  # a writer moved under an unlocked read: do not trust it
+            if retry:
+                return {}, [], "usage.db changed during read"
+            snaps, rows, err = _read_db(db, since, until, retry=True)
+            return (snaps, rows, err) if err is None else ({}, [], "usage.db changed during read")
+        return snaps, rows, None
     except sqlite3.Error as exc:
         return {}, [], f"usage.db unreadable: {exc}"
 
@@ -189,7 +213,11 @@ def compute(*, since: float | None = None, until: float | None = None, days: flo
     proxy_path = proxy_path or paths.state_path("proxy_calls.jsonl")
 
     snaps, rows, err = _read_db(Path(db_path), since, until)
-    proxy_rows = _read_proxy(Path(proxy_path), since, until)
+    try:
+        proxy_rows = _read_proxy(Path(proxy_path), since, until)
+    except OSError as exc:
+        proxy_rows = []
+        err = err or f"proxy_calls.jsonl unreadable: {type(exc).__name__}"
     rows += proxy_rows
     index = session_kind.KindIndex(
         [{"session_id": r["session"], "session_kind": r["stamp"]} for r in proxy_rows], backfill=False)
@@ -221,22 +249,25 @@ def compute(*, since: float | None = None, until: float | None = None, days: flo
     def _tot(counter_key: str) -> int:
         return sum(c[counter_key] for c in per_pop.values())
 
-    evaluated = sum(_tot(k) for k in ("eligible", "ineligible", "unknown_to_map"))
+    evaluated = _tot("eligible") + _tot("ineligible")  # a provider the map never knew is not judged either way
+    unknown = _tot("unknown_to_map")
     ineligible = _tot("ineligible")
     not_evaluable = _tot("not_evaluable_no_sig") + _tot("not_evaluable_sig_unresolved")
     organic = per_pop["organic"]
-    organic_eval = organic["eligible"] + organic["ineligible"] + organic["unknown_to_map"]
+    organic_eval = organic["eligible"] + organic["ineligible"]
     largest = max(organic_sessions.values()) if organic_sessions else 0
     share = largest / organic_eval if organic_eval else None
     informative = (organic_eval >= MIN_ORGANIC_N and len(organic_sessions) >= MIN_SESSIONS
                    and share is not None and share <= MAX_SESSION_SHARE)
     return {
         "window": [since, until], "rows_read": len(rows), "evaluated_n": evaluated,
-        "ineligible": ineligible, "not_evaluable": not_evaluable,
-        "evaluable": evaluated > 0,
+        "unknown_to_map_n": unknown, "not_evaluable": not_evaluable,
+        "evaluable": evaluated > 0 and not err,
+        # None, never 0, when nothing could be evaluated: an unevaluable set must not read as 0 ineligible.
+        "ineligible": ineligible if evaluated > 0 and not err else None,
         "populations": {p: dict(c) for p, c in per_pop.items()},
         "per_door": {k: dict(v) for k, v in per_door.items()},
-        "organic_evaluated_n": organic_eval, "organic_ineligible": organic["ineligible"],
+        "organic_evaluated_n": organic_eval, "organic_ineligible": organic["ineligible"] if evaluated > 0 and not err else None,
         "organic_sessions": len(organic_sessions), "largest_session_share": share,
         "informative": informative, "not_checkable": list(_NOT_CHECKABLE),
         "error": err, "examples": examples,
@@ -258,10 +289,20 @@ def render_line(res: dict) -> str:
     pops = res["populations"]
     split = ", ".join(
         f"{p} {pops[p].get('ineligible', 0)}/"
-        f"{sum(pops[p].get(k, 0) for k in ('eligible', 'ineligible', 'unknown_to_map'))}"
-        for p in POPULATIONS if any(pops[p].get(k) for k in ("eligible", "ineligible", "unknown_to_map")))
+        f"{sum(pops[p].get(k, 0) for k in ('eligible', 'ineligible'))}"
+        for p in POPULATIONS if any(pops[p].get(k) for k in ("eligible", "ineligible")))
     tail = "" if res["informative"] else (
         f"; not informative (organic n={res['organic_evaluated_n']} of {MIN_ORGANIC_N}, "
         f"{res['organic_sessions']} of {MIN_SESSIONS} sessions)")
+    unk = f"; {res['unknown_to_map_n']} unknown to the map" if res.get("unknown_to_map_n") else ""
     return (f"{head} {res['ineligible']} of {res['evaluated_n']} evaluable ({split}); "
-            f"{n_ne} not evaluable (no resolvable stamp){tail}")
+            f"{n_ne} not evaluable (no resolvable stamp){unk}{tail}")
+
+
+def error_result(since: float, until: float, reason: str) -> dict:
+    """A not-evaluable result for a counter that could not run at all (reason shown by :func:`render_line`)."""
+    return {"window": [since, until], "rows_read": 0, "evaluated_n": 0, "ineligible": None,
+            "organic_ineligible": None, "not_evaluable": 0, "unknown_to_map_n": 0, "evaluable": False,
+            "populations": {}, "per_door": {}, "organic_evaluated_n": 0, "organic_sessions": 0,
+            "largest_session_share": None, "informative": False, "not_checkable": list(_NOT_CHECKABLE),
+            "error": reason, "examples": []}

@@ -1502,6 +1502,8 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
         if _inelig["organic_ineligible"]:
             issues.append(f"{_inelig['organic_ineligible']} organic route(s) to a model not eligible at decision time")
     except Exception as e:  # noqa: BLE001 -- doctor must never crash on a report line
+        from llm_router import failopen
+        failopen.record("W12-INELIGIBLE", e)
         print(f"  {_warn(f'ineligible-route counter failed: {e}')}")
 
     _local_text_jobs_section()
