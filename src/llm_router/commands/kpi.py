@@ -3020,8 +3020,8 @@ def cmd_kpi(args: list[str]) -> int:
                           "(comparison only, no reduction claimed) and the S7 status")
     ap.add_argument("--baseline-start", default=None,
                      help="with --quota-burn: start of the 7-day baseline week (default: the "
-                          "first organic Claude Code quota_samples row, assumed to be the GE6 deploy; "
-                          "non-Claude Code sessions such as Codex cannot move it)")
+                          "first organic quota_samples row, assumed to be the GE6 deploy; a session whose tag "
+                          "names another host, or with no host has a UUIDv7 id (Codex), cannot move it)")
     ap.add_argument("--retention", action="store_true",
                      help="S7 / P3.7: this install's own 14-day retention status from the local "
                           "active_days.jsonl (install day, active days, active on day 14: "
