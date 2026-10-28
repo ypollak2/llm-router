@@ -31,6 +31,10 @@ async def llm_codex(
             "Expected at: /Applications/Codex.app"
         )
 
+    from llm_router import local_privacy
+
+    prompt = local_privacy.guard_cloud_cli(prompt, what="llm_codex")
+
     result = await run_codex(prompt, model=model)
 
     # Log to usage table so dashboard includes direct llm_codex calls

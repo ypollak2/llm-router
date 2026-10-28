@@ -30,6 +30,10 @@ async def llm_gemini(
             "Expected at: ~/.local/bin/gemini or /usr/local/bin/gemini"
         )
 
+    from llm_router import local_privacy
+
+    prompt = local_privacy.guard_cloud_cli(prompt, what="llm_gemini")
+
     result = await run_gemini_cli(prompt, model=model)
 
     # Log to usage table so dashboard includes direct llm_gemini calls

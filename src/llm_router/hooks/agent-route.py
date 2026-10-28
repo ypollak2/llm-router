@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 25
+# llm_router-hook-version: 26
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -1326,6 +1326,29 @@ def _try_direct_subagent(
         zone, _pct = get_current_pressure()
         chain = build_chain(complexity, zone, task_type)
         if not chain:
+            return None
+        # UN-04b: the secret door (as sdk._secret_door). A prompt with a secret may only go to a loopback,
+        # non-cloud Ollama model; with none in the chain nothing is executed here (None = the real spawn, which
+        # stays inside the user's own Claude session). `cloud:` overrides, as in the other doors.
+        try:
+            from llm_router import local_privacy as _lp
+            prompt, _ovr = _lp.split_override(prompt)
+            _hits = _lp.scan_secrets(prompt)
+            if _hits and _lp.override_requested(prefix=_ovr):
+                for _h in _hits:
+                    _lp.count_secret_event("overridden", _h.label)
+            elif _hits:
+                chain = [m for m in chain if m.provider == "ollama" and _lp.stays_local(m.model)]
+                if not chain:
+                    for _h in _hits:
+                        _lp.count_secret_event("refused", _h.label)
+                    return None
+        except Exception as _exc:  # fail closed: an unreadable door must not send the prompt out
+            try:
+                from llm_router import failopen
+                failopen.record("LR-FO-UN04B-AGENT-ROUTE", _exc)
+            except Exception:
+                pass
             return None
         request, context, history, agent_context, okf = prompt, None, None, None, True
         try:
