@@ -51,7 +51,7 @@ async def test_two_step_install_is_silent_and_matches_the_cli_digest(tmp_path, m
     from llm_router import authority
     assert not authority.state_file().exists(), "install must not set the routing authority"
 
-    b = _fixture(tmp_path / "b", monkeypatch)
+    _fixture(tmp_path / "b", monkeypatch)  # twin HOME: the env now points at it
     assert install.cmd_install(["--auto"]) == 0
     assert install.read_receipt()["digest"] == mcp_receipt["digest"]
 
