@@ -1285,6 +1285,34 @@ def _with_routing_note(tool_input: dict) -> dict:
     return ti
 
 
+def _secret_door(prompt: str) -> tuple[str, bool]:
+    """UN-04b: the secret door for every path of this hook that sends the prompt to a cloud service (NS3 Codex,
+    DIRECT execution, CLI delegation). Run ONCE in ``main`` before any of them. Returns ``(prompt, hold)``: ``hold``
+    True means the prompt holds a high-precision secret and none of those paths may run (the host's own spawn
+    proceeds; the prompt stays inside the user's Claude session). The ``cloud:`` prefix overrides (stripped,
+    counted, as in the other doors). A door error holds (fail closed, ``failopen`` code)."""
+    try:
+        from llm_router import local_privacy as _lp
+        prompt, _ovr = _lp.split_override(prompt)
+        _hits = _lp.scan_secrets(prompt)
+        if not _hits:
+            return prompt, False
+        if _lp.override_requested(prefix=_ovr):
+            for _h in _hits:
+                _lp.count_secret_event("overridden", _h.label)
+            return prompt, False
+        for _h in _hits:
+            _lp.count_secret_event("refused", _h.label)
+        return prompt, True
+    except Exception as _exc:
+        try:
+            from llm_router import failopen
+            failopen.record("LR-FO-UN04B-AGENT-ROUTE", _exc)
+        except Exception:
+            pass
+        return prompt, True
+
+
 def _try_direct_subagent(
     prompt: str, task_type: str, complexity: str, session_id: str,
     subagent_type: str = "general-purpose", ledger_session_id: str | None = None,
@@ -1326,29 +1354,6 @@ def _try_direct_subagent(
         zone, _pct = get_current_pressure()
         chain = build_chain(complexity, zone, task_type)
         if not chain:
-            return None
-        # UN-04b: the secret door (as sdk._secret_door). A prompt with a secret may only go to a loopback,
-        # non-cloud Ollama model; with none in the chain nothing is executed here (None = the real spawn, which
-        # stays inside the user's own Claude session). `cloud:` overrides, as in the other doors.
-        try:
-            from llm_router import local_privacy as _lp
-            prompt, _ovr = _lp.split_override(prompt)
-            _hits = _lp.scan_secrets(prompt)
-            if _hits and _lp.override_requested(prefix=_ovr):
-                for _h in _hits:
-                    _lp.count_secret_event("overridden", _h.label)
-            elif _hits:
-                chain = [m for m in chain if m.provider == "ollama" and _lp.stays_local(m.model)]
-                if not chain:
-                    for _h in _hits:
-                        _lp.count_secret_event("refused", _h.label)
-                    return None
-        except Exception as _exc:  # fail closed: an unreadable door must not send the prompt out
-            try:
-                from llm_router import failopen
-                failopen.record("LR-FO-UN04B-AGENT-ROUTE", _exc)
-            except Exception:
-                pass
             return None
         request, context, history, agent_context, okf = prompt, None, None, None, True
         try:
@@ -2376,6 +2381,11 @@ def main() -> None:
     with _hl_phase("classify"):
         task_type, complexity = _classify(prompt)
 
+    # ── UN-04b secret door: once, before NS3 / DIRECT / CLI delegation ────────
+    prompt, _secret_hold = _secret_door(prompt)
+    if _secret_hold:
+        _log_agent_call(subagent_type, prompt, "withheld_secret")
+
     # ── NS3: suitable spawns → Codex CLI FIRST (external, free from Claude quota) ──
     # Must run before _allow_routed_spawn() below: that branch defaults to ON and
     # returns unconditionally, which is why Codex delegation was unreachable before
@@ -2383,7 +2393,8 @@ def main() -> None:
     with _hl_phase("codex_delegation"):  # routed model time when it runs
         _codex_delegated = _try_codex_subagent_delegation(
             prompt, task_type, complexity, subagent_type, session_id,
-            cwd=hook_input.get("cwd"), ledger_session_id=hook_input.get("session_id"))
+            cwd=hook_input.get("cwd"), ledger_session_id=hook_input.get("session_id")
+        ) if not _secret_hold else None
     if _codex_delegated is not None:
         _log_agent_call(subagent_type, prompt, "routed_codex_subagent")
         json.dump({
@@ -2430,7 +2441,7 @@ def main() -> None:
                                         ledger_session_id=hook_input.get("session_id"),
                                         transcript_path=hook_input.get("transcript_path"),
                                         project_root=hook_input.get("cwd"))
-                   if _qb_allowed else None)
+                   if _qb_allowed and not _secret_hold else None)
     if not _qb_allowed:
         _log_agent_call(subagent_type, prompt,
                          f"breaker_open:{_qb_decision.reason if _qb_decision else 'agent_route'}")
@@ -2453,7 +2464,8 @@ def main() -> None:
     with _hl_phase("cli_delegation"):  # routed model time when it runs
         _delegated = _try_cli_delegation(
             prompt, task_type, complexity, session_id, subagent_type, cwd=hook_input.get("cwd"),
-            ledger_session_id=hook_input.get("session_id"))
+            ledger_session_id=hook_input.get("session_id")
+        ) if not _secret_hold else None
     if _delegated is not None:
         _log_agent_call(subagent_type, prompt, "routed_cli_delegation")
         json.dump({

@@ -33,7 +33,11 @@ async def llm_codex(
 
     from llm_router import local_privacy
 
-    prompt = local_privacy.guard_cloud_cli(prompt, what="llm_codex")
+    try:
+        prompt = local_privacy.guard_cloud_cli(prompt, what="llm_codex")
+    except local_privacy.SecretLocalOnlyRefused as refusal:
+        # Returned, not raised: an uncaught exception reaches the model as a bare "Error executing tool".
+        return str(refusal)
 
     result = await run_codex(prompt, model=model)
 

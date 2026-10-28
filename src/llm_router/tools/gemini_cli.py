@@ -32,7 +32,11 @@ async def llm_gemini(
 
     from llm_router import local_privacy
 
-    prompt = local_privacy.guard_cloud_cli(prompt, what="llm_gemini")
+    try:
+        prompt = local_privacy.guard_cloud_cli(prompt, what="llm_gemini")
+    except local_privacy.SecretLocalOnlyRefused as refusal:
+        # Returned, not raised: an uncaught exception reaches the model as a bare "Error executing tool".
+        return str(refusal)
 
     result = await run_gemini_cli(prompt, model=model)
 
