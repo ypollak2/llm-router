@@ -24,9 +24,14 @@ is a heuristic, so a miss is silenced with an inline escape:
     <!-- provenance: exempt (reason) -->
 
 on the unit, or `<!-- provenance: exempt-file (reason) -->` anywhere in a file
-whose figures all come from a named generator. The reason is mandatory. Fenced code blocks, inline code spans, URLs and HTML
+whose figures all come from a named generator (honoured under docs/ only; in
+README.md and changelog.d/ it is ignored). The reason is mandatory. Fenced code blocks, inline code spans, URLs and HTML
 comments are not scanned for numbers. CHANGELOG.md is released history and is
 out of scope.
+
+Ratchet note: a baseline key is path + hash of the unit text + occurrence number,
+so a pasted copy of a baselined unit is new. Editing a baselined unit changes its
+hash and shows as one new plus one stale entry: that forces the fix, by design.
 
 Ratchet: scripts/numbers_provenance_baseline.json lists units that were already
 flagged when the lint landed. New flagged units fail; a baseline entry that no
@@ -49,14 +54,15 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 BASELINE_NAME = "scripts/numbers_provenance_baseline.json"
 
-SCOPE_GLOBS = ("README.md", "docs/*.md", "changelog.d/*.md")
+SCOPE_GLOBS = ("README.md", "docs/**/*.md", "changelog.d/*.md")
 
 # --- result-shaped numbers -------------------------------------------------
 _NUM = r"\d[\d,]*(?:\.\d+)?"
 RESULT_PATTERNS = {
-    "percent": re.compile(rf"(?<![\w.]){_NUM}\s?%"),
+    "percent": re.compile(rf"(?<![\w.]){_NUM}\s?(?:%|percent\b)"),
+    "times": re.compile(rf"(?<![\w.]){_NUM}\s+times\s+(?:cheaper|faster|slower|more|less|as|lower|higher|better|worse|smaller|larger)\b", re.IGNORECASE),
     "n-of-m": re.compile(rf"(?<![\w.]){_NUM}\s+of\s+~?{_NUM}(?![\w.]*\s*(?:tools|hosts|backends|providers|files|items|rows)\b)"),
-    "multiplier": re.compile(rf"(?<![\w.]){_NUM}\s?[x×](?![\w])"),
+    "multiplier": re.compile(rf"(?<![\w.]){_NUM}\s?[x×](?![\w])(?!\s*\d)"),
     "latency": re.compile(rf"(?<![\w.]){_NUM}\s?(?:ms|µs)(?![\w])|(?<![\w.]){_NUM}\s(?:s|sec|seconds)(?![\w])"),
     "dollars": re.compile(rf"\$\s?(?!0(?![.\d])){_NUM}"),
     "tokens": re.compile(rf"~?{_NUM}\s?[kKmM]?\s+tokens\b"),
@@ -64,30 +70,44 @@ RESULT_PATTERNS = {
 
 # --- markers ---------------------------------------------------------------
 EXT = r"(?:py|json|jsonl|md|yaml|yml|toml|sh|txt|csv|db|ts|js|log|html)"
-SOURCE_RE = re.compile(
-    rf"(?:[\w.~-]+/)+[\w.-]+\.{EXT}\b"          # a/b.ext
-    rf"|\b[\w-]+\.{EXT}\b"                       # bare file.ext
-    r"|\bPR\s?#\d+|/pull/\d+|~/\.rsi/"
-)
+# A source is a path containing "/" that exists in the repo (a ~/.rsi path is
+# private and not checked), `PR #NNN`, or a `~/.rsi/` path. A bare name.ext is
+# not a source: nothing says which file, or that it exists.
+PATH_RE = re.compile(rf"(?<![\w/])~?(?:[\w.-]+/)+[\w.-]+\.{EXT}\b")
+PR_RE = re.compile(r"\bPR\s?#\d+|/pull/\d+|~/\.rsi/")
+# N: n=30, "30 runs", "8 of 8". A bare date is a window, not an N.
 WINDOW_RE = re.compile(
-    r"\b[nN]\s?=\s?\d"                           # n=30
-    r"|\b20\d\d-\d\d-\d\d\b"                     # ISO date
+    r"\b[nN]\s?=\s?\d"
     r"|\b\d[\d,]*\s+(?:runs?|prompts?|calls?|requests?|samples?|cases?|tasks?|"
-    r"sessions?|events?|rows?|trials?|payloads?|probes?|days?|turns?|queries|"
+    r"sessions?|events?|rows?|files?|trials?|payloads?|probes?|turns?|queries|"
     r"decisions?|iterations?)\b"
-    rf"|\b{_NUM}\s+of\s+~?{_NUM}"                # 8 of 8
+    rf"|\b{_NUM}\s+of\s+~?{_NUM}"
 )
+
+
+def has_source(raw: str, root: Path | None, rel: str = "") -> bool:
+    if PR_RE.search(raw):
+        return True
+    for m in PATH_RE.finditer(raw):
+        tok = m.group(0)
+        if tok.startswith("~"):
+            continue
+        if root is None:
+            return True
+        cand = tok
+        while cand.startswith("../"):
+            cand = cand[3:]
+        if (root / cand).exists() or (root / Path(rel).parent / tok).exists():
+            return True
+    return False
+
 
 # A unit that is describing configuration or pricing, not reporting a result.
 CONFIG_WORDS = re.compile(
     r"\b(?:default|defaults|threshold|thresholds|timeout|timeouts|deadline|"
-    r"ttl|interval|budget|budgets|cap|caps|capped|limit|limits|"
-    r"at least|at most|up to|no more than|no less than|min|max|"
-    r"configurable|configure|set to|setting|env var|"
-    r"list price|list prices|pricing|price|prices|per 1m|per million|"
-    r"per month|per user|/mo|/month|/1m|/1k|free tier|"
-    r"example|e\.g\.|for instance|illustrat\w+|hypothetical|suppose|"
-    r"rule|policy|window of|rolling|quota|weights?)\b|<=|>=|≤|≥|LLM_ROUTER_\w+",
+    r"ttl|interval|budget|budgets|configurable|configure|set to|env var|"
+    r"list price|list prices|pricing|per 1m|per million|"
+    r"per month|per user|/mo|/month|/1m|/1k|free tier|weights?)\b|<=|>=|≤|≥|LLM_ROUTER_\w+",
     re.IGNORECASE,
 )
 
@@ -152,7 +172,7 @@ def key_for(path: str, unit: str) -> str:
     return f"{path}::{digest}"
 
 
-def analyse_unit(unit: str):
+def analyse_unit(unit: str, root: Path | None = None, rel: str = ""):
     """Return a list of problems (empty when the unit is fine)."""
     if EXEMPT_RE.search(unit):
         return []
@@ -170,10 +190,10 @@ def analyse_unit(unit: str):
     if CONFIG_WORDS.search(raw):
         return []
     problems = []
-    if not SOURCE_RE.search(raw):
-        problems.append("no source (file path, PR #NNN or ~/.rsi path)")
+    if not has_source(raw, root, rel):
+        problems.append("no source (existing repo path with /, PR #NNN or ~/.rsi path)")
     if not WINDOW_RE.search(raw):
-        problems.append("no N or window (n=, date, 'N runs', 'N of M')")
+        problems.append("no N (n=, 'N runs', 'N of M'; a date alone is not N)")
     if problems:
         shown = ", ".join(f"{k}:{v}" for k, v in hits[:4])
         return [f"{'; '.join(problems)} [{shown}]"]
@@ -190,13 +210,16 @@ def scan_tree(root: Path):
                 continue
             seen.add(rel)
             text = path.read_text(encoding="utf-8", errors="replace")
-            if EXEMPT_FILE_RE.search(text):
+            if rel.startswith("docs/") and EXEMPT_FILE_RE.search(text):
                 continue
+            occ: dict[str, int] = {}
             for line_no, unit in split_units(text):
-                for why in analyse_unit(unit):
+                for why in analyse_unit(unit, root, rel):
+                    base = key_for(rel, unit)
+                    idx = occ[base] = occ.get(base, 0) + 1
                     findings.append(
                         {
-                            "key": key_for(rel, unit),
+                            "key": f"{base}#{idx}",
                             "path": rel,
                             "line": line_no,
                             "why": why,
