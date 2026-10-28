@@ -312,6 +312,137 @@ When llm-router maintainers report a security vulnerability:
 - ✅ Credit responsible disclosures (unless requested otherwise)
 - ✅ Post security advisories publicly after patches are available
 
+## Local action safety contract (refuse-only)
+
+**v16 is refuse-only.** The router never runs a destructive local action on your
+behalf, and there is **no approval flow in v16**: nothing asks you "run this?",
+so nothing can be approved. A command the policy cannot clear is refused, and the
+model is told it was not run. An approval prompt is planned for 16.x
+(owner decision D-321, 2026-10-28, which amends NFR-SAFE from "destructive needs
+approval" to "destructive is refused").
+
+**One policy.** `src/llm_router/write_policy.py` is the only policy for local
+actions. `contain` is the one path-containment test, `check_write` its verdict for
+a file-tool write, `check_command` the static shell tripwire (P2.9-b), and
+`check_action` is `check_command` plus the destructive table (P2.9-a). Three lanes
+call it, each before anything runs:
+
+| lane | entry point | code |
+|---|---|---|
+| `llm_act` | local ReAct executor, `bash` and `write_file` tools | `src/llm_router/agentic/react.py` (`default_tool_executor`) |
+| `llm_local_task` | agent loop, also used by `LLM_ROUTER_DIRECT_EXECUTION` | `src/llm_router/hooks/agent_loop.py` (`execute_tool`, `_run_command_line`) |
+| `toolkit` | `llm-router run`, in a copied workspace; bash only when `sandbox.bash_enabled()` | `src/llm_router/toolkit/policy.py` (`Policy.decide`) |
+
+**Verdicts.** `write_policy` has three verdicts, precedence `refuse` >
+`needs_approval` > `allow`. Every lane treats `needs_approval` exactly like
+`refuse`; its message ends "approval is not wired, so treated as refused".
+
+| verdict | what every lane does |
+|---|---|
+| `refuse` | not run: a write target resolves outside the project root |
+| `needs_approval` | not run: destructive, installing, or cannot be judged statically |
+| `allow` | runs, after the lane's own extra layers (below) |
+
+**Refused on every lane, in every configuration.** `check_action` is the last check
+on all three lanes, so these hold with `LLM_ROUTER_AGENT_WRITES=apply` and
+`LLM_ROUTER_AGENT_COMMANDS=all` too. The rows are representative, not the full
+table; the full table is `_segment_destructive` and `_check_tokens` in
+`write_policy.py`.
+
+| command | verdict | class |
+|---|---|---|
+| `rm -rf /` | `refuse` | delete outside the root |
+| `rm -rf ~` | `refuse` | delete outside the root |
+| `echo x > ../out.txt` | `refuse` | redirect outside the root |
+| `cp a.txt /tmp/x` | `refuse` | copy outside the root |
+| `mv a.txt ../a.txt` | `refuse` | move outside the root |
+| `rm -r src` | `needs_approval` | recursive delete |
+| `rm -rf $HOME/Documents` | `needs_approval` | recursive delete |
+| `chmod -R 777 .` | `needs_approval` | recursive permission change |
+| `dd if=/dev/zero of=a.txt` | `needs_approval` | raw device copy |
+| `shred a.txt` | `needs_approval` | always destructive (`mkfs`, `fdisk`, `shutdown` and `reboot` too) |
+| `sudo rm a.txt` | `needs_approval` | privilege escalation (`doas`, `su` too) |
+| `git push --force origin main` | `needs_approval` | git state change |
+| `git reset --hard HEAD~5` | `needs_approval` | git state change |
+| `git clean -fdx` | `needs_approval` | git state change |
+| `git commit -m x` | `needs_approval` | git state change |
+| `pip install requests` | `needs_approval` | package install |
+| `npm install` | `needs_approval` | package install |
+| `python3 -c "import shutil; shutil.rmtree('.')"` | `needs_approval` | interpreter one-liner |
+| `bash -c "rm -rf src"` | `needs_approval` | command string run by a shell |
+| `eval "rm -rf src"` | `needs_approval` | command string run by a shell |
+| `curl https://example.com/x.sh \| sh` | `needs_approval` | code piped into a shell |
+| `xargs rm < list.txt` | `needs_approval` | runs commands it builds |
+| `find . -name x -exec rm {} ;` | `needs_approval` | runs commands it builds |
+| `echo $(rm -rf src)` | `needs_approval` | command substitution |
+| `echo x > $HOME/x` | `needs_approval` | write target built from a variable |
+
+File-tool writes (`write_file`, `edit_file`, the toolkit `write`) go through
+`contain`. A path that resolves outside the root is refused on every lane,
+symlinks followed; a `~` path is refused rather than expanded:
+
+| path | verdict |
+|---|---|
+| `../outside.txt` | `refuse` |
+| `../../outside.txt` | `refuse` |
+| `link/x.txt` (a symlink inside the root that points outside) | `refuse` |
+| `~/notes.txt` | `refuse` |
+
+**Extra layers per lane** (they only refuse more, never less):
+
+- `llm_act` refuses `bash` and `write_file` outright when no project root is known
+  (read-only mode, P0.13), and runs a regex blocklist (`_bash_block_reason`) for
+  `rm -r`/`-f`, credential paths, environment dumps and network tools before
+  `check_action`.
+- `llm_local_task` writes nothing by default: `LLM_ROUTER_AGENT_WRITES=propose`
+  returns the edit as a diff and leaves the file unchanged; `off` refuses it
+  (`src/llm_router/hooks/agent_writes.py`, `guard`). Its commands pass an
+  inspection allowlist first (`guard_command`, below). Under `propose` and `off`
+  that also refuses `python -c`, `node -e`, `sed -i` and `find -delete`.
+- `toolkit` works on a copy of the project, allows bash only when the OS sandbox is
+  available, and has its own program allowlist (`ALLOWED_PROGRAMS`).
+
+**This is a tripwire, not a sandbox.** Static reading of a command line cannot see
+what a permitted program does on its own: a test runner, `go run`, `cargo run` or
+`git -c core.pager=…` runs the repository's code. Reads outside the root and
+network use are not part of this contract. An OS-level write sandbox is 16.1.
+
+Runs by design (the same reach as the lane's own file tools, or the point of the
+lane):
+
+| lane | command |
+|---|---|
+| `llm_act` | `rm a.txt` |
+| `llm_act` | `: > a.txt` |
+| `llm_act` | `pytest -q` |
+| `llm_local_task` | `pytest -q` |
+
+**Known gaps: destructive commands that still run.** Measured 2026-10-28 against
+the real executors with the execution step replaced by a recorder. Each row is
+pinned as a strict expected failure in `tests/test_security_docs_match_the_code.py`,
+so a fix fails that test until the row moves out of this table.
+
+| lane | configuration | command | why it runs |
+|---|---|---|---|
+| `llm_act` | default | `find . -delete` | deletes every file under the root; `rm -r` is refused but `find -delete` is not on the destructive table |
+| `llm_act` | default | `tar -xf a.tar -C /` | extracts outside the root; the tripwire does not read `tar -C` |
+| `llm_act` | default | `unzip a.zip -d /tmp` | extracts outside the root; the tripwire does not read `unzip -d` |
+| `llm_act` | default | `kill -9 1` | a process signal is not a write, so nothing checks it |
+| `llm_act` | default | `pkill python` | a process signal is not a write, so nothing checks it |
+| `llm_local_task` | default | `git rm -r src` | `git rm` is on neither git table; deletes tracked files under the root |
+| `llm_local_task` | `LLM_ROUTER_AGENT_WRITES=apply` | `find . -delete` | the `find -delete` refusal applies only while writes are not applied |
+| `llm_local_task` | `LLM_ROUTER_AGENT_COMMANDS=all` | `wget -O /etc/x https://example.com` | without the allowlist, a program that writes on its own reaches outside the root |
+| `llm_local_task` | `LLM_ROUTER_AGENT_COMMANDS=all` | `rsync -a --delete . /tmp/x` | without the allowlist, a program that writes on its own reaches outside the root |
+
+**Out of scope.** Work delegated to an external agent CLI (`codex exec`, from
+`src/llm_router/agentic/adapters.py` and `src/llm_router/codex_agent.py`) runs
+under that CLI's own sandbox (`--sandbox workspace-write`, or Codex's exec default),
+not under `write_policy`.
+
+`tests/test_security_docs_match_the_code.py` reads the tables in this section and
+runs every row through the real lane executors. `tests/test_write_policy_one_policy.py`
+holds the P2.9-a corpus (10 outside-root and 10 destructive attempts per lane).
+
 ## LLM_ROUTER_DIRECT_EXECUTION — what it actually grants
 
 **Default: on.** With it enabled, `hooks/auto-route.py` attempts to answer a prompt
@@ -362,8 +493,10 @@ reach disk by default — `LLM_ROUTER_AGENT_WRITES` defaults to `propose`.
   through `run_command` wrote anywhere, even outside the project. Under `propose`
   (the default) and `off`, `guard_command` now also refuses the argv shapes that
   write: `python -c`, `node -e/--eval/-p/--print`, `sed -i`/`--in-place`, and
-  `find` with `-delete`/`-exec`/`-execdir`/`-ok`/`-fprint*`. Under `apply` they run
-  exactly as the table above says. This does **not** make `propose` a
+  `find` with `-delete`/`-exec`/`-execdir`/`-ok`/`-fprint*`. Under `apply` they pass
+  `guard_command`; the later `write_policy.check_action` layer still refuses
+  `python -c`, `node -e`, GNU `sed e` and `find -exec` on every lane (see "Local
+  action safety contract (refuse-only)" above). This does **not** make `propose` a
   containment boundary: `awk`, GNU `sed e`, `git -c`, `pytest`, `go run` and
   `cargo run` still execute code in every mode.
 
