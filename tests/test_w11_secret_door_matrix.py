@@ -10,9 +10,21 @@ classified, and a socket trace shows a secret prompt makes no non-loopback conne
   through every door with a chain of a loopback Ollama model and a cloud model; the recorded peers must all be
   loopback. Positive controls: with the door open (``scan_secrets`` -> no hits, or ``private_dispatch_active`` ->
   False at the provider layer) the same prompt records a non-loopback peer, so the tracer can see a leak.
+* Sink inventory (``_scan_sinks``): a second scan keyed by what leaves the machine, not by the router's own names: CLI
+  runners (run_codex / run_gemini_cli / run_claude), direct_executor call_gemini / call_openai, urlopen / open_url,
+  httpx / requests / aiohttp requests, subprocess to a model CLI, anthropic / openai SDK clients, a bare litellm
+  ``completion``. Every hit has a row or its file has a pinned-count row; ``probe`` rows are the audited "carries no
+  prompt text" allowlist. Known limit: ``subprocess.*`` is counted only when the call names a model CLI.
+* LIMITS of the router-door trace: the router doors are traced at the ``litellm.acompletion`` stub boundary (the
+  stub dials its model's host through the patched socket). It proves the guard layers never call ``acompletion`` with
+  a cloud model for a secret prompt, not that litellm's own httpx transport would reach the patched connect. Only the
+  SDK door and the hook sinks below run a real urllib transport. The ``net`` fixture also replaces
+  ``_build_and_filter_chain`` and ``get_model_chain`` (chain-builder filtering is bypassed on purpose; the positive
+  control shows the block is ``scan_secrets`` and the marker).
 * ``judge_cascade.judge_inline`` sends prompt + response to a Haiku judge with no private check. It is not reachable
-  from any entry point (see ``test_judge_cascade_is_not_reachable``); ``test_..._would_leak_if_wired`` documents
-  the latent gap as a strict xfail.
+  from any entry point (``test_judge_cascade_is_not_reachable``); ``test_..._would_leak_if_wired`` is a strict xfail.
+* LEAK sinks (strict xfail, ``test_leak_*``; fix PR "UN-04b"): llm_codex, llm_gemini, agent-route direct execution and
+  CLI delegation, direct_executor call_gemini / call_openai, auto-route API classifiers, playwright-compress Gemini.
 
 No real network, no real model, tmp homes (the lc12 fixtures). Secrets are generated at run time.
 """
@@ -23,6 +35,7 @@ import ast
 import asyncio
 import collections
 import ipaddress
+import re
 import socket
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -182,6 +195,224 @@ def test_judge_cascade_is_not_reachable():
     importers = {k: {m for m in v if m != "env_registry"} for k, v in importers.items()}
     assert importers.get("judge_cascade") == {"streaming_judge"}
     assert importers.get("streaming_judge", set()) == set()
+
+
+
+# ------------------------------------------------------------------------------------------------ the sink inventory
+# The call-name scan above finds the router's own entry points. A model call can also leave through a sink that
+# never names them: a CLI runner, a urllib / httpx / aiohttp / requests request, a subprocess to a model CLI, an
+# anthropic / openai SDK client, a bare ``from litellm import completion``. This second scan keys every such call
+# ``(file, function, callee)``. A hit needs a SINK_FUNCS row or, failing that, its file in SINK_FILES (the count of
+# the file's remaining hits is pinned, so a new sink in an audited file fails too). Classes:
+#   LEAK        a secret prompt reaches the sink; a strict xfail below traces it (fix PR: UN-04b)
+#   probe       audited: carries no prompt text (reason on the row)
+#   local       prompt text to the configured Ollama base (loopback unless the user configured otherwise)
+#   router door / proxy / primitive / fixed prompt / opt-in: see the row's reason
+SINK_NAMES = {"run_codex", "run_gemini_cli", "run_claude", "call_gemini", "call_openai", "execute_chain",
+              "execute_agent", "urlopen", "open_url", "create_subprocess_exec", "create_subprocess_shell",
+              "safe_subprocess_exec", "build_request"}
+SINK_HTTP_VERBS = {"post", "get", "put", "request", "stream", "send"}
+SINK_HTTP_MODULES = ("httpx", "requests", "aiohttp")
+SINK_SDK = {"Anthropic", "AsyncAnthropic", "OpenAI", "AsyncOpenAI"}
+MODEL_CLI = re.compile(r"codex|gemini|claude|judge_cmd", re.I)  # subprocess.* counts only when it names a model CLI
+
+SINK_FUNCS: dict[tuple[str, str, str], tuple[int, str, str]] = {
+    ('model_evaluator.py', 'eval_codex_model', 'run_codex'): (1, 'fixed prompt', 'BenchmarkSuite prompt, no user text'),
+    ('model_evaluator.py', 'eval_ollama_model', 'open_url'): (1, 'fixed prompt', 'BenchmarkSuite prompt to local Ollama'),
+    ('tools/codex.py', 'llm_codex', 'run_codex'): (1, 'LEAK', 'raw prompt to the codex CLI, no secret check'),
+    ('tools/gemini_cli.py', 'llm_gemini', 'run_gemini_cli'): (1, 'LEAK', 'raw prompt to the gemini CLI, no secret check'),
+    ('hooks/agent-route.py', '_try_direct_subagent', 'execute_agent'): (1, 'LEAK', 'agent-route.py:1360 direct execution; no secret door (scrub_text only)'),
+    ('hooks/agent-route.py', '_try_direct_subagent', 'execute_chain'): (1, 'LEAK', 'agent-route.py:1362 -> call_gemini / call_openai'),
+    ('hooks/agent-route.py', '_try_cli_delegation', 'run_gemini_cli'): (1, 'LEAK', 'agent-route.py:1882 prompt to the gemini CLI'),
+    ('hooks/agent-route.py', '_run_codex_agent_inner', 'run_codex'): (1, 'LEAK', 'agent-route.py:1678 prompt to the codex CLI'),
+    ('hooks/direct_executor.py', 'call_gemini', 'urlopen'): (1, 'LEAK', 'urllib POST of the prompt to Google'),
+    ('hooks/direct_executor.py', 'call_openai', 'urlopen'): (1, 'LEAK', 'urllib POST of the prompt to OpenAI'),
+    ('hooks/direct_executor.py', '<module>', 'call_gemini'): (1, 'LEAK', '_PROVIDER_CALLS entry for call_gemini'),
+    ('hooks/direct_executor.py', '<module>', 'call_openai'): (1, 'LEAK', '_PROVIDER_CALLS entry for call_openai'),
+    ('hooks/direct_executor.py', '_ollama_open', 'open_url'): (1, 'local', 'loopback Ollama via open_url'),
+    ('hooks/auto-route.py', 'classify_with_gemini', 'urlopen'): (1, 'LEAK', 'first 500 chars of the prompt to Gemini; opt-in LLM_ROUTER_CLASSIFY_LOCAL_ONLY=0'),
+    ('hooks/auto-route.py', 'classify_with_openai', 'urlopen'): (1, 'LEAK', 'first 500 chars of the prompt to OpenAI; opt-in LLM_ROUTER_CLASSIFY_LOCAL_ONLY=0'),
+    ('hooks/auto-route.py', '_ollama_open', 'urlopen'): (1, 'local', 'loopback Ollama'),
+    ('hooks/auto-route.py', '_ollama_open', 'open_url'): (1, 'local', 'loopback Ollama'),
+    ('hooks/auto-route.py', '_fetch_usage_inline', 'urlopen'): (1, 'probe', 'Anthropic usage endpoint, no prompt text'),
+    ('hooks/auto-route.py', 'main', 'execute_agent'): (2, 'local', 'draft chain filtered to ollama/codex/gemini_cli (_free_tier_draft_chain, auto-route.py:3834); direct_executor executes ollama/gemini/openai only, so the draft runs on Ollama'),
+    ('hooks/auto-route.py', 'main', 'execute_chain'): (1, 'local', 'same draft chain filter'),
+    ('hooks/playwright-compress.py', '_try_gemini', 'urlopen'): (1, 'LEAK', 'page snapshot (tool output, may hold a secret) to Gemini whenever GEMINI_API_KEY is set'),
+    ('hooks/playwright-compress.py', '_ollama_open', 'urlopen'): (1, 'local', 'loopback Ollama'),
+    ('hooks/playwright-compress.py', '_ollama_open', 'open_url'): (1, 'local', 'loopback Ollama'),
+    ('resolver/calibrate.py', 'CloudCompleter._cli', 'run_codex'): (1, 'fixed prompt', 'calibration probes'),
+}
+SINK_FILES: dict[str, tuple[int, str, str]] = {
+    'agentic/react.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'agentic_registry.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'alerts.py': (1, 'probe', 'outbound text is a scrubbed alert / savings digest / team report built from counters, not prompt text'),
+    'benchmark_fetcher.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'claude_agent.py': (1, 'primitive', 'the CLI runner itself; every caller has its own row'),
+    'codex_agent.py': (1, 'primitive', 'the CLI runner itself; every caller has its own row'),
+    'commands/doctor.py': (3, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'commands/pi.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'commands/update.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'commands/verify.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'config.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'context_summary.py': (2, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'control_plane/client.py': (3, 'opt-in', 'explicit opt-in feature; text leaves by design when enabled, not traced'),
+    'cost.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'digest.py': (2, 'probe', 'outbound text is a scrubbed alert / savings digest / team report built from counters, not prompt text'),
+    'discover.py': (3, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'discovery_rescan.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'frameworks/openai_agents.py': (1, 'router door', 'an adapter whose client points at the llm-router gateway (a router door)'),
+    'gemini_cli_agent.py': (1, 'primitive', 'the CLI runner itself; every caller has its own row'),
+    'gemini_cli_quota.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'hook_client.py': (2, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'hooks/agent_loop.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'hooks/codex-post-tool.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'hooks/gemini-cli-post-tool.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'hooks/opencode-post-tool.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'hooks/session-end.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'hooks/session-start.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'hooks/tool_intercept.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'hooks/usage-refresh.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'integrations/helicone.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'library/sealer.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'local_agent/compact.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'local_agent/proxy_step.py': (2, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'local_check/judge.py': (2, 'opt-in', 'explicit opt-in feature; text leaves by design when enabled, not traced'),
+    'local_classifier.py': (2, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'local_context_guard.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'local_platforms.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'local_privacy.py': (2, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'media.py': (16, 'router door', 'reached only through route_and_call (_call_media / dispatch after the chain cut, or the SDK secret door)'),
+    'model_catalog.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'model_discovery.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'model_pull.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'ollama_watchdog.py': (3, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'proxy/backends.py': (3, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'proxy/failopen_shim.py': (3, 'proxy', "proxy door: log-only by D-28 (engine.secret_enforcement), owner-gated; replays the client's own request"),
+    'proxy/server.py': (7, 'proxy', "proxy door: log-only by D-28 (engine.secret_enforcement), owner-gated; replays the client's own request"),
+    'quickstart.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'resolver/calibrate.py': (2, 'fixed prompt', 'benchmark / calibration probes, no user text'),
+    'resolver/inventory.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'resource_map.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'router.py': (3, 'router door', 'reached only through route_and_call (_call_media / dispatch after the chain cut, or the SDK secret door)'),
+    'runtime_offer.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'safe_subprocess.py': (1, 'primitive', 'the CLI runner itself; every caller has its own row'),
+    'sdk.py': (2, 'router door', 'reached only through route_and_call (_call_media / dispatch after the chain cut, or the SDK secret door)'),
+    'semantic_cache.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'semantic_classify.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'service_manager.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'session_broker.py': (1, 'opt-in', 'explicit opt-in feature; text leaves by design when enabled, not traced'),
+    'shadow_frontier.py': (3, 'proxy', "proxy door: log-only by D-28 (engine.secret_enforcement), owner-gated; replays the client's own request"),
+    'stats.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'statusline_segments.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'team.py': (2, 'probe', 'outbound text is a scrubbed alert / savings digest / team report built from counters, not prompt text'),
+    'toolkit/adapters/ollama.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'tools/admin.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'tools/agoragentic.py': (8, 'opt-in', 'explicit opt-in feature; text leaves by design when enabled, not traced'),
+    'tools/subscription.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'vision_registry.py': (3, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'warm.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+}
+
+
+def _scan_sinks() -> collections.Counter:
+    found: collections.Counter = collections.Counter()
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        rel = path.relative_to(SRC).as_posix()
+
+        def visit(node, stack):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                stack = stack + [node.name]
+            if isinstance(node, ast.Call):
+                f = node.func
+                dotted = ast.unparse(f)
+                name = f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else None
+                if name and name.lstrip("_") in SINK_NAMES:
+                    name = name.lstrip("_")  # `from ... import execute_chain as _execute_chain`
+                hit = None
+                if name in SINK_NAMES or name in SINK_SDK:
+                    hit = name
+                elif name in ("Client", "AsyncClient", "ClientSession") and any(m in dotted for m in SINK_HTTP_MODULES):
+                    hit = name
+                elif (name in SINK_HTTP_VERBS and isinstance(f, ast.Attribute)
+                      and (any(dotted.startswith(m + ".") for m in SINK_HTTP_MODULES)
+                           or re.search(r"(^|\.)(client|http|session|_client)$", ast.unparse(f.value)))):
+                    hit = "http." + name
+                elif name == "create" and re.search(r"(messages|completions|responses)\.create$", dotted):
+                    hit = "sdk.create"
+                elif (dotted.split(".")[0] == "subprocess" and name in {"run", "Popen", "check_output", "check_call", "call"}
+                      and MODEL_CLI.search(ast.dump(node))):
+                    hit = "subprocess." + name
+                elif name == "completion" and isinstance(f, ast.Name):
+                    hit = "completion"  # a bare `from litellm import completion`
+                if hit:
+                    found[(rel, ".".join(stack) or "<module>", hit)] += 1
+            for child in ast.iter_child_nodes(node):
+                visit(child, stack)
+        visit(tree, [])
+    return found
+
+
+def classify_sinks(found: collections.Counter, funcs=None, files=None) -> list[str]:
+    funcs = SINK_FUNCS if funcs is None else funcs
+    files = SINK_FILES if files is None else files
+    problems, rest = [], collections.Counter()
+    for key, n in sorted(found.items()):
+        if key in funcs:
+            if funcs[key][0] != n:
+                problems.append(f"{key[0]}::{key[1]} {key[2]}: {n} sites, row says {funcs[key][0]}")
+        else:
+            rest[key[0]] += n
+    for key in sorted(funcs):
+        if key not in found:
+            problems.append(f"STALE sink row {key[0]}::{key[1]} {key[2]}")
+    for file, n in sorted(rest.items()):
+        if file not in files:
+            problems.append(f"UNCLASSIFIED sink in {file} ({n} call(s)): "
+                            + ", ".join(f"{k[1]}:{k[2]}" for k in sorted(found) if k[0] == file and k not in funcs))
+        elif files[file][0] != n:
+            problems.append(f"{file}: {n} unclassified sinks, row says {files[file][0]}")
+    for file in sorted(files):
+        if file not in rest:
+            problems.append(f"STALE sink file row {file}")
+    return problems
+
+
+def test_every_off_machine_sink_is_classified():
+    found = _scan_sinks()
+    assert sum(found.values()) >= 100, "the sink scan found too few sites: an empty scan passes everything"
+    assert classify_sinks(found) == []
+    assert {v[1] for v in SINK_FUNCS.values()} | {v[1] for v in SINK_FILES.values()} == {
+        "probe", "local", "primitive", "router door", "proxy", "fixed prompt", "opt-in", "LEAK"}
+
+
+def test_sink_summary_counts():
+    found = _scan_sinks()
+    by_class: collections.Counter = collections.Counter()
+    for n, cls, _why in list(SINK_FUNCS.values()) + list(SINK_FILES.values()):
+        by_class[cls] += n
+    assert sum(by_class.values()) == sum(found.values())
+    leaks = sorted({f"{k[0]}::{k[1]}" for k in SINK_FUNCS if SINK_FUNCS[k][1] == "LEAK"})
+    assert by_class["LEAK"] == 13 and len(leaks) == 11, (by_class["LEAK"], leaks)
+
+
+def test_negative_control_a_new_urlopen_call_site_fails(tmp_path, monkeypatch):
+    """A temp copy of the tree with a new urllib sink in a new file, and one in an already audited file."""
+    import shutil
+    copy = tmp_path / "llm_router"
+    shutil.copytree(SRC, copy, ignore=shutil.ignore_patterns("__pycache__", "data", "*.json", "*.gz"))
+    (copy / "new_sink.py").write_text(
+        "import urllib.request\n\ndef leak(prompt):\n"
+        "    req = urllib.request.Request('https://example.invalid', data=prompt.encode())\n"
+        "    return urllib.request.urlopen(req)\n")
+    with open(copy / "stats.py", "a") as fh:
+        fh.write("\n\ndef extra(u):\n    import urllib.request\n    return urllib.request.urlopen(u)\n")
+    monkeypatch.setitem(globals(), "SRC", copy)
+    assert classify_sinks(_scan_sinks()) == [
+        "UNCLASSIFIED sink in new_sink.py (1 call(s)): leak:urlopen",
+        "stats.py: 2 unclassified sinks, row says 1"]
+    with pytest.raises(AssertionError):
+        assert classify_sinks(_scan_sinks()) == []
 
 
 # ------------------------------------------------------------------------------------------------ the socket trace
@@ -376,12 +607,9 @@ NO_CONTROL = {"mcp llm_text_job"}
 
 @pytest.mark.parametrize("door", sorted(DOORS))
 def test_secret_prompt_makes_no_non_loopback_connection(door, net):
-    mp = net.monkeypatch
-    out = DOORS[door](net, _secret())
+    DOORS[door](net, _secret())
     t = net.trace
     assert t.off_machine == [], f"{door}: secret prompt reached {t.off_machine}"
-    assert t.peers or isinstance(out, local_privacy.SecretLocalOnlyRefused) or out is not None, (
-        f"{door}: nothing was traced and nothing was refused; the door did not run")
     assert t.peers, f"{door}: the loopback model was never tried, so the trace proved nothing"
 
 
@@ -398,7 +626,6 @@ def test_positive_control_door_open_records_a_non_loopback_peer(door, net):
 
 
 def test_positive_control_provider_layer_marker_off_connects(net):
-    mp = net.monkeypatch
     """The provider layer alone: the marker set and ``private_dispatch_active`` real -> refused, no peer; patched to
     False -> the cloud model is dialled."""
     msgs = [{"role": "user", "content": f"explain {_secret()}"}]
@@ -411,7 +638,7 @@ def test_positive_control_provider_layer_marker_off_connects(net):
             local_privacy.reset_secret_dispatch(tok)
     out = _swallow(go())
     assert net.trace.peers == [] and out is not None
-    mp.setattr(local_privacy, "private_dispatch_active", lambda: False)
+    net.monkeypatch.setattr(local_privacy, "private_dispatch_active", lambda: False)
     _swallow(go())
     assert net.trace.off_machine == ["203.0.113.9"]
 
@@ -454,3 +681,162 @@ def test_ensemble_classifier_with_an_explicit_cloud_primary_would_leak(net):
 test_ensemble_classifier_with_an_explicit_cloud_primary_would_leak = pytest.mark.xfail(
     strict=True, reason="UN-04 finding: ensemble.local_llm_classify trusts LLM_ROUTER_ENSEMBLE_PRIMARY to be local")(
     test_ensemble_classifier_with_an_explicit_cloud_primary_would_leak)
+
+
+# ------------------------------------------------------------------------------------------------ sink leaks (UN-04b)
+# Each test below sends a generated secret through one LEAK sink and asserts the text did not leave. They fail today
+# (strict xfail, so a fix flips them to XPASS and the mark must go). Fix PR: UN-04b.
+class _FakeProc:
+    returncode = 0
+
+    def __init__(self, sink):
+        self.sink = sink
+
+    async def communicate(self, input=None):
+        if input:
+            self.sink.append(input.decode() if isinstance(input, bytes) else str(input))
+        return b"", b""
+
+    async def wait(self):
+        return 0
+
+    def kill(self):
+        pass
+
+
+@pytest.fixture
+def cli_trace(monkeypatch, tmp_path):
+    """Every model-CLI subprocess is recorded (argv and stdin) and never started."""
+    sent: list[str] = []
+
+    async def create_subprocess_exec(*argv, **kw):
+        sent.append(" ".join(str(a) for a in argv))
+        return _FakeProc(sent)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_subprocess_exec)
+    import llm_router.codex_agent as ca
+    import llm_router.gemini_cli_agent as ga
+    monkeypatch.setattr(ca, "find_codex_binary", lambda: "/nonexistent/codex")
+    monkeypatch.setattr(ga, "find_gemini_binary", lambda: "/nonexistent/gemini")
+    monkeypatch.setattr(ga, "_GEMINI_BINARY_PATH", "/nonexistent/gemini")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    return sent
+
+
+def _xfail_leak(fn):
+    return pytest.mark.xfail(strict=True, reason="UN-04 leak: a secret prompt reaches a cloud sink; fix in UN-04b")(fn)
+
+
+@_xfail_leak
+def test_leak_llm_codex_sends_a_secret_to_the_codex_cli(cli_trace, monkeypatch):
+    """tools/codex.py:27 llm_codex -> run_codex (codex CLI -> OpenAI)."""
+    from llm_router.tools import codex
+    monkeypatch.setattr(codex, "is_codex_available", lambda: True)
+    s = _secret()
+    _swallow(codex.llm_codex(prompt=f"explain {s}"))
+    assert cli_trace, "the codex runner was never reached: the test proves nothing"
+    assert not any(s in c for c in cli_trace)
+
+
+@_xfail_leak
+def test_leak_llm_gemini_sends_a_secret_to_the_gemini_cli(cli_trace, monkeypatch):
+    """tools/gemini_cli.py:28 llm_gemini -> run_gemini_cli (gemini CLI -> Google)."""
+    from llm_router.tools import gemini_cli
+    monkeypatch.setattr(gemini_cli, "is_gemini_cli_available", lambda: True)
+    s = _secret()
+    _swallow(gemini_cli.llm_gemini(prompt=f"explain {s}"))
+    assert cli_trace, "the gemini runner was never reached: the test proves nothing"
+    assert not any(s in c for c in cli_trace)
+
+
+@pytest.fixture
+def hook_net(trace, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.setenv("GEMINI_API_KEY", "k-" + "x" * 20)
+    monkeypatch.setenv("OPENAI_API_KEY", "k-" + "y" * 20)
+    return trace
+
+
+@_xfail_leak
+@pytest.mark.parametrize("provider", ["gemini", "openai"])
+def test_leak_direct_executor_sends_a_secret_to_a_cloud_api(hook_net, provider):
+    """hooks/direct_executor.py call_gemini :435 / call_openai :477, reached by hooks/agent-route.py:1360-1362
+    (execute_agent / execute_chain) and the SDK door (which has its own guard)."""
+    from llm_router.hooks import direct_executor as de
+    model = "gemini-2.5-flash" if provider == "gemini" else "gpt-4o-mini"
+    try:
+        de.execute_chain(f"explain {_secret()}", [de.ModelSpec(provider, model)], "query", timeout=2)
+    except Exception:  # noqa: BLE001
+        pass
+    assert hook_net.peers, "no connection was attempted: the test proves nothing"
+    assert hook_net.off_machine == []
+
+
+def _load_hook(name):
+    import importlib.util
+    path = SRC / "hooks" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_") + "_un04", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@_xfail_leak
+def test_leak_agent_route_direct_subagent_sends_a_secret_to_a_cloud_api(hook_net, monkeypatch):
+    """hooks/agent-route.py:1321-1362 _try_direct_subagent: build_chain (not free-tier filtered) -> execute_chain."""
+    from llm_router.hooks import chain_builder
+    from llm_router.hooks import direct_executor as de
+    mod = _load_hook("agent-route")
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")  # off by default (owner decision 2026-10-02)
+    monkeypatch.setattr(chain_builder, "build_chain", lambda *a, **k: [de.ModelSpec("gemini", "gemini-2.5-flash")])
+    monkeypatch.setattr(chain_builder, "needs_claude_tools", lambda *a, **k: False)
+    monkeypatch.setattr(chain_builder, "get_current_pressure", lambda: ("green", 5))
+    try:
+        mod._try_direct_subagent(f"explain {_secret()}", "query", "simple", "s1")
+    except Exception:  # noqa: BLE001
+        pass
+    assert hook_net.peers, "no connection was attempted: the test proves nothing"
+    assert hook_net.off_machine == []
+
+
+@_xfail_leak
+@pytest.mark.parametrize("fn", ["classify_with_gemini", "classify_with_openai"])
+def test_leak_auto_route_api_classifier_sends_a_secret_to_a_cloud_api(hook_net, monkeypatch, fn):
+    """hooks/auto-route.py classify_with_gemini / classify_with_openai: first 500 chars of every prompt, opt-in
+    (LLM_ROUTER_CLASSIFY_LOCAL_ONLY=0; the default keeps the layer off)."""
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFY_LOCAL_ONLY", "0")
+    mod = _load_hook("auto-route")
+    getattr(mod, fn)(f"explain {_secret()}")
+    assert hook_net.peers, "no connection was attempted: the test proves nothing"
+    assert hook_net.off_machine == []
+
+
+@_xfail_leak
+def test_leak_playwright_compress_sends_a_page_secret_to_gemini(hook_net):
+    """hooks/playwright-compress.py _try_gemini: the page snapshot goes to Gemini whenever GEMINI_API_KEY is set."""
+    mod = _load_hook("playwright-compress")
+    mod._try_gemini(f"page text with a token {_secret()}")
+    assert hook_net.peers, "no connection was attempted: the test proves nothing"
+    assert hook_net.off_machine == []
+
+
+@_xfail_leak
+@pytest.mark.parametrize("cli", ["codex", "gemini"])
+def test_leak_agent_route_cli_delegation_sends_a_secret_to_a_cloud_cli(cli_trace, monkeypatch, cli):
+    """hooks/agent-route.py:1678 / :1882 _try_cli_delegation (default ON): a subagent prompt goes to the codex or
+    gemini CLI with no secret check."""
+    import llm_router.codex_agent as ca
+    import llm_router.gemini_cli_agent as ga
+    from llm_router.hooks import chain_builder
+    mod = _load_hook("agent-route")
+    monkeypatch.setattr(chain_builder, "needs_claude_tools", lambda *a, **k: True)
+    monkeypatch.setattr(ca, "is_codex_available", lambda: cli == "codex")
+    monkeypatch.setattr(ga, "is_gemini_cli_available", lambda: cli == "gemini")
+    s = _secret()
+    try:
+        mod._try_cli_delegation(f"fix {s}", "code", "complex", "s1")
+    except Exception:  # noqa: BLE001
+        pass
+    assert cli_trace, "no CLI was started: the test proves nothing"
+    assert not any(s in c for c in cli_trace)
