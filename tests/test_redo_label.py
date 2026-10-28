@@ -693,6 +693,43 @@ def test_owner_done_marker_only_after_the_whole_pass(make_run):
     assert record["n_labelled"] == 30 and record["others"] == 20
 
 
+def test_owner_screen_shows_the_label_definition(make_run):
+    """RLUI: the owner pressed y on 25/25 pairs twice after misreading what y means; every screen now
+    states the y/n definition above the key prompt."""
+    run = make_run(n=2)
+    rc, output = run_tui(owner_args(), ["n", "n"], run.env)
+    assert rc == 0 and output.count(MARKER) == 2
+    flat = b" ".join(output.split())
+    y_line = (b"y = THIS MESSAGE says the previous answer was wrong or incomplete and asks to fix, "
+              b"redo or retry it")
+    n_line = b"n = anything else: new task, follow-up question, 'keep going', approval, thanks"
+    assert flat.count(y_line) == flat.count(n_line) == 2
+    screens = flat.split(b"[y] redo [n] not redo [u] unclear [q] quit >")[:-1]
+    assert len(screens) == 2                      # each screen: blocks, then the definition, then keys
+    assert all(screen.rfind(b"THIS MESSAGE:") < screen.rfind(y_line) < screen.rfind(n_line)
+               for screen in screens)
+
+
+@pytest.mark.parametrize("key, shown", [("n", b"n (not redo)"), ("y", b"y (redo)")])
+def test_all_identical_owner_pass_warns_but_records_as_given(make_run, key, shown):
+    run = make_run(n=30)                          # 10 F pairs and 20 S/R pairs
+    rc, output = run_tui(owner_args(20), [key] * 30, run.env)
+    flat = b" ".join(output.split())
+    assert rc == 0 and b"WARNING: all 30 owner labels in this pass are " + shown in flat
+    assert b"llm-router redo-label --run run1 --owner --others 20" in flat
+    assert b"owner pass complete: n_labelled=30 spot_checks=20" in flat
+    record = json.loads((run.run_dir / "owner_done.json").read_text())
+    assert record["n_labelled"] == 30
+    assert {r["label"] for r in owner_rows(run)} == {"redo" if key == "y" else "not_redo"}
+
+
+def test_mixed_owner_pass_prints_no_warning(make_run):
+    run = make_run(n=30)
+    rc, output = run_tui(owner_args(20), ["y"] + ["n"] * 29, run.env)
+    assert rc == 0 and b"owner pass complete: n_labelled=30" in output
+    assert b"WARNING" not in output
+
+
 @pytest.mark.parametrize("others", [0, 1])
 def test_owner_pass_without_the_spot_check_minimum_writes_no_marker(make_run, others):
     """Design section 3 step 2: every F pair plus 20 S/R spot checks. --others 0 or 1 labels the F pairs
