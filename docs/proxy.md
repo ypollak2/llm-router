@@ -103,8 +103,10 @@ client tools are never routed.
 - **Backend health.** On 2026-09-30 the dedicated Ollama server's Metal
   backend ran out of GPU memory under swap pressure (`command buffer 0 failed
   with status 5`, `kIOGPUCommandBufferCallbackErrorOutOfMemory`). Until it was
-  restarted, every step got an empty reply in ~0.1 s (29/29 empties in that
-  A/B came from those windows; 0/24 while healthy), and every one fell back.
+  restarted, every step got an immediate empty reply (the empties in the
+  2026-09-30 A/B came from those windows; report
+  `~/.rsi/research/llm-router-cursor-parity/p3-compaction-ab.md`, see below),
+  and every one fell back.
   Per proxy process, per serving model (`llm_router.proxy.backend_health`):
   `LLM_ROUTER_PROXY_BACKEND_FAIL_N` consecutive empty or sub-second invalid
   replies, or one crash signature in an Ollama error, stop local serving for
@@ -115,9 +117,11 @@ client tools are never routed.
   nor reset the streak.
 - **Step-budget cancel.** A step that misses the budget closes its Ollama
   connection and Ollama cancels the request. The Metal faults were checked
-  against this: in the 2026-09-30 logs 2 of 12 budget cancels were followed by
-  a fault, and both cancelled requests had processed only 650 of ~4.4k prompt
-  tokens in 30 s, so the GPU was already starved; the 2026-09-28 fault began
+  against the 2026-09-30 server logs: only a minority of budget cancels were
+  followed by a fault, and those cancelled requests had processed only a small
+  part of their prompt within the step budget, so the GPU was already starved
+  (no log file or script for this check is in the repo, so no figure is given);
+  the 2026-09-28 fault began
   mid-prefill with no cancel before it. The fault is GPU memory, not the
   cancel, so the cancel is unchanged. Letting a cancelled request finish would
   keep a starved GPU busy and queue the next step behind it.
@@ -235,8 +239,8 @@ serving path to `llm_router.local_agent`:
   serving model, so a dedicated server needs `OLLAMA_MAX_LOADED_MODELS=2`
   (with `1`, every embed call evicts the 20 GB model).
 - **Edits.** An `Edit`/`Write`/`MultiEdit`/`NotebookEdit` reply from the raw
-  tool-call loop is **never served, with or without `--local-agent`** (0/20
-  edits passed through that loop on fixtures). With `--local-agent`, a
+  tool-call loop is **never served, with or without `--local-agent`** (edits
+  through that loop failed on the fixtures tried; no result file is in the repo). With `--local-agent`, a
   single-file `Edit` whose target the session has read and that has no
   uncommitted changes goes through `llm_router.edit`'s validated protocol
   (JSON instructions, exact-once match against the file on disk, syntax gate,
@@ -281,8 +285,8 @@ llm-router proxy --serve local-agent --model ollama/qwen3.6:35b-a3b-coding --oll
 ANTHROPIC_BASE_URL=http://127.0.0.1:8787 ENABLE_TOOL_SEARCH=true claude
 ```
 
-Why it exists: the 2026-10-04 route probes found that the stock proxy served 0 of 9 Claude Code steps
-locally (the first call of every turn always went to Anthropic, the routing policy could keep a step on
+Why it exists: the 2026-10-04 route probes found that the stock proxy served no Claude Code step
+locally (no result file for those probes is in the repo; the first call of every turn always went to Anthropic, the routing policy could keep a step on
 Claude, and an Edit/Write reply was never served), and that the default `fast` trim hides Skill, Agent, MCP
 and ToolSearch from the local model. This mode makes the three in-memory patches of that experiment real, for
 this mode only:
@@ -298,8 +302,9 @@ start (a restart, `/compact`) is pinned to Claude and never moved local. A local
 conversation to Claude once, with the reason in the ledger.
 
 **Eligibility** (`decide_local`, a rule stub the resolver will replace): no media anywhere in the conversation;
-estimated prompt <= 25,000 tokens (a digit-aware estimate fitted to real Ollama counts, within 1.02-1.21x of them on 7 payloads;
-`local_context_guard`'s chars/3.04 is 1.4x high on JSON tool schemas and 0.90x low on a 450-line log, so it stays the 32k window
+estimated prompt <= 25,000 tokens (a digit-aware estimate fitted to real Ollama counts, within 1.02-1.21x of them on 7 payloads on
+2026-10-05, recorded in the estimator comment in `src/llm_router/proxy/local_mode.py` and `tests/test_proxy_local_mode.py::CALIBRATION`;
+`local_context_guard`'s chars/3.04 is 1.4x high on JSON tool schemas and 0.90x low on a 450-line log (same comment), so it stays the 32k window
 backstop in the backend instead); no media anywhere; backend healthy; quality breaker closed.
 
 **Never silent.** Every step not served locally has a ledger `reason` and `egress: true`, and prints one line on
@@ -314,7 +319,7 @@ and resident with `num_ctx >= 32768` (it is loaded first if absent); the Ollama 
 `OLLAMA_NUM_PARALLEL` is 1 (read from its process environment, so only a loopback server can be checked) and
 no runner has `-np` other than 1; `--trim none` (the default in this mode); `--tiers off`; compaction off; the
 overflow guard passes a self-test; the ledger and kill-switch directories are writable. In this mode the first-token
-hedge defaults to off and the step budget to 120 s (a conversation's first call evaluates a ~12k-token prompt).
+hedge defaults to off and the step budget to 120 s (a conversation's first call evaluates a large prompt).
 
 Not in this mode (later redesign PRs): thinking passthrough, images served locally, `--no-egress`, the ToolSearch
 loop-guard fix, AskUserQuestion repair, sub-agent inheritance.
@@ -423,7 +428,8 @@ Those turns stay `claude_main_call` units, with lever `proxy`, and are judged
 
 A forwarded call can be sent to a cheaper Claude tier by rewriting
 `body["model"]`. All Claude tiers share one API schema, so client tools stay
-native. The Phase 0.4 probe (2026-09-29, n=5 calls per model) found Max quota
+native. The Phase 0.4 probe (2026-09-29, n=5 calls per model;
+`~/.rsi/research/llm-router-cursor-parity/max-quota-probe.md`) found Max quota
 is one shared weekly pool that drains in proportion to per-call cost. Moving a
 call down a tier therefore drains the pool more slowly, **but only if the
 conversation is not paying to re-write its prompt cache on the new tier**.
@@ -469,16 +475,16 @@ conversation is not paying to re-write its prompt cache on the new tier**.
   (`off` / `on` / `conversation`), so a ledger spanning both A/B arms can be
   split without relying on the port a session ran on.
 
-Measured so far (per-turn mode, `on`): the live smoke of 2026-09-29 (3 golden
-fixture tasks, real `claude -p --model opus`, 23 calls) ran with
+Measured so far (per-turn mode, `on`): the live smoke of 2026-09-29 (golden
+fixture tasks, real `claude -p --model opus`) ran with
 `switch_after_first_call: true` (execute on Sonnet after an Opus first call).
-All 3 tasks passed. Anthropic replied with the rewritten model on 8 of 8
-rewritten calls. The estimated cost was **$1.07 against $0.78 on all-Opus**, a
-net loss: each of the 3 switches re-wrote 25-34k prefix tokens on Sonnet, and
-Opus 5.5 and Sonnet 5.5 read cache at the same rate. That handoff is therefore
-off by default. With the default policy, a single-prompt task stays on its
-first-call model (replay: 22/22 calls on Opus, 0 switches), so the rewrite
-only takes effect after a cold gap or a complexity change.
+The tasks passed and Anthropic honoured the rewritten model, but the estimated
+cost was **higher than all-Opus**, a net loss: each switch re-wrote the whole
+cached prefix on Sonnet, and Opus 5.5 and Sonnet 5.5 read cache at the same
+rate. No result file for that smoke is in the repo, so no figure is given. That
+handoff is therefore off by default. With the default policy, a single-prompt
+task stays on its first-call model (in replay it never switched), so the
+rewrite only takes effect after a cold gap or a complexity change.
 
 ### Haiku guard (`proxy/haiku_guard.py`): `haiku_rewrite` turns itself off
 
@@ -781,10 +787,10 @@ the state dir and replays the frozen main golden with `LLM_ROUTER_SHADOW_FRONTIE
 ### Key finding (1.2): per-turn switching does not pay; conversation-level might
 
 Per-turn tier switching loses money under prompt caching: a switch mid-task
-re-writes the whole cached prefix (25-34k tokens in the smoke above), and
+re-writes the whole cached prefix (see the smoke above), and
 Opus 5.5 and Sonnet 5.5 read cache at the SAME rate ($0.20/M), so only output
-and genuinely new content get cheaper after a switch -- a few tenths of a
-cent a call, never enough to earn back a 3-6 call task's re-write. The
+and genuinely new content get cheaper after a switch -- a small saving per
+call, never enough to earn back a short task's re-write. The
 conclusion was not "tiering doesn't work," it was "tiering pays only when the
 tier is chosen once, at the conversation's start" -- which is what
 `--tiers conversation` (Phase 1.2b) does: classify the first human prompt,
@@ -796,8 +802,7 @@ the paired A/B that gates making this the default.
 ## Cost accounting: real Anthropic spend (`proxy.cost_accounting`)
 
 Claude Code's own `total_cost_usd` is **phantom** on a proxied session: it prices locally
-served tokens at list price (2026-10-03: $21.09 over 178 trials against a real spend of
-$0). The ledger is the source of truth. Every row carries `served_by` (`local` |
+served tokens at list price, although Anthropic charges nothing for them. The ledger is the source of truth. Every row carries `served_by` (`local` |
 `anthropic`), `anthropic_usage` (the real usage with the cache read/write split; all zeros
 when local, `null` when unknown), `anthropic_cost_usd` and `counterfactual_cost_usd` (a
 step-level estimate on the requested model; not summed). `proxy_session_cost()` gives per
@@ -898,7 +903,7 @@ next session. Measured 2026-10-07 (claude 2.1.292, `--setting-sources
 project,local`, base URL on a smoke port): with nothing listening, `claude -p`
 retried for 222.85 s and failed with `API Error: Connection refused` (n = 1);
 through the shim with the main proxy killed, 10/10 sessions answered and 10
-`proxy_down` rows were written (docs/BUGS.md P010-1).
+`proxy_down` rows were written (docs/bugs/P010-1.md).
 
 The shim imports neither `proxy/server.py` nor its dependencies, so a broken
 main-proxy deploy cannot take it down. It uses httpx for the upstream leg

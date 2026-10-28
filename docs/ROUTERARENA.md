@@ -26,12 +26,21 @@ including our first entry, fall over.
 
 ## Results
 
-Full split, 8,400 queries, graded locally with this repo's harness. Source:
-[`submissions/routerarena/PR_BODY.md`](../submissions/routerarena/PR_BODY.md), with the
-8,400-row predictions in `submissions/routerarena/llm-router-knn.json` and the 420-row
-robustness predictions in `submissions/routerarena/llm-router-knn-robustness.json`.
-The grading run is not dated in the repo; these files entered `main` on 2026-10-07
-(commit `da31df7e`), so every figure in this section is from that date or earlier.
+Full split, 8,400 queries, graded locally with this repo's harness. Which file
+holds which figure:
+
+- The Arena Score, accuracy, cost per 1K queries, robustness (with its flip count),
+  and the previous entry's figures (71.26, 30.00, 294 of 420) are stated only in
+  the write-up [`submissions/routerarena/PR_BODY.md`](../submissions/routerarena/PR_BODY.md).
+  No grader output that reproduces them is in this repo.
+- The query count and the routed-model shares can be recounted from the
+  8,400-row predictions file `submissions/routerarena/llm-router-knn.json`. Its
+  `accuracy` and `cost` fields are empty, so it does not confirm the scores. The
+  420 paraphrase pairs are the rows of `submissions/routerarena/llm-router-knn-robustness.json`.
+
+The grading run is not dated in the repo. These files entered `main` on
+2026-09-15 (commit `ccee00db`), so every figure in this section is from that
+date or earlier.
 
 | Metric | Value |
 |---|---|

@@ -145,11 +145,8 @@ number exists when the run ends.
 bypasses them (`CONTINUATION: bypass to host agent`). Counting them as misses
 makes the router look worse for doing the right thing.
 
-Measured 2026-09-14 on the session replay (`scripts/bench_session_replay.py`): 10 of 115 prompts were bare
-acknowledgements. Including them understated BOTH runs by about four points:
-
-    all prompts     baseline 76% drafts / 66% acceptable -> after 77% / 72%
-    routable only   baseline 80% / 70%                   -> after 81% / 76%
+Found 2026-09-14 on the session replay: some of the replayed prompts were bare
+acknowledgements, and counting them understated BOTH runs.
 
 The comparison is unaffected — both runs were understated equally — but the
 absolute number was wrong, and it is the absolute number that gets quoted.
@@ -160,10 +157,10 @@ hook-injected text were being replayed as if the user had typed them.
 
 ### A miss with no recorded reason is a hole in the instrument
 
-The same run reported 8 of 115 misses as "no reason logged" — 7% of prompts
-vanishing unexplained, while 6-point differences were being argued over. Seven
-were the deliberate CONTINUATION bypass and one was transient; none was a router
-defect. The bench read only two of the hook nine terminal outcomes.
+The same run reported some misses as "no reason logged" — prompts vanishing
+unexplained while differences of a few points were being argued over. Almost all
+were the deliberate CONTINUATION bypass and the rest were transient; none was a
+router defect. The bench read only two of the hook's nine terminal outcomes.
 
 When a measurement cannot explain an outcome, fix the measurement before trusting
 any number it produces.
@@ -194,7 +191,7 @@ Two rules follow:
 
 This was the fifth measurement defect in two days, after the contaminated corpus,
 the survivorship-biased p90, the partial rate quoted as final, and the instrument
-that could not explain 7% of its own outcomes. Every one inflated or deflated a
+that could not explain some of its own outcomes. Every one inflated or deflated a
 number that had already been reported.
 
 
