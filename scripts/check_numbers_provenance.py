@@ -26,8 +26,8 @@ is a heuristic, so a miss is silenced with an inline escape:
 on the unit, or `<!-- provenance: exempt-file (reason) -->` anywhere in a file
 whose figures all come from a named generator (honoured under docs/ only; in
 README.md and changelog.d/ it is ignored). The reason is mandatory. Fenced code blocks, inline code spans, URLs and HTML
-comments are not scanned for numbers. CHANGELOG.md is released history and is
-out of scope.
+comments are not scanned for numbers. CHANGELOG.md, docs/releases/, docs/prereg/ and docs/archive/ are released or
+frozen history and are out of scope.
 
 Ratchet note: a baseline key is path + hash of the unit text + occurrence number,
 so a pasted copy of a baselined unit is new. Editing a baselined unit changes its
@@ -47,14 +47,18 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 BASELINE_NAME = "scripts/numbers_provenance_baseline.json"
 
 SCOPE_GLOBS = ("README.md", "docs/**/*.md", "changelog.d/*.md")
+# Released or frozen history is out of scope by path (like CHANGELOG.md).
+EXCLUDE_PREFIXES = ("docs/releases/", "docs/prereg/", "docs/archive/")
 
 # --- result-shaped numbers -------------------------------------------------
 _NUM = r"\d[\d,]*(?:\.\d+)?"
@@ -206,7 +210,7 @@ def scan_tree(root: Path):
     for pattern in SCOPE_GLOBS:
         for path in sorted(root.glob(pattern)):
             rel = path.relative_to(root).as_posix()
-            if rel in seen or not path.is_file():
+            if rel in seen or not path.is_file() or rel.startswith(EXCLUDE_PREFIXES):
                 continue
             seen.add(rel)
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -254,7 +258,16 @@ def main(argv=None) -> int:
             {k: f[k] for k in ("key", "path", "line", "why", "text")} for f in findings
         ]
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
-        baseline_path.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+        # os.write + os.replace, not write_text: a committed file, not state, and
+        # tests/test_w04_state_file_modes.py ratchets raw open-for-write sites.
+        data = (json.dumps({"entries": entries}, indent=2) + "\n").encode("utf-8")
+        fd, tmp = tempfile.mkstemp(dir=baseline_path.parent, prefix=".numbers-")
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, baseline_path)
         print(f"wrote {len(entries)} baseline entries ({nfiles} files scanned)")
         return 0
 
