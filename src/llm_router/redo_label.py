@@ -572,13 +572,16 @@ def _owner_text(text, width):
 
 
 def _owner_definition(width):
-    """LABEL_DEFINITION wrapped to ``width``: prose lines as they are, each table row (separator
-    dropped) as ``case -> y`` with a hanging indent. Words are never split."""
+    """LABEL_DEFINITION wrapped to ``width``: prose lines as they are, each case row (header and
+    separator dropped) as ``case -> y`` with a hanging indent. Words are never split."""
     lines = []
+    header_seen = False
     for line in LABEL_DEFINITION.split("\n"):
         if line.startswith("|"):
             cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-            if not set("".join(cells)) <= set("-: "):
+            if not header_seen:
+                header_seen = True
+            elif not set("".join(cells)) <= set("-: "):
                 lines.append(textwrap.fill(f"{cells[0]} -> {cells[1]}", width=max(10, width),
                                            initial_indent="  ", subsequent_indent="      ",
                                            break_long_words=False, break_on_hyphens=False))
@@ -590,14 +593,18 @@ def _owner_definition(width):
 
 def _owner_screen(stdout, view, position, total, labelled):
     width = shutil.get_terminal_size().columns
-    parts = [f"Pair {position} of {total} (labelled so far: {labelled})"]
+    parts = []
     for title, text in (("PREVIOUS PROMPT (start):", view.prev_head),
                         ("PREVIOUS ANSWER (end):", view.answer_tail),
                         ("THIS MESSAGE:", view.prompt)):
         parts.extend((title, text))
-    stdout.write("\x1b[2J\x1b[H" + "\n\n".join(
-        _owner_text(part, width) for part in parts) + "\n\n"
-        + _owner_definition(width) + "\n\n" + OWNER_KEYS + "\n")
+    # The definition goes first, so on a short terminal it scrolls off before THIS MESSAGE does;
+    # the message being labelled stays next to the keys.
+    stdout.write("\x1b[2J\x1b[H"
+                 + _owner_text(f"Pair {position} of {total} (labelled so far: {labelled})", width)
+                 + "\n\n" + _owner_definition(width) + "\n\n"
+                 + "\n\n".join(_owner_text(part, width) for part in parts)
+                 + "\n\n" + OWNER_KEYS + "\n")
     stdout.write("[y] redo  [n] not redo  [u] unclear  [q] quit  > ")
     stdout.flush()
 

@@ -700,8 +700,8 @@ def _flat(data):
 
 def test_owner_screen_shows_the_label_definition(make_run):
     """RLUI: the owner pressed y on 25/25 pairs twice after misreading what y means. Every screen now
-    shows the judge's LABEL_DEFINITION (its prose and every table row) and the key map, after THIS MESSAGE
-    and before the key prompt."""
+    shows the judge's LABEL_DEFINITION (its prose and every case row) above PREVIOUS PROMPT, and the key
+    map after THIS MESSAGE, right before the key prompt."""
     run = make_run(n=2)
     rc, output = run_tui(owner_args(), ["n", "n"], run.env)
     assert rc == 0 and output.count(MARKER) == 2
@@ -709,19 +709,22 @@ def test_owner_screen_shows_the_label_definition(make_run):
     prose = [line for line in lines if line.strip() and not line.startswith("|")]
     rows = [[cell.strip() for cell in line.strip().strip("|").split("|")]
             for line in lines if line.startswith("|")]
-    rows = [cells for cells in rows if not set("".join(cells)) <= set("-: ")]
-    assert prose and len(rows) == 12              # header plus 11 cases
+    rows = [cells for cells in rows[1:] if not set("".join(cells)) <= set("-: ")]
+    assert prose and len(rows) == 11              # the 11 cases; the header row is not shown
     expected = [_flat(text.encode()) for text in prose]
     expected += [_flat(f"{case} -> {y}".encode()) for case, y in rows]
-    expected.append(b"keys: y = 1 (redo) n = 0 (not redo) u = unclear q = quit")
+    expected.append(b"PREVIOUS PROMPT (start):")
     screens = _flat(output).split(b"[y] redo [n] not redo [u] unclear [q] quit >")[:-1]
     assert len(screens) == 2
     for screen in screens:
-        tail = screen[screen.rfind(b"THIS MESSAGE:"):]
-        positions = [tail.find(text) for text in expected]
+        head = screen[screen.rfind(b"Pair "):]
+        positions = [head.find(text) for text in expected]
         assert all(position > 0 for position in positions), [
             text for text, position in zip(expected, positions) if position <= 0]
         assert positions == sorted(positions)
+        assert b"Case -> y" not in head
+        tail = screen[screen.rfind(b"THIS MESSAGE:"):]
+        assert tail.rstrip().endswith(b"keys: y = 1 (redo) n = 0 (not redo) u = unclear q = quit")
 
 
 @pytest.mark.parametrize("key, shown", [("n", b"n = 0 (not redo)"), ("y", b"y = 1 (redo)")])
