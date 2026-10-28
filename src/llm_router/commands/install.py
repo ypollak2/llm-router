@@ -319,7 +319,7 @@ _UNSUPPORTED_HOSTS = {
 }
 
 
-def _run_install(flags: list[str]) -> None:
+def _run_install(flags: list[str]) -> InstalledHosts | None:
     # --host <name> is handled before the regular install path — it prints
     # config snippets only (no file modifications to external tools).
     if "--host" in flags:
@@ -531,19 +531,78 @@ def _receipt_hook_files(host: str) -> dict[str, Path]:
     return {src: dst for src, dst in files.items() if (ih._HOOKS_SRC / src).exists()}
 
 
-def wired_row(host: str, via: str, hook_files: dict[str, Path] | None = None) -> dict:
-    """Row for a host whose installer returned. ``hook_files`` (source name -> installed path)
-    defaults to where run_full's installer writes; a caller that wires hooks elsewhere (the
-    plugin) passes its own. A hook file missing after install makes the row ``error``."""
+def _receipt_registry(host: str) -> Path | None:
+    """The JSON file in which run_full's installer for ``host`` registers its hook commands."""
+    from llm_router import install_hooks as ih
+
+    if host == "claude-code":
+        return ih.settings_path()
+    if host == "codex":
+        return Path.home() / ".codex" / "hooks.json"
+    if host == "gemini-cli":
+        return Path.home() / ".gemini" / "extensions" / "llm_router" / "hooks" / "hooks.json"
+    if host == "claw-code":
+        cc_dir = ih._claw_code_dir()
+        return cc_dir / "settings.json" if cc_dir is not None else None
+    return None
+
+
+def _json_strings(node):
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for v in node.values():
+            yield from _json_strings(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _json_strings(v)
+
+
+def _unregistered(files: dict[str, Path], registry: Path) -> list[str]:
+    """Source names whose installed path appears in no string of the registry JSON (every
+    installer registers a command that contains the hook's installed path)."""
+    import json
+
+    try:
+        strings = list(_json_strings(json.loads(registry.read_text(encoding="utf-8"))))
+    except (OSError, ValueError):
+        strings = []
+    return sorted(src for src, dst in files.items() if not any(str(dst) in s for s in strings))
+
+
+_DEFAULT_REGISTRY = object()
+
+
+def wired_row(host: str, via: str, hook_files: dict[str, Path] | None = None,
+              registry: Path | None | object = _DEFAULT_REGISTRY) -> dict:
+    """Row for a host whose installer returned.
+
+    ``wired`` means every hook file is installed (its version is read back into
+    ``hook_version``) AND registered: its installed path appears in a command in the host's
+    registry JSON (Claude Code / claw-code settings.json, ~/.codex/hooks.json, the Gemini CLI
+    extension hooks.json). A missing or unregistered hook makes the row ``error``.
+
+    ``hook_files`` (source name -> installed path) defaults to where run_full's installer
+    writes, and ``registry`` to that installer's registry file. A caller that wires hooks
+    elsewhere (the plugin, P212-3) passes its own ``hook_files`` and, if nothing to check,
+    ``registry=None``. Key ``hook_files`` by the SOURCE names in ``install_hooks._HOOK_DEFS``
+    (e.g. ``auto-route.py``, not ``llm_router-auto-route.py``): the digest compares
+    ``hook_version`` by key, so other keys never match the CLI install."""
     from llm_router.install_hooks import _hook_version
 
     files = _receipt_hook_files(host) if hook_files is None else hook_files
+    if registry is _DEFAULT_REGISTRY:
+        registry = _receipt_registry(host) if hook_files is None else None
     versions = {src: _hook_version(dst) for src, dst in sorted(files.items()) if dst.is_file()}
     missing = sorted(set(files) - set(versions))
+    row = {"status": "wired", "reason": None, "via": via, "hook_version": versions or None}
     if missing:
-        return {"status": "error", "reason": f"hook missing after install: {', '.join(missing)}",
-                "via": via, "hook_version": versions or None}
-    return {"status": "wired", "reason": None, "via": via, "hook_version": versions or None}
+        return {**row, "status": "error", "reason": f"hook missing after install: {', '.join(missing)}"}
+    unregistered = _unregistered(files, registry) if files and registry is not None else []
+    if unregistered:
+        return {**row, "status": "error",
+                "reason": f"hook not registered in {registry}: {', '.join(unregistered)}"}
+    return row
 
 
 def error_row(via: str | None, exc: BaseException) -> dict:
@@ -587,9 +646,16 @@ def write_receipt(receipt: dict, path: Path | None = None) -> Path:
 
     path = path or receipt_path()
     tmp = path.with_name(path.name + ".tmp")
-    with state_files.open_private(tmp, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
-    os.replace(tmp, path)
+    try:
+        with state_files.open_private(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        if tmp.exists():
+            tmp.unlink()  # a failure here propagates as the OSError the caller records
+        raise
     return path
 
 
@@ -634,6 +700,16 @@ def receipt_line(receipt: dict) -> str:
             f"version={receipt.get('package_version')}")
 
 
+def _host_failed(host: str, label: str, via: str | None, exc: BaseException) -> dict:
+    """An installer that raised: record it (failopen), say so on stderr (npm and MCP callers
+    keep stdout for the receipt line), and return its ``error`` row."""
+    from llm_router import failopen
+
+    failopen.record("P212-INSTALL-HOST-FAILED", exc, detail=host)
+    print(_fail(f"{label}: install failed: {type(exc).__name__}: {exc}"), file=sys.stderr)
+    return error_row(via, exc)
+
+
 def run_full(interactive: bool = True, flags: list[str] | None = None, *,
              schedule: dict | None = None) -> InstalledHosts:
     """Install globally and return the labels of hosts wired by this run (a list), with the
@@ -659,8 +735,7 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
         actions = install()
     except Exception as exc:  # noqa: BLE001 -- P2.12: a failing host is an error row, not an abort
         actions = []
-        rows["claude-code"] = error_row("settings", exc)
-        print(_fail(f"Claude Code: install failed: {exc}"))
+        rows["claude-code"] = _host_failed("claude-code", "Claude Code", "settings", exc)
     else:
         rows["claude-code"] = wired_row("claude-code", "settings")
     for a in actions:
@@ -676,8 +751,7 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
             cc_actions = install_claw_code()
         except Exception as exc:  # noqa: BLE001 -- see claude-code above
             cc_actions = []
-            rows["claw-code"] = error_row("settings", exc)
-            print(_fail(f"claw-code: install failed: {exc}"))
+            rows["claw-code"] = _host_failed("claw-code", "claw-code", "settings", exc)
         else:
             skipped = bool(cc_actions) and cc_actions[0].startswith("SKIP claw-code")
             rows["claw-code"] = (not_wired_row(cc_actions[0][len("SKIP "):]) if skipped
@@ -714,8 +788,7 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
                 try:
                     host_actions = install_fn()
                 except Exception as exc:  # noqa: BLE001 -- see claude-code above
-                    rows[host_id] = error_row("files", exc)
-                    print(_fail(f"{label}: install failed: {exc}"))
+                    rows[host_id] = _host_failed(host_id, label, "files", exc)
                     continue
                 for a in host_actions:
                     ok = a.lstrip().startswith("✓")

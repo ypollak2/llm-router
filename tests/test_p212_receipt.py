@@ -145,8 +145,10 @@ def test_negative_control_a_raising_installer_is_an_error_row(home, monkeypatch,
     assert receipt["hosts"]["gemini-cli"]["status"] == "wired"  # one failure does not abort the rest
     failures = install.receipt_failures(receipt)
     assert failures == ["codex: error: RuntimeError: codex config.toml is read-only"]
-    out = capsys.readouterr().out
-    assert "install finished with errors" in out and "hosts=2/3" in out
+    cap = capsys.readouterr()
+    assert "install finished with errors" in cap.out and "hosts=2/3" in cap.out
+    # npm / MCP callers keep the diagnosis: stderr, not only the stdout stream
+    assert "Codex CLI: install failed: RuntimeError: codex config.toml is read-only" in cap.err
 
 
 def test_negative_control_a_missing_hook_file_is_an_error_row(home, monkeypatch):
@@ -167,6 +169,52 @@ def test_negative_control_a_missing_hook_file_is_an_error_row(home, monkeypatch)
         "gemini-cli: error: hook missing after install: gemini-cli-auto-route.py"]
 
 
+def test_negative_control_an_unregistered_hook_is_an_error_row(home):
+    """Codex with an invalid ~/.codex/hooks.json: the installer copies the hook scripts but
+    registers none ("hooks not installed"). Files alone must not make the row ``wired``."""
+    _add_host(home, "codex")
+    (home / ".codex" / "hooks.json").write_text("{not json")
+
+    receipt = install.run_full(interactive=False).receipt
+
+    row = receipt["hosts"]["codex"]
+    assert row["status"] == "error" and row["hook_version"] == _bundled("codex"), row
+    assert row["reason"] == (f"hook not registered in {home / '.codex' / 'hooks.json'}: "
+                             "auto-route.py, codex-post-tool.py, codex-stop.py")
+    assert install.receipt_failures(receipt) == [f"codex: error: {row['reason']}"]
+    assert receipt["hosts"]["claude-code"]["status"] == "wired"
+
+
+def _quickstart(monkeypatch, receipt) -> None:
+    from llm_router import quickstart
+
+    monkeypatch.setattr(sys, "argv", ["llm-router-quickstart"])
+    monkeypatch.setattr(quickstart, "detect_hosts", lambda: ["claude"])
+    monkeypatch.setattr(quickstart, "_has_any_api_key", lambda: True)
+    monkeypatch.setattr(quickstart, "_has_ollama", lambda: False)
+    monkeypatch.setattr(quickstart, "_ask_yes", lambda *a, **k: False)  # no live test call
+    monkeypatch.setattr(install, "_run_install", lambda flags: install.InstalledHosts([], receipt))
+    quickstart.main()
+
+
+def test_quickstart_prints_the_manual_fallback_when_a_host_failed(monkeypatch, capsys):
+    """Review of #768: before the receipt, a raising host installer reached quickstart's
+    ``except`` and printed the manual command; as an error row it must still do so."""
+    receipt = install.build_receipt({"claude-code": install.error_row("settings", OSError("disk full"))})
+    _quickstart(monkeypatch, receipt)
+    out = capsys.readouterr().out
+    assert "✓ claude configured" not in out
+    assert "⚠ Could not auto-install for claude: claude-code: error: OSError: disk full" in out
+    assert "Manual: llm-router install --host claude" in out
+
+
+def test_quickstart_reports_configured_on_a_clean_receipt(monkeypatch, capsys):
+    row = {"status": "wired", "reason": None, "via": "settings", "hook_version": {"auto-route.py": 1}}
+    _quickstart(monkeypatch, install.build_receipt({"claude-code": row}))
+    out = capsys.readouterr().out
+    assert "✓ claude configured" in out and "Could not auto-install" not in out
+
+
 def test_checker_is_red_on_a_missing_or_wrong_receipt(home):
     install.run_full(interactive=False)
     good = install.read_receipt()
@@ -181,6 +229,25 @@ def test_checker_is_red_on_a_missing_or_wrong_receipt(home):
     tampered = json.loads(json.dumps(good))
     tampered["hosts"]["claude-code"]["hook_version"]["auto-route.py"] = 1
     assert install.receipt_failures(tampered) == ["install receipt digest does not match its rows"]
+
+
+def test_failed_receipt_write_leaves_no_tmp_file(home, monkeypatch):
+    from llm_router import state_files
+
+    target = install.receipt_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    real_open = state_files.open_private
+
+    def half_write(path, mode="a", **kw):
+        fh = real_open(path, mode, **kw)
+        fh.write("{")
+        fh.close()
+        raise OSError("disk full")
+
+    monkeypatch.setattr(state_files, "open_private", half_write)
+    with pytest.raises(OSError, match="disk full"):
+        install.write_receipt(install.build_receipt({}, package_version="1.0"))
+    assert not target.with_name(target.name + ".tmp").exists() and not target.exists()
 
 
 def test_digest_ignores_ts_via_and_reason_but_not_versions():
