@@ -206,3 +206,50 @@ def test_main_cloud_prefix_overrides(monkeypatch):
     assert _carries(argv, SECRET), "positive control: the override reaches the CLI"
     assert not _carries(argv, "cloud:")
 
+
+
+# ── the hook's own logs must not keep a secret fragment ──────────────────────
+
+def _log_text(mod) -> str:
+    home = Path(mod._router_home())
+    return "".join(f.read_text() for f in (home / "agent_calls.json", home / "agent_calls_ledger.jsonl")
+                   if f.exists())
+
+
+def _has_fragment(text: str, secret: str, n: int = 8) -> bool:
+    return any(secret[i:i + n] in text for i in range(len(secret) - n + 1))
+
+
+@pytest.mark.parametrize("at", [480, 490])
+def test_log_rows_scrub_before_truncating(at):
+    """A token that straddles char 500 used to be cut into a fragment the scrubber no longer matched."""
+    mod = _hook()
+    mod._log_agent_call("general-purpose", "x" * at + " " + SECRET + " tail", "routed_direct")
+    text = _log_text(mod)
+    assert "routed_direct" in text, "the row must have been written (else the check is vacuous)"
+    assert not _has_fragment(text, SECRET), "a >=8 char secret fragment reached the agent-call logs"
+
+
+@pytest.mark.parametrize("at", [480, 490])
+def test_main_withheld_row_has_no_prompt_text(monkeypatch, at):
+    _run_main(monkeypatch, "x" * at + " " + SECRET, routed_spawn=False)
+    mod = _hook()
+    text = _log_text(mod)
+    assert "withheld_secret" in text, "the withheld row must exist (else the check is vacuous)"
+    assert not _has_fragment(text, SECRET)
+    import json
+    rows = [json.loads(ln) for ln in (Path(mod._router_home()) / "agent_calls_ledger.jsonl").read_text().splitlines()
+            if ln.strip()]
+    held = [r for r in rows if r["decision"] == "withheld_secret"]
+    assert len(held) == 1
+    assert "x" * 20 not in held[0]["prompt"], "a withheld row carries length and categories, not prompt text"
+    assert "GitHub token" in held[0]["prompt"]
+
+
+def test_door_error_fails_closed(monkeypatch):
+    """scan_secrets raising: no CLI argv, no urlopen (NS3, DIRECT and CLI delegation all held)."""
+    def boom(*a, **k):
+        raise RuntimeError("scan down")
+    monkeypatch.setattr(lp, "scan_secrets", boom)
+    argv, urls, _ = _run_main(monkeypatch, RESEARCH + PLAIN_PROMPT, direct=True, routed_spawn=False)
+    assert argv == [] and urls == []

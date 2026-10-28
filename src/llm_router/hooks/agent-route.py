@@ -778,7 +778,9 @@ def _log_agent_call(subagent_type: str, prompt: str, decision: str) -> None:
     entry = {
         "timestamp": time.time(),
         "subagent_type": subagent_type,
-        "prompt": _scrub_agent_prompt(prompt[:500]),  # scrub + truncate
+        # Scrub the WHOLE prompt, then truncate: cutting first can leave a fragment of a secret that straddles
+        # the cut and that the scrubber no longer matches (UN-04b).
+        "prompt": _scrub_agent_prompt(prompt)[:500],
         "decision": decision,
         "session_id": _get_session_id(),
         "session_kind": _session_kind_of(_get_session_id()),
@@ -2384,7 +2386,12 @@ def main() -> None:
     # ── UN-04b secret door: once, before NS3 / DIRECT / CLI delegation ────────
     prompt, _secret_hold = _secret_door(prompt)
     if _secret_hold:
-        _log_agent_call(subagent_type, prompt, "withheld_secret")
+        try:  # the row carries length and categories only, never prompt text
+            from llm_router import local_privacy as _lp_cat
+            _cats = ",".join(sorted({h.label for h in _lp_cat.scan_secrets(prompt)})) or "unknown"
+        except Exception:
+            _cats = "unknown"
+        _log_agent_call(subagent_type, f"[withheld: secret prompt, {len(prompt)} chars; {_cats}]", "withheld_secret")
 
     # ── NS3: suitable spawns → Codex CLI FIRST (external, free from Claude quota) ──
     # Must run before _allow_routed_spawn() below: that branch defaults to ON and
