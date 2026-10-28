@@ -413,6 +413,14 @@ def _prioritise(rows: list[dict], policy: str, now: float) -> None:
     from llm_router.user_routing_policy import apply_routing_policy
     connected = [r for r in rows if r["status"] == "connected" and "generate" in r["capabilities"]]
     ordered = apply_routing_policy([r["chain_id"] for r in connected], policy)
+    try:  # UN-01: the user's order rules beat the policy order (D-125); fail-open
+        from llm_router import user_rules
+        ordered = user_rules.apply_rules(
+            ordered, lambda cid: cid,
+            [r for r in user_rules.effective_rules() if r.get("kind") == "order"])
+    except Exception as exc:
+        from llm_router import failopen
+        failopen.record("CHZ-FO-USER-RULES-READ", exc)
     rank = {cid: i + 1 for i, cid in enumerate(ordered)}
     for r in connected:
         r["effective_priority"] = rank[r["chain_id"]]

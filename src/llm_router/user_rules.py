@@ -13,23 +13,30 @@ and which a hook can read with ``json.loads`` and no PyYAML::
     # <<< llm-router prefer <<<
 
 Stdlib-only (plus ``paths``, ``file_lock`` and ``failopen``), no PyYAML. Round A
-stores and validates rules; no routing path reads them yet.
+stores and validates rules. Round B (UN-01) reads them: ``map_reader.apply_to_chain``
+applies ``ban`` and ``order`` rules (:func:`apply_rules`) at every door that builds a
+chain, and ``resource_map`` ranks by ``order`` rules. ``cap`` and ``local_only`` are
+stored but not yet applied.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TypeVar
 
 from llm_router import failopen
 from llm_router.file_lock import exclusive_lock
 from llm_router.paths import state_path
 from llm_router.prefer_grammar import KNOWN_PROVIDERS
+
+T = TypeVar("T")
 
 MARK_BEGIN = "# >>> llm-router prefer (managed; edit with `llm-router prefer`) >>>"
 MARK_END = "# <<< llm-router prefer <<<"
@@ -307,3 +314,62 @@ def remove_rule(rule_id: str, path: Path | None = None) -> list[dict]:
         return kept
 
     return mutate_rules(change, path)
+
+
+# ── reading for routing (round B, UN-01) ─────────────────────────────────────
+
+_rules_cache: dict[str, tuple[tuple[int, int], list[dict]]] = {}
+
+
+def effective_rules() -> list[dict]:
+    """Stored rules for the routing paths: [] when absent, damaged or unreadable
+    (fail-open, recorded as CHZ-FO-USER-RULES-READ). Re-read only when the file's
+    (mtime_ns, size) changes, so a per-call chain build costs one ``stat``."""
+    try:
+        target = routing_path()
+        st = target.stat()
+    except OSError:
+        return []
+    sig = (st.st_mtime_ns, st.st_size)
+    hit = _rules_cache.get(str(target))
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    rules = read_rules(target)
+    _rules_cache[str(target)] = (sig, rules)
+    return rules
+
+
+def _matches(target: dict, model_id: str) -> bool:
+    provider, _, model = model_id.partition("/")
+    if provider not in target.get("providers", ()):
+        return False
+    glob = target.get("model")
+    return glob is None or fnmatch.fnmatchcase(model, glob)
+
+
+def apply_rules(chain: Sequence[T], key: Callable[[T], str], rules: list[dict], *,
+                reorder: bool = True) -> list[T]:
+    """*chain* without the entries a ``ban`` rule names, then reordered so each
+    ``order`` rule's ``first`` entries precede its ``then`` entries (relative order
+    inside a group is kept; entries the rules do not name stay where they were).
+    ``reorder=False`` (a pinned model, a floor chain) applies bans only."""
+    bans = [r["target"] for r in rules if r.get("kind") == "ban"]
+    out = [m for m in chain if not any(_matches(b, key(m)) for b in bans)]
+    orders = [r for r in rules if r.get("kind") == "order"] if reorder else []
+    for _ in range(len(orders) + 1):          # chained rules (A before B before C) settle in n passes
+        changed = False
+        for r in orders:
+            ids = [key(m) for m in out]
+            then_at = next((i for i, x in enumerate(ids) if _matches(r["then"], x)), None)
+            if then_at is None:
+                continue
+            late = [i for i in range(then_at + 1, len(out)) if _matches(r["first"], ids[i])]
+            if not late:
+                continue
+            moved = [out[i] for i in late]
+            rest = [m for i, m in enumerate(out) if i not in set(late)]
+            out = rest[:then_at] + moved + rest[then_at:]
+            changed = True
+        if not changed:
+            break
+    return out

@@ -488,11 +488,24 @@ def _classify_class(text: str, *, capabilities: bool = True) -> tuple[str, str]:
     return task, cx
 
 
+def _chain_token() -> tuple:
+    """Cache-key token of a policy chain: the map's mtime plus the stored user
+    rules' (mtime_ns, size) -- a changed ``prefer`` rule must rebuild the chain
+    with the map unchanged (UN-01)."""
+    from llm_router import map_reader, user_rules
+
+    try:
+        st = user_rules.routing_path().stat()
+        rules_tok: tuple | None = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        rules_tok = None
+    return (map_reader.token(), rules_tok)
+
+
 async def policy_chain(text: str) -> tuple[str, str, list[str]]:
     """``(task_type, complexity, chain)`` from the router's own policy."""
     from llm_router.config import get_config
     from llm_router.profiles import complexity_to_profile
-    from llm_router import map_reader
     from llm_router.router import _build_and_filter_chain
     from llm_router.types import Complexity, TaskType
 
@@ -500,7 +513,7 @@ async def policy_chain(text: str) -> tuple[str, str, list[str]]:
     # P1.8: the chain is cached with the map file's mtime, so a rewritten map is
     # re-read; None (no map file) is the pre-map behaviour.
     global _chain_cache_token
-    tok = map_reader.token()
+    tok = _chain_token()
     if tok != _chain_cache_token:      # map rewritten, aged out or deleted: drop old chains
         _chain_cache.clear()
         _chain_cache_token = tok
@@ -528,10 +541,9 @@ async def tier_classify(text: str, pinned: str | None = None, *, anthropic: bool
     it. Same signature and return shape as ``choose_model`` so it is a drop-in
     seam; ``pinned`` is accepted and ignored (no model is chosen here)."""
     del pinned
-    from llm_router import map_reader
 
     task, cx, layer, conf = _classify_full(text, capabilities=False)  # the class only (P0.9-e)
-    chain = _chain_cache.get((task, cx, map_reader.token())) or []
+    chain = _chain_cache.get((task, cx, _chain_token())) or []
     model = next((m for m in chain if tool_capable(m, anthropic=anthropic)), None)
     return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": model,
             "layer": layer, "confidence": conf}
@@ -542,12 +554,11 @@ def tier_classify_pure(text: str) -> dict:
     ``engine_door`` call (so no shadow row, no decide-mode ledger row, no decision cache) and
     no model call. Sync and CPU-only. For lane A (``proxy.lane_a``), which classifies
     continuation steps that stay pinned when the lane is off."""
-    from llm_router import map_reader
     from llm_router.classify import GATEWAY_POLICY, classify_signals
 
     sig = classify_signals(text, GATEWAY_POLICY, capabilities=False)
     task, cx = sig.task_type.value, sig.complexity.value
-    chain = _chain_cache.get((task, cx, map_reader.token())) or []
+    chain = _chain_cache.get((task, cx, _chain_token())) or []
     return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": None}
 
 
