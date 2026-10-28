@@ -180,7 +180,7 @@ async def test_ban_that_empties_the_chain_gives_the_no_route_result(doors):
     store("no ollama", "no gemini", "no openai")
     assert await router_chain() == []
     assert await proxy_chain() == []
-    assert hook_chain() == [] or "ollama" not in provs(hook_chain())
+    assert hook_chain() == []
 
 
 def test_ban_rule_with_missing_keys_is_fail_open_and_recorded(monkeypatch):
@@ -196,7 +196,10 @@ def test_ban_rule_with_missing_keys_is_fail_open_and_recorded(monkeypatch):
 @pytest.mark.xfail(strict=True, reason="proxy/tiers.py — owned by the lane-A/tiers session: a Claude-model "
                    "ban or cap at the proxy door is a tier decision made there, which this PR does not touch")
 def test_proxy_tier_decision_honours_a_claude_ban():
-    import inspect
-
     from llm_router.proxy import tiers
-    assert "user_rules" in inspect.getsource(tiers)
+
+    policy = tiers.ClaudeTierPolicy.load(None)
+    opus = next(t for t in policy.by_name.values() if "opus" in (t.model or ""))
+    assert tiers.tier_model(opus.name) == opus.model     # control: the tier resolves with no rule
+    store("never claude opus")
+    assert tiers.tier_model(opus.name) is None           # a banned model must not be served as a tier
