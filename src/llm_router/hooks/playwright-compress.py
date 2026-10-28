@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 5
+# llm_router-hook-version: 6
 """PostToolUse hook — compress Playwright page snapshots via cheap LLM.
 
 After every browser_snapshot call:
@@ -14,7 +14,7 @@ the re-snapshot and retry-storm patterns.
 Env vars:
   OLLAMA_HOST                     Ollama base URL (default: http://localhost:11434)
   LLM_ROUTER_OLLAMA_MODEL         Model for compression (default: first installed)
-  GEMINI_API_KEY                  Enables Gemini Flash fallback
+  GEMINI_API_KEY                  Enables Gemini Flash fallback (never for a snapshot holding a secret: UN-04c)
   LLM_ROUTER_PLAYWRIGHT_COMPRESS  Set to "off" to disable this hook
 """
 
@@ -190,12 +190,39 @@ def _try_ollama(snapshot: str) -> str | None:
         return None
 
 
+def _cloud_blocked(text: str) -> bool:
+    """UN-04c: True when ``text`` must NOT leave this machine (the repo's secret door, ``local_privacy.scan_secrets``).
+
+    A page snapshot is site-controlled content and can hold tokens (forms, dashboards, URLs), so the ``cloud:``
+    override is not honoured here: nothing in a page is the user asking to send it. Fails closed: llm_router not
+    importable, or a door that raises, blocks the cloud call (the error is recorded as UN-04C-PW-DOOR)."""
+    try:
+        from llm_router import local_privacy as _lp
+
+        return bool(_lp.scan_secrets(text))
+    except ImportError:
+        return True  # cannot verify the text is clean, so do not send it
+    except Exception as exc:  # noqa: BLE001 -- fail closed, but leave a trace
+        try:
+            from llm_router import failopen
+
+            failopen.record("UN-04C-PW-DOOR", exc)
+        except Exception:  # noqa: BLE001 -- accounting must not change the answer
+            pass
+        return True
+
+
 def _try_gemini(snapshot: str) -> str | None:
-    """Compress via Gemini Flash. Returns summary or None if key absent or error."""
+    """Compress via Gemini Flash. Returns summary or None if key absent, a secret is present, or error.
+
+    None falls through to the rule-based compressor, which is local."""
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         return None
-    prompt = _COMPRESS_PROMPT.format(snapshot=snapshot[:MAX_SNAPSHOT_CHARS])
+    sent = snapshot[:MAX_SNAPSHOT_CHARS]
+    if _cloud_blocked(sent):
+        return None
+    prompt = _COMPRESS_PROMPT.format(snapshot=sent)
     body = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0, "maxOutputTokens": 400},
