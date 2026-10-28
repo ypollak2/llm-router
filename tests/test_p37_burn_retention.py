@@ -262,6 +262,14 @@ def test_baseline_anchors_on_first_organic_row_not_synthetic(home):
     assert qs.baseline_start_ts() == T0
 
 
+def test_baseline_ignores_an_earlier_codex_organic_row(home):
+    """P37H: a Codex plugin start row (UUIDv7 id, organic stamp) older than the first
+    Claude Code row (UUIDv4 id) does not move the assumed baseline start."""
+    _row(home, "019a1b2c-3d4e-7f50-8a1b-2c3d4e5f6a7b", T0 - 2 * DAY, sk="organic")
+    _row(home, "0f8e2c4a-1b2c-4d3e-8f4a-5b6c7d8e9f01", T0, sk="organic")
+    assert qs.baseline_start_ts() == T0
+
+
 def test_baseline_ignores_history_pruning(home):
     _row(home, "org1", T0, sk="organic")
     with open(home / qs.HISTORY_NAME, "w") as fh:  # history holds an earlier row ...
