@@ -59,4 +59,4 @@ bash scripts/<bucket>/<script>.sh
 | `analyze-violations.py` | Analyses routing-enforcement violations from the local log. |
 | `cleanup-hook-health.py` | Prunes stale hook-health records. |
 | `gen_cast.py` | Generates terminal-cast recordings. |
-| `generate-readme-svgs.py` | Regenerates the README SVG art. |
+| `generate-readme-svgs.py` | Generates the old README SVG art into `docs/readme/`. The README no longer embeds it, and its figures have no source. |

@@ -1,10 +1,13 @@
 <!-- AUTO-GENERATED — do not edit by hand. Updated weekly by GitHub Actions. -->
-<!-- Source: src/llm_router/data/benchmarks.json · Generator: scripts/bench/update_benchmarks.py -->
+<!-- Source: src/llm_router/data/benchmarks.json version 1 as committed in dc0f442c4f (2026-03-30) · Generator: scripts/bench/update_benchmarks.py -->
 
 # Model Benchmarks
 
-> 🔄 **Auto-updated every Monday** by [GitHub Actions](../.github/workflows/benchmarks.yml)
-> 📅 Last updated: **2026-03-30** &nbsp;·&nbsp; Version **1**
+> 📌 **Snapshot.** Every score, rank and price on this page comes from `src/llm_router/data/benchmarks.json`
+> **version 1**, generated 2026-03-30, as committed in `dc0f442c4f`. The file in the repo today is a later
+> version with different values; this page has not been regenerated from it (the weekly job in
+> [GitHub Actions](../.github/workflows/benchmarks.yml) only logs a warning when the page fails to render).
+> 📅 Snapshot date: **2026-03-30** &nbsp;·&nbsp; Version **1**
 > 📊 Sources: Arena Hard Auto · Aider Edit Leaderboard · HuggingFace Open LLM v2 · LiteLLM Pricing
 
 The router uses these benchmarks to dynamically reorder model chains so the best-performing

@@ -59,10 +59,10 @@ LEDGER: tuple[Claim, ...] = (
         id="secrets-never-leave",
         text="Secrets never leave your machine. A prompt containing an API key, "
              "token or private material is scrubbed before it is written or sent.",
-        source="README.md:156",
+        source="README.md:140",
         status=PROVEN,
         proof="tests/test_r2_nothing_leaves_unscrubbed.py",
-        readme_lines=(156,),
+        readme_lines=(140,),
     ),
     Claim(
         id="scrub-before-persistence",
@@ -124,7 +124,7 @@ LEDGER: tuple[Claim, ...] = (
     Claim(
         id="preserves-task-success",
         text="Routing to a cheaper model preserves task success.",
-        source="README.md (why-route panel)",
+        source="README.md (why-route panel, removed 2026-10-28)",
         status=UNPROVEN,
         note="THE CENTRAL CLAIM, AND IT IS NOT PROVEN. The only mechanism that "
              "could measure it (Ground Truth capture) was off by default until "

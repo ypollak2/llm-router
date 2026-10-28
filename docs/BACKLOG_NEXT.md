@@ -5,8 +5,9 @@ raised here and not closed, with the gate that will say it is done and the
 dependency that decides when it can start.
 
 Baseline for anything that changes routing behaviour:
-`scripts/bench_session_replay.py`, 5 real sessions in order — **76% drafts / 66%
-acceptable** over 115 prompts, or **80% / 70%** over the 105 routable ones.
+`scripts/bench_session_replay.py`, 5 real sessions in order. The 2026-09-14 figures
+first quoted here were removed: that run predates the script's commit (see
+`docs/MEASUREMENT.md`); use the 2026-09-15 noise-floor runs there instead.
 
 Rule: a gate never asks a question. Repair twice, then PARK with the exact
 failure recorded, and move on. Every task ends done, repaired or parked.
@@ -27,8 +28,8 @@ failure recorded, and move on. Every task ends done, repaired or parked.
 | ID | Task | Gate | Depends on |
 |---|---|---|---|
 | N7 | Firm up the acceptance number | 3 runs per arm; report the mean and the spread, or state plainly that the effect is inside the noise | N1 (merge first so the arms are stable) |
-| N8 | Unpark A4 — hook vs router classifier | A measurement on the replay corpus deciding which engine is correct FOR THE HOOK, then reconcile `HOOK_POLICY` to it, then delete the duplicate. They agree on 59.7% today and the hook is the more expensive of the two | N7 (needs a trustworthy baseline) |
-| N9 | Decide Ollama residency | `KEEP_ALIVE=30m` holds 20.8GB on a 48GB machine and has already killed a background task. Measure the reload tax against the memory, then choose | — |
+| N8 | Unpark A4 — hook vs router classifier | A measurement on the replay corpus deciding which engine is correct FOR THE HOOK, then reconcile `HOOK_POLICY` to it, then delete the duplicate. They disagree on a large share of prompts today (no source file for that figure, so none is given) and the hook is the more expensive of the two | N7 (needs a trustworthy baseline) |
+| N9 | Decide Ollama residency | `KEEP_ALIVE=30m` keeps a large model resident on the owner's machine and has already killed a background task. Measure the reload tax against the memory, then choose | — |
 
 ## The three steps of PLAN_CONTEXT_EVERYWHERE that were never executed
 
