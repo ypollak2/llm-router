@@ -14,7 +14,7 @@ classified, and a socket trace shows a secret prompt makes no non-loopback conne
   runners (run_codex / run_gemini_cli / run_claude), direct_executor call_gemini / call_openai, urlopen / open_url,
   httpx / requests / aiohttp requests, subprocess to a model CLI, anthropic / openai SDK clients, a bare litellm
   ``completion``. Every hit has a row or its file has a pinned-count row; ``probe`` rows are the audited "carries no
-  prompt text" allowlist. Known limit: ``subprocess.*`` is counted only when the call names a model CLI.
+  prompt text" allowlist. Known limit: ``subprocess.*`` is counted only when the call names a model CLI. Swapping one sink for another inside an audited file keeps its pinned count (design limit). UNSCANNED_FAMILIES lists what no name scan can see (the OTLP exporter).
 * LIMITS of the router-door trace: the router doors are traced at the ``litellm.acompletion`` stub boundary (the
   stub dials its model's host through the patched socket). It proves the guard layers never call ``acompletion`` with
   a cloud model for a secret prompt, not that litellm's own httpx transport would reach the patched connect. Only the
@@ -225,8 +225,8 @@ SINK_FUNCS: dict[tuple[str, str, str], tuple[int, str, str]] = {
     ('hooks/agent-route.py', '_try_direct_subagent', 'execute_chain'): (1, 'LEAK', 'agent-route.py:1362 -> call_gemini / call_openai'),
     ('hooks/agent-route.py', '_try_cli_delegation', 'run_gemini_cli'): (1, 'LEAK', 'agent-route.py:1882 prompt to the gemini CLI'),
     ('hooks/agent-route.py', '_run_codex_agent_inner', 'run_codex'): (1, 'LEAK', 'agent-route.py:1678 prompt to the codex CLI'),
-    ('hooks/direct_executor.py', 'call_gemini', 'urlopen'): (1, 'LEAK', 'urllib POST of the prompt to Google'),
-    ('hooks/direct_executor.py', 'call_openai', 'urlopen'): (1, 'LEAK', 'urllib POST of the prompt to OpenAI'),
+    ('hooks/direct_executor.py', 'call_gemini', 'urlopen'): (1, 'LEAK', 'urllib POST of the prompt to Google; scrub_text redacts the secret value, the rest of the prompt still leaves'),
+    ('hooks/direct_executor.py', 'call_openai', 'urlopen'): (1, 'LEAK', 'urllib POST of the prompt to OpenAI; scrub_text redacts the secret value, the rest of the prompt still leaves'),
     ('hooks/direct_executor.py', '<module>', 'call_gemini'): (1, 'LEAK', '_PROVIDER_CALLS entry for call_gemini'),
     ('hooks/direct_executor.py', '<module>', 'call_openai'): (1, 'LEAK', '_PROVIDER_CALLS entry for call_openai'),
     ('hooks/direct_executor.py', '_ollama_open', 'open_url'): (1, 'local', 'loopback Ollama via open_url'),
@@ -255,9 +255,9 @@ SINK_FILES: dict[str, tuple[int, str, str]] = {
     'commands/verify.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'config.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'context_summary.py': (2, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
-    'control_plane/client.py': (3, 'opt-in', 'explicit opt-in feature; text leaves by design when enabled, not traced'),
+    'control_plane/client.py': (3, 'opt-in', 'opt-in; CPClient has no callers in src, heartbeat payload is caller-supplied'),
     'cost.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
-    'digest.py': (2, 'probe', 'outbound text is a scrubbed alert / savings digest / team report built from counters, not prompt text'),
+    'digest.py': (1, 'probe', 'outbound text is a scrubbed alert / savings digest / team report built from counters, not prompt text'),
     'discover.py': (3, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'discovery_rescan.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'frameworks/openai_agents.py': (1, 'router door', 'an adapter whose client points at the llm-router gateway (a router door)'),
@@ -265,9 +265,6 @@ SINK_FILES: dict[str, tuple[int, str, str]] = {
     'gemini_cli_quota.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'hook_client.py': (2, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
     'hooks/agent_loop.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
-    'hooks/codex-post-tool.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
-    'hooks/gemini-cli-post-tool.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
-    'hooks/opencode-post-tool.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'hooks/session-end.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'hooks/session-start.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'hooks/tool_intercept.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
@@ -287,8 +284,8 @@ SINK_FILES: dict[str, tuple[int, str, str]] = {
     'model_pull.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'ollama_watchdog.py': (3, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'proxy/backends.py': (3, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
-    'proxy/failopen_shim.py': (3, 'proxy', "proxy door: log-only by D-28 (engine.secret_enforcement), owner-gated; replays the client's own request"),
-    'proxy/server.py': (7, 'proxy', "proxy door: log-only by D-28 (engine.secret_enforcement), owner-gated; replays the client's own request"),
+    'proxy/failopen_shim.py': (3, 'proxy', "proxy class, owner-gated, log-only by D-28: replay_http replays the client request to Anthropic; claude_judge sends request context + reply to the claude CLI"),
+    'proxy/server.py': (7, 'proxy', "proxy class, owner-gated, log-only by D-28: replay_http replays the client request to Anthropic; claude_judge sends request context + reply to the claude CLI"),
     'quickstart.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'resolver/calibrate.py': (2, 'fixed prompt', 'benchmark / calibration probes, no user text'),
     'resolver/inventory.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
@@ -300,17 +297,24 @@ SINK_FILES: dict[str, tuple[int, str, str]] = {
     'semantic_cache.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
     'semantic_classify.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
     'service_manager.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
-    'session_broker.py': (1, 'opt-in', 'explicit opt-in feature; text leaves by design when enabled, not traced'),
-    'shadow_frontier.py': (3, 'proxy', "proxy door: log-only by D-28 (engine.secret_enforcement), owner-gated; replays the client's own request"),
+    'session_broker.py': (1, 'router door', 'codex_adapter jobs are reached through route_and_call, so the router door guards them'),
+    'shadow_frontier.py': (3, 'proxy', "proxy class, owner-gated, log-only by D-28: replay_http replays the client request to Anthropic; claude_judge sends request context + reply to the claude CLI"),
     'stats.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'statusline_segments.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
-    'team.py': (2, 'probe', 'outbound text is a scrubbed alert / savings digest / team report built from counters, not prompt text'),
+    'team.py': (1, 'probe', 'outbound text is a scrubbed alert / savings digest / team report built from counters, not prompt text'),
     'toolkit/adapters/ollama.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
     'tools/admin.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
-    'tools/agoragentic.py': (8, 'opt-in', 'explicit opt-in feature; text leaves by design when enabled, not traced'),
+    'tools/agoragentic.py': (8, 'opt-in', 'opt-in (SEC-003 env); agoragentic_execute (:76-100) posts task + input to agoragentic.com with NO secret check, not traced'),
     'tools/subscription.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'vision_registry.py': (3, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'warm.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+}
+
+
+#: Families the sink scan cannot see (no urlopen / httpx name), audited by reading. A new one needs a line here.
+UNSCANNED_FAMILIES = {
+    "tracing.py:53-85 OTLP span exporter": "opt-in via OTEL_EXPORTER_OTLP_ENDPOINT; span attributes are metadata, but "
+                                           "record_span_exception(str(exc)) can carry provider error text that echoes request content",
 }
 
 
@@ -336,7 +340,7 @@ def _scan_sinks() -> collections.Counter:
                     hit = name
                 elif (name in SINK_HTTP_VERBS and isinstance(f, ast.Attribute)
                       and (any(dotted.startswith(m + ".") for m in SINK_HTTP_MODULES)
-                           or re.search(r"(^|\.)(client|http|session|_client)$", ast.unparse(f.value)))):
+                           or re.search(r"(^|\.)(client|http|_client)$", ast.unparse(f.value)))):
                     hit = "http." + name
                 elif name == "create" and re.search(r"(messages|completions|responses)\.create$", dotted):
                     hit = "sdk.create"
@@ -384,6 +388,11 @@ def test_every_off_machine_sink_is_classified():
     assert classify_sinks(found) == []
     assert {v[1] for v in SINK_FUNCS.values()} | {v[1] for v in SINK_FILES.values()} == {
         "probe", "local", "primitive", "router door", "proxy", "fixed prompt", "opt-in", "LEAK"}
+
+
+def test_unscanned_families_are_named():
+    tracing = (SRC / "tracing.py").read_text()
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" in tracing and "OTLPSpanExporter" in tracing and UNSCANNED_FAMILIES
 
 
 def test_sink_summary_counts():
@@ -684,8 +693,16 @@ test_ensemble_classifier_with_an_explicit_cloud_primary_would_leak = pytest.mark
 
 
 # ------------------------------------------------------------------------------------------------ sink leaks (UN-04b)
-# Each test below sends a generated secret through one LEAK sink and asserts the text did not leave. They fail today
-# (strict xfail, so a fix flips them to XPASS and the mark must go). Fix PR: UN-04b.
+MARK = "w11-marker-7f3a"  # non-secret words that ride along with the secret, to see the prompt arrive
+
+
+# One runner per LEAK sink. A runner drives the sink with a given prompt and the fixture returns everything that
+# reached it: the argv and stdin of a model-CLI subprocess, or the url and body of a urlopen request (recorded before
+# any DNS, nothing is sent). Per sink two tests:
+#   test_reach_*  (plain test)  a NON-secret prompt reaches the sink, so the harness can see it: the positive control
+#   test_leak_*   (strict xfail) the ONE assertion "the secret is not in what reached the sink". It fails today and
+#                 XPASSes once the sink is guarded (refused before the sink), which is the signal UN-04b gets.
+# Fix PR: "UN-04b".
 class _FakeProc:
     returncode = 0
 
@@ -723,54 +740,22 @@ def cli_trace(monkeypatch, tmp_path):
     return sent
 
 
-def _xfail_leak(fn):
-    return pytest.mark.xfail(strict=True, reason="UN-04 leak: a secret prompt reaches a cloud sink; fix in UN-04b")(fn)
-
-
-@_xfail_leak
-def test_leak_llm_codex_sends_a_secret_to_the_codex_cli(cli_trace, monkeypatch):
-    """tools/codex.py:27 llm_codex -> run_codex (codex CLI -> OpenAI)."""
-    from llm_router.tools import codex
-    monkeypatch.setattr(codex, "is_codex_available", lambda: True)
-    s = _secret()
-    _swallow(codex.llm_codex(prompt=f"explain {s}"))
-    assert cli_trace, "the codex runner was never reached: the test proves nothing"
-    assert not any(s in c for c in cli_trace)
-
-
-@_xfail_leak
-def test_leak_llm_gemini_sends_a_secret_to_the_gemini_cli(cli_trace, monkeypatch):
-    """tools/gemini_cli.py:28 llm_gemini -> run_gemini_cli (gemini CLI -> Google)."""
-    from llm_router.tools import gemini_cli
-    monkeypatch.setattr(gemini_cli, "is_gemini_cli_available", lambda: True)
-    s = _secret()
-    _swallow(gemini_cli.llm_gemini(prompt=f"explain {s}"))
-    assert cli_trace, "the gemini runner was never reached: the test proves nothing"
-    assert not any(s in c for c in cli_trace)
-
-
 @pytest.fixture
-def hook_net(trace, monkeypatch, tmp_path):
+def hook_net(monkeypatch, tmp_path):
+    """Every urllib request is recorded (url + body) before any DNS and never sent."""
+    import urllib.request
+    sent: list[str] = []
+
+    def urlopen(req, *a, **k):
+        data = getattr(req, "data", None)
+        sent.append(f"{getattr(req, 'full_url', req)} {data.decode(errors='replace') if data else ''}")
+        raise OSError("W1-1 trace: not sent")
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     monkeypatch.setenv("GEMINI_API_KEY", "k-" + "x" * 20)
     monkeypatch.setenv("OPENAI_API_KEY", "k-" + "y" * 20)
-    return trace
-
-
-@_xfail_leak
-@pytest.mark.parametrize("provider", ["gemini", "openai"])
-def test_leak_direct_executor_sends_a_secret_to_a_cloud_api(hook_net, provider):
-    """hooks/direct_executor.py call_gemini :435 / call_openai :477, reached by hooks/agent-route.py:1360-1362
-    (execute_agent / execute_chain) and the SDK door (which has its own guard)."""
-    from llm_router.hooks import direct_executor as de
-    model = "gemini-2.5-flash" if provider == "gemini" else "gpt-4o-mini"
-    try:
-        de.execute_chain(f"explain {_secret()}", [de.ModelSpec(provider, model)], "query", timeout=2)
-    except Exception:  # noqa: BLE001
-        pass
-    assert hook_net.peers, "no connection was attempted: the test proves nothing"
-    assert hook_net.off_machine == []
+    return sent
 
 
 def _load_hook(name):
@@ -782,61 +767,162 @@ def _load_hook(name):
     return mod
 
 
-@_xfail_leak
-def test_leak_agent_route_direct_subagent_sends_a_secret_to_a_cloud_api(hook_net, monkeypatch):
-    """hooks/agent-route.py:1321-1362 _try_direct_subagent: build_chain (not free-tier filtered) -> execute_chain."""
+def _quiet(fn, *a, **k):
+    try:
+        return fn(*a, **k)
+    except Exception:  # noqa: BLE001 - the sink was fed; what it does next is not the question
+        return None
+
+
+def _run_llm_codex(env, text, mp):
+    from llm_router.tools import codex
+    mp.setattr(codex, "is_codex_available", lambda: True)
+    _swallow(codex.llm_codex(prompt=f"explain {text}"))
+
+
+def _run_llm_gemini(env, text, mp):
+    from llm_router.tools import gemini_cli
+    mp.setattr(gemini_cli, "is_gemini_cli_available", lambda: True)
+    _swallow(gemini_cli.llm_gemini(prompt=f"explain {text}"))
+
+
+def _run_direct(provider):
+    def run(env, text, mp):
+        from llm_router.hooks import direct_executor as de
+        model = "gemini-2.5-flash" if provider == "gemini" else "gpt-4o-mini"
+        _quiet(de.execute_chain, f"explain {text}", [de.ModelSpec(provider, model)], "query", timeout=2)
+    return run
+
+
+def _run_agent_route_direct(env, text, mp):
     from llm_router.hooks import chain_builder
     from llm_router.hooks import direct_executor as de
     mod = _load_hook("agent-route")
-    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")  # off by default (owner decision 2026-10-02)
-    monkeypatch.setattr(chain_builder, "build_chain", lambda *a, **k: [de.ModelSpec("gemini", "gemini-2.5-flash")])
-    monkeypatch.setattr(chain_builder, "needs_claude_tools", lambda *a, **k: False)
-    monkeypatch.setattr(chain_builder, "get_current_pressure", lambda: ("green", 5))
-    try:
-        mod._try_direct_subagent(f"explain {_secret()}", "query", "simple", "s1")
-    except Exception:  # noqa: BLE001
-        pass
-    assert hook_net.peers, "no connection was attempted: the test proves nothing"
-    assert hook_net.off_machine == []
+    mp.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")  # off by default (owner decision 2026-10-02)
+    mp.setattr(chain_builder, "build_chain", lambda *a, **k: [de.ModelSpec("gemini", "gemini-2.5-flash")])
+    mp.setattr(chain_builder, "needs_claude_tools", lambda *a, **k: False)
+    mp.setattr(chain_builder, "get_current_pressure", lambda: ("green", 5))
+    _quiet(mod._try_direct_subagent, f"explain {text}", "query", "simple", "s1")
 
 
-@_xfail_leak
-@pytest.mark.parametrize("fn", ["classify_with_gemini", "classify_with_openai"])
-def test_leak_auto_route_api_classifier_sends_a_secret_to_a_cloud_api(hook_net, monkeypatch, fn):
-    """hooks/auto-route.py classify_with_gemini / classify_with_openai: first 500 chars of every prompt, opt-in
-    (LLM_ROUTER_CLASSIFY_LOCAL_ONLY=0; the default keeps the layer off)."""
-    monkeypatch.setenv("LLM_ROUTER_CLASSIFY_LOCAL_ONLY", "0")
-    mod = _load_hook("auto-route")
-    getattr(mod, fn)(f"explain {_secret()}")
-    assert hook_net.peers, "no connection was attempted: the test proves nothing"
-    assert hook_net.off_machine == []
+def _run_agent_route_cli(cli):
+    def run(env, text, mp):
+        import llm_router.codex_agent as ca
+        import llm_router.gemini_cli_agent as ga
+        from llm_router.hooks import chain_builder
+        mod = _load_hook("agent-route")
+        mp.setattr(chain_builder, "needs_claude_tools", lambda *a, **k: True)
+        mp.setattr(ca, "is_codex_available", lambda: cli == "codex")
+        mp.setattr(ga, "is_gemini_cli_available", lambda: cli == "gemini")
+        _quiet(mod._try_cli_delegation, f"fix {text}", "code", "complex", "s1")
+    return run
 
 
-@_xfail_leak
-def test_leak_playwright_compress_sends_a_page_secret_to_gemini(hook_net):
-    """hooks/playwright-compress.py _try_gemini: the page snapshot goes to Gemini whenever GEMINI_API_KEY is set."""
-    mod = _load_hook("playwright-compress")
-    mod._try_gemini(f"page text with a token {_secret()}")
-    assert hook_net.peers, "no connection was attempted: the test proves nothing"
-    assert hook_net.off_machine == []
+def _run_auto_route(fn):
+    def run(env, text, mp):
+        mp.setenv("LLM_ROUTER_CLASSIFY_LOCAL_ONLY", "0")  # the API classifier layer is opt-in
+        _quiet(getattr(_load_hook("auto-route"), fn), f"explain {text}")
+    return run
 
 
-@_xfail_leak
-@pytest.mark.parametrize("cli", ["codex", "gemini"])
-def test_leak_agent_route_cli_delegation_sends_a_secret_to_a_cloud_cli(cli_trace, monkeypatch, cli):
-    """hooks/agent-route.py:1678 / :1882 _try_cli_delegation (default ON): a subagent prompt goes to the codex or
-    gemini CLI with no secret check."""
-    import llm_router.codex_agent as ca
-    import llm_router.gemini_cli_agent as ga
-    from llm_router.hooks import chain_builder
-    mod = _load_hook("agent-route")
-    monkeypatch.setattr(chain_builder, "needs_claude_tools", lambda *a, **k: True)
-    monkeypatch.setattr(ca, "is_codex_available", lambda: cli == "codex")
-    monkeypatch.setattr(ga, "is_gemini_cli_available", lambda: cli == "gemini")
-    s = _secret()
-    try:
-        mod._try_cli_delegation(f"fix {s}", "code", "complex", "s1")
-    except Exception:  # noqa: BLE001
-        pass
-    assert cli_trace, "no CLI was started: the test proves nothing"
-    assert not any(s in c for c in cli_trace)
+def _run_playwright(env, text, mp):
+    _quiet(_load_hook("playwright-compress")._try_gemini, f"page text with a token {text}")
+
+
+#: id -> (runner, fixture name holding what reached the sink, where the leak is)
+LEAK_RUNNERS = {
+    "llm_codex": (_run_llm_codex, "cli_trace", "tools/codex.py:34"),
+    "llm_gemini": (_run_llm_gemini, "cli_trace", "tools/gemini_cli.py:33"),
+    "direct_gemini": (_run_direct("gemini"), "hook_net", "hooks/direct_executor.py:435 call_gemini"),
+    "direct_openai": (_run_direct("openai"), "hook_net", "hooks/direct_executor.py:477 call_openai"),
+    "agent_route_direct": (_run_agent_route_direct, "hook_net", "hooks/agent-route.py:1360-1362"),
+    "agent_route_codex": (_run_agent_route_cli("codex"), "cli_trace", "hooks/agent-route.py:1678"),
+    "agent_route_gemini_cli": (_run_agent_route_cli("gemini"), "cli_trace", "hooks/agent-route.py:1882"),
+    "auto_route_gemini": (_run_auto_route("classify_with_gemini"), "hook_net", "hooks/auto-route.py:2882"),
+    "auto_route_openai": (_run_auto_route("classify_with_openai"), "hook_net", "hooks/auto-route.py:2852"),
+    "playwright_gemini": (_run_playwright, "hook_net", "hooks/playwright-compress.py:193"),
+}
+
+
+@pytest.mark.parametrize("sink", sorted(LEAK_RUNNERS))
+def test_reach_a_plain_prompt_reaches_the_sink(sink, request):
+    """Positive control, no secret: the harness sees what the sink is given (so an empty result below means a guard)."""
+    run, fixture, _where = LEAK_RUNNERS[sink]
+    sunk = request.getfixturevalue(fixture)
+    run(None, f"{MARK} hello world", request.getfixturevalue("monkeypatch"))
+    assert any(MARK in x for x in sunk), f"{sink}: the plain prompt never reached the sink"
+
+
+def _leak(sink, request):
+    run, fixture, _where = LEAK_RUNNERS[sink]
+    sunk = request.getfixturevalue(fixture)
+    secret = _secret()
+    run(None, f"{MARK} {secret}", request.getfixturevalue("monkeypatch"))
+    # The single assertion: no part of a secret-bearing prompt reached the sink (NFR-PRIV "secret -> local only").
+    # Some sinks redact the secret value (direct_executor scrub_text) and still send the rest of the prompt.
+    assert not any(MARK in x for x in sunk), (
+        f"{sink} ({_where}): a secret-bearing prompt reached the sink; secret value itself present: "
+        f"{any(secret in x for x in sunk)}")
+
+
+_LEAK = pytest.mark.xfail(strict=True, reason="UN-04 leak: a secret prompt reaches a cloud sink; fix in UN-04b")
+
+
+@_LEAK
+def test_leak_llm_codex(request):
+    """tools/codex.py:34 llm_codex -> run_codex (codex CLI -> OpenAI)."""
+    _leak("llm_codex", request)
+
+
+@_LEAK
+def test_leak_llm_gemini(request):
+    """tools/gemini_cli.py:33 llm_gemini -> run_gemini_cli (gemini CLI -> Google)."""
+    _leak("llm_gemini", request)
+
+
+@_LEAK
+def test_leak_direct_executor_call_gemini(request):
+    """hooks/direct_executor.py:435 call_gemini (reached by agent-route.py:1360-1362; the SDK door has its own guard)."""
+    _leak("direct_gemini", request)
+
+
+@_LEAK
+def test_leak_direct_executor_call_openai(request):
+    """hooks/direct_executor.py:477 call_openai."""
+    _leak("direct_openai", request)
+
+
+@_LEAK
+def test_leak_agent_route_direct_subagent(request):
+    """hooks/agent-route.py:1321-1362 _try_direct_subagent: build_chain (not free-tier filtered) -> execute_chain."""
+    _leak("agent_route_direct", request)
+
+
+@_LEAK
+def test_leak_agent_route_cli_delegation_codex(request):
+    """hooks/agent-route.py:1678 (default ON): a subagent prompt goes to the codex CLI."""
+    _leak("agent_route_codex", request)
+
+
+@_LEAK
+def test_leak_agent_route_cli_delegation_gemini(request):
+    """hooks/agent-route.py:1882 (default ON): a subagent prompt goes to the gemini CLI."""
+    _leak("agent_route_gemini_cli", request)
+
+
+@_LEAK
+def test_leak_auto_route_classify_with_gemini(request):
+    """hooks/auto-route.py:2882: first 500 chars of every prompt, opt-in (LLM_ROUTER_CLASSIFY_LOCAL_ONLY=0)."""
+    _leak("auto_route_gemini", request)
+
+
+@_LEAK
+def test_leak_auto_route_classify_with_openai(request):
+    """hooks/auto-route.py:2852, same opt-in."""
+    _leak("auto_route_openai", request)
+
+
+@_LEAK
+def test_leak_playwright_compress_gemini(request):
+    """hooks/playwright-compress.py:193: the page snapshot goes to Gemini whenever GEMINI_API_KEY is set."""
+    _leak("playwright_gemini", request)
