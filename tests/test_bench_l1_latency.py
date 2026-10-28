@@ -107,7 +107,8 @@ def test_fallback_layer_fails_ok_and_is_in_histogram(tmp_path):  # SHOULD2
 def test_real_engine_layer_histogram_has_no_fallback(tmp_path):
     res, _ = _run(tmp_path, _corpus(tmp_path, 6), "--n", "6")
     assert sum(res["layers"].values()) == 12 and "fallback" not in res["layers"]
-    assert res["ok"] is True and res["scope"] == "rules-only" and res["artifacts"] == {"lexical_sha256": None, "calibration_sha256": None}
+    assert res["ok"] is True and res["scope"] == "rules-only" and res["artifacts"] == {"lexical_sha256": None, "calibration_sha256": None,
+                                                                                   "lexical_loaded": False, "calibration_loaded": False}
 
 
 def test_short_corpus_is_not_ok(tmp_path):  # SHOULD3: n < requested
@@ -141,12 +142,25 @@ def test_text_like_ids_are_redacted_and_worker_error_is_type_only(tmp_path):  # 
     assert r.returncode != 0 and "ValueError" in r.stderr and "LEAKED" not in r.stderr and "invented" not in r.stderr
 
 
-def test_lexical_passthrough_records_sha_and_scope(tmp_path):  # SHOULD1
+def _lexical_artifact(tmp_path: Path) -> Path:
+    from llm_router import ml_lexical
+    rows = ["write a poem", "fix the bug in parser", "research news today", "explain monads"] * 5
+    p = tmp_path / "lex.json"
+    ml_lexical.save(ml_lexical.fit(rows, ["haiku", "opus", "sonnet", "opus"] * 5), p)
+    return p
+
+
+def test_real_lexical_artifact_gives_rules_plus_lexical(tmp_path):  # SHOULD1
     import hashlib
-    lex = tmp_path / "lex.json"
-    lex.write_text("{}")
-    out = tmp_path / "o.json"
-    subprocess.run([sys.executable, str(SCRIPT), "--corpus", str(_corpus(tmp_path, 4)), "--n", "4", "--lexical", str(lex),
-                    "--out", str(out)], capture_output=True, text=True)
-    res = json.loads(out.read_text())
-    assert res["scope"] == "rules+lexical" and res["artifacts"]["lexical_sha256"] == hashlib.sha256(b"{}").hexdigest()
+    lex = _lexical_artifact(tmp_path)
+    res, _ = _run(tmp_path, _corpus(tmp_path, 4), "--n", "4", "--lexical", str(lex))
+    assert res["scope"] == "rules+lexical" and res["artifacts"]["lexical_loaded"] is True
+    assert res["artifacts"]["lexical_sha256"] == hashlib.sha256(lex.read_bytes()).hexdigest() and res["ok"] is True
+
+
+def test_given_but_unloadable_artifact_is_rules_only_and_not_ok(tmp_path):  # SHOULD1
+    bad = tmp_path / "lex.json"
+    bad.write_text("{}")
+    res, _ = _run(tmp_path, _corpus(tmp_path, 4), "--n", "4", "--lexical", str(bad), expect_rc=1)
+    assert res["scope"] == "rules-only" and res["artifacts"]["lexical_loaded"] is False
+    assert res["ok"] is False and res["not_ok_reasons"] == ["artifact given but not loaded: lexical"]

@@ -20,7 +20,8 @@ Method
     compared on every Decision field except ``layer`` and ``ms``. Reported: agreement share and the
     disagreeing ids (never text).
   * Scope: rules-only by default (scratch home has no lexical artifact); ``--lexical`` / ``--calibration`` point at
-    artifacts (passed as LLM_ROUTER_ENGINE_LEXICAL / _CALIBRATION), their sha256 is recorded and ``scope`` becomes rules+lexical.
+    artifacts (passed as LLM_ROUTER_ENGINE_LEXICAL / _CALIBRATION), their sha256 is recorded. ``scope`` comes from what the worker actually loaded
+    (``engine._lexical() is not None``), not from the flag; a given artifact that did not load makes ok false.
   * ``ok`` requires: 0 network attempts, 0 ``fallback`` layer decisions, n == requested, p95 within the bar, stability
     clean. Exit code is 1 when ``ok`` is false.
   * Isolation: scratch HOME / LLM_ROUTER_HOME per worker; ``socket`` connect, create_connection and
@@ -153,7 +154,10 @@ def worker(corpus: Path, n: int, id_field: str, text_field: str, spec: str, seed
         lay = str(getattr(d, "layer", None) or (d.get("layer") if isinstance(d, dict) else None) or "unknown")
         layers[lay] = layers.get(lay, 0) + 1
         keys[rid] = hashlib.sha256(_decision_key(d).encode()).hexdigest()[:16]
-    json.dump({"ms": ms, "keys": keys, "net_attempts": len(hits), "layers": layers,
+    from llm_router import engine as _eng  # what the worker really loaded, not what the flags asked for
+    lex_loaded = _eng._lexical() is not None
+    cal_loaded = bool(_eng._calibration())
+    json.dump({"lexical_loaded": lex_loaded, "calibration_loaded": cal_loaded, "ms": ms, "keys": keys, "net_attempts": len(hits), "layers": layers,
                "hashseed": os.environ.get("PYTHONHASHSEED")}, sys.stdout)
     return 0
 
@@ -212,6 +216,13 @@ def measure(args) -> dict:
     for r in runs:
         for k, v in r["layers"].items():
             layers[k] = layers.get(k, 0) + v
+    lex_loaded = all(r["lexical_loaded"] for r in runs)
+    cal_loaded = all(r["calibration_loaded"] for r in runs)
+    reasons = []
+    if args.lexical and not lex_loaded:
+        reasons.append("artifact given but not loaded: lexical")
+    if args.calibration and not cal_loaded:
+        reasons.append("artifact given but not loaded: calibration")
     net = sum(r["net_attempts"] for r in runs)
     now = datetime.now(timezone.utc)
     return {
@@ -219,9 +230,11 @@ def measure(args) -> dict:
         "window": {"date": now.strftime("%Y-%m-%d"), "start_utc": now.isoformat(timespec="seconds")},
         "sha": _git_sha(), "corpus_sha256": _sha256(args.corpus), "corpus_file": args.corpus.name,
         "n": len(rows), "n_requested": args.n, "rows_skipped": skipped, "ids_redacted": redacted,
-        "scope": "rules+lexical" if lex_sha else "rules-only",
+        "scope": "rules+lexical" if lex_loaded else "rules-only",
         "sampling": {"method": "first-n" if args.first_n else "seeded-random", "seed": None if args.first_n else args.seed},
-        "artifacts": {"lexical_sha256": lex_sha, "calibration_sha256": cal_sha},
+        "artifacts": {"lexical_sha256": lex_sha, "calibration_sha256": cal_sha,
+                      "lexical_loaded": lex_loaded, "calibration_loaded": cal_loaded},
+        "not_ok_reasons": reasons,
         "layers": layers,
         "engine_spec": args.engine_spec,
         "latency": {**lat, "cold_first_ms": round(ms0[0], 3), "warm": summarize(warm),
@@ -232,7 +245,7 @@ def measure(args) -> dict:
         "machine": {"load1_before": round(load1, 2), "load1_after": round(load1_after, 2), "max_load": args.max_load,
                     "uncontended": max(load1, load1_after) < args.max_load, "python": sys.version.split()[0]},
         "n_ok": len(rows) == args.n,
-        "ok": (net == 0 and layers.get("fallback", 0) == 0 and len(rows) == args.n
+        "ok": (not reasons and net == 0 and layers.get("fallback", 0) == 0 and len(rows) == args.n
                and lat["p95_ms"] <= P95_BAR_MS and (stability is None or not stability["disagreeing_ids"])),
     }
 
