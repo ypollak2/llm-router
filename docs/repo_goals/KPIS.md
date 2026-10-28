@@ -627,7 +627,9 @@ reports, for the window, the existing GE6 lines (burn per session and per human 
 session start/Stop samples in `quota_samples.jsonl`, stale samples as "estimated") and adds:
 
 * **The baseline week**: the 7 days from the first ORGANIC row in `quota_samples.jsonl` (same kind
-  resolution as the burn lines; synthetic and benchmark rows cannot move it; the file is never
+  resolution as the burn lines; synthetic and benchmark rows cannot move it, nor can a session
+  identified as not Claude Code (its tag names another host, or, with no host, its id is a UUIDv7,
+  as Codex ids are; any other session counts); the file is never
   pruned, so the 30-day prune of `quota_history.jsonl` cannot move it). It is an ASSUMPTION that
   this is the GE6 deploy: the text says "(assumed: first organic row)" and the JSON carries
   `baseline_meta.assumed`. Override with `--baseline-start`. The week is flagged "partial
