@@ -11,8 +11,8 @@ streamed) excludes the session; else organic evidence makes it organic; else it 
 Disagreeing sources exclude the session (excluded_by_evidence). An unreadable or corrupt
 overrides file, tag file, sidecar or ledger refuses the run with counts only. The census
 then reports the ledger and backfill sidecar states and untagged counts by cause (tag,
-ledger and sidecar facets); with the flag off it prints what it printed before. Run directories are 0700 and files
-are 0600.
+ledger and sidecar facets); with the flag off it prints none of those include-untagged
+keys. Run directories are 0700 and files are 0600.
 """
 from __future__ import annotations
 
@@ -418,7 +418,7 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
     served_loader = served_loader or _served_loader(since, until)
     excluded_keys = load_excluded(excluded)
     kinds: Counter[str] = Counter()
-    counts = dict(sessions_total=0, organic_pairs_eligible=0, no_ts=0,
+    counts = dict(sessions_total=0, organic_pairs_eligible=0, untagged_eligible_pairs=0, no_ts=0,
                   excluded_m09=0, flagged_ineligible=0,
 
                   exclusion_list_size=len(excluded_keys),
@@ -453,6 +453,13 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
                 causes["sidecar"]["sidecar_unknown"] += 1
         if kind_name != session_kind.KIND_ORGANIC and not (
                 include_untagged and resolution.kind in (None, "untagged")):
+            if kind_name == "untagged":
+                # Count only (no pool, no text kept): the pairs this session would have admitted
+                # as organic. The tagging_gap verdict compares these with organic_pairs_eligible,
+                # so zero-prompt headless runs cannot outvote the organic supply.
+                counts["untagged_eligible_pairs"] += sum(
+                    pair.ts is not None and since <= pair.ts <= until
+                    for pair in redo_signal.turn_pairs(redo_signal.read_transcript(path)))
             continue
         entries = redo_signal.read_transcript(path)
         prompts = redo_signal.human_prompts(entries)
@@ -479,6 +486,8 @@ def collect(*, projects_dir: Path | None = None, days: float = 30,
             eligible_by_kind[kind_name] += 1
             if kind_name == session_kind.KIND_ORGANIC:
                 counts["organic_pairs_eligible"] += 1
+            elif kind_name == "untagged":
+                counts["untagged_eligible_pairs"] += 1
             if pair_key(sid, pair.turn_index) in excluded_keys:
                 counts["excluded_m09"] += 1
                 continue
@@ -583,17 +592,23 @@ def draw(pool: Iterable[Candidate], seed: int, salt: str) -> list[dict]:
     return rows
 
 
-def _no_go_reason(n: int, kinds: dict[str, int],
-                  include_untagged: bool = False) -> str | None:
-    if n >= MIN_FLAGGED:
+def _tagging_gap(counts: dict) -> bool:
+    """Untagged sessions hold more eligible pairs than organic ones (session counts do not
+    decide: headless runs with no human prompt are untagged but contribute no pair)."""
+    return counts["untagged_eligible_pairs"] > counts["organic_pairs_eligible"]
+
+
+def _no_go_reason(counts: dict, include_untagged: bool = False) -> str | None:
+    if counts["N_F"] >= MIN_FLAGGED:
         return None
-    if not include_untagged and kinds["untagged"] > kinds["organic"]:
+    if not include_untagged and _tagging_gap(counts):
         return "tagging_gap"
     return "insufficient_flagged_supply"
 
 
-def _gate(n: int, kinds: dict[str, int], include_untagged: bool = False) -> str:
-    reason = _no_go_reason(n, kinds, include_untagged)
+def _gate(counts: dict, include_untagged: bool = False) -> str:
+    n, kinds = counts["N_F"], counts["sessions_by_kind"]
+    reason = _no_go_reason(counts, include_untagged)
     if reason is None:
         verdict = "GO"
     elif reason == "tagging_gap":
@@ -610,14 +625,13 @@ def _gate(n: int, kinds: dict[str, int], include_untagged: bool = False) -> str:
             + ("; include_untagged=on" if include_untagged else ""))
 
 
-def _gate_lines(n: int, kinds: dict[str, int],
-                include_untagged: bool = False) -> list[str]:
-    lines = [_gate(n, kinds, include_untagged)]
-    if (not include_untagged and _no_go_reason(n, kinds) is not None
-            and kinds["untagged"] > kinds["organic"]):
+def _gate_lines(counts: dict, include_untagged: bool = False) -> list[str]:
+    lines = [_gate(counts, include_untagged)]
+    if _no_go_reason(counts, include_untagged) == "tagging_gap":
         lines.append(
-            "WARNING: most sessions are untagged: N_F shortfall may be a tagging gap, "
-            "not detector supply -- do not tune the detector on this result")
+            "WARNING: untagged sessions hold more eligible pairs than organic ones: N_F "
+            "shortfall may be a tagging gap, not detector supply -- do not tune the detector "
+            "on this result")
     return lines
 
 
@@ -801,18 +815,17 @@ def cmd_redo_sample(args: list[str]) -> int:
         for line in warnings:
             print(line)
         print("\n".join(_gate_lines(
-            counts["N_F"], counts["sessions_by_kind"], options.include_untagged)))
+            counts, options.include_untagged)))
         return 0
     for line in warnings:
         print(line)
     if not options.tune:    # a tune set is drawn from whatever supply there is: no flagged-supply gate
         print("\n".join(_gate_lines(
-            counts["N_F"], counts["sessions_by_kind"], options.include_untagged)))
+            counts, options.include_untagged)))
     below = counts["N_F"] < MIN_FLAGGED
     if below and not options.allow_below_threshold and not options.tune:
         print("Refused: --allow-below-threshold is required to freeze this supply.")
-        if _no_go_reason(counts["N_F"], counts["sessions_by_kind"],
-                          options.include_untagged) == "tagging_gap":
+        if _no_go_reason(counts, options.include_untagged) == "tagging_gap":
             print("The cause is session tagging, not detector supply: fix session "
                   "tagging, then re-census. --allow-below-threshold freezes an "
                   "under-supplied sample and does not fix the cause.")
@@ -852,7 +865,7 @@ def cmd_redo_sample(args: list[str]) -> int:
         n_prior_runs=len(prior_runs),
         n_flagged_pool=counts["N_F"], allow_below_threshold=options.allow_below_threshold,
         no_go=(None if options.tune else _no_go_reason(
-            counts["N_F"], counts["sessions_by_kind"], options.include_untagged)),
+            counts, options.include_untagged)),
         concentrated=counts["largest_session_share_F"] > 0.6,
         shortfall=150 - len(rows),
         window=dict(days=options.days, since_iso=_iso(since), until_iso=_iso(until)),

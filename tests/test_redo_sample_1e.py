@@ -116,16 +116,18 @@ def test_combined_gate_and_tagging_gap(isolated):
     write(isolated, "missing-private-session")
     _, default = collect(isolated)
     _, combined = collect(isolated, include_untagged=True)
-    kinds = combined["sessions_by_kind"]
     assert default["N_F"] == 10 and combined["N_F"] == 20
-    assert "NO-GO" in sample._gate(default["N_F"], kinds)
-    assert ": GO;" in sample._gate(combined["N_F"], kinds, True)
-    majority = {"organic": 1, "untagged": 3}
-    assert sample._no_go_reason(10, majority) == "tagging_gap"
-    assert any("WARNING" in line for line in sample._gate_lines(10, majority))
-    assert sample._no_go_reason(18, majority, True) == "insufficient_flagged_supply"
-    assert sample._no_go_reason(19, majority, True) is None
-    lines = sample._gate_lines(18, majority, True)
+    assert "NO-GO" in sample._gate(default)
+    assert ": GO;" in sample._gate(combined, True)
+
+    def majority(n):    # untagged sessions hold most eligible pairs
+        return {"N_F": n, "organic_pairs_eligible": 1, "untagged_eligible_pairs": 3,
+                "sessions_by_kind": {"organic": 1, "untagged": 3}}
+    assert sample._no_go_reason(majority(10)) == "tagging_gap"
+    assert any("WARNING" in line for line in sample._gate_lines(majority(10)))
+    assert sample._no_go_reason(majority(18), True) == "insufficient_flagged_supply"
+    assert sample._no_go_reason(majority(19), True) is None
+    lines = sample._gate_lines(majority(18), True)
     assert len(lines) == 1 and "include_untagged=on" in lines[0]
     assert "tagging_gap" not in lines[0]
 
