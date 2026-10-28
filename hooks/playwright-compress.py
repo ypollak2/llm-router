@@ -166,9 +166,30 @@ def _ollama_open(req, base_url, timeout):
     return open_url(req, base_url=base_url, timeout=timeout)
 
 
+def _ollama_is_loopback(base_url: str) -> bool:
+    """True when ``base_url`` is a loopback daemon (``local_privacy.is_loopback_base``); a plain hostname check
+    when llm_router is not importable, so the default local setup keeps working there."""
+    try:
+        from llm_router.local_privacy import is_loopback_base
+    except ImportError:
+        from urllib.parse import urlparse
+
+        try:
+            host = urlparse(base_url if "//" in base_url else "http://" + base_url).hostname or ""
+        except ValueError:
+            return False
+        return host in ("localhost", "127.0.0.1", "::1")
+    return is_loopback_base(base_url)
+
+
 def _try_ollama(snapshot: str) -> str | None:
-    """Compress via Ollama. Returns summary or None on any failure."""
-    prompt = _COMPRESS_PROMPT.format(snapshot=snapshot[:MAX_SNAPSHOT_CHARS])
+    """Compress via Ollama. Returns summary or None on any failure.
+
+    UN-04c: a remote OLLAMA_HOST is off this machine, so a snapshot holding a secret is not sent to it."""
+    sent = snapshot[:MAX_SNAPSHOT_CHARS]
+    if not _ollama_is_loopback(OLLAMA_BASE) and _cloud_blocked(sent):
+        return None
+    prompt = _COMPRESS_PROMPT.format(snapshot=sent)
     body = json.dumps({
         "model": OLLAMA_MODEL,
         "prompt": prompt,

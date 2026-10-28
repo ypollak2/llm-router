@@ -40,7 +40,7 @@ class _Resp:
         return False
 
     def read(self):
-        return json.dumps({"candidates": [{"content": {"parts": [{"text": "SUMMARY"}]}}]}).encode()
+        return json.dumps({"candidates": [{"content": {"parts": [{"text": "GEMINI_REPLY"}]}}]}).encode()
 
 
 @pytest.fixture
@@ -66,17 +66,80 @@ def test_secret_snapshot_makes_no_gemini_call(hook, calls):
     assert calls == []
 
 
-def test_secret_snapshot_falls_back_to_rule_based_in_main(hook, calls, monkeypatch, capsys):
-    key = fx.real_shaped("github_token", 12)
-    snap = _snapshot(f'- text "token" [ref=e98]: {key}')
+def _run_main(hook, monkeypatch, capsys, snap):
+    import io
+
+    payload = {"hook_event_name": "PostToolUse", "tool_name": "mcp__plugin_playwright__browser_snapshot",
+               "tool_response": {"text": snap}}
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
     monkeypatch.setattr(hook, "_try_ollama", lambda s: None)
-    out = hook._try_gemini(snap) or hook._rule_based(snap)
+    hook.main()
+    return json.loads(capsys.readouterr().out)["hookSpecificOutput"]["contextForAgent"]
+
+
+def test_main_with_secret_snapshot_uses_rule_based_not_gemini(hook, calls, monkeypatch, capsys):
+    key = fx.real_shaped("github_token", 12)
+    ctx = _run_main(hook, monkeypatch, capsys, _snapshot(f'- text "token" [ref=e98]: {key}'))
     assert calls == []
-    assert out and "SUMMARY" not in out
+    assert "GEMINI_REPLY" not in ctx and "DOM snapshot compressed" in ctx
+
+
+def test_main_with_clean_snapshot_uses_gemini(hook, calls, monkeypatch, capsys):
+    ctx = _run_main(hook, monkeypatch, capsys, _snapshot())
+    assert len(calls) == 1 and "GEMINI_REPLY" in ctx
+
+
+def test_secret_past_the_truncation_boundary_is_not_sent_so_not_blocked(hook, calls):
+    key = fx.real_shaped("openai_key", 13)
+    filler = "x" * (hook.MAX_SNAPSHOT_CHARS + 5)
+    assert hook._try_gemini(_snapshot(filler + "\n" + key)) == "GEMINI_REPLY"
+    assert len(calls) == 1
+    # and a secret just inside the boundary is blocked
+    head = "- row\n" * 10
+    inside = head + key
+    assert len(inside) < hook.MAX_SNAPSHOT_CHARS
+    assert hook._try_gemini(inside) is None
+    assert len(calls) == 1
+
+
+@pytest.fixture
+def ollama_calls(hook, monkeypatch):
+    seen: list[str] = []
+
+    class R(_Resp):
+        def read(self):
+            return json.dumps({"response": "LOCAL"}).encode()
+
+    def fake_open(req, base_url, timeout):
+        seen.append(req.full_url)
+        return R()
+
+    monkeypatch.setattr(hook, "_ollama_open", fake_open)
+    return seen
+
+
+def test_remote_ollama_with_secret_gets_no_request(hook, ollama_calls, monkeypatch):
+    monkeypatch.setattr(hook, "OLLAMA_BASE", "http://ollama.remote.invalid:11434")
+    key = fx.real_shaped("openai_key", 14)
+    assert hook._try_ollama(_snapshot(f'- text "k" [ref=e1]: {key}')) is None
+    assert ollama_calls == []
+
+
+def test_remote_ollama_clean_snapshot_still_sent(hook, ollama_calls, monkeypatch):
+    monkeypatch.setattr(hook, "OLLAMA_BASE", "http://ollama.remote.invalid:11434")
+    assert hook._try_ollama(_snapshot()) == "LOCAL"
+    assert len(ollama_calls) == 1
+
+
+def test_loopback_ollama_with_secret_stays_local(hook, ollama_calls, monkeypatch):
+    monkeypatch.setattr(hook, "OLLAMA_BASE", "http://localhost:11434")
+    key = fx.real_shaped("openai_key", 15)
+    assert hook._try_ollama(_snapshot(f'- text "k" [ref=e1]: {key}')) == "LOCAL"
+    assert len(ollama_calls) == 1
 
 
 def test_clean_snapshot_still_goes_to_gemini(hook, calls):
-    assert hook._try_gemini(_snapshot()) == "SUMMARY"
+    assert hook._try_gemini(_snapshot()) == "GEMINI_REPLY"
     assert len(calls) == 1 and "generativelanguage.googleapis.com" in calls[0]
 
 
