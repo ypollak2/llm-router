@@ -14,8 +14,9 @@ from tests.test_redo_sample import isolated as isolated, record
 
 EMPTY = "M0.9 exclusion list EMPTY: spent M0.9 pairs are NOT excluded"
 WARNING = (
-    "WARNING: most sessions are untagged: N_F shortfall may be a tagging gap, "
-    "not detector supply -- do not tune the detector on this result"
+    "WARNING: untagged sessions hold more eligible pairs than organic ones: N_F "
+    "shortfall may be a tagging gap, not detector supply -- do not tune the detector "
+    "on this result"
 )
 PROMPT = "PRIVATE_PROMPT_MARKER"
 ANSWER = "PRIVATE_ANSWER_MARKER"
@@ -135,6 +136,12 @@ def test_kind_gate(transcripts, monkeypatch, capsys, untagged, mode):
         assert frozen["no_go"] == reason
 
 
+def gate_counts(n, untagged_pairs, organic_pairs=1, sessions=None):
+    return {"N_F": n, "untagged_eligible_pairs": untagged_pairs,
+            "organic_pairs_eligible": organic_pairs,
+            "sessions_by_kind": sessions or {"organic": 1, "untagged": untagged_pairs}}
+
+
 @pytest.mark.parametrize("n,untagged,reason", [
     (5, 0, "insufficient_flagged_supply"),
     (5, 1, "insufficient_flagged_supply"),
@@ -142,7 +149,7 @@ def test_kind_gate(transcripts, monkeypatch, capsys, untagged, mode):
     (19, 2, None),
 ])
 def test_gate(n, untagged, reason):
-    line = sample._gate(n, {"organic": 1, "untagged": untagged})
+    line = sample._gate(gate_counts(n, untagged))
     if reason is None:
         assert line.startswith(f"N_F={n} vs threshold 19: GO; sessions:")
         assert "tagging_gap" not in line
@@ -151,7 +158,7 @@ def test_gate(n, untagged, reason):
 
 @pytest.mark.parametrize("n", [sample.MIN_FLAGGED - 1, sample.MIN_FLAGGED])
 def test_gate_lines_warning_requires_no_go(n):
-    lines = sample._gate_lines(n, {"organic": 1, "untagged": 2})
+    lines = sample._gate_lines(gate_counts(n, 2))
     if n >= sample.MIN_FLAGGED:
         assert len(lines) == 1
         assert ": GO;" in lines[0]
@@ -176,6 +183,62 @@ def test_tagging_gap_threshold_refusal(transcripts, monkeypatch, capsys):
     assert ("--allow-below-threshold freezes an under-supplied sample "
             "and does not fix the cause.") in output
     assert not run_dir(transcripts, "tagging-gap").exists()
+
+
+def write_headless(root, sid):
+    """A `claude -p`/SDK run: prompts with promptSource "sdk" are not human prompts."""
+    project = root / "project"
+    project.mkdir(exist_ok=True)
+    now = datetime.now(timezone.utc).timestamp()
+    entries = []
+    for i in range(3):
+        entries += [dict(record(PROMPT, now - 60 + 2 * i), promptSource="sdk"),
+                    record(ANSWER, now - 59 + 2 * i, "assistant")]
+    (project / f"{sid}.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in entries), encoding="utf-8")
+
+
+def test_headless_untagged_sessions_do_not_make_a_tagging_gap(transcripts, monkeypatch, capsys):
+    """RSG1: many untagged zero-prompt sessions, few organic ones, N_F below threshold:
+    the verdict is the supply reason, not tagging_gap, and no tagging next step is printed."""
+    organic_sids = {SID, "organic-2"}
+    write(transcripts, "organic-2")
+    for i in range(10):
+        write_headless(transcripts, f"headless-{i}")
+    monkeypatch.setattr(session_kind, "tag_kind_of",
+                        lambda sid: "organic" if sid in organic_sids else None)
+    assert sample.cmd_redo_sample(["--census"]) == 0
+    output = capsys.readouterr().out
+    assert "sessions_by_kind: {\"organic\": 2, \"untagged\": 10}" in output.splitlines()
+    assert "NO-GO (insufficient_flagged_supply) -- next step: detector tune to v3" in output
+    assert "tagging_gap" not in output
+    assert "fix session tagging" not in output
+    assert "tagging gap" not in output
+    assert sample.cmd_redo_sample(["--freeze", "--run-id", "headless"]) == 3
+    output = capsys.readouterr().out
+    assert "Refused: --allow-below-threshold is required" in output
+    assert "The cause is session tagging" not in output
+    assert freeze(transcripts, "headless", "--allow-empty-exclusion") == 0
+    frozen = json.loads((run_dir(transcripts, "headless") / "frozen.json").read_text())
+    assert frozen["no_go"] == "insufficient_flagged_supply"
+    counts = sample.census(projects_dir=transcripts)
+    assert counts["organic_pairs_eligible"] == 2
+    assert counts["untagged_eligible_pairs"] == 0
+    assert 0 < counts["N_F"] < sample.MIN_FLAGGED
+
+
+def test_untagged_sessions_with_pairs_still_make_a_tagging_gap(transcripts, monkeypatch, capsys):
+    """Positive control: untagged sessions WITH eligible pairs outnumbering organic pairs."""
+    for i in range(3):
+        write(transcripts, f"untagged-{i}")
+    monkeypatch.setattr(
+        session_kind, "tag_kind_of", lambda sid: "organic" if sid == SID else None)
+    assert sample.cmd_redo_sample(["--census"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "organic_pairs_eligible: 1" in lines
+    gate = next(i for i, line in enumerate(lines) if line.startswith("N_F="))
+    assert "NO-GO (tagging_gap) -- next step: fix session tagging" in lines[gate]
+    assert "N_F shortfall may be a tagging gap" in lines[gate + 1]  # wording-independent
 
 
 @pytest.mark.parametrize("exists", [False, True])

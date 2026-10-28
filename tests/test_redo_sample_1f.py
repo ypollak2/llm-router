@@ -221,7 +221,7 @@ def test_combined_weight_labels(isolated):
 
 
 FLAG_OFF_KEYS = {
-    "sessions_total", "organic_pairs_eligible", "no_ts", "excluded_m09", "flagged_ineligible",
+    "sessions_total", "organic_pairs_eligible", "untagged_eligible_pairs", "no_ts", "excluded_m09", "flagged_ineligible",
     "exclusion_list_size", "exclusion_list_sha256", "exclusion_source", "sessions_by_kind",
     "eligible_after_exclusion", "N_F", "N_S", "N_R", "flagged_per_signal", "cheap_served",
     "n_sessions", "max_pairs_per_session", "largest_session_share", "median_pairs_per_session",
