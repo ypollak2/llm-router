@@ -24,8 +24,9 @@ than retyping it, so the `ENABLE_TOOL_SEARCH` half is never dropped.
 ### Cost parity: always set `ENABLE_TOOL_SEARCH=true`
 
 Measured 2026-09-28, same 3 fixture tasks, `claude -p` with and without the
-proxy: the proxied arm cost **3.5x** the no-proxy baseline ($2.44 vs $0.69)
-for the same tasks passing the same way. Root cause is in Claude Code, not
+proxy: the proxied arm cost **several times** the no-proxy baseline for the
+same tasks passing the same way (no script or result file for that run is in
+this repo, so no figure is given). Root cause is in Claude Code, not
 this proxy: Claude Code disables its Tool Search / dynamic-tool-loading
 feature — which keeps most MCP and skill tool schemas out of the request
 until a step actually needs them — the instant `ANTHROPIC_BASE_URL` is not a
@@ -36,8 +37,8 @@ every request inlines every deferred tool's full schema, which inflates the
 cacheable prefix (`Dynamic tool loading: 0/134 deferred tools included`
 becomes `134/134` in `claude --debug api` output) and, on a cache miss, is
 billed at the 1-hour cache-write rate — 2x the input rate. In a debug capture,
-the first Anthropic call of a proxied session went from ~50k tokens
-(input + cache write + cache read) with Tool Search on, to ~128k with it off.
+the first Anthropic call of a proxied session (input + cache write + cache
+read) grew sharply with Tool Search off.
 
 `ENABLE_TOOL_SEARCH=true` (or `auto` / `auto:N`) restores first-party
 behaviour. It is safe with this proxy specifically because `forward()` never
@@ -88,9 +89,9 @@ client tools are never routed.
   streamed tool call cannot be taken back.
 - **Binding.** Loopback only unless you opt in explicitly. Browser cross-origin
   requests are refused.
-- **Loop guard.** A live trial (2026-09-28) found one session with 44
+- **Loop guard.** A live trial (2026-09-28) found one session with dozens of
   consecutive served replies re-issuing the same `Read` of the same file —
-  correct in the end, but 195s and an inflated routed share/avoided-cost. Per
+  correct in the end, but slow and an inflated routed share/avoided-cost. Per
   session, in-memory only (`llm_router.proxy.loop_guard`): a served tool call
   that exactly repeats one of the session's last `LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW`
   served tool calls, or a session that has served `LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE`
@@ -829,10 +830,11 @@ Everything above is opt-in, one session at a time. `llm-router install
 means a dead proxy fails every session's first API call, not just one that
 opted in. Owner-approved 2026-09-30 after a trial on real prompts
 (`~/.rsi/research/llm-router-cursor-parity/trial-real-prompts.md`, n=6):
-72-80% lower cost, every conversation landed on Sonnet (the classifier never
-picked Opus), and 1 of 6 routed answers was unacceptable — a moderate,
-investigation-heavy first prompt Sonnet answered shallowly. Everything below
-exists because of that last finding as much as the first two.
+every conversation landed on Sonnet (the classifier never picked Opus), and 1
+of 6 routed answers was unacceptable — a moderate, investigation-heavy first
+prompt Sonnet answered shallowly. No cost-saving figure is stated: six prompts
+are too few for one. Everything below exists because of that last finding as
+much as the first.
 
 ### Install / uninstall
 
