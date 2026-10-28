@@ -883,6 +883,90 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
     return result
 
 
+# ── MCP install door (P2.12, P212-4) ───────────────────────────────────────────
+
+#: Seconds a confirm token stays valid after the plan was shown.
+INSTALL_TOKEN_TTL_S = 600
+
+
+def _install_plan() -> dict:
+    """What ``run_full(interactive=False)`` would touch on this machine. Reads only."""
+    from llm_router import host_detect
+
+    hosts = {"claude-code": None}
+    for host_id, info in host_detect.detect_hosts().items():
+        if info.present:
+            hosts.setdefault(host_id, None)
+    plan: dict[str, dict] = {}
+    for host_id in sorted(hosts):
+        files = sorted(str(p) for p in _receipt_hook_files(host_id).values())
+        registry = _receipt_registry(host_id)
+        plan[host_id] = {"hook_files": files, "registry": str(registry) if registry else None}
+    return plan
+
+
+def _install_token(plan: dict, issued: int) -> str:
+    import hashlib
+    import json
+
+    blob = json.dumps({"plan": plan, "home": str(paths.llm_router_home())}, sort_keys=True)
+    return f"{issued}.{hashlib.sha256(f'{issued}:{blob}'.encode()).hexdigest()[:16]}"
+
+
+def _token_valid(token: object, plan: dict, now: float) -> bool:
+    import hmac
+
+    if not isinstance(token, str) or "." not in token:
+        return False
+    stamp = token.split(".", 1)[0]
+    if not stamp.isdigit() or not 0 <= now - int(stamp) <= INSTALL_TOKEN_TTL_S:
+        return False
+    return hmac.compare_digest(token, _install_token(plan, int(stamp)))
+
+
+def admin_install(value: str = "") -> str:
+    """``llm_router_admin(action="install")``: two steps, nothing is printed to the process stdout.
+
+    Step 1 (``value`` empty) lists the hosts and files the install would write and returns a
+    confirm token; it writes nothing. Step 2 (``value`` = JSON ``{"confirm": token}``) runs
+    ``run_full(interactive=False)`` -- the same call as ``install --auto``, so the receipt and its
+    digest match the CLI's -- with stdout and stderr captured, because stdout belongs to the MCP
+    stdio stream. It never changes the proxy default or the routing authority."""
+    import contextlib
+    import io
+    import json
+    import time
+
+    token = None
+    if (value or "").strip():
+        try:
+            body = json.loads(value)
+            token = body["confirm"]
+        except (ValueError, KeyError, TypeError):
+            return 'Bad value: leave it empty to see the plan, or pass JSON {"confirm": "<token>"}.'
+    plan = _install_plan()
+    now = time.time()
+    if token is None:
+        lines = [f"  {h}: {', '.join(d['hook_files']) or 'no hook scripts'}"
+                 + (f" (registered in {d['registry']})" if d["registry"] else "") for h, d in plan.items()]
+        confirm = json.dumps({"confirm": _install_token(plan, int(now))})
+        return ("Nothing installed yet. `install` would wire these hosts:\n" + "\n".join(lines)
+                + "\nIt does not change the proxy default or the routing authority."
+                + f"\nTo install, call again with value='{confirm}' (valid {INSTALL_TOKEN_TTL_S // 60} minutes).")
+    if not _token_valid(token, plan, now):
+        return ("Not installed: the confirm token is wrong, expired, or the detected hosts changed; "
+                "start again with an empty value.")
+    sink = io.StringIO()
+    with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+        receipt = run_full(interactive=False).receipt
+    failures = receipt_failures(receipt)
+    rows = "\n".join(f"  {h}: {r['status']}" + (f" ({r['reason']})" if r.get("reason") else "")
+                      for h, r in receipt["hosts"].items())
+    head = "Install finished with errors." if failures else "Installed."
+    return (f"{head}\n{rows}\n{receipt_line(receipt)}\ndigest: {receipt['digest']}"
+            + ("".join(f"\n  problem: {f}" for f in failures)) + "\nRestart the host to activate.")
+
+
 # ── install --headless ─────────────────────────────────────────────────────────
 
 def _run_install_headless(flags: list[str] | None = None, *, schedule: dict | None = None) -> None:
