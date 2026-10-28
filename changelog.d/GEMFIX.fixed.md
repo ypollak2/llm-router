@@ -1,0 +1,1 @@
+The Gemini CLI installer now accepts the legacy `hooks.json` shape (`"PostToolUse": {"enabled": true}`): it migrates the toggle dict to the current list shape, keeps user entries and keys, and registers every hook, so `llm-router install` no longer reports the gemini-cli row as `error` on such machines (follow-up to PR #768).

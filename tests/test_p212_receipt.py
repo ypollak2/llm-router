@@ -135,8 +135,14 @@ def test_negative_control_a_raising_installer_is_an_error_row(home, monkeypatch,
         raise RuntimeError("codex config.toml is read-only")
 
     monkeypatch.setattr(install, "_install_codex_files", boom)
+    from llm_router import failopen
+    recorded = []
+    real_record = failopen.record
+    monkeypatch.setattr(failopen, "record", lambda *a, **k: (recorded.append((a, k)), real_record(*a, **k))[1])
 
     assert install.cmd_install(["--auto"]) == 1
+    assert [(a[0], k.get("detail")) for a, k in recorded if a[0] == "P212-INSTALL-HOST-FAILED"] == [
+        ("P212-INSTALL-HOST-FAILED", "codex")]
     receipt = install.read_receipt()
     assert receipt["hosts"]["codex"] == {
         "status": "error", "reason": "RuntimeError: codex config.toml is read-only",
@@ -260,3 +266,40 @@ def test_digest_ignores_ts_via_and_reason_but_not_versions():
     assert bumped["digest"] != base["digest"]
     assert install.build_receipt({"claude-code": row}, package_version="1.1")["digest"] != base["digest"]
     assert re.fullmatch(r"[0-9a-f]{64}", base["digest"])
+
+
+def test_gemini_legacy_dict_hooks_json_is_migrated_and_registered(home):
+    """GEMFIX: an old install wrote ``"PostToolUse": {"enabled": true}``; the merge used to
+    raise AttributeError (swallowed), registering nothing and making the row ``error``."""
+    _add_host(home, "gemini-cli")
+    hj = home / ".gemini" / "extensions" / "llm_router" / "hooks" / "hooks.json"
+    hj.parent.mkdir(parents=True)
+    hj.write_text(json.dumps({"hooks": {
+        "PostToolUse": {"enabled": True},
+        "BeforeTool": [{"matcher": "x", "command": "/user/own.sh"}]}, "userKey": 1}))
+
+    receipt = install.run_full(interactive=False).receipt
+    assert receipt["hosts"]["gemini-cli"]["status"] == "wired", receipt["hosts"]["gemini-cli"]
+    assert install.receipt_failures(receipt) == []
+    doc = json.loads(hj.read_text())
+    assert doc["userKey"] == 1
+    assert doc["hooks"]["BeforeTool"] == [{"matcher": "x", "command": "/user/own.sh"}]
+    for ev in ("SessionStart", "PostToolUse", "UserPromptSubmit", "SessionEnd"):
+        assert isinstance(doc["hooks"][ev], list) and doc["hooks"][ev], ev
+    assert len(doc["hooks"]["UserPromptSubmit"]) == 2
+    before = hj.read_text()
+    install.run_full(interactive=False)
+    assert hj.read_text() == before  # idempotent
+
+
+def test_gemini_current_shape_hooks_json_is_unchanged_by_reinstall(home):
+    _add_host(home, "gemini-cli")
+    install.run_full(interactive=False)
+    hj = home / ".gemini" / "extensions" / "llm_router" / "hooks" / "hooks.json"
+    doc = json.loads(hj.read_text())
+    doc["hooks"]["PostToolUse"].append({"matcher": "*", "command": "/user/own.sh"})
+    hj.write_text(json.dumps(doc, indent=2))
+    before = hj.read_text()
+    receipt = install.run_full(interactive=False).receipt
+    assert receipt["hosts"]["gemini-cli"]["status"] == "wired"
+    assert json.loads(hj.read_text()) == json.loads(before)

@@ -1866,6 +1866,18 @@ def _install_opencode_files() -> list[str]:
     return actions
 
 
+def _gemini_event_list(value) -> list:
+    """The hook list for one Gemini hooks.json event. Older installs wrote an event as a
+    toggle dict (``"PostToolUse": {"enabled": true}``) that carries no command; that shape
+    becomes an empty list (a dict holding a ``command`` becomes one entry), so the merge
+    can append. A list is returned unchanged; anything else is not ours and also resets."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict) and value.get("command"):
+        return [{k: v for k, v in value.items() if k != "enabled"}]
+    return []
+
+
 def _install_gemini_cli_files() -> list[str]:
     """Write Gemini CLI-specific config files and return a list of actions taken."""
     import json as _json
@@ -1959,7 +1971,9 @@ def _install_gemini_cli_files() -> list[str]:
         try:
             current = _json.loads(hooks_json.read_text())
             hooks = current.setdefault("hooks", {})
-            
+            for _event in ("SessionStart", "PostToolUse", "UserPromptSubmit", "SessionEnd"):
+                hooks[_event] = _gemini_event_list(hooks.get(_event))
+
             # SessionStart
             start_hooks = hooks.setdefault("SessionStart", [])
             if not any(start_hook_dest in str(h) for h in start_hooks):
