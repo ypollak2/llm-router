@@ -893,10 +893,8 @@ def _install_plan() -> dict:
     """What ``run_full(interactive=False)`` would touch on this machine. Reads only."""
     from llm_router import host_detect
 
-    hosts = {"claude-code": None}
-    for host_id, info in host_detect.detect_hosts().items():
-        if info.present:
-            hosts.setdefault(host_id, None)
+    hosts = {"claude-code"}
+    hosts.update(h for h, info in host_detect.detect_hosts().items() if info.present)
     plan: dict[str, dict] = {}
     for host_id in sorted(hosts):
         files = sorted(str(p) for p in _receipt_hook_files(host_id).values())

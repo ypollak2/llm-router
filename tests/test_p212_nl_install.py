@@ -33,7 +33,7 @@ def _fixture(root: Path, monkeypatch) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_two_step_install_is_silent_and_matches_the_cli_digest(tmp_path, monkeypatch, capsys):
+async def test_two_step_install_is_silent_and_matches_the_cli_digest(tmp_path, monkeypatch, capfd):
     a = _fixture(tmp_path / "a", monkeypatch)
     before = _tree(a)
 
@@ -43,7 +43,7 @@ async def test_two_step_install_is_silent_and_matches_the_cli_digest(tmp_path, m
     assert "Nothing installed yet" in plan and "codex" in plan and "claude-code" in plan
 
     done = await consolidated.llm_router_admin("install", json.dumps({"confirm": _token(plan)}))
-    captured = capsys.readouterr()
+    captured = capfd.readouterr()  # fd level: also catches child processes
     assert captured.out == "" and captured.err == ""
     mcp_receipt = install.read_receipt()
     assert mcp_receipt is not None and install.receipt_failures(mcp_receipt) == []

@@ -342,6 +342,7 @@ def _default_runner(argv: list[str], timeout: float) -> tuple[int, str] | None:
         return None
     proc = subprocess.run(
         [exe, *argv[1:]], capture_output=True, text=True, timeout=timeout, check=False,
+        stdin=subprocess.DEVNULL,  # P212-4: never read the MCP stdio stream
         env={**os.environ, "PATH": search_path()},
     )
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
