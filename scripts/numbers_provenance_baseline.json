@@ -1,0 +1,242 @@
+{
+  "entries": [
+    {
+      "key": "docs/BACKEND-QUALITY.md::215fc675de6e",
+      "path": "docs/BACKEND-QUALITY.md",
+      "line": 51,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [multiplier:8x]",
+      "text": "A three-way tie. For contained work the local model is indistinguishable from both cloud agents at 4-8x the speed and zero marginal cost."
+    },
+    {
+      "key": "docs/BACKEND-QUALITY.md::6e554a245653",
+      "path": "docs/BACKEND-QUALITY.md",
+      "line": 104,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [multiplier:2.8x]",
+      "text": "The separation this suite produces is not a single ranking. On **correctness** local sits clearly below both cloud agents (8 vs 10). Codex and Claude are level "
+    },
+    {
+      "key": "docs/BACKLOG.md::b2643c23281d",
+      "path": "docs/BACKLOG.md",
+      "line": 38,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:2%]",
+      "text": "- **Item 8 (`tool_intercept` cannot reach real work)** \u2014 partially addressed. `&&` conjunctions admitted; eligibility 8/492 \u2192 12/492. Pipes and redirects still "
+    },
+    {
+      "key": "docs/BENCHMARKS.md::2f126f1920ed",
+      "path": "docs/BENCHMARKS.md",
+      "line": 164,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:30%, percent:50%, percent:0%, percent:20%]",
+      "text": "| Task Type | Arena Hard | Aider | HF Score | Cost (inverted) | |-----------|-----------|-------|----------|-----------------| | \ud83d\udcbb code | 30% | **50%** | 0% | 2"
+    },
+    {
+      "key": "docs/MEASUREMENT.md::4616c3776c93",
+      "path": "docs/MEASUREMENT.md",
+      "line": 18,
+      "why": "no source (file path, PR #NNN or ~/.rsi path) [percent:54%, n-of-m:1,037 of 1,938]",
+      "text": "Test-suite invocations write to the production log with `session_id=unknown`. On 2026-08-31 that was **1,037 of 1,938 entries \u2014 54% of the file.** A rate comput"
+    },
+    {
+      "key": "docs/MEASUREMENT.md::f2c385c21581",
+      "path": "docs/MEASUREMENT.md",
+      "line": 73,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:2%]",
+      "text": "Intercepting half the commands that produce 2% of the output is worth nothing. Coverage claims in this repo are `bytes of tool output avoided / total bytes`."
+    },
+    {
+      "key": "docs/MEASUREMENT.md::b172e801a77e",
+      "path": "docs/MEASUREMENT.md",
+      "line": 203,
+      "why": "no source (file path, PR #NNN or ~/.rsi path) [percent:69.6%, percent:69.6%, percent:70.4%, percent:77.4%]",
+      "text": "acceptable 69.6% 69.6% identical drafts produced 70.4% 77.4% 7 points apart verdict flips 24 of 115 prompts changed verdict between runs"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::ed7b4a6bff79",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 3,
+      "why": "no source (file path, PR #NNN or ~/.rsi path) [percent:57%, percent:70%, percent:70%, n-of-m:24 of 115]",
+      "text": "> **Update 2026-09-15, after G5 and G1.** Usable drafts moved **57% -> 70%**, > measured twice on independent runs that both landed on 70%. The noise floor: > a"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::8915236b99fc",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 14,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:100%]",
+      "text": "The goal is ~100% of prompts getting a draft worth using. This is what stands between here and there, sized rather than assumed."
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::7a1cd0055c94",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 19,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:57%, percent:15%, percent:28%]",
+      "text": "| Outcome | Count | Share | |---|---|---| | **Usable draft** | 66 | **57%** | | Drafted but unusable | 17 | 15% | | No draft at all | 32 | 28% |"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::9f8ff4a4ee8e",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 27,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:12%, percent:13%, percent:6%, percent:4%]",
+      "text": "| Reason | Count | Share | Is it wrong? | |---|---|---|---| | `no free-tier model available` | 14 | 12% | **No** \u2014 complex code/research to Claude, the stated c"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::5aa3feb67349",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 36,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:18%, percent:82%, percent:57%]",
+      "text": "**18% is correct behaviour, not a gap.** The honest ceiling is therefore ~82%, and the addressable distance from 57% is **25 points**."
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::582d9326d57d",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 39,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:13%]",
+      "text": "## G1 \u2014 The model invents plan filenames (13%, the largest single gap)"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::f11376fc80a3",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 56,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:4%]",
+      "text": "## G2 \u2014 Grounding rejects 5 drafts outright (4%)"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::35e992d22e46",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 67,
+      "why": "no source (file path, PR #NNN or ~/.rsi path) [percent:3%]",
+      "text": "## G3 \u2014 3 prompts still hit the context gate (3%)"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::9ba49bfc8aa6",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 77,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:2%]",
+      "text": "## G4 \u2014 2 drafts claim a status they cannot observe (2%)"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::270cf2f421f9",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 90,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:7%]",
+      "text": "Five defects in two days, each caught only after a number had been reported: contaminated corpus, survivorship-biased p90, a partial rate quoted as final, an in"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::7d30054316a7",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 103,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:13%, percent:4%, percent:3%, percent:2%]",
+      "text": "G5 (establish the noise floor \u2014 everything else is read against it) G1 (13%, one prompt edit, re-scored from disk in seconds) G2 (4%, 15 minutes of reading befo"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::cf5dc404b5e0",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 110,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:100%, percent:80%, percent:57%]",
+      "text": "100%. Eighteen points are correct behaviour: complex work going to Claude is the stated design, and a bare \"continue\" carries nothing to route. A realistic targ"
+    },
+    {
+      "key": "docs/RESEARCH_LANDSCAPE.md::70e10f1b7fe1",
+      "path": "docs/RESEARCH_LANDSCAPE.md",
+      "line": 105,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [dollars:$1.3]",
+      "text": "2. **Martian's \"$1.3B valuation\" claim** is sourced from a single Medium post, not a funding announcement, TechCrunch/Bloomberg piece, or Crunchbase entry \u2014 **U"
+    },
+    {
+      "key": "docs/RESEARCH_SEMANTIC_LAYER.md::5aa04c29a0e1",
+      "path": "docs/RESEARCH_SEMANTIC_LAYER.md",
+      "line": 607,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [latency:200 ms]",
+      "text": "- Warm retrieval overhead initially targets p95 below 200 ms on a declared reference machine for a declared repository size, with all optional embedding work in"
+    },
+    {
+      "key": "docs/ROUTERARENA.md::66c83157e815",
+      "path": "docs/ROUTERARENA.md",
+      "line": 45,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:72.59%, dollars:$0.1093]",
+      "text": "| Metric | Value | |---|---| | **Arena Score** | **72.35** | | Accuracy | 72.59% | | Cost per 1K queries | $0.1093 | | Robustness | 79.29 (87 flips of 420 parap"
+    },
+    {
+      "key": "docs/ROUTERARENA.md::4dda694c286c",
+      "path": "docs/ROUTERARENA.md",
+      "line": 53,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:63.1%, percent:20.9%, percent:16.0%]",
+      "text": "Routed model distribution: `gemini-3.1-flash-lite-preview` 63.1%, `qwen/qwen3-235b-a22b-2507` 20.9%, `deepseek/deepseek-v4-flash` 16.0%."
+    },
+    {
+      "key": "docs/ROUTERARENA.md::e364916f9862",
+      "path": "docs/ROUTERARENA.md",
+      "line": 64,
+      "why": "no source (file path, PR #NNN or ~/.rsi path) [n-of-m:294 of 420]",
+      "text": "The accuracy gain is small. The robustness gain is not, and it is the more interesting number: the first entry routed on **hashed bag-of-words**, which changed "
+    },
+    {
+      "key": "docs/empty-chain-behaviour.md::fe49159b19ed",
+      "path": "docs/empty-chain-behaviour.md",
+      "line": 67,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [multiplier:0.6x]",
+      "text": "- **After the call.** `check_truncated` records a truncation it detects as `CHZ-FO-LOCAL-CTX-TRUNCATED`. It is a heuristic: it fires when `prompt_eval_count` re"
+    },
+    {
+      "key": "docs/model-resolver.md::82fa705e56bc",
+      "path": "docs/model-resolver.md",
+      "line": 133,
+      "why": "no N or window (n=, date, 'N runs', 'N of M') [percent:75%, percent:15%, percent:75%, percent:50%]",
+      "text": "| Figure | Harness | Source | |---|---|---| | Claude 15/20 (75%) | Claude-only, plan_implement arm A | `plan_implement/analysis_output.txt` | | qwen3-coder 3/20"
+    },
+    {
+      "key": "docs/model-resolver.md::8d4d677ef0c8",
+      "path": "docs/model-resolver.md",
+      "line": 141,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [percent:95%, percent:53%, percent:89%]",
+      "text": "Wilson 95% intervals are wide (for 15/20, [53%, 89%]); Astra's review notes a 15/20 tie is weak evidence of equivalence. They are shown to explain why a local m"
+    },
+    {
+      "key": "docs/proxy.md::ca018399317b",
+      "path": "docs/proxy.md",
+      "line": 26,
+      "why": "no source (file path, PR #NNN or ~/.rsi path) [multiplier:2x]",
+      "text": "Measured 2026-09-28, same 3 fixture tasks, `claude -p` with and without the proxy: the proxied arm cost **several times** the no-proxy baseline for the same tas"
+    },
+    {
+      "key": "docs/proxy.md::3ee7e2f64621",
+      "path": "docs/proxy.md",
+      "line": 168,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [latency:110 s]",
+      "text": "- **Warm.** `keep_alive: 600` (seconds; `--keep-alive -1` pins forever) is sent on every call, plus one warm-up call at start. A cold load took 8-110 s in that "
+    },
+    {
+      "key": "docs/proxy.md::65cdbd276c85",
+      "path": "docs/proxy.md",
+      "line": 170,
+      "why": "no source (file path, PR #NNN or ~/.rsi path); no N or window (n=, date, 'N runs', 'N of M') [latency:8 s]",
+      "text": "- **Hedge.** 8 s to the first token."
+    },
+    {
+      "key": "docs/proxy.md::729619a527ed",
+      "path": "docs/proxy.md",
+      "line": 414,
+      "why": "no N or window (n=, date, 'N runs', 'N of M') [tokens:5 tokens]",
+      "text": "`est_cost_usd` reconciles against Claude Code's own `total_cost_usd` (from `claude -p ... --output-format json`) only when nothing was served locally: a served "
+    },
+    {
+      "key": "docs/proxy.md::c1458d4c40b1",
+      "path": "docs/proxy.md",
+      "line": 671,
+      "why": "no source (file path, PR #NNN or ~/.rsi path) [percent:2%, percent:100%]",
+      "text": "- **Fill then 2% (OD-4 = A, per task group).** `rate` is 1.0 until the task group has 60 decided pairs among the verdict rows of the last 14 days, then 0.02. A "
+    },
+    {
+      "key": "docs/proxy.md::d2296fd96fba",
+      "path": "docs/proxy.md",
+      "line": 678,
+      "why": "no source (file path, PR #NNN or ~/.rsi path) [percent:2%]",
+      "text": "- The 12, 400k, 60, 2% and 14 days are the numbers the PREREG-LANEA draft lists; the SALT is its draft literal."
+    },
+    {
+      "key": "docs/proxy.md::56d721742112",
+      "path": "docs/proxy.md",
+      "line": 813,
+      "why": "no N or window (n=, date, 'N runs', 'N of M') [percent:3%]",
+      "text": "`python scripts/reconcile_proxy_cost.py [--exclude SID ...]` (read-only) compares the ledger with transcript totals (sub-agent transcripts included): a fully fo"
+    }
+  ]
+}

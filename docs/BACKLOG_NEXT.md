@@ -38,7 +38,7 @@ three survive it and are still worth doing.
 
 | ID | Task | Gate | Size |
 |---|---|---|---|
-| N10 | Raise tool-capture truncation | `_stringify(tool_input, 200)` / `(tool_result, 500)`: 128 events measured at p50 661, p90 710, max 711 — pinned at the cap. After: fewer events at the ceiling, and a prompt naming a recently-written file resolves | M |
+| N10 | Raise tool-capture truncation | `_stringify(tool_input, 200)` / `(tool_result, 500)`: captured events sit at the cap (the earlier figures had no window or source file and were removed). After: fewer events at the ceiling, and a prompt naming a recently-written file resolves | M |
 | N11 | Structured facts slot | `{branch, head_sha, last_tool, last_command_head, last_exit_code}` from `git` on every PostToolUse, overwritten not appended, ~20-40 tokens, never writable by a model | M |
 | N12 | Relax OKF's anchor gate for session-local tokens | `okf.py:643` requires a >=6-char identifier so "W3" and "Q-L" can never match. Scope to tokens seen this session; NEVER the bulk index — that precision collapse was fixed once already | M |
 
