@@ -11,6 +11,7 @@ import json
 import math
 import os
 import random
+import shlex
 import re
 import shutil
 import subprocess
@@ -58,14 +59,9 @@ LABEL_DEFINITION = """y = 1 iff the developer's message shows that the previous 
 | Pasted tool or error output with no complaint, as a continuation of debugging the answer's own fix | `unclear` unless the message says the fix failed |
 | Short repeat ("ok", "continue", "yes") | 0 |
 | Cannot decide from what is shown | `unclear` |"""
-# Shown to the owner above the key prompt on every pair (P3.6-c RLUI: the owner pressed y on 25/25
-# pairs twice after misreading what y means). A plain-language summary of LABEL_DEFINITION, which stays
-# the judge's full definition and is not shown here.
-OWNER_DEFINITION = ("y = THIS MESSAGE says the previous answer was wrong or incomplete and asks to fix, "
-                    "redo or retry it, or re-asks the same request.  n = anything else: new task, "
-                    "follow-up question, 'keep going', approval, thanks, an extension of a correct "
-                    "answer, or a complaint about something other than the previous answer.  "
-                    "u = cannot tell from what is shown.")
+# P3.6-c RLUI: the owner pressed y on 25/25 pairs twice after misreading what y means. Every owner
+# screen now shows LABEL_DEFINITION itself (the judge's definition, so the two cannot drift) and this key map.
+OWNER_KEYS = "keys: y = 1 (redo)   n = 0 (not redo)   u = unclear   q = quit"
 OWNER_UNIFORM_MIN = 10
 
 
@@ -575,6 +571,23 @@ def _owner_text(text, width):
                      for line in safe.split("\n"))
 
 
+def _owner_definition(width):
+    """LABEL_DEFINITION wrapped to ``width``: prose lines as they are, each table row (separator
+    dropped) as ``case -> y`` with a hanging indent. Words are never split."""
+    lines = []
+    for line in LABEL_DEFINITION.split("\n"):
+        if line.startswith("|"):
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if not set("".join(cells)) <= set("-: "):
+                lines.append(textwrap.fill(f"{cells[0]} -> {cells[1]}", width=max(10, width),
+                                           initial_indent="  ", subsequent_indent="      ",
+                                           break_long_words=False, break_on_hyphens=False))
+        else:
+            lines.append(textwrap.fill(line, width=max(10, width), break_long_words=False,
+                                       break_on_hyphens=False))
+    return "\n".join(lines)
+
+
 def _owner_screen(stdout, view, position, total, labelled):
     width = shutil.get_terminal_size().columns
     parts = [f"Pair {position} of {total} (labelled so far: {labelled})"]
@@ -582,25 +595,31 @@ def _owner_screen(stdout, view, position, total, labelled):
                         ("PREVIOUS ANSWER (end):", view.answer_tail),
                         ("THIS MESSAGE:", view.prompt)):
         parts.extend((title, text))
-    parts.append(OWNER_DEFINITION)
     stdout.write("\x1b[2J\x1b[H" + "\n\n".join(
-        _owner_text(part, width) for part in parts) + "\n\n")
+        _owner_text(part, width) for part in parts) + "\n\n"
+        + _owner_definition(width) + "\n\n" + OWNER_KEYS + "\n")
     stdout.write("[y] redo  [n] not redo  [u] unclear  [q] quit  > ")
     stdout.flush()
 
 
-def _uniform_pass_warning(labels, run, others):
+def _uniform_pass_warning(labels, options, others):
     """A warning when every owner label of a complete pass (lost pairs aside) is the same redo or
     not_redo label and there are at least OWNER_UNIFORM_MIN of them; otherwise None. Advisory only:
     what is recorded does not change."""
     answered = [value for value in labels if value != "lost"]
     if len(answered) < OWNER_UNIFORM_MIN or len(set(answered)) != 1 or answered[0] == "unclear":
         return None
-    key = "y (redo)" if answered[0] == "redo" else "n (not redo)"
-    return (f"WARNING: all {len(answered)} owner labels in this pass are {key}. That is unusual; check it "
-            f"is what you meant ({OWNER_DEFINITION}) The labels are recorded as given. To redo the pass "
-            f"before any redo-score --tune, move labels_owner.jsonl and owner_done.json out of the run "
-            f"directory, then run again: llm-router redo-label --run {run} --owner --others {others}")
+    key = "y = 1 (redo)" if answered[0] == "redo" else "n = 0 (not redo)"
+    command = ["llm-router", "redo-label", "--run", options.run, "--owner", "--others", str(others)]
+    if os.path.realpath(options.projects_dir) != os.path.realpath(northstar.claude_projects_dir()):
+        command += ["--projects-dir", str(options.projects_dir)]
+    if getattr(options, "force_unresolved", False):
+        command.append("--force-unresolved")
+    return (f"WARNING: all {len(answered)} owner labels in this pass are {key}. That is unusual; check "
+            f"it against the definition shown on each screen. The labels are recorded as given. To redo "
+            f"the pass before this run is scored (redo-score or redo-score --tune), move labels_owner.jsonl "
+            f"(and owner_done.json, if present) out of the run directory, then run again: "
+            f"{shlex.join(command)}")
 
 
 def run_owner(options: argparse.Namespace, *, stdin=None, stdout=None) -> int:
@@ -698,7 +717,7 @@ def run_owner(options: argparse.Namespace, *, stdin=None, stdout=None) -> int:
         if remaining == 0 and total > 0:
             from llm_router.redo_score import OWNER_MIN_SPOT_CHECKS, owner_sample_state, write_owner_done
             warning = _uniform_pass_warning([labelled[pair_id] for pair_id in sample],
-                                            options.run, len(others))
+                                            options, len(others))
             if warning:
                 print(warning, file=stdout, flush=True)
             record = write_owner_done(options.run_dir)

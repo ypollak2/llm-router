@@ -8,6 +8,7 @@ import pty
 import random
 import re
 import select
+import shutil
 import stat
 import subprocess
 import sys
@@ -693,34 +694,59 @@ def test_owner_done_marker_only_after_the_whole_pass(make_run):
     assert record["n_labelled"] == 30 and record["others"] == 20
 
 
+def _flat(data):
+    return b" ".join(data.split())
+
+
 def test_owner_screen_shows_the_label_definition(make_run):
-    """RLUI: the owner pressed y on 25/25 pairs twice after misreading what y means; every screen now
-    states the y/n definition above the key prompt."""
+    """RLUI: the owner pressed y on 25/25 pairs twice after misreading what y means. Every screen now
+    shows the judge's LABEL_DEFINITION (its prose and every table row) and the key map, after THIS MESSAGE
+    and before the key prompt."""
     run = make_run(n=2)
     rc, output = run_tui(owner_args(), ["n", "n"], run.env)
     assert rc == 0 and output.count(MARKER) == 2
-    flat = b" ".join(output.split())
-    y_line = (b"y = THIS MESSAGE says the previous answer was wrong or incomplete and asks to fix, "
-              b"redo or retry it")
-    n_line = b"n = anything else: new task, follow-up question, 'keep going', approval, thanks"
-    assert flat.count(y_line) == flat.count(n_line) == 2
-    screens = flat.split(b"[y] redo [n] not redo [u] unclear [q] quit >")[:-1]
-    assert len(screens) == 2                      # each screen: blocks, then the definition, then keys
-    assert all(screen.rfind(b"THIS MESSAGE:") < screen.rfind(y_line) < screen.rfind(n_line)
-               for screen in screens)
+    lines = label.LABEL_DEFINITION.split("\n")
+    prose = [line for line in lines if line.strip() and not line.startswith("|")]
+    rows = [[cell.strip() for cell in line.strip().strip("|").split("|")]
+            for line in lines if line.startswith("|")]
+    rows = [cells for cells in rows if not set("".join(cells)) <= set("-: ")]
+    assert prose and len(rows) == 12              # header plus 11 cases
+    expected = [_flat(text.encode()) for text in prose]
+    expected += [_flat(f"{case} -> {y}".encode()) for case, y in rows]
+    expected.append(b"keys: y = 1 (redo) n = 0 (not redo) u = unclear q = quit")
+    screens = _flat(output).split(b"[y] redo [n] not redo [u] unclear [q] quit >")[:-1]
+    assert len(screens) == 2
+    for screen in screens:
+        tail = screen[screen.rfind(b"THIS MESSAGE:"):]
+        positions = [tail.find(text) for text in expected]
+        assert all(position > 0 for position in positions), [
+            text for text, position in zip(expected, positions) if position <= 0]
+        assert positions == sorted(positions)
 
 
-@pytest.mark.parametrize("key, shown", [("n", b"n (not redo)"), ("y", b"y (redo)")])
+@pytest.mark.parametrize("key, shown", [("n", b"n = 0 (not redo)"), ("y", b"y = 1 (redo)")])
 def test_all_identical_owner_pass_warns_but_records_as_given(make_run, key, shown):
     run = make_run(n=30)                          # 10 F pairs and 20 S/R pairs
     rc, output = run_tui(owner_args(20), [key] * 30, run.env)
-    flat = b" ".join(output.split())
+    flat = _flat(output)
     assert rc == 0 and b"WARNING: all 30 owner labels in this pass are " + shown in flat
-    assert b"llm-router redo-label --run run1 --owner --others 20" in flat
+    assert b"before this run is scored (redo-score or redo-score --tune)" in flat
+    assert b"run again: llm-router redo-label --run run1 --owner --others 20\r" in output
     assert b"owner pass complete: n_labelled=30 spot_checks=20" in flat
     record = json.loads((run.run_dir / "owner_done.json").read_text())
     assert record["n_labelled"] == 30
     assert {r["label"] for r in owner_rows(run)} == {"redo" if key == "y" else "not_redo"}
+
+
+def test_uniform_pass_warning_repeats_the_owners_projects_dir_and_force(make_run, tmp_path):
+    run = make_run(n=30)
+    other = tmp_path / "other projects"
+    shutil.copytree(run.projects, other)
+    args = [*owner_args(20), "--projects-dir", str(other), "--force-unresolved"]
+    rc, output = run_tui(args, ["y"] * 30, run.env)
+    expected = (f"llm-router redo-label --run run1 --owner --others 20 --projects-dir '{other}' "
+                "--force-unresolved")
+    assert rc == 0 and expected.encode() in output
 
 
 def test_mixed_owner_pass_prints_no_warning(make_run):
