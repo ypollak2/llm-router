@@ -22,6 +22,7 @@ from llm_router import install_hooks as ih
 from llm_router.commands import install
 
 AUTO_WIRED = {"claude-code", "codex", "gemini-cli"}  # what run_full wires with hook scripts
+WIRED = AUTO_WIRED | {"pi"}  # pi: MCP config only, no hook scripts (P212-6, D-315)
 MATRIX = sorted(host_detect._HOSTS)
 
 
@@ -38,6 +39,9 @@ def _point_at(home: Path, monkeypatch) -> Path:
                         lambda **k: detect(**{"home": home, "which": lambda b: None, **k}))
     monkeypatch.setattr(seats, "refresh_seats",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("no seat probe in tests")))
+    # The pi smoke runs `pi mcp list`; never the developer's real pi (tests/test_p212_pi_mcp.py
+    # puts a fake pi on PATH for the smoke itself).
+    monkeypatch.setattr(install, "_pi_binary", lambda: None)
     return home
 
 
@@ -121,7 +125,7 @@ def test_host_matrix(home, host):
     assert install.receipt_failures(receipt) == [], receipt
     assert host in receipt["hosts"], f"{host} detected but has no receipt row"
     row = receipt["hosts"][host]
-    assert row["status"] == ("wired" if host in AUTO_WIRED else "not_wired"), row
+    assert row["status"] == ("wired" if host in WIRED else "not_wired"), row
     assert install.read_receipt() == receipt
 
 

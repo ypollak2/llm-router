@@ -40,8 +40,8 @@ _HOSTS: dict[str, tuple[str, str]] = {
     "cursor": ("cursor", ".cursor"),
     # The installer writes project-scoped .windsurf/mcp.json.
     "windsurf": ("windsurf", ".windsurf"),
-    # Detected so `llm-router install` can report them with a reason; no
-    # installer wires them yet (v16 P0.4; wiring is P2.12).
+    # Pi is wired by `llm-router install` (MCP config only, D-315); Kimi is
+    # detected so install can report it with a reason (planned in 16.1).
     "pi": ("pi", ".pi"),
     "kimi": ("kimi", ".kimi"),
 }

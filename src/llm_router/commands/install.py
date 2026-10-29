@@ -318,9 +318,8 @@ _HOST_ALIASES = {"claude-desktop": "desktop", "claude_desktop": "desktop"}
 
 # Hosts the README lists as planned: `--host <id>` reports the reason and exits
 # 2, and auto-detect reports them instead of skipping them silently (v16 P0.4).
-# Wiring them is v16 P2.12.
+# Kimi is planned in 16.1 (D-27); Pi is wired, MCP config only (D-315).
 _UNSUPPORTED_HOSTS = {
-    "pi": "not wired into `llm-router install` yet",
     "kimi": "not wired into `llm-router install` yet",
 }
 
@@ -550,6 +549,8 @@ def _receipt_registry(host: str) -> Path | None:
     if host == "claw-code":
         cc_dir = ih._claw_code_dir()
         return cc_dir / "settings.json" if cc_dir is not None else None
+    if host == "pi":
+        return pi_mcp_path()  # registers the MCP server only; Pi has no hooks (D-315)
     return None
 
 
@@ -919,6 +920,7 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
         _auto_wire = {
             "codex": ("Codex CLI", _install_codex_files),
             "gemini-cli": ("Gemini CLI", _install_gemini_cli_files),
+            "pi": ("Pi", _install_pi_files),
         }
         _unwired: list[str] = []
         for host_id in detected:
@@ -939,7 +941,10 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
                 for a in host_actions:
                     ok = a.lstrip().startswith("✓")
                     print(f"  {_green('✓') if ok else _dim('·')}  {a.lstrip('✓ ').strip()}")
-                rows[host_id] = wired_row(host_id, "files")
+                rows[host_id] = pi_row() if host_id == "pi" else wired_row(host_id, "files")
+                if "smoke" in rows[host_id]:
+                    smoke = rows[host_id]["smoke"]
+                    print(f"  pi mcp list: {smoke['status']}: {smoke['detail']}")
                 if rows[host_id]["status"] == "wired":
                     installed_hosts.append(label)
                 else:
@@ -1277,6 +1282,12 @@ Note: cost-routing is not available in Copilot (no hook system).
 
     "windsurf": """\
 {bold}Windsurf (MCP native){reset}  — writing config files…
+""",
+
+    "pi": """\
+{bold}Pi coding agent (pi.dev){reset}  (MCP server only)
+Adds mcpServers.llm_router to ~/.pi/agent/mcp.json; other servers are kept.
+The end-of-turn line on Pi is planned in 16.1.
 """,
 }
 
@@ -1866,7 +1877,7 @@ def _remove_toml_table_block(text: str, header: str) -> str:
 
 def uninstall_host_integrations() -> list[str]:
     """RED2-8-01: remove the live MCP registrations that `llm-router install --host
-    <codex|cursor|gemini-cli|vscode|copilot-cli|openclaw|trae>` wrote, so a
+    <codex|cursor|gemini-cli|vscode|copilot-cli|openclaw|trae|pi>` wrote, so a
     `llm_router uninstall` does not leave dangling `llm_router` entries that break those
     tools after `pip uninstall`. Each remover is home-scoped and defensive — a
     no-op when the host was never installed, and never aborts on one host's error.
@@ -1893,6 +1904,7 @@ def uninstall_host_integrations() -> list[str]:
         (home / ".config" / "gh" / "copilot" / "mcp.json", "mcpServers"),
         (home / ".openclaw" / "mcp.json", "mcpServers"),
         (home / ".config" / "opencode" / "config.json", "mcpServers"),  # RED2-9-01
+        (home / ".pi" / "agent" / "mcp.json", "mcpServers"),  # P212-6 (D-315)
     ]
     if sys.platform == "darwin":
         json_targets.append((home / "Library" / "Application Support" / "Code" / "User" / "mcp.json", "servers"))
@@ -2281,6 +2293,144 @@ def _install_gemini_cli_files() -> list[str]:
     return actions
 
 
+# ── Pi coding agent (pi.dev): MCP config only (D-315) ─────────────────────────
+#
+# Pi 0.99.1 reads MCP servers from ~/.pi/agent/mcp.json ({"mcpServers": {...}}, the shape
+# Claude Code and Cursor use; Pi's docs/mcp.md) and checks them with `pi mcp list`, which
+# connects to every enabled server and exits 1 while any of them is not connected. No hooks,
+# no extension: the end-of-turn line on Pi is planned in 16.1.
+
+PI_SERVER = "llm_router"
+PI_SMOKE_TIMEOUT_S = 60
+_PI_LEGACY_NAMES = ("llm-router",)
+
+
+def pi_agent_dir() -> Path:
+    return Path.home() / ".pi" / "agent"
+
+
+def pi_mcp_path() -> Path:
+    return pi_agent_dir() / "mcp.json"
+
+
+def _read_pi_mcp(path: Path) -> tuple[dict, str | None]:
+    """(config, None), or ({}, why the file is refused). A missing file is an empty config."""
+    import json as _json
+
+    if not path.exists():
+        return {}, None
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        return {}, f"{path} could not be read ({exc}); left unchanged"
+    except ValueError as exc:
+        return {}, f"{path} is not valid JSON ({exc}); left unchanged. Fix it, then rerun `llm-router install --host pi`"
+    if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
+        return {}, (f"{path} has no mcpServers object (Pi expects {{\"mcpServers\": {{...}}}}); left unchanged. "
+                    "Fix it, then rerun `llm-router install --host pi`")
+    return data, None
+
+
+def _is_router_entry(entry: object) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    args = entry.get("args") if isinstance(entry.get("args"), list) else []
+    return (entry.get("command") in ("llm-router", "llm_router")
+            or any(str(a) in ("claude-code-llm-router", "llm-routing") for a in args))
+
+
+def _install_pi_files() -> list[str]:
+    """Add ``mcpServers.llm_router`` to ~/.pi/agent/mcp.json. Every other key and server is
+    kept; an existing ``llm_router`` entry is left as it is; the file's mode is kept. A file
+    that is not valid JSON (or has no ``mcpServers`` object) is refused, not overwritten: the
+    first action is then ``SKIP <reason>``."""
+    import json as _json
+
+    from llm_router import install_manifest
+
+    path = pi_mcp_path()
+    data, refusal = _read_pi_mcp(path)
+    if refusal:
+        return [f"SKIP {refusal}"]
+    servers = data.setdefault("mcpServers", {})
+    actions: list[str] = []
+    if PI_SERVER in servers:
+        actions.append(f"  llm_router already in {path} (left as it is)")
+    else:
+        servers[PI_SERVER] = {"command": "llm-router", "args": []}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_text_atomic(path, _json.dumps(data, indent=2) + "\n")
+        install_manifest.record("json_mcp", path, root_key="mcpServers", server=PI_SERVER)
+        actions.append(f"✓ Added llm_router MCP server to {path}")
+    for name in _PI_LEGACY_NAMES:
+        if _is_router_entry(servers.get(name)):
+            actions.append(f"  {path} also has an older llm-router entry '{name}' (Pi lists its tools twice); "
+                           f"remove it with `pi mcp remove {name}`")
+    return actions
+
+
+def _pi_binary() -> str | None:
+    return shutil.which("pi")
+
+
+def pi_smoke(agent_dir: Path | None = None, *, run=None) -> dict:
+    """``pi mcp list --json`` against ``agent_dir`` (default ~/.pi/agent).
+
+    ``{"status": "skipped"}`` when no ``pi`` binary is on PATH (never a failure);
+    ``passed`` when Pi lists the llm_router server as connected with at least one tool;
+    else ``failed``. Only our server is judged: Pi exits 1 when any other server in the
+    user's file is down, and the detail says so."""
+    import json as _json
+    import subprocess
+
+    pi = _pi_binary()
+    if pi is None:
+        return {"status": "skipped", "detail": "pi binary not on PATH"}
+    agent_dir = agent_dir or pi_agent_dir()
+    run = run or subprocess.run
+    try:
+        proc = run([pi, "mcp", "list", "--json"], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                   timeout=PI_SMOKE_TIMEOUT_S, cwd=str(agent_dir),
+                   env={**os.environ, "PI_CODING_AGENT_DIR": str(agent_dir)})
+    except subprocess.TimeoutExpired:
+        return {"status": "failed", "detail": f"`pi mcp list` did not finish in {PI_SMOKE_TIMEOUT_S}s"}
+    except OSError as exc:
+        return {"status": "failed", "detail": f"`pi mcp list` could not run: {exc}"}
+    try:
+        data = _json.loads(proc.stdout)
+    except ValueError:
+        tail = (proc.stderr or proc.stdout or "").strip()[-200:]
+        return {"status": "failed", "detail": f"`pi mcp list` exited {proc.returncode} without JSON: {tail}"}
+    listed = data.get("servers") if isinstance(data, dict) else None
+    server = next((s for s in listed or [] if isinstance(s, dict) and s.get("name") == PI_SERVER), None)
+    if server is None:
+        errors = "; ".join(str(e) for e in (data.get("errors") or [])) if isinstance(data, dict) else ""
+        return {"status": "failed", "detail": f"llm_router not listed by `pi mcp list`{': ' + errors if errors else ''}"}
+    tools = server.get("tools") if isinstance(server.get("tools"), list) else []
+    if server.get("state") != "connected" or not tools:
+        why = server.get("error") or f"{len(tools)} tools"
+        return {"status": "failed", "detail": f"llm_router {server.get('state')}: {why}"}
+    detail = f"llm_router connected, {len(tools)} tools"
+    if proc.returncode != 0:
+        detail += f"; `pi mcp list` exited {proc.returncode} because of another server"
+    return {"status": "passed", "detail": detail}
+
+
+def pi_row() -> dict:
+    """Receipt row for Pi after ``_install_pi_files`` returned: ``wired`` when mcp.json
+    registers llm_router and the smoke did not fail; the smoke result rides along in
+    ``smoke`` (left out of the digest, like ``via``)."""
+    data, refusal = _read_pi_mcp(pi_mcp_path())
+    if refusal or PI_SERVER not in data.get("mcpServers", {}):
+        return {"status": "error", "reason": refusal or f"llm_router missing from {pi_mcp_path()} after install",
+                "via": "files", "hook_version": None}
+    smoke = pi_smoke()
+    row = {"status": "wired", "reason": None, "via": "files", "hook_version": None, "smoke": smoke}
+    if smoke["status"] == "failed":
+        row.update(status="error", reason=f"pi mcp list: {smoke['detail']}")
+    return row
+
+
 def _install_copilot_cli_files() -> list[str]:
     """Write GitHub Copilot CLI config files and return a list of actions taken."""
     import pathlib
@@ -2426,7 +2576,7 @@ def _install_host(host: str, mode: str = "auto") -> None:
     reset = "\033[0m" if _color_enabled() else ""
 
     if host in _UNSUPPORTED_HOSTS:
-        print(f"unsupported: {_UNSUPPORTED_HOSTS[host]}; planned in v16 P2.12")
+        print(f"unsupported: {_UNSUPPORTED_HOSTS[host]}; planned in 16.1")
         sys.exit(2)
 
     hosts_to_show = list(_HOST_SNIPPETS.keys()) if host == "all" else [host]
@@ -2453,6 +2603,7 @@ def _install_host(host: str, mode: str = "auto") -> None:
         "vscode":     (_install_vscode_files,       "Restart VS Code and enable MCP in Copilot settings."),
         "cursor":     (_install_cursor_files,       f"Restart Cursor and run {route_tool('llm_savings')} to verify."),
         "windsurf":   (_install_windsurf_files,     f"Restart Windsurf and run {route_tool('llm_savings')} to verify."),
+        "pi":         (_install_pi_files,           "Run `pi mcp list` to verify (llm_router: connected), then /reload in Pi."),
     }
 
     for h in hosts_to_show:

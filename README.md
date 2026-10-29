@@ -103,14 +103,14 @@ Python agents route in-process, no server: `from llm_router import Router; r = R
 | **GitHub Copilot CLI** | `llm-router install --host copilot-cli` |
 | **OpenClaw** | `llm-router install --host openclaw` |
 | **Trae IDE** | `llm-router install --host trae` |
-| **Pi (pi.dev)** | planned (v16 P2.12); `--host pi` reports why and exits 2 |
+| **Pi (pi.dev)** (MCP server only; end-of-turn line planned in 16.1) | `llm-router install --host pi` |
 | **Factory Droid** | `llm-router install --host factory` |
 | **Claude Desktop** | `llm-router install --host desktop` |
 | **VS Code** (native MCP) | `llm-router install --host vscode` |
 | **Cursor** | `llm-router install --host cursor` |
 | **GitHub Copilot in VS Code** (capability extension, no cost-routing) | `llm-router install --host copilot` |
 | **Windsurf / Cascade** | `llm-router install --host windsurf` |
-| **Kimi Code (Moonshot AI)** | planned (v16 P2.12); `--host kimi` reports why and exits 2 |
+| **Kimi Code (Moonshot AI)** | planned (16.1); `--host kimi` reports why and exits 2 |
 
 `llm-router install --host all` installs or prints every host config in one
 pass. Full per-host detail, including what each host genuinely cannot do:
