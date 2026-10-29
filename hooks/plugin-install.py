@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 2
+# llm_router-hook-version: 3
 """Claude Code plugin SessionStart hook (P2.12, P212-3): keep the wired hosts on the plugin's version.
 
 The plugin bundle (``${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json``) can move ahead of what
@@ -24,7 +24,9 @@ state dir. Stdlib only: the plugin has no importable llm_router package. Never r
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -33,6 +35,7 @@ from pathlib import Path
 CONSENT = "plugin_install_consent.json"
 STATE = "plugin_install_state.json"
 RECEIPT = "install_receipt.json"
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
 RETRY_AFTER_S = 24 * 3600
 MAX_ATTEMPTS = 3
 
@@ -67,6 +70,23 @@ def _detached(argv: list[str], env, cwd) -> None:
                      stderr=subprocess.DEVNULL, start_new_session=True)
 
 
+def _attempts(state: dict, plugin: str) -> tuple[int, float]:
+    """(attempts, last spawn time) for this version. Planted or corrupt state (1e999, a negative
+    count, nan, text) counts as attempts exhausted: no spawn, the setup line, never an exception."""
+    if state.get("spawn_version") != plugin:
+        return 0, 0.0
+    try:
+        n = state.get("spawn_attempts", 0)
+        ts = state.get("spawn_ts", 0)
+        if isinstance(n, bool) or isinstance(ts, bool) or not isinstance(n, int) or not isinstance(ts, (int, float)):
+            raise ValueError("bad types")
+        if n < 0 or not math.isfinite(ts):
+            raise ValueError("out of range")
+        return n, float(ts)
+    except (ValueError, OverflowError, TypeError):
+        return MAX_ATTEMPTS, 0.0
+
+
 def run(env=os.environ, spawn=_detached, out=sys.stdout, now=time.time) -> int:
     root = Path(env.get("CLAUDE_PLUGIN_ROOT") or Path(__file__).resolve().parent.parent)
     plugin = str(_read_json(root / ".claude-plugin" / "plugin.json").get("version") or "")
@@ -81,6 +101,10 @@ def run(env=os.environ, spawn=_detached, out=sys.stdout, now=time.time) -> int:
             return 0
         if not plugin:
             return 0
+        if not VERSION_RE.match(plugin):  # it goes into an npx argument: never pass anything else
+            print(f"llm-router: plugin version {plugin[:40]!r} is not a plain version; "
+                  "not starting an install. Run /llm-router:setup.", file=out)
+            return 0
         pointer = ("Run /llm-router:setup to update them"
                    f" (plugin {plugin}, wired hosts {wired or 'none'}).")
         if _read_json(state_dir / CONSENT).get("consent") is not True:
@@ -90,8 +114,7 @@ def run(env=os.environ, spawn=_detached, out=sys.stdout, now=time.time) -> int:
                 print(f"llm-router: plugin {plugin} is newer than the wired hosts ({wired or 'none'}). "
                       "Run /llm-router:setup to update them (asked once for this version).", file=out)
             return 0
-        attempts = int(state.get("spawn_attempts") or 0) if state.get("spawn_version") == plugin else 0
-        last = float(state.get("spawn_ts") or 0) if attempts else 0.0
+        attempts, last = _attempts(state, plugin)
         if attempts:
             print("llm-router: the background update to plugin " + plugin + " has not taken effect. " + pointer, file=out)
         if attempts >= MAX_ATTEMPTS or (attempts and now() - last < RETRY_AFTER_S):

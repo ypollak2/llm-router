@@ -211,6 +211,43 @@ def test_failed_spawn_is_retried_after_backoff_capped_and_cleared_by_a_matching_
     assert "spawn_version" not in state
 
 
+@pytest.mark.parametrize("bad", ["1.0.0 --foo", "file:../x", "--registry=x", "1.0", "1.0.0;rm", ""])
+def test_a_plugin_version_that_is_not_plain_semver_never_spawns(tmp_path, bad):
+    root = _fake_plugin(tmp_path, bad)
+    _wired_receipt(tmp_path, "9.9.8")
+    (tmp_path / "state" / "plugin_install_consent.json").write_text('{"consent": true}')
+    out = io.StringIO()
+    _hook().run(_env(tmp_path, root), lambda *a, **k: pytest.fail("spawned for " + repr(bad)), out)
+    assert out.getvalue().count("\n") == (1 if bad else 0)
+
+
+def test_a_prerelease_version_is_accepted(tmp_path):
+    root = _fake_plugin(tmp_path, "16.0.0-rc.1")
+    _wired_receipt(tmp_path, "9.9.8")
+    (tmp_path / "state" / "plugin_install_consent.json").write_text('{"consent": true}')
+    spawned = []
+    _hook().run(_env(tmp_path, root), lambda argv, env, cwd: spawned.append(argv), io.StringIO())
+    assert spawned and spawned[0][2] == "llm-routing@16.0.0-rc.1"
+
+
+@pytest.mark.parametrize("planted", [
+    '{"spawn_version": "9.9.9", "spawn_attempts": 1e999, "spawn_ts": 5}',
+    '{"spawn_version": "9.9.9", "spawn_attempts": -3, "spawn_ts": 5}',
+    '{"spawn_version": "9.9.9", "spawn_attempts": 1, "spawn_ts": NaN}',
+    '{"spawn_version": "9.9.9", "spawn_attempts": 1, "spawn_ts": 1e999}',
+    '{"spawn_version": "9.9.9", "spawn_attempts": "two", "spawn_ts": 5}',
+    '{"spawn_version": "9.9.9", "spawn_attempts": 1.5, "spawn_ts": 5}',
+])
+def test_planted_or_corrupt_state_means_no_spawn_the_setup_line_and_no_exception(tmp_path, planted):
+    root = _fake_plugin(tmp_path, "9.9.9")
+    _wired_receipt(tmp_path, "9.9.8")
+    (tmp_path / "state" / "plugin_install_consent.json").write_text('{"consent": true}')
+    (tmp_path / "state" / "plugin_install_state.json").write_text(planted)
+    out = io.StringIO()
+    rc = _hook().run(_env(tmp_path, root), lambda *a, **k: pytest.fail("spawned on corrupt state"), out, now=lambda: 10**9)
+    assert rc == 0 and "/llm-router:setup" in out.getvalue()
+
+
 def test_spawn_that_raises_is_recorded_and_reported_not_fatal(tmp_path, capsys):
     root = _fake_plugin(tmp_path, "9.9.9")
     _wired_receipt(tmp_path, "9.9.8")
@@ -321,6 +358,21 @@ def test_another_projects_entry_does_not_suppress_cli_wiring(home, tmp_path):
     install.cmd_install(["--auto"])
     assert install.read_receipt()["hosts"]["claude-code"]["via"] == "settings"
     assert _llm_router_hook_commands(ih.settings_path())
+
+
+def test_project_settings_cannot_switch_off_a_user_scope_plugin_wiring(home, tmp_path):
+    for user_flag in (None, False):  # absent, then explicitly off in the user's own settings
+        _register_plugin(home, scope="user", enabled=user_flag)
+        proj = ih.settings_path().parent.parent / "repo"
+        (proj / ".claude").mkdir(parents=True, exist_ok=True)
+        (proj / ".claude" / "settings.json").write_text(
+            json.dumps({"enabledPlugins": {"llm-router@ypollak2": True}}))
+        (proj / ".claude" / "settings.local.json").write_text(
+            json.dumps({"enabledPlugins": {"llm-router@ypollak2": True}}))
+        os.chdir(proj)  # the fixture restores cwd
+        install.cmd_install(["--auto"])
+        assert install.read_receipt()["hosts"]["claude-code"]["via"] == "settings", user_flag
+        assert _llm_router_hook_commands(ih.settings_path())
 
 
 def test_this_projects_entry_counts(home):

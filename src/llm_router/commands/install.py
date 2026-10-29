@@ -742,27 +742,39 @@ def claude_plugin_root() -> Path | None:
             return {}
         return data if isinstance(data, dict) else {}
 
-    # enabledPlugins: user settings, overridden by the project's own settings files. A key
-    # that is absent anywhere means NOT enabled (never assume).
-    enabled: dict = {}
-    for f in (ih.settings_path(), cwd / ".claude" / "settings.json", cwd / ".claude" / "settings.local.json"):
-        value = _read(f).get("enabledPlugins")
-        if isinstance(value, dict):
-            enabled.update(value)
+    # enabledPlugins: a user-scope entry is judged ONLY on the user's own settings.json (a
+    # repository must not be able to switch off the user's global wiring); project settings
+    # count only for project/local-scope entries of this very directory. Absent = not enabled.
+    def _flags(*files: Path) -> dict:
+        merged: dict = {}
+        for f in files:
+            value = _read(f).get("enabledPlugins")
+            if isinstance(value, dict):
+                merged.update(value)
+        return merged
+
+    user_enabled = _flags(ih.settings_path())
+    project_enabled = _flags(ih.settings_path(), cwd / ".claude" / "settings.json",
+                             cwd / ".claude" / "settings.local.json")
     plugins = _read(ih.claude_dir() / "plugins" / "installed_plugins.json").get("plugins")
     for key, entries in sorted((plugins if isinstance(plugins, dict) else {}).items()):
-        if not str(key).startswith("llm-router@") or enabled.get(key) is not True:
+        if not str(key).startswith("llm-router@"):
             continue
         for entry in entries if isinstance(entries, list) else []:
             if not isinstance(entry, dict):
                 continue
             scope = entry.get("scope")
-            if scope != "user":
+            if scope == "user":
+                if user_enabled.get(key) is not True:
+                    continue
+            else:
                 project = entry.get("projectPath")
                 if scope not in ("project", "local") or not isinstance(project, str) or not project:
                     continue
                 if Path(project).expanduser().resolve() != cwd:
                     continue  # another project's plugin entry
+                if project_enabled.get(key) is not True:
+                    continue
             root = _usable(entry.get("installPath"))
             if root is not None:
                 return root
