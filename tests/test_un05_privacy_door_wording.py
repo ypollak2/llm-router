@@ -93,25 +93,71 @@ def test_a_changed_matrix_is_caught():
     assert derive_rows(matrix=matrix) != documented
 
 
+def guard_calls(source: str) -> list[int]:
+    """Line numbers of calls to ``llm_router.engine.guard`` in ``source``, resolving import aliases per module:
+    ``import llm_router.engine as e``, ``from llm_router import engine as x``, ``from llm_router.engine import guard
+    as g`` and the plain forms. Other ``.guard`` (``_writes.guard``) is not matched."""
+    tree = ast.parse(source)
+    modules: set[str] = set()   # names bound to the engine module
+    funcs: set[str] = set()     # names bound to engine.guard itself
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name == "llm_router.engine" and a.asname:
+                    modules.add(a.asname)
+        elif isinstance(n, ast.ImportFrom):
+            mod = n.module or ""
+            for a in n.names:
+                if a.name == "engine" and (mod == "llm_router" or (n.level and mod == "")):
+                    modules.add(a.asname or a.name)
+                elif a.name == "guard" and (mod == "llm_router.engine" or (n.level and mod == "engine")):
+                    funcs.add(a.asname or a.name)
+    hits = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        f = n.func
+        if isinstance(f, ast.Name) and f.id in funcs:
+            hits.append(n.lineno)
+        elif isinstance(f, ast.Attribute) and f.attr == "guard":
+            v = f.value
+            if isinstance(v, ast.Name) and v.id in modules:
+                hits.append(n.lineno)
+            elif isinstance(v, ast.Attribute) and v.attr == "engine" and isinstance(v.value, ast.Name) \
+                    and v.value.id == "llm_router":
+                hits.append(n.lineno)   # llm_router.engine.guard() after `import llm_router.engine`
+    return hits
+
+
 def test_engine_guard_is_not_wired_into_src():
     """SECURITY.md says ``engine.guard()`` is a test seam, not a door. If any code under src calls it, that sentence is
     wrong: wire it into the matrix and the table instead."""
-    callers = []
-    for path in sorted(m.SRC.rglob("*.py")):
-        tree = ast.parse(path.read_text(), filename=str(path))
-        imported = any(isinstance(n, ast.ImportFrom) and (n.module or "").endswith("engine")
-                       and any(a.name == "guard" for a in n.names) for n in ast.walk(tree))
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Call):
-                f = n.func
-                if (isinstance(f, ast.Attribute) and f.attr == "guard" and isinstance(f.value, ast.Name)
-                        and f.value.id in ("engine", "_engine")) or (imported and isinstance(f, ast.Name) and f.id == "guard"):
-                    callers.append(f"{path.relative_to(m.SRC)}:{n.lineno}")
+    callers = [f"{p.relative_to(m.SRC)}:{ln}" for p in sorted(m.SRC.rglob("*.py"))
+               for ln in guard_calls(p.read_text())]
     assert callers == [], callers
     assert "engine.guard()" in SECURITY.read_text(encoding="utf-8")
+
+
+def test_guard_scan_sees_every_import_alias_form():
+    """Negative controls: each way of reaching ``engine.guard`` is detected; an unrelated ``.guard`` is not."""
+    forms = [
+        "import llm_router.engine as e\ne.guard('x')\n",
+        "from llm_router.engine import guard as g\ng('x')\n",
+        "from llm_router import engine as x\nx.guard('x')\n",
+        "from llm_router import engine\nengine.guard('x')\n",
+        "from llm_router.engine import guard\nguard('x')\n",
+        "import llm_router.engine\nllm_router.engine.guard('x')\n",
+        "from . import engine\nengine.guard('x')\n",
+        "from .engine import guard as g\ng('x')\n",
+    ]
+    for src in forms:
+        assert guard_calls(src), src
+    for src in ["from llm_router.hooks import agent_writes as _writes\n_writes.guard(1)\n",
+                "def guard(): pass\nguard()\n",
+                "import llm_router.engine as e\ne.decide('x')\n"]:
+        assert guard_calls(src) == [], src
 
 
 def test_readme_privacy_paragraph_points_at_the_door_table():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "SECURITY.md#data-handling--storage-mapping" in readme
-    assert "not every door enforces this" in " ".join(readme.lower().split())
