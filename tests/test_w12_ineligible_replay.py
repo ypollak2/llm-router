@@ -52,13 +52,14 @@ from tests import w12_replay_fixture as fx
 pytestmark = [pytest.mark.timeout(300), pytest.mark.xdist_group("w12_replay")]
 
 SEED = 20261029
-#: Requests per door: 1,026 in all (spec: N >= 1,000, >= 100 per door). The router and gateway doors cost ~0.1 s
+#: Requests per door: 1,640 in all (spec: N >= 1,000, >= 100 per door). The router and gateway doors cost ~0.1 s
 #: a request (every ``route_and_call`` re-opens and re-migrates ``usage.db``), so they get fewer; each door
 #: must still show >= 100 EVALUATED rows (a route to a provider the map has no row for is not judged).
-REQUESTS = {"router": 118, "gateway": 118, "hook": 280, "sdk": 280, "proxy": 230}
+REQUESTS = {"router": 200, "gateway": 200, "hook": 320, "sdk": 440, "proxy": 480}
 DOORS = tuple(REQUESTS)
 MUTANT_REQUESTS = {"router": 20, "gateway": 20, "hook": 40, "sdk": 40, "proxy": 40}
 PLANTED = 7
+MIN_JUDGED_PER_DOOR = 150
 ANSWER = ("A reasonable answer: check the queue depth first, then compare consumer lag against the "
           "autoscaler events, and only then look at the downstream timeout in the ledger service.")
 
@@ -112,6 +113,42 @@ def _world_env(mp: pytest.MonkeyPatch, tmp_path: Path) -> None:
     mp.chdir(tmp_path)
     mp.setattr(cost, "_write_provenance", lambda: cost.PROVENANCE_RUNTIME)
     mp.setattr(failopen, "record", lambda *a, **k: None)
+    # The module-scoped fixture runs before conftest's function-scoped guards, so do their job here: no local
+    # model registry (it GETs :11434/api/tags), no codex / gemini CLI probes, and a socket guard that refuses
+    # and records any connection to the Ollama port.
+    import socket
+
+    import llm_router.router as router_module
+
+    mp.setattr("llm_router.agentic_registry.list_installed_models", lambda: [])
+    mp.setattr(router_module, "is_codex_available", lambda: False)
+    mp.setattr(router_module, "is_gemini_cli_available", lambda: False)
+    real_connect = socket.socket.connect
+
+    def guarded(self, address):
+        if isinstance(address, tuple) and len(address) >= 2 and address[1] == 11434:
+            OLLAMA_CONNECTS.append(address)
+            raise ConnectionRefusedError("W12 replay: no connection to Ollama")
+        return real_connect(self, address)
+
+    mp.setattr(socket.socket, "connect", guarded)
+    # Every route_and_call re-opens usage.db and re-checks ~2,700 migration columns; once a column is seen the
+    # answer cannot change for the same db, so remember it (cleared by _use_db whenever the db changes).
+    real_exists = cost._column_exists
+
+    async def column_exists(db, table, column):
+        if (table, column) in _KNOWN_COLUMNS:
+            return True
+        found = await real_exists(db, table, column)
+        if found:
+            _KNOWN_COLUMNS.add((table, column))
+        return found
+
+    mp.setattr(cost, "_column_exists", column_exists)
+
+
+OLLAMA_CONNECTS: list = []
+_KNOWN_COLUMNS: set = set()
 
 
 def _use_db(path: Path, monkeypatch) -> None:
@@ -120,6 +157,7 @@ def _use_db(path: Path, monkeypatch) -> None:
     monkeypatch.setenv("LLM_ROUTER_DB_PATH", str(path))
     config_module._config = None
     decision_stamp.reset_cache()
+    _KNOWN_COLUMNS.clear()
 
 
 def _install(state: fx.MapState, monkeypatch) -> dict:
@@ -192,25 +230,26 @@ def _served(run: DoorRun, chosen: str | None, doc: dict) -> None:
 
 # ── one function per door: real chain builder in, chosen model + written decision row out ─────────
 
-def _door_router(run: DoorRun, state: fx.MapState, prompt: str, doc: dict) -> None:
-    from llm_router.router import route_and_call
+def _door_router(run: DoorRun, state: fx.MapState, prompt: str, doc: dict, model: str | None = None) -> None:
+    from llm_router.router import BudgetExceededError, NoRoutableModelsError, route_and_call
     from llm_router.types import Complexity, TaskType
 
     try:
-        resp = _run(route_and_call(TaskType(state.task), prompt, complexity_hint=Complexity(state.complexity)))
-    except Exception:       # nothing routable: the door raises / returns no route, and writes no routed row
+        resp = _run(route_and_call(TaskType(state.task), prompt, complexity_hint=Complexity(state.complexity),
+                                   model_override=model))
+    except (NoRoutableModelsError, BudgetExceededError):   # nothing routable: no route, no routed row
         _served(run, None, doc)
         return
     _served(run, resp.model, doc)
 
 
-def _door_gateway(run: DoorRun, state: fx.MapState, prompt: str, doc: dict) -> None:
+def _door_gateway(run: DoorRun, state: fx.MapState, prompt: str, doc: dict, model: str | None = None) -> None:
     from fastapi import HTTPException
 
     from llm_router import gateway
 
     try:
-        out = _run(gateway._route(prompt, state.task, state.complexity))
+        out = _run(gateway._route(prompt, state.task, state.complexity, prefer_model=model))
     except HTTPException:
         _served(run, None, doc)
         return
@@ -311,6 +350,7 @@ def test_replay_n_per_door_zero_ineligible_and_both_checks_agree(replay):
     total_requests = sum(REQUESTS.values())
     assert total_requests >= 1000
     detail = []
+    judged = 0
     for door, run in replay.runs.items():
         res = _count(run)
         # non-vacuity: the door produced routes the counter could judge, at least 100 of them
@@ -327,8 +367,12 @@ def test_replay_n_per_door_zero_ineligible_and_both_checks_agree(replay):
         assert res["populations"]["synthetic"].get("eligible", 0) == res["evaluated_n"], (door, res["populations"])
         assert res["organic_evaluated_n"] == 0
         assert len(run.served) + run.no_route == REQUESTS[door], (door, len(run.served), run.no_route)
+        assert res["evaluated_n"] >= MIN_JUDGED_PER_DOOR, (door, res["evaluated_n"])
+        judged += res["evaluated_n"]
         detail.append(f"{door}={res['evaluated_n']}/{REQUESTS[door]}")
-    print("W12 replay evaluated/requests: " + " ".join(detail))
+    assert judged >= 1000, judged                        # M2: min n 1,000 JUDGED decisions (07-ACCEPTANCE:122)
+    assert OLLAMA_CONNECTS == [], OLLAMA_CONNECTS        # hermetic: nothing reached for the Ollama port
+    print(f"W12 replay judged total={judged}; evaluated/requests: " + " ".join(detail))
 
 
 ALL_DOWN = 8
@@ -361,8 +405,11 @@ def _plant_state() -> fx.MapState:
 
 
 def _plant(run: DoorRun, mp, n: int) -> None:
-    """*n* decisions recorded as routed to the disconnected provider, through the door's real writer + stamp:
-    ``cost.log_routing_decision`` + ``decision_stamp.stamp`` (db doors), ``ledger.write_row`` (proxy)."""
+    """*n* decisions recorded as routed to the disconnected provider, each through its door's own writer:
+    ``log_direct_to_db`` (hook, sdk), ``cost.log_routing_decision`` + ``decision_stamp.stamp`` (router, gateway),
+    ``ledger.write_row`` (proxy)."""
+    from llm_router.hooks.direct_executor import DirectResult, ModelSpec
+    from llm_router.hooks.savings_logger import log_direct_to_db
     from llm_router.proxy import ledger
 
     _use_db(run.db, mp)
@@ -371,6 +418,15 @@ def _plant(run: DoorRun, mp, n: int) -> None:
         for _ in range(n):
             ledger.write_row({"ts": time.time(), "served_model": "gemini-2.5-flash", "served_by": "gemini",
                               "session_id": "replay-proxy", "session_kind": "harness"}, run.proxy)
+        return
+    if run.door in ("hook", "sdk"):
+        for _ in range(n):
+            log_direct_to_db(result=DirectResult(text=ANSWER, model=ModelSpec("gemini", "gemini-2.5-flash"),
+                                                 latency_ms=5, input_tokens=10, output_tokens=10),
+                             prompt="planted", task_type="query", complexity="simple",
+                             classifier_type=run.door, session_id=f"replay-{run.door}", door=run.door,
+                             layer="heuristic")
+        _label_replay(run.db)
         return
 
     async def write() -> None:
@@ -426,6 +482,119 @@ def test_mutant_filter_disabled_makes_both_checks_go_above_zero(replay, monkeypa
         assert res["ineligible"] == run.independent_ineligible, (door, res["ineligible"], run.independent_ineligible)
         sums[door] = res["ineligible"]
     print("W12 mutant ineligible per door: " + " ".join(f"{d}={v}" for d, v in sums.items()))
+
+
+# ── caller-named models (review M1 / S1) ──────────────────────────────────────
+
+SUBSCRIPTION_MODEL = "anthropic/claude-haiku-4-5"   # what an Anthropic-format gateway client names
+NAMED_REQUESTS = {"router": 220, "gateway": 220}
+PIN_REQUESTS = 25
+
+
+def _named_state(seed: int, door: str, i: int) -> fx.MapState:
+    """A map state whose local rows include ``qwen3:8b`` (the subscription fallback chain carries it)."""
+    st = fx.map_state_for(seed, door, i)
+    base = tuple(dict.fromkeys(("ollama/qwen3:8b", *st.base_chain)))
+    return fx.MapState(statuses=st.statuses, base_chain=base, task=st.task, complexity=st.complexity)
+
+
+def _named_replay(root: Path, door: str, n: int, mp, model: str, *, pin_down: str | None = None,
+                  seed: int = SEED + 2) -> DoorRun:
+    run = _new_db(root, door, mp)
+    for i in range(n):
+        state = _named_state(seed, door, i)
+        if pin_down:    # the pinned provider is disconnected in this map
+            state = fx.MapState(statuses={**state.statuses, pin_down: "disconnected", "ollama": "connected"},
+                                base_chain=state.base_chain, task=state.task, complexity=state.complexity)
+        doc = _install(state, mp)
+        _DRIVERS[door](run, state, fx.prompt_for(seed, door, i), doc, model=model)
+    _label_replay(run.db)
+    return run
+
+
+@pytest.fixture
+def subscription_mode(replay, monkeypatch):
+    import llm_router.config as config_module
+
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
+    config_module._config = None
+    yield
+    config_module._config = None
+
+
+@pytest.mark.parametrize("door", ["router", "gateway"])
+def test_subscription_override_fallback_replay_zero_ineligible(replay, subscription_mode, door):
+    """Review M1: a caller-named ``anthropic/*`` model in subscription mode falls back to the static balanced
+    chain; that chain answers to the map like every other. >= 100 judged decisions per door, both checks 0."""
+    mroot = replay.root / "named"
+    mroot.mkdir(exist_ok=True)
+    run = _named_replay(mroot, door, NAMED_REQUESTS[door], replay.mp, SUBSCRIPTION_MODEL)
+    res = _count(run)
+    assert res["evaluated_n"] >= 100, (door, res["evaluated_n"], run.no_route)
+    assert res["ineligible"] == 0, (door, res["examples"])
+    assert run.independent_ineligible == 0 and run.independent_evaluated == res["evaluated_n"], door
+
+
+@pytest.mark.parametrize("door", ["router", "gateway"])
+def test_explicit_pin_to_a_disconnected_model_is_honoured_and_counted(replay, door):
+    """Review S1: a caller who names a model gets it (``return [model_override]``); the counter still counts
+    that as an ineligible route, as 07-ACCEPTANCE M2 says pins are counted. Counter == number of pinned requests."""
+    mroot = replay.root / "pin"
+    mroot.mkdir(exist_ok=True)
+    run = _named_replay(mroot, door, PIN_REQUESTS, replay.mp, "openai/gpt-4o-mini", pin_down="openai")
+    res = _count(run)
+    assert PIN_REQUESTS > 0 and run.no_route == 0
+    assert {m for m, _ in run.served} == {"openai/gpt-4o-mini"}
+    assert res["ineligible"] == PIN_REQUESTS == run.independent_ineligible, (door, res["ineligible"])
+
+
+def test_subscription_override_fallback_honours_the_map(tmp_path, monkeypatch):
+    """Review M1, regression (fails on main): openai is disconnected in the map; the fallback chain for a named
+    ``anthropic/*`` model used to be returned unfiltered and served ``openai/gpt-4o``."""
+    import llm_router.config as config_module
+    from llm_router.router import route_and_call
+    from llm_router.types import Complexity, TaskType
+
+    _world_env(monkeypatch, tmp_path)
+    _stub_transport(monkeypatch)
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
+    _use_db(tmp_path / "m1.db", monkeypatch)
+    state = fx.MapState(statuses={"ollama": "connected", "gemini": "connected", "openai": "disconnected",
+                                  "deepseek": "disconnected", "groq": "disconnected"},
+                        base_chain=("ollama/qwen3:8b", "gemini/gemini-2.5-flash"), task="query",
+                        complexity="moderate")
+    _install(state, monkeypatch)
+    seen = _run(route_and_call(TaskType.QUERY, "summarise the retry policy in two lines",
+                               complexity_hint=Complexity.MODERATE, model_override=SUBSCRIPTION_MODEL))
+    config_module._config = None
+    assert seen.provider not in {"openai", "deepseek", "groq"}, seen.model
+
+
+def test_subject_specialist_honours_the_map(tmp_path, monkeypatch):
+    """Review S2, regression (fails on main): a policy specialist fronted after the build skipped the map."""
+    from llm_router.router import route_and_call
+    from llm_router.types import Complexity, TaskType
+    from tests.test_benchmark_cat_g import _policy
+
+    _world_env(monkeypatch, tmp_path)
+    _stub_transport(monkeypatch)
+    _use_db(tmp_path / "s2.db", monkeypatch)
+    monkeypatch.setattr("llm_router.policy.get_active_policy",
+                        lambda: _policy("w12", workhorses=["gemini/gemini-2.5-flash"],
+                                        specialists={"code": "openai/gpt-4o-mini"}))
+
+    def served(openai_status: str) -> str:
+        state = fx.MapState(statuses={"ollama": None, "gemini": "connected", "openai": openai_status,
+                                      "deepseek": None, "groq": None},
+                            base_chain=("gemini/gemini-2.5-flash", "openai/gpt-4o-mini"), task="code",
+                            complexity="simple")
+        _install(state, monkeypatch)
+        return _run(route_and_call(TaskType.CODE, "write a function that reverses a list",
+                                   complexity_hint=Complexity.SIMPLE,
+                                   classification_data={"subject": "code"})).model
+
+    assert served("connected") == "openai/gpt-4o-mini"      # the specialist leads when the map allows it
+    assert served("disconnected").startswith("gemini/")     # and yields to the map when it does not
 
 
 # ── the finding the replay made ──────────────────────────────────────────────
