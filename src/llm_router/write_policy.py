@@ -1365,6 +1365,7 @@ _ALLOW_PLAIN = frozenset({
     "which", "echo", "printf", "pwd", "true", "false", ":", "test", "[", "basename",
     "dirname", "realpath", "readlink", "cd", "pushd", "popd",
     "sleep",                     # tests/test_agent_loop.py drives the lane timeout with it
+    "yes",                       # stdout only; tests/test_s_run_command_sequences.py pipes it
     "touch", "mkdir", "cp", "mv", "rm", "tee", "sed", "gsed", "awk", "gawk", "mawk", "nawk",
 })
 #: Wrappers whose inner command is checked like any other.
