@@ -616,13 +616,11 @@ def test_npx_and_npm_exec_wire_no_host_and_point_at_the_plugin(npm_env):
 
 
 def test_a_hung_installer_is_killed_and_npm_install_still_succeeds(npm_env):
-    import time
-
-    start = time.monotonic()
+    # Behaviour, not a clock: without the timeout the stub sleeps 30 s and then
+    # exits 0, which takes the success path, so ETIMEDOUT appears only if the
+    # kill fired.
     r = _run_installer(npm_env, timeout_ms=1000, STUB_SLEEP="30")
-    elapsed = time.monotonic() - start
     assert r.returncode == 0, r.stdout + r.stderr
-    assert elapsed < 20, f"the timeout did not stop the installer ({elapsed:.1f}s)"
     assert "WARNING" in r.stderr and "ETIMEDOUT" in r.stderr, r.stderr
     assert "llm-router install" in r.stderr
 
