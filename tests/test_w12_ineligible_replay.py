@@ -123,6 +123,13 @@ def _world_env(mp: pytest.MonkeyPatch, tmp_path: Path) -> None:
     mp.setattr("llm_router.agentic_registry.list_installed_models", lambda: [])
     mp.setattr(router_module, "is_codex_available", lambda: False)
     mp.setattr(router_module, "is_gemini_cli_available", lambda: False)
+
+    async def no_cli(*a, **k):      # a subprocess CLI is never started: the entry fails and the chain moves on
+        from types import SimpleNamespace
+        return SimpleNamespace(success=False, exit_code=127, content="not started (W12 replay)", usage=None)
+
+    mp.setattr(router_module, "run_codex", no_cli)
+    mp.setattr(router_module, "run_gemini_cli", no_cli)
     real_connect = socket.socket.connect
 
     def guarded(self, address):
