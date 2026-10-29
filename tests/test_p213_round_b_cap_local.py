@@ -400,12 +400,16 @@ async def test_day_cap_counts_rows_whatever_the_timestamp_spelling(temp_db, monk
     import sqlite3
     from datetime import datetime, timedelta, timezone
 
-    store("cap gemini 3/day")
-    await record("gemini", GEM, 3, monkeypatch=monkeypatch)
+    store("cap gemini 4/day")
+    await record("gemini", GEM, 4, monkeypatch=monkeypatch)
     now = datetime.now(timezone.utc)
     spellings = [(now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S"),
                  (now - timedelta(hours=2)).astimezone(timezone(timedelta(hours=-10))).isoformat(timespec="seconds"),
-                 (now - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")]
+                 (now - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S"),
+                 # 30 min after the window opens, in an offset that sorts before the UTC cutoff as text
+                 # (a raw-text lower bound and a date-only pre-filter both lose this row)
+                 (now - timedelta(hours=24) + timedelta(minutes=30)).astimezone(
+                     timezone(timedelta(hours=-10))).isoformat(timespec="seconds")]
     with sqlite3.connect(temp_db) as con:
         ids = [r[0] for r in con.execute("SELECT id FROM routing_decisions ORDER BY id")]
         for rid, ts in zip(ids, spellings):
@@ -427,7 +431,7 @@ def test_tier_classify_pure_reads_no_ledger(monkeypatch):
     assert touched == []
 
 
-@pytest.mark.xfail(strict=True, reason="proxy/tiers.py — owned by the lane-A/tiers session: a cap on a "
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="proxy/tiers.py — owned by the lane-A/tiers session: a cap on a "
                    "Claude model at the proxy door is a tier decision made there, which this PR does not touch")
 async def test_proxy_tier_decision_honours_a_claude_cap(temp_db, monkeypatch):
     from llm_router.proxy import tiers

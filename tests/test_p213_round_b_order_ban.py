@@ -193,7 +193,7 @@ def test_ban_rule_with_missing_keys_is_fail_open_and_recorded(monkeypatch):
     assert "CHZ-FO-USER-RULES-READ" in seen
 
 
-@pytest.mark.xfail(strict=True, reason="proxy/tiers.py — owned by the lane-A/tiers session: a Claude-model "
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="proxy/tiers.py — owned by the lane-A/tiers session: a Claude-model "
                    "ban or cap at the proxy door is a tier decision made there, which this PR does not touch")
 def test_proxy_tier_decision_honours_a_claude_ban():
     from llm_router.proxy import tiers
