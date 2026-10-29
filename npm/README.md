@@ -38,6 +38,15 @@ If wiring a host fails, you get a warning and the command to retry, but
 the install receipt. To install the binary without touching any host config,
 set `LLM_ROUTER_NO_AUTO_INSTALL=1` for the install.
 
+Run through `npx` (or `npm exec`), the postinstall wires nothing: the Claude
+Code plugin starts the server that way and brings its own hooks, and
+`npx -y llm-routing install` runs the installer itself.
+
+npm hides a postinstall's output when it succeeds, so normally you will not
+see the receipt line or a wiring warning. Add `--foreground-scripts` to the
+`npm install` to see them, or run `llm-router doctor` afterwards to check what
+was wired.
+
 ## Why a proxy cannot do this
 
 Every other router in this category is a proxy: you point your agent at a local

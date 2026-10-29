@@ -137,22 +137,39 @@ async function main() {
 
 const OPT_OUT = 'LLM_ROUTER_NO_AUTO_INSTALL';
 const MANUAL = 'llm-router install';
+const PLUGIN_POINTER =
+  'llm-routing: or, inside Claude Code ->  /plugin marketplace add ypollak2/llm-router' +
+  '  then  /plugin install llm-router@ypollak2';
+// `install --auto` normally finishes in seconds; this bounds a hang (a lock, a
+// stuck CLI probe) so it cannot block `npm i` forever.
+const INSTALL_TIMEOUT_MS = 120000;
 
 // Run `<bin> install --auto` and echo its one `receipt:` line. Returns 0 in
 // every case, including failure: wiring hosts is a convenience on top of a
 // working binary, and a failed `npm i` would take the working binary away too.
-// `spawn` is injectable so tests can observe the call without a real binary.
-function runInstaller(bin, env = process.env, spawn = spawnSync) {
+// `spawn` and `timeoutMs` are injectable so tests can observe the call without
+// a real binary and without waiting two minutes for the timeout path.
+function runInstaller(bin, env = process.env, spawn = spawnSync, timeoutMs = INSTALL_TIMEOUT_MS) {
   const optOut = String(env[OPT_OUT] || '').trim().toLowerCase();
   if (['1', 'true', 'yes', 'on'].includes(optOut)) {
     console.log(`llm-routing: ${OPT_OUT} is set, so no host was wired.`);
     console.log(`llm-routing: to wire your hosts later, run:  ${MANUAL}`);
     // The plugin is an alternative only while nothing is wired: after a
     // successful `install --auto` it would register the same hooks twice.
-    console.log(
-      'llm-routing: or, inside Claude Code ->  /plugin marketplace add ypollak2/llm-router' +
-        '  then  /plugin install llm-router@ypollak2'
-    );
+    console.log(PLUGIN_POINTER);
+    return 0;
+  }
+
+  // `npx llm-routing ...` / `npm exec` (npm_command === 'exec', checked under
+  // npm 11.16 for npx -y, npx --package and npm exec; `npm i [-g]` reports
+  // 'install'). The Claude Code plugin starts its MCP server with
+  // `npx -y llm-routing`, and the plugin already provides the hooks and MCP
+  // entry, so wiring here would register them twice. Anyone else on npx is
+  // running a command next (`npx -y llm-routing install` wires the hosts).
+  if (env.npm_command === 'exec') {
+    console.log('llm-routing: run through npx / npm exec, so the postinstall wires no host.');
+    console.log(`llm-routing: to wire your hosts, run:  ${MANUAL}`);
+    console.log(PLUGIN_POINTER);
     return 0;
   }
 
@@ -164,13 +181,19 @@ function runInstaller(bin, env = process.env, spawn = spawnSync) {
       env,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
     });
   } catch (err) {
     res = { error: err };
   }
   const stdout = String((res && res.stdout) || '');
   const stderr = String((res && res.stderr) || '');
-  const receipt = stdout.split(/\r?\n/).find((line) => line.startsWith('receipt: '));
+  // run_full prints the line indented ("  receipt: ..."), so match it trimmed.
+  const receipt = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('receipt: '));
   if (receipt) console.log(`llm-routing: ${receipt}`);
 
   if (res && !res.error && res.status === 0) {
