@@ -76,7 +76,8 @@ _SH_FAMILY = {"sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "mksh",
 _INTERPRETERS_STDIN_PATHS = {"-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"}
 #: Options of an interpreter that take a value, so the next word is not a script.
 _INTERP_VALUED = {
-    "python": {"-W", "-X", "-Q"}, "node": {"-r", "--require", "--import", "--loader"},
+    "python": {"-W", "-X", "-Q", "--check-hash-based-pycs"},
+    "node": {"-r", "--require", "--import", "--loader"},
     "sh": {"-o", "-O", "+o", "+O", "--rcfile", "--init-file"},
     "perl": {"-I", "-M", "-m", "-x"}, "ruby": {"-I", "-r", "-C"},
 }
@@ -254,6 +255,11 @@ def _tokenize(cmd: str) -> tuple[list[Token], bool]:
     return toks, subst
 
 
+def _in_git_dir(rel: Path) -> bool:
+    """`.git` in any case: the default macOS filesystem is case-insensitive (rv-785b S2)."""
+    return any(part.casefold() == ".git" for part in rel.parts)
+
+
 def _unresolved_symlink(path: Path) -> bool:
     """A fully resolved path has no symlink left; one left means resolve() hit a loop."""
     return any(q.is_symlink() for q in (path, *path.parents))
@@ -307,7 +313,7 @@ class _Scan:
         self.targets.append(str(resolved))
         if not resolved.is_relative_to(self.root):
             self.outside.append(str(resolved))
-        elif self.allowlist and ".git" in resolved.relative_to(self.root).parts:
+        elif self.allowlist and _in_git_dir(resolved.relative_to(self.root)):
             self.need(f"write into .git ({text}): git runs its hooks and config")
 
     def confine(self, text: str, what: str, expands: bool = False) -> Path | None:
@@ -451,7 +457,9 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
         return
     prog = os.path.basename(words[i][1])
     args = [w[1] for w in words[i + 1:]]
-    expands = {w[1]: w[2] for w in words[i + 1:]}
+    expands: dict[str, bool] = {}
+    for w in words[i + 1:]:                            # rv-785b M1: a quoted copy with the
+        expands[w[1]] = expands.get(w[1], False) or w[2]   # same text must not clear the flag
     opts, rest = _split_opts(args)
     if scan.allowlist:
         in_uv = any(s[:2] == ("wrap", "uv run") for s in stripped)
@@ -477,9 +485,16 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
             scan.cwd = (p if p.is_absolute() else scan.cwd / p).resolve()
             if _unresolved_symlink(scan.cwd):
                 raise RuntimeError("symlink loop")
+        if scan.allowlist:                             # rv-785b M3: later commands work on
+            if scan.cwd is None:                       # cwd without naming a path
+                scan.need(f"{prog} to a directory that cannot be resolved statically")
+            elif not scan.cwd.is_relative_to(scan.root):
+                scan.escapes.append(f"{scan.cwd} ({prog})")
         return
     if prog == "popd":
         scan.cwd = None
+        if scan.allowlist:
+            scan.need("popd to a directory that cannot be resolved statically")
         return
     family = ("python" if re.fullmatch(r"python[\d.]*", prog) else "node" if prog in ("node", "nodejs")
               else "sh" if prog in _SH_FAMILY else prog)
@@ -1387,7 +1402,7 @@ _GIT_C_SAFE = re.compile(
 _GO_SUBS = frozenset({"build", "test", "vet", "list", "version", "env", "doc", "run"})
 _GO_OUT = frozenset({"o", "coverprofile", "cpuprofile", "memprofile", "blockprofile",
                      "mutexprofile", "trace", "outputdir", "modfile", "pkgdir"})
-_GO_EXEC = frozenset({"exec", "toolexec", "vettool"})
+_GO_EXEC = frozenset({"exec", "toolexec", "vettool", "overlay"})
 #: Other go build/test flags that take a separate value (so it is not a package).
 _GO_VALUED = frozenset({"p", "run", "bench", "tags", "ldflags", "gcflags", "asmflags", "count",
                         "timeout", "covermode", "coverpkg", "parallel", "benchtime", "cpu",
@@ -1451,6 +1466,8 @@ def _path_parts(word: str) -> list[str]:
     """The path-shaped pieces of one argument: the word, the value after each `=`,
     and each `:`-separated part; URLs are not local paths (file:// is)."""
     cands = [word] + [word.split("=", k)[-1] for k in range(1, word.count("=") + 1)]
+    if word.startswith("@"):
+        cands.append(word[1:])                 # `pytest @args.txt` reads options from a file
     out: list[str] = []
     for c in cands:
         if c.startswith("file://"):
@@ -1463,9 +1480,16 @@ def _path_parts(word: str) -> list[str]:
     return out
 
 
+_UV_INDEX_OPTS = frozenset({"--index", "--index-url", "-i", "--extra-index-url", "--default-index",
+                            "--find-links", "-f", "--upgrade", "-U", "--upgrade-package", "-P",
+                            "--reinstall", "--reinstall-package", "--refresh", "--refresh-package"})
+
+
 def _confine_words(scan: _Scan, words: list[str], ex: dict[str, bool], what: str) -> None:
     for w in words:
-        if ex.get(w, False):
+        # rv-785b M2: a runner expands `$VAR` itself (pytest expandvars a quoted
+        # `--junitxml=$HOME/x`), so `$` or a backtick needs approval, quoted or not.
+        if ex.get(w, False) or "$" in w or "`" in w:
             scan.need(f"{what} argument built from an expansion: {w}")
             continue
         for part in _path_parts(w):
@@ -1486,9 +1510,15 @@ def _allowed_prefix(scan: _Scan, stripped: list[tuple[str, str, list[Token]]]) -
         elif name == "uv run":
             opts = [t[1] for t in toks]
             if any(o.split("=", 1)[0] in ("--with", "--with-editable", "--with-requirements")
-                   for o in opts):
+                   or (o.startswith("-w") and not o.startswith("--")) for o in opts):
                 scan.need("uv run --with installs packages that then run")
-            _confine_words(scan, opts, {t[1]: t[2] for t in toks}, "uv run")
+            uv_ex: dict[str, bool] = {}
+            for t in toks:
+                uv_ex[t[1]] = uv_ex.get(t[1], False) or t[2]
+            if any(o.split("=", 1)[0] in _UV_INDEX_OPTS for o in opts):
+                scan.need("uv run with an index, find-links, upgrade or refresh option "
+                          "installs packages that then run")
+            _confine_words(scan, opts, uv_ex, "uv run")
 
 
 def _program_location(scan: _Scan, word: str, prog: str, in_uv: bool) -> None:
@@ -1622,6 +1652,16 @@ def _al_git(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
     if sub == "rm" and any(c in p for p in pos for c in "*?[") or sub == "rm" and any(
             p.startswith(":") for p in pos):
         scan.need("'git rm' with a glob or pathspec magic can delete many files")
+    if sub in ("add", "mv", "rm"):
+        # rv-785b M4: with the root nested in a repository, `git rm ../x` deletes
+        # outside it. Every operand must resolve inside the root, after `--` too.
+        if any(o.startswith("--pathspec-from-file") for o, _v in opts):
+            scan.need(f"git {sub} --pathspec-from-file reads paths this check cannot see")
+        for p in pos:
+            if p.startswith(":"):
+                scan.need(f"git {sub} {p}: pathspec magic can reach outside the root")
+            else:
+                scan.confine(p, f"git {sub} operand", ex.get(p, False))
     first = next((a for a in rest if not a.startswith("-")), "")
     if (sub == "reflog" and first in ("expire", "delete", "drop")) or (
             sub == "worktree" and first != "list") or (
@@ -1663,25 +1703,55 @@ def _al_python(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
 _NODE_LOADERS = ("--require", "--import", "--loader", "--experimental-loader", "-r")
 
 
+#: node options that take a separate value, so the value is not the script.
+_NODE_VALUED = frozenset({
+    "-C", "--conditions", "-r", "--require", "--import", "--loader", "--experimental-loader",
+    "--input-type", "--title", "--icu-data-dir", "--openssl-config", "--redirect-warnings",
+    "--report-dir", "--report-directory", "--report-filename", "--secure-heap",
+    "--secure-heap-min", "--test-reporter", "--test-reporter-destination",
+    "--test-name-pattern", "--test-skip-pattern", "--test-concurrency", "--watch-path",
+    "--env-file", "--env-file-if-exists", "--cpu-prof-dir", "--cpu-prof-name",
+    "--heap-prof-dir", "--heap-prof-name", "--diagnostic-dir", "--disable-warning",
+    "--dns-result-order", "--unhandled-rejections", "--trace-event-categories",
+    "--trace-event-file-pattern", "--localstorage-file", "--experimental-config-file",
+    "--run", "--stack-size", "--max-old-space-size", "--inspect-port", "--debug-port",
+    "--experimental-sea-config", "--build-snapshot-config", "--snapshot-blob"})
+_JS_SCRIPT = re.compile(r".*\.(js|mjs|cjs|ts|mts|cts|jsx|tsx)$")
+_LOOPBACK = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
 def _al_node(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
     k = 0
-    while k < len(args) and args[k].startswith("-") and args[k] not in ("-", "--"):
+    while k < len(args) and args[k] != "--":
         a = args[k]
+        if not a.startswith("-") or a == "-":
+            # The script. An unknown option that takes a value can make its value look
+            # like the script (rv-785b S1: `node -C x -e ...`), so scanning stops only at
+            # a word that is clearly a script: a JS file name or a path.
+            if _JS_SCRIPT.fullmatch(a) or "/" in a or a == "-":
+                break
+            k += 1
+            continue
         name, eq, val = a.partition("=")
         # rv-785 M1: inline code in any spelling (`-e`, `-pe`, `--eval=...`, `--print`).
         if name in ("--eval", "--print") or (not a.startswith("--") and (
                 "e" in a[1:] or "p" in a[1:])):
             scan.need("node -e/-p runs inline code")
             return
+        if name in _NODE_VALUED and not eq:
+            val, k = (args[k + 1] if k + 1 < len(args) else ""), k + 1
         if name in _NODE_LOADERS:
-            if not eq:
-                val, k = (args[k + 1] if k + 1 < len(args) else ""), k + 1
             # a module from data:/a URL is inline code; a path must be a project file
             if val.startswith("data:") or _URL.match(val) or "://" in val:
                 scan.need(f"node {name} {val[:40]} loads code that is not a project file")
                 return
             if val.startswith((".", "/", "~")):
                 scan.confine(val, f"node {name}", ex.get(val, False))
+        if name.startswith(("--inspect", "--debug")) and eq and name != "--inspect-port":
+            host = val.rsplit(":", 1)[0] if ":" in val and not val.startswith("[") else (
+                val.split("]")[0] + "]" if val.startswith("[") else "")
+            if host and host not in _LOOPBACK:         # rv-785b N2: a debugger on the network
+                scan.need(f"node {name}={val} opens the debugger beyond loopback")
         k += 1
     rest = args[k + 1:] if args[k:k + 1] == ["--"] else args[k:]
     if rest and rest[0] not in _INTERPRETERS_STDIN_PATHS:
@@ -1772,7 +1842,8 @@ def _al_go(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
         scan.need(f"'go {sub}' is not on the local-action allowlist")
         return
     rest = args[k + 1:]
-    if sub == "env" and any(a in ("-w", "-u") for a in rest):
+    if sub == "env" and any(a.startswith("-") and a.lstrip("-").split("=", 1)[0] in ("w", "u")
+                            for a in rest):                # `--w`, `-w=true` (rv-785b M5)
         scan.need("go env -w/-u writes the user's go configuration")
     i, pkgs, after_args = 0, [], False
     while i < len(rest):
@@ -1785,7 +1856,7 @@ def _al_go(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
             if name in _GO_OUT | _GO_EXEC | _GO_VALUED and not eq:
                 val, i = (rest[i + 1] if i + 1 < len(rest) else ""), i + 1
             if name in _GO_EXEC:
-                scan.need(f"go -{name} runs a program")
+                scan.need(f"go -{name} runs a program or swaps in other files")
             elif name in _GO_OUT:
                 scan.target(val, ex.get(val, False))
         elif not after_args:
@@ -1799,9 +1870,27 @@ def _al_go(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
             # rv-785 M3: a module path (`example.com/x/cmd`, `pkg@latest`) is code
             # go downloads; only local packages (`.`, `./...`, `./cmd/x`, x.go) run.
             first = p.split("/", 1)[0]
+            own = _go_module(scan.root)         # rv-785b S5: the project's own module path
+            if own and "@" not in p and (p == own or p.startswith(own + "/")):
+                continue
+            if p in ("all", "std", "cmd") and sub != "list":
+                scan.need(f"go {sub} {p} runs packages that are not the project's")
+                continue
             if "@" in p or ("." in first and first not in (".", "..") and not p.endswith(".go")):
                 scan.need(f"go {sub} {p}: a module path is code go downloads, not a "
                           "project package")
+
+
+def _go_module(root: Path) -> str:
+    """The `module` line of the root's go.mod, or ''."""
+    try:
+        for line in (root / "go.mod").read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == "module":
+                return parts[1].strip('"')
+    except OSError:
+        return ""
+    return ""
 
 
 def _al_cargo(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
@@ -1935,7 +2024,7 @@ def check_write(path: object, root: Path) -> Verdict:
     if resolved is None:
         return Verdict(REFUSE, f"{why}: {str(path)[:120]}")
     base = Path(root).resolve()
-    if resolved.is_relative_to(base) and ".git" in resolved.relative_to(base).parts:
+    if resolved.is_relative_to(base) and _in_git_dir(resolved.relative_to(base)):
         return Verdict(NEEDS_APPROVAL, f"write into .git ({str(path)[:120]}): git runs its "
                        "hooks and config" + _NOT_WIRED)
     return Verdict(ALLOW, "", (str(resolved),))

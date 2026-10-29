@@ -90,6 +90,27 @@ def test_ordinary_agent_commands_still_pass(root, cmd):
     ("/usr/bin/python3 s.py", wp.NEEDS_APPROVAL),
     ("git -ccore.pager=x log", wp.NEEDS_APPROVAL),
     ("echo x > .git/config", wp.NEEDS_APPROVAL),
+    # rv-785b: expansion per token, `$` in runner args, cd out, git operands,
+    # go flag spellings, node valued options, `.GIT`, uv index options
+    ("rm $HOME/x '$HOME/x'", wp.NEEDS_APPROVAL),
+    ("pytest '--junitxml=$HOME/v'", wp.NEEDS_APPROVAL),
+    ("cd .. && pytest", wp.REFUSE),
+    ("cd ~ && ruff format", wp.REFUSE),
+    ("cd - && ls", wp.NEEDS_APPROVAL),
+    ("git rm -q ../v.txt", wp.REFUSE),
+    ("git mv -f a.txt ../v.txt", wp.REFUSE),
+    ("git add -- ../v.txt", wp.REFUSE),
+    ("go env --w GOFLAGS=-x", wp.NEEDS_APPROVAL),
+    ("go env -u=true GOFLAGS", wp.NEEDS_APPROVAL),
+    ("node -C x -e 1", wp.NEEDS_APPROVAL),
+    ("python3 --check-hash-based-pycs always -c 1", wp.NEEDS_APPROVAL),
+    ("echo x >> .GIT/config", wp.NEEDS_APPROVAL),
+    ("uv run --extra-index-url https://x.example/simple pytest", wp.NEEDS_APPROVAL),
+    ("uv run -w evilpkg pytest", wp.NEEDS_APPROVAL),
+    ("go test all", wp.NEEDS_APPROVAL),
+    ("go test -overlay ov.json ./...", wp.NEEDS_APPROVAL),
+    ("node --inspect=0.0.0.0:9229 s.js", wp.NEEDS_APPROVAL),
+    ("pytest @../args.txt", wp.REFUSE),
 ])
 def test_flags_and_programs_outside_the_list_are_refused(root, cmd, decision):
     v = wp.check_action(cmd, root)
@@ -119,7 +140,18 @@ def test_bare_name_found_inside_the_root_is_refused(root, monkeypatch):
 
 def test_file_tool_write_into_git_is_refused(root):
     assert wp.check_write(".git/hooks/pre-commit", root).decision == wp.NEEDS_APPROVAL
+    assert wp.check_write(".GIT/hooks/pre-commit", root).decision == wp.NEEDS_APPROVAL
     assert wp.check_write("src/ok.py", root).decision == wp.ALLOW
+
+
+def test_the_projects_own_go_module_path_is_local(root):
+    """rv-785b S5: `go test <module>/...` names the project, not downloaded code."""
+    assert wp.check_action("go test github.com/me/proj/...", root).decision == wp.NEEDS_APPROVAL
+    (root / "go.mod").write_text("module github.com/me/proj\n\ngo 1.22\n")
+    assert wp.check_action("go test github.com/me/proj/...", root).decision == wp.ALLOW
+    assert wp.check_action("go vet github.com/me/proj/pkg", root).decision == wp.ALLOW
+    assert wp.check_action("go run github.com/me/proj/cmd@latest", root).decision == wp.NEEDS_APPROVAL
+    assert wp.check_action("go run github.com/other/x", root).decision == wp.NEEDS_APPROVAL
 
 
 def test_check_command_alone_is_still_the_tripwire(root):
