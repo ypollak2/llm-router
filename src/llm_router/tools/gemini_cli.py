@@ -30,6 +30,14 @@ async def llm_gemini(
             "Expected at: ~/.local/bin/gemini or /usr/local/bin/gemini"
         )
 
+    from llm_router import local_privacy
+
+    try:
+        prompt = local_privacy.guard_cloud_cli(prompt, what="llm_gemini")
+    except local_privacy.SecretLocalOnlyRefused as refusal:
+        # Returned, not raised: an uncaught exception reaches the model as a bare "Error executing tool".
+        return str(refusal)
+
     result = await run_gemini_cli(prompt, model=model)
 
     # Log to usage table so dashboard includes direct llm_gemini calls
