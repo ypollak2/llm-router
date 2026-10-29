@@ -1,0 +1,1383 @@
+{
+  "entries": [
+    {
+      "key": "docs/BACKEND-QUALITY.md::215fc675de6e#1",
+      "path": "docs/BACKEND-QUALITY.md",
+      "line": 51,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [multiplier:8x]",
+      "text": "A three-way tie. For contained work the local model is indistinguishable from both cloud agents at 4-8x the speed and zero marginal cost."
+    },
+    {
+      "key": "docs/BACKEND-QUALITY.md::6e554a245653#1",
+      "path": "docs/BACKEND-QUALITY.md",
+      "line": 104,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [multiplier:2.8x]",
+      "text": "The separation this suite produces is not a single ranking. On **correctness** local sits clearly below both cloud agents (8 vs 10). Codex and Claude are level "
+    },
+    {
+      "key": "docs/BACKLOG.md::b2643c23281d#1",
+      "path": "docs/BACKLOG.md",
+      "line": 38,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:2%]",
+      "text": "- **Item 8 (`tool_intercept` cannot reach real work)** \u2014 partially addressed. `&&` conjunctions admitted; eligibility 8/492 \u2192 12/492. Pipes and redirects still "
+    },
+    {
+      "key": "docs/BENCHMARKS.md::2f126f1920ed#1",
+      "path": "docs/BENCHMARKS.md",
+      "line": 164,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:30%, percent:50%, percent:0%, percent:20%]",
+      "text": "| Task Type | Arena Hard | Aider | HF Score | Cost (inverted) | |-----------|-----------|-------|----------|-----------------| | \ud83d\udcbb code | 30% | **50%** | 0% | 2"
+    },
+    {
+      "key": "docs/MEASUREMENT.md::4616c3776c93#1",
+      "path": "docs/MEASUREMENT.md",
+      "line": 18,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:54%, n-of-m:1,037 of 1,938]",
+      "text": "Test-suite invocations write to the production log with `session_id=unknown`. On 2026-08-31 that was **1,037 of 1,938 entries \u2014 54% of the file.** A rate comput"
+    },
+    {
+      "key": "docs/MEASUREMENT.md::f2c385c21581#1",
+      "path": "docs/MEASUREMENT.md",
+      "line": 73,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:2%]",
+      "text": "Intercepting half the commands that produce 2% of the output is worth nothing. Coverage claims in this repo are `bytes of tool output avoided / total bytes`."
+    },
+    {
+      "key": "docs/MEASUREMENT.md::b172e801a77e#1",
+      "path": "docs/MEASUREMENT.md",
+      "line": 203,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:69.6%, percent:69.6%, percent:70.4%, percent:77.4%]",
+      "text": "acceptable 69.6% 69.6% identical drafts produced 70.4% 77.4% 7 points apart verdict flips 24 of 115 prompts changed verdict between runs"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::ed7b4a6bff79#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 3,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:57%, percent:70%, percent:70%, n-of-m:24 of 115]",
+      "text": "> **Update 2026-09-15, after G5 and G1.** Usable drafts moved **57% -> 70%**, > measured twice on independent runs that both landed on 70%. The noise floor: > a"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::8915236b99fc#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 14,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:100%]",
+      "text": "The goal is ~100% of prompts getting a draft worth using. This is what stands between here and there, sized rather than assumed."
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::7a1cd0055c94#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 19,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:57%, percent:15%, percent:28%]",
+      "text": "| Outcome | Count | Share | |---|---|---| | **Usable draft** | 66 | **57%** | | Drafted but unusable | 17 | 15% | | No draft at all | 32 | 28% |"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::9f8ff4a4ee8e#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 27,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:12%, percent:13%, percent:6%, percent:4%]",
+      "text": "| Reason | Count | Share | Is it wrong? | |---|---|---|---| | `no free-tier model available` | 14 | 12% | **No** \u2014 complex code/research to Claude, the stated c"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::5aa3feb67349#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 36,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:18%, percent:82%, percent:57%]",
+      "text": "**18% is correct behaviour, not a gap.** The honest ceiling is therefore ~82%, and the addressable distance from 57% is **25 points**."
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::582d9326d57d#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 39,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:13%]",
+      "text": "## G1 \u2014 The model invents plan filenames (13%, the largest single gap)"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::f11376fc80a3#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 56,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:4%]",
+      "text": "## G2 \u2014 Grounding rejects 5 drafts outright (4%)"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::35e992d22e46#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 67,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:3%]",
+      "text": "## G3 \u2014 3 prompts still hit the context gate (3%)"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::9ba49bfc8aa6#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 77,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:2%]",
+      "text": "## G4 \u2014 2 drafts claim a status they cannot observe (2%)"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::270cf2f421f9#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 90,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:7%]",
+      "text": "Five defects in two days, each caught only after a number had been reported: contaminated corpus, survivorship-biased p90, a partial rate quoted as final, an in"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::7d30054316a7#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 103,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:13%, percent:4%, percent:3%, percent:2%]",
+      "text": "G5 (establish the noise floor \u2014 everything else is read against it) G1 (13%, one prompt edit, re-scored from disk in seconds) G2 (4%, 15 minutes of reading befo"
+    },
+    {
+      "key": "docs/PLAN_CLOSE_THE_GAP.md::cf5dc404b5e0#1",
+      "path": "docs/PLAN_CLOSE_THE_GAP.md",
+      "line": 110,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:100%, percent:80%, percent:57%]",
+      "text": "100%. Eighteen points are correct behaviour: complex work going to Claude is the stated design, and a bare \"continue\" carries nothing to route. A realistic targ"
+    },
+    {
+      "key": "docs/RESEARCH_LANDSCAPE.md::9b042a98603d#1",
+      "path": "docs/RESEARCH_LANDSCAPE.md",
+      "line": 39,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:21%, percent:100%, percent:2%, multiplier:20\u00d7]",
+      "text": "- **GitHub issue** [anthropics/claude-code#41930](https://github.com/anthropics/claude-code/issues/41930) \u2014 \"Critical: Widespread abnormal usage limit drain acr"
+    },
+    {
+      "key": "docs/RESEARCH_LANDSCAPE.md::f8d93258362d#1",
+      "path": "docs/RESEARCH_LANDSCAPE.md",
+      "line": 40,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [multiplier:10x]",
+      "text": "- **Hacker News** [\"Claude Code users hitting usage limits 'way faster than expected'\"](https://news.ycombinator.com/item?id=47586176) \u2014 **331 points, 224 comme"
+    },
+    {
+      "key": "docs/RESEARCH_LANDSCAPE.md::35cc96afbbcd#1",
+      "path": "docs/RESEARCH_LANDSCAPE.md",
+      "line": 42,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:5%, dollars:$20, dollars:$100, dollars:$200]",
+      "text": "- **Weekly rate limits**, effective Aug 28, 2025 across Pro ($20)/Max ($100/$200) tiers, publicly framed by Anthropic as targeting \"less than 5% of subscribers\""
+    },
+    {
+      "key": "docs/RESEARCH_LANDSCAPE.md::591102c03c9a#1",
+      "path": "docs/RESEARCH_LANDSCAPE.md",
+      "line": 90,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:1%, percent:1%, multiplier:50x]",
+      "text": "| Channel | Evidence it worked for a comparable tool | Relevance to llm-router | |---|---|---| | **npx one-liner + organic HN/Reddit/LinkedIn virality** | **ccu"
+    },
+    {
+      "key": "docs/RESEARCH_LANDSCAPE.md::70e10f1b7fe1#1",
+      "path": "docs/RESEARCH_LANDSCAPE.md",
+      "line": 105,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [dollars:$1.3]",
+      "text": "2. **Martian's \"$1.3B valuation\" claim** is sourced from a single Medium post, not a funding announcement, TechCrunch/Bloomberg piece, or Crunchbase entry \u2014 **U"
+    },
+    {
+      "key": "docs/RESEARCH_SEMANTIC_LAYER.md::b85415430a9a#1",
+      "path": "docs/RESEARCH_SEMANTIC_LAYER.md",
+      "line": 606,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:98%]",
+      "text": "- At least 98% of audited factual citations point to supporting evidence at the evaluated snapshot."
+    },
+    {
+      "key": "docs/RESEARCH_SEMANTIC_LAYER.md::5aa04c29a0e1#1",
+      "path": "docs/RESEARCH_SEMANTIC_LAYER.md",
+      "line": 607,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:200 ms]",
+      "text": "- Warm retrieval overhead initially targets p95 below 200 ms on a declared reference machine for a declared repository size, with all optional embedding work in"
+    },
+    {
+      "key": "docs/RESEARCH_SEMANTIC_LAYER.md::11c7de842e68#1",
+      "path": "docs/RESEARCH_SEMANTIC_LAYER.md",
+      "line": 652,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:90%]",
+      "text": "- Applicable-lesson precision of at least 90% on a reviewed test set, with high-impact misses reported separately."
+    },
+    {
+      "key": "docs/RETENTION.md::86a7bea4d2be#1",
+      "path": "docs/RETENTION.md",
+      "line": 20,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:70%]",
+      "text": "| Item | Value | |---|---| | Rows | `day` (local calendar date, `YYYY-MM-DD`) and `install_id` (16 random hex characters generated locally on the first row). No"
+    },
+    {
+      "key": "docs/ROUTERARENA.md::66c83157e815#1",
+      "path": "docs/ROUTERARENA.md",
+      "line": 45,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:72.59%, dollars:$0.1093]",
+      "text": "| Metric | Value | |---|---| | **Arena Score** | **72.35** | | Accuracy | 72.59% | | Cost per 1K queries | $0.1093 | | Robustness | 79.29 (87 flips of 420 parap"
+    },
+    {
+      "key": "docs/ROUTERARENA.md::4dda694c286c#1",
+      "path": "docs/ROUTERARENA.md",
+      "line": 53,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:63.1%, percent:20.9%, percent:16.0%]",
+      "text": "Routed model distribution: `gemini-3.1-flash-lite-preview` 63.1%, `qwen/qwen3-235b-a22b-2507` 20.9%, `deepseek/deepseek-v4-flash` 16.0%."
+    },
+    {
+      "key": "docs/ROUTERARENA.md::e364916f9862#1",
+      "path": "docs/ROUTERARENA.md",
+      "line": 64,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:294 of 420]",
+      "text": "The accuracy gain is small. The robustness gain is not, and it is the more interesting number: the first entry routed on **hashed bag-of-words**, which changed "
+    },
+    {
+      "key": "docs/bugs/0001.md::d0d22e411c32#1",
+      "path": "docs/bugs/0001.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:0 of 544]",
+      "text": "- **Symptom.** O3 printed \"local share unknown\". In `usage.db`, 0 of 544 runtime `routing_decisions` rows had a `session_id`, including 444 Ollama-served rows ("
+    },
+    {
+      "key": "docs/bugs/0001.md::60a43e803cb9#1",
+      "path": "docs/bugs/0001.md",
+      "line": 17,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:19 of 20]",
+      "text": "- **Test.** M0-3: at least 19 of 20 synthetic rows carry the calling session's own id across 2 concurrent research sessions. #288 carries its own tests (a fresh"
+    },
+    {
+      "key": "docs/bugs/0004.md::bb3f29bef288#1",
+      "path": "docs/bugs/0004.md",
+      "line": 5,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0 ms]",
+      "text": "## 4. `G1_proxy` printed 0 ms"
+    },
+    {
+      "key": "docs/bugs/0004.md::06e493bff9e5#1",
+      "path": "docs/bugs/0004.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [latency:0 ms, latency:4 ms, latency:83 ms]",
+      "text": "- **Symptom.** `llm-router kpi` showed the proxy half of G1 as 0 ms (primary plan, source [K]), although the ledger's `tier_decision_s` had p50 4 ms and p95 83 "
+    },
+    {
+      "key": "docs/bugs/0004.md::0042878479ac#1",
+      "path": "docs/bugs/0004.md",
+      "line": 10,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:25,924 of\n  25,963]",
+      "text": "- **Cause.** `_g1_proxy` took the p95 of `added_latency_s`. That field is 0.0 on 25,924 of 25,963 forwarded rows (all-time copy of the ledger, 2026-10-07): it i"
+    },
+    {
+      "key": "docs/bugs/0006.md::6461cb73a23c#1",
+      "path": "docs/bugs/0006.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:99.3%, percent:81.4%]",
+      "text": "- **Symptom.** One session supplied 1,175 of the 1,183 organic turn-first rows in W0 (99.3%) and 81.4% of the NS units, while p_eval had excluded it as \"this re"
+    },
+    {
+      "key": "docs/bugs/0008.md::3f5e06c01249#1",
+      "path": "docs/bugs/0008.md",
+      "line": 11,
+      "why": "no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0.5 s]",
+      "text": "- **Cause.** `hooks/auto-route.py` (:387 at da31df7): `DISABLE_LLM_CLASSIFIERS = _ollama_reachable or not _has_api_key`. The comment above it says local-only me"
+    },
+    {
+      "key": "docs/bugs/0011.md::093d04d37a5c#1",
+      "path": "docs/bugs/0011.md",
+      "line": 17,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0.3 s, latency:0.3 s, latency:0.5 s]",
+      "text": "1. `test_different_tool_disagrees`: the fake Claude replied after a fixed 0.3 s. Before local reaches its backend the job makes four worker-thread hops (deepcop"
+    },
+    {
+      "key": "docs/bugs/0011.md::91b682c89139#1",
+      "path": "docs/bugs/0011.md",
+      "line": 27,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:5 ms, latency:129 ms, latency:33 ms]",
+      "text": "3. `test_assemble_never_holds_the_event_loop`: a 5 ms ticker and asyncio's slow-callback log, both wall clock. With the loop CPU time sampled beside the wall ga"
+    },
+    {
+      "key": "docs/bugs/0013.md::ada718836b78#1",
+      "path": "docs/bugs/0013.md",
+      "line": 5,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:100%]",
+      "text": "## 13. Retrospective accuracy 100% at 0 corrections"
+    },
+    {
+      "key": "docs/bugs/0013.md::edf35d56014b#1",
+      "path": "docs/bugs/0013.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:100%]",
+      "text": "- **Symptom.** Every retrospective of a session in which nobody corrected a route printed \"Accuracy: 100%\"."
+    },
+    {
+      "key": "docs/bugs/0015.md::ef1b6eb6a86b#1",
+      "path": "docs/bugs/0015.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:53%, percent:80%]",
+      "text": "- **Symptom.** With `usage.json` at 0.80 (session 53%, weekly 80%; rsync copy taken 2026-10-07T17:53Z, n = 1 file), `claude_usage.get_claude_pressure()` on da31"
+    },
+    {
+      "key": "docs/bugs/0023.md::8eac5e2bef48#1",
+      "path": "docs/bugs/0023.md",
+      "line": 16,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:99%]",
+      "text": "- **Test.** `test_usage_session_id_migration_is_idempotent`, `test_direct_row_carries_the_payload_session_on_usage`, `test_log_usage_stamps_the_mcp_call_session"
+    },
+    {
+      "key": "docs/bugs/0024.md::95ee7e61fce2#1",
+      "path": "docs/bugs/0024.md",
+      "line": 14,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:20%, percent:100%]",
+      "text": "- **Test.** `test_stop_line_north_star_uses_the_strict_rule` (50 heuristic-used units, 10 strict: prints 20%, was 100%)."
+    },
+    {
+      "key": "docs/bugs/0028.md::9350993f403e#1",
+      "path": "docs/bugs/0028.md",
+      "line": 15,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:20%, percent:100%]",
+      "text": "- **Test.** `test_northstar_cli_shows_the_strict_rule_as_the_north_star` (50 heuristic-used units, 10 strict: shows 20%, was 100%), `test_report_schema_is_pinne"
+    },
+    {
+      "key": "docs/bugs/0029.md::3855cf0bbd60#1",
+      "path": "docs/bugs/0029.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:3 of 3]",
+      "text": "- **Symptom.** `hooks/session-end-clawcode.py` (installed as a Stop hook, `install_hooks.py`) exited 1 with `TypeError: unsupported format string passed to None"
+    },
+    {
+      "key": "docs/bugs/A0-FLAKE-1.md::b91c161a6151#1",
+      "path": "docs/bugs/A0-FLAKE-1.md",
+      "line": 20,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0.5 s]",
+      "text": "- **Test.** Same test. With a pool whose workers sleep 0.5 s before starting (temporary pytest plugin, not committed) the old test fails with the exact CI error"
+    },
+    {
+      "key": "docs/bugs/AB-2.md::07288a2353cf#1",
+      "path": "docs/bugs/AB-2.md",
+      "line": 9,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:20 of 20]",
+      "text": "- **Symptom.** (a) 12 parallel PreToolUse[Agent] hooks left the in-flight count at 12, 8 and 10 and `pending` at 12, 4 and 8 on three reviewer runs; the new tes"
+    },
+    {
+      "key": "docs/bugs/AUTOROUTE-LAT-1.md::337a71767a17#1",
+      "path": "docs/bugs/AUTOROUTE-LAT-1.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:15%, percent:17%, latency:653 ms, latency:922 ms]",
+      "text": "- **Symptom.** `router_added_ms` p95 653 ms (n = 274, `~/.llm-router/hook_latency.jsonl`, last 24 h to 2026-10-09 13:47Z; 922 ms over all 315 rows) against the "
+    },
+    {
+      "key": "docs/bugs/AUTOROUTE-LAT-1.md::c73166f44ada#1",
+      "path": "docs/bugs/AUTOROUTE-LAT-1.md",
+      "line": 14,
+      "why": "no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:650 ms]",
+      "text": "- **Cause (outside-in, `scripts/hook_wall.py` method, fixture `auto-route.json`, scratch HOME, load1 1.2-3.7).** Per-prompt CPU went to work no prompt needed, w"
+    },
+    {
+      "key": "docs/bugs/AUTOROUTE-LAT-1.md::c8f8bfd4f5a4#1",
+      "path": "docs/bugs/AUTOROUTE-LAT-1.md",
+      "line": 16,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:52 ms, latency:30 ms]",
+      "text": "1. `llm_router.session_store` and `llm_router.persist_redaction` call `get_config()` for three fields no operator had set: `import llm_router.config` is ~31-52 "
+    },
+    {
+      "key": "docs/bugs/AUTOROUTE-LAT-1.md::2692031eeca0#1",
+      "path": "docs/bugs/AUTOROUTE-LAT-1.md",
+      "line": 19,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:47 ms]",
+      "text": "2. `llm_router.logging` imported structlog (and rich, via `structlog.dev`) at import: 25-47 ms, because `auto-route.py` calls `configure_logging()` first thing "
+    },
+    {
+      "key": "docs/bugs/AUTOROUTE-LAT-1.md::a582475cc4b5#1",
+      "path": "docs/bugs/AUTOROUTE-LAT-1.md",
+      "line": 22,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:9 ms]",
+      "text": "3. `llm_router/__init__.py` imported `response_router` and `sdk` (and `llm_router.types`) eagerly, and resolved `__version__` through `importlib.metadata` (~9 m"
+    },
+    {
+      "key": "docs/bugs/AUTOROUTE-LAT-1.md::216e8349e5d6#1",
+      "path": "docs/bugs/AUTOROUTE-LAT-1.md",
+      "line": 43,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:300 s]",
+      "text": "- `model_discovery.available_ollama_models_nowait()`: env, then fresh cache, then stale cache; a stale or missing cache is refreshed by a detached `python -m ll"
+    },
+    {
+      "key": "docs/bugs/AUTOROUTE-LAT-1.md::31b128cd380f#1",
+      "path": "docs/bugs/AUTOROUTE-LAT-1.md",
+      "line": 51,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [latency:124.8 ms, latency:106.4 ms, latency:73.1 ms, latency:21.9 ms]",
+      "text": "- **Result (`hook_wall.measure`, n = 200 cold + 200 warm per arm, two interleaved passes, load1 median 2.4 / 3.1 cold, max 3.7; no row above load 4).** Wall p95"
+    },
+    {
+      "key": "docs/bugs/AUTOROUTE-LAT-1.md::1316aa59f218#1",
+      "path": "docs/bugs/AUTOROUTE-LAT-1.md",
+      "line": 56,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [latency:53 ms, latency:16 ms, latency:10 ms, latency:8 ms]",
+      "text": "- **Not fixed.** Python start-up and teardown (~53 ms) and the hook's own 6,000-line script compile and ~86 module-level regex compiles (~16 ms) are not reduced"
+    },
+    {
+      "key": "docs/bugs/A_0-2.md::01afbcf97c95#1",
+      "path": "docs/bugs/A_0-2.md",
+      "line": 7,
+      "why": "no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:30 s, latency:20 ms, latency:30018 ms, latency:3 s]",
+      "text": "- **Symptom.** While one `llm_act` ran, every other call to the MCP server waited for it, and two `llm_act` calls took the sum of their times. On b3dd351, `test"
+    },
+    {
+      "key": "docs/bugs/CI-1.md::f1eeaf1f3d57#1",
+      "path": "docs/bugs/CI-1.md",
+      "line": 10,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:28 of 60]",
+      "text": "- **Cause.** The fixture `_init` runs `git commit`; with auto-maintenance on, commit spawns a detached `git maintenance run --auto` that creates and removes `.g"
+    },
+    {
+      "key": "docs/bugs/CLS-FREEZE-1.md::adc452dd7102#1",
+      "path": "docs/bugs/CLS-FREEZE-1.md",
+      "line": 17,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [tokens:512 tokens]",
+      "text": "- **Fix (D-169 (1)-(3)).** `cls_pins.ollama_name` normalises a bare name to `<name>:latest`; `cls_pins.ollama_digest_sets` keeps the sorted set of every digest "
+    },
+    {
+      "key": "docs/bugs/CTX-PROJ-2.md::11866a1d31e1#1",
+      "path": "docs/bugs/CTX-PROJ-2.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0.5 s]",
+      "text": "- **Symptom.** (1) A session's very first `record_event` resolved its path before the hook's `session_cwd` record existed; the record appeared before the under-"
+    },
+    {
+      "key": "docs/bugs/CTX-PROJ-2.md::db50e5d43428#1",
+      "path": "docs/bugs/CTX-PROJ-2.md",
+      "line": 15,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:5 s]",
+      "text": "- **Fix.** (1) `record_event` resolves the path once more BEFORE taking the lock; if the pin is created there, adoption runs with no lock of ours held, and the "
+    },
+    {
+      "key": "docs/bugs/D-141.md::a00324f18f46#1",
+      "path": "docs/bugs/D-141.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:150 s, latency:120 s]",
+      "text": "- **Symptom.** Claude Code calls to `llm`, `llm_route` and `llm_edit` returned only `Error executing tool llm`. Separately, a `task=\"query\"` call routed to four"
+    },
+    {
+      "key": "docs/bugs/F25.md::f68f040410f6#1",
+      "path": "docs/bugs/F25.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:5 of 5]",
+      "text": "- **Symptom.** 2026-10-16 12:48-16:07Z, ledger rows 2481/2483/2485/2491/2492: five `research` calls ended `error_exception`, model `none`, no attempt events, la"
+    },
+    {
+      "key": "docs/bugs/FLAKE-LAV-1.md::9535bbb4de7f#1",
+      "path": "docs/bugs/FLAKE-LAV-1.md",
+      "line": 19,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:2 of 50]",
+      "text": "- **Second guard.** The session-wide `_codex_home_untouched_for_the_whole_session` fingerprinted the same file whole (mtime+sha256) and errored once per xdist w"
+    },
+    {
+      "key": "docs/bugs/FLAKE-LAV-1.md::0391914c417a#1",
+      "path": "docs/bugs/FLAKE-LAV-1.md",
+      "line": 29,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [multiplier:8x, latency:30 s, latency:40 s, latency:8 s]",
+      "text": "- **Not found.** No timing/ruff failure reproduced in the verify file; its 30 s deadlines held under 8x CPU oversubscription (runs took ~40 s vs ~8 s unloaded)."
+    },
+    {
+      "key": "docs/bugs/GE6-1.md::2ec4bade578e#1",
+      "path": "docs/bugs/GE6-1.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:85.7%, percent:95%]",
+      "text": "- **Symptom.** `kpi --quota-burn` coverage on a copy of `~/.llm-router` for 2026-10-01T10:28Z..2026-10-08T10:28Z reported 7 organic sessions; the owner's overri"
+    },
+    {
+      "key": "docs/bugs/H06-FLAKE-1.md::4f5da25e27ab#1",
+      "path": "docs/bugs/H06-FLAKE-1.md",
+      "line": 9,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:5 s, latency:5 s]",
+      "text": "- **Fix.** The old pattern (open \"w\", then write) is now driven with a forced interleaving: the writer truncates, sets an Event, and parks (5 s bound) until the"
+    },
+    {
+      "key": "docs/bugs/H06-FLAKE-1.md::0801147a8e31#1",
+      "path": "docs/bugs/H06-FLAKE-1.md",
+      "line": 10,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:50 of 50]",
+      "text": "- **Test.** The same test file. Mutation: making the old-pattern write atomic (tmp + `os.replace` before the mid-write hook) makes `test_the_old_pattern_really_"
+    },
+    {
+      "key": "docs/bugs/HAIKU55-1.md::c78588363c14#1",
+      "path": "docs/bugs/HAIKU55-1.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:95.8%, percent:3.9%, percent:4.2%, tokens:100,000 tokens]",
+      "text": "- **Symptom (2026-10-10).** `llm-router kpi` G3 (gate P0.8 recompute, window since 2026-10-03, copy of `~/.llm-router/proxy_calls.jsonl` taken 2026-10-10 08:19Z"
+    },
+    {
+      "key": "docs/bugs/HAIKU55-TIER-1.md::008606d71dd0#1",
+      "path": "docs/bugs/HAIKU55-TIER-1.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [dollars:$0.10, dollars:$0.50, dollars:$0.50, dollars:$2.50]",
+      "text": "- **Symptom (2026-10-10, before the switch).** Owner approved moving the live `haiku` tier from `claude-haiku-4-5` to `claude-haiku-5-5`. Changing only `model:`"
+    },
+    {
+      "key": "docs/bugs/HOOK-DRAFT-1.md::e80f7ceb5c6b#1",
+      "path": "docs/bugs/HOOK-DRAFT-1.md",
+      "line": 13,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0.56 s]",
+      "text": "- **Cause.** Two lists of \"local models that can generate\" used two filters. The router's list (`discover.ollama_can_generate`) applies the classifier/unnamed-i"
+    },
+    {
+      "key": "docs/bugs/HOOKMETRIC-1.md::7ff5e0b85e78#1",
+      "path": "docs/bugs/HOOKMETRIC-1.md",
+      "line": 9,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:300 s]",
+      "text": "- **Cause.** agent-route runs the delegated Codex sub-agent synchronously inside `with _hl_phase(\"codex_delegation\")` (up to ~300 s), but `hook_latency.MODEL_PH"
+    },
+    {
+      "key": "docs/bugs/L2-SE-1.md::fdcbd5700908#1",
+      "path": "docs/bugs/L2-SE-1.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [latency:4,237 ms, latency:300 ms, latency:500 ms, latency:2,302 ms]",
+      "text": "- **Symptom.** Live session-end p95 was 4,237 ms against the +300 ms sync bar. A synthetic ledger reproduced the mechanism (latency investigation of 2026-10-17,"
+    },
+    {
+      "key": "docs/bugs/L2-SE-1.md::6c23267fe9b3#1",
+      "path": "docs/bugs/L2-SE-1.md",
+      "line": 11,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:70 ms]",
+      "text": "- **Cause.** `session-end.py` called `dashboard_data.query_window` for five windows, `summary(\"today\")`, `summary(\"lifetime\")` (each repeating `query_window`, `"
+    },
+    {
+      "key": "docs/bugs/L2-SE-1.md::1ea48e0ab425#1",
+      "path": "docs/bugs/L2-SE-1.md",
+      "line": 22,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:305 ms, latency:190 ms, latency:172 ms, latency:125 ms]",
+      "text": "- **Not fixed.** The Stop still runs bounded per-session and 14-day queries on the ledger (`model_breakdown`, `executed_routes`, `_query_session_metrics`, `_que"
+    },
+    {
+      "key": "docs/bugs/LC-1.md::de2e318d6467#1",
+      "path": "docs/bugs/LC-1.md",
+      "line": 7,
+      "why": "no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:68 ms]",
+      "text": "- **Symptom.** `tests/test_local_classifier.py::test_no_slow_callback_on_the_async_path_and_the_detector_works` failed on CI py3.11 (run 37811026623 attempt 2: "
+    },
+    {
+      "key": "docs/bugs/LC-1.md::8defc573b154#1",
+      "path": "docs/bugs/LC-1.md",
+      "line": 20,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:10 ms]",
+      "text": "- **Test.** `test_no_blocking_call_on_the_async_path_and_the_guard_works`. Mutants, each red: `time.sleep(0.01)` in `_is_loaded`, a sync `urlopen` in `_classify"
+    },
+    {
+      "key": "docs/bugs/LC-12h.md::7089a6c9a4dd#1",
+      "path": "docs/bugs/LC-12h.md",
+      "line": 29,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:1.6 s]",
+      "text": "- **Symptom.** The door refused placeholders (`AKIAIOSFODNN7EXAMPLE`, `ghp_` + `x` * 36, `postgres:postgres@db`, `YOUR_API_KEY_HERE_...`, JWT fixtures) and scan"
+    },
+    {
+      "key": "docs/bugs/LEDGER-ERR-1.md::bec446d6138a#1",
+      "path": "docs/bugs/LEDGER-ERR-1.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:129 s, latency:3 s, latency:244 s]",
+      "text": "- **Symptom.** Gate M0-3 rerun 2026-10-10 (two concurrent sessions, 20 `llm(task=\"code\", tier=\"fast\")` calls, T0 08:59:12Z): calls A5, B7, B10 ended in \"Error e"
+    },
+    {
+      "key": "docs/bugs/LEDGER-ERR-1.md::f0f00738ab12#1",
+      "path": "docs/bugs/LEDGER-ERR-1.md",
+      "line": 24,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [dollars:$0]",
+      "text": "- **Gate scope (owner decision 2026-10-10).** The M0-3 gate query (`P0.0-m0.json` M0-3 sql) reads `routing_decisions` where `provenance='runtime'`. So a failed "
+    },
+    {
+      "key": "docs/bugs/LOCAL-TIMEOUT-1.md::2878229e7a7a#1",
+      "path": "docs/bugs/LOCAL-TIMEOUT-1.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:120 s, latency:15 s, latency:69 s]",
+      "text": "- **Symptom (N18, 2026-10-10).** In the live chain for `llm(task=\"code\", tier=\"fast\")`, `ollama/qwen3-coder:30b` is first. `routing_quality.jsonl`, 08:34:22Z to"
+    },
+    {
+      "key": "docs/bugs/LOCAL-TIMEOUT-1.md::be6c94de9ccf#1",
+      "path": "docs/bugs/LOCAL-TIMEOUT-1.md",
+      "line": 18,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:120 s]",
+      "text": "- **Cause, router side (this fix).** `router._dispatch_model_loop` remembered nothing between routes. A model that had just timed out led the next route again a"
+    },
+    {
+      "key": "docs/bugs/LOCAL-TIMEOUT-1.md::a378faa70867#1",
+      "path": "docs/bugs/LOCAL-TIMEOUT-1.md",
+      "line": 29,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0.48 s, latency:4.5 s, latency:120 s]",
+      "text": "- **Measured.** Before the fix, the same router path took 0.48 s (coder loaded) and 4.5 s (coder loaded from cold, with qwen3.8 evicted) on 2026-10-10 12:47Z af"
+    },
+    {
+      "key": "docs/bugs/LOCAL-TIMEOUT-1.md::bdf4f9e32f52#1",
+      "path": "docs/bugs/LOCAL-TIMEOUT-1.md",
+      "line": 32,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:30 ms]",
+      "text": "- **Known and left alone.** The stuck Ollama scheduler is an Ollama problem. Lowering memory pressure makes it less likely (see the N18 report: global `OLLAMA_C"
+    },
+    {
+      "key": "docs/bugs/N19.md::a237bc955989#1",
+      "path": "docs/bugs/N19.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:30 ms]",
+      "text": "- **Symptom (2026-10-10, M0-3 rerun `chain_attempts`).** `ollama/nimble:9b` (a decision classifier) was attempt A5 in a code chain and returned 400 \"does not su"
+    },
+    {
+      "key": "docs/bugs/N21.md::8391254a481e#1",
+      "path": "docs/bugs/N21.md",
+      "line": 11,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:20 of 20]",
+      "text": "- **Cause 1.** `quality_breaker._fetch_class_units` read `northstar.units()` without looking at `session_kind`. A discarded answer is outcome `discarded` (a fai"
+    },
+    {
+      "key": "docs/bugs/N21.md::af9578bacec5#1",
+      "path": "docs/bugs/N21.md",
+      "line": 23,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [tokens:0 tokens]",
+      "text": "- **Fix 2.** `cost.log_breaker_refusal` (via `log_route_error`, same writer, dedup and session source as LEDGER-ERR-1) writes one `usage` row and one `routing_d"
+    },
+    {
+      "key": "docs/bugs/N22.md::12c99aeb69da#1",
+      "path": "docs/bugs/N22.md",
+      "line": 5,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:120 s]",
+      "text": "## N22. Floor-served calls left only the safety-net usage row, and paid 120 s per extra local model"
+    },
+    {
+      "key": "docs/bugs/N22.md::77398802858a#1",
+      "path": "docs/bugs/N22.md",
+      "line": 7,
+      "why": "no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:268 s]",
+      "text": "- **Symptom.** M0-3 rerun3 (2026-10-10, T0 19:57:53Z, `~/.rsi/research/primary-plan/v16/m03_rerun3_20261010/`): calls A2, B2, B6 returned a real ollama/qwen3-co"
+    },
+    {
+      "key": "docs/bugs/P010-1.md::2b0cabb48447#1",
+      "path": "docs/bugs/P010-1.md",
+      "line": 23,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:2 of 4]",
+      "text": "- **Found while fixing.** The first shim used aiohttp's client, which rejects the duplicate `Server` header the main proxy sends (uvicorn's own next to Anthropi"
+    },
+    {
+      "key": "docs/bugs/P03-1.md::6971122e3943#1",
+      "path": "docs/bugs/P03-1.md",
+      "line": 15,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:77%, latency:3.6 s]",
+      "text": "- **Cause.** The filter and its provider set lived as private names in `router.py` (`_strip_local_for_qa`, `_QA_STRIP_PROVIDERS`). The hook path cannot import `"
+    },
+    {
+      "key": "docs/bugs/P08E-1.md::255bcf28691d#1",
+      "path": "docs/bugs/P08E-1.md",
+      "line": 16,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [tokens:0 tokens, tokens:0 tokens]",
+      "text": "- **Fix.** The cache-hit branch writes one `usage` row through `cost.log_usage` with `reason=\"cache_hit\"` (`REASON_CACHE_HIT`), provider `cache`, model `cache/<"
+    },
+    {
+      "key": "docs/bugs/P08E-1.md::d5ca04007ede#1",
+      "path": "docs/bugs/P08E-1.md",
+      "line": 34,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [tokens:0 tokens]",
+      "text": "- **Fix.** A cache row is its own non-call bucket: excluded from paid, free and subscription counts. Definition in `llm_router/provider_classes.py`; hooks keep "
+    },
+    {
+      "key": "docs/bugs/P09-10.md::f128eb585360#1",
+      "path": "docs/bugs/P09-10.md",
+      "line": 16,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:30 of 30, latency:1 s]",
+      "text": "- **Test.** Same tests. With a 1 s sleep injected between open and write in `capped_log.append`, the old tests (3) fail with the exact CI error; the new ones pa"
+    },
+    {
+      "key": "docs/bugs/P09-11.md::a09d034ac567#1",
+      "path": "docs/bugs/P09-11.md",
+      "line": 5,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:5 ms]",
+      "text": "## P09-11. `kpi` G1_proxy turn-first p95 read 5 ms from rows that were not turn-first"
+    },
+    {
+      "key": "docs/bugs/P09-11.md::bfb887018beb#1",
+      "path": "docs/bugs/P09-11.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [latency:5.0 ms, latency:70 ms, latency:50 ms]",
+      "text": "- **Symptom.** An independent recompute from the raw proxy ledger (2026-10-09; its window and ledger copy are that recompute's, the figures were not re-measured"
+    },
+    {
+      "key": "docs/bugs/P09-12.md::cd9732a38649#1",
+      "path": "docs/bugs/P09-12.md",
+      "line": 15,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:12 ms]",
+      "text": "1. `haiku_checks` ran `haiku_block_reason`, which serializes the whole body (`_approx_context_tokens`, `json.dumps` of messages, system and tools: 1-12 ms on th"
+    },
+    {
+      "key": "docs/bugs/P09-12.md::dfe4592621e6#1",
+      "path": "docs/bugs/P09-12.md",
+      "line": 21,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:25%]",
+      "text": "2. `classify` scored up to 3,000 characters with 18 IGNORECASE regexes (re cannot use its literal fast paths under IGNORECASE: ~1.2 us/char) and ran the capabil"
+    },
+    {
+      "key": "docs/bugs/P09-12.md::813813ca8d3d#1",
+      "path": "docs/bugs/P09-12.md",
+      "line": 24,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:8 ms]",
+      "text": "3. With `--steps off` (the live mode) nothing imported `llm_router.classify` before the first classified call, so every proxy start paid ~8 ms of import inside "
+    },
+    {
+      "key": "docs/bugs/P09-2.md::e0c9e79deebb#1",
+      "path": "docs/bugs/P09-2.md",
+      "line": 5,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:2.2 s]",
+      "text": "## P09-2. Proxy tier decision took 1.2-2.2 s on rules-only turn-first calls"
+    },
+    {
+      "key": "docs/bugs/P09-2.md::e89d3b4de974#1",
+      "path": "docs/bugs/P09-2.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:3 of 6, latency:1.673 s, latency:50 ms]",
+      "text": "- **Symptom.** `tier_decision_s` was 1.208, 2.203 and 1.673 s on 3 of 6 live turn-first rows (reasons haiku_rewrite, sticky, thinking_floor), against the PRD's "
+    },
+    {
+      "key": "docs/bugs/P09-2.md::7669f305fd36#1",
+      "path": "docs/bugs/P09-2.md",
+      "line": 10,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:21.6 s, latency:107 ms, latency:0.2 ms]",
+      "text": "- **Cause.** Not the quota read (the plan's first hypothesis: `proxy.quota_pressure` parses `usage.json` once per mtime and costs one `stat()` per call). The ti"
+    },
+    {
+      "key": "docs/bugs/P09-2.md::6c0815bc4af0#1",
+      "path": "docs/bugs/P09-2.md",
+      "line": 20,
+      "why": "no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:1 s]",
+      "text": "- **Test.** `tests/test_p09_proxy_decision.py`: `test_a_turn_first_decision_never_waits_on_a_chain_build` (a 1 s fake chain build; FAILS on da31df7), `test_tier"
+    },
+    {
+      "key": "docs/bugs/P09-5.md::28a0ae21f412#1",
+      "path": "docs/bugs/P09-5.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [latency:4,488 ms, latency:300 ms, latency:44 ms]",
+      "text": "- **Symptom.** status-bar p95 4,488 ms (n = 344) against the PRD's 300 ms [HL7]; p50 44 ms."
+    },
+    {
+      "key": "docs/bugs/P09-5.md::afda5cdc5656#1",
+      "path": "docs/bugs/P09-5.md",
+      "line": 15,
+      "why": "no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:2,016 ms]",
+      "text": "- **Test.** `tests/test_p09_status_bar_cache.py::test_the_prompt_path_never_waits_on_a_locked_usage_db` (FAILS on da31df7: 2,016 ms), `test_a_stale_cache_return"
+    },
+    {
+      "key": "docs/bugs/P09-6.md::4e76a9999d13#1",
+      "path": "docs/bugs/P09-6.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [latency:3,353 ms, latency:300 ms]",
+      "text": "- **Symptom.** session-end p95 3,353 ms (n = 252) against the PRD's +300 ms sync bar [HL7]. The Stop hook fires after every turn, so every turn paid it. The row"
+    },
+    {
+      "key": "docs/bugs/P09-6.md::50d07ad613e1#1",
+      "path": "docs/bugs/P09-6.md",
+      "line": 15,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:120 s]",
+      "text": "- **Fix.** One detached child (`--background-stop-work`, fork + execv through `statusline_tick._spawn_detached`, no new subprocess site) runs the fetch and the "
+    },
+    {
+      "key": "docs/bugs/P09-8.md::1f0bcbe2a8f7#1",
+      "path": "docs/bugs/P09-8.md",
+      "line": 5,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:5 ms]",
+      "text": "## P09-8. The statusline \"wrapper adds < 5 ms\" test failed under load"
+    },
+    {
+      "key": "docs/bugs/P09-8.md::302fe30445a9#1",
+      "path": "docs/bugs/P09-8.md",
+      "line": 13,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:100 ms]",
+      "text": "- **Fix (test only).** The arms run interleaved and each is judged on its minimum (load only adds time). The structural half is a separate, load-independent tes"
+    },
+    {
+      "key": "docs/bugs/P09-8.md::3017fdc16902#1",
+      "path": "docs/bugs/P09-8.md",
+      "line": 18,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:12 of 12, latency:200 ms]",
+      "text": "- **Test.** `test_the_timing_wrapper_adds_under_5ms_per_call` and `test_the_unsampled_path_starts_no_process_and_a_sampled_call_two_clock_reads`: 12 of 12 passe"
+    },
+    {
+      "key": "docs/bugs/P09-FLAKE-1.md::3bfc29bb7667#1",
+      "path": "docs/bugs/P09-FLAKE-1.md",
+      "line": 10,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:2 s, latency:5 s]",
+      "text": "- **Cause.** Test bug. The test already proves the property directly (`called == []`, `spawned == [1]`); the extra `elapsed < 2.0` used wall-clock as a proxy fo"
+    },
+    {
+      "key": "docs/bugs/P09-FLAKE-1.md::0c3bb811cad9#1",
+      "path": "docs/bugs/P09-FLAKE-1.md",
+      "line": 16,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:60 s]",
+      "text": "- **Fix (test only).** Dropped both `elapsed < 2.0` assertions. The child in the second test now blocks on a release file (60 s cap) that the test writes after "
+    },
+    {
+      "key": "docs/bugs/P09-FLAKE-2.md::0013bd45a52f#1",
+      "path": "docs/bugs/P09-FLAKE-2.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:5 ms, latency:68 ms]",
+      "text": "- **Symptom.** main CI run 37926623089 (commit 03f274a5), job test (3.11): `AssertionError: (2.04, 68.3, 10.57)` (added unsampled ms, added sampled ms, median b"
+    },
+    {
+      "key": "docs/bugs/P09-SE-1.md::aef2073c48bd#1",
+      "path": "docs/bugs/P09-SE-1.md",
+      "line": 5,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0.2 s, latency:0.3 s, latency:1.8 s]",
+      "text": "## P09-SE-1. The Stop hook spent 0.2 s waiting for nobody and 0.3 s (p95 1.8 s) scanning transcripts inline"
+    },
+    {
+      "key": "docs/bugs/P09-SE-1.md::f6b3bb63154f#1",
+      "path": "docs/bugs/P09-SE-1.md",
+      "line": 15,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:200 ms]",
+      "text": "1. `_read_session_spend` called `_flush_session_spend_from_mcp`, which wrote `session_spend_flush_request.txt` and `time.sleep(0.2)` \"for the MCP server to reac"
+    },
+    {
+      "key": "docs/bugs/P09-SE-1.md::963718a1f032#1",
+      "path": "docs/bugs/P09-SE-1.md",
+      "line": 19,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:7,920 ms]",
+      "text": "2. `northstar.current_session_line` -> `report(days=2)` -> `build_sessions` loads every Claude transcript modified in the last two days (to fold sub-agent sessi"
+    },
+    {
+      "key": "docs/bugs/P09-SE-1.md::450ef2b890ea#1",
+      "path": "docs/bugs/P09-SE-1.md",
+      "line": 33,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:75 ms]",
+      "text": "- **Not fixed (measured, kept out).** Making `llm_router.cost` / `urllib` imports lazy: `cost` is imported again by `dashboard_data.query_window` in `_query_cum"
+    },
+    {
+      "key": "docs/bugs/P09C-1.md::668b9e26b725#1",
+      "path": "docs/bugs/P09C-1.md",
+      "line": 5,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:500 ms, latency:2,435 ms]",
+      "text": "## P09C-1. The full status line spent ~500 ms (live p95 2,435 ms) in sixteen sequential subprocesses"
+    },
+    {
+      "key": "docs/bugs/P09C-1.md::ff8ea776c1a6#1",
+      "path": "docs/bugs/P09C-1.md",
+      "line": 12,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [latency:20 ms, latency:76 ms, latency:63 ms, latency:165 ms]",
+      "text": "- **Cause.** `statusline-command.sh` ran, per render: three `python3 -c` to read `cwd`, `transcript_path` and `model` out of one JSON (~20 ms each); five more f"
+    },
+    {
+      "key": "docs/bugs/P09C-1.md::ece013d7334e#1",
+      "path": "docs/bugs/P09C-1.md",
+      "line": 21,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:90 s]",
+      "text": "- **Fix.** The segments are computed by one detached process (`statusline_segments.py`, stdlib-only at import) into `statusline_seg_<session>.kv`; the script re"
+    },
+    {
+      "key": "docs/bugs/P0_14-b.md::c4a9d8e6c076#1",
+      "path": "docs/bugs/P0_14-b.md",
+      "line": 12,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:17 of 22]",
+      "text": "- **Cause.** `_host_of` prefixed `//` to any scheme-less string and printed `urlsplit(...).hostname`, so any token without a slash was \"a host\". The guards exis"
+    },
+    {
+      "key": "docs/bugs/P1_7-c-1.md::5af26df3b524#1",
+      "path": "docs/bugs/P1_7-c-1.md",
+      "line": 17,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0.30 ms, latency:1.26 ms, latency:0.54 ms]",
+      "text": "- **Fix.** v16 P1.7-c: `assemble` scans backwards from the newest message, stops once it holds its context, and reads at most `MAX_SCAN_MESSAGES` = 400 messages"
+    },
+    {
+      "key": "docs/bugs/PROXY-OKF-FLAKE-1.md::5f7d6213774b#1",
+      "path": "docs/bugs/PROXY-OKF-FLAKE-1.md",
+      "line": 10,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:20 of 20, latency:2.5 s]",
+      "text": "- **Test.** The same test file. With a temporary 2.5 s sleep inside `okf_context.attach`, the old test failed with the same assertion and the same failopen line"
+    },
+    {
+      "key": "docs/bugs/SLT-1.md::a987f388cfc2#1",
+      "path": "docs/bugs/SLT-1.md",
+      "line": 21,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:5 of 5, n-of-m:20 of 20, latency:1 s]",
+      "text": "- **Test.** Same test. With a 1 s sleep injected in the fake refresher between `open` and `write`, the old test fails with the exact CI error (`'' == 'x'`) and "
+    },
+    {
+      "key": "docs/bugs/SLT-FLAKE-1.md::fc9db5b74aa4#1",
+      "path": "docs/bugs/SLT-FLAKE-1.md",
+      "line": 25,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:183 of 183]",
+      "text": "- **Test.** Same test. After the fix the same harness passed 183 of 183 runs (3 rounds, 253 passed each). A mutant that appends a segment to line 1 in `both` mo"
+    },
+    {
+      "key": "docs/bugs/STATUSLINE-COLD-1.md::d29c00a12c8d#1",
+      "path": "docs/bugs/STATUSLINE-COLD-1.md",
+      "line": 5,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:234 ms]",
+      "text": "## STATUSLINE-COLD-1. The first render of a session built the segment cache inline (live p95 234 ms)"
+    },
+    {
+      "key": "docs/bugs/STATUSLINE-COLD-1.md::4e6ebd1e9618#1",
+      "path": "docs/bugs/STATUSLINE-COLD-1.md",
+      "line": 9,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:200 ms, latency:17 ms, latency:79 ms, latency:82 ms]",
+      "text": "- **Cause.** `statusline-command.sh` computed a missing per-session cache synchronously (`_seg_run sync`: interpreter probe plus the segments build, 80-200 ms)."
+    },
+    {
+      "key": "docs/bugs/STATUSLINE-COLD-1.md::6f950fe96ec0#1",
+      "path": "docs/bugs/STATUSLINE-COLD-1.md",
+      "line": 14,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:5 s]",
+      "text": "- **Fix.** A missing cache starts the detached builder (`_seg_run`, single-flight: one launch per 5 s per session plus the builder's own lock) and the line rend"
+    },
+    {
+      "key": "docs/bugs/STEP-SIDECALL-1.md::490c0779b8bc#1",
+      "path": "docs/bugs/STEP-SIDECALL-1.md",
+      "line": 19,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:17 of 26, latency:17 s]",
+      "text": "- **Cause 1 (17 of 26 in 6cf3b1b8): Message Threads.** Claude Code 2.1.294 to 2.1.296 (beta `message-threads-2026-08-12`, flag `tengu_quiet_heron`) sends a CONT"
+    },
+    {
+      "key": "docs/bugs/STEP-SIDECALL-1.md::234ca2c87cb1#1",
+      "path": "docs/bugs/STEP-SIDECALL-1.md",
+      "line": 31,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:2 of 26,, n-of-m:94 of 419]",
+      "text": "- **Cause 2 (2 of 26, and 94 of 419 headless): a prompt typed during a tool run.** Claude Code adds it to the user turn that holds the tool results, as a text b"
+    },
+    {
+      "key": "docs/bugs/STEP-SIDECALL-1.md::c548da1cc6fb#1",
+      "path": "docs/bugs/STEP-SIDECALL-1.md",
+      "line": 50,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:19 of 53]",
+      "text": "4. New text-free ledger column `thread` (`create` | `continue` | null) so the next audit can re-label offline; this audit could not, because the ledger did not "
+    },
+    {
+      "key": "docs/bugs/SYSONE-WARM-1.md::d9f305e6986a#1",
+      "path": "docs/bugs/SYSONE-WARM-1.md",
+      "line": 16,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:1.7 s]",
+      "text": "- **Fix.** The systemone warm-up POSTs `decision_classifier.payload(model, ...)` to `/v1/systemone` (the endpoint that loads it, ~1.7 s cold). A non-200 warm-up"
+    },
+    {
+      "key": "docs/bugs/TURNFIRST-1.md::ea89549966c9#1",
+      "path": "docs/bugs/TURNFIRST-1.md",
+      "line": 5,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:95.6%]",
+      "text": "## TURNFIRST-1. `turn_first` rows were sub-agent calls and notifications, so 95.6% of them classed as code"
+    },
+    {
+      "key": "docs/bugs/TURNFIRST-1.md::889dc072969a#1",
+      "path": "docs/bugs/TURNFIRST-1.md",
+      "line": 7,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:95.6%, n-of-m:108 of 113]",
+      "text": "- **Symptom (2026-10-09).** Live ledger `~/.llm-router/proxy_calls.jsonl`, window 2026-10-08 17:50 to 2026-10-09 21:05 local, counts only (no text field read): "
+    },
+    {
+      "key": "docs/bugs/TURNFIRST-1.md::ecae2827feba#1",
+      "path": "docs/bugs/TURNFIRST-1.md",
+      "line": 58,
+      "why": "no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:200 ms]",
+      "text": "- **Test.** `tests/proxy/test_turn_population.py`: sub-agent first call vs mid-run SendMessage vs mid-run task notification vs main-thread typed / notification "
+    },
+    {
+      "key": "docs/empty-chain-behaviour.md::fe49159b19ed#1",
+      "path": "docs/empty-chain-behaviour.md",
+      "line": 67,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [multiplier:0.6x]",
+      "text": "- **After the call.** `check_truncated` records a truncation it detects as `CHZ-FO-LOCAL-CTX-TRUNCATED`. It is a heuristic: it fires when `prompt_eval_count` re"
+    },
+    {
+      "key": "docs/empty-chain-behaviour.md::3d2095b61b42#1",
+      "path": "docs/empty-chain-behaviour.md",
+      "line": 68,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [multiplier:0.90x, multiplier:1.4x]",
+      "text": "- **Residual risk: the guard estimate can undercount.** `check_overflow` uses `estimate_payload_tokens` in `local_context_guard.py` ((chars / `CHARS_PER_TOKEN` "
+    },
+    {
+      "key": "docs/measurements/2026-09-18-context-pack-shape.md::d21dfea2ac0a#1",
+      "path": "docs/measurements/2026-09-18-context-pack-shape.md",
+      "line": 46,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [tokens:254 tokens]",
+      "text": "An audit run that used `llm-router semantic explain` against the user's real knowledge directory got **254 tokens** instead \u2014 correctly, because that store had "
+    },
+    {
+      "key": "docs/measurements/2026-09-18-context-pack-shape.md::ddf4746312f6#1",
+      "path": "docs/measurements/2026-09-18-context-pack-shape.md",
+      "line": 71,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:12 of 12]",
+      "text": "- the OKF half is byte-identical in **12 of 12** prompts \u2014 retrieval does not change, which was the question"
+    },
+    {
+      "key": "docs/measurements/2026-09-18-grounding-corrected-baseline.md::2d366c3d3812#1",
+      "path": "docs/measurements/2026-09-18-grounding-corrected-baseline.md",
+      "line": 45,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:64.0%, percent:64.0%]",
+      "text": "`a535f22`'s commit message publishes `with OKF context 16/25 64.0%, lift +64.0%`, measured under the old substring rule. The reasonable worry was that some of t"
+    },
+    {
+      "key": "docs/measurements/2026-09-18-grounding-corrected-baseline.md::a266672cf31a#1",
+      "path": "docs/measurements/2026-09-18-grounding-corrected-baseline.md",
+      "line": 49,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:64.0%, percent:66.7%]",
+      "text": "On this evidence that worry does not hold up: the two rules do not separate on this task at all. The old number looks sound, and **+64.0% at n=25 and +66.7% at "
+    },
+    {
+      "key": "docs/measurements/2026-09-18-grounding-corrected-baseline.md::fa294d4d9021#1",
+      "path": "docs/measurements/2026-09-18-grounding-corrected-baseline.md",
+      "line": 61,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:0%, percent:97.6%, percent:33.3%, n-of-m:41 of 60]",
+      "text": "Retrieval found material for 41 of 60 questions. On those 41 the model went from 0% to 97.6%; on the other 19 it had nothing to work with, and 19/60 is most of "
+    },
+    {
+      "key": "docs/measurements/2026-10-04-hook-latency-recorder-overhead.md::838dce81d7b6#1",
+      "path": "docs/measurements/2026-10-04-hook-latency-recorder-overhead.md",
+      "line": 58,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0.41 ms]",
+      "text": "Re-measured on the tree rebased onto `origin/main` at b48c872 (the first measurement, before the rebase, read -0.08 to +0.41 ms; the machine's noise moved, the "
+    },
+    {
+      "key": "docs/measurements/2026-10-04-hook-latency-recorder-overhead.md::da1a686329d8#1",
+      "path": "docs/measurements/2026-10-04-hook-latency-recorder-overhead.md",
+      "line": 61,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [latency:0.70 ms, latency:36 ms, latency:402 ms, latency:50 ms]",
+      "text": "- Added wall time per hook invocation, paired median: **+0.20 to +0.70 ms** across the 11 hooks (n=200 each), against hook wall times of 36 ms to 402 ms. The si"
+    },
+    {
+      "key": "docs/measurements/2026-10-04-hook-latency-recorder-overhead.md::6608f33622c0#1",
+      "path": "docs/measurements/2026-10-04-hook-latency-recorder-overhead.md",
+      "line": 67,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0.21 ms, latency:0.2 ms, latency:0.23 ms]",
+      "text": "- The micro numbers predict the small-hook figure: about 0.21 ms is the one-off import of `llm_router.hook_latency` and `llm_router.capped_log`; `begin()` is ab"
+    },
+    {
+      "key": "docs/measurements/2026-10-04-hook-latency-recorder-overhead.md::23fa007a0266#1",
+      "path": "docs/measurements/2026-10-04-hook-latency-recorder-overhead.md",
+      "line": 71,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:60 ms]",
+      "text": "- `elapsed_ms` is shorter than the wall time the host sees by the interpreter's start-up and teardown: \"wall minus recorded\" above, 18 to 60 ms (median, same ru"
+    },
+    {
+      "key": "docs/measurements/2026-10-07-hook-phase-timing-overhead.md::186e1c357267#1",
+      "path": "docs/measurements/2026-10-07-hook-phase-timing-overhead.md",
+      "line": 31,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:0.88 ms, latency:0.40 ms, latency:2 ms]",
+      "text": "- A/B `auto-route`: paired median diff **-0.88 ms** (control A/A **+0.40 ms**). Both lie inside the noise of a loaded machine; neither is distinguishable from 0"
+    },
+    {
+      "key": "docs/measurements/2026-10-07-hook-phase-timing-overhead.md::ac271f9a5900#1",
+      "path": "docs/measurements/2026-10-07-hook-phase-timing-overhead.md",
+      "line": 34,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:1.3%, percent:2%, n-of-m:393 of 31]",
+      "text": "- Only `auto-route` and `session-start` rows grow: from 106 bytes to 232 (8 phases) or 287 (11 phases). Those two hooks wrote 393 of 31,271 rows (1.3%) in the l"
+    },
+    {
+      "key": "docs/measurements/G1-synthetic-2026-10-14.md::c022ba24ef8f#1",
+      "path": "docs/measurements/G1-synthetic-2026-10-14.md",
+      "line": 19,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [tokens:65,536 tokens]",
+      "text": "| Decision | Text | |---|---| | D-101 | Repair 1 = real per-model windows: a cloud door builds the pack for the model's registry window, capped at 65,536 tokens"
+    },
+    {
+      "key": "docs/measurements/G1-synthetic-2026-10-14.md::1dbc0bc11001#1",
+      "path": "docs/measurements/G1-synthetic-2026-10-14.md",
+      "line": 55,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [tokens:~52k tokens]",
+      "text": "The original Sonnet FAIL below stays as the record of the pre-repair behaviour. It still describes sessions over ~52k tokens, where the pack falls back to the l"
+    },
+    {
+      "key": "docs/measurements/G1-synthetic-2026-10-14.md::30a24e329021#1",
+      "path": "docs/measurements/G1-synthetic-2026-10-14.md",
+      "line": 78,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:273 s]",
+      "text": "Governing rules: `PREREG-P11B-synthetic.md` (sha256 `231fe6a4\u2026`) plus AMEND1 (`f8d97895\u2026`). `check_prereg.py` matched both before the run. The run used origin/m"
+    },
+    {
+      "key": "docs/measurements/G1-synthetic-2026-10-14.md::dcaccf27de66#1",
+      "path": "docs/measurements/G1-synthetic-2026-10-14.md",
+      "line": 169,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [multiplier:0.8 x, tokens:~200k tokens]",
+      "text": "1. **The window was forced small.** The prereg fixed `target_window = 8192` so that every item is in pack mode. For a cloud Sonnet door the real window is ~200k"
+    },
+    {
+      "key": "docs/measurements/G1-synthetic-2026-10-14.md::087ebc8c6a64#1",
+      "path": "docs/measurements/G1-synthetic-2026-10-14.md",
+      "line": 189,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [dollars:$8.73, dollars:$0.15, dollars:$5, dollars:$18]",
+      "text": "Spend: $8.73 for the 120 scored calls (CLI-reported `total_cost_usd`). A 1-item smoke run after the freeze, to check CLI auth, added $0.15; it was not scored. T"
+    },
+    {
+      "key": "docs/measurements/G1-synthetic-2026-10-14.md::ffd8275c8dfc#1",
+      "path": "docs/measurements/G1-synthetic-2026-10-14.md",
+      "line": 245,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:99%]",
+      "text": "The corpus is `g1_synthetic_evidence.py replay-corpus`: 60 sessions x 5 turns, with sub-agents in turns 2-5 (1,320 records). Identity uses kpi's P1.10-a rule (`"
+    },
+    {
+      "key": "docs/measurements/G1-synthetic-2026-10-14.md::979281bb7748#1",
+      "path": "docs/measurements/G1-synthetic-2026-10-14.md",
+      "line": 251,
+      "why": "no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:1,020 s]",
+      "text": "The replay ran for 1,020 s wall time with 0 errors. It also reported 0 network violations, but that figure **means nothing in this container**. The replay's net"
+    },
+    {
+      "key": "docs/measurements/G1-synthetic-2026-10-14.md::0f60f5f045c2#1",
+      "path": "docs/measurements/G1-synthetic-2026-10-14.md",
+      "line": 257,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:100%, percent:100%, percent:100%]",
+      "text": "| Path | n | with session_id + real task_id | Verdict | |---|---|---|---| | proxy (host-shaped calls) | 1,320 | 1,320 (100%) | PASS | | usage (sub-agent route r"
+    },
+    {
+      "key": "docs/measurements/G1-synthetic-2026-10-14.md::667387d10dbd#1",
+      "path": "docs/measurements/G1-synthetic-2026-10-14.md",
+      "line": 267,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:59.5%]",
+      "text": "**Probe envelopes.** `synthetic_replay.py` also sends each turn-first record as three probe envelopes (`nosys`, `bare`, `reminder`). Each is sent under its own "
+    },
+    {
+      "key": "docs/measurements/G1-synthetic-2026-10-14.md::be86187aae8b#1",
+      "path": "docs/measurements/G1-synthetic-2026-10-14.md",
+      "line": 276,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:188 ms, latency:240 ms, latency:2,000 ms, latency:70 ms]",
+      "text": "| Hook (G0 guard) | n | p50 | p95 | Bar | Verdict | |---|---|---|---|---|---| | P0.9-a session-start | 60 | 188 ms | 240 ms | 2,000 ms | PASS | | P0.9-b status-"
+    },
+    {
+      "key": "docs/model-resolver.md::1eeb3997f4c6#1",
+      "path": "docs/model-resolver.md",
+      "line": 61,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:0%]",
+      "text": "Unknown stays unknown: an unreadable or stale quota reading is `unknown`, never 0%; an Ollama build that reports no capabilities leaves them `unknown`, never `n"
+    },
+    {
+      "key": "docs/model-resolver.md::82fa705e56bc#1",
+      "path": "docs/model-resolver.md",
+      "line": 133,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:75%, percent:15%, percent:75%, percent:50%]",
+      "text": "| Figure | Harness | Source | |---|---|---| | Claude 15/20 (75%) | Claude-only, plan_implement arm A | `plan_implement/analysis_output.txt` | | qwen3-coder 3/20"
+    },
+    {
+      "key": "docs/model-resolver.md::8d4d677ef0c8#1",
+      "path": "docs/model-resolver.md",
+      "line": 141,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:95%, percent:53%, percent:89%]",
+      "text": "Wilson 95% intervals are wide (for 15/20, [53%, 89%]); Astra's review notes a 15/20 tie is weak evidence of equivalence. They are shown to explain why a local m"
+    },
+    {
+      "key": "docs/model-resolver.md::5e592b2f024f#1",
+      "path": "docs/model-resolver.md",
+      "line": 154,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:99%]",
+      "text": "1. **Hard eligibility, never averaged.** Every failing reason is recorded per model. Present in the inventory; privacy (`local-only` needs a local model); autho"
+    },
+    {
+      "key": "docs/proxy.md::ca018399317b#1",
+      "path": "docs/proxy.md",
+      "line": 26,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [multiplier:2x]",
+      "text": "Measured 2026-09-28, same 3 fixture tasks, `claude -p` with and without the proxy: the proxied arm cost **several times** the no-proxy baseline for the same tas"
+    },
+    {
+      "key": "docs/proxy.md::3ee7e2f64621#1",
+      "path": "docs/proxy.md",
+      "line": 168,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:110 s]",
+      "text": "- **Warm.** `keep_alive: 600` (seconds; `--keep-alive -1` pins forever) is sent on every call, plus one warm-up call at start. A cold load took 8-110 s in that "
+    },
+    {
+      "key": "docs/proxy.md::65cdbd276c85#1",
+      "path": "docs/proxy.md",
+      "line": 170,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:8 s]",
+      "text": "- **Hedge.** 8 s to the first token."
+    },
+    {
+      "key": "docs/proxy.md::729619a527ed#1",
+      "path": "docs/proxy.md",
+      "line": 414,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [tokens:5 tokens]",
+      "text": "`est_cost_usd` reconciles against Claude Code's own `total_cost_usd` (from `claude -p ... --output-format json`) only when nothing was served locally: a served "
+    },
+    {
+      "key": "docs/proxy.md::00b254fdb898#1",
+      "path": "docs/proxy.md",
+      "line": 491,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:50%, percent:50%, percent:15%]",
+      "text": "While the live policy has `haiku_rewrite: true`, the proxy runs a guard at start and then every hour. A trip opens the `proxy_haiku` class of the quality breake"
+    },
+    {
+      "key": "docs/proxy.md::c1458d4c40b1#1",
+      "path": "docs/proxy.md",
+      "line": 671,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:2%, percent:100%]",
+      "text": "- **Fill then 2% (OD-4 = A, per task group).** `rate` is 1.0 until the task group has 60 decided pairs among the verdict rows of the last 14 days, then 0.02. A "
+    },
+    {
+      "key": "docs/proxy.md::d2296fd96fba#1",
+      "path": "docs/proxy.md",
+      "line": 678,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:2%]",
+      "text": "- The 12, 400k, 60, 2% and 14 days are the numbers the PREREG-LANEA draft lists; the SALT is its draft literal."
+    },
+    {
+      "key": "docs/proxy.md::56d721742112#1",
+      "path": "docs/proxy.md",
+      "line": 813,
+      "why": "no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:3%]",
+      "text": "`python scripts/reconcile_proxy_cost.py [--exclude SID ...]` (read-only) compares the ledger with transcript totals (sub-agent transcripts included): a fully fo"
+    },
+    {
+      "key": "docs/proxy.md::ee8ace3ad2e1#1",
+      "path": "docs/proxy.md",
+      "line": 1028,
+      "why": "no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:95%, percent:90%, percent:10%, latency:120 s]",
+      "text": "**Coverage.** `scripts/coverage_check.py --since ... --until ...` counts host model calls (assistant message ids in the Claude Code transcripts) that passed a d"
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::fbff7e757534#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 13,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:80%, percent:0.0%, percent:81.4%, percent:0.0%]",
+      "text": "**NS \u2014 Non-Claude-and-used share.** (prompts + LLM calls served by a non-Claude model AND used as-is) / (all prompts + LLM calls), organic sessions only. Target"
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::4ecfa947f6b9#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 126,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:54%]",
+      "text": "Typed prompt (`o3_transcripts.is_typed_prompt`; `o3_integrity.py` has its own copy) = a `user` entry that is not a sidechain, not `isMeta`, has non-blank text, "
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::14e11d8acd33#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 139,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:95%]",
+      "text": "*Bound* (M0.3d). When G3 `session_kind` completeness is below 95%, O3 prints `o3.bound` with `lower` and `upper`: the headline (untagged rows treated as non-org"
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::eeb389a3de95#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 168,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [multiplier:3.89x]",
+      "text": "*Owner-accepted warning (M0-2, 2026-10-07).* On W0 the integrity ratio is 813 / 209 = 3.89 on the only measurable session (b9f04425, research), outside the bar,"
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::24b6195e05e4#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 211,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [latency:120 s]",
+      "text": "3. **usage_outcome.** A `redone` verdict (`usage_outcome.py`) for the unit's routed event. Local units only (a verdict exists only for routed MCP events). Joine"
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::19a3e5dd5f72#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 232,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:236 of 300, n-of-m:19 of 22, n-of-m:115 of 150]",
+      "text": "**Population of that run (not O3's).** PLAN M0.9 asks for organic sessions plus b9f04425. The sampler applied no session-kind filter. Of 524 pairs in the extend"
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::34615cfc9b5c#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 268,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:0%]",
+      "text": "Accept rate = accepted / (accepted + redone). Below 50 decided it prints `too few to tell (n=N)`; with none decided, `not measurable`; never `0%` for unknown. P"
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::7e7508396485#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 286,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:99.3%]",
+      "text": "*Session-kind override.* `~/.llm-router/session_kind_overrides.json`, `{session_id: {\"kind\": ..., \"reason\": ...}}`, names a session whose tag or whose rows' own"
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::97625f63c19d#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 450,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:0.4%]",
+      "text": "`llm-router kpi` counts completeness where a field can apply, from the schema's start, and reports what it left out. It replaces \"every row, every field non-nul"
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::37ae57af9974#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 471,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:0%, percent:100%]",
+      "text": "- **Not measurable, not a rate.** No row in the window, every row before the schema start, or no row with an applicable field prints `not measurable: <reason>`,"
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::157af6e511a2#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 479,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:93.0%]",
+      "text": "The audit above reads the proxy's tier fields only; on 2026-10-08 it read 93.0% while no other writer was checked. The verdict (`--json`: `kpis.G3.prd`) scores "
+    },
+    {
+      "key": "docs/repo_goals/KPIS.md::cf2102ca668b#1",
+      "path": "docs/repo_goals/KPIS.md",
+      "line": 648,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:40%]",
+      "text": "It never claims the 40% reduction: that is 16.1 (LATER), and one install's window is not a population."
+    },
+    {
+      "key": "docs/repo_goals/PLAN-fixes.md::0ef173597e85#1",
+      "path": "docs/repo_goals/PLAN-fixes.md",
+      "line": 158,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:80%, percent:87%]",
+      "text": "| ID | Decision | |---|---| | D1 | Register the PyPI trusted publisher | | D2 | `benchmarks.yml`: re-enable, or state that updates are manual | | D3 | README \"3"
+    },
+    {
+      "key": "docs/spikes/local-speed-2026-09-28.md::1f5e0648e354#1",
+      "path": "docs/spikes/local-speed-2026-09-28.md",
+      "line": 29,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:19 of 24]",
+      "text": "- Per-call latency, schema validation, and **tool-choice agreement** with whatever tool the original successful routed run actually called at that exact decisio"
+    },
+    {
+      "key": "docs/spikes/local-speed-2026-09-28.md::94fefa1c62d3#1",
+      "path": "docs/spikes/local-speed-2026-09-28.md",
+      "line": 44,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:60%]",
+      "text": "**Baseline noise floor.** Replaying the *exact* baseline config (same model, same server, no trim) against the 8 calls with ground truth agrees with the origina"
+    },
+    {
+      "key": "docs/spikes/local-speed-2026-09-28.md::9ea1fcb9e1ba#1",
+      "path": "docs/spikes/local-speed-2026-09-28.md",
+      "line": 98,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [tokens:3,146\ntokens]",
+      "text": "Condensed system prompt (366 chars, replacing the real 27,739-char one) + a fixed 4-tool subset (`Read`, `Edit`, `Write`, `Bash` \u2014 the only tools this fixture's"
+    },
+    {
+      "key": "docs/spikes/local-speed-2026-09-28.md::76bfbe560e48#1",
+      "path": "docs/spikes/local-speed-2026-09-28.md",
+      "line": 117,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [tokens:~3k tokens]",
+      "text": "By construction, the condensed system prompt and the 4-tool list (same order) are byte-identical across every call in a trimmed run. Ollama's 0.32.13 `llama-ser"
+    },
+    {
+      "key": "docs/spikes/local-speed-2026-09-28.md::229c6330a6c7#1",
+      "path": "docs/spikes/local-speed-2026-09-28.md",
+      "line": 217,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [multiplier:17.7x, multiplier:1.31x]",
+      "text": "**Local is viable for per-step routing of easy continuation steps, on this hardware, once the model stays warm and the request is trimmed \u2014 it is not viable in "
+    },
+    {
+      "key": "docs/spikes/local-speed-2026-09-28.md::81bea5c1f864#1",
+      "path": "docs/spikes/local-speed-2026-09-28.md",
+      "line": 226,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:60%]",
+      "text": "**Which step classes:** the \"easy, obvious-next-tool\" classes this spike covers (`Read` a named file, run the test with `Bash`, summarise a tool result as final"
+    },
+    {
+      "key": "docs/spikes/per-call-proxy-2026-09-28.md::34dac1ecee58#1",
+      "path": "docs/spikes/per-call-proxy-2026-09-28.md",
+      "line": 3,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [percent:2%]",
+      "text": "Question: can llm-router sit at `ANTHROPIC_BASE_URL` and route individual `/v1/messages` calls of Claude Code's own agent loop, using llm-router's own policy, i"
+    },
+    {
+      "key": "docs/spikes/per-call-proxy-2026-09-28.md::991796606ffc#1",
+      "path": "docs/spikes/per-call-proxy-2026-09-28.md",
+      "line": 97,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:73%, n-of-m:16 of 22]",
+      "text": "16 of 22 (73%) are easy-step shaped. These tasks are toy-sized, so read this as the upper end. Longer real tasks will have more substantive steps."
+    },
+    {
+      "key": "docs/spikes/per-call-proxy-2026-09-28.md::d4546de958ee#1",
+      "path": "docs/spikes/per-call-proxy-2026-09-28.md",
+      "line": 117,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [n-of-m:10 of 13, multiplier:17.7\u00d7, latency:61 s, latency:2.2 s]",
+      "text": "| Metric (6 golden tasks, c001-c006) | Baseline (all Anthropic) | Routed | |---|---|---| | Tasks passing fixture test, test file untouched | 6/6 (c001 re-graded"
+    },
+    {
+      "key": "docs/spikes/per-call-proxy-2026-09-28.md::c3de8ba38abf#1",
+      "path": "docs/spikes/per-call-proxy-2026-09-28.md",
+      "line": 151,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [tokens:600 tokens]",
+      "text": "- Routed turns in between do not break the cached prefix. System prompt and tools stay byte-identical. The next Anthropic call only has to cache-write the route"
+    },
+    {
+      "key": "docs/spikes/per-call-proxy-2026-09-28.md::eca8515a887a#1",
+      "path": "docs/spikes/per-call-proxy-2026-09-28.md",
+      "line": 156,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path) [percent:21%, multiplier:0.1\u00d7, multiplier:2\u00d7, multiplier:5\u00d7]",
+      "text": "- Priced as Sonnet-equivalent input, the Anthropic side drops about 21% (read 0.1\u00d7, 1h write 2\u00d7, output 5\u00d7: 260.8k \u2192 206.0k). Half the calls went away but saved"
+    },
+    {
+      "key": "docs/spikes/per-call-proxy-2026-09-28.md::94ea01cbd83f#1",
+      "path": "docs/spikes/per-call-proxy-2026-09-28.md",
+      "line": 170,
+      "why": "no source (existing repo path with /, PR #NNN or ~/.rsi path); no N (n=, 'N runs', 'N of M'; a date alone is not N) [multiplier:17.7\u00d7, latency:9 s, latency:100 s]",
+      "text": "1. **Latency / prefix cache on the local backend.** Each routed step re-sends about 21k prompt tokens. Ollama's prefix cache hit only sometimes (3-9 s warm, 55-"
+    }
+  ]
+}

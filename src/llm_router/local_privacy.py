@@ -263,6 +263,24 @@ def refusal(hits: list[SecretHit], **kw: Any) -> SecretLocalOnlyRefused:
     return SecretLocalOnlyRefused(refusal_message(hits, **kw), hits)
 
 
+def guard_cloud_cli(prompt: str, *, what: str) -> str:
+    """The secret door for a door whose only destination is a cloud CLI (``llm_codex`` / ``llm_gemini``): there is
+    no local model to fall back to, so a secret-bearing prompt is refused, exactly as ``route_and_call`` does when
+    its local-only chain is empty. Returns the prompt to send: unchanged, or without the ``cloud:`` prefix when the
+    caller overrode (logged as a count, never the value). ``what`` names the door in the refusal."""
+    prompt, override = split_override(prompt)
+    hits = scan_secrets(prompt)
+    if not hits:
+        return prompt
+    if override_requested(prefix=override):
+        for h in hits:
+            count_secret_event("overridden", h.label)
+        return prompt
+    for h in hits:
+        count_secret_event("refused", h.label)
+    raise refusal(hits, why=f"{what} sends it to a cloud service")
+
+
 def contains_secret(*parts: Any) -> bool:
     """True when any text in ``parts`` (strings, or message lists) holds a high-precision secret."""
     return bool(scan_secrets(messages=[{"content": t} for part in parts for t in _texts(part)]))
