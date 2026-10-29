@@ -268,7 +268,16 @@ def best_agentic_model(
 def populate_in_background() -> bool:
     """Force-probe the registry in a detached subprocess so callers (e.g. the
     install hook) never block ~1-2 min. Best-effort: True if spawned, False if
-    skipped (no Ollama / no models) or on error."""
+    skipped (no Ollama / no models / LLM_ROUTER_NO_DETACHED_SPAWN) or on error.
+
+    TESTLEAK: the child gets none of the parent's test guards and ran live
+    Ollama inference after its test ended (PR #797 review left 5 running, PR #796
+    8). The flag is inherited by every process the suite starts, so honouring it
+    here also covers an installer run as a child process."""
+    from llm_router.safe_subprocess import detached_spawn_disabled
+
+    if detached_spawn_disabled():
+        return False
     try:
         if not list_installed_models():
             return False

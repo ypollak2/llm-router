@@ -58,6 +58,33 @@ for _x in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME
     os.environ.pop(_x, None)
 _real_home_guard.install()
 
+# TESTLEAK (2026-10-29): `install_hooks.install()` calls
+# `agentic_registry.populate_in_background()`, which starts a detached
+# `python -m llm_router.agentic_registry` (start_new_session=True). That child has
+# none of these guards (no :11434 block, no real-HOME tripwire), outlives its test
+# and runs live Ollama inference against every installed model: the PR #797 review
+# left 5 running, PR #796's npm child path 8. CI has no Ollama, so it never shows
+# there. Three layers: populate_in_background honours LLM_ROUTER_NO_DETACHED_SPAWN
+# (inherited by child processes), the autouse stub below, and this audit hook,
+# which refuses the spawn itself however Popen was imported or patched.
+_REGISTRY_CHILD = "llm_router.agentic_registry"
+
+
+def _refuse_registry_child(event: str, args: tuple) -> None:
+    if event != "subprocess.Popen":
+        return
+    argv = args[1] if len(args) > 1 else None
+    parts = [argv] if isinstance(argv, (str, bytes, os.PathLike)) else list(argv or ())
+    for part in parts:
+        if isinstance(part, (str, bytes, os.PathLike)) and _REGISTRY_CHILD in os.fsdecode(part):
+            raise RuntimeError(
+                f"tests may not start `{_REGISTRY_CHILD}` (a detached live-Ollama probe that "
+                "outlives the test). See TESTLEAK in tests/conftest.py."
+            )
+
+
+sys.addaudithook(_refuse_registry_child)
+
 
 class _FakeDetachedProc:
     """Stand-in for a detached child: already exited, never ran."""
@@ -110,6 +137,33 @@ def allow_detached_spawn(monkeypatch, request):
 
     monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
     return calls
+
+
+_REAL_POPULATE_IN_BACKGROUND = None
+
+
+@pytest.fixture(autouse=True)
+def _no_background_registry_probe(monkeypatch):
+    """TESTLEAK: no test reaches the real ``populate_in_background`` (see the audit hook above)."""
+    global _REAL_POPULATE_IN_BACKGROUND
+    from llm_router import agentic_registry
+
+    if _REAL_POPULATE_IN_BACKGROUND is None:
+        _REAL_POPULATE_IN_BACKGROUND = agentic_registry.populate_in_background
+    monkeypatch.setattr(agentic_registry, "populate_in_background", lambda: False)
+
+
+@pytest.fixture
+def real_populate_in_background(monkeypatch):
+    """Opt out of ``_no_background_registry_probe`` for a test of the function itself.
+
+    The test must still control ``subprocess.Popen`` (e.g. via ``allow_detached_spawn``):
+    a real ``llm_router.agentic_registry`` child is refused by the audit hook.
+    """
+    from llm_router import agentic_registry
+
+    monkeypatch.setattr(agentic_registry, "populate_in_background", _REAL_POPULATE_IN_BACKGROUND)
+    return _REAL_POPULATE_IN_BACKGROUND
 
 
 # ── G-D: prove the wheel is what is under test ──────────────────────────────

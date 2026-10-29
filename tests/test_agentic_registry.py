@@ -123,15 +123,17 @@ def test_best_agentic_model_never_probes(monkeypatch):
     assert seen.get("allow_probe") is False
 
 
-def test_populate_in_background_spawns_when_models_present(monkeypatch):
-    calls = {"popen": 0}
+def test_populate_in_background_spawns_when_models_present(
+    monkeypatch, real_populate_in_background, allow_detached_spawn
+):
     monkeypatch.setattr(reg, "list_installed_models", lambda: ["hermes3:8b"])
-    import subprocess
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: calls.__setitem__("popen", calls["popen"] + 1))
     assert reg.populate_in_background() is True
-    assert calls["popen"] == 1
+    assert [argv[1:] for argv in allow_detached_spawn] == [["-m", "llm_router.agentic_registry"]]
 
 
-def test_populate_in_background_skips_without_models(monkeypatch):
+def test_populate_in_background_skips_without_models(
+    monkeypatch, real_populate_in_background, allow_detached_spawn
+):
     monkeypatch.setattr(reg, "list_installed_models", lambda: [])
     assert reg.populate_in_background() is False
+    assert allow_detached_spawn == []
