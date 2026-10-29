@@ -548,6 +548,7 @@ def test_subscription_override_fallback_replay_zero_ineligible(replay, subscript
     mroot.mkdir(exist_ok=True)
     run = _named_replay(mroot, door, NAMED_REQUESTS[door], replay.mp, SUBSCRIPTION_MODEL)
     res = _count(run)
+    print(f"W12 named-model slice {door}: judged={res['evaluated_n']}/{NAMED_REQUESTS[door]} no_route={run.no_route}")
     assert res["evaluated_n"] >= 100, (door, res["evaluated_n"], run.no_route)
     assert res["ineligible"] == 0, (door, res["examples"])
     assert run.independent_ineligible == 0 and run.independent_evaluated == res["evaluated_n"], door
