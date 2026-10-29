@@ -116,6 +116,12 @@ def test_ordinary_agent_commands_still_pass(root, cmd):
     ("node --inspect-brk=0.0.0.0 s.js", wp.NEEDS_APPROVAL),
     ("node --inspect-wait=10.0.0.5:9229 s.js", wp.NEEDS_APPROVAL),
     ("node --debug-port 0.0.0.0 s.js", wp.NEEDS_APPROVAL),
+    ("node --inspect_port 0.0.0.0:9229 --inspect s.js", wp.NEEDS_APPROVAL),
+    ("node --inspect_port=0.0.0.0:9229 --inspect s.js", wp.NEEDS_APPROVAL),
+    ("node --debug_port 0.0.0.0 s.js", wp.NEEDS_APPROVAL),
+    ("node --debug_port=0.0.0.0 s.js", wp.NEEDS_APPROVAL),
+    ("uv run --config-file x.toml pytest", wp.NEEDS_APPROVAL),
+    ("uv run --env-file e.env pytest", wp.NEEDS_APPROVAL),
     ("uv run --keyring-provider subprocess pytest", wp.NEEDS_APPROVAL),
     ("go test -mod=mod ./...", wp.NEEDS_APPROVAL),
     ("go test -mod mod ./...", wp.NEEDS_APPROVAL),
@@ -192,7 +198,8 @@ def test_toolkit_allowlist_is_inside_the_shared_allowlist():
     "node --inspect s.js", "node --inspect=9229 s.js", "node --inspect-port=9229 --inspect s.js",
     "node --inspect-port 9230 s.js", "node --inspect-port=127.0.0.1:9229 --inspect s.js",
     "node --inspect-brk=localhost:9229 s.js", "node --inspect-port=[::1]:9229 s.js",
-    "go test -mod=readonly ./...",
+    "go test -mod=readonly ./...", "node --inspect-publish-uid=http s.js",
+    "node --inspect_port 9230 s.js",
 ])
 def test_loopback_and_port_only_debugger_forms_stay_allowed(root, cmd):
     """Anti-vacuity for the --inspect fix: the loopback and port-only forms are not refused."""

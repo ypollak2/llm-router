@@ -1484,7 +1484,7 @@ def _path_parts(word: str) -> list[str]:
 _UV_INDEX_OPTS = frozenset({"--index", "--index-url", "-i", "--extra-index-url", "--default-index",
                             "--find-links", "-f", "--upgrade", "-U", "--upgrade-package", "-P",
                             "--reinstall", "--reinstall-package", "--refresh", "--refresh-package",
-                            "--keyring-provider"})
+                            "--keyring-provider", "--config-file", "--env-file"})
 
 
 def _confine_words(scan: _Scan, words: list[str], ex: dict[str, bool], what: str) -> None:
@@ -1746,6 +1746,8 @@ def _al_node(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
             k += 1
             continue
         name, eq, val = a.partition("=")
+        if name.startswith("--"):
+            name = name.replace("_", "-")          # node reads `--inspect_port` as `--inspect-port`
         # rv-785 M1: inline code in any spelling (`-e`, `-pe`, `--eval=...`, `--print`).
         if name in ("--eval", "--print") or (not a.startswith("--") and (
                 "e" in a[1:] or "p" in a[1:])):
@@ -1760,7 +1762,7 @@ def _al_node(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
                 return
             if val.startswith((".", "/", "~")):
                 scan.confine(val, f"node {name}", ex.get(val, False))
-        if name.startswith(("--inspect", "--debug")) and val:
+        if name.startswith(("--inspect", "--debug")) and val and name != "--inspect-publish-uid":
             # rv-785c S1: every --inspect*/--debug* flag counts, including the valued
             # `--inspect-port X` (= or separate), so `--inspect-port=0.0.0.0:9229
             # --inspect` cannot open the debugger on the network.

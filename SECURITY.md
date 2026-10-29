@@ -400,7 +400,7 @@ because a test runner's plugins and a test binary's flags cannot be listed:
   `git diff --ext-diff`, `go -exec/-toolexec/-vettool/-overlay`, `go env -w/-u`, `cargo --config`,
   `npm --script-shell`, `uv run --with/-w` and `uv run`'s index, find-links,
   upgrade and refresh options (they install packages, which then run),
-  `node --inspect*=<non-loopback host>` (also `--inspect-port`), `go -mod=mod`, `uv run --keyring-provider`, an
+  `node` debugger flags (`--inspect*`, `--debug*`, `_` or `-` spelling) with a non-loopback host, `go -mod=mod`, `uv run --keyring-provider/--config-file/--env-file`, an
   existing `pytest --basetemp` directory (pytest deletes it first), and every
   `git -c KEY` except formatting keys (`color.*`, `log.*`, `core.quotepath`,
   `core.pager=cat` ...). `core.pager`, `alias.*`, `core.fsmonitor`,
@@ -594,9 +594,20 @@ reviews of PR #778 and PR #785, twice).
 | `node --inspect=0.0.0.0:9229 s.js` | `needs_approval` | debugger beyond loopback | opens the debugger to the network |
 | `node --inspect-port=0.0.0.0:9229 --inspect s.js` | `needs_approval` | debugger beyond loopback (any `--inspect*`/`--debug*` flag) | the host in `--inspect-port` was skipped, so the debugger opened on the network |
 | `node --inspect-port 0.0.0.0:9229 --inspect s.js` | `needs_approval` | debugger beyond loopback (any `--inspect*`/`--debug*` flag) | same, with the host as a separate argument |
+| `node --inspect_port 0.0.0.0:9229 --inspect s.js` | `needs_approval` | debugger beyond loopback (any `--inspect*`/`--debug*` flag) | node reads `_` as `-`, so the underscore spelling skipped the check |
+| `node --inspect_port=0.0.0.0:9229 --inspect s.js` | `needs_approval` | debugger beyond loopback (any `--inspect*`/`--debug*` flag) | underscore spelling with `=` |
+| `node --debug_port=0.0.0.0 s.js` | `needs_approval` | debugger beyond loopback (any `--inspect*`/`--debug*` flag) | underscore spelling with `=` |
+| `node --debug_port 0.0.0.0 s.js` | `needs_approval` | debugger beyond loopback (any `--inspect*`/`--debug*` flag) | same, `--debug-port` |
+| `uv run --config-file x.toml pytest` | `needs_approval` | `uv run` index or upgrade option | a config file can set indexes or `keyring-provider` |
 | `uv run --keyring-provider subprocess pytest` | `needs_approval` | `uv run` index or upgrade option | `uv` runs a `keyring` program found on PATH |
 | `go test -mod=mod ./...` | `needs_approval` | `go -mod=mod` fetches modules | go downloads modules from the network before it tests |
 | `pytest @{OUT}/args.txt` | `refuse` | argument outside the root | reads options from a file outside the root |
+
+**Known gap (best-effort, not claimed):** a Go toolchain download (a `toolchain`
+line in `go.mod`, or `GOTOOLCHAIN`) is not modelled: `go test` can fetch and run
+a different Go release. A project-local `uv.toml` / `pyproject.toml` `[tool.uv]`
+section that `uv run` picks up by itself (without `--config-file`) can also set
+indexes or `keyring-provider`.
 
 File-tool writes (`write_file`, `edit_file`, the toolkit `write`) go through
 `contain`. A path that resolves outside the root is refused on every lane,
