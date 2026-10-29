@@ -451,23 +451,13 @@ async def _build_and_filter_chain(
                 model_override,
             )
             blocked_provider = "anthropic/" if model_override.startswith("anthropic/") else "gemini/"
-            fallback_chain = [
-                m for m in get_model_chain(
-                    RoutingProfile.BALANCED, task_type,
-                    is_subscription_mode=True,
-                )
-                if not m.startswith(blocked_provider)
-            ]
-            # W1-2 (UN-09 review M1): the static fallback answers to the resource map and the user's rules
-            # like every other chain (it used to be returned unfiltered, so a disconnected provider was served).
-            from llm_router import map_reader as _fb_map
-            return _fb_map.apply_to_chain(
-                fallback_chain or get_model_chain(
-                    RoutingProfile.BALANCED, task_type,
-                    is_subscription_mode=True,
-                ),
-                reorder=False, task=task_type.value,
+            # W1-2 (UN-09 review M1'): no hand-picked filters. Build the chain exactly as an un-pinned
+            # call would (reachability, block lists, policy, map, user rules), then drop the blocked provider.
+            built = await _build_and_filter_chain(
+                task_type, RoutingProfile.BALANCED, None, complexity_hint, c, config,
+                last_resort_floor=last_resort_floor,
             )
+            return [m for m in built if not m.startswith(blocked_provider)]
         return [model_override]
 
     # ── Pre-fetch penalty data ────────────────────────────────────────────────
@@ -1477,6 +1467,36 @@ def _budget_lock() -> "_AsyncProcLock":
 def _disabled_subprocess_backends() -> set[str]:
     raw = os.environ.get("LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS", "")
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+def _front_allowed(model: str, config, task_type: TaskType) -> bool:
+    """W1-2: may *model*, injected at the front of a built chain, stay? Same answers as the main build:
+    reachable provider, no hard block (LLM_ROUTER_BLOCK_PROVIDERS), no repo block, policy block / allow lists,
+    then the resource map and the user's stored rules."""
+    try:
+        if not _keep_reachable_providers([model], config):
+            return False
+        prov = provider_from_model(model)
+        if prov in _blocked_providers():
+            return False
+        repo_cfg = get_repo_config()
+        if prov in set(repo_cfg.block_providers or ()):
+            return False
+        from llm_router.policy import OrgPolicy, apply_policy
+        from llm_router.policy_runtime import get_effective_org_policy
+        _org = get_effective_org_policy()
+        _blk = list({*_org.block_models, *repo_cfg.block_models})
+        _alw = list({*_org.allow_models, *repo_cfg.allow_models})
+        if _blk or _alw:
+            kept, _ = apply_policy([model], task_type.value, OrgPolicy(
+                block_providers=list({*_org.block_providers}), block_models=_blk, allow_models=_alw,
+                task_caps=_org.task_caps, source="merged"))
+            if not kept:
+                return False
+        from llm_router import map_reader
+        return bool(map_reader.apply_to_chain([model], reorder=False, task=task_type.value))
+    except Exception:  # noqa: BLE001 - an injection that cannot be vetted is not injected
+        return False
 
 
 def _blocked_providers() -> frozenset[str]:
@@ -5105,8 +5125,7 @@ async def route_and_call(
             # W1-2 (UN-09 replay): an entry injected after the chain build still answers to the resource map and
             # the user's rules. Without this the tier fronted a provider the map had disconnected (1 of 118
             # router and 1 of 118 gateway replay requests routed to it).
-            from llm_router import map_reader as _pt_map
-            if _pt_map.apply_to_chain([_ptier], reorder=False, task=task_type.value):
+            if _front_allowed(_ptier, config, task_type):
                 models_to_try = [_ptier] + [m for m in models_to_try if m != _ptier]
                 log.debug("Precision-tier: fronting %s for an exact-answer prompt", _ptier)
 
@@ -5129,9 +5148,8 @@ async def route_and_call(
                         models_to_try, subject_str, get_active_policy()
                     )
                     # W1-2 (UN-09 review S2): a specialist fronted after the build answers to the map and rules too.
-                    from llm_router import map_reader as _spec_map
-                    if models_to_try[:1] != _before_spec[:1] and not _spec_map.apply_to_chain(
-                            models_to_try[:1], reorder=False, task=task_type.value):
+                    if models_to_try[:1] != _before_spec[:1] and not _front_allowed(
+                            models_to_try[0], config, task_type):
                         models_to_try = _before_spec
             except Exception as _spec_err:
                 log.debug(
