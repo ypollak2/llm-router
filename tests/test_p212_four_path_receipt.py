@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -48,7 +49,10 @@ PATHS = ("cli", "npm", "plugin", "nl")
 #: each not_wired branch of run_full: a snippet host (cursor), a host that cannot be wired
 #: globally (windsurf) and an unsupported one (pi).
 HOSTS = ("claude-code", "codex", "gemini-cli", "cursor", "windsurf", "pi")
-WIRED = {"claude-code", "codex", "gemini-cli"}
+#: pi's expected receipt status. "not_wired" (unsupported) on main today; P212-6 (#797)
+#: wires pi, and then this one line becomes "wired".
+PI_STATUS = "not_wired"
+WIRED = {"claude-code", "codex", "gemini-cli"} | ({"pi"} if PI_STATUS == "wired" else set())
 ROW_FIELDS = ("status", "reason", "via", "hook_version")
 #: §2's only allowed per-row difference: {(path, host): {field: (expected on that path, elsewhere)}}
 ALLOWED = {("plugin", "claude-code"): {"via": ("plugin", "settings")}}
@@ -125,11 +129,56 @@ def _twin(root: Path, monkeypatch) -> dict:
             "tree": _tree(state)}
 
 
-#: Runs in the child Python the npm shim starts: the same pins as ``_twin`` (detection from
-#: the HOME, no seat probe), then the binary's entry point with the argv npm passed.
+#: Runs in the child Python the npm shim starts: the same conditions as the in-process paths,
+#: then the binary's entry point with the argv npm passed. The in-process paths get the
+#: conftest's ``_hermetic_reachability`` (:11434 refused) and so never start the agentic
+#: registry probe; this child has no conftest, so it gets the same block here, plus
+#: ``agentic_registry.populate_in_background`` stubbed to False and a refusal for any
+#: ``agentic_registry`` subprocess. An audit hook records any :11434 connect that gets past
+#: the block. Without them, on a machine running Ollama the child's
+#: ``install_hooks.install()`` started a detached ``python -m llm_router.agentic_registry``
+#: that outlived the test and ran live inference (review of #796). Every refusal is written
+#: to $P212_5_EVENTS so the test can assert on it.
 _BOOT = """\
-import sys
+import json, os, socket, subprocess, sys
 from pathlib import Path
+
+def _event(kind, detail=""):
+    with open(os.environ["P212_5_EVENTS"], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": kind, "detail": str(detail)}) + "\\n")
+
+def _audit(event, args):  # independent of the block below: a :11434 connect that got through
+    if event == "socket.connect" and isinstance(args[1], tuple) and len(args[1]) >= 2 and args[1][1] == 11434:
+        _event("ollama_connected", args[1])
+sys.addaudithook(_audit)
+
+_real_connect = socket.socket.connect
+def _connect(self, address):
+    try:
+        port = int(address[1]) if isinstance(address, tuple) and len(address) >= 2 else None
+    except (TypeError, ValueError):
+        port = None
+    if port == 11434:
+        _event("ollama_blocked", address)
+        raise OSError("live Ollama connection blocked in tests (localhost:11434)")
+    return _real_connect(self, address)
+socket.socket.connect = _connect
+
+_RealPopen = subprocess.Popen
+class _Popen(_RealPopen):
+    def __init__(self, args, *a, **k):
+        if "agentic_registry" in " ".join(map(str, args if isinstance(args, (list, tuple)) else [args])):
+            _event("agentic_registry_spawn_refused", args)
+            raise OSError("agentic_registry subprocess refused in tests")
+        super().__init__(args, *a, **k)
+subprocess.Popen = _Popen
+
+from llm_router import agentic_registry
+def _no_registry_probe():
+    _event("populate_in_background_stubbed")
+    return False
+agentic_registry.populate_in_background = _no_registry_probe
+
 from llm_router import host_detect, seats
 _home = Path.home()
 _detect = host_detect.detect_hosts
@@ -150,14 +199,29 @@ finally:
 """
 
 
+def _receipt_in(home: dict) -> dict | None:
+    """The receipt in this HOME's configured state dir, read by path and not through the
+    process env: a path that dropped LLM_ROUTER_HOME on the way would write it elsewhere."""
+    return install.read_receipt(home["state"] / install.RECEIPT_NAME)
+
+
 def _run_cli(home: dict, monkeypatch, tmp: Path) -> dict | None:
     assert install.cmd_install(["--auto"]) == 0
-    return install.read_receipt()
+    return _receipt_in(home)
+
+
+def _child_events(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
 def _run_npm(home: dict, monkeypatch, tmp: Path) -> dict | None:
     node = _node()
     tmp.mkdir(exist_ok=True)
+    pkg = tmp / "pkg"  # npm runs a postinstall in the package dir; a copy keeps the repo's npm/ clean
+    pkg.mkdir()
+    for name in ("install.js", "package.json"):
+        (pkg / name).write_bytes((REPO / "npm" / name).read_bytes())
+    events = tmp / "child-events.jsonl"
     boot = tmp / "npm-boot.py"
     boot.write_text(_BOOT)
     shim = tmp / "llm-router"
@@ -165,14 +229,21 @@ def _run_npm(home: dict, monkeypatch, tmp: Path) -> dict | None:
     shim.chmod(0o755)
     (tmp / "no_net.js").write_text(_NO_NET)
     pkg_src = str(Path(llm_router.__file__).resolve().parent.parent)
-    env = {**os.environ, "npm_command": "install",  # `npm i -g`, not npx
+    env = {**os.environ, "npm_command": "install", "P212_5_EVENTS": str(events),  # `npm i -g`, not npx
            "PYTHONPATH": os.pathsep.join(p for p in (pkg_src, str(REPO), os.environ.get("PYTHONPATH", "")) if p)}
     code = "process.exitCode = require(process.argv[1]).runInstaller(process.argv[2], process.env);"
-    res = subprocess.run([node, "-r", str(tmp / "no_net.js"), "-e", code, str(REPO / "npm" / "install.js"), str(shim)],
-                         cwd=home["root"], env=env, capture_output=True, text=True, timeout=300)
+    res = subprocess.run([node, "-r", str(tmp / "no_net.js"), "-e", code, str(pkg / "install.js"), str(shim)],
+                         cwd=pkg, env=env, capture_output=True, text=True, timeout=300)
     assert res.returncode == 0, res.stdout + res.stderr  # postinstall exits 0 even when wiring fails,
     assert "WARNING" not in res.stderr, res.stderr       # so the installer's own failure shows here
-    receipt = install.read_receipt()
+    kinds = [e["kind"] for e in _child_events(events)]
+    # the install reached the registry probe's spawn point and the stub stopped it ...
+    assert "populate_in_background_stubbed" in kinds, kinds
+    # ... nothing else started the probe process, and no :11434 connect got through
+    assert "agentic_registry_spawn_refused" not in kinds, _child_events(events)
+    assert "ollama_connected" not in kinds, _child_events(events)
+    assert set(kinds) <= {"populate_in_background_stubbed", "ollama_blocked"}, kinds
+    receipt = _receipt_in(home)
     if receipt is not None:  # the postinstall echoes the line of the receipt it left
         assert f"llm-routing: receipt: {receipt['digest'][:8]} " in res.stdout, res.stdout + res.stderr
     return receipt
@@ -193,26 +264,30 @@ def _run_plugin(home: dict, monkeypatch, tmp: Path) -> dict | None:
 
     def spawn_now(argv, env, cwd):
         calls.append(argv)
-        assert argv[:3] == ["npx", "-y", f"llm-routing@{version}"], argv
+        assert argv == ["npx", "-y", f"llm-routing@{version}", "install", "--auto", "--via-plugin"], argv
+        for k in set(os.environ) - set(env):  # run with exactly the env the hook passes
+            monkeypatch.delenv(k)
         for k, v in env.items():
             if os.environ.get(k) != v:
                 monkeypatch.setenv(k, v)
         monkeypatch.chdir(cwd)
         # npx runs the npm postinstall first; under npx (npm_command=exec) it wires no host
-        # (tests/test_npm_wrapper.py), then the binary with the rest of argv.
-        assert install.cmd_install(argv[3:]) == 0, argv
+        # (tests/test_npm_wrapper.py), then the binary, whose cli.main hands
+        # cmd_install the arguments after `install`.
+        assert install.cmd_install(argv[4:]) == 0, argv
 
-    assert _plugin_hook().run({**os.environ, "CLAUDE_PLUGIN_ROOT": str(REPO)}, spawn_now, open(os.devnull, "w")) == 0
-    assert len(calls) == 1, calls
-    return install.read_receipt()
+    out = io.StringIO()
+    assert _plugin_hook().run({**os.environ, "CLAUDE_PLUGIN_ROOT": str(REPO)}, spawn_now, out) == 0
+    assert len(calls) == 1 and out.getvalue() == "", (calls, out.getvalue())
+    return _receipt_in(home)
 
 
 def _run_nl(home: dict, monkeypatch, tmp: Path) -> dict | None:
     plan = asyncio.run(consolidated.llm_router_admin("install"))
-    assert install.read_receipt() is None, "step 1 wrote a receipt"
+    assert _receipt_in(home) is None, "step 1 wrote a receipt"
     token = json.loads(re.search(r"value='(\{.*\})'", plan).group(1))["confirm"]
     asyncio.run(consolidated.llm_router_admin("install", json.dumps({"confirm": token})))
-    return install.read_receipt()
+    return _receipt_in(home)
 
 
 RUNNERS = {"cli": _run_cli, "npm": _run_npm, "plugin": _run_plugin, "nl": _run_nl}
@@ -257,6 +332,7 @@ def test_four_install_paths_leave_the_same_receipt(tmp_path, monkeypatch):
     cli = receipts["cli"]
     assert sorted(cli["hosts"]) == sorted(HOSTS), cli["hosts"]
     assert {h for h, r in cli["hosts"].items() if r["status"] == "wired" and r["hook_version"]} == WIRED, cli["hosts"]
+    assert cli["hosts"]["pi"]["status"] == PI_STATUS, cli["hosts"]["pi"]
     assert all(cli["hosts"][h]["reason"] for h in set(HOSTS) - WIRED), cli["hosts"]
     assert len(owned := homes.user_owned_files(tmp_path / "cli" / "upgrade")) >= 5, owned
 
