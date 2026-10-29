@@ -68,8 +68,66 @@ counter and the category, never the value) and never refused. `engine.secret_fin
 are bounded and it scans long text in overlapping windows, so it is linear in the text and misses nothing at a
 window edge. A refused call skips the semantic cache and the judge queue, gets no emergency fallback to the budget
 chain, may not switch to a non-local model on overflow, and the LLM complexity classifier is not called for it.
-Doors: `route_and_call` (the `llm_*` MCP tools, the gateway), `route_and_stream`, the `llm_stream` tool and the
-SDK (`llm_router.sdk.route`, whose Ollama leg also goes direct).
+Doors: not every path that can send text off this machine enforces this door. The table below says which do and
+which do not. It is checked against the door matrix in `tests/test_w11_secret_door_matrix.py` (UN-04, #771) by
+`tests/test_un05_privacy_door_wording.py`, which fails if the two disagree. In short: every caller of `route_and_call` /
+`route_and_stream` (the `llm_*` MCP tools, the gateway, the stand-alone route server, the SDK `llm_router.sdk.route`,
+whose Ollama leg also goes direct) and the provider layer enforce it; so do the `llm_stream`, `llm_codex` and
+`llm_gemini` tools, the `agent-route` hook and the playwright-compress Gemini path, each with its own check. The
+`auto-route` hook's opt-in cloud classifiers, the direct executor's Gemini and OpenAI calls, the Claude Code proxy
+and a few opt-in features do not.
+`engine.guard()` (`engine.py`) is a test seam. Nothing under `src` calls it. The secret door is `local_privacy` plus
+`router.route_and_call` and the provider layer (`providers.call_llm*`); `guard()` would only repeat it. Door status, from
+the matrix (`NOT enforced` rows are disclosed on purpose, not fixed):
+
+<!-- door-table:start -->
+| Door (`file` or `file::function`) | Status | Note |
+|---|---|---|
+| `hooks/auto-route.py::classify_with_gemini` | NOT enforced | Sends the first 500 characters of the prompt to Gemini. Needs both `LLM_ROUTER_HOOK_LLM_LAYER=on` (default off) and `LLM_ROUTER_CLASSIFY_LOCAL_ONLY=0`; no secret check. |
+| `hooks/auto-route.py::classify_with_openai` | NOT enforced | Same, to OpenAI. |
+| `hooks/direct_executor.py::call_gemini` | NOT enforced | Reached by `execute_chain` (the hook's direct execution). The prompt goes through `scrub_text` (redacts the secret value; the rest of the prompt still leaves), not through this door. The default draft chain keeps only ollama, codex and gemini_cli (`LLM_ROUTER_FREE_TIER_DRAFTS`, default on), so by default it runs on Ollama; with that switch off, a Gemini entry can run. |
+| `hooks/direct_executor.py::call_openai` | NOT enforced | Same, to OpenAI. |
+| `proxy/failopen_shim.py` | NOT enforced: log-only | The Claude Code proxy only logs a secret (D-28 A); it replays the client request to Anthropic. |
+| `proxy/server.py` | NOT enforced: log-only | Same: log-only. |
+| `shadow_frontier.py` | NOT enforced: log-only | Same: log-only. |
+| `control_plane/client.py` | NOT enforced: opt-in | Opt-in; `CPClient` has no caller in `src`; the heartbeat payload is the caller's. |
+| `local_check/judge.py` | NOT enforced: opt-in | Opt-in feature; text leaves by design when it is enabled. |
+| `tools/agoragentic.py` | NOT enforced: opt-in | Opt-in (`LLM_ROUTER_AGORAGENTIC=on`, off by default); `agoragentic_execute` posts the task and input to agoragentic.com with no secret check. |
+| `judge_cascade.py::judge_inline` | NOT enforced: unreachable | Would send prompt and response to a Haiku judge with no check. No entry point reaches it (`test_judge_cascade_is_not_reachable`), so it is latent, not live. |
+| `ensemble.py::local_llm_classify` | local by construction | The classifier model is the discovered local Ollama model; `LLM_ROUTER_ENSEMBLE_PRIMARY` can name a cloud model, and then a secret prompt goes where you pointed it. |
+| `classifier.py::classify_complexity` | enforced: own check |  |
+| `hooks/agent-route.py::_run_codex_agent_inner` | enforced: own check |  |
+| `hooks/agent-route.py::_try_cli_delegation` | enforced: own check |  |
+| `hooks/agent-route.py::_try_direct_subagent` | enforced: own check |  |
+| `hooks/playwright-compress.py::_try_gemini` | enforced: own check |  |
+| `judge.py::_evaluate_background` | enforced: own check |  |
+| `tools/codex.py::llm_codex` | enforced: own check |  |
+| `tools/gemini_cli.py::llm_gemini` | enforced: own check |  |
+| `tools/routing.py::llm_stream` | enforced: own check |  |
+| `commands/benchmark.py` | enforced: router door |  |
+| `context.py` | enforced: router door |  |
+| `gateway.py` | enforced: router door |  |
+| `integrations/agno.py` | enforced: router door |  |
+| `orchestrator.py` | enforced: router door |  |
+| `providers.py` | enforced: router door |  |
+| `quickstart.py` | enforced: router door |  |
+| `route_server.py` | enforced: router door |  |
+| `router.py` | enforced: router door |  |
+| `tools/agentic.py` | enforced: router door |  |
+| `tools/fs.py` | enforced: router door |  |
+| `tools/media.py` | enforced: router door |  |
+| `tools/routing.py` | enforced: router door |  |
+| `tools/text.py` | enforced: router door |  |
+| `tui/app.py` | enforced: router door |  |
+| `tui/cli.py` | enforced: router door |  |
+<!-- door-table:end -->
+
+Router-door rows are one per file (every `route_and_call` caller in it inherits the door); the others are one per function.
+Probes (no prompt text), fixed prompts, primitives and Ollama-local sinks are in the matrix but are not doors, so they are
+not listed. The matrix finds call sites by name. The OTLP span exporter (`tracing.py`, opt-in via
+`OTEL_EXPORTER_OTLP_ENDPOINT`) is audited by hand: spans are metadata, but a recorded provider error string can echo
+request text.
+
 - **The scan reads** the new request: the prompt, the system prompt and the caller context of this one call. **Not**
   earlier turns of the conversation (`messages`): each was scanned when it was the new request, and scanning them again
   made one past secret refuse every later turn. The price: a real secret in turn 3 that the caller overrode (or that a
@@ -91,12 +149,14 @@ SDK (`llm_router.sdk.route`, whose Ollama leg also goes direct).
 Limits:
 - The **Claude Code proxy** (`llm-router proxy`) only logs a secret (D-28 A); it does not reroute. Its local-model
   backend uses a shared httpx client that follows proxy env (open, see the table).
-- The **Claude Code hooks' direct-execution path** (`hooks/auto-route.py` -> `execute_chain`) is not behind this
-  door (open). Only `sdk.route` is.
+- The **Claude Code hooks**: `agent-route` holds a secret prompt (UN-04b, #772) and `playwright-compress` refuses a
+  snapshot with one (UN-04c, #775). `auto-route` has no door of its own: its direct execution (`execute_chain`) uses
+  `scrub_text`, not this door, and its cloud classifiers are opt-in and unguarded (table above). With the defaults
+  neither sends a secret prompt to a cloud API.
 - llm-router controls only what it forwards: a prompt typed into Claude Code (or another host) has already
   gone to that host's model.
-- Agent delegation (`llm_act` delegate / `llm_delegate`, which runs CLI agents such as Codex) does not go
-  through this door.
+- Agent delegation (`llm_act` delegate / `llm_delegate`) has no row in the matrix; do not assume it goes through
+  this door. The `llm_codex` and `llm_gemini` tools and the `agent-route` hook's Codex / Gemini CLI paths do (table above).
 - The scan reads the request's own text, not session history the router injects afterwards, and it does not
   catch secrets that match none of its shapes, or low-entropy secrets (a dictionary-word database password).
 

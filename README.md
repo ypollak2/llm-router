@@ -143,9 +143,12 @@ is routed; `off` disables that. Full modes and per-host overrides:
   daemon — direct, not through an HTTP proxy, with no semantic cache, judge
   queue or cloud fallback — or refuses it with the secret's category and how to
   proceed (`cloud:` prefix to override one request). Placeholders such as
-  `AKIA...EXAMPLE` or `postgres:postgres@` are not refused. Not covered: the
-  Claude Code proxy and hooks (logs only), agent delegation, and what a host
-  already sent to its own model. **[Details and limits](SECURITY.md#data-handling--storage-mapping)**.
+  `AKIA...EXAMPLE` or `postgres:postgres@` are not refused. Not every door
+  enforces this: the router, gateway, SDK, `llm_stream`, `llm_codex`, `llm_gemini`
+  and the `agent-route` hook do; the Claude Code proxy (logs only), the opt-in
+  `auto-route` cloud classifiers, the hook's direct-execution Gemini/OpenAI calls,
+  agent delegation and other opt-in features do not, and what a host already
+  sent to its own model is out of reach. **[The per-door table, details and limits](SECURITY.md#data-handling--storage-mapping)**.
 - **Automatic fallback with circuit breakers.** A provider that fails or
   rate-limits is skipped, not retried into the ground.
 - **You can see it working.** A status line, terminal title and OS

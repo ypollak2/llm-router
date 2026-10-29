@@ -570,7 +570,11 @@ def guard(text: str, *, door: str, local_model_healthy: bool, ctx_digest: str = 
           session_id: str | None = None, task_id: str | None = None) -> Decision:
     """``decide`` plus D-28 enforcement, shaped like a door's call: returns the
     Decision, or raises ``SecretLocalOnlyError`` (non-proxy doors, secret, no
-    healthy local model). The proxy never raises (log-only)."""
+    healthy local model). The proxy never raises (log-only).
+
+    Not wired: no code under ``src`` calls this. It is a test seam. The secret door is ``local_privacy`` plus
+    ``router.route_and_call`` and the provider layer; the door list is the table in SECURITY.md, checked against
+    ``tests/test_w11_secret_door_matrix.py`` (UN-05)."""
     d = decide(text, ctx_digest=ctx_digest, door=door, session_id=session_id, task_id=task_id)
     require_local_or_refuse(d, door, local_model_healthy=local_model_healthy)
     return d
