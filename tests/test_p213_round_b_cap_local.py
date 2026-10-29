@@ -402,14 +402,18 @@ async def test_day_cap_counts_rows_whatever_the_timestamp_spelling(temp_db, monk
 
     store("cap gemini 4/day")
     await record("gemini", GEM, 4, monkeypatch=monkeypatch)
-    now = datetime.now(timezone.utc)
+    # A pinned instant, not the wall clock: the -10:00 row below only has a local DATE before the
+    # window start's UTC date when the instant is before 10:00 UTC, so a floating clock would let
+    # the date-only and raw-text pre-filter mutants pass for 14 hours of every day.
+    now = datetime(2026, 10, 29, 3, 10, tzinfo=timezone.utc)
     spellings = [(now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S"),
                  (now - timedelta(hours=2)).astimezone(timezone(timedelta(hours=-10))).isoformat(timespec="seconds"),
                  (now - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S"),
-                 # 30 min after the window opens, in an offset that sorts before the UTC cutoff as text
-                 # (a raw-text lower bound and a date-only pre-filter both lose this row)
+                 # 30 min after the window opens, written at -10:00: its text starts with the day
+                 # BEFORE the window start's UTC date (a raw-text or date-only lower bound loses it)
                  (now - timedelta(hours=24) + timedelta(minutes=30)).astimezone(
                      timezone(timedelta(hours=-10))).isoformat(timespec="seconds")]
+    assert spellings[3][:10] < (now - timedelta(hours=24)).strftime("%Y-%m-%d")
     with sqlite3.connect(temp_db) as con:
         ids = [r[0] for r in con.execute("SELECT id FROM routing_decisions ORDER BY id")]
         for rid, ts in zip(ids, spellings):
