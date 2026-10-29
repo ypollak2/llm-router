@@ -941,7 +941,11 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
                 for a in host_actions:
                     ok = a.lstrip().startswith("✓")
                     print(f"  {_green('✓') if ok else _dim('·')}  {a.lstrip('✓ ').strip()}")
-                rows[host_id] = pi_row() if host_id == "pi" else wired_row(host_id, "files")
+                try:
+                    rows[host_id] = pi_row() if host_id == "pi" else wired_row(host_id, "files")
+                except Exception as exc:  # noqa: BLE001 -- see claude-code above
+                    rows[host_id] = _host_failed(host_id, label, "files", exc)
+                    continue
                 if "smoke" in rows[host_id]:
                     smoke = rows[host_id]["smoke"]
                     print(f"  pi mcp list: {smoke['status']}: {smoke['detail']}")
@@ -998,8 +1002,11 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
         print(f"\n{_red('✗')} {_bold('LLM Router install finished with errors:')} {', '.join(failed)}")
     else:
         print(f"\n{_green('✓')} {_bold('LLM Router installed globally.')}")
-    if installed_hosts:
-        print(f"  Every {' and '.join(installed_hosts)} session will now auto-route tasks.")
+    auto_routed = [h for h in installed_hosts if h != "Pi"]  # Pi: MCP tools only, no hooks (D-315)
+    if auto_routed:
+        print(f"  Every {' and '.join(auto_routed)} session will now auto-route tasks.")
+    if "Pi" in installed_hosts:
+        print("  Pi sessions get the llm-router MCP tools; Pi has no hooks, so prompts are not auto-routed.")
     print("  Restart Claude Code (and Claude Desktop if installed) to activate.\n")
 
     print(_bold("  Provider keys (optional — router works without any):"))
@@ -2302,7 +2309,9 @@ def _install_gemini_cli_files() -> list[str]:
 
 PI_SERVER = "llm_router"
 PI_SMOKE_TIMEOUT_S = 60
+PI_REASON_MAX = 300  # receipt reasons/details stay short; Pi can echo a server's whole stderr
 _PI_LEGACY_NAMES = ("llm-router",)
+_PI_RERUN = "then rerun `llm-router install --host pi`"
 
 
 def pi_agent_dir() -> Path:
@@ -2311,6 +2320,11 @@ def pi_agent_dir() -> Path:
 
 def pi_mcp_path() -> Path:
     return pi_agent_dir() / "mcp.json"
+
+
+def _clip(text: object, limit: int = PI_REASON_MAX) -> str:
+    s = " ".join(str(text).split())
+    return s if len(s) <= limit else f"{s[:limit]}… ({len(s) - limit} more chars)"
 
 
 def _read_pi_mcp(path: Path) -> tuple[dict, str | None]:
@@ -2322,13 +2336,28 @@ def _read_pi_mcp(path: Path) -> tuple[dict, str | None]:
     try:
         data = _json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as exc:
-        return {}, f"{path} could not be read ({exc}); left unchanged"
+        return {}, f"{path} could not be read ({_clip(exc)}); left unchanged"
     except ValueError as exc:
-        return {}, f"{path} is not valid JSON ({exc}); left unchanged. Fix it, then rerun `llm-router install --host pi`"
+        return {}, f"{path} is not valid JSON ({_clip(exc)}); left unchanged. Fix it, {_PI_RERUN}"
     if not isinstance(data, dict) or not isinstance(data.get("mcpServers", {}), dict):
         return {}, (f"{path} has no mcpServers object (Pi expects {{\"mcpServers\": {{...}}}}); left unchanged. "
-                    "Fix it, then rerun `llm-router install --host pi`")
+                    f"Fix it, {_PI_RERUN}")
     return data, None
+
+
+def _pi_write_refusal(path: Path) -> str | None:
+    """Why ``path`` must not be replaced: a symlink (dotfile managers; replacing it would fork
+    the user's managed config) or a file the user made read-only."""
+    if path.is_symlink():
+        try:
+            target = os.readlink(path)
+        except OSError:
+            target = "?"
+        return (f"{path} is a symlink (to {target}); left unchanged. Add "
+                '"llm_router": {"command": "llm-router", "args": []} under mcpServers in the file it points at')
+    if path.exists() and not os.access(path, os.W_OK):
+        return f"{path} is read-only; left unchanged. Make it writable, {_PI_RERUN}"
+    return None
 
 
 def _is_router_entry(entry: object) -> bool:
@@ -2339,17 +2368,40 @@ def _is_router_entry(entry: object) -> bool:
             or any(str(a) in ("claude-code-llm-router", "llm-routing") for a in args))
 
 
+def _write_pi_mcp(path: Path, text: str) -> None:
+    """Atomic: a unique temp file in the same dir, fsync, os.replace. An existing file keeps
+    its mode; a new one is 0600 in dirs created 0700 (users later add bearer headers here)."""
+    import tempfile
+
+    from llm_router import state_files
+
+    state_files.private_dir(path.parent)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")  # 0600
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if path.exists():
+            shutil.copymode(path, tmp)
+        os.replace(tmp, path)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def _install_pi_files() -> list[str]:
     """Add ``mcpServers.llm_router`` to ~/.pi/agent/mcp.json. Every other key and server is
     kept; an existing ``llm_router`` entry is left as it is; the file's mode is kept. A file
-    that is not valid JSON (or has no ``mcpServers`` object) is refused, not overwritten: the
-    first action is then ``SKIP <reason>``."""
+    that is not valid JSON, has no ``mcpServers`` object, is a symlink or is read-only is
+    refused, not touched: the first action is then ``SKIP <reason>``."""
     import json as _json
 
     from llm_router import install_manifest
 
     path = pi_mcp_path()
     data, refusal = _read_pi_mcp(path)
+    refusal = _pi_write_refusal(path) or refusal
     if refusal:
         return [f"SKIP {refusal}"]
     servers = data.setdefault("mcpServers", {})
@@ -2358,8 +2410,7 @@ def _install_pi_files() -> list[str]:
         actions.append(f"  llm_router already in {path} (left as it is)")
     else:
         servers[PI_SERVER] = {"command": "llm-router", "args": []}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _write_text_atomic(path, _json.dumps(data, indent=2) + "\n")
+        _write_pi_mcp(path, _json.dumps(data, indent=2, ensure_ascii=False) + "\n")
         install_manifest.record("json_mcp", path, root_key="mcpServers", server=PI_SERVER)
         actions.append(f"✓ Added llm_router MCP server to {path}")
     for name in _PI_LEGACY_NAMES:
@@ -2370,7 +2421,8 @@ def _install_pi_files() -> list[str]:
 
 
 def _pi_binary() -> str | None:
-    return shutil.which("pi")
+    found = shutil.which("pi")
+    return os.path.abspath(found) if found else None  # a relative PATH entry; the smoke runs elsewhere
 
 
 def pi_smoke(agent_dir: Path | None = None, *, run=None) -> dict:
@@ -2378,8 +2430,9 @@ def pi_smoke(agent_dir: Path | None = None, *, run=None) -> dict:
 
     ``{"status": "skipped"}`` when no ``pi`` binary is on PATH (never a failure);
     ``passed`` when Pi lists the llm_router server as connected with at least one tool;
-    else ``failed``. Only our server is judged: Pi exits 1 when any other server in the
-    user's file is down, and the detail says so."""
+    else ``failed``, also for any output this parser does not expect. Only our server is
+    judged: Pi exits 1 when any other server in the user's file is down, and the detail says
+    so. Note ``pi mcp list`` starts every enabled server in the file."""
     import json as _json
     import subprocess
 
@@ -2389,27 +2442,30 @@ def pi_smoke(agent_dir: Path | None = None, *, run=None) -> dict:
     agent_dir = agent_dir or pi_agent_dir()
     run = run or subprocess.run
     try:
-        proc = run([pi, "mcp", "list", "--json"], capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                   timeout=PI_SMOKE_TIMEOUT_S, cwd=str(agent_dir),
+        proc = run([pi, "mcp", "list", "--json"], capture_output=True, text=True, encoding="utf-8",
+                   errors="replace", stdin=subprocess.DEVNULL, timeout=PI_SMOKE_TIMEOUT_S, cwd=str(agent_dir),
                    env={**os.environ, "PI_CODING_AGENT_DIR": str(agent_dir)})
     except subprocess.TimeoutExpired:
         return {"status": "failed", "detail": f"`pi mcp list` did not finish in {PI_SMOKE_TIMEOUT_S}s"}
-    except OSError as exc:
-        return {"status": "failed", "detail": f"`pi mcp list` could not run: {exc}"}
+    except (OSError, ValueError) as exc:
+        return {"status": "failed", "detail": _clip(f"`pi mcp list` could not run: {exc}")}
+    out, err = proc.stdout or "", proc.stderr or ""
     try:
-        data = _json.loads(proc.stdout)
+        data = _json.loads(out)
     except ValueError:
-        tail = (proc.stderr or proc.stdout or "").strip()[-200:]
-        return {"status": "failed", "detail": f"`pi mcp list` exited {proc.returncode} without JSON: {tail}"}
-    listed = data.get("servers") if isinstance(data, dict) else None
-    server = next((s for s in listed or [] if isinstance(s, dict) and s.get("name") == PI_SERVER), None)
+        return {"status": "failed",
+                "detail": _clip(f"`pi mcp list` exited {proc.returncode} without JSON: {(err or out).strip()[-200:]}")}
+    if not isinstance(data, dict) or not isinstance(data.get("servers", []), list):
+        return {"status": "failed", "detail": "`pi mcp list --json` output has no servers list"}
+    errors = data.get("errors") if isinstance(data.get("errors"), list) else []
+    server = next((s for s in data.get("servers", []) if isinstance(s, dict) and s.get("name") == PI_SERVER), None)
     if server is None:
-        errors = "; ".join(str(e) for e in (data.get("errors") or [])) if isinstance(data, dict) else ""
-        return {"status": "failed", "detail": f"llm_router not listed by `pi mcp list`{': ' + errors if errors else ''}"}
+        why = "; ".join(str(e) for e in errors)
+        return {"status": "failed", "detail": _clip(f"llm_router not listed by `pi mcp list`{': ' + why if why else ''}")}
     tools = server.get("tools") if isinstance(server.get("tools"), list) else []
     if server.get("state") != "connected" or not tools:
         why = server.get("error") or f"{len(tools)} tools"
-        return {"status": "failed", "detail": f"llm_router {server.get('state')}: {why}"}
+        return {"status": "failed", "detail": _clip(f"llm_router {server.get('state')}: {why}")}
     detail = f"llm_router connected, {len(tools)} tools"
     if proc.returncode != 0:
         detail += f"; `pi mcp list` exited {proc.returncode} because of another server"
@@ -2419,12 +2475,17 @@ def pi_smoke(agent_dir: Path | None = None, *, run=None) -> dict:
 def pi_row() -> dict:
     """Receipt row for Pi after ``_install_pi_files`` returned: ``wired`` when mcp.json
     registers llm_router and the smoke did not fail; the smoke result rides along in
-    ``smoke`` (left out of the digest, like ``via``)."""
+    ``smoke`` (left out of the digest, like ``via``). Never raises for an odd smoke."""
     data, refusal = _read_pi_mcp(pi_mcp_path())
     if refusal or PI_SERVER not in data.get("mcpServers", {}):
         return {"status": "error", "reason": refusal or f"llm_router missing from {pi_mcp_path()} after install",
                 "via": "files", "hook_version": None}
-    smoke = pi_smoke()
+    try:
+        smoke = pi_smoke()
+    except Exception as exc:  # noqa: BLE001 -- an odd smoke is a failed smoke, never an aborted install
+        from llm_router import failopen
+        failopen.record("P212-PI-SMOKE", exc)
+        smoke = {"status": "failed", "detail": _clip(f"smoke crashed: {type(exc).__name__}: {exc}")}
     row = {"status": "wired", "reason": None, "via": "files", "hook_version": None, "smoke": smoke}
     if smoke["status"] == "failed":
         row.update(status="error", reason=f"pi mcp list: {smoke['detail']}")
@@ -2606,7 +2667,14 @@ def _install_host(host: str, mode: str = "auto") -> None:
         "pi":         (_install_pi_files,           "Run `pi mcp list` to verify (llm_router: connected), then /reload in Pi."),
     }
 
+    pi_failed = False
     for h in hosts_to_show:
+        if h == "pi" and host == "all":
+            from llm_router import host_detect
+            if not host_detect.detect_hosts()["pi"].present:
+                print("  pi: not detected (no `pi` binary, no ~/.pi); skipped\n")
+                print("─" * min(w, 70))
+                continue
         if h in _FILE_WRITERS:
             install_fn, verify_hint = _FILE_WRITERS[h]
             label = _HOST_SNIPPETS[h].format(bold=bold, reset=reset, **_SNIPPET_TOOLS).strip()
@@ -2615,7 +2683,19 @@ def _install_host(host: str, mode: str = "auto") -> None:
             for action in actions:
                 print(f"  {action}")
             print()
-            print(f"  {verify_hint}")
+            if h == "pi":
+                # The same check run_full puts in the receipt; a refusal or a failed smoke exits 1.
+                row = None if actions and actions[0].startswith("SKIP ") else pi_row()
+                smoke = row.get("smoke") if row else None
+                if smoke is not None:
+                    print(f"  pi mcp list: {smoke['status']}: {smoke['detail']}")
+                pi_failed = row is None or row["status"] != "wired"
+                if pi_failed:
+                    print(f"  Pi not wired: {row['reason'] if row else 'see the SKIP line above'}")
+                else:
+                    print(f"  {verify_hint}")
+            else:
+                print(f"  {verify_hint}")
         else:
             snippet = _HOST_SNIPPETS[h].format(bold=bold, reset=reset, **_SNIPPET_TOOLS)
             print(snippet)
@@ -2625,3 +2705,5 @@ def _install_host(host: str, mode: str = "auto") -> None:
         f"\nFor Claude Code (hooks + full cost-routing): {bold}llm-router install{reset}\n"
         f"See docs/hosts/ for setup guides and trade-off explanations.\n"
     )
+    if pi_failed:
+        sys.exit(1)

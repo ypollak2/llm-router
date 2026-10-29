@@ -38,6 +38,17 @@ with open(here / "calls.jsonl", "a") as fh:
 if mode == "garbage":
     print("pi: something went wrong")
     sys.exit(1)
+odd = {{"servers-int": '{{"servers": 5}}', "errors-int": '{{"servers": [], "errors": 5}}',
+       "errors-str": '{{"servers": [], "errors": "boom"}}', "not-object": '[1, 2]'}}
+if mode in odd:
+    print(odd[mode])
+    sys.exit(1)
+if mode == "binary":
+    sys.stdout.buffer.write(b"\xff\xfe{{not utf-8\x80")
+    sys.exit(1)
+if mode == "huge":
+    print(json.dumps({{"servers": [{{"name": "llm_router", "state": "failed", "tools": [], "error": "x" * 100000}}]}}))
+    sys.exit(1)
 cfg = json.loads((Path(agent) / "mcp.json").read_text())
 servers, down = [], False
 for name, entry in cfg.get("mcpServers", {{}}).items():
@@ -178,14 +189,82 @@ def test_run_full_reports_a_malformed_file_as_not_wired_with_the_reason(home, ca
 def test_host_pi_wires_and_exits_0(home, capsys):
     install._run_install(["--host", "pi"])  # a SystemExit here fails the test
     assert json.loads(_mcp(home).read_text())["mcpServers"]["llm_router"] == ENTRY
-    assert "pi mcp list" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "pi mcp list: skipped: pi binary not on PATH" in out and "Run `pi mcp list` to verify" in out
 
 
-def test_host_pi_on_a_malformed_file_prints_the_refusal(home, capsys):
-    path = _seed(home, "{not json")
+def test_host_pi_runs_the_smoke_with_pi_on_path(home, tmp_path, monkeypatch, capsys):
+    bindir = _fake_pi(tmp_path, monkeypatch)
     install._run_install(["--host", "pi"])
+    assert "pi mcp list: passed: llm_router connected, 2 tools" in capsys.readouterr().out
+    assert [c["argv"] for c in _calls(bindir)] == [["mcp", "list", "--json"]]
+
+
+def test_host_pi_exits_1_when_the_smoke_fails(home, tmp_path, monkeypatch, capsys):
+    _fake_pi(tmp_path, monkeypatch, mode="fail")
+    with pytest.raises(SystemExit) as e:
+        install._run_install(["--host", "pi"])
+    assert e.value.code == 1
+    out = capsys.readouterr().out
+    assert "Pi not wired: pi mcp list: llm_router failed: spawn llm-router ENOENT" in out
+    assert "to verify" not in out
+
+
+def test_host_pi_on_a_malformed_file_exits_1_without_a_verify_hint(home, capsys):
+    path = _seed(home, "{not json")
+    with pytest.raises(SystemExit) as e:
+        install._run_install(["--host", "pi"])
+    assert e.value.code == 1
     assert path.read_text() == "{not json"
-    assert f"SKIP {path} is not valid JSON" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f"SKIP {path} is not valid JSON" in out and "to verify" not in out
+
+
+def test_host_all_does_not_create_pi_config_without_pi(home, capsys):
+    install._run_install(["--host", "all"])
+    assert not (home / ".pi").exists()
+    assert "pi: not detected" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("dangling", [False, True], ids=["symlink", "dangling-symlink"])
+def test_a_symlinked_mcp_json_is_refused_and_left_alone(home, tmp_path, dangling):
+    target = tmp_path / "dotfiles" / "pi-mcp.json"
+    target.parent.mkdir()
+    if not dangling:
+        target.write_text(USER_FILE)
+    link = _mcp(home)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+
+    actions = install._install_pi_files()
+
+    assert link.is_symlink() and os.readlink(link) == str(target)
+    assert (target.read_text() == USER_FILE) if not dangling else not target.exists()
+    assert actions[0].startswith(f"SKIP {link} is a symlink (to {target}); left unchanged"), actions
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores file modes")
+def test_a_read_only_mcp_json_is_refused_and_left_byte_identical(home):
+    path = _seed(home, mode=0o444)
+    actions = install._install_pi_files()
+    assert path.read_text() == USER_FILE and stat.S_IMODE(path.stat().st_mode) == 0o444
+    assert actions == [f"SKIP {path} is read-only; left unchanged. Make it writable, "
+                       "then rerun `llm-router install --host pi`"]
+
+
+def test_a_new_pi_config_is_private(home):
+    install._install_pi_files()
+    assert stat.S_IMODE(_mcp(home).stat().st_mode) == 0o600
+    assert stat.S_IMODE((home / ".pi").stat().st_mode) == 0o700
+    assert stat.S_IMODE((home / ".pi" / "agent").stat().st_mode) == 0o700
+    assert sorted(p.name for p in (home / ".pi" / "agent").iterdir()) == ["mcp.json"]  # no temp left
+
+
+def test_non_ascii_values_are_written_as_is(home):
+    path = _seed(home, json.dumps({"mcpServers": {"fs": {"command": "npx", "args": ["/Users/josé/פרויקט"]}}},
+                                  ensure_ascii=False))
+    install._install_pi_files()
+    assert "/Users/josé/פרויקט" in path.read_text(encoding="utf-8")
 
 
 def test_quickstart_pi_writer_is_the_install_writer(home):
@@ -285,6 +364,64 @@ def test_output_that_is_not_json_fails_the_smoke(home, tmp_path, monkeypatch):
     smoke = install.pi_smoke()
 
     assert smoke["status"] == "failed" and "exited 1 without JSON" in smoke["detail"], smoke
+
+
+@pytest.mark.parametrize("mode, detail", [
+    ("servers-int", "`pi mcp list --json` output has no servers list"),
+    ("not-object", "`pi mcp list --json` output has no servers list"),
+    ("errors-int", "llm_router not listed by `pi mcp list`"),
+    ("errors-str", "llm_router not listed by `pi mcp list`"),
+    ("binary", None),
+    ("huge", None),
+])
+def test_odd_smoke_output_is_a_failed_smoke_and_the_receipt_is_still_written(home, tmp_path, monkeypatch,
+                                                                              mode, detail):
+    _add_host(home, "pi")
+    _fake_pi(tmp_path, monkeypatch, mode=mode)
+
+    assert install.cmd_install(["--auto"]) == 1
+
+    receipt = install.read_receipt()
+    assert receipt is not None and receipt["hosts"]["claude-code"]["status"] == "wired"
+    row = receipt["hosts"]["pi"]
+    assert row["status"] == "error" and row["smoke"]["status"] == "failed", row
+    if detail is not None:
+        assert row["smoke"]["detail"] == detail
+    assert len(row["reason"]) <= len("pi mcp list: ") + install.PI_REASON_MAX + 40, len(row["reason"])
+
+
+def test_a_crashing_smoke_is_an_error_row_not_an_aborted_install(home, monkeypatch):
+    _add_host(home, "pi")
+    monkeypatch.setattr(install, "pi_smoke", lambda *a, **k: 1 / 0)
+
+    assert install.cmd_install(["--auto"]) == 1
+
+    row = install.read_receipt()["hosts"]["pi"]
+    assert row["status"] == "error" and row["reason"] == "pi mcp list: smoke crashed: ZeroDivisionError: division by zero"
+
+
+def test_a_raising_pi_row_is_an_error_row(home, monkeypatch):
+    _add_host(home, "pi")
+    monkeypatch.setattr(install, "pi_row", lambda: {}["boom"])
+    assert install.cmd_install(["--auto"]) == 1
+    assert install.read_receipt()["hosts"]["pi"]["status"] == "error"
+
+
+def test_a_relative_path_entry_still_finds_pi(home, tmp_path, monkeypatch):
+    bindir = _fake_pi(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", f"{bindir.name}{os.pathsep}/usr/bin:/bin")
+    install._install_pi_files()
+    assert install.pi_smoke()["status"] == "passed"
+
+
+def test_the_summary_does_not_claim_pi_auto_routes(home, capsys):
+    _add_host(home, "pi")
+    install.run_full(interactive=False)
+    out = capsys.readouterr().out
+    assert "Every Claude Code session will now auto-route tasks." in out
+    assert "Pi has no hooks, so prompts are not auto-routed" in out
+    assert "and Pi session" not in out
 
 
 def test_smoke_reports_llm_router_missing(home, tmp_path, monkeypatch):

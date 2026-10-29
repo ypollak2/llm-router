@@ -64,7 +64,8 @@ def test_every_readme_row_is_installable_or_labelled_planned() -> None:
     assert bad == []
 
 
-def test_every_advertised_host_installs_without_unknown(isolated_install_env) -> None:
+def test_every_advertised_host_installs_without_unknown(isolated_install_env, monkeypatch) -> None:
+    monkeypatch.setattr(install, "_pi_binary", lambda: None)  # `--host pi` smoke: never the real pi
     checked = 0
     for host, row in _readme_host_rows():
         if host == "claude-code" or _PLANNED in row:

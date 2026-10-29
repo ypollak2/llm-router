@@ -7,13 +7,13 @@ This page documents **exactly which features work where**, without sugar-coating
 | Feature | Claude Code | Codex CLI | Gemini CLI | Pi (pi.dev) | VS Code/Cursor | Browser | Local CLI |
 |---------|:-----------:|:---------:|:----------:|:-----------:|:--------------:|:-------:|:---------:|
 | **Auto-Routing Hooks** | ✅ Full | ⚠️ Prompt hook only | ⚠️ Prompt hook only | ❌ None (MCP only) | 🔜 Not yet | ❌ No | ✅ Limited |
-| **Session-End Tracking** | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Manual |
+| **Session-End Tracking** | ✅ Yes | ❌ No | ✅ Yes | 🔜 Not yet (16.1) | ❌ No | ❌ No | ✅ Manual |
 | **Quota Pressure Display** | ✅ Yes | ❌ No | ✅ Yes | ❌ No | ❌ No | ❌ No | ❌ No |
 | **60 MCP Tools (Direct)** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
-| **Cost Optimization** | ✅ — | ⚠️ Opt-in* | ✅ — | ✅ — | ⚠️ Partial* | ❌ No | ✅ Manual |
-| **Free-First Routing** | ✅ Yes | ⚠️ Opt-in | ✅ Yes | ✅ Yes | ⚠️ Opt-in | ❌ No | ⚠️ Opt-in |
-| **Saved Usage Analytics** | ✅ Yes | ⚠️ Routed calls only | ✅ Yes | ✅ Yes | ⚠️ Manual** | ❌ No | ✅ Yes |
-| **Decision Replay** | ✅ Yes | ⚠️ Routed calls only | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Yes |
+| **Cost Optimization** | ✅ — | ⚠️ Opt-in* | ✅ — | ⚠️ Routed calls only | ⚠️ Partial* | ❌ No | ✅ Manual |
+| **Free-First Routing** | ✅ Yes | ⚠️ Opt-in | ✅ Yes | ⚠️ Routed calls only | ⚠️ Opt-in | ❌ No | ⚠️ Opt-in |
+| **Saved Usage Analytics** | ✅ Yes | ⚠️ Routed calls only | ✅ Yes | ⚠️ Routed calls only | ⚠️ Manual** | ❌ No | ✅ Yes |
+| **Decision Replay** | ✅ Yes | ⚠️ Routed calls only | ✅ Yes | ⚠️ Routed calls only | ❌ No | ❌ No | ✅ Yes |
 
 **Legend:**
 - ✅ **Yes** — Fully supported, automatic
@@ -165,10 +165,12 @@ llm-router install --host gemini-cli
 
 > **Status (v16, D-315):** `llm-router install --host pi`, or a plain `llm-router install` on a
 > machine with Pi, adds `mcpServers.llm_router` to `~/.pi/agent/mcp.json` (the file and shape
-> Pi 0.99.1 documents in its `docs/mcp.md`). Other servers and keys in the file are kept; a file
-> that is not valid JSON is refused and left unchanged. When the `pi` binary is on PATH the
-> install runs `pi mcp list --json` and records the result in the install receipt (`skipped`
-> without the binary). No hooks and no end-of-turn line: the Pi end-of-turn line is planned in 16.1.
+> Pi 0.99.1 documents in its `docs/mcp.md`). Other servers and keys in the file are kept. A file
+> that is not valid JSON, a symlink or read-only is refused and left unchanged. When the `pi`
+> binary is on PATH both commands run `pi mcp list --json` (it starts every enabled server in the
+> file) and print the result; `--host pi` exits 1 on a refusal or a failed check, and a plain or
+> `--auto` install also records it in the install receipt (`skipped` without the binary). No hooks
+> and no end-of-turn line: the Pi end-of-turn line is planned in 16.1.
 
 **Activation:**
 ```bash
