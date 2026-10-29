@@ -23,8 +23,8 @@ classified, and a socket trace shows a secret prompt makes no non-loopback conne
   control shows the block is ``scan_secrets`` and the marker).
 * ``judge_cascade.judge_inline`` sends prompt + response to a Haiku judge with no private check. It is not reachable
   from any entry point (``test_judge_cascade_is_not_reachable``); ``test_..._would_leak_if_wired`` is a strict xfail.
-* LEAK sinks (strict xfail, ``test_leak_*``; fix PR "UN-04b"): llm_codex, llm_gemini, agent-route direct execution and
-  CLI delegation, direct_executor call_gemini / call_openai, auto-route API classifiers. The playwright-compress Gemini
+* LEAK sinks (strict xfail, ``test_leak_*``): direct_executor call_gemini / call_openai, auto-route API classifiers
+  (UN-04d). llm_codex, llm_gemini and the agent-route doors are fixed by UN-04b (#772): class `guarded`, plain tests. The playwright-compress Gemini
   leak is fixed (UN-04c, #775): class `guarded`, and its test is a plain passing test.
 
 No real network, no real model, tmp homes (the lc12 fixtures). Secrets are generated at run time.
@@ -220,12 +220,12 @@ MODEL_CLI = re.compile(r"codex|gemini|claude|judge_cmd", re.I)  # subprocess.* c
 SINK_FUNCS: dict[tuple[str, str, str], tuple[int, str, str]] = {
     ('model_evaluator.py', 'eval_codex_model', 'run_codex'): (1, 'fixed prompt', 'BenchmarkSuite prompt, no user text'),
     ('model_evaluator.py', 'eval_ollama_model', 'open_url'): (1, 'fixed prompt', 'BenchmarkSuite prompt to local Ollama'),
-    ('tools/codex.py', 'llm_codex', 'run_codex'): (1, 'LEAK', 'raw prompt to the codex CLI, no secret check'),
-    ('tools/gemini_cli.py', 'llm_gemini', 'run_gemini_cli'): (1, 'LEAK', 'raw prompt to the gemini CLI, no secret check'),
-    ('hooks/agent-route.py', '_try_direct_subagent', 'execute_agent'): (1, 'LEAK', 'agent-route.py:1360 direct execution; no secret door (scrub_text only)'),
-    ('hooks/agent-route.py', '_try_direct_subagent', 'execute_chain'): (1, 'LEAK', 'agent-route.py:1362 -> call_gemini / call_openai'),
-    ('hooks/agent-route.py', '_try_cli_delegation', 'run_gemini_cli'): (1, 'LEAK', 'agent-route.py:1882 prompt to the gemini CLI'),
-    ('hooks/agent-route.py', '_run_codex_agent_inner', 'run_codex'): (1, 'LEAK', 'agent-route.py:1678 prompt to the codex CLI'),
+    ('tools/codex.py', 'llm_codex', 'run_codex'): (1, 'guarded', 'secret door present (#772 UN-04b): local_privacy.guard_cloud_cli before run_codex'),
+    ('tools/gemini_cli.py', 'llm_gemini', 'run_gemini_cli'): (1, 'guarded', 'secret door present (#772 UN-04b): local_privacy.guard_cloud_cli before run_gemini_cli'),
+    ('hooks/agent-route.py', '_try_direct_subagent', 'execute_agent'): (1, 'guarded', 'secret door present (#772 UN-04b): main() _secret_door runs before the direct, NS3 and CLI paths'),
+    ('hooks/agent-route.py', '_try_direct_subagent', 'execute_chain'): (1, 'guarded', 'secret door present (#772 UN-04b): main() _secret_door (the executor itself is still unguarded, see call_gemini / call_openai)'),
+    ('hooks/agent-route.py', '_try_cli_delegation', 'run_gemini_cli'): (1, 'guarded', 'secret door present (#772 UN-04b): main() _secret_door'),
+    ('hooks/agent-route.py', '_run_codex_agent_inner', 'run_codex'): (1, 'guarded', 'secret door present (#772 UN-04b): main() _secret_door'),
     ('hooks/direct_executor.py', 'call_gemini', 'urlopen'): (1, 'LEAK', 'urllib POST of the prompt to Google; scrub_text redacts the secret value, the rest of the prompt still leaves'),
     ('hooks/direct_executor.py', 'call_openai', 'urlopen'): (1, 'LEAK', 'urllib POST of the prompt to OpenAI; scrub_text redacts the secret value, the rest of the prompt still leaves'),
     ('hooks/direct_executor.py', '<module>', 'call_gemini'): (1, 'LEAK', '_PROVIDER_CALLS entry for call_gemini'),
@@ -403,7 +403,7 @@ def test_sink_summary_counts():
         by_class[cls] += n
     assert sum(by_class.values()) == sum(found.values())
     leaks = sorted({f"{k[0]}::{k[1]}" for k in SINK_FUNCS if SINK_FUNCS[k][1] == "LEAK"})
-    assert by_class["LEAK"] == 12 and len(leaks) == 10, (by_class["LEAK"], leaks)
+    assert by_class["LEAK"] == 6 and len(leaks) == 5, (by_class["LEAK"], leaks)
 
 
 def test_negative_control_a_new_urlopen_call_site_fails(tmp_path, monkeypatch):
@@ -703,7 +703,7 @@ MARK = "w11-marker-7f3a"  # non-secret words that ride along with the secret, to
 #   test_reach_*  (plain test)  a NON-secret prompt reaches the sink, so the harness can see it: the positive control
 #   test_leak_*   (strict xfail) the ONE assertion "the secret is not in what reached the sink". It fails today and
 #                 XPASSes once the sink is guarded (refused before the sink), which is the signal UN-04b gets.
-# Fix PR: "UN-04b".
+# Fixed sinks (UN-04b #772, UN-04c #775) are plain tests named test_guarded_*; the rest stay strict xfails.
 class _FakeProc:
     returncode = 0
 
@@ -869,14 +869,12 @@ def _leak(sink, request):
 _LEAK = pytest.mark.xfail(strict=True, reason="UN-04 leak: a secret prompt reaches a cloud sink; fix in UN-04b")
 
 
-@_LEAK
-def test_leak_llm_codex(request):
+def test_guarded_llm_codex_refuses_a_secret(request):
     """tools/codex.py:34 llm_codex -> run_codex (codex CLI -> OpenAI)."""
     _leak("llm_codex", request)
 
 
-@_LEAK
-def test_leak_llm_gemini(request):
+def test_guarded_llm_gemini_refuses_a_secret(request):
     """tools/gemini_cli.py:33 llm_gemini -> run_gemini_cli (gemini CLI -> Google)."""
     _leak("llm_gemini", request)
 
@@ -893,22 +891,14 @@ def test_leak_direct_executor_call_openai(request):
     _leak("direct_openai", request)
 
 
-@_LEAK
-def test_leak_agent_route_direct_subagent(request):
-    """hooks/agent-route.py:1321-1362 _try_direct_subagent: build_chain (not free-tier filtered) -> execute_chain."""
-    _leak("agent_route_direct", request)
-
-
-@_LEAK
-def test_leak_agent_route_cli_delegation_codex(request):
-    """hooks/agent-route.py:1678 (default ON): a subagent prompt goes to the codex CLI."""
-    _leak("agent_route_codex", request)
-
-
-@_LEAK
-def test_leak_agent_route_cli_delegation_gemini(request):
-    """hooks/agent-route.py:1882 (default ON): a subagent prompt goes to the gemini CLI."""
-    _leak("agent_route_gemini_cli", request)
+def test_guarded_agent_route_secret_door_holds_a_secret_and_only_a_secret():
+    """The agent-route sinks (_try_direct_subagent, _try_cli_delegation, _run_codex_agent_inner) are guarded by
+    main()'s ``_secret_door`` (UN-04b, #772), not inside each helper, so a helper called directly still reaches its
+    sink (``test_reach_*``). The end-to-end main() traces are tests/test_un04b_secret_door_cli_and_agent_route.py;
+    this pins the door's verdict that the rows rely on."""
+    door = _load_hook("agent-route")._secret_door
+    assert door(f"explain {_secret()}")[1] is True
+    assert door("explain a mutex")[1] is False
 
 
 @_LEAK
