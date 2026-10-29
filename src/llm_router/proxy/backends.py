@@ -491,7 +491,8 @@ def _classify_class(text: str, *, capabilities: bool = True) -> tuple[str, str]:
 def _chain_token() -> tuple:
     """Cache-key token of a policy chain: the map's mtime plus the stored user
     rules' (mtime_ns, size) -- a changed ``prefer`` rule must rebuild the chain
-    with the map unchanged (UN-01)."""
+    with the map unchanged (UN-01) -- plus the caps hit now, so a cap that is hit
+    or rolls over rebuilds it with both files unchanged (UN-02)."""
     from llm_router import map_reader, user_rules
 
     try:
@@ -499,7 +500,14 @@ def _chain_token() -> tuple:
         rules_tok: tuple | None = (st.st_mtime_ns, st.st_size)
     except OSError:
         rules_tok = None
-    return (map_reader.token(), rules_tok)
+    try:
+        cap_tok = user_rules.cap_token()
+    except Exception as exc:  # noqa: BLE001 - a cap read never blocks routing
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-USER-RULES-READ", exc)
+        cap_tok = None
+    return (map_reader.token(), rules_tok, cap_tok)
 
 
 async def policy_chain(text: str) -> tuple[str, str, list[str]]:

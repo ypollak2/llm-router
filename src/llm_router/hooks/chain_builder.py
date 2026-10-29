@@ -262,7 +262,8 @@ def build_chain(complexity: str, zone: str, task_type: str, *,
         from llm_router import map_reader
 
         mapped = map_reader.apply_to_chain(
-            chain, key=lambda s: f"{'anthropic' if s.provider == 'claude' else s.provider}/{s.model}")
+            chain, key=lambda s: f"{'anthropic' if s.provider == 'claude' else s.provider}/{s.model}",
+            task=task_type)
     except Exception:
         # Not a skipped step: the eligibility filter below still has to run on this chain.
         return _drop_failed_eligibility(chain, complexity, task_type)

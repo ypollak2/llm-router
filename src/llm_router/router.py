@@ -1066,7 +1066,8 @@ async def _build_and_filter_chain(
     )
     from llm_router import map_reader
     _before_map = models_to_try
-    models_to_try = map_reader.apply_to_chain(models_to_try, reorder=not _keep_order)
+    models_to_try = map_reader.apply_to_chain(models_to_try, reorder=not _keep_order,
+                                             task=task_type.value)
     _note_dropped(_before_map, models_to_try, skip_causes.UNAVAILABLE)
 
     # ── Unvalidated local models: last, after every reorder (P0.15, D-60c = A) ──
@@ -1084,7 +1085,7 @@ async def _build_and_filter_chain(
         if _blocked_tail:
             _tail = [m for m in _tail if provider_from_model(m) not in _blocked_tail]
         # The map may drop a disconnected resource but must not reorder the tail (filter only).
-        _tail = map_reader.apply_to_chain(_tail, reorder=False)
+        _tail = map_reader.apply_to_chain(_tail, reorder=False, task=task_type.value)
         models_to_try = models_to_try + _tail
 
     # F26 / D-175: a TEXT chain that is still empty after every filter and injection gets the floor.
@@ -1275,7 +1276,7 @@ def _empty_chain_floor(
         chain = [m for m in chain if provider_from_model(m) not in _blocked_now]
     from llm_router import map_reader
 
-    chain = map_reader.apply_to_chain(chain, reorder=False)
+    chain = map_reader.apply_to_chain(chain, reorder=False, task=task_type.value)
     if chain:
         tier = _floor_tier_of(chain[0])
         record_floor_tier(task_type, profile, tier)
