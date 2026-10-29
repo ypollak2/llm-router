@@ -21,6 +21,7 @@ GENERATED = (
     "discovery.json", "ollama_last_ok.txt",
     "grandfathered_models.json", "grandfathered_models.init",
     "seats.json", "usage.json", "install-manifest.json", ".claude.json",
+    "install_receipt.json",  # P212-1: rewritten by every full install
 )
 #: directories the installer owns wholesale inside the state dir
 GENERATED_DIRS = ("hooks",)

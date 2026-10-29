@@ -32,6 +32,8 @@ GOLDEN = """
 
   Provider keys (optional — router works without any):
   test provider keys
+
+  receipt: <digest8> hosts=2/4 version=<version>
 """
 
 
@@ -68,6 +70,7 @@ def sandbox(tmp_path, monkeypatch):
         lambda **_k: SimpleNamespace(summary_line=lambda **_k: "test seats", free_bucket=lambda: []),
     )
     monkeypatch.setattr(install, "_maybe_enable_claude_subscription", lambda found: None)
+    monkeypatch.setattr(install, "_receipt_hook_files", lambda host: {})  # the fakes write no hooks
     return tmp_path, calls
 
 
@@ -128,6 +131,7 @@ def test_golden_output_on_a_fixture_home(sandbox, capsys):
     install.run_full(interactive=False)
 
     out = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().out)
+    out = re.sub(r"receipt: [0-9a-f]{8} (.*) version=\S+", r"receipt: <digest8> \1 version=<version>", out)
     assert out == GOLDEN
 def test_no_hosts_still_installs_claude(sandbox):
     home, calls = sandbox

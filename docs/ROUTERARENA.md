@@ -26,7 +26,21 @@ including our first entry, fall over.
 
 ## Results
 
-Full split, 8,400 queries, graded locally with this repo's harness:
+Full split, 8,400 queries, graded locally with this repo's harness. Which file
+holds which figure:
+
+- The Arena Score, accuracy, cost per 1K queries, robustness (with its flip count),
+  and the previous entry's figures (71.26, 30.00, 294 of 420) are stated only in
+  the write-up [`submissions/routerarena/PR_BODY.md`](../submissions/routerarena/PR_BODY.md).
+  No grader output that reproduces them is in this repo.
+- The query count and the routed-model shares can be recounted from the
+  8,400-row predictions file `submissions/routerarena/llm-router-knn.json`. Its
+  `accuracy` and `cost` fields are empty, so it does not confirm the scores. The
+  420 paraphrase pairs are the rows of `submissions/routerarena/llm-router-knn-robustness.json`.
+
+The grading run is not dated in the repo. These files entered `main` on
+2026-09-15 (commit `ccee00db`), so every figure in this section is from that
+date or earlier.
 
 | Metric | Value |
 |---|---|
@@ -78,11 +92,9 @@ structural.
 
 ## What it cost to produce
 
-| Run | Cost | Wall time |
-|---|---|---|
-| `sub_10` split | ~$0.50 | 30–40 min |
-| Full split (8,400 queries) | ~$3–5 | 4–5 hours |
-| Robustness split | $0 | seconds — routing only, no inference |
+The `sub_10` and full splits run inference through OpenRouter, so they spend API
+credit; no measured cost or wall time for them is recorded in this repo. The
+robustness split is routing only, with no inference, so it costs nothing.
 
 An `OPENROUTER_API_KEY` and the dataset parquets are the only prerequisites.
 Reproduction commands are in
@@ -98,8 +110,8 @@ attempts that failed are the more useful record:
   to its measured-best model. Across the variants tried, **instance-level
   retrieval was the only mechanism that beat simply always picking one model** on
   the Arena score. A per-cluster policy sounds principled and did not pay.
-- **Proxy splits misled by 4.25 points.** Tuning against a convenient subset and
-  extrapolating gave a number 4.25 points away from the real full-split result.
+- **Proxy splits misled tuning.** Tuning against a convenient subset and
+  extrapolating gave a number well away from the real full-split result.
   A single-point calibration on a proxy distribution is a guess, not a
   measurement — evaluate on the target distribution or do not quote the figure.
 - **Optimality entries are not included** in the current submission, so

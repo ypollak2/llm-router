@@ -166,13 +166,17 @@ def main() -> None:
     # every run. Found by test_shipped_modules_import's function-level import
     # scan (F21), not by the audit.
     from llm_router.cli import _install_host
-    from llm_router.commands.install import _run_install
+    from llm_router.commands.install import _run_install, receipt_failures
 
     for host in target_hosts:
         print(f"\n  Installing for: {host}")
         try:
             if host == "claude":
-                _run_install(flags=[])
+                # P212-1: a host that fails is an error row in the receipt, not an exception
+                receipt = getattr(_run_install(flags=[]), "receipt", None)
+                failures = receipt_failures(receipt) if receipt is not None else []
+                if failures:
+                    raise RuntimeError("; ".join(failures))
             else:
                 _install_host(host)
             print(f"  ✓ {host} configured")

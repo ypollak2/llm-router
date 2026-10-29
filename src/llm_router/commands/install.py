@@ -145,6 +145,9 @@ Usage:
                                      windsurf, gemini-cli, codex, …)
   llm-router install --mode <mode>       Install mode (auto | gateway)
   llm-router install --no-hosts          Claude Code only; skip other detected hosts (Codex, Gemini CLI)
+  llm-router install --auto              Full install with no prompts (for npm postinstall, plugins,
+                                     scripts). Writes install_receipt.json in the state dir, prints
+                                     one `receipt:` line, exits 1 if any host failed to install
   llm-router install --project           Write AGENTS.md + CLAUDE.md (link) into the current
                                      repository so both agents read one set of rules
   llm-router install --proxy-default     Make the per-call proxy the DEFAULT ANTHROPIC_BASE_URL
@@ -223,6 +226,8 @@ def cmd_install(args: list[str]) -> int:
     if any(a in ("--help", "-h", "help") for a in args):
         print(_INSTALL_HELP)
         return 0
+    if "--auto" in args:
+        return _run_auto(args)
     if "--proxy-default" in args:
         # Handled here, not inside `_run_install`, so a refused install (the
         # proxy never answered — see commands/proxy_default.py) can actually
@@ -243,11 +248,34 @@ def cmd_install(args: list[str]) -> int:
             print("llm-router install: --authority and --no-authority contradict each other", file=sys.stderr)
             return 2
         return _install_authority(value)
-    _run_install(args)
+    result = _run_install(args)
     rc = _after_plain_install(args)
     if "--check" not in args and "--project" not in args:
         _local_check_nudge()
+    receipt = getattr(result, "receipt", None)
+    if rc == 0 and receipt is not None and receipt_failures(receipt):
+        return 1  # P2.12: a host that failed to install is an error row, not a silent 0
     return rc
+
+
+#: Flags that select a different install than the full one ``--auto`` runs.
+_AUTO_CONFLICTS = ("--host", "--project", "--check", "--headless", "--proxy-default", "--authority")
+
+
+def _run_auto(args: list[str]) -> int:
+    """``install --auto`` (P2.12): ``run_full(interactive=False)``, exit code from the receipt.
+
+    No prompt (``input`` is never called), no daily-job question, no authority step and no
+    local-check nudge: npm postinstall, the plugin and the MCP door run exactly this, so all
+    of them leave the same receipt. 0 when every host row is ``wired`` or ``not_wired``,
+    1 when any row is ``error``, 2 for a flag that selects a different install."""
+    clash = [a for a in args if a in _AUTO_CONFLICTS]
+    if clash:
+        print(f"llm-router install: --auto runs the full install; it cannot be combined with {clash[0]}",
+              file=sys.stderr)
+        return 2
+    result = run_full(interactive=False, flags=[a for a in args if a != "--auto"])
+    return 1 if receipt_failures(result.receipt) else 0
 
 
 def _local_check_nudge() -> None:
@@ -291,7 +319,7 @@ _UNSUPPORTED_HOSTS = {
 }
 
 
-def _run_install(flags: list[str]) -> None:
+def _run_install(flags: list[str]) -> InstalledHosts | None:
     # --host <name> is handled before the regular install path — it prints
     # config snippets only (no file modifications to external tools).
     if "--host" in flags:
@@ -393,7 +421,7 @@ def _run_install(flags: list[str]) -> None:
         _run_install_headless(flags)
         return
 
-    run_full(interactive=True, flags=flags)
+    return run_full(interactive=True, flags=flags)
 
 
 #: Detected hosts whose `--host` installer cannot wire them from a global
@@ -450,9 +478,243 @@ def _daily_schedule_step(*, interactive: bool, flags: list[str], schedule: dict 
     return ok
 
 
+# ── Install receipt (P2.12) ────────────────────────────────────────────────────
+#
+# One row per host: every host ``host_detect`` finds, plus claude-code (always wired by
+# ``install()``) and claw-code when run_full wires it. Each row has ``status`` (wired |
+# not_wired | error), ``reason`` (set unless wired), ``via`` (settings | plugin | files, or
+# None when nothing was wired) and ``hook_version`` ({source hook name: version read from
+# the INSTALLED file}, or None). ``digest`` hashes only ``package_version`` and each host's
+# (status, hook_version): ``ts``, ``via``, ``reason`` and paths are left out, so the CLI,
+# npm, plugin and MCP install paths can be compared by digest alone.
+
+RECEIPT_NAME = "install_receipt.json"
+RECEIPT_SCHEMA = 1
+RECEIPT_STATUSES = ("wired", "not_wired", "error")
+
+
+class InstalledHosts(list):
+    """What ``run_full`` always returned (labels of the hosts it wired), plus ``.receipt``."""
+
+    def __init__(self, labels: list[str], receipt: dict):
+        super().__init__(labels)
+        self.receipt = receipt
+
+
+def receipt_path() -> Path:
+    return paths.state_path(RECEIPT_NAME)
+
+
+def _receipt_hook_files(host: str) -> dict[str, Path]:
+    """Source hook name -> where run_full's installer for ``host`` puts it. Hosts that run_full
+    does not wire with hook scripts map to {}. A source the package does not ship is left out,
+    as the installers skip it too."""
+    from llm_router import install_hooks as ih
+
+    state_hooks = paths.state_path("hooks")
+    if host == "claude-code":
+        files = {src: ih.hooks_dst() / dst for src, dst, _e, _m in ih._HOOK_DEFS}
+    elif host == "codex":
+        files = {"auto-route.py": state_hooks / "codex-auto-route.py",
+                 "codex-post-tool.py": state_hooks / "codex-post-tool.py",
+                 "codex-stop.py": state_hooks / "codex-stop.py"}
+    elif host == "gemini-cli":
+        files = {n: state_hooks / n for n in ("gemini-cli-post-tool.py", "gemini-cli-auto-route.py",
+                                              "status-bar.py", "gemini-cli-session-end.py",
+                                              "session-start.py")}
+    elif host == "claw-code":
+        cc_dir = ih._claw_code_dir()
+        files = ({src: cc_dir / "hooks" / dst for src, dst, _e, _m in ih._CLAW_CODE_HOOK_DEFS}
+                 if cc_dir is not None else {})
+    else:
+        files = {}
+    return {src: dst for src, dst in files.items() if (ih._HOOKS_SRC / src).exists()}
+
+
+def _receipt_registry(host: str) -> Path | None:
+    """The JSON file in which run_full's installer for ``host`` registers its hook commands."""
+    from llm_router import install_hooks as ih
+
+    if host == "claude-code":
+        return ih.settings_path()
+    if host == "codex":
+        return Path.home() / ".codex" / "hooks.json"
+    if host == "gemini-cli":
+        return Path.home() / ".gemini" / "extensions" / "llm_router" / "hooks" / "hooks.json"
+    if host == "claw-code":
+        cc_dir = ih._claw_code_dir()
+        return cc_dir / "settings.json" if cc_dir is not None else None
+    return None
+
+
+def _json_strings(node):
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        for v in node.values():
+            yield from _json_strings(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _json_strings(v)
+
+
+def _unregistered(files: dict[str, Path], registry: Path) -> list[str]:
+    """Source names whose installed path appears in no string of the registry JSON (every
+    installer registers a command that contains the hook's installed path)."""
+    import json
+
+    try:
+        strings = list(_json_strings(json.loads(registry.read_text(encoding="utf-8"))))
+    except (OSError, ValueError):
+        strings = []
+    return sorted(src for src, dst in files.items() if not any(str(dst) in s for s in strings))
+
+
+_DEFAULT_REGISTRY = object()
+
+
+def wired_row(host: str, via: str, hook_files: dict[str, Path] | None = None,
+              registry: Path | None | object = _DEFAULT_REGISTRY) -> dict:
+    """Row for a host whose installer returned.
+
+    ``wired`` means every hook file is installed (its version is read back into
+    ``hook_version``) AND registered: its installed path appears in a command in the host's
+    registry JSON (Claude Code / claw-code settings.json, ~/.codex/hooks.json, the Gemini CLI
+    extension hooks.json). A missing or unregistered hook makes the row ``error``.
+
+    ``hook_files`` (source name -> installed path) defaults to where run_full's installer
+    writes, and ``registry`` to that installer's registry file. A caller that wires hooks
+    elsewhere (the plugin, P212-3) passes its own ``hook_files`` and, if nothing to check,
+    ``registry=None``. Key ``hook_files`` by the SOURCE names in ``install_hooks._HOOK_DEFS``
+    (e.g. ``auto-route.py``, not ``llm_router-auto-route.py``): the digest compares
+    ``hook_version`` by key, so other keys never match the CLI install."""
+    from llm_router.install_hooks import _hook_version
+
+    files = _receipt_hook_files(host) if hook_files is None else hook_files
+    if registry is _DEFAULT_REGISTRY:
+        registry = _receipt_registry(host) if hook_files is None else None
+    versions = {src: _hook_version(dst) for src, dst in sorted(files.items()) if dst.is_file()}
+    missing = sorted(set(files) - set(versions))
+    row = {"status": "wired", "reason": None, "via": via, "hook_version": versions or None}
+    if missing:
+        return {**row, "status": "error", "reason": f"hook missing after install: {', '.join(missing)}"}
+    unregistered = _unregistered(files, registry) if files and registry is not None else []
+    if unregistered:
+        return {**row, "status": "error",
+                "reason": f"hook not registered in {registry}: {', '.join(unregistered)}"}
+    return row
+
+
+def error_row(via: str | None, exc: BaseException) -> dict:
+    return {"status": "error", "reason": f"{type(exc).__name__}: {exc}", "via": via, "hook_version": None}
+
+
+def not_wired_row(reason: str) -> dict:
+    return {"status": "not_wired", "reason": reason, "via": None, "hook_version": None}
+
+
+def receipt_digest(receipt: dict) -> str:
+    """sha256 over the canonical JSON of package_version and {host: [status, hook_version]}."""
+    import hashlib
+    import json
+
+    canon = {"package_version": receipt.get("package_version"),
+             "hosts": {h: [row.get("status"), row.get("hook_version")]
+                       for h, row in (receipt.get("hosts") or {}).items()}}
+    blob = json.dumps(canon, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(blob).hexdigest()
+
+
+def build_receipt(hosts: dict[str, dict], *, package_version: str | None = None) -> dict:
+    from datetime import datetime, timezone
+
+    if package_version is None:
+        from llm_router import __version__
+        package_version = __version__
+    receipt = {"schema": RECEIPT_SCHEMA, "package_version": package_version,
+               "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "hosts": dict(sorted(hosts.items()))}
+    receipt["digest"] = receipt_digest(receipt)
+    return receipt
+
+
+def write_receipt(receipt: dict, path: Path | None = None) -> Path:
+    """Atomic write, file 0600 (``state_files.open_private``). Raises OSError on failure."""
+    import json
+
+    from llm_router import state_files
+
+    path = path or receipt_path()
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with state_files.open_private(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        if tmp.exists():
+            tmp.unlink()  # a failure here propagates as the OSError the caller records
+        raise
+    return path
+
+
+def read_receipt(path: Path | None = None) -> dict | None:
+    """The last receipt written, or None when it is absent or not valid JSON."""
+    import json
+
+    try:
+        data = json.loads((path or receipt_path()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def receipt_failures(receipt: dict | None) -> list[str]:
+    """Host-matrix check: one line per problem, [] when the receipt passes. A missing receipt,
+    no host rows, a digest that does not match the rows, an ``error`` row, an unknown status
+    and a ``not_wired`` row without a reason each fail."""
+    if not receipt:
+        return ["no install receipt"]
+    hosts = receipt.get("hosts")
+    if not isinstance(hosts, dict) or not hosts:
+        return ["install receipt has no host rows"]
+    out = []
+    if receipt.get("digest") != receipt_digest(receipt):
+        out.append("install receipt digest does not match its rows")
+    for host, row in sorted(hosts.items()):
+        status = row.get("status") if isinstance(row, dict) else None
+        if status not in RECEIPT_STATUSES:
+            out.append(f"{host}: unknown status {status!r}")
+        elif status == "error":
+            out.append(f"{host}: error: {row.get('reason') or 'no reason given'}")
+        elif status == "not_wired" and not (row.get("reason") or "").strip():
+            out.append(f"{host}: not_wired without a reason")
+    return out
+
+
+def receipt_line(receipt: dict) -> str:
+    hosts = receipt.get("hosts") or {}
+    wired = sum(1 for row in hosts.values() if row.get("status") == "wired")
+    return (f"receipt: {str(receipt.get('digest', ''))[:8]} hosts={wired}/{len(hosts)} "
+            f"version={receipt.get('package_version')}")
+
+
+def _host_failed(host: str, label: str, via: str | None, exc: BaseException) -> dict:
+    """An installer that raised: record it (failopen), say so on stderr (npm and MCP callers
+    keep stdout for the receipt line), and return its ``error`` row."""
+    from llm_router import failopen
+
+    failopen.record("P212-INSTALL-HOST-FAILED", exc, detail=host)
+    print(_fail(f"{label}: install failed: {type(exc).__name__}: {exc}"), file=sys.stderr)
+    return error_row(via, exc)
+
+
 def run_full(interactive: bool = True, flags: list[str] | None = None, *,
-             schedule: dict | None = None) -> list[str]:
-    """Install globally and return the labels of hosts wired by this run."""
+             schedule: dict | None = None) -> InstalledHosts:
+    """Install globally and return the labels of hosts wired by this run (a list), with the
+    install receipt (see ``build_receipt``) on ``.receipt``; the receipt is also written to
+    ``receipt_path()`` and summarised in one printed ``receipt:`` line."""
     from llm_router.install_hooks import check_api_keys, install
 
     flags = flags if flags is not None else []
@@ -468,7 +730,14 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
     print(f"{_bold('║   LLM Router — One-Command Install        ║')}")
     print(f"{_bold('╚══════════════════════════════════════════╝')}\n")
 
-    actions = install()
+    rows: dict[str, dict] = {}
+    try:
+        actions = install()
+    except Exception as exc:  # noqa: BLE001 -- P2.12: a failing host is an error row, not an abort
+        actions = []
+        rows["claude-code"] = _host_failed("claude-code", "Claude Code", "settings", exc)
+    else:
+        rows["claude-code"] = wired_row("claude-code", "settings")
     for a in actions:
         print(f"  {_green('✓')}  {a}")
 
@@ -478,7 +747,15 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
     if claw_code or cc_detected:
         if cc_detected and not claw_code:
             print(f"\n{_bold('  claw-code detected — installing hooks...')}")
-        cc_actions = install_claw_code()
+        try:
+            cc_actions = install_claw_code()
+        except Exception as exc:  # noqa: BLE001 -- see claude-code above
+            cc_actions = []
+            rows["claw-code"] = _host_failed("claw-code", "claw-code", "settings", exc)
+        else:
+            skipped = bool(cc_actions) and cc_actions[0].startswith("SKIP claw-code")
+            rows["claw-code"] = (not_wired_row(cc_actions[0][len("SKIP "):]) if skipped
+                                 else wired_row("claw-code", "settings"))
         for a in cc_actions:
             ok = not a.startswith("SKIP")
             marker = _green('✓') if ok else _yellow('⚠')
@@ -489,30 +766,47 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
     # one command. --host still targets a single host; --no-hosts skips this.
     # Every detected host is either wired here or reported with a reason
     # (v16 P0.4): before, gemini-cli was detected and then silently skipped.
-    installed_hosts = ["Claude Code"]
-    if "--no-hosts" not in flags:
-        from llm_router import host_detect
+    installed_hosts = ["Claude Code"] if rows["claude-code"]["status"] == "wired" else []
+    from llm_router import host_detect
+    detected = [h for h, info in host_detect.detect_hosts().items() if info.present]
+    if "--no-hosts" in flags:
+        for host_id in detected:
+            if host_id != "claude-code":
+                rows[host_id] = not_wired_row("skipped: --no-hosts")
+    else:
         _auto_wire = {
             "codex": ("Codex CLI", _install_codex_files),
             "gemini-cli": ("Gemini CLI", _install_gemini_cli_files),
         }
         _unwired: list[str] = []
-        for host_id, info in host_detect.detect_hosts().items():
-            if not info.present or host_id == "claude-code":
-                continue  # absent, or already wired by install() above
+        for host_id in detected:
+            if host_id == "claude-code":
+                continue  # already wired by install() above
             if host_id in _auto_wire:
                 label, install_fn = _auto_wire[host_id]
                 print(f"\n{_bold(f'  {label} detected — installing...')}")
-                for a in install_fn():
+                try:
+                    host_actions = install_fn()
+                except Exception as exc:  # noqa: BLE001 -- see claude-code above
+                    rows[host_id] = _host_failed(host_id, label, "files", exc)
+                    continue
+                for a in host_actions:
                     ok = a.lstrip().startswith("✓")
                     print(f"  {_green('✓') if ok else _dim('·')}  {a.lstrip('✓ ').strip()}")
-                installed_hosts.append(label)
+                rows[host_id] = wired_row(host_id, "files")
+                if rows[host_id]["status"] == "wired":
+                    installed_hosts.append(label)
+                else:
+                    print(_fail(f"{label}: {rows[host_id]['reason']}"))
             elif host_id in _NOT_GLOBALLY_WIRABLE:
+                rows[host_id] = not_wired_row(_NOT_GLOBALLY_WIRABLE[host_id])
                 print(f"  {host_id}: detected, not wired: {_NOT_GLOBALLY_WIRABLE[host_id]}")
             elif host_id in _HOST_SNIPPETS:
+                rows[host_id] = not_wired_row(f"not auto-wired; run `llm-router install --host {host_id}`")
                 _unwired.append(host_id)
             else:
                 reason = _UNSUPPORTED_HOSTS.get(host_id, "no installer for this host")
+                rows[host_id] = not_wired_row(reason)
                 print(f"  {host_id}: detected, not wired: {reason}")
         if _unwired:
             # One line, not one per host: vscode and cursor are on most dev machines.
@@ -548,16 +842,31 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
 
     _daily_schedule_step(interactive=interactive, flags=flags, schedule=schedule)
 
-    print(f"\n{_green('✓')} {_bold('LLM Router installed globally.')}")
-    print(f"  Every {' and '.join(installed_hosts)} session will now auto-route tasks.")
+    failed = sorted(h for h, row in rows.items() if row["status"] == "error")
+    if failed:
+        print(f"\n{_red('✗')} {_bold('LLM Router install finished with errors:')} {', '.join(failed)}")
+    else:
+        print(f"\n{_green('✓')} {_bold('LLM Router installed globally.')}")
+    if installed_hosts:
+        print(f"  Every {' and '.join(installed_hosts)} session will now auto-route tasks.")
     print("  Restart Claude Code (and Claude Desktop if installed) to activate.\n")
 
     print(_bold("  Provider keys (optional — router works without any):"))
     for line in check_api_keys():
         print(f"  {line}")
 
+    receipt = build_receipt(rows)
+    try:
+        write_receipt(receipt)
+    except OSError as exc:
+        from llm_router import failopen
+        failopen.record("P212-INSTALL-RECEIPT-WRITE", exc)
+        print(_warn(f"install receipt not written to {receipt_path()}: {exc}"))
+    print(f"\n  {receipt_line(receipt)}")
+    result = InstalledHosts(installed_hosts, receipt)
+
     if not interactive:
-        return installed_hosts
+        return result
 
     print(f"\n{_bold('  Try it:')}")
     print('    In Claude Code, ask: "What does os.path.join do?"')
@@ -571,7 +880,7 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
     print("    llm-router install --force      — reinstall / update paths")
     print("    llm-router install --claw-code  — also install into claw-code")
     print("    llm-router uninstall            — remove\n")
-    return installed_hosts
+    return result
 
 
 # ── install --headless ─────────────────────────────────────────────────────────

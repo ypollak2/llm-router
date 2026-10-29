@@ -21,9 +21,8 @@ computed over the raw log is wrong by roughly a factor of two, and it is wrong
 in a direction that looks like a regression.
 
 The exclusion above is NOT sufficient, and believing it was cost a third wrong
-number. Excluding `unknown` still admitted fixture session ids — `sess-fai` (496
-prompts), `sess-xyz` (251) and others, 1,510 in all. The rate moved from 64.0% to
-16.4% when they were removed.
+number. Excluding `unknown` still admitted fixture session ids — `sess-fai`, `sess-xyz`
+and others. The rate fell sharply when they were removed.
 
 Test with a POSITIVE pattern, never a list of things to exclude. A real Claude
 Code session id is eight hex characters; anything that fails that test is not one,
@@ -42,16 +41,16 @@ ad-hoc parser; two of them disagreed on the same day.
 
 ### A rate without its denominator is not a measurement
 
-Days with 21-64 prompts produced rates of 2.5%, 1.6%, 0% and 4.3%. All four were
-noise, and all four were briefly reported as a collapse. **Always print n.**
+Low-volume days produced near-zero rates. All of them were noise, and all of them
+were briefly reported as a collapse. **Always print n.**
 Below ~50 real prompts, say "too few to tell" instead of a number.
 
 ### The routing rate is a property of the WORKLOAD, not of the router
 
-Measured: release/CI days route at ~62%, ordinary code days at 78-96%. The
-`_is_context_dependent` gate fired 1.5% on 31 Aug and 32.2% on 1 Sep — a 21x
-jump with **no commit touching that code** — and recovered to 4.4% by 10 Sep
-with no fix applied.
+Observed: release/CI days routed at a clearly lower rate than ordinary code days.
+The `_is_context_dependent` gate's firing rate jumped between 31 Aug and 1 Sep
+with **no commit touching that code**, and fell back by 10 Sep with no fix
+applied.
 
 Before concluding "the router regressed", check what the user was doing. A day
 of `fix(ci)` prompts is full of file references, which is exactly what the gate
@@ -61,7 +60,7 @@ do.**
 ### An unlogged branch will cost a day
 
 `ENFORCE=off` and `shadow` skipped the DIRECT block while logging nothing, and
-that branch accounted for 28.5% of one day's prompts. It was invisible in every
+that branch accounted for a large share of one day's prompts. It was invisible in every
 report until the hook was run under all four modes side by side.
 
 **Invariant:** every invocation logging `prompt_len=` must log exactly one
@@ -75,15 +74,14 @@ Intercepting half the commands that produce 2% of the output is worth nothing.
 Coverage claims in this repo are `bytes of tool output avoided / total bytes`.
 
 Related: eligibility is not interception. The compressor rejects output it
-cannot shrink, so of 26 commands that pass the allowlist only 9 actually
+cannot shrink, so many commands that pass the allowlist never actually
 intercept. Quote the number after the compression gate, and say which one it is.
 
 ### Before claiming a saving, measure the thing that pays
 
-"A local model ran" is not a saving. The measured 2026-09-13 result: handing
-Claude a local candidate to review cost **1.86x more Claude tokens** than Claude
-doing the task itself (5 of 5 tasks, turns 33 -> 80). Verification is not
-cheaper than authorship.
+"A local model ran" is not a saving. On 2026-09-13, handing Claude a local
+candidate to review cost **more Claude tokens** than Claude doing the task
+itself, on every task tried. Verification is not cheaper than authorship.
 
 A saving claim needs: Claude tokens before, Claude tokens after, same task,
 scored for correctness both ways.
@@ -91,7 +89,7 @@ scored for correctness both ways.
 ### Wall-clock timings on this machine are not trustworthy
 
 macOS Maintenance Sleep advances `time.time()` and not `time.monotonic()`. One
-benchmark task was recorded at 918.6s of which **902s was the laptop asleep**.
+benchmark task's recorded duration was **almost entirely the laptop asleep**.
 Use `time.monotonic()` for durations and `caffeinate -i` for unattended runs.
 
 ### Verify the thing you are measuring exists
@@ -108,7 +106,7 @@ pinning one model also removes the fallback and so measures a different system.
 
 ### A rate measured under a budget overrun is measuring the budget
 
-Two runs of one identical configuration scored 17% and 53%. The cause was not the
+Two runs of one identical configuration scored far apart. The cause was not the
 model: the per-model timeout (45s), the hook timeout (60s) and the agent-loop
 budget (90s) were each set without reference to the others, so whether a run
 scored well depended on whether the first model happened to finish before the
@@ -130,9 +128,9 @@ noticed.
 
 ### A partial rate is not a rate
 
-Reported 2026-09-14 from a benchmark still in progress: "82% drafts / 70%
-acceptable" at n=66 of 115. The completed run was **76% / 66%** — the last 49
-prompts pulled it down six and four points.
+Reported 2026-09-14 from a benchmark still in progress: a running total of drafts
+and acceptable answers, quoted before the run had finished. The completed run
+came in **several points lower** on both, once the remaining prompts were scored.
 
 Nothing was wrong with the measurement. The mistake was quoting a running total as
 though it were a result, and then writing it into three planning documents as the
@@ -147,11 +145,8 @@ number exists when the run ends.
 bypasses them (`CONTINUATION: bypass to host agent`). Counting them as misses
 makes the router look worse for doing the right thing.
 
-Measured 2026-09-14 on the session replay: 10 of 115 prompts were bare
-acknowledgements. Including them understated BOTH runs by about four points:
-
-    all prompts     baseline 76% drafts / 66% acceptable -> after 77% / 72%
-    routable only   baseline 80% / 70%                   -> after 81% / 76%
+Found 2026-09-14 on the session replay: some of the replayed prompts were bare
+acknowledgements, and counting them understated BOTH runs.
 
 The comparison is unaffected — both runs were understated equally — but the
 absolute number was wrong, and it is the absolute number that gets quoted.
@@ -162,43 +157,41 @@ hook-injected text were being replayed as if the user had typed them.
 
 ### A miss with no recorded reason is a hole in the instrument
 
-The same run reported 8 of 115 misses as "no reason logged" — 7% of prompts
-vanishing unexplained, while 6-point differences were being argued over. Seven
-were the deliberate CONTINUATION bypass and one was transient; none was a router
-defect. The bench read only two of the hook nine terminal outcomes.
+The same run reported some misses as "no reason logged" — prompts vanishing
+unexplained while differences of a few points were being argued over. Almost all
+were the deliberate CONTINUATION bypass and the rest were transient; none was a
+router defect. The bench read only two of the hook's nine terminal outcomes.
 
 When a measurement cannot explain an outcome, fix the measurement before trusting
 any number it produces.
 
 ### Freeze the instrument before comparing two runs
 
-Measured 2026-09-15, and nearly reported as a ten-point regression:
-
-    like-for-like, 60 prompts        baseline    after
-    as STORED (mixed scorers)             61%      53%
-    both re-scored, CURRENT scorer        53%      53%
+Measured 2026-09-15, and nearly reported as a regression: read as stored (each
+run scored by the scorer of its day), the after run looked clearly worse; with
+both runs re-scored by the current scorer, the two were identical.
 
 There was no regression. The scorer had changed between the runs - N3 widened
 `grounding_violations` to catch bare filenames, so "cites files that do not exist"
-went 7 -> 11 on the SAME drafts. Reading a stored verdict computed under the old
+rose on the SAME drafts. Reading a stored verdict computed under the old
 rules against a live verdict computed under the new ones measures the edit to the
 ruler, not the change to the system.
 
 The corpus had moved too: a filter dropping `<task-notification>` blocks meant the
-two runs no longer replayed the same list, so a 115-prompt comparison was really
-60.
+two runs no longer replayed the same list, so the comparison covered only the
+prompts both runs shared.
 
 Two rules follow:
 
 * **Re-score both arms from raw outputs** whenever the scorer has changed. This is
   the reason every draft body is persisted - both arms re-scored in seconds
-  instead of 100 minutes of model time.
+  instead of re-running the models.
 * **Change the corpus or the scorer, never both, between runs you intend to
   compare** - and say which one moved.
 
 This was the fifth measurement defect in two days, after the contaminated corpus,
 the survivorship-biased p90, the partial rate quoted as final, and the instrument
-that could not explain 7% of its own outcomes. Every one inflated or deflated a
+that could not explain some of its own outcomes. Every one inflated or deflated a
 number that had already been reported.
 
 
@@ -220,5 +213,5 @@ What follows, and what every claim in this repo must respect:
 * **Per-prompt comparison is worthless.** A fifth of prompts flip for free, so
   "this prompt improved" is never evidence.
 
-Establish this before comparing, not after. It is the only reason G1's
-57% -> 70% can be stated as a result rather than a hope.
+Establish this before comparing, not after. It is the only reason a G1
+acceptance gain can be stated as a result rather than a hope.

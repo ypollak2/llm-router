@@ -1,11 +1,3 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/hero-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/readme/hero-light.svg">
-    <img src="assets/readme/hero-light.svg" alt="llm-router routes AI coding prompts across free, budget, and premium model tiers." width="100%"/>
-  </picture>
-</p>
-
 <h1 align="center">llm-router</h1>
 
 <p align="center">
@@ -79,14 +71,6 @@ authenticated by a subscription, because there is no key to forward.
 separately, each with its own n — not a blended percentage. This project does
 not publish a general savings percentage; any number depends on your own
 workload. See [Savings](#savings) below.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/readme/why-route-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/readme/why-route-light.svg">
-    <img src="assets/readme/why-route-light.svg" alt="Animated benefits panel for llm-router showing cheaper routing, preserved quality, quota protection, and low-config setup." width="100%"/>
-  </picture>
-</p>
 
 ---
 
@@ -175,8 +159,9 @@ is routed; `off` disables that. Full modes and per-host overrides:
 
 ## Reference
 
-The default MCP surface shows **12 front-door tools**; an opt-out shows everything registered
-(see [docs/configuration.md](docs/configuration.md) for user settings).
+The default MCP surface shows **12 front-door tools** (the `CONSOLIDATED_TOOLS` set in
+`src/llm_router/tool_surface.py`; `tests/test_doc_tool_counts_match_registration.py` checks
+this count against it); an opt-out shows everything registered (see [docs/configuration.md](docs/configuration.md) for user settings).
 
 | Topic | What | Guide |
 |-------|------|-------|
@@ -223,7 +208,7 @@ with `LLM_ROUTER_DIRECT_EXECUTION=false`. Full analysis:
 
 Self-audits are published in **[audit/](audit/)** and
 **[docs/repo_goals/AUDIT-2026-09-25.md](docs/repo_goals/AUDIT-2026-09-25.md)**
-(13 met, 6 partial, 1 not met), including negative results.
+(on 2026-09-25, of 20 goals: 13 met, 6 partial, 1 not met), including negative results.
 
 **Ground Truth accumulation** (opt-in) builds a
 corpus of replayable routing decisions instead of unlinked telemetry; off by
@@ -238,7 +223,7 @@ Full index: **[guide/README.md](guide/README.md)**
 
 | Document | Purpose |
 |----------|---------|
-| [Quick Start (2 min)](guide/QUICKSTART_2MIN.md) | Fastest path to working routing |
+| [Quick Start](guide/QUICKSTART_2MIN.md) | Fastest path to working routing |
 | [Getting Started](guide/GETTING_STARTED.md) | Full setup walkthrough |
 | [Host Support Matrix](guide/HOST_SUPPORT_MATRIX.md) | Per-host feature comparison |
 | [Providers](guide/PROVIDERS.md) | Provider setup and model recommendations |
@@ -254,10 +239,10 @@ Full index: **[guide/README.md](guide/README.md)**
 | [Changelog](CHANGELOG.md) | Release notes ([archive](CHANGELOG-ARCHIVE.md)) |
 
 `llm-router` is scored on the [RouterArena](https://github.com/RouteWorks/RouterArena)
-benchmark — full split, 8,400 queries, graded locally with this repo's harness,
-**not yet independently verified**. Current Arena Score: **72.35**. Full
-methodology and negative results (including a proxy split that misled tuning
-by 4.25 points): **[docs/ROUTERARENA.md](docs/ROUTERARENA.md)**.
+benchmark, graded locally with this repo's harness and **not yet independently
+verified**. Results with their n and source files, methodology and negative
+results (including a proxy split that misled tuning):
+**[docs/ROUTERARENA.md](docs/ROUTERARENA.md)**.
 
 ---
 
@@ -274,7 +259,7 @@ Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 git clone https://github.com/ypollak2/llm-router.git
 cd llm-router
 uv sync --extra dev
-uv run pytest tests/ -q         # Run tests (10,000+)
+uv run pytest tests/ -q         # Run tests
 uv run ruff check src/ tests/   # Lint
 ```
 

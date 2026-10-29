@@ -378,6 +378,8 @@ def test_plain_install_wires_codex_when_detected(home, monkeypatch, capsys):
     fake = S.Seats(claude=S.Seat(kind="claude.ai", plan="max"), codex=S.Seat(kind="chatgpt", plan="pro"),
                    detected_at="2026-09-04T00:00:00+00:00")
     monkeypatch.setattr(S, "refresh_seats", lambda **kw: fake)
+    hook_files = install._receipt_hook_files  # the fake Claude install writes no hook files (P212-1)
+    monkeypatch.setattr(install, "_receipt_hook_files", lambda h: {} if h == "claude-code" else hook_files(h))
 
     install._run_install([])
     out = capsys.readouterr().out
