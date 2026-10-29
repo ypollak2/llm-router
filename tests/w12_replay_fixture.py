@@ -119,7 +119,7 @@ def map_state_for(seed: int, door: str, index: int) -> MapState:
     rng = random.Random(f"{seed}/{door}/{index}/map")
     statuses: dict[str, str | None] = {}
     for p in PROVIDERS:
-        statuses[p] = rng.choices(STATUSES, weights=(52, 18, 12, 10, 8))[0]
+        statuses[p] = rng.choices(STATUSES, weights=(54, 18, 12, 10, 6))[0]
     if not any(s == "connected" for s in statuses.values()) and rng.random() < 0.9:
         statuses[rng.choice(PROVIDERS)] = "connected"   # a few all-down maps stay: those chains must come back empty
     cands: list[str] = [f"ollama/{m}" for m in LOCAL_MODELS] + [f"{p}/{m}" for p, m in CLOUD.items()]
@@ -128,6 +128,14 @@ def map_state_for(seed: int, door: str, index: int) -> MapState:
     task = rng.choices(("code", "query", "analyze", "generate"), weights=(40, 25, 20, 15))[0]
     complexity = rng.choices(("simple", "moderate", "complex"), weights=(45, 40, 15))[0]
     return MapState(statuses=statuses, base_chain=base, task=task, complexity=complexity)
+
+
+def all_down_state(seed: int, door: str, index: int) -> MapState:
+    """A map that has a row for every provider and not one of them connected."""
+    base = map_state_for(seed, door, index)
+    return MapState(statuses={p: rng_status for p, rng_status in zip(PROVIDERS, ("disconnected", "unhealthy", "absent",
+                                                                                  "disconnected", "unhealthy"))},
+                    base_chain=base.base_chain, task=base.task, complexity=base.complexity)
 
 
 def map_document(state: MapState, generated_at: str) -> dict:

@@ -5096,8 +5096,13 @@ async def route_and_call(
             and "openai" not in _blocked_providers()
         ):
             _ptier = "openai/gpt-4o-mini"
-            models_to_try = [_ptier] + [m for m in models_to_try if m != _ptier]
-            log.debug("Precision-tier: fronting %s for an exact-answer prompt", _ptier)
+            # W1-2 (UN-09 replay): an entry injected after the chain build still answers to the resource map and
+            # the user's rules. Without this the tier fronted a provider the map had disconnected (1 of 118
+            # router and 1 of 118 gateway replay requests routed to it).
+            from llm_router import map_reader as _pt_map
+            if _pt_map.apply_to_chain([_ptier], reorder=False, task=task_type.value):
+                models_to_try = [_ptier] + [m for m in models_to_try if m != _ptier]
+                log.debug("Precision-tier: fronting %s for an exact-answer prompt", _ptier)
 
         # Subject specialist override (Plan 07 Phase 3 B.2b).
         # If the active routing policy declares a specialist for the

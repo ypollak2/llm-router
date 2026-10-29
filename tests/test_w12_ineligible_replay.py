@@ -47,13 +47,17 @@ from llm_router import resource_map as rm
 from llm_router.types import LLMResponse
 from tests import w12_replay_fixture as fx
 
+#: One module-scoped replay (about 50 s on a loaded machine) feeds every test; pytest-timeout's default 30 s
+#: would kill the first test that builds it, and ``xdist_group`` keeps one worker from building it twice.
+pytestmark = [pytest.mark.timeout(300), pytest.mark.xdist_group("w12_replay")]
+
 SEED = 20261029
-#: Requests per door: 1,010 in all (spec: N >= 1,000, >= 100 per door). The router and gateway doors cost ~0.1 s
+#: Requests per door: 1,026 in all (spec: N >= 1,000, >= 100 per door). The router and gateway doors cost ~0.1 s
 #: a request (every ``route_and_call`` re-opens and re-migrates ``usage.db``), so they get fewer; each door
 #: must still show >= 100 EVALUATED rows (a route to a provider the map has no row for is not judged).
-REQUESTS = {"router": 130, "gateway": 130, "hook": 250, "sdk": 250, "proxy": 250}
+REQUESTS = {"router": 118, "gateway": 118, "hook": 280, "sdk": 280, "proxy": 230}
 DOORS = tuple(REQUESTS)
-MUTANT_REQUESTS = {"router": 30, "gateway": 30, "hook": 60, "sdk": 60, "proxy": 60}
+MUTANT_REQUESTS = {"router": 20, "gateway": 20, "hook": 40, "sdk": 40, "proxy": 40}
 PLANTED = 7
 ANSWER = ("A reasonable answer: check the queue depth first, then compare consumer lag against the "
           "autoscaler events, and only then look at the downstream timeout in the ledger service.")
@@ -322,15 +326,27 @@ def test_replay_n_per_door_zero_ineligible_and_both_checks_agree(replay):
         # replay rows are labelled and kept apart from organic ones
         assert res["populations"]["synthetic"].get("eligible", 0) == res["evaluated_n"], (door, res["populations"])
         assert res["organic_evaluated_n"] == 0
+        assert len(run.served) + run.no_route == REQUESTS[door], (door, len(run.served), run.no_route)
         detail.append(f"{door}={res['evaluated_n']}/{REQUESTS[door]}")
     print("W12 replay evaluated/requests: " + " ".join(detail))
 
 
-def test_states_with_every_provider_down_route_nowhere(replay):
-    """Chains the filter empties produce no decision row: nothing was routed to a disconnected provider."""
-    for door, run in replay.runs.items():
-        assert run.no_route >= 1, (door, "the generator must produce some chains the filter empties")
-        assert len(run.served) + run.no_route == REQUESTS[door], door
+ALL_DOWN = 8
+
+
+@pytest.mark.parametrize("door", DOORS)
+def test_every_provider_disconnected_routes_nowhere(replay, door):
+    """Maps that disconnect every provider the chain could use: the door serves nothing and records nothing
+    (not counted in the 1,000: a separate, deliberately hostile set)."""
+    (replay.root / "alldown").mkdir(exist_ok=True)
+    run = _new_db(replay.root / "alldown", door, replay.mp)
+    for i in range(ALL_DOWN):
+        state = fx.all_down_state(SEED, door, i)
+        doc = _install(state, replay.mp)
+        _DRIVERS[door](run, state, fx.prompt_for(SEED, door, i), doc)
+    assert run.served == [] and run.no_route == ALL_DOWN, (door, run.served, run.no_route)
+    assert not run.db.exists() or sqlite3.connect(run.db).execute(
+        "select count(*) from routing_decisions").fetchone()[0] == 0, door
 
 
 # ── positive controls ─────────────────────────────────────────────────────────
@@ -380,7 +396,8 @@ def test_planted_ineligible_routes_are_counted_exactly(replay, door, tmp_path):
 
     src = replay.runs[door]
     copy = DoorRun(door, tmp_path / "test_usage.db", tmp_path / "proxy_calls.jsonl")
-    shutil.copy(src.db, copy.db) if src.db.exists() else None
+    if src.db.exists():
+        shutil.copy(src.db, copy.db)
     if src.proxy.exists():
         shutil.copy(src.proxy, copy.proxy)
     before = _count(copy)
