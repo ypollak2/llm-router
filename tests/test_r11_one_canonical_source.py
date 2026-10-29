@@ -57,6 +57,7 @@ STATE_PATH_ALLOWED = {
     "llm_router/edit_survival.py": "stdlib leaf, path-loaded by the release audit",
     # Hook processes that must resolve state before the package is importable.
     "llm_router/hooks/codex-stop.py": "P35-3: imports nothing from llm_router (stat + one JSON read); mirrors paths.llm_router_home()",
+    "llm_router/hooks/plugin-install.py": "P212-3: Claude plugin SessionStart hook, runs from the plugin dir with no importable llm_router; mirrors paths.llm_router_home()",
     "llm_router/hooks/agent_writes.py": "standalone hook, pre-import resolution",
     "llm_router/hooks/direct_executor.py": "standalone hook, pre-import resolution",
     "llm_router/hooks/draft_usage.py": "standalone hook, pre-import resolution",

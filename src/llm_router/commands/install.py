@@ -148,6 +148,12 @@ Usage:
   llm-router install --auto              Full install with no prompts (for npm postinstall, plugins,
                                      scripts). Writes install_receipt.json in the state dir, prints
                                      one `receipt:` line, exits 1 if any host failed to install
+  llm-router install --auto --via-plugin The Claude Code plugin already provides the hooks and MCP
+                                     entry: wire the other hosts, leave settings.json hooks alone
+                                     (the plugin's SessionStart hook runs this, after consent;
+                                     the installer also does this by itself when it finds the plugin)
+  llm-router install --no-plugin         With --auto: wire Claude Code hooks from the CLI even if the
+                                     plugin is installed (you then have them twice; for plugin removal)
   llm-router install --project           Write AGENTS.md + CLAUDE.md (link) into the current
                                      repository so both agents read one set of rules
   llm-router install --proxy-default     Make the per-call proxy the DEFAULT ANTHROPIC_BASE_URL
@@ -226,7 +232,7 @@ def cmd_install(args: list[str]) -> int:
     if any(a in ("--help", "-h", "help") for a in args):
         print(_INSTALL_HELP)
         return 0
-    if "--auto" in args:
+    if "--auto" in args or "--via-plugin" in args:
         return _run_auto(args)
     if "--proxy-default" in args:
         # Handled here, not inside `_run_install`, so a refused install (the
@@ -700,6 +706,119 @@ def receipt_line(receipt: dict) -> str:
             f"version={receipt.get('package_version')}")
 
 
+CONSENT_NAME = "plugin_install_consent.json"
+
+
+def consent_path() -> Path:
+    return paths.state_path(CONSENT_NAME)
+
+
+def claude_plugin_root() -> Path | None:
+    """Root of the llm-router Claude Code plugin that is active on this machine, or None.
+
+    ``CLAUDE_PLUGIN_ROOT`` (set by Claude Code for plugin hooks, and passed on to the detached
+    ``--via-plugin`` run) wins; otherwise ``<claude dir>/plugins/installed_plugins.json`` is read
+    for an ``llm-router@...`` entry that counts for this machine: user scope, or project/local
+    scope whose ``projectPath`` is the current directory; its install path ships
+    ``hooks/hooks.json``; and ``enabledPlugins`` (user settings, then the project's) says True. The plugin provides the Claude Code
+    hooks and MCP entry, so a second copy in settings.json would fire every hook twice."""
+    import json
+
+    from llm_router import install_hooks as ih
+
+    def _usable(p: object) -> Path | None:
+        root = Path(p).expanduser() if isinstance(p, str) and p else None
+        return root if root is not None and (root / "hooks" / "hooks.json").is_file() else None
+
+    env_root = _usable(os.environ.get("CLAUDE_PLUGIN_ROOT"))
+    if env_root is not None:
+        return env_root
+    cwd = Path.cwd().resolve()
+
+    def _read(path: Path) -> dict:
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    # enabledPlugins: a user-scope entry is judged ONLY on the user's own settings.json (a
+    # repository must not be able to switch off the user's global wiring); project settings
+    # count only for project/local-scope entries of this very directory. Absent = not enabled.
+    def _flags(*files: Path) -> dict:
+        merged: dict = {}
+        for f in files:
+            value = _read(f).get("enabledPlugins")
+            if isinstance(value, dict):
+                merged.update(value)
+        return merged
+
+    user_enabled = _flags(ih.settings_path())
+    project_enabled = _flags(ih.settings_path(), cwd / ".claude" / "settings.json",
+                             cwd / ".claude" / "settings.local.json")
+    plugins = _read(ih.claude_dir() / "plugins" / "installed_plugins.json").get("plugins")
+    for key, entries in sorted((plugins if isinstance(plugins, dict) else {}).items()):
+        if not str(key).startswith("llm-router@"):
+            continue
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            scope = entry.get("scope")
+            if scope == "user":
+                if user_enabled.get(key) is not True:
+                    continue
+            else:
+                project = entry.get("projectPath")
+                if scope not in ("project", "local") or not isinstance(project, str) or not project:
+                    continue
+                if Path(project).expanduser().resolve() != cwd:
+                    continue  # another project's plugin entry
+                if project_enabled.get(key) is not True:
+                    continue
+            root = _usable(entry.get("installPath"))
+            if root is not None:
+                return root
+    return None
+
+
+def _plugin_hook_files(root: Path) -> dict[str, Path]:
+    """Source hook name -> the copy the plugin bundle ships (same keys as the CLI install, so
+    the receipt digest compares the two)."""
+    from llm_router import install_hooks as ih
+
+    return {src: root / "hooks" / src for src, _dst, _e, _m in ih._HOOK_DEFS if (ih._HOOKS_SRC / src).exists()}
+
+
+def _settings_hooks_registered() -> bool:
+    """True when settings.json already registers llm-router hook commands (a CLI install)."""
+    import json
+
+    from llm_router import install_hooks as ih
+
+    try:
+        hooks = json.loads(ih.settings_path().read_text("utf-8")).get("hooks") or {}
+    except (OSError, ValueError, AttributeError):
+        return False
+    return any("llm_router" in s or "llm-router" in s for s in _json_strings(hooks))
+
+
+def record_plugin_consent() -> None:
+    """Running the installer through the plugin (``/llm-router:setup`` or the detached run) is
+    the consent the SessionStart hook waits for. Atomic, 0600; failure is recorded, not fatal."""
+    import json
+
+    from llm_router import failopen, state_files
+
+    path = consent_path()
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with state_files.open_private(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"consent": True}, sort_keys=True) + "\n")
+        os.replace(tmp, path)
+    except OSError as exc:
+        failopen.record("P212-PLUGIN-CONSENT-WRITE", exc)
+
+
 def _host_failed(host: str, label: str, via: str | None, exc: BaseException) -> dict:
     """An installer that raised: record it (failopen), say so on stderr (npm and MCP callers
     keep stdout for the receipt line), and return its ``error`` row."""
@@ -731,13 +850,36 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
     print(f"{_bold('╚══════════════════════════════════════════╝')}\n")
 
     rows: dict[str, dict] = {}
-    try:
-        actions = install()
-    except Exception as exc:  # noqa: BLE001 -- P2.12: a failing host is an error row, not an abort
+    # P212-3: when the Claude Code plugin is active (asked for with --via-plugin, or found on
+    # this machine), it provides the hooks and the MCP entry; writing them to settings.json
+    # too would fire every hook twice. Every other host is wired as usual.
+    plugin_root = None if ("--no-plugin" in flags and "--via-plugin" not in flags) else claude_plugin_root()
+    via_plugin = plugin_root is not None
+    if via_plugin and "--via-plugin" not in flags:
+        print(_dim(f"  Claude Code plugin found at {plugin_root}: it provides the hooks and MCP entry, so "
+                   "none are written to settings.json. To wire them from the CLI instead, run "
+                   "`llm-router install --auto --no-plugin`."))
+    if "--via-plugin" in flags and not via_plugin:
+        rows["claude-code"] = error_row("plugin", RuntimeError(
+            "--via-plugin: no llm-router plugin found (CLAUDE_PLUGIN_ROOT unset and none in installed_plugins.json)"))
+        print(_fail(f"Claude Code: {rows['claude-code']['reason']}"), file=sys.stderr)
         actions = []
-        rows["claude-code"] = _host_failed("claude-code", "Claude Code", "settings", exc)
     else:
-        rows["claude-code"] = wired_row("claude-code", "settings")
+        try:
+            actions = install(via_plugin=True) if via_plugin else install()
+        except Exception as exc:  # noqa: BLE001 -- P2.12: a failing host is an error row, not an abort
+            actions = []
+            rows["claude-code"] = _host_failed("claude-code", "Claude Code", "plugin" if via_plugin else "settings", exc)
+        else:
+            if via_plugin:
+                rows["claude-code"] = wired_row("claude-code", "plugin", hook_files=_plugin_hook_files(plugin_root))
+                if _settings_hooks_registered():
+                    print(_warn("settings.json still registers llm-router hooks from an earlier install; "
+                                "with the plugin every hook fires twice. Run `llm-router uninstall` to remove them."))
+                if "--via-plugin" in flags:
+                    record_plugin_consent()
+            else:
+                rows["claude-code"] = wired_row("claude-code", "settings")
     for a in actions:
         print(f"  {_green('✓')}  {a}")
 

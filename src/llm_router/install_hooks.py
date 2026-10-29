@@ -1279,11 +1279,14 @@ def check_api_keys() -> list[str]:
     return lines
 
 
-def install(force: bool = False) -> list[str]:
+def install(force: bool = False, via_plugin: bool = False) -> list[str]:
     """Install hooks and rules globally. Returns list of actions taken.
     
     Args:
         force: If True, overwrite existing hooks even if they appear up to date.
+        via_plugin: The Claude Code plugin already provides the hooks and the MCP entry
+            (P212-3): write neither into settings.json / ~/.claude.json, or every hook
+            fires twice. Rules, statusline and the rest are installed as usual.
     """
     actions: list[str] = []
 
@@ -1305,10 +1308,11 @@ def install(force: bool = False) -> list[str]:
 
     # ── Copy hook scripts ────────────────────────────────────────────────
     hooks_dst().mkdir(parents=True, exist_ok=True)
-    actions.extend(_sync_hook_support_files())  # CHZ-SURF-01
+    if not via_plugin:
+        actions.extend(_sync_hook_support_files())  # CHZ-SURF-01
     settings = _load_settings()
 
-    for src_name, dst_name, event, matcher in _HOOK_DEFS:
+    for src_name, dst_name, event, matcher in ([] if via_plugin else _HOOK_DEFS):
         src = _HOOKS_SRC / src_name
         dst = hooks_dst() / dst_name
         timeout = _HOOK_TIMEOUTS.get(dst_name)
@@ -1368,7 +1372,7 @@ def install(force: bool = False) -> list[str]:
 
     # ── Copy sidecar scripts (not hook-event scripts, just files
     # session-start.py shells out to) ──────────────────────────────────────
-    for name in _SIDECAR_SCRIPTS:
+    for name in ([] if via_plugin else _SIDECAR_SCRIPTS):
         src = _HOOKS_SRC / name
         dst = hooks_dst() / name
         if not src.exists():
@@ -1386,12 +1390,14 @@ def install(force: bool = False) -> list[str]:
     # ── Register MCP server globally ─────────────────────────────────────
     # Build the entry using the installed llm_router binary when available
     # (pip install), falling back to uv run for development installs.
-    mcp_entry, _mcp_warnings = _build_mcp_entry()
+    mcp_entry, _mcp_warnings = _build_mcp_entry() if not via_plugin else (None, [])
     actions.extend(_mcp_warnings)
 
     # GH#41: skip registration entirely rather than write a command that cannot
     # resolve. A missing server is diagnosable; a dead one reports CONNECTION_CLOSED.
-    if mcp_entry is None:
+    if via_plugin:
+        actions.append("Hooks and MCP server come from the Claude Code plugin; settings.json not touched for them")
+    elif mcp_entry is None:
         actions.append("SKIP MCP registration — no runnable llm-router command")
     else:
         # ~/.claude/settings.json — Claude Desktop / interactive Claude Code
