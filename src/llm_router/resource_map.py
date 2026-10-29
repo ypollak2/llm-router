@@ -200,9 +200,17 @@ def _row(resource: str, kind: str, chain_id: str, **kw) -> dict:
         "reset_at": None, "marginal_cost": {"value": None, "label": ""},
         "capabilities": [], "limits": {}, "competence": None, "key": None,
         "effective_priority": None,
+        "privacy": "cloud",   # SEC-S6: text sent to this resource leaves the machine unless _ollama_rows says otherwise
     }
     row.update(kw)
     return row
+
+
+def privacy_class(model: str, base: str) -> str:
+    """``local`` when a call to *model* via the Ollama daemon at *base* stays on this machine, else ``cloud``.
+    The one definition of "stays local" is ``local_privacy.stays_local`` (loopback daemon, not a ``-cloud`` tag)."""
+    from llm_router import local_privacy
+    return "local" if local_privacy.stays_local(model, base) else "cloud"
 
 
 def _not_connected(row: dict, seat, fallback: str) -> dict:
@@ -333,7 +341,8 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
         seat = getattr(inp.seats, "ollama", None)
         status = seat.status if seat is not None and seat.status == "installed_not_connected" else "absent"
         why = seat.reason if status == "installed_not_connected" else f"Ollama not reachable at {base}"
-        return [_row("ollama", "local", "ollama", status=status, reason=why)]
+        return [_row("ollama", "local", "ollama", status=status, reason=why,
+                     privacy=privacy_class("ollama/-", base))]
     rows = []
     seen: set[str] = set()
     for m in tags.get("models") or []:
@@ -368,6 +377,7 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
         rows.append(_row(
             f"ollama/{name}", "local", f"ollama/{name}",
             status="connected", reason=reason,
+            privacy=privacy_class(f"ollama/{name}", base),
             marginal_cost={"value": 0.0, "label": "local; electricity not counted"},
             capabilities=caps,
             # D-159: True only when /api/show reported a capabilities list. Without it the
@@ -384,7 +394,8 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
             competence=comp,
         ))
     if not rows:
-        rows.append(_row("ollama", "local", "ollama", reason="Ollama reachable, no models installed"))
+        rows.append(_row("ollama", "local", "ollama", reason="Ollama reachable, no models installed",
+                     privacy=privacy_class("ollama/-", base)))
     return rows
 
 
