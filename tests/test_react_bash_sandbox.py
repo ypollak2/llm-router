@@ -9,7 +9,6 @@ belongs behind the MGEE worktree gate.
 """
 from __future__ import annotations
 
-import sys
 
 from llm_router.agentic.react import default_tool_executor
 
@@ -50,7 +49,8 @@ def test_safe_commands_still_run(tmp_path):
 def test_python_build_test_commands_allowed(tmp_path):
     ex = default_tool_executor(cwd=str(tmp_path))
     (tmp_path / "p.py").write_text("print(6*7)")   # `python -c` needs approval (P2.9-b)
-    out = ex("bash", {"command": f"{sys.executable} p.py"})
+    # a bare name: since D-322 a program given as a path is refused (rv-785 S2)
+    out = ex("bash", {"command": "python3 p.py"})
     assert "[exit 0]" in out and "42" in out
 
 

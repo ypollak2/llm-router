@@ -307,6 +307,8 @@ class _Scan:
         self.targets.append(str(resolved))
         if not resolved.is_relative_to(self.root):
             self.outside.append(str(resolved))
+        elif self.allowlist and ".git" in resolved.relative_to(self.root).parts:
+            self.need(f"write into .git ({text}): git runs its hooks and config")
 
     def confine(self, text: str, what: str, expands: bool = False) -> Path | None:
         """A path the command works in or runs (not a write target) must resolve inside root."""
@@ -399,13 +401,13 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
         scan.target(tok[1], tok[2])
 
     i = 0
-    stripped: list[tuple[str, str]] = []               # ("assign", NAME) / ("wrap", name)
+    stripped: list[tuple[str, str, list[Token]]] = []  # ("assign", NAME, [tok]) / ("wrap", name, opts)
     while i < len(words):                              # strip wrappers
         w = words[i][1]
         base = os.path.basename(w)
         if _ASSIGN.match(w) or w in _KEYWORDS:
             if _ASSIGN.match(w):
-                stripped.append(("assign", w.split("=", 1)[0]))
+                stripped.append(("assign", w.split("=", 1)[0], [words[i]]))
             i += 1
         elif w == "function":
             i += 2                                     # `function NAME`; the body follows
@@ -416,10 +418,11 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
                 continue
             return                                     # `for N in W`, `case W in`: data only
         elif (inner := _wrapper(scan, words, i)) is not None:
-            stripped.append(("wrap", base + " run" if base in ("uv", "poetry", "pipx") else base))
+            label = base + " run" if base in ("uv", "poetry", "pipx") else base
+            stripped.append(("wrap", label, words[i + (2 if label.endswith(" run") else 1):inner]))
             i = inner
         elif base in _WRAPPERS or base in ("sudo", "doas"):
-            stripped.append(("wrap", base))
+            stripped.append(("wrap", base, []))
             if base in ("sudo", "doas"):
                 scan.need("privilege escalation (sudo)")
             i += 1
@@ -451,10 +454,11 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
     expands = {w[1]: w[2] for w in words[i + 1:]}
     opts, rest = _split_opts(args)
     if scan.allowlist:
-        if ("wrap", "uv run") in stripped and prog.endswith(".py"):
-            scan.confine(words[i][1], "uv run script")         # `uv run s.py`: a project file
+        in_uv = any(s[:2] == ("wrap", "uv run") for s in stripped)
+        if in_uv and prog.endswith(".py"):
+            scan.confine(words[i][1], "uv run script", words[i][2])   # `uv run s.py`
         else:
-            _allowed_program(scan, prog, args, expands)
+            _allowed_program(scan, words[i][1], prog, args, expands, in_uv)
 
     def tgt(text: str) -> None:
         scan.target(text, expands.get(text, False))
@@ -1384,6 +1388,11 @@ _GO_SUBS = frozenset({"build", "test", "vet", "list", "version", "env", "doc", "
 _GO_OUT = frozenset({"o", "coverprofile", "cpuprofile", "memprofile", "blockprofile",
                      "mutexprofile", "trace", "outputdir", "modfile", "pkgdir"})
 _GO_EXEC = frozenset({"exec", "toolexec", "vettool"})
+#: Other go build/test flags that take a separate value (so it is not a package).
+_GO_VALUED = frozenset({"p", "run", "bench", "tags", "ldflags", "gcflags", "asmflags", "count",
+                        "timeout", "covermode", "coverpkg", "parallel", "benchtime", "cpu",
+                        "list", "skip", "mod", "fuzz", "fuzztime", "shuffle", "overlay",
+                        "installsuffix", "buildmode", "compiler", "pgo"})
 _CARGO_SUBS = frozenset({"build", "b", "check", "c", "test", "t", "run", "r", "bench",
                          "clippy", "doc", "d", "metadata", "tree", "fmt", "version"})
 _NPM_SUBS = frozenset({"test", "t", "run", "run-script", "ls", "list"})
@@ -1425,28 +1434,105 @@ def _getopt(args: list[str], short_valued: str = "",
     return opts, pos
 
 
-def _allowed_prefix(scan: _Scan, stripped: list[tuple[str, str]]) -> None:
-    for kind, name in stripped:
-        if kind == "assign" and name not in _ALLOW_ENV:
-            scan.need(f"setting {name} can change what an allowed program runs "
-                      f"(allowed: {', '.join(sorted(_ALLOW_ENV))})")
-        elif kind == "wrap" and name not in _ALLOW_WRAPPERS:
+#: Programs that run code or take arbitrary paths. EVERY argument of these (and
+#: every `=`/`:` value inside one, after `--` too) that names a path must resolve
+#: inside root: a per-flag table cannot list plugin and test-binary flags
+#: (`pytest -o log_file=`, `node --test-reporter-destination=`, `cargo test --
+#: --logfile`, `go test -args -test.cpuprofile=`), so the rule is general (rv-785 M2).
+_RUNNERS = frozenset({"python", "node", "pytest", "go", "cargo", "uv", "pip", "pip3", "npm",
+                      "yarn", "ruff"})
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+#: PATH directories inside the root that may hold the project's own tools (the
+#: accepted "code the lane runs" residual): a virtualenv or node_modules/.bin.
+_PROJECT_BIN = re.compile(r"(^|/)(\.?venv|env|node_modules)(/[^/]+)*/(bin|\.bin|Scripts)$")
+
+
+def _path_parts(word: str) -> list[str]:
+    """The path-shaped pieces of one argument: the word, the value after each `=`,
+    and each `:`-separated part; URLs are not local paths (file:// is)."""
+    cands = [word] + [word.split("=", k)[-1] for k in range(1, word.count("=") + 1)]
+    out: list[str] = []
+    for c in cands:
+        if c.startswith("file://"):
+            c = c[7:]
+        elif _URL.match(c):
+            continue
+        for part in ([c] + c.split(":") if ":" in c else [c]):
+            if part and ("/" in part or part.startswith("~") or part == ".."):
+                out.append(part)
+    return out
+
+
+def _confine_words(scan: _Scan, words: list[str], ex: dict[str, bool], what: str) -> None:
+    for w in words:
+        if ex.get(w, False):
+            scan.need(f"{what} argument built from an expansion: {w}")
+            continue
+        for part in _path_parts(w):
+            scan.confine(part, f"{what} argument")
+
+
+def _allowed_prefix(scan: _Scan, stripped: list[tuple[str, str, list[Token]]]) -> None:
+    for kind, name, toks in stripped:
+        if kind == "assign":
+            if name not in _ALLOW_ENV:
+                scan.need(f"setting {name} can change what an allowed program runs "
+                          f"(allowed: {', '.join(sorted(_ALLOW_ENV))})")
+            else:                               # PYTHONPATH=<outside> loads code from there
+                value = toks[0][1].split("=", 1)[1]
+                _confine_words(scan, [value], {value: toks[0][2]}, f"{name}=")
+        elif name not in _ALLOW_WRAPPERS:
             scan.need(f"'{name}' is not on the local-action allowlist")
+        elif name == "uv run":
+            opts = [t[1] for t in toks]
+            if any(o.split("=", 1)[0] in ("--with", "--with-editable", "--with-requirements")
+                   for o in opts):
+                scan.need("uv run --with installs packages that then run")
+            _confine_words(scan, opts, {t[1]: t[2] for t in toks}, "uv run")
 
 
-def _allowed_program(scan: _Scan, prog: str, args: list[str],
-                     expands: dict[str, bool]) -> None:
-    """D-322: *prog* (the basename, as everywhere in this module) must be on the
-    allowlist, and its own flags must stay inside root."""
+def _program_location(scan: _Scan, word: str, prog: str, in_uv: bool) -> None:
+    """rv-785 S2: what file would run. A path (`./cat`, `src/find`, `/x/python3`)
+    is refused outright: the basename says nothing about the file. A bare name runs
+    what PATH finds; refused when PATH has a relative entry or finds a file inside
+    the root (a file the model could have written), except a project venv or
+    node_modules/.bin, which is the documented residual. `uv run` resolves inside
+    the project's own environment, the same residual."""
+    if "/" in word:
+        scan.need(f"'{word}': a program given as a path is not judged by its name; "
+                  "use the bare name")
+        return
+    if in_uv:
+        return
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d or not os.path.isabs(d):
+            scan.need(f"PATH has a relative entry ({d or 'empty'}), so '{prog}' could be a project file")
+            return
+        cand = Path(d) / prog
+        if cand.is_file() and os.access(cand, os.X_OK):
+            real, d_real = cand.resolve(), Path(d).resolve()
+            in_bin = d_real.is_relative_to(scan.root) and _PROJECT_BIN.search(
+                d_real.relative_to(scan.root).as_posix())
+            if real.is_relative_to(scan.root) and not in_bin:
+                scan.need(f"'{prog}' resolves to {real}, a file inside the project root")
+            return
+
+
+def _allowed_program(scan: _Scan, word: str, prog: str, args: list[str],
+                     expands: dict[str, bool], in_uv: bool = False) -> None:
+    """D-322: *prog* must be on the allowlist, the file that runs must be a system
+    program (`_program_location`), and its own flags must stay inside root."""
     family = ("python" if re.fullmatch(r"python[\d.]*", prog) else "node" if prog == "nodejs"
               else "pytest" if prog == "py.test" else prog)
-    if family in _ALLOW_PLAIN:
-        return
-    check = _CHECKS.get(family)
-    if check is None:
+    if family not in _ALLOW_PLAIN and family not in _CHECKS:
         scan.need(f"'{prog}' is not on the local-action allowlist")
         return
-    check(scan, args, expands)
+    _program_location(scan, word, prog, in_uv)
+    if family in _RUNNERS:
+        _confine_words(scan, args, expands, prog)
+    check = _CHECKS.get(family)
+    if check is not None:
+        check(scan, args, expands)
 
 
 def _al_find(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
@@ -1497,6 +1583,8 @@ def _al_git(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
     k = 0
     while k < len(args) and args[k].startswith("-"):
         name, eq, val = args[k].partition("=")
+        if name.startswith("-c") and len(name) > 2:            # attached `-ckey=value`
+            name, eq, val = "-c", "=", args[k][2:]
         if name in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
                     "--super-prefix", "--attr-source") and not eq:
             val, k = (args[k + 1] if k + 1 < len(args) else ""), k + 1
@@ -1505,7 +1593,7 @@ def _al_git(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
         elif name == "-c":
             key, _eq, value = val.partition("=")
             if not (_GIT_C_SAFE.fullmatch(key) or (key.lower() == "core.pager"
-                                                   and value in ("", "cat"))):
+                                                   and _eq and value == "cat")):
                 scan.need(f"git -c {key} can make git run a command")
         elif name in ("--config-env", "--super-prefix") or (name == "--exec-path" and eq):
             scan.need(f"git {name} changes what git runs")
@@ -1523,6 +1611,8 @@ def _al_git(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
     for o, v in opts:
         if o in ("--output", "-o") and v is not None:
             scan.target(v, ex.get(v, False))
+        elif o == "--ext-diff":
+            scan.need("git --ext-diff runs an external diff program")
         elif o in ("--open-files-in-pager", "-O") and sub == "grep":
             scan.need("git grep --open-files-in-pager runs a command")
         elif o in ("--remote", "--exec") and sub == "archive":
@@ -1543,11 +1633,21 @@ def _al_python(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
     opts, rest = _interp_opts(args, _INTERP_VALUED["python"])
     module = None
     for o in opts:
-        if o[:2] in ("-W", "-X"):
+        if o.startswith("--"):
             continue
-        m = re.fullmatch(r"-[A-Za-z]*m(.*)", o)
-        if m:
-            module = m.group(1) or (rest.pop(0) if rest else "")
+        # rv-785 M1: walk the short-option cluster the way CPython does. `-W`/`-X`
+        # take the rest as a value; `c` takes the rest (or the next word) as CODE,
+        # attached or not (`-cprint(1)`, `-Ic...`), whatever follows it.
+        for k, ch in enumerate(o[1:], 1):
+            if ch in "WX":
+                break
+            if ch == "c":
+                scan.need("python -c runs inline code")
+                return
+            if ch == "m":
+                module = o[k + 1:] or (rest.pop(0) if rest else "")
+                break
+        if module is not None:
             break
     if module is not None:
         if module not in _PY_SAFE_MODULES:
@@ -1560,8 +1660,30 @@ def _al_python(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
         scan.confine(rest[0], "python script", ex.get(rest[0], False))
 
 
+_NODE_LOADERS = ("--require", "--import", "--loader", "--experimental-loader", "-r")
+
+
 def _al_node(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
-    _opts, rest = _interp_opts(args, _INTERP_VALUED["node"])
+    k = 0
+    while k < len(args) and args[k].startswith("-") and args[k] not in ("-", "--"):
+        a = args[k]
+        name, eq, val = a.partition("=")
+        # rv-785 M1: inline code in any spelling (`-e`, `-pe`, `--eval=...`, `--print`).
+        if name in ("--eval", "--print") or (not a.startswith("--") and (
+                "e" in a[1:] or "p" in a[1:])):
+            scan.need("node -e/-p runs inline code")
+            return
+        if name in _NODE_LOADERS:
+            if not eq:
+                val, k = (args[k + 1] if k + 1 < len(args) else ""), k + 1
+            # a module from data:/a URL is inline code; a path must be a project file
+            if val.startswith("data:") or _URL.match(val) or "://" in val:
+                scan.need(f"node {name} {val[:40]} loads code that is not a project file")
+                return
+            if val.startswith((".", "/", "~")):
+                scan.confine(val, f"node {name}", ex.get(val, False))
+        k += 1
+    rest = args[k + 1:] if args[k:k + 1] == ["--"] else args[k:]
     if rest and rest[0] not in _INTERPRETERS_STDIN_PATHS:
         scan.confine(rest[0], "node script", ex.get(rest[0], False))
 
@@ -1652,20 +1774,34 @@ def _al_go(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
     rest = args[k + 1:]
     if sub == "env" and any(a in ("-w", "-u") for a in rest):
         scan.need("go env -w/-u writes the user's go configuration")
-    i = 0
+    i, pkgs, after_args = 0, [], False
     while i < len(rest):
         a = rest[i]
-        if a == "--":
-            break
-        if a.startswith("-") and a != "-":
+        if a in ("-args", "--args"):
+            after_args = True                  # the rest goes to the test binary
+        elif a.startswith("-") and a != "-":
             name, eq, val = a.lstrip("-").partition("=")
-            if name in _GO_OUT | _GO_EXEC and not eq:
+            name = name.removeprefix("test.")  # go test accepts -test.<flag> (rv-785 M2)
+            if name in _GO_OUT | _GO_EXEC | _GO_VALUED and not eq:
                 val, i = (rest[i + 1] if i + 1 < len(rest) else ""), i + 1
             if name in _GO_EXEC:
                 scan.need(f"go -{name} runs a program")
             elif name in _GO_OUT:
                 scan.target(val, ex.get(val, False))
+        elif not after_args:
+            pkgs.append(a)
         i += 1
+    if sub == "run":                           # `go run PKG args...`: only PKG (or *.go files)
+        n_go = next((k for k, p in enumerate(pkgs) if not p.endswith(".go")), len(pkgs))
+        pkgs = pkgs[:max(n_go, 1)]
+    if sub in ("run", "build", "test", "vet", "list"):
+        for p in pkgs:
+            # rv-785 M3: a module path (`example.com/x/cmd`, `pkg@latest`) is code
+            # go downloads; only local packages (`.`, `./...`, `./cmd/x`, x.go) run.
+            first = p.split("/", 1)[0]
+            if "@" in p or ("." in first and first not in (".", "..") and not p.endswith(".go")):
+                scan.need(f"go {sub} {p}: a module path is code go downloads, not a "
+                          "project package")
 
 
 def _al_cargo(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
@@ -1798,6 +1934,10 @@ def check_write(path: object, root: Path) -> Verdict:
     resolved, why = contain(path, root)
     if resolved is None:
         return Verdict(REFUSE, f"{why}: {str(path)[:120]}")
+    base = Path(root).resolve()
+    if resolved.is_relative_to(base) and ".git" in resolved.relative_to(base).parts:
+        return Verdict(NEEDS_APPROVAL, f"write into .git ({str(path)[:120]}): git runs its "
+                       "hooks and config" + _NOT_WIRED)
     return Verdict(ALLOW, "", (str(resolved),))
 
 

