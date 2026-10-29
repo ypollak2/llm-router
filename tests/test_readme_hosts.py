@@ -152,6 +152,8 @@ def test_plain_install_silent_for_absent_hosts(isolated_install_env, monkeypatch
 
 
 def test_npm_postinstall_points_at_the_plugin() -> None:
+    # P212-2: the postinstall now runs `install --auto` itself, so the "next step"
+    # hint is gone; the plugin pointer is printed when the opt-out skipped wiring
+    # (behaviour pinned by tests/test_npm_wrapper.py).
     js = (Path(__file__).resolve().parents[1] / "npm" / "install.js").read_text()
-    assert "next step ->  llm-router install" in js
     assert "/plugin install llm-router@ypollak2" in js

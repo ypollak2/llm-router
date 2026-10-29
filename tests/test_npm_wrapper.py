@@ -13,8 +13,15 @@ someone else's `npm install`, which is the worst possible place to find out.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
+import sys
+import tarfile
 from pathlib import Path
+
+import pytest
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -452,3 +459,205 @@ def test_npm_publish_uses_trusted_publishing_not_a_token():
         "trusted publishing exchanges a GitHub OIDC token for npm credentials; "
         "without id-token: write there is nothing to exchange"
     )
+
+
+# ── postinstall wires the hosts: `<bin> install --auto` (v16 P2.12, P212-2) ──
+#
+# These run the real install.js under node against a stub binary. Reading the JS
+# for a string cannot tell a call that runs from one that sits in dead code, so
+# every assertion here is about what node actually did: the argv the stub saw,
+# the exit code npm would see, and what was printed.
+
+#: Records one line per invocation (args joined by a tab), answers --version,
+#: and for `install` writes a receipt into $HOME the way the real binary does,
+#: prints the one `receipt:` line and exits $STUB_EXIT.
+_STUB = """#!/bin/sh
+( IFS="$(printf '\\t')"; printf '%s\\n' "$*" ) >> "$STUB_ARGV_LOG"
+if [ "$1" = "--version" ]; then echo "llm-router 15.4.0"; exit 0; fi
+status=wired
+[ "${STUB_EXIT:-0}" = "0" ] || status=error
+mkdir -p "$HOME/.llm-router"
+printf '{"hosts": {"codex": {"status": "%s"}}}\\n' "$status" > "$HOME/.llm-router/install-receipt.json"
+echo "LLM Router - One-Command Install"
+echo "receipt: deadbeef hosts=2/3 version=15.4.0"
+[ "$status" = "wired" ] || echo "Codex CLI: install failed: PermissionError: denied" >&2
+exit "${STUB_EXIT:-0}"
+"""
+
+#: Preload for runInstaller-only runs: any network call is a test failure.
+_NO_NET = """
+const blocked = () => { throw new Error('network blocked by test'); };
+for (const m of ['http', 'https']) { const mod = require(m); mod.get = mod.request = blocked; }
+"""
+
+#: Preload for the whole postinstall: https.get serves a local tarball instead of
+#: GitHub, and every URL asked for is logged so the test can count them.
+_FAKE_RELEASE = """
+const fs = require('fs');
+const { EventEmitter } = require('events');
+require('http').get = require('http').request = () => { throw new Error('http blocked by test'); };
+const https = require('https');
+https.request = () => { throw new Error('https.request blocked by test'); };
+https.get = (url, opts, cb) => {
+  fs.appendFileSync(process.env.TEST_URL_LOG, String(url) + '\\n');
+  const res = fs.createReadStream(process.env.TEST_TARBALL);
+  res.statusCode = 200;
+  res.headers = {};
+  process.nextTick(() => cb(res));
+  return new EventEmitter();
+};
+"""
+
+
+def _node() -> str:
+    """node, or a FAILURE in CI: a skipped test passes vacuously, and the
+    ubuntu runners ship node, so a missing one there is a broken runner."""
+    node = shutil.which("node")
+    if node is None:
+        if os.environ.get("CI"):
+            pytest.fail("node is required in CI to run the npm postinstall tests")
+        pytest.skip("node not installed")
+    return node
+
+
+@pytest.fixture
+def npm_env(tmp_path):
+    """A copy of the npm package, a stub binary and a fixture HOME.
+
+    The package is copied so the postinstall's `vendor/` lands in tmp, never in
+    the repo's npm/ (which test_binary_is_not_vendored_into_the_package guards).
+    """
+    if sys.platform == "win32":
+        pytest.skip("the stub binary is a POSIX shell script")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    for name in ("install.js", "package.json"):
+        shutil.copy(NPM / name, pkg / name)
+    home = tmp_path / "home"
+    home.mkdir()
+    stub = tmp_path / "fake-llm-router"
+    stub.write_text(_STUB)
+    stub.chmod(0o755)
+    (tmp_path / "no_net.js").write_text(_NO_NET)
+    (tmp_path / "fake_release.js").write_text(_FAKE_RELEASE)
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(home),
+        "STUB_ARGV_LOG": str(tmp_path / "argv.log"),
+    }
+    return {"tmp": tmp_path, "pkg": pkg, "home": home, "stub": stub, "env": env}
+
+
+def _invocations(e) -> list[list[str]]:
+    log = Path(e["env"]["STUB_ARGV_LOG"])
+    if not log.exists():
+        return []
+    return [line.split("\t") for line in log.read_text().splitlines()]
+
+
+def _run_installer(e, bin_path=None, **extra_env):
+    """`require('install.js').runInstaller(bin, process.env)` under real node."""
+    code = "process.exitCode = require(process.argv[1]).runInstaller(process.argv[2], process.env);"
+    return subprocess.run(
+        [_node(), "-r", str(e["tmp"] / "no_net.js"), "-e", code,
+         str(e["pkg"] / "install.js"), str(bin_path or e["stub"])],
+        cwd=e["tmp"], env={**e["env"], **extra_env},
+        capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_postinstall_runs_install_auto_and_echoes_the_receipt(npm_env):
+    r = _run_installer(npm_env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _invocations(npm_env) == [["install", "--auto"]]
+    assert "llm-routing: receipt: deadbeef hosts=2/3 version=15.4.0" in r.stdout
+    # Only the receipt line is echoed, not the installer's banner.
+    assert "One-Command Install" not in r.stdout
+    # Hosts are wired now; pointing at the plugin would register its hooks twice.
+    assert "/plugin install" not in r.stdout
+
+
+def test_opt_out_never_calls_the_installer_and_says_why(npm_env):
+    r = _run_installer(npm_env, LLM_ROUTER_NO_AUTO_INSTALL="1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _invocations(npm_env) == [], "the opt-out still ran the installer"
+    assert "LLM_ROUTER_NO_AUTO_INSTALL" in r.stdout
+    assert "llm-router install" in r.stdout, "no manual command offered after the opt-out"
+    # Nothing is wired, so the plugin is still a valid alternative.
+    assert "/plugin install llm-router@ypollak2" in r.stdout
+    assert not (npm_env["home"] / ".llm-router").exists()
+
+
+def test_opt_out_is_not_triggered_by_an_empty_or_zero_value(npm_env):
+    for value in ("", "0"):
+        npm_env["env"]["STUB_ARGV_LOG"] = str(npm_env["tmp"] / f"argv-{value or 'empty'}.log")
+        r = _run_installer(npm_env, LLM_ROUTER_NO_AUTO_INSTALL=value)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert _invocations(npm_env) == [["install", "--auto"]], value
+
+
+def test_installer_failure_warns_but_npm_install_still_succeeds(npm_env):
+    r = _run_installer(npm_env, STUB_EXIT="1")
+    assert r.returncode == 0, "a host-wiring failure failed the whole npm install"
+    assert _invocations(npm_env) == [["install", "--auto"]]
+    assert "WARNING" in r.stderr and "exit code 1" in r.stderr, r.stderr
+    assert "llm-router install" in r.stderr, "no manual command offered"
+    # The installer's own reason reaches the user, and its receipt stays put.
+    assert "PermissionError: denied" in r.stderr
+    assert "receipt: deadbeef" in r.stdout
+    receipt = json.loads((npm_env["home"] / ".llm-router" / "install-receipt.json").read_text())
+    assert receipt["hosts"]["codex"]["status"] == "error"
+
+
+def test_an_installer_that_cannot_start_still_exits_zero(npm_env):
+    r = _run_installer(npm_env, bin_path=npm_env["tmp"] / "no-such-binary")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WARNING" in r.stderr and "ENOENT" in r.stderr, r.stderr
+    assert "llm-router install" in r.stderr
+
+
+def test_a_spawn_that_throws_still_exits_zero(npm_env):
+    """The injected spawner raising (not returning an error) must not escape
+    to main()'s catch, which would exit 1 and fail the npm install."""
+    code = ("process.exitCode = require(process.argv[1]).runInstaller("
+            "'llm-router', process.env, () => { throw new Error('spawn exploded'); });")
+    r = subprocess.run(
+        [_node(), "-r", str(npm_env["tmp"] / "no_net.js"), "-e", code, str(npm_env["pkg"] / "install.js")],
+        cwd=npm_env["tmp"], env=npm_env["env"], capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "spawn exploded" in r.stderr and "llm-router install" in r.stderr
+
+
+def test_the_whole_postinstall_downloads_once_then_wires_hosts(npm_env):
+    """`node install.js` exactly as npm runs it, with GitHub replaced by a
+    local tarball: one download, then `--version`, then `install --auto`."""
+    targets = {
+        ("darwin", "arm64"): "llm-router-macos-arm64.tar.gz",
+        ("darwin", "x86_64"): "llm-router-macos-x86_64.tar.gz",
+        ("linux", "x86_64"): "llm-router-linux-x86_64.tar.gz",
+    }
+    import platform as _platform
+
+    asset = targets.get((sys.platform, _platform.machine()))
+    if asset is None:
+        pytest.skip(f"no published binary for {sys.platform}/{_platform.machine()}")
+    e = npm_env
+    tarball = e["tmp"] / asset
+    with tarfile.open(tarball, "w:gz") as tf:
+        tf.add(e["stub"], arcname="llm-router/llm-router")
+    url_log = e["tmp"] / "urls.log"
+
+    r = subprocess.run(
+        [_node(), "-r", str(e["tmp"] / "fake_release.js"), "install.js"],
+        cwd=e["pkg"], env={**e["env"], "TEST_TARBALL": str(tarball), "TEST_URL_LOG": str(url_log)},
+        capture_output=True, text=True, timeout=120,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    version = _package_json()["version"]
+    assert url_log.read_text().splitlines() == [
+        f"https://github.com/ypollak2/llm-router/releases/download/v{version}/{asset}"
+    ]
+    assert _invocations(e) == [["--version"], ["install", "--auto"]]
+    assert "llm-routing: receipt: deadbeef" in r.stdout
+    assert "next step ->" not in r.stdout, "the manual next-step hint is still printed"

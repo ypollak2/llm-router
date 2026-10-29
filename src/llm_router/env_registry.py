@@ -419,6 +419,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # Read by scripts/release/eval_gate.py (--skip-quality tag policy, PLAN v16 P3.2),
     # a release script outside src/ -- hand-declared, like the other out-of-scan readers.
     "LLM_ROUTER_RELEASE_OWNER_OVERRIDE": ("llm_router", "scripts/release/eval_gate.py", 1),
+    # Read by npm/install.js (JavaScript, the npm postinstall; v16 P2.12 P212-2), outside
+    # src/ -- hand-declared like the release script above. "1" skips the postinstall's
+    # `llm-router install --auto`. An install-time switch, deliberately not in PUBLIC.
+    "LLM_ROUTER_NO_AUTO_INSTALL": ("llm_router", "npm/install.js", 1),
     "LLM_ROUTER_STATUSLINE_REFRESH_CMD": ("llm_router", "statusline_tick.py", 1),
     "LLM_ROUTER_STATUSLINE_SLOW_MS": ("llm_router", "statusline_refresh.py", 1),
     "LLM_ROUTER_STATUS_EVERY": ("llm_router", "hooks/status-bar-clawcode.py", 2),

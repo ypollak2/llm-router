@@ -31,6 +31,13 @@ matching [GitHub release](https://github.com/ypollak2/llm-router/releases), and
 If the download fails, the install **fails loudly** rather than leaving a broken
 `llm-router` on your PATH to be discovered mid-session.
 
+Once the binary runs, `postinstall` wires the hosts it finds on your machine by
+running `llm-router install --auto`, and prints that run's one `receipt:` line.
+If wiring a host fails, you get a warning and the command to retry, but
+`npm install` still succeeds: the binary works, and the failure is recorded in
+the install receipt. To install the binary without touching any host config,
+set `LLM_ROUTER_NO_AUTO_INSTALL=1` for the install.
+
 ## Why a proxy cannot do this
 
 Every other router in this category is a proxy: you point your agent at a local
@@ -66,7 +73,7 @@ xattr -dr com.apple.quarantine "$(dirname "$(readlink -f "$(which llm-router)")"
 ## After installing
 
 ```bash
-llm-router install     # wire up your host (Claude Code by default)
+llm-router install     # re-run the host wiring (postinstall already ran it once)
 llm-router doctor      # verify everything is connected
 llm-router status      # today's savings and quota
 ```
