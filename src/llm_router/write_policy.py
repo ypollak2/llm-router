@@ -1483,7 +1483,8 @@ def _path_parts(word: str) -> list[str]:
 
 _UV_INDEX_OPTS = frozenset({"--index", "--index-url", "-i", "--extra-index-url", "--default-index",
                             "--find-links", "-f", "--upgrade", "-U", "--upgrade-package", "-P",
-                            "--reinstall", "--reinstall-package", "--refresh", "--refresh-package"})
+                            "--reinstall", "--reinstall-package", "--refresh", "--refresh-package",
+                            "--keyring-provider"})
 
 
 def _confine_words(scan: _Scan, words: list[str], ex: dict[str, bool], what: str) -> None:
@@ -1721,6 +1722,17 @@ _JS_SCRIPT = re.compile(r".*\.(js|mjs|cjs|ts|mts|cts|jsx|tsx)$")
 _LOOPBACK = ("127.0.0.1", "localhost", "::1", "[::1]")
 
 
+def _inspect_host(val: str) -> str:
+    """The host in a node `--inspect*` value (`host:port`, `[v6]:port`, bare port or host)."""
+    if val.startswith("["):
+        return val.split("]")[0] + "]"
+    if val.isdigit():
+        return ""                                   # port only: node binds loopback
+    if val.count(":") == 1:
+        return val.split(":")[0]
+    return val                                      # bare host, or a bare IPv6 address
+
+
 def _al_node(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
     k = 0
     while k < len(args) and args[k] != "--":
@@ -1748,11 +1760,13 @@ def _al_node(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
                 return
             if val.startswith((".", "/", "~")):
                 scan.confine(val, f"node {name}", ex.get(val, False))
-        if name.startswith(("--inspect", "--debug")) and eq and name != "--inspect-port":
-            host = val.rsplit(":", 1)[0] if ":" in val and not val.startswith("[") else (
-                val.split("]")[0] + "]" if val.startswith("[") else "")
+        if name.startswith(("--inspect", "--debug")) and val:
+            # rv-785c S1: every --inspect*/--debug* flag counts, including the valued
+            # `--inspect-port X` (= or separate), so `--inspect-port=0.0.0.0:9229
+            # --inspect` cannot open the debugger on the network.
+            host = _inspect_host(val)
             if host and host not in _LOOPBACK:         # rv-785b N2: a debugger on the network
-                scan.need(f"node {name}={val} opens the debugger beyond loopback")
+                scan.need(f"node {name} {val} opens the debugger beyond loopback")
         k += 1
     rest = args[k + 1:] if args[k:k + 1] == ["--"] else args[k:]
     if rest and rest[0] not in _INTERPRETERS_STDIN_PATHS:
@@ -1858,6 +1872,8 @@ def _al_go(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
                 val, i = (rest[i + 1] if i + 1 < len(rest) else ""), i + 1
             if name in _GO_EXEC:
                 scan.need(f"go -{name} runs a program or swaps in other files")
+            elif name == "mod" and val == "mod":
+                scan.need("go -mod=mod lets go fetch modules from the network")
             elif name in _GO_OUT:
                 scan.target(val, ex.get(val, False))
         elif not after_args:

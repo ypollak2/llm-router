@@ -110,6 +110,15 @@ def test_ordinary_agent_commands_still_pass(root, cmd):
     ("go test all", wp.NEEDS_APPROVAL),
     ("go test -overlay ov.json ./...", wp.NEEDS_APPROVAL),
     ("node --inspect=0.0.0.0:9229 s.js", wp.NEEDS_APPROVAL),
+    ("node --inspect-port=0.0.0.0:9229 --inspect s.js", wp.NEEDS_APPROVAL),
+    ("node --inspect-port 0.0.0.0:9229 --inspect s.js", wp.NEEDS_APPROVAL),
+    ("node --inspect-port=[::]:9229 s.js", wp.NEEDS_APPROVAL),
+    ("node --inspect-brk=0.0.0.0 s.js", wp.NEEDS_APPROVAL),
+    ("node --inspect-wait=10.0.0.5:9229 s.js", wp.NEEDS_APPROVAL),
+    ("node --debug-port 0.0.0.0 s.js", wp.NEEDS_APPROVAL),
+    ("uv run --keyring-provider subprocess pytest", wp.NEEDS_APPROVAL),
+    ("go test -mod=mod ./...", wp.NEEDS_APPROVAL),
+    ("go test -mod mod ./...", wp.NEEDS_APPROVAL),
     ("pytest @../args.txt", wp.REFUSE),
 ])
 def test_flags_and_programs_outside_the_list_are_refused(root, cmd, decision):
@@ -177,3 +186,14 @@ def test_toolkit_allowlist_is_inside_the_shared_allowlist():
     from llm_router.toolkit.policy import ALLOWED_PROGRAMS
     names = {"python" if p.startswith("python") else p for p in ALLOWED_PROGRAMS}
     assert names <= wp.allowed_programs(), names - wp.allowed_programs()
+
+
+@pytest.mark.parametrize("cmd", [
+    "node --inspect s.js", "node --inspect=9229 s.js", "node --inspect-port=9229 --inspect s.js",
+    "node --inspect-port 9230 s.js", "node --inspect-port=127.0.0.1:9229 --inspect s.js",
+    "node --inspect-brk=localhost:9229 s.js", "node --inspect-port=[::1]:9229 s.js",
+    "go test -mod=readonly ./...",
+])
+def test_loopback_and_port_only_debugger_forms_stay_allowed(root, cmd):
+    """Anti-vacuity for the --inspect fix: the loopback and port-only forms are not refused."""
+    assert wp.check_action(cmd, root).decision == wp.ALLOW, cmd

@@ -400,7 +400,7 @@ because a test runner's plugins and a test binary's flags cannot be listed:
   `git diff --ext-diff`, `go -exec/-toolexec/-vettool/-overlay`, `go env -w/-u`, `cargo --config`,
   `npm --script-shell`, `uv run --with/-w` and `uv run`'s index, find-links,
   upgrade and refresh options (they install packages, which then run),
-  `node --inspect=<non-loopback host>`, an
+  `node --inspect*=<non-loopback host>` (also `--inspect-port`), `go -mod=mod`, `uv run --keyring-provider`, an
   existing `pytest --basetemp` directory (pytest deletes it first), and every
   `git -c KEY` except formatting keys (`color.*`, `log.*`, `core.quotepath`,
   `core.pager=cat` ...). `core.pager`, `alias.*`, `core.fsmonitor`,
@@ -592,6 +592,10 @@ reviews of PR #778 and PR #785, twice).
 | `uv run -w evilpkg pytest` | `needs_approval` | `uv run --with` installs code | installs a package, which then runs (`-w` is `--with`) |
 | `go test all` | `needs_approval` | not a project package | runs the tests of dependencies |
 | `node --inspect=0.0.0.0:9229 s.js` | `needs_approval` | debugger beyond loopback | opens the debugger to the network |
+| `node --inspect-port=0.0.0.0:9229 --inspect s.js` | `needs_approval` | debugger beyond loopback (any `--inspect*`/`--debug*` flag) | the host in `--inspect-port` was skipped, so the debugger opened on the network |
+| `node --inspect-port 0.0.0.0:9229 --inspect s.js` | `needs_approval` | debugger beyond loopback (any `--inspect*`/`--debug*` flag) | same, with the host as a separate argument |
+| `uv run --keyring-provider subprocess pytest` | `needs_approval` | `uv run` index or upgrade option | `uv` runs a `keyring` program found on PATH |
+| `go test -mod=mod ./...` | `needs_approval` | `go -mod=mod` fetches modules | go downloads modules from the network before it tests |
 | `pytest @{OUT}/args.txt` | `refuse` | argument outside the root | reads options from a file outside the root |
 
 File-tool writes (`write_file`, `edit_file`, the toolkit `write`) go through

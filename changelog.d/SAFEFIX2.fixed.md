@@ -1,0 +1,1 @@
+Local agent lanes (`llm_act`, `llm_local_task run_command`) now refuse a non-loopback host in any `node --inspect*`/`--debug*` flag, including `--inspect-port` (value joined by `=` or given as a separate argument), plus `go -mod=mod` and `uv run --keyring-provider`.
