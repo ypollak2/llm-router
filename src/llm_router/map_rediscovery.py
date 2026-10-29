@@ -195,6 +195,12 @@ def diff_maps(old: dict | None, new: dict) -> list[dict]:
         a, b = o[res], n[res]
         if a["status"] != b["status"]:
             add("status", res, a["status"], b["status"], f"~ {_short(res)} {b['status']}")
+        # SEC-S6: a privacy guarantee is never lowered silently. A map written before
+        # the field existed has no class, so its first rebuild announces nothing.
+        qa, qb = a.get("privacy"), b.get("privacy")
+        if qa and qb and qa != qb:
+            add("privacy", res, qa, qb,
+                f"{'!' if qa == 'local' else '~'} {_short(res)} privacy {qa}->{qb}")
         da, db = a.get("digest"), b.get("digest")
         if b.get("kind") == "local" and da and db and da != db:
             add("digest", res, (da or "")[:12], db[:12], f"~ {_short(res)} new digest")
