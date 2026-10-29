@@ -32,9 +32,11 @@ Precedence: refuse > needs_approval > allow.
 
 P2.9-a makes this ONE policy for ``llm_act``, ``llm_local_task`` and the toolkit:
 ``contain`` is the single path-containment test and ``check_write`` its verdict
-form; ``check_action`` is ``check_command`` plus the ``DESTRUCTIVE`` table
-(``rm -r``, git state changes, package installs: needs approval, which is refused
-while approval is unwired); ``pick_root`` chooses the project root (MCP root, then
+form; ``check_action`` is ``check_command`` plus the program allowlist (D-322:
+any program not on it, and any delete/exec flag of one that is, needs approval;
+output and working paths must resolve inside ``root``) plus the ``DESTRUCTIVE``
+table (``rm -r``, git state changes, package installs: needs approval, which is
+refused while approval is unwired); ``pick_root`` chooses the project root (MCP root, then
 ``CLAUDE_PROJECT_DIR``, then the caller's request; never the process cwd).
 """
 from __future__ import annotations
@@ -264,38 +266,54 @@ class _Scan:
         self.targets: list[str] = []
         self.outside: list[str] = []
         self.approvals: list[str] = []
+        self.allowlist = False                      # D-322: check_action's program allowlist
+        self.escapes: list[str] = []                # non-write paths outside root (git -C ...)
 
     def need(self, why: str) -> None:
         if why not in self.approvals:
             self.approvals.append(why)
 
-    def target(self, text: str, expands: bool = False, base: Path | None = None) -> None:
+    def _place(self, text: str, expands: bool, base: Path | None, kind: str) -> Path | None:
+        """Resolve *text* the way the shell would, or record why it cannot be judged."""
         if text in _NULL_DEVICES:
-            return
+            return None
         if expands:
-            self.need(f"write target built from an expansion: {text}")
-            return
+            self.need(f"{kind} built from an expansion: {text}")
+            return None
         if text == "~-" or text.startswith("~-/"):
-            self.need(f"write target uses ~- (previous directory): {text}")
-            return
+            self.need(f"{kind} uses ~- (previous directory): {text}")
+            return None
         if text == "~+" or text.startswith("~+/"):
             if self.cwd is None:
-                self.need(f"write target uses ~+ after an unresolvable cd: {text}")
-                return
+                self.need(f"{kind} uses ~+ after an unresolvable cd: {text}")
+                return None
             text = str(self.cwd) + text[2:]
         p = Path(os.path.expanduser(text))
         if not p.is_absolute():
             anchor = base if base is not None else self.cwd
             if anchor is None:
-                self.need(f"relative write target after an unresolvable cd: {text}")
-                return
+                self.need(f"relative {kind} after an unresolvable cd: {text}")
+                return None
             p = anchor / p
         resolved = p.resolve()
         if _unresolved_symlink(resolved):
             raise RuntimeError("symlink loop")
+        return resolved
+
+    def target(self, text: str, expands: bool = False, base: Path | None = None) -> None:
+        resolved = self._place(text, expands, base, "write target")
+        if resolved is None:
+            return
         self.targets.append(str(resolved))
         if not resolved.is_relative_to(self.root):
             self.outside.append(str(resolved))
+
+    def confine(self, text: str, what: str, expands: bool = False) -> Path | None:
+        """A path the command works in or runs (not a write target) must resolve inside root."""
+        resolved = self._place(text, expands, None, what)
+        if resolved is not None and not resolved.is_relative_to(self.root):
+            self.escapes.append(f"{resolved} ({what})")
+        return resolved
 
 
 _PATH_WRITERS: dict[str, set[str]] = {
@@ -381,10 +399,13 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
         scan.target(tok[1], tok[2])
 
     i = 0
+    stripped: list[tuple[str, str]] = []               # ("assign", NAME) / ("wrap", name)
     while i < len(words):                              # strip wrappers
         w = words[i][1]
         base = os.path.basename(w)
         if _ASSIGN.match(w) or w in _KEYWORDS:
+            if _ASSIGN.match(w):
+                stripped.append(("assign", w.split("=", 1)[0]))
             i += 1
         elif w == "function":
             i += 2                                     # `function NAME`; the body follows
@@ -395,8 +416,10 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
                 continue
             return                                     # `for N in W`, `case W in`: data only
         elif (inner := _wrapper(scan, words, i)) is not None:
+            stripped.append(("wrap", base + " run" if base in ("uv", "poetry", "pipx") else base))
             i = inner
         elif base in _WRAPPERS or base in ("sudo", "doas"):
+            stripped.append(("wrap", base))
             if base in ("sudo", "doas"):
                 scan.need("privilege escalation (sudo)")
             i += 1
@@ -416,6 +439,8 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
                 i += 1                                 # the DURATION operand
         else:
             break
+    if scan.allowlist:
+        _allowed_prefix(scan, stripped)
     if i >= len(words):
         return
     if words[i][2]:
@@ -425,6 +450,11 @@ def _segment(scan: _Scan, words: list[Token], redirs: list[tuple[str, Token | No
     args = [w[1] for w in words[i + 1:]]
     expands = {w[1]: w[2] for w in words[i + 1:]}
     opts, rest = _split_opts(args)
+    if scan.allowlist:
+        if ("wrap", "uv run") in stripped and prog.endswith(".py"):
+            scan.confine(words[i][1], "uv run script")         # `uv run s.py`: a project file
+        else:
+            _allowed_program(scan, prog, args, expands)
 
     def tgt(text: str) -> None:
         scan.target(text, expands.get(text, False))
@@ -1197,6 +1227,10 @@ def _arith_end(toks: list[Token], k: int) -> int | None:
 
 def check_command(cmd: str, root: Path) -> Verdict:
     """Judge before execution; parse and path-resolution errors need approval."""
+    return _check(cmd, root, allowlist=False)
+
+
+def _check(cmd: str, root: Path, allowlist: bool) -> Verdict:
     if not cmd.strip():
         return Verdict(ALLOW)
     try:
@@ -1204,14 +1238,16 @@ def check_command(cmd: str, root: Path) -> Verdict:
     except ValueError as exc:
         return Verdict(NEEDS_APPROVAL, f"cannot parse command ({exc})" + _NOT_WIRED)
     try:
-        return _check_tokens(cmd, root, toks, subst)
+        return _check_tokens(cmd, root, toks, subst, allowlist)
     except (ValueError, RuntimeError, OSError) as exc:
         return Verdict(NEEDS_APPROVAL,
                        f"cannot judge command ({type(exc).__name__})" + _NOT_WIRED)
 
 
-def _check_tokens(cmd: str, root: Path, toks: list[Token], subst: bool) -> Verdict:
+def _check_tokens(cmd: str, root: Path, toks: list[Token], subst: bool,
+                  allowlist: bool = False) -> Verdict:
     scan = _Scan(root)
+    scan.allowlist = allowlist
     if subst:
         scan.need(_SUBST_WHY)
     arithmetic = (re.search(r"(?<![\w$-])(?:let|declare|typeset|read)\b|\blocal\s+-\w*i", cmd)
@@ -1281,12 +1317,450 @@ def _check_tokens(cmd: str, root: Path, toks: list[Token], subst: bool) -> Verdi
     flush("")
 
     targets = tuple(scan.targets)
-    if scan.outside:
-        return Verdict(REFUSE, "write target outside project root: "
-                       + ", ".join(scan.outside) + " — not run", targets)
+    if scan.outside or scan.escapes:
+        why = []
+        if scan.outside:
+            why.append("write target outside project root: " + ", ".join(scan.outside))
+        if scan.escapes:
+            why.append("path outside project root: " + ", ".join(scan.escapes))
+        return Verdict(REFUSE, "; ".join(why) + " — not run", targets)
     if scan.approvals:
         return Verdict(NEEDS_APPROVAL, "; ".join(scan.approvals) + _NOT_WIRED, targets)
     return Verdict(ALLOW, "", targets)
+
+
+# ── D-322 (SAFEFIX): the local-action program allowlist ──────────────────────
+#
+# UN-15 measured that llm_act refused only what its denylist knew (`crontab -r`,
+# `diskutil eraseDisk`, `unlink ~/.zshrc` ran) and that no lane read an allowed
+# program's own output/exec flags (`pytest --basetemp=<dir>` runs rm -rf on it,
+# `rg --pre rm` deletes every file it searches). So check_action now runs only
+# programs named here, and reads the flags of each one that can write, delete or
+# run something. A program not named here needs approval, which is not wired, so
+# it is refused. Paths a command works in (`git -C`, a script) must be inside root.
+
+#: Programs with no write/delete/exec flag of their own. Writers among them
+#: (rm, cp, mv, tee, touch, mkdir, sed, awk) have their targets read by _segment.
+_ALLOW_PLAIN = frozenset({
+    "ls", "cat", "head", "tail", "wc", "file", "stat", "du", "grep", "cut", "diff", "tr",
+    "which", "echo", "printf", "pwd", "true", "false", ":", "test", "[", "basename",
+    "dirname", "realpath", "readlink", "cd", "pushd", "popd",
+    "sleep",                     # tests/test_agent_loop.py drives the lane timeout with it
+    "touch", "mkdir", "cp", "mv", "rm", "tee", "sed", "gsed", "awk", "gawk", "mawk", "nawk",
+})
+#: Wrappers whose inner command is checked like any other.
+_ALLOW_WRAPPERS = frozenset({"time", "timeout", "uv run"})
+#: Variables a command prefix may set. Others change what an allowed program runs
+#: (GIT_EXTERNAL_DIFF, PYTEST_ADDOPTS, RUSTC_WRAPPER, PATH, LD_PRELOAD ...).
+_ALLOW_ENV = frozenset({
+    "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "PYTHONHASHSEED",
+    "NO_COLOR", "FORCE_COLOR", "CI", "TERM", "LANG", "LC_ALL", "TZ", "COLUMNS",
+})
+#: `python -m` modules: test runners and compilers, nothing that evaluates a string
+#: (timeit, runpy, code, pdb, cProfile, trace) or unpacks an archive (tarfile, zipfile).
+_PY_SAFE_MODULES = frozenset({"pytest", "unittest", "py_compile", "compileall", "json.tool", "ruff"})
+_FIND_ACTIONS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint",
+                           "-fprint0", "-fprintf", "-fls"})
+_GIT_SUBS = frozenset({
+    # read
+    "status", "log", "diff", "show", "blame", "annotate", "ls-files", "ls-tree", "rev-parse",
+    "rev-list", "cat-file", "describe", "shortlog", "grep", "name-rev", "merge-base",
+    "show-ref", "for-each-ref", "count-objects", "version", "whatchanged", "range-diff",
+    "diff-tree", "diff-index", "diff-files", "check-ignore", "check-attr", "cherry",
+    "show-branch", "archive", "reflog", "worktree", "submodule",
+    # read forms only (`_git_read_only`)
+    "branch", "stash", "tag", "remote", "config",
+    # the index writes that ran before D-322 and stay inside the repository
+    "add", "mv", "rm",
+})
+_GIT_READ_FORMS = frozenset({"branch", "stash", "tag", "remote", "config"})
+#: `git -c KEY=VALUE` keys that only change formatting. Any other key can run a
+#: command (core.pager, alias.*, core.fsmonitor, core.sshCommand, diff.external,
+#: *.textconv, filter.*, credential.helper, include.path ...), so it is refused.
+_GIT_C_SAFE = re.compile(
+    r"(?i)(color|column|advice|log|i18n)(\..+)?|core\.(quotepath|abbrev)"
+    r"|diff\.(renames|noprefix|mnemonicprefix|relative)")
+_GO_SUBS = frozenset({"build", "test", "vet", "list", "version", "env", "doc", "run"})
+_GO_OUT = frozenset({"o", "coverprofile", "cpuprofile", "memprofile", "blockprofile",
+                     "mutexprofile", "trace", "outputdir", "modfile", "pkgdir"})
+_GO_EXEC = frozenset({"exec", "toolexec", "vettool"})
+_CARGO_SUBS = frozenset({"build", "b", "check", "c", "test", "t", "run", "r", "bench",
+                         "clippy", "doc", "d", "metadata", "tree", "fmt", "version"})
+_NPM_SUBS = frozenset({"test", "t", "run", "run-script", "ls", "list"})
+_NPM_EXEC_OPTS = frozenset({"--script-shell", "--userconfig", "--globalconfig",
+                            "--node-options", "--shell", "--editor", "--browser"})
+_VERSION_FLAGS = frozenset({"--version", "-V", "-v", "--help", "-h"})
+
+
+def _getopt(args: list[str], short_valued: str = "",
+            long_valued: frozenset[str] = frozenset()) -> tuple[list[tuple[str, str | None]], list[str]]:
+    """getopt-style walk: ([(option, value)], positionals). Long options accept GNU
+    prefixes (`--out=x` is `--output=x`); `--` ends the options."""
+    opts: list[tuple[str, str | None]] = []
+    pos: list[str] = []
+    k = 0
+    while k < len(args):
+        a = args[k]
+        if a == "--":
+            pos += args[k + 1:]
+            break
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            full = _long_option(name, set(long_valued)) if long_valued else None
+            if full and not eq and k + 1 < len(args):
+                val, k = args[k + 1], k + 1
+            opts.append((full or name, val if (eq or full) else None))
+        elif a.startswith("-") and a != "-":
+            for j, ch in enumerate(a[1:], 1):
+                if ch in short_valued:
+                    val = a[j + 1:]
+                    if not val and k + 1 < len(args):
+                        val, k = args[k + 1], k + 1
+                    opts.append(("-" + ch, val))
+                    break
+                opts.append(("-" + ch, None))
+        else:
+            pos.append(a)
+        k += 1
+    return opts, pos
+
+
+def _allowed_prefix(scan: _Scan, stripped: list[tuple[str, str]]) -> None:
+    for kind, name in stripped:
+        if kind == "assign" and name not in _ALLOW_ENV:
+            scan.need(f"setting {name} can change what an allowed program runs "
+                      f"(allowed: {', '.join(sorted(_ALLOW_ENV))})")
+        elif kind == "wrap" and name not in _ALLOW_WRAPPERS:
+            scan.need(f"'{name}' is not on the local-action allowlist")
+
+
+def _allowed_program(scan: _Scan, prog: str, args: list[str],
+                     expands: dict[str, bool]) -> None:
+    """D-322: *prog* (the basename, as everywhere in this module) must be on the
+    allowlist, and its own flags must stay inside root."""
+    family = ("python" if re.fullmatch(r"python[\d.]*", prog) else "node" if prog == "nodejs"
+              else "pytest" if prog == "py.test" else prog)
+    if family in _ALLOW_PLAIN:
+        return
+    check = _CHECKS.get(family)
+    if check is None:
+        scan.need(f"'{prog}' is not on the local-action allowlist")
+        return
+    check(scan, args, expands)
+
+
+def _al_find(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    hit = next((a for a in args if a in _FIND_ACTIONS), None)
+    if hit:
+        scan.need(f"find {hit} deletes, writes or runs commands")
+
+
+def _al_rg(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    if any(a.split("=", 1)[0] in ("--pre", "--pre-glob") for a in args):
+        scan.need("rg --pre runs a command on every file it searches")
+
+
+def _al_ag(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    if any(a.split("=", 1)[0] == "--pager" for a in args):
+        scan.need("ag --pager runs a command")
+
+
+def _al_sort(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    opts, _pos = _getopt(args, "kotST", frozenset({
+        "--output", "--key", "--field-separator", "--buffer-size", "--temporary-directory",
+        "--compress-program", "--files0-from", "--random-source", "--batch-size",
+        "--parallel", "--sort"}))
+    for o, v in opts:
+        if o in ("-o", "--output") and v is not None:
+            scan.target(v, ex.get(v, False))
+        elif o == "--compress-program":
+            scan.need("sort --compress-program runs a program")
+
+
+def _al_uniq(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    _opts, pos = _getopt(args, "fsw", frozenset({"--skip-fields", "--skip-chars", "--check-chars"}))
+    if len(pos) > 1:
+        scan.target(pos[1], ex.get(pos[1], False))         # uniq INPUT OUTPUT
+
+
+def _al_tree(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    opts, _pos = _getopt(args, "LPIoHT", frozenset({"--filelimit", "--timefmt", "--charset",
+                                                   "--sort"}))
+    for o, v in opts:
+        if o == "-o" and v is not None:
+            scan.target(v, ex.get(v, False))
+        elif o == "-R":
+            scan.need("tree -R writes a file into every directory")
+
+
+def _al_git(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    k = 0
+    while k < len(args) and args[k].startswith("-"):
+        name, eq, val = args[k].partition("=")
+        if name in ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+                    "--super-prefix", "--attr-source") and not eq:
+            val, k = (args[k + 1] if k + 1 < len(args) else ""), k + 1
+        if name in ("-C", "--git-dir", "--work-tree"):
+            scan.confine(val, f"git {name}", ex.get(val, False))
+        elif name == "-c":
+            key, _eq, value = val.partition("=")
+            if not (_GIT_C_SAFE.fullmatch(key) or (key.lower() == "core.pager"
+                                                   and value in ("", "cat"))):
+                scan.need(f"git -c {key} can make git run a command")
+        elif name in ("--config-env", "--super-prefix") or (name == "--exec-path" and eq):
+            scan.need(f"git {name} changes what git runs")
+        k += 1
+    sub, rest = (args[k], args[k + 1:]) if k < len(args) else ("", [])
+    if not sub:
+        return
+    if sub not in _GIT_SUBS:
+        scan.need(f"'git {sub}' is not on the local-action allowlist")
+        return
+    if sub in _GIT_READ_FORMS and not _git_read_only(sub, rest):
+        scan.need(f"'git {sub}' with these arguments changes state")
+    opts, pos = _getopt(rest, "o" if sub == "archive" else "",
+                        frozenset({"--output", "--open-files-in-pager", "--remote", "--exec"}))
+    for o, v in opts:
+        if o in ("--output", "-o") and v is not None:
+            scan.target(v, ex.get(v, False))
+        elif o in ("--open-files-in-pager", "-O") and sub == "grep":
+            scan.need("git grep --open-files-in-pager runs a command")
+        elif o in ("--remote", "--exec") and sub == "archive":
+            scan.need(f"git archive {o} runs a command")
+        elif sub == "rm" and (o in ("-r", "--recursive")):
+            scan.need("'git rm -r' needs approval (recursive delete)")
+    if sub == "rm" and any(c in p for p in pos for c in "*?[") or sub == "rm" and any(
+            p.startswith(":") for p in pos):
+        scan.need("'git rm' with a glob or pathspec magic can delete many files")
+    first = next((a for a in rest if not a.startswith("-")), "")
+    if (sub == "reflog" and first in ("expire", "delete", "drop")) or (
+            sub == "worktree" and first != "list") or (
+            sub == "submodule" and first not in ("", "status", "summary")):
+        scan.need(f"'git {sub} {first}' changes state")
+
+
+def _al_python(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    opts, rest = _interp_opts(args, _INTERP_VALUED["python"])
+    module = None
+    for o in opts:
+        if o[:2] in ("-W", "-X"):
+            continue
+        m = re.fullmatch(r"-[A-Za-z]*m(.*)", o)
+        if m:
+            module = m.group(1) or (rest.pop(0) if rest else "")
+            break
+    if module is not None:
+        if module not in _PY_SAFE_MODULES:
+            scan.need(f"python -m {module or '?'} is not on the local-action allowlist "
+                      f"(allowed: {', '.join(sorted(_PY_SAFE_MODULES))})")
+            return
+        _PY_MODULE_CHECKS.get(module, _al_none)(scan, rest, ex)
+        return
+    if rest and rest[0] not in _INTERPRETERS_STDIN_PATHS:
+        scan.confine(rest[0], "python script", ex.get(rest[0], False))
+
+
+def _al_node(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    _opts, rest = _interp_opts(args, _INTERP_VALUED["node"])
+    if rest and rest[0] not in _INTERPRETERS_STDIN_PATHS:
+        scan.confine(rest[0], "node script", ex.get(rest[0], False))
+
+
+def _al_none(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    return None
+
+
+def _al_json_tool(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    _opts, pos = _getopt(args, "", frozenset({"--indent"}))
+    if len(pos) > 1:
+        scan.target(pos[1], ex.get(pos[1], False))         # json.tool INFILE OUTFILE
+
+
+def _al_compile(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    """py_compile / compileall write __pycache__ next to every source they compile."""
+    opts, pos = _getopt(args, "rdspxijoe", frozenset({"--invalidation-mode"}))
+    if any(o == "-i" for o, _v in opts) or not pos or "-" in pos:
+        scan.need("python -m compileall/py_compile without explicit paths compiles "
+                  "files it was not given (sys.path or a list)")
+    for p in pos:
+        if p != "-":
+            scan.target(p, ex.get(p, False))
+
+
+def _al_unittest(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    opts, _pos = _getopt(args, "stp", frozenset({"--start-directory", "--top-level-directory",
+                                                "--pattern"}))
+    for o, v in opts:
+        if o in ("-s", "-t", "--start-directory", "--top-level-directory") and v:
+            scan.confine(v, f"unittest {o}", ex.get(v, False))
+
+
+_PYTEST_VALUED = frozenset({
+    "--basetemp", "--junitxml", "--junit-xml", "--log-file", "--report-log", "--resultlog",
+    "--html", "--json-report-file", "--rootdir", "--override-ini", "--cov-report",
+    "--deselect", "--ignore", "--ignore-glob", "--maxfail", "--tb", "--durations",
+    "--confcutdir", "--cov", "--capture", "--import-mode", "--log-level", "--config-file",
+    "--timeout", "--dist", "--log-file-level", "--log-cli-level"})
+_PYTEST_OUT = frozenset({"--junitxml", "--junit-xml", "--log-file", "--report-log",
+                         "--resultlog", "--html", "--json-report-file", "--debug"})
+
+
+def _al_pytest(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    opts, pos = _getopt(args, "kmpcoWrn", _PYTEST_VALUED)
+    for o, v in opts:
+        if v is None:
+            continue
+        if o == "--basetemp":
+            n = len(scan.outside)
+            scan.target(v, ex.get(v, False))
+            if len(scan.outside) == n and not ex.get(v, False):
+                p = scan._place(v, False, None, "pytest --basetemp")
+                if p is not None and p.exists():
+                    scan.need(f"pytest --basetemp={v}: pytest deletes that directory "
+                              "first, and it exists")
+        elif o in _PYTEST_OUT:
+            scan.target(v, ex.get(v, False))
+        elif o == "--rootdir":
+            scan.confine(v, "pytest --rootdir", ex.get(v, False))
+        elif o == "--cov-report" and ":" in v:
+            dest = v.split(":", 1)[1]
+            scan.target(dest, ex.get(dest, False))
+        elif o in ("-o", "--override-ini"):
+            key, _eq, value = v.partition("=")
+            if key.strip() == "cache_dir":
+                scan.target(value, False)
+            elif key.strip() == "addopts":
+                scan.need("pytest -o addopts= adds options this check cannot see")
+    for p in pos:
+        path = p.split("::", 1)[0]
+        if path:
+            scan.confine(path, "pytest path", ex.get(p, False))
+
+
+def _al_go(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    k = 0
+    if args[:1] == ["-C"] or (args and args[0].startswith("-C=")):
+        val = args[0][3:] if args[0].startswith("-C=") else (args[1] if len(args) > 1 else "")
+        scan.confine(val, "go -C", ex.get(val, False))
+        k = 1 if args[0].startswith("-C=") else 2
+    sub = args[k] if k < len(args) else ""
+    if not sub or sub in _VERSION_FLAGS:
+        return
+    if sub not in _GO_SUBS:
+        scan.need(f"'go {sub}' is not on the local-action allowlist")
+        return
+    rest = args[k + 1:]
+    if sub == "env" and any(a in ("-w", "-u") for a in rest):
+        scan.need("go env -w/-u writes the user's go configuration")
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--":
+            break
+        if a.startswith("-") and a != "-":
+            name, eq, val = a.lstrip("-").partition("=")
+            if name in _GO_OUT | _GO_EXEC and not eq:
+                val, i = (rest[i + 1] if i + 1 < len(rest) else ""), i + 1
+            if name in _GO_EXEC:
+                scan.need(f"go -{name} runs a program")
+            elif name in _GO_OUT:
+                scan.target(val, ex.get(val, False))
+        i += 1
+
+
+def _al_cargo(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    args = args[:args.index("--")] if "--" in args else args
+    opts, pos = _getopt(args, "CZjpF", frozenset({
+        "--manifest-path", "--target-dir", "--config", "--artifact-dir", "--out-dir",
+        "--lockfile-path", "--color", "--jobs", "--package", "--features", "--target",
+        "--bin", "--example", "--test", "--bench", "--profile", "--message-format"}))
+    pos = [p for p in pos if not p.startswith("+")]                # +toolchain
+    if pos and pos[0] not in _CARGO_SUBS:
+        scan.need(f"'cargo {pos[0]}' is not on the local-action allowlist")
+        return
+    for o, v in opts:
+        if o == "--config":
+            scan.need("cargo --config can set a program cargo runs (build.rustc-wrapper)")
+        elif o in ("-C", "--manifest-path") and v is not None:
+            scan.confine(v, f"cargo {o}", ex.get(v, False))
+        elif o in ("--target-dir", "--artifact-dir", "--out-dir", "--lockfile-path") and v:
+            scan.target(v, ex.get(v, False))
+
+
+def _al_ruff(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    opts, pos = _getopt(args, "o", frozenset({"--output-file", "--cache-dir", "--config",
+                                             "--select", "--ignore", "--extend-select",
+                                             "--target-version", "--line-length"}))
+    if pos and pos[0] not in ("check", "format", "version"):
+        scan.need(f"'ruff {pos[0]}' is not on the local-action allowlist")
+        return
+    for o, v in opts:
+        if o in ("-o", "--output-file", "--cache-dir") and v:
+            scan.target(v, ex.get(v, False))
+    for p in pos[1:]:
+        scan.confine(p, "ruff path", ex.get(p, False))
+
+
+def _al_pip(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    opts, pos = _getopt(args, "i", frozenset({
+        "--index-url", "--extra-index-url", "--proxy", "--log", "--log-file", "--cache-dir",
+        "--cert", "--client-cert", "--timeout", "--retries", "--exists-action",
+        "--trusted-host", "--python", "--keyring-provider"}))
+    if pos and pos[0] not in ("list", "show", "freeze", "check"):
+        scan.need(f"'pip {pos[0]}' is not on the local-action allowlist")
+    for o, v in opts:
+        if o in ("--log", "--log-file") and v:
+            scan.target(v, ex.get(v, False))
+
+
+def _al_npm(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    opts, pos = _getopt(args, "Cw", frozenset({"--prefix", "--workspace", "--cache",
+                                              "--registry", "--loglevel"}))
+    if pos and pos[0] not in _NPM_SUBS:
+        scan.need(f"'npm {pos[0]}' is not on the local-action allowlist")
+    for o, v in opts:
+        if o in ("--prefix", "-C") and v is not None:
+            scan.confine(v, f"npm {o}", ex.get(v, False))
+        elif o in _NPM_EXEC_OPTS:
+            scan.need(f"npm {o} changes what npm runs")
+
+
+def _al_yarn(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    opts, pos = _getopt(args, "", frozenset({"--cwd"}))
+    if pos and pos[0] not in ("test", "run"):
+        scan.need(f"'yarn {pos[0]}' is not on the local-action allowlist")
+    for o, v in opts:
+        if o == "--cwd" and v is not None:
+            scan.confine(v, "yarn --cwd", ex.get(v, False))
+
+
+def _al_uv(scan: _Scan, args: list[str], ex: dict[str, bool]) -> None:
+    """`uv run` is a wrapper (_wrapper); this is every other uv subcommand."""
+    opts, pos = _getopt(args, "p", frozenset({"--directory", "--project", "--cache-dir",
+                                             "--python", "--config-file", "--color"}))
+    if pos and not (pos[0] == "tree" or (pos[0] == "pip" and pos[1:2] and pos[1] in (
+            "list", "show", "freeze", "check", "tree"))):
+        scan.need(f"'uv {' '.join(pos[:2])}' is not on the local-action allowlist")
+    for o, v in opts:
+        if o in ("--directory", "--project") and v is not None:
+            scan.confine(v, f"uv {o}", ex.get(v, False))
+        elif o == "--cache-dir" and v:
+            scan.target(v, ex.get(v, False))
+
+
+_PY_MODULE_CHECKS = {"pytest": _al_pytest, "json.tool": _al_json_tool, "py_compile": _al_compile,
+                     "compileall": _al_compile, "unittest": _al_unittest, "ruff": _al_ruff}
+_CHECKS = {
+    "find": _al_find, "rg": _al_rg, "ag": _al_ag, "sort": _al_sort, "uniq": _al_uniq,
+    "tree": _al_tree, "git": _al_git, "python": _al_python, "node": _al_node,
+    "pytest": _al_pytest, "go": _al_go, "cargo": _al_cargo, "ruff": _al_ruff, "pip": _al_pip,
+    "pip3": _al_pip, "npm": _al_npm, "yarn": _al_yarn, "uv": _al_uv,
+}
+
+
+def allowed_programs() -> frozenset[str]:
+    """Every program name check_action can run (D-322), for docs and tests."""
+    return _ALLOW_PLAIN | frozenset(_CHECKS)
 
 
 # ── P2.9-a: one policy for the three local lanes ─────────────────────────────
@@ -1480,8 +1954,9 @@ def destructive_reason(cmd: str) -> str | None:
 
 
 def check_action(cmd: str, root: Path) -> Verdict:
-    """``check_command`` then the destructive table: refuse > needs_approval > allow."""
-    verdict = check_command(cmd, root)
+    """``check_command`` plus the program allowlist (D-322), then the destructive
+    table: refuse > needs_approval > allow."""
+    verdict = _check(cmd, root, allowlist=True)
     if verdict.decision == REFUSE:
         return verdict
     why = destructive_reason(cmd)

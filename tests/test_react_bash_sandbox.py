@@ -54,8 +54,11 @@ def test_python_build_test_commands_allowed(tmp_path):
     assert "[exit 0]" in out and "42" in out
 
 
-def test_localhost_curl_allowed_for_dev_servers(tmp_path):
-    # egress to localhost is fine (dev servers, ollama); only external egress is blocked
-    ex = default_tool_executor(cwd=str(tmp_path))
-    out = ex("bash", {"command": "curl http://127.0.0.1:1/ --max-time 1"})
-    assert "blocked" not in out.lower()
+def test_localhost_curl_passes_the_regex_but_not_the_allowlist(tmp_path):
+    # The network regex lets localhost through (dev servers, ollama), but since
+    # D-322 (SAFEFIX) `curl` is not on write_policy's allowlist, so it is refused.
+    from llm_router.agentic.react import _bash_block_reason
+    cmd = "curl http://127.0.0.1:1/ --max-time 1"
+    assert _bash_block_reason(cmd) is None
+    out = default_tool_executor(cwd=str(tmp_path))("bash", {"command": cmd})
+    assert out.startswith("tool error") and "not on the local-action allowlist" in out, out
