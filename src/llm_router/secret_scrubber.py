@@ -6,7 +6,6 @@ leakage of API keys, tokens, passwords, and other credentials.
 """
 
 import re
-import urllib.parse
 from typing import Any
 
 # Common secret patterns to detect and redact
@@ -77,7 +76,7 @@ SECRET_PATTERNS = {
     # been measuring a gap both scrubbers shared. Three base64url segments
     # separated by dots, anchored on the "eyJ" that every JSON header
     # encodes to, so ordinary dotted identifiers are not swept up.
-    "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+    "jwt": re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
     "env_key_assignment": re.compile(r"\b[A-Z][A-Z0-9_]*_(?:API_)?KEY\s*[=:]\s*\S+"),
     "private_key": re.compile(
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
@@ -163,12 +162,9 @@ def scrub_text(text: str) -> str:
     """
     if not text or not isinstance(text, str):
         return text
-    if "%" in text:  # SECDET: a percent-encoded prefix (sk%2Dant-...) is read decoded; only a changed run is rewritten
-        text = _PCT_RUN.sub(_scrub_pct_run, text)
+    if "%" in text:  # SECDET: a percent-encoded prefix (sk%2Dant-...) is read decoded; only the secret span is rewritten
+        text = _scrub_percent_runs(text)
     return _scrub_plain(text)
-
-
-_PCT_RUN = re.compile(r"\S*%[0-9A-Fa-f]{2}\S*")
 
 
 def _scrub_plain(text: str) -> str:
@@ -177,11 +173,64 @@ def _scrub_plain(text: str) -> str:
     return text
 
 
-def _scrub_pct_run(m: "re.Match[str]") -> str:
-    run = m.group(0)
-    decoded = urllib.parse.unquote(run)
-    scrubbed = _scrub_plain(decoded)
-    return run if scrubbed == decoded else scrubbed
+_NONSPACE_RUN = re.compile(r"\S+")
+_PCT_OR_CHAR = re.compile(r"%[0-9A-Fa-f]{2}|.", re.DOTALL)
+#: What a key can be made of. An escape that decodes to one of these is read decoded; every other escape stays as typed.
+_KEY_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~")
+
+
+def _scrub_percent_runs(text: str) -> str:
+    """Linear in ``len(text)`` (no backtracking: a whitespace split, then one pass over a run that has an escape)."""
+    out: list[str] = []
+    last = 0
+    for m in _NONSPACE_RUN.finditer(text):
+        run = m.group(0)
+        if "%" not in run:
+            continue
+        scrubbed = _scrub_percent_run(run)
+        if scrubbed != run:
+            out.append(text[last:m.start()])
+            out.append(scrubbed)
+            last = m.end()
+    out.append(text[last:])
+    return "".join(out)
+
+
+def _scrub_percent_run(run: str) -> str:
+    """Redact only the secret spans of ``run``, found in its key-decoded form and mapped back to the original
+    characters, so ``%26`` / ``%2F`` / ``%20`` beside the secret stay exactly as they were typed."""
+    norm: list[str] = []
+    starts: list[int] = []   # norm index -> start offset in ``run``
+    ends: list[int] = []     # norm index -> end offset in ``run``
+    changed = False
+    for m in _PCT_OR_CHAR.finditer(run):
+        tok = m.group(0)
+        if len(tok) == 3 and chr(int(tok[1:], 16)) in _KEY_CHARS:
+            tok, changed = chr(int(tok[1:], 16)), True
+        norm.append(tok)
+        starts.extend([m.start()] * len(tok))
+        ends.extend([m.end()] * len(tok))
+    if not changed:
+        return run
+    normalised = "".join(norm)
+    spans: list[tuple[int, int, str]] = []
+    for name, pattern in SECRET_PATTERNS.items():
+        for sm in pattern.finditer(normalised):
+            a, b = sm.span()
+            if b > a and not any(a < e and s_ < b for s_, e, _ in spans):
+                spans.append((a, b, name))
+    if not spans:
+        return run
+    out, pos = [], 0
+    for a, b, name in sorted(spans):
+        lo, hi = starts[a], ends[b - 1]
+        if lo < pos:
+            continue
+        out.append(run[pos:lo])
+        out.append(f"[REDACTED-{name.upper()}]")
+        pos = hi
+    out.append(run[pos:])
+    return "".join(out)
 
 
 def _scrub_value(value: Any) -> Any:

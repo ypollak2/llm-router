@@ -323,18 +323,21 @@ def _reason(s: str) -> str:
 #: Secret shapes. Every quantifier is bounded, so a scan is linear in the text (a 48k-char run of ``[a-z0-9+.-]``
 #: took 1.6 s with the unbounded ``db_url_password`` scheme; LC-12h repair). Which shapes may REFUSE a call is
 #: ``HIGH_PRECISION`` below; the rest are counted by category (``local_privacy``) and nothing more.
+#: After a fixed-length body (GitHub 36, Google 35): anything but more key characters, or a typed filler run glued on to
+#: slip the token past the door (``...xxxxxxxx``, ``...abcdefgh``). SECDET.
+_TAIL_FILLER = r"(?=[xX]{8}|abcdefgh|ABCDEFGH|01234567|example|dummy)"
 _SECRET_SHAPES = {
     "anthropic_key": re.compile(r"sk-ant-[A-Za-z0-9_-]{32,256}"),
     # Listed before openai_key; openai_key excludes this exact shape so one key yields one name.
     "openrouter_key": re.compile(r"sk-or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-])"),
-    "openai_key": re.compile(r"sk-(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-]))(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]{0,300}\d)(?=[A-Za-z0-9_-]{0,300}[A-Za-z])[A-Za-z0-9_-]{32,256}"),
-    "google_key": re.compile(r"AIza[0-9A-Za-z_-]{35,128}"),
-    "aws_key_id": re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
-    "github_token": re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{50,255})"),
+    "openai_key": re.compile(r"(?:\bsk-|sk-(?=(?:proj|svcacct)-))(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-]))(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]{0,300}\d)(?=[A-Za-z0-9_-]{0,300}[A-Za-z])[A-Za-z0-9_-]{32,256}"),
+    "google_key": re.compile(r"AIza[0-9A-Za-z_-]{35}(?:(?![0-9A-Za-z_-])|" + _TAIL_FILLER + ")"),
+    "aws_key_id": re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    "github_token": re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{36}(?:(?![A-Za-z0-9])|" + _TAIL_FILLER + r")|github_pat_[A-Za-z0-9_]{50,255})"),
     "slack_token": re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,256}"),
     "private_key": re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----"),
-    "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}"),
-    "bearer_token": re.compile(r"\bBearer\s{1,8}(?=[A-Za-z0-9._~+/-]{0,300}\d)[A-Za-z0-9._~+/-]{30,512}=*"),
+    "jwt": re.compile(r"eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}"),
+    "bearer_token": re.compile(r"Bearer\s{1,8}(?=[A-Za-z0-9._~+/-]{0,300}\d)[A-Za-z0-9._~+/-]{30,512}=*"),
     "db_url_password": re.compile(
         r"\b[a-z][a-z0-9+.-]{0,31}://([^\s:/@]{1,64}):(?![$<{])([^\s@/]{8,128})@[\w.-]{1,255}", re.I),
 }
@@ -385,7 +388,7 @@ def _sequential(s: str) -> bool:
     """8+ consecutive ascending or descending characters (``01234567``, ``abcdefgh``): a typed placeholder."""
     run = 1
     for i in range(1, len(s)):
-        step = ord(s[i]) - ord(s[i - 1])
+        step = ord(s[i].lower()) - ord(s[i - 1].lower())
         run = run + 1 if (step == 1 and s[i].isalnum() and s[i - 1].isalnum()) else 1
         if run >= 8:
             return True
@@ -404,6 +407,39 @@ def _is_placeholder(value: str) -> bool:
         return True
     # whole delimiter-separated words only: a random key never splits into "key" or "test"
     return any(tok in _PLACEHOLDER_TOKENS for tok in re.split(r"[_\-. :/]+", low) if tok)
+
+
+def _strip_sequential(s: str) -> str:
+    """``s`` without its runs of 8+ consecutive ascending alphanumerics (the runs :func:`_sequential` flags)."""
+    keep = [True] * len(s)
+    run = 1
+    for i in range(1, len(s)):
+        run = run + 1 if (ord(s[i].lower()) - ord(s[i - 1].lower()) == 1 and s[i].isalnum() and s[i - 1].isalnum()) else 1
+        if run >= 8:
+            for k in range(i - run + 1, i + 1):
+                keep[k] = False
+    return "".join(c for c, k in zip(s, keep) if k)
+
+
+_PLACEHOLDER_SUBSTR_RE = re.compile("|".join(map(re.escape, _PLACEHOLDER_SUBSTR)), re.I)
+
+
+def _residue_is_real(value: str) -> bool:
+    """SECDET: after the filler a page can glue to or splice into a real token (``xxxxxxxx``, ``abcdefgh``, ``-example``,
+    ``your-key`` words) is cut out, is a long random body left? Then the filler did not make it a placeholder."""
+    s = _KEY_PREFIX.sub("", value, count=1)
+    s = _strip_sequential(_PLACEHOLDER_SUBSTR_RE.sub("", _FILLER_RUN.sub("", s)))
+    s = "".join(t for t in re.split(r"([_\-. :/]+)", s) if t.lower() not in _PLACEHOLDER_TOKENS)
+    s = re.sub(r"[_\-. :/]+", "", s)
+    return len(s) >= 24 and _random_looking(s, bits=3.5, distinct=12)
+
+
+def _is_placeholder_value(value: str) -> bool:
+    """A placeholder is judged on the token's own look: the markers ``<...>`` / ``${...}`` always are; any other
+    placeholder look counts only when no long random residue is left once the filler is removed."""
+    if "<" in value or ">" in value or "${" in value or "{{" in value:
+        return True
+    return _is_placeholder(value) and not _residue_is_real(value)
 
 
 def _random_looking(body: str, *, bits: float = 3.5, distinct: int = 10) -> bool:
@@ -522,11 +558,11 @@ def _findings(text: str) -> dict[str, bool]:
                     high = _jwt_is_real(m.group(0))
                 elif name == "bearer_token":
                     value = m.group(0).split(None, 1)[1].rstrip("=")
-                    high = not value.startswith("eyJ") and not _is_placeholder(value) and _random_looking(value)
+                    high = not value.startswith("eyJ") and not _is_placeholder_value(value) and _random_looking(value)
                 else:
                     value = m.group(0)
                     body = _KEY_PREFIX.sub("", value, count=1)
-                    high = not _is_placeholder(value) and _random_looking(
+                    high = not _is_placeholder_value(value) and _random_looking(
                         body, bits=3.0 if name == "aws_key_id" else 3.5, distinct=9 if name == "aws_key_id" else 12)
                 if high:
                     found[name] = True
