@@ -24,7 +24,8 @@ classified, and a socket trace shows a secret prompt makes no non-loopback conne
 * ``judge_cascade.judge_inline`` sends prompt + response to a Haiku judge with no private check. It is not reachable
   from any entry point (``test_judge_cascade_is_not_reachable``); ``test_..._would_leak_if_wired`` is a strict xfail.
 * LEAK sinks (strict xfail, ``test_leak_*``; fix PR "UN-04b"): llm_codex, llm_gemini, agent-route direct execution and
-  CLI delegation, direct_executor call_gemini / call_openai, auto-route API classifiers, playwright-compress Gemini.
+  CLI delegation, direct_executor call_gemini / call_openai, auto-route API classifiers. The playwright-compress Gemini
+  leak is fixed (UN-04c, #775): class `guarded`, and its test is a plain passing test.
 
 No real network, no real model, tmp homes (the lc12 fixtures). Secrets are generated at run time.
 """
@@ -237,8 +238,8 @@ SINK_FUNCS: dict[tuple[str, str, str], tuple[int, str, str]] = {
     ('hooks/auto-route.py', '_fetch_usage_inline', 'urlopen'): (1, 'probe', 'Anthropic usage endpoint, no prompt text'),
     ('hooks/auto-route.py', 'main', 'execute_agent'): (2, 'local', 'draft chain filtered to ollama/codex/gemini_cli (_free_tier_draft_chain, auto-route.py:3834); direct_executor executes ollama/gemini/openai only, so the draft runs on Ollama'),
     ('hooks/auto-route.py', 'main', 'execute_chain'): (1, 'local', 'same draft chain filter'),
-    ('hooks/playwright-compress.py', '_try_gemini', 'urlopen'): (1, 'LEAK', 'page snapshot (tool output, may hold a secret) to Gemini whenever GEMINI_API_KEY is set'),
-    ('hooks/playwright-compress.py', '_ollama_open', 'urlopen'): (1, 'local', 'loopback Ollama'),
+    ('hooks/playwright-compress.py', '_try_gemini', 'urlopen'): (1, 'guarded', 'secret door present (UN-04c, #775): _cloud_blocked -> local_privacy.scan_secrets, fails closed, no cloud: override'),
+    ('hooks/playwright-compress.py', '_ollama_open', 'urlopen'): (1, 'local', 'Ollama base; a remote OLLAMA_HOST is refused for a snapshot holding a secret by _cloud_blocked in _try_ollama (#775)'),
     ('hooks/playwright-compress.py', '_ollama_open', 'open_url'): (1, 'local', 'loopback Ollama'),
     ('resolver/calibrate.py', 'CloudCompleter._cli', 'run_codex'): (1, 'fixed prompt', 'calibration probes'),
 }
@@ -387,7 +388,7 @@ def test_every_off_machine_sink_is_classified():
     assert sum(found.values()) >= 100, "the sink scan found too few sites: an empty scan passes everything"
     assert classify_sinks(found) == []
     assert {v[1] for v in SINK_FUNCS.values()} | {v[1] for v in SINK_FILES.values()} == {
-        "probe", "local", "primitive", "router door", "proxy", "fixed prompt", "opt-in", "LEAK"}
+        "probe", "local", "primitive", "router door", "proxy", "fixed prompt", "opt-in", "LEAK", "guarded"}
 
 
 def test_unscanned_families_are_named():
@@ -402,7 +403,7 @@ def test_sink_summary_counts():
         by_class[cls] += n
     assert sum(by_class.values()) == sum(found.values())
     leaks = sorted({f"{k[0]}::{k[1]}" for k in SINK_FUNCS if SINK_FUNCS[k][1] == "LEAK"})
-    assert by_class["LEAK"] == 13 and len(leaks) == 11, (by_class["LEAK"], leaks)
+    assert by_class["LEAK"] == 12 and len(leaks) == 10, (by_class["LEAK"], leaks)
 
 
 def test_negative_control_a_new_urlopen_call_site_fails(tmp_path, monkeypatch):
@@ -922,7 +923,6 @@ def test_leak_auto_route_classify_with_openai(request):
     _leak("auto_route_openai", request)
 
 
-@_LEAK
-def test_leak_playwright_compress_gemini(request):
-    """hooks/playwright-compress.py:193: the page snapshot goes to Gemini whenever GEMINI_API_KEY is set."""
+def test_playwright_compress_gemini_refuses_a_secret_snapshot(request):
+    """hooks/playwright-compress.py _try_gemini was a leak; UN-04c (#775) added the secret door (_cloud_blocked)."""
     _leak("playwright_gemini", request)
