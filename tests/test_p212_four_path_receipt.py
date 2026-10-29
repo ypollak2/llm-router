@@ -49,8 +49,11 @@ PATHS = ("cli", "npm", "plugin", "nl")
 #: each not_wired branch of run_full: a snippet host (cursor), a host that cannot be wired
 #: globally (windsurf) and an unsupported one (pi).
 HOSTS = ("claude-code", "codex", "gemini-cli", "cursor", "windsurf", "pi")
-#: pi's expected receipt status. "not_wired" (unsupported) on main today; P212-6 (#797)
-#: wires pi, and then this one line becomes "wired".
+#: pi's expected receipt status. "not_wired" (unsupported) on main today. When P212-6 (#797)
+#: wires pi, flipping this alone is NOT enough: pi's wired row has hook_version None and an
+#: extra `smoke` field, so the WIRED/ROW_FIELDS checks must allow both for pi; a host such as
+#: kimi must take pi's place as the unsupported one in HOSTS; and install._pi_binary must be
+#: stubbed in _twin and in the npm child _BOOT so a machine with a real pi never runs it.
 PI_STATUS = "not_wired"
 WIRED = {"claude-code", "codex", "gemini-cli"} | ({"pi"} if PI_STATUS == "wired" else set())
 ROW_FIELDS = ("status", "reason", "via", "hook_version")
