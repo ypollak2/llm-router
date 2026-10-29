@@ -259,9 +259,38 @@ def _population(label: str, day: str, key: str, actions: list[dict], turns: list
     }
 
 
+def classifier_agreement(start: float, until: float, rows: Iterable[dict] | None = None) -> dict | None:
+    """W2-8 / R-CLS-6: rules-vs-kNN classifier agreement over the day window [start, until), from the
+    ``classifier_agreement.jsonl`` rows (``classifier_health``; the same comparison its status line makes).
+    Returns ``None`` when no row was compared in the window: unmeasured is null, never 0%. Otherwise
+    ``{n, agree_pct, window, source}``. It is agreement between two deciders, NOT accuracy. The LLM-shadow
+    fallback is a different population and is not read here."""
+    from llm_router import classifier_health as ch
+
+    if rows is None:
+        rows = ch.read_agreement()
+    n = agree = 0
+    for r in rows:
+        ts = r.get("ts")
+        if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not start <= ts < until:
+            continue
+        if r.get("kind") == "classifier_shadow" or "knn_tier" not in r:
+            continue
+        c = ch._compared(r)
+        if c is None:
+            continue
+        n += 1
+        agree += c[1]
+    if not n:
+        return None
+    return {"n": n, "agree_pct": round(100.0 * agree / n, 2), "window": {"since": start, "until": until},
+            "source": ch.AGREEMENT_FILE, "status": "measured",
+            "note": "rules vs kNN agreement, not ground-truth accuracy"}
+
+
 def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
                 manifest_ids: Iterable[str] = (), code_rev: str | None = None,
-                local_by_cause=None) -> dict:
+                local_by_cause=None, agreement_rows: Iterable[dict] | None = None) -> dict:
     """The row for one UTC ``day`` (see the module docstring). ``partial`` is True when the day has not
     ended at ``now``; the window then ends at ``now``. ``local_by_cause``: None reads ``usage.db``
     (``ledger_view.local_by_cause``, F23), or pass a dict / ``False`` (skip)."""
@@ -359,6 +388,10 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
         "code_rev": code_rev if code_rev is not None else _code_rev(),
         "partial": partial,
         "synthetic_manifest_ids": len(ids),
+        "classifier_agreement": (classifier_agreement(start, until, agreement_rows) or {
+            "n": 0, "agree_pct": None, "window": {"since": start, "until": until},
+            "source": "classifier_agreement.jsonl", "status": "not_measured",
+            "note": "no rules-vs-kNN comparison logged in this window (kNN off or no traffic); not 0%"}),
         "populations": pops,
         "day_wide": {"local_by_cause": local_by_cause or None,
                      "local_by_cause_note": "usage.db routing_decisions served local that day (proxy ledger rows are NOT "
