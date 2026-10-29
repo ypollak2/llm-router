@@ -36,7 +36,7 @@ rewrites it) when it isn't serving the step itself. With Tool Search off,
 every request inlines every deferred tool's full schema, which inflates the
 cacheable prefix (`Dynamic tool loading: 0/134 deferred tools included`
 becomes `134/134` in `claude --debug api` output) and, on a cache miss, is
-billed at the 1-hour cache-write rate — 2x the input rate. In a debug capture,
+billed at the 1-hour cache-write rate — 2x the input rate <!-- provenance: exempt (Anthropic list price: 1-hour cache write is 2x input) -->. In a debug capture,
 the first Anthropic call of a proxied session (input + cache write + cache
 read) grew sharply with Tool Search off.
 
@@ -414,8 +414,8 @@ about a fifth of the Anthropic cost, because cached re-reads are already cheap.
 `est_cost_usd` reconciles against Claude Code's own `total_cost_usd` (from
 `claude -p ... --output-format json`) only when nothing was served locally:
 a served step's reply reports Ollama's own prompt/eval token counts as its
-`usage` (`translate.py`), and Claude Code's own cost tracker bills those as
-Sonnet-5 tokens even though Anthropic never saw the call. On a session with
+`usage` (`translate.py`), and Claude Code's own cost tracker bills those at
+Sonnet-5 prices even though Anthropic never saw the call. On a session with
 served steps, expect `total_cost_usd` to run ahead of `est_cost_usd` by
 roughly that much — it is Claude Code overcounting a reply it received, not
 the ledger undercounting one it sent.
@@ -812,7 +812,7 @@ complete and consistent, else keeps the `est.` figure.
 
 `python scripts/reconcile_proxy_cost.py [--exclude SID ...]` (read-only) compares the
 ledger with transcript totals (sub-agent transcripts included): a fully forwarded session
-must match within 3%, a fully local one must carry exactly 0 Anthropic tokens. Calls the
+must match within `--tolerance` (default 3%), a fully local one must carry exactly 0 Anthropic tokens. Calls the
 ledger bills that the transcript never records (title/side calls, interrupted turns) show
 as `not_in_transcript` and are real spend.
 

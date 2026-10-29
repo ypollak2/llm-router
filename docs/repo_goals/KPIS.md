@@ -476,7 +476,7 @@ A row is **complete** when every field that can apply to its type is recorded:
 
 ### G3 verdict: the PRD field list per writer (PLAN v16 R8, P0.8-c)
 
-The audit above reads the proxy's tier fields only; on 2026-10-08 it read 93.0% while no other writer was checked.
+The audit above reads the proxy's tier fields only; on 2026-10-08 it printed one proxy-only percentage while no other writer was checked.
 The verdict (`--json`: `kpis.G3.prd`) scores four writers apart, each over the PRD field list: `session_id`,
 `task_id`, model, tier, reason, tokens, cost, latency, outcome. NULL is missing.
 

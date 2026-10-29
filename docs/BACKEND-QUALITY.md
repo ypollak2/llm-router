@@ -49,7 +49,8 @@ task is impossible). All 35 passed that screen.
 | claude | sonnet | 24/25 | 25/25 | 12s |
 
 A three-way tie. For contained work the local model is indistinguishable from
-both cloud agents at 4-8x the speed and zero marginal cost.
+both cloud agents at 4-8x the speed (median 3s against 12s and 24s, 25 tasks,
+PR #137) and zero marginal cost.
 
 ### hard — the gap appears
 
@@ -104,7 +105,7 @@ obvious fix passes separates nothing, so it does not belong here.
 The separation this suite produces is not a single ranking. On **correctness**
 local sits clearly below both cloud agents (8 vs 10). Codex and Claude are level
 on correctness and separate on **discipline**: 3/11 clean versus 10/11, at 2.8x
-the wall-clock.
+the wall-clock (median 50s against 18s, 11 tasks, PR #137).
 
 
 ## What actually failed
