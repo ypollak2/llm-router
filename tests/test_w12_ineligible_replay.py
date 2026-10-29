@@ -428,6 +428,28 @@ def test_mutant_filter_disabled_makes_both_checks_go_above_zero(replay, monkeypa
     print("W12 mutant ineligible per door: " + " ".join(f"{d}={v}" for d, v in sums.items()))
 
 
+# ── the finding the replay made ──────────────────────────────────────────────
+
+def test_precision_tier_fronts_openai_only_when_the_map_allows_it(tmp_path, monkeypatch):
+    """A short exact-answer prompt is fronted with ``openai/gpt-4o-mini``; that injection used to skip the map."""
+    from llm_router.router import route_and_call
+    from llm_router.types import Complexity, TaskType
+
+    def served(openai_status: str) -> str:
+        state = fx.MapState(statuses={"ollama": None, "gemini": "connected", "openai": openai_status,
+                                      "deepseek": None, "groq": None},
+                            base_chain=("gemini/gemini-2.5-flash", "openai/gpt-4o-mini"), task="query",
+                            complexity="simple")
+        _install(state, monkeypatch)
+        return _run(route_and_call(TaskType.QUERY, "what is 17 * 23?", complexity_hint=Complexity.SIMPLE)).model
+
+    _world_env(monkeypatch, tmp_path)
+    _stub_transport(monkeypatch)
+    _use_db(tmp_path / "precision.db", monkeypatch)
+    assert served("connected") == "openai/gpt-4o-mini"      # the tier works when the map allows it
+    assert served("disconnected").startswith("gemini/")     # and yields to the map when it does not
+
+
 # ── the generator itself ─────────────────────────────────────────────────────
 
 def test_fixture_is_deterministic_and_matches_the_door_corpus_shape():
