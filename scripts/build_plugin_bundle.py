@@ -41,6 +41,13 @@ _CODEX_EVENT_ALIASES: dict[str, str] = {
 }
 
 
+#: Hooks only the Claude Code plugin ships (never written to settings.json by the CLI installer,
+#: so they are not in ``_HOOK_DEFS``): (script, event, matcher, timeout seconds). P212-3.
+_PLUGIN_ONLY_HOOKS: list[tuple[str, str, str, int]] = [
+    ("plugin-install.py", "SessionStart", "", 5),
+]
+
+
 def _hooks_json(root_var: str) -> dict:
     """Build a hooks.json mapping event -> matcher groups -> handlers.
 
@@ -59,6 +66,12 @@ def _hooks_json(root_var: str) -> dict:
         if timeout is not None:
             handler["timeout"] = timeout
         events.setdefault(event, {}).setdefault(matcher, []).append(handler)
+
+    if root_var == "${CLAUDE_PLUGIN_ROOT}":
+        for src_name, event, matcher, timeout in _PLUGIN_ONLY_HOOKS:
+            events.setdefault(event, {}).setdefault(matcher, []).append(
+                {"type": "command", "command": f"{root_var}/hooks/{src_name}", "timeout": timeout}
+            )
 
     out: dict[str, list] = {}
     for event, by_matcher in events.items():
@@ -113,6 +126,17 @@ _COMMANDS: dict[str, str] = {
         "saved today, which tiers absorbed the work, and whether any quota is\n"
         "under pressure. Say plainly if the quota has not been measured yet.\n"
     ),
+    "setup": (
+        "---\n"
+        "description: Wire every detected host to this plugin's version (asks first)\n"
+        "---\n\n"
+        "The plugin's SessionStart check found that the hosts wired by llm-router are not on\n"
+        "this plugin's version. List what that changes (the other detected hosts: Codex, Gemini\n"
+        "CLI and so on; Claude Code's hooks and MCP entry already come from this plugin) and ask\n"
+        "me to confirm. Only after I say yes, run `npx -y llm-routing install --auto --via-plugin`\n"
+        "and report its `receipt:` line and any host that failed. Running it records my consent,\n"
+        "so later plugin updates are applied in the background.\n"
+    ),
     "savings": (
         "---\n"
         "description: Report routing savings over a window\n"
@@ -165,6 +189,8 @@ def build() -> dict[Path, str]:
     # then fails CI whenever a source hook is edited without rebuilding.
     hooks_src = REPO / "src" / "llm_router" / "hooks"
     files[REPO / "hooks" / "codex-stop.py"] = (hooks_src / "codex-stop.py").read_text()
+    for src_name, _event, _matcher, _timeout in _PLUGIN_ONLY_HOOKS:
+        files[REPO / "hooks" / src_name] = (hooks_src / src_name).read_text()
     for src_name, _installed, _event, _matcher in _HOOK_DEFS:
         origin = hooks_src / src_name
         if origin.is_file():
