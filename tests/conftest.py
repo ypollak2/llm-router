@@ -150,7 +150,13 @@ _REAL_POPULATE_IN_BACKGROUND = None
 def _no_background_registry_probe(monkeypatch):
     """TESTLEAK: no test reaches the real ``populate_in_background`` (see the audit hook above)."""
     global _REAL_POPULATE_IN_BACKGROUND
-    from llm_router import agentic_registry
+    try:
+        from llm_router import agentic_registry
+    except ImportError:
+        # Windows: agentic_registry -> hooks.agent_loop -> toolkit.sandbox imports the
+        # Unix-only `resource` (PR #799 CI, test-windows-claude-creds). install() cannot
+        # import it there either, so there is nothing to spawn and nothing to stub.
+        return
 
     if _REAL_POPULATE_IN_BACKGROUND is None:
         _REAL_POPULATE_IN_BACKGROUND = agentic_registry.populate_in_background
