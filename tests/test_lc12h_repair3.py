@@ -66,30 +66,31 @@ def _route(prompt, **k):
 
 
 # ----------------------------------------------------------------------------- (a) labelled examples, JWT
-def test_a_values_in_labelled_blocks_are_not_refused_and_unlabelled_ones_are():
+def test_a_values_in_labelled_blocks_are_refused_like_unlabelled_ones():
+    """SECDET: a filename / config cue is page- or site-controlled text and exempts nothing; the value's own look does."""
     key = fx.real_shaped("openai_key", 5)
     aws = fx.real_shaped("aws_key_id", 6)
     token = fx.real_shaped("github_token", 7)
-    labelled = [   # filename / config cues only (repair 4 dropped the free-text words: they launder a real key)
+    labelled = [
         f"# .env.example\nOPENAI_API_KEY=\"{key}\"\n",
         f".env.sample:\nAPI_KEY=\"{key}\"",
         f"Here is a sample config:\n```\nOPENAI_API_KEY={key}\n```",
         f"sample env file\n\nAWS_ACCESS_KEY_ID={aws}",
         f"cat config/secrets.yml.template\nGITHUB_TOKEN={token}",
     ]
-    assert [t[:30] for t in labelled if high(t)] == []
-    assert [t[:30] for t in labelled if local_privacy.scan_secrets(t)] == []
+    assert all(high(t) for t in labelled)
+    assert all(local_privacy.scan_secrets(t) for t in labelled)
     unlabelled = [f"OPENAI_API_KEY={key}", f"debug this: {aws}", f"my token is {token}"]
     assert all(high(t) for t in unlabelled)
 
 
-def test_a_a_real_secret_a_few_lines_below_a_label_is_still_refused():
+def test_a_a_real_secret_beside_a_label_is_refused_at_any_distance():
     aws = "AWS_ACCESS_KEY_ID=" + fx.real_shaped("aws_key_id", 9)
-    assert high("sample env file\n" + aws) == []
-    assert high("sample env file\nA=1\n" + aws) == []                      # the label is two lines above: covered
-    assert high("sample env file\nA=1\nB=2\n" + aws) == ["aws_key_id"]    # three lines above: not covered
+    assert high("sample env file\n" + aws) == ["aws_key_id"]
+    assert high("sample env file\nA=1\n" + aws) == ["aws_key_id"]
+    assert high("sample env file\nA=1\nB=2\n" + aws) == ["aws_key_id"]
     mixed = "# .env.example\nAPI_KEY=" + fx.real_shaped("openai_key", 10) + "\n\n\n\nnow my real one:\n" + aws
-    assert high(mixed) == ["aws_key_id"]
+    assert high(mixed) == ["aws_key_id", "openai_key"]
 
 
 def test_a_a_real_jwt_is_refused_and_fixtures_and_the_jwt_io_sample_are_not():

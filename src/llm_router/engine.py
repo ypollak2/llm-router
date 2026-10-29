@@ -36,10 +36,11 @@ import re
 import sqlite3
 import threading
 import time
+import urllib.parse
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 from llm_router import capped_log, decision_ledger, failopen, ml_lexical, prompt_key
 from llm_router.classify import GATEWAY_POLICY, _score_categories, classify_signals
@@ -323,14 +324,14 @@ def _reason(s: str) -> str:
 #: took 1.6 s with the unbounded ``db_url_password`` scheme; LC-12h repair). Which shapes may REFUSE a call is
 #: ``HIGH_PRECISION`` below; the rest are counted by category (``local_privacy``) and nothing more.
 _SECRET_SHAPES = {
-    "anthropic_key": re.compile(r"\bsk-ant-[A-Za-z0-9_-]{32,256}"),
+    "anthropic_key": re.compile(r"sk-ant-[A-Za-z0-9_-]{32,256}"),
     # Listed before openai_key; openai_key excludes this exact shape so one key yields one name.
-    "openrouter_key": re.compile(r"\bsk-or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-])"),
-    "openai_key": re.compile(r"\bsk-(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-]))(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]{0,300}\d)(?=[A-Za-z0-9_-]{0,300}[A-Za-z])[A-Za-z0-9_-]{32,256}"),
-    "google_key": re.compile(r"\bAIza[0-9A-Za-z_-]{35,128}"),
-    "aws_key_id": re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
-    "github_token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{50,255})"),
-    "slack_token": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,256}"),
+    "openrouter_key": re.compile(r"sk-or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-])"),
+    "openai_key": re.compile(r"sk-(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-]))(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]{0,300}\d)(?=[A-Za-z0-9_-]{0,300}[A-Za-z])[A-Za-z0-9_-]{32,256}"),
+    "google_key": re.compile(r"AIza[0-9A-Za-z_-]{35,128}"),
+    "aws_key_id": re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    "github_token": re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{50,255})"),
+    "slack_token": re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,256}"),
     "private_key": re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----"),
     "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}"),
     "bearer_token": re.compile(r"\bBearer\s{1,8}(?=[A-Za-z0-9._~+/-]{0,300}\d)[A-Za-z0-9._~+/-]{30,512}=*"),
@@ -346,9 +347,9 @@ _ASSIGN = re.compile(
 #: and entropy and no placeholder look, a PEM private-key block with a body, a bearer token with entropy, a
 #: database URL whose password is not a common word, and a JWT that decodes to real-looking claims (not the jwt.io
 #: sample or a test fixture). ``assigned_literal`` (any quoted 20-char mixed literal after "token =") is LOG-ONLY:
-#: counted, never refused. Whatever a line, or the two lines above it, labels with a filename or config cue
-#: (``.env.example``, ``example.env``, "sample config", a ``.example`` / ``.sample`` / ``.template`` path) is never
-#: high either: :func:`_labelled_example`. Free-text words ("fake", "dummy", "placeholder") are not cues.
+#: counted, never refused. Only the value itself can exempt it (placeholder look); text around it never does: a
+#: nearby ``.env.example`` / ``.example`` host / "sample config" label is page- or site-controlled text and exempts nothing
+#: (SECDET). A percent-encoded prefix (``sk%2Dant-``) is read decoded; a key glued to preceding letters is found.
 HIGH_PRECISION = frozenset({"anthropic_key", "openrouter_key", "openai_key", "google_key", "aws_key_id",
                             "github_token", "slack_token", "private_key", "bearer_token", "db_url_password", "jwt"})
 #: What a person reads in a refusal (the category, never the value).
@@ -432,29 +433,6 @@ def _entropy(s: str) -> float:
     return -sum(c / n * math.log2(c / n) for c in (s.count(ch) for ch in set(s)))
 
 
-#: A filename or config cue near a value that says the value is an example: ``.env.example`` / ``.env.sample`` /
-#: ``example.env``, "sample config" / "example env file", or a path ending ``.example`` / ``.sample`` /
-#: ``.template``. Free-text words ("fake", "dummy", "placeholder", "not a real", "for illustration") are NOT cues:
-#: anyone can write them next to a real key (#721 review, round 2), so they exempt nothing.
-_EXAMPLE_LABEL = re.compile(
-    r"\.env\.(?:example|sample|template)\b|\b(?:example|sample)\.env\b|"
-    r"\b(?:example|sample)\s+(?:env|config|configuration)\b|"
-    r"[\w./-]+\.(?:example|sample|template)(?![\w-]|\.\w)", re.I)
-
-
-def _labelled_example(text: str, start: int, end: int) -> bool:
-    """True when the line holding ``text[start:end]``, or one of the two lines above it (a fence or heading), carries
-    a filename/config example cue (:data:`_EXAMPLE_LABEL`). The cue is the author's statement that the value is not
-    real; it exempts a real-looking value on purpose, and the door counts every exemption
-    (``exempted_by_label:<label>``). Bounded to 300 characters before and 200 after the value."""
-    window_start = text.rfind("\n", 0, start) + 1
-    for _ in range(2):
-        window_start = text.rfind("\n", 0, max(0, window_start - 1)) + 1
-    line_end = text.find("\n", end)
-    lo, hi = max(window_start, start - 300), min(len(text) if line_end < 0 else line_end, end + 200)
-    return bool(_EXAMPLE_LABEL.search(text, lo, hi))
-
-
 _JWT_DUMMY_CLAIM = re.compile(
     r"^(?:1234567890|123456|123|1|0|john doe|jane doe|me|you|subject|sub|"
     r"(?:user|demo|test\w*|admin|alice|bob|foo|bar|baz|fake\w*|dummy\w*|sample\w*|example\w*)[-_. ]?\d{0,4})$", re.I)
@@ -510,13 +488,23 @@ def _windows(text: str):
             return
 
 
-def secret_findings(text: str, on_exempt: Callable[[str], None] | None = None) -> dict[str, bool]:
+def secret_findings(text: str) -> dict[str, bool]:
     """``{shape name: is_high}`` for the secret shapes in ``text`` (names only, never the secret).
 
     ``is_high`` is True when some match of a ``HIGH_PRECISION`` shape is a real-looking value: not a placeholder
     (``AKIA...EXAMPLE``, ``ghp_xxxx...``, ``YOUR_API_KEY_HERE``, ``postgres:postgres@``), long and random enough.
-    ``on_exempt(name)`` is called for each real-looking match a filename/config label exempted (the door counts them).
+    A text holding a ``%XX`` escape is also scanned percent-decoded (``sk%2Dant-...``).
     Linear in ``len(text)``."""
+    found = _findings(text)
+    if "%" in text:
+        decoded = urllib.parse.unquote(text)
+        if decoded != text:
+            for name, high in _findings(decoded).items():
+                found[name] = found.get(name, False) or high
+    return found
+
+
+def _findings(text: str) -> dict[str, bool]:
     found: dict[str, bool] = {}
     for offset, window in _windows(text):
         for name, pat in _SECRET_SHAPES.items():
@@ -540,10 +528,6 @@ def secret_findings(text: str, on_exempt: Callable[[str], None] | None = None) -
                     body = _KEY_PREFIX.sub("", value, count=1)
                     high = not _is_placeholder(value) and _random_looking(
                         body, bits=3.0 if name == "aws_key_id" else 3.5, distinct=9 if name == "aws_key_id" else 12)
-                if high and _labelled_example(window, m.start(), m.end()):
-                    high = False  # a filename/config cue labels it an example (.env.example, sample config, ...)
-                    if on_exempt is not None:
-                        on_exempt(name)
                 if high:
                     found[name] = True
         if "assigned_literal" not in found:

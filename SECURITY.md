@@ -57,13 +57,13 @@ a bearer token with entropy, a database URL whose password is not a common word,
 not refused: AWS documentation keys (`...EXAMPLE`), runs of `x` / `*` / `0` / `.`, `YOUR_...` / `<...>` /
 `${...}` / `changeme` / `placeholder` / `dummy` / `test` values (a value that is itself shaped like one), sequential typing, URL passwords equal to the
 user name or in a short common-word list (`postgres:postgres@`, `user:password@`, `admin:admin@`), the jwt.io sample
-and JWTs whose identity claims are all test/demo values (or `alg: none`, or whose signature is a placeholder). A value on
-a line, or up to two lines under a line, that carries a filename or config cue (`.env.example` / `.env.sample` /
-`.env.template` / `example.env`, "sample config" / "example env", or a path ending `.example` / `.sample` /
-`.template`) is not refused either: the cue is the author's statement that it is an example, so a real secret next to
-such a cue is exempt too (residual: anyone can type the cue). Free-text words (`fake`, `dummy`, `placeholder`, "not a
-real", "for illustration") are not cues and exempt nothing: `fake? no. <key>` is refused. Separate residual: the placeholder-value exemptions look at the value itself (a stopword list and substrings such as `example`, `dummy`, `placeholder`, `changeme`), so a real secret that happens to contain one of those words is exempt. Every exemption is counted
-as `exempted_by_label:<category>`. Quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a
+and JWTs whose identity claims are all test/demo values (or `alg: none`, or whose signature is a placeholder). A filename or config
+label near a value (`.env.example`, a `.example` host, "sample config") exempts nothing: that text is page- or
+site-controlled, so only the value's own placeholder look exempts it (SECDET). Free-text words (`fake`, `dummy`, "for
+illustration") are not cues either: `fake? no. <key>` is refused. Residual: the placeholder-value exemptions look at the
+value itself (a stopword list and substrings such as `example`, `dummy`, `placeholder`, `changeme`), so a real secret that
+happens to contain one of those words is exempt. A percent-encoded prefix (`sk%2Dant-`) is read decoded, and a key glued to
+preceding letters is found. Quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a
 counter and the category, never the value) and never refused. `engine.secret_findings` is the detector; its quantifiers
 are bounded and it scans long text in overlapping windows, so it is linear in the text and misses nothing at a
 window edge. A refused call skips the semantic cache and the judge queue, gets no emergency fallback to the budget

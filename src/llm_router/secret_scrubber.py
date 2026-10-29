@@ -6,6 +6,7 @@ leakage of API keys, tokens, passwords, and other credentials.
 """
 
 import re
+import urllib.parse
 from typing import Any
 
 # Common secret patterns to detect and redact
@@ -46,7 +47,7 @@ SECRET_PATTERNS = {
     # Merged from session_store (CHZ-SEC-01: unify the drifted scrubbers so this
     # module is the single superset). GitHub tokens, generic UPPER_KEY=value
     # assignments, and PEM private-key blocks.
-    "github_token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"),
+    "github_token": re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     # ── Added 2026-09-21. This module calls itself the single source of truth
     # that every content store delegates to. Checking that claim against the
     # FIVE other secret-pattern tables in this same repository showed it was not
@@ -60,7 +61,7 @@ SECRET_PATTERNS = {
     # Six stores delegate here -- result_cache, semantic_cache, session_store,
     # context, envelope, prompt_capture -- so a Slack token reaching any of them
     # was persisted in plaintext while a weaker, unused module knew the pattern.
-    "slack_token": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
+    "slack_token": re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
     # `sk-` is already covered above; `pk-`/`rk-` are the publishable/restricted
     # siblings that the other tables matched and this one did not.
     "prefixed_key": re.compile(r"\b(?:pk|rk)-[A-Za-z0-9_\-]{16,}"),
@@ -162,9 +163,25 @@ def scrub_text(text: str) -> str:
     """
     if not text or not isinstance(text, str):
         return text
+    if "%" in text:  # SECDET: a percent-encoded prefix (sk%2Dant-...) is read decoded; only a changed run is rewritten
+        text = _PCT_RUN.sub(_scrub_pct_run, text)
+    return _scrub_plain(text)
+
+
+_PCT_RUN = re.compile(r"\S*%[0-9A-Fa-f]{2}\S*")
+
+
+def _scrub_plain(text: str) -> str:
     for pattern_name, pattern in SECRET_PATTERNS.items():
         text = pattern.sub(f"[REDACTED-{pattern_name.upper()}]", text)
     return text
+
+
+def _scrub_pct_run(m: "re.Match[str]") -> str:
+    run = m.group(0)
+    decoded = urllib.parse.unquote(run)
+    scrubbed = _scrub_plain(decoded)
+    return run if scrubbed == decoded else scrubbed
 
 
 def _scrub_value(value: Any) -> Any:
