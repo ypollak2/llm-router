@@ -394,7 +394,8 @@ def _ollama_rows(inp: MapInputs, now: float) -> list[dict]:
             competence=comp,
         ))
     if not rows:
-        rows.append(_row("ollama", "local", "ollama", reason="Ollama reachable, no models installed"))
+        rows.append(_row("ollama", "local", "ollama", reason="Ollama reachable, no models installed",
+                     privacy=privacy_class("ollama/-", base)))
     return rows
 
 

@@ -25,8 +25,12 @@ def _home(tmp_path, monkeypatch):
     monkeypatch.delenv("OLLAMA_URL", raising=False)
 
 
-def _map(tmp_path, names, base="http://localhost:11434"):
-    tags = {"models": [{"name": n, "digest": "d", "modified_at": "m"} for n in names]}
+LOCAL, REMOTE = "http://localhost:11434", "http://203.0.113.9:11434"
+
+
+def _map(tmp_path, names, base="http://localhost:11434", reachable=True):
+    tags = ({"models": [{"name": n, "digest": "d", "modified_at": "m"} for n in names]}
+            if reachable else None)
     inp = rm.MapInputs(
         seats=Seats(claude=Seat(), codex=Seat(), gemini=Seat(), ollama=Seat(kind="local")),
         env={}, ollama_url=base, http_get=lambda url: tags if url.endswith("/api/tags") else None,
@@ -61,7 +65,7 @@ def test_remote_base_is_one_event_and_a_notice(tmp_path):
     assert mr.notice_text(ev) == "map: ! qwen3:8b privacy local->cloud"
 
 
-def test_a_cloud_tag_replacing_the_row_class_is_one_event(tmp_path):
+def test_a_hand_edited_row_class_change_is_one_event(tmp_path):
     old = _map(tmp_path, ["x"])
     new = json.loads(json.dumps(old))
     for r in new["resources"]:
@@ -88,3 +92,32 @@ def test_the_notice_reaches_pending_notice(tmp_path):
     new = _map(tmp_path, ["qwen3:8b"], base="http://203.0.113.9:11434")
     mr.record_changes(old, new, source="test", now=T0)
     assert "privacy local->cloud" in mr.pending_notice(now=T0 + 1)
+
+
+def _placeholder_class(m):
+    (row,) = [r for r in m["resources"] if r["resource"] == "ollama"]
+    return row["privacy"]
+
+
+@pytest.mark.parametrize("reachable", [False, True], ids=["unreachable", "no_models"])
+def test_placeholder_rows_are_classed_by_the_base(tmp_path, reachable):
+    assert _placeholder_class(_map(tmp_path, [], LOCAL, reachable)) == "local"
+    assert _placeholder_class(_map(tmp_path, [], REMOTE, reachable)) == "cloud"
+
+
+@pytest.mark.parametrize("reachable", [False, True], ids=["unreachable", "no_models"])
+def test_a_base_flip_on_a_placeholder_is_one_event_per_flip(tmp_path, reachable):
+    a, b, c = (_map(tmp_path, [], base, reachable) for base in (LOCAL, REMOTE, LOCAL))
+    assert [(e["before"], e["after"]) for e in _privacy(mr.diff_maps(a, b))] == [("local", "cloud")]
+    assert [(e["before"], e["after"]) for e in _privacy(mr.diff_maps(b, c))] == [("cloud", "local")]
+
+
+def test_a_base_flip_with_models_is_one_event_per_flip(tmp_path):
+    a, b, c = (_map(tmp_path, ["qwen3:8b"], base) for base in (LOCAL, REMOTE, LOCAL))
+    assert len(_privacy(mr.diff_maps(a, b))) == 1 and len(_privacy(mr.diff_maps(b, c))) == 1
+
+
+def test_outage_then_recovery_with_an_unchanged_base_is_silent(tmp_path):
+    up = _map(tmp_path, ["qwen3:8b"])
+    down = _map(tmp_path, [], reachable=False)
+    assert _privacy(mr.diff_maps(up, down)) == [] and _privacy(mr.diff_maps(down, up)) == []
