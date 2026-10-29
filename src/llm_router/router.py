@@ -458,9 +458,15 @@ async def _build_and_filter_chain(
                 )
                 if not m.startswith(blocked_provider)
             ]
-            return fallback_chain or get_model_chain(
-                RoutingProfile.BALANCED, task_type,
-                is_subscription_mode=True,
+            # W1-2 (UN-09 review M1): the static fallback answers to the resource map and the user's rules
+            # like every other chain (it used to be returned unfiltered, so a disconnected provider was served).
+            from llm_router import map_reader as _fb_map
+            return _fb_map.apply_to_chain(
+                fallback_chain or get_model_chain(
+                    RoutingProfile.BALANCED, task_type,
+                    is_subscription_mode=True,
+                ),
+                reorder=False, task=task_type.value,
             )
         return [model_override]
 
@@ -5118,9 +5124,15 @@ async def route_and_call(
                 )
                 subject_str = (classification_data or {}).get("subject")
                 if subject_str:
+                    _before_spec = models_to_try
                     models_to_try = apply_subject_specialist_by_subject(
                         models_to_try, subject_str, get_active_policy()
                     )
+                    # W1-2 (UN-09 review S2): a specialist fronted after the build answers to the map and rules too.
+                    from llm_router import map_reader as _spec_map
+                    if models_to_try[:1] != _before_spec[:1] and not _spec_map.apply_to_chain(
+                            models_to_try[:1], reorder=False, task=task_type.value):
+                        models_to_try = _before_spec
             except Exception as _spec_err:
                 log.debug(
                     "Subject specialist override skipped (continuing): %s",
