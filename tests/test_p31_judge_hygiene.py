@@ -222,8 +222,8 @@ def test_enqueue_cost_does_not_grow_with_queue_length(home, monkeypatch):
     or uniformly stalled run sits near 1. Medians, not p95: the design allows one full check
     per stride crossed (an occasional slow sample on the large queue), which the read-count
     test above bounds exactly. The absolute p95 bar catches a constant cost the ratio cannot
-    see (e.g. a synchronous network call); 50 ms is 4.3x the worst contended CI p95 seen
-    (11.68 ms) and over 40x the local p95 (0.3-1.1 ms).
+    see (e.g. a synchronous network call); 50 ms is about 4x the one contended CI p95 on
+    record (11.68 ms: job 123384734519, run 40855328190, timing (3.13), PR #788).
     """
     small = _fill_queue(home / "small" / "judge_queue.jsonl", 50)
     large = _fill_queue(home / "large" / "judge_queue.jsonl", 2000)
