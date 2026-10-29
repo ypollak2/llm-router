@@ -16,7 +16,7 @@ were denominator errors, not reasoning errors. Read this before quoting a rate.
 ### Never quote a rate from `auto-route-debug.log` without excluding test runs
 
 Test-suite invocations write to the production log with `session_id=unknown`.
-On 2026-08-31 that was **1,037 of 1,938 entries — 54% of the file.** A rate
+On 2026-08-31 that was **1,037 of 1,938 entries — 54% of the file** (PR #137). A rate
 computed over the raw log is wrong by roughly a factor of two, and it is wrong
 in a direction that looks like a regression.
 
@@ -203,6 +203,7 @@ scorer (2026-09-15, n=115 each):
     acceptable        69.6%   69.6%      identical
     drafts produced   70.4%   77.4%      7 points apart
     verdict flips     24 of 115 prompts changed verdict between runs
+    source            PR #139, n=115 per run
 
 The headline was identical and the internals were not; the two effects cancelled.
 

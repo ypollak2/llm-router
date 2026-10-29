@@ -5,6 +5,7 @@
 > acceptance is stable across identical runs, draft PRODUCTION swings 7 points,
 > and 24 of 115 prompts flip verdict for free — so per-prompt comparisons are
 > worthless and only differences above ~5 points on acceptance mean anything.
+> Source: PR #139 (n=115 per run).
 > G1 was the whole gain. The sections below are the pre-G1 state, kept because
 > the arithmetic of what is and is not addressable has not changed.
 
@@ -16,7 +17,7 @@ between here and there, sized rather than assumed.
 
 ## The current distribution
 
-| Outcome | Count | Share |
+| Outcome (n=115, PR #139) | Count | Share |
 |---|---|---|
 | **Usable draft** | 66 | **57%** |
 | Drafted but unusable | 17 | 15% |
@@ -24,7 +25,7 @@ between here and there, sized rather than assumed.
 
 Broken down:
 
-| Reason | Count | Share | Is it wrong? |
+| Reason (n=115, PR #139) | Count | Share | Is it wrong? |
 |---|---|---|---|
 | `no free-tier model available` | 14 | 12% | **No** — complex code/research to Claude, the stated carve-out |
 | `cites files that do not exist` | 15 | 13% | Yes — but only **2 unique names**, repeated |
@@ -33,10 +34,11 @@ Broken down:
 | `context-dependent prompt` | 3 | 3% | Yes |
 | `asserts a status it cannot observe` | 2 | 2% | Yes |
 
-**18% is correct behaviour, not a gap.** The honest ceiling is therefore ~82%,
-and the addressable distance from 57% is **25 points**.
+**18% is correct behaviour, not a gap** (the 12% and 6% rows above, n=115,
+PR #139). The honest ceiling is therefore ~82%, and the addressable distance
+from 57% is **25 points**.
 
-## G1 — The model invents plan filenames (13%, the largest single gap)
+## G1 — The model invents plan filenames (the largest single gap)
 
 15 rejections come from **two** names: `30_CI_GAP_PLAN.md` and
 `docs/PHASE_1_PLAN.md`. Verified fake — `git ls-files` finds neither, and the
@@ -53,7 +55,7 @@ plausible filename rather than saying it cannot see one.
 * **Risk**: low, but it pushes toward deferral, which is the other failure mode —
   so the gate must watch both numbers, not one.
 
-## G2 — Grounding rejects 5 drafts outright (4%)
+## G2 — Grounding rejects 5 drafts outright
 
 Separate from G1: these are rejected *before* relaying, by
 `_draft_is_relayable`. One cited `_quarantined_tests/...`, a path that existed
@@ -64,7 +66,7 @@ when the draft was written and does not now.
 * **Gate**: classify all 5 by hand. No code until that is known.
 * **Cost**: 15 minutes reading 5 drafts.
 
-## G3 — 3 prompts still hit the context gate (3%)
+## G3 — 3 prompts still hit the context gate
 
 Down from 95 before the rescue arms were unblocked. What remains is the residue
 the OKF, session and tool-loop arms could not resolve.
@@ -74,7 +76,7 @@ the OKF, session and tool-loop arms could not resolve.
 * **Gate**: each of the 3 either drafts, or has a recorded reason why it cannot.
 * **Cost**: small. This is the tail, not the body.
 
-## G4 — 2 drafts claim a status they cannot observe (2%)
+## G4 — 2 drafts claim a status they cannot observe
 
 Down from 10 before the system prompt was rewritten. The remaining 2 are the hard
 residue: confabulation under missing information, which instruction alone does not
@@ -89,7 +91,7 @@ reliably suppress.
 
 Five defects in two days, each caught only after a number had been reported:
 contaminated corpus, survivorship-biased p90, a partial rate quoted as final, an
-instrument that could not explain 7% of its outcomes, and a moving scorer.
+instrument that could not explain some of its outcomes, and a moving scorer.
 
 * **Fix**: before any further quality claim, run `bench_session_replay.py` twice
   on an unchanged tree and report the spread. If two identical runs differ by more
@@ -104,12 +106,13 @@ instrument that could not explain 7% of its outcomes, and a moving scorer.
     G1  (13%, one prompt edit, re-scored from disk in seconds)
     G2  (4%, 15 minutes of reading before any code)
     G3, G4  (3% and 2%, the tail)
+    (shares from the n=115 table above, PR #139)
 
 ## What this plan will NOT reach
 
 100%. Eighteen points are correct behaviour: complex work going to Claude is the
 stated design, and a bare "continue" carries nothing to route. A realistic target
-after G1–G4 is **~75-80% usable**, against 57% today.
+after G1–G4 is **~75-80% usable**, against 57% today (n=115, PR #139).
 
 Saying so now is the point. The previous plan implied the gap was all addressable,
 and it is not.

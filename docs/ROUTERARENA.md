@@ -42,7 +42,7 @@ The grading run is not dated in the repo. These files entered `main` on
 2026-09-15 (commit `ccee00db`), so every figure in this section is from that
 date or earlier.
 
-| Metric | Value |
+| Metric (8,400 queries, `submissions/routerarena/PR_BODY.md`) | Value |
 |---|---|
 | **Arena Score** | **72.35** |
 | Accuracy | 72.59% |
@@ -51,7 +51,8 @@ date or earlier.
 | Failed / abnormal entries | 0 / 0 |
 
 Routed model distribution: `gemini-3.1-flash-lite-preview` 63.1%,
-`qwen/qwen3-235b-a22b-2507` 20.9%, `deepseek/deepseek-v4-flash` 16.0%.
+`qwen/qwen3-235b-a22b-2507` 20.9%, `deepseek/deepseek-v4-flash` 16.0%
+(5,299, 1,756 and 1,345 of 8,400 rows in `submissions/routerarena/llm-router-knn.json`).
 
 ### Against our own previous entry
 
@@ -68,7 +69,7 @@ question got you a different model and therefore a different answer quality, for
 no reason a user could see or predict. The current router uses features that
 survive paraphrase — a frozen sentence embedding plus deterministic structural
 signals (length band, code markers, script, equation and MCQ shape) — and flips
-on 87.
+on 87. Both flip counts are from `submissions/routerarena/PR_BODY.md`.
 
 If you only take one thing from this page: **a router that changes its mind when
 you rephrase the question is not routing, it is sampling.**

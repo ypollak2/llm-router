@@ -36,8 +36,9 @@ several of them wrong. Where a count is stated, the command that produces it is 
   `_turn_blocked`, `mode` column added, `realized` flag threaded through.
   `tests/test_savings_realized_gate.py`.
 - **Item 8 (`tool_intercept` cannot reach real work)** — partially addressed.
-  `&&` conjunctions admitted; eligibility 8/492 → 12/492. Pipes and redirects
-  still refused, which is 436 of the remainder, so this item is only ~2% closed.
+  `&&` conjunctions admitted; eligibility 8 of 492 → 12 of 492 real Bash
+  commands (PR #137). Pipes and redirects still refused, which is 436 of the
+  remainder, so this item is only ~2% closed.
 - **Item 9 (PreToolUse deny cannot substitute a result)** — confirmed by
   experiment and recorded in the memory note; no code change, the design avoids
   it instead.
