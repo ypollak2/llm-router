@@ -650,6 +650,12 @@ def _pmax(resource):
     return max(known) if known else None
 
 
+def quota_pressure(resource) -> float | None:
+    """The resource's quota pressure in 0..1: the higher of its session and weekly readings,
+    measured or estimated only; ``None`` when neither is known (the P2.3 score's ``pmax``)."""
+    return _pmax(resource)
+
+
 def _reset_in_h(reset_at, now):
     if not isinstance(reset_at, str):
         return None

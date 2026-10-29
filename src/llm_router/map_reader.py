@@ -195,19 +195,21 @@ def apply_to_chain(
     *,
     reorder: bool = True,
     view: MapView | None = None,
+    task: str | None = None,
 ) -> list[T]:
-    """:func:`_apply_map`, then the user's stored ``ban`` / ``order`` rules (P2.13,
-    UN-01). The rules apply even with no usable map (they are the user's own
-    words, not map facts), and are fail-open: an unreadable ``routing.yaml`` or a
-    raising rule leaves the map-filtered chain unchanged. User order beats the
-    map's ranking and the P2.3 spread (D-125); ``reorder=False`` (a pin) keeps
-    bans only."""
+    """:func:`_apply_map`, then the user's stored rules (P2.13, UN-01/UN-02):
+    ``ban`` / ``order``, hit ``cap`` s, ``no_paid_api`` and, for *task* (the
+    call's task type value), ``local_only``. The rules apply even with no usable
+    map (they are the user's own words, not map facts), and are fail-open: an
+    unreadable ``routing.yaml`` or a raising rule leaves the map-filtered chain
+    unchanged. User order beats the map's ranking and the P2.3 spread (D-125);
+    ``reorder=False`` (a pin) keeps the exclusions only."""
     out = _apply_map(chain, key, reorder=reorder, view=view)
     try:
         from llm_router import user_rules
 
         rules = user_rules.effective_rules()
-        return user_rules.apply_rules(out, key, rules, reorder=reorder) if rules else out
+        return user_rules.apply_rules(out, key, rules, reorder=reorder, task=task) if rules else out
     except Exception as exc:
         from llm_router import failopen
 

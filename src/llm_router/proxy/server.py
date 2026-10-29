@@ -452,7 +452,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 # F33: the window check counts irreducible tokens only. A pin with a known
                 # small window that passes is forwarded the UNTRIMMED body; this path does
                 # not trim history (docs/empty-chain-behaviour.md).
-                pin_ok = needs is None or bool(capability_filter.filter_chain([cfg.model], needs))
+                # UN-02: the stored `prefer` exclusions (ban, hit cap, no paid API) hold this
+                # pin too; an excluded pin keeps the call on Claude like a capability miss.
+                from llm_router import user_rules
+                pin_ok = (needs is None or bool(capability_filter.filter_chain([cfg.model], needs))) \
+                    and user_rules.allows(cfg.model)
                 choice = {"task_type": "local_agent", "complexity": "pinned",
                           "chain_head": [cfg.model] if pin_ok else [],
                           "model": cfg.model if pin_ok else None}

@@ -17,8 +17,10 @@ stores and validates rules. Round B (UN-01) reads them: ``map_reader.apply_to_ch
 applies ``ban`` and ``order`` rules (:func:`apply_rules`) at read time at every door
 that builds a chain (the resource map does not bake them in, so removing a rule takes
 effect at once). Unvalidated local models (P0.15) are appended after the rules run:
-a ban removes them, but an order rule does not move them. ``cap`` and ``local_only``
-are stored but not yet applied.
+a ban removes them, but an order rule does not move them. UN-02 adds the exclusions
+``cap`` (a hit cap drops its target until the window rolls), ``no_paid_api``
+(:data:`UNPAID_PROVIDERS`) and ``local_only`` (the task's chain keeps only entries that
+stay on this machine); like a ban they also apply to a pinned chain.
 """
 
 from __future__ import annotations
@@ -27,7 +29,9 @@ import fnmatch
 import json
 import os
 import re
+import sys
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -349,14 +353,203 @@ def _matches(target: dict, model_id: str) -> bool:
     return glob is None or fnmatch.fnmatchcase(model, glob)
 
 
+#: ``no paid API`` (UN-02): the providers that never bill per call. Local runtimes
+#: (``ledger_view.LOCAL_PROVIDERS``) and the two subscription CLIs, which are treated as
+#: unpaid because they run on the user's seat (as ``cost.log_usage`` costs them 0; an API-key
+#: login for either is not told apart here). Every other provider is a paid API, including
+#: every provider in ``tools/setup._PROVIDER_REGISTRY`` (each is reached with an API key; a test
+#: pins it) and a provider this list does not know. Two are conditional: ``openai_compat`` is
+#: unpaid only when its configured base URL is loopback (it can name a remote, key-billed
+#: endpoint, config SEC-002), and ``anthropic`` only in the Claude subscription mode, the one
+#: mode in which the router never exports an Anthropic API key
+#: (``router._keep_reachable_providers``).
+UNPAID_PROVIDERS = frozenset({"ollama", "lm_studio", "vllm", "llamacpp", "codex", "gemini_cli"})
+
+
+def _claude_subscription() -> bool:
+    """The Claude subscription mode: the loaded config's setting in a process that has it (the
+    MCP server, the proxy), else ``LLM_ROUTER_CLAUDE_SUBSCRIPTION`` as the hooks read it."""
+    cfg = sys.modules.get("llm_router.config")
+    if cfg is not None:
+        try:
+            return bool(cfg.get_config().llm_router_claude_subscription)
+        except Exception as exc:  # noqa: BLE001 - fall back to the variable the hooks read
+            failopen.record("CHZ-FO-USER-RULES-READ", exc)
+    return os.environ.get("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "").strip().lower() in ("1", "true", "yes")
+
+
+def _compat_base_is_loopback() -> bool:
+    """``openai_compat_base_url`` of the loaded config is a loopback URL. A process without the
+    config loaded (a hook) cannot tell, so the endpoint counts as paid there."""
+    cfg = sys.modules.get("llm_router.config")
+    if cfg is None:
+        return False
+    from llm_router.local_privacy import is_loopback_base
+
+    return is_loopback_base(cfg.get_config().openai_compat_base_url)
+
+
+def is_paid_api(provider: str) -> bool:
+    """True when a call to *provider* is billed per call (see :data:`UNPAID_PROVIDERS`)."""
+    if provider in UNPAID_PROVIDERS:
+        return False
+    if provider == "openai_compat":
+        return not _compat_base_is_loopback()
+    return not (provider == "anthropic" and _claude_subscription())
+
+
+def _stays_local(model_id: str) -> bool:
+    """``local_privacy.stays_local``: an Ollama model on a loopback daemon, not a ``-cloud`` tag
+    (the NFR-PRIV definition of "stays on this machine"). Imported only when a rule needs it."""
+    from llm_router.local_privacy import stays_local
+
+    return stays_local(model_id)
+
+
+def _bare_model(provider: str, model: str) -> str:
+    """A ledger row's model without its provider prefix (rows hold both spellings)."""
+    return model[len(provider) + 1:] if model.startswith(provider + "/") else model
+
+
+def _cap_hit(rule: dict, executed: list[tuple[str, str]] | None, now: float | None) -> bool:
+    target, n = rule["target"], rule["n"]
+    if rule["unit"] == "day":
+        rows = executed or []
+        used = sum(1 for p, m in rows if _matches(target, f"{p}/{_bare_model(p, m)}"))
+        return used >= n
+    from llm_router import map_reader, resource_map
+
+    data = map_reader.load_data(now=now)
+    if data is None:
+        return False            # no fresh map: pressure unknown, the cap is not hit
+    pressures = [resource_map.quota_pressure(r) for r in data["resources"]
+                 if r.get("status") == "connected"
+                 and str(r.get("chain_id", "")).split("/", 1)[0] in target["providers"]]
+    known = [p for p in pressures if p is not None]
+    return bool(known) and max(known) * 100.0 >= n
+
+
+#: How long a cap reading is reused while neither the rules, the ledger files nor the map
+#: change. Bounds how late a cap that rolls over (or a hit written by another process before
+#: SQLite touches the files) is seen; a chain build otherwise reads the ledger up to four times.
+CAP_CACHE_TTL_S = 5.0
+_cap_cache: dict[tuple, tuple[float, list[dict]]] = {}
+
+
+def _file_sig(path) -> tuple | None:
+    try:
+        st = os.stat(path)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _cap_cache_key(caps: list[dict]) -> tuple:
+    from llm_router import ledger_view
+
+    db = str(ledger_view._db_path(None))
+    key: tuple = (json.dumps(caps, sort_keys=True), db, _file_sig(db), _file_sig(db + "-wal"))
+    if any(r.get("unit") == "pct" for r in caps):
+        from llm_router import map_reader, resource_map
+
+        key += (str(resource_map.map_path()), map_reader.token())
+    return key
+
+
+def cap_hits(rules: list[dict], *, now: float | None = None) -> list[dict]:
+    """The ``cap`` rules that are hit now. A ``day`` cap counts the router-executed calls of its
+    target in the rolling 24 h (``ledger_view.router_executed_models``, D-125); a ``pct`` cap
+    compares the provider's quota pressure on the fresh resource map (the higher of the session
+    and weekly readings, measured or estimated only) with its percent. A hit cap drops its
+    target until the window rolls. Fail-open: a cap whose reading fails is not hit, and the
+    failure is recorded as ``CHZ-FO-USER-RULES-READ``; unknown pressure or no ledger is 0 use.
+    With ``now`` omitted the result is reused for :data:`CAP_CACHE_TTL_S` while the rules, the
+    ledger files (``usage.db`` and its WAL) and the map are unchanged."""
+    caps = [r for r in rules if r.get("kind") == "cap"]
+    if not caps:
+        return []
+    if now is not None:
+        return _read_caps(caps, now)
+    try:
+        key = _cap_cache_key(caps)
+    except Exception as exc:  # noqa: BLE001 - no cache key: read uncached
+        failopen.record("CHZ-FO-USER-RULES-READ", exc)
+        return _read_caps(caps, None)
+    t = time.monotonic()
+    cached = _cap_cache.get(key)
+    if cached is not None and cached[0] > t:
+        return cached[1]
+    hit = _read_caps(caps, None)
+    try:
+        key = _cap_cache_key(caps)   # after the read: opening a WAL ledger can create its -wal file
+    except Exception as exc:  # noqa: BLE001 - keep the pre-read key
+        failopen.record("CHZ-FO-USER-RULES-READ", exc)
+    _cap_cache.clear()
+    _cap_cache[key] = (t + CAP_CACHE_TTL_S, hit)
+    return hit
+
+
+def _read_caps(caps: list[dict], now: float | None) -> list[dict]:
+    executed: list[tuple[str, str]] | None = None
+    if any(r.get("unit") == "day" for r in caps):
+        try:
+            from llm_router import ledger_view
+
+            executed = ledger_view.router_executed_models(ledger_view.rolling(24.0, now=now))
+        except Exception as exc:  # noqa: BLE001 - an unreadable ledger never blocks routing
+            failopen.record("CHZ-FO-USER-RULES-READ", exc)
+            caps = [r for r in caps if r.get("unit") != "day"]
+    hit = []
+    for rule in caps:
+        try:
+            if _cap_hit(rule, executed, now):
+                hit.append(rule)
+        except Exception as exc:  # noqa: BLE001 - fail-open per cap
+            failopen.record("CHZ-FO-USER-RULES-READ", exc)
+    return hit
+
+
+def _token_of(hit: list[dict]) -> tuple[str, ...]:
+    return tuple(sorted(str(r.get("id", r.get("text", ""))) for r in hit))
+
+
+def cap_token(rules: list[dict] | None = None) -> tuple[str, ...] | None:
+    """Cache-key part for chain caches: the ids of the caps hit now (``None`` without caps). A
+    cap that is hit or rolls over changes the chain with the map and the rules file unchanged."""
+    rules = effective_rules() if rules is None else rules
+    if not any(r.get("kind") == "cap" for r in rules):
+        return None
+    return _token_of(cap_hits(rules))
+
+
+def allows(model_id: str, *, task: str | None = None) -> bool:
+    """True when the stored rules leave *model_id* in a one-entry chain (bans, hit caps,
+    ``no_paid_api`` and, for *task*, ``local_only``; order rules cannot drop it). For a
+    configured pin that bypasses the chain builders. Fail-open: a rule read that raises allows."""
+    try:
+        rules = effective_rules()
+        return not rules or bool(apply_rules([model_id], lambda m: m, rules, reorder=False, task=task))
+    except Exception as exc:  # noqa: BLE001 - a rule read never blocks routing
+        failopen.record("CHZ-FO-USER-RULES-READ", exc)
+        return True
+
+
 def apply_rules(chain: Sequence[T], key: Callable[[T], str], rules: list[dict], *,
-                reorder: bool = True) -> list[T]:
-    """*chain* without the entries a ``ban`` rule names, then reordered so each
-    ``order`` rule's ``first`` entries precede its ``then`` entries (relative order
-    inside a group is kept; entries the rules do not name stay where they were).
-    ``reorder=False`` (a pinned model, a floor chain) applies bans only."""
-    bans = [r["target"] for r in rules if r.get("kind") == "ban"]
-    out = [m for m in chain if not any(_matches(b, key(m)) for b in bans)]
+                reorder: bool = True, task: str | None = None,
+                now: float | None = None) -> list[T]:
+    """*chain* without the entries a ``ban`` rule or a hit ``cap`` names, without paid APIs
+    under ``no_paid_api``, and, when a ``local_only`` rule names *task*, without every entry
+    that does not stay on this machine (an empty result is the caller's no-route path). Then
+    reordered so each ``order`` rule's ``first`` entries precede its ``then`` entries (relative
+    order inside a group is kept; entries the rules do not name stay where they were).
+    ``reorder=False`` (a pinned model, a floor chain) applies the exclusions only."""
+    drops = [r["target"] for r in rules if r.get("kind") == "ban"]
+    drops += [r["target"] for r in cap_hits(rules, now=now)]
+    out = [m for m in chain if not any(_matches(b, key(m)) for b in drops)]
+    if any(r.get("kind") == "no_paid_api" for r in rules):
+        out = [m for m in out if not is_paid_api(key(m).partition("/")[0])]
+    if task is not None and any(r.get("kind") == "local_only" and r.get("task") == task for r in rules):
+        out = [m for m in out if _stays_local(key(m))]
     orders = [r for r in rules if r.get("kind") == "order"] if reorder else []
     for _ in range(len(orders) + 1):          # chained rules (A before B before C) settle in n passes
         changed = False

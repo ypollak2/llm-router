@@ -1,8 +1,9 @@
 # `llm-router prefer` (P2.13)
 
-Natural-language routing priorities, English and Hebrew. Round A (this change)
-parses, echoes and stores them. Routing does not change until the doors read the
-stored rules (round B).
+Natural-language routing priorities, English and Hebrew. Round A parses, echoes and
+stores them. Round B reads them where chains are built: the MCP/router door, the hook
+and SDK chain builder, and the proxy's non-Claude model choice (see "What routing does
+with each rule" below).
 
 ```
 llm-router prefer "codex before claude"        # order
@@ -28,6 +29,31 @@ llm-router prefer --list | --remove p1 | --clear
 - Contradictions are refused at write time: an order cycle, a ban on an order's first
   target, bans that exclude every provider, `only local` with ollama banned, a cap out of
   range (day n >= 1, percent 1-100).
+
+## What routing does with each rule
+
+- **order / ban**: an order puts the first target ahead of the second in the chain; a ban
+  removes the target.
+- **cap N/day**: once the router has executed N calls for the target in the rolling 24 hours,
+  the target drops from the chain until older calls age out. Only calls the router itself
+  sends count and are limited (MCP llm tools, hook- and SDK-routed calls). Claude Code
+  conversation turns, proxy-forwarded ones included, are neither counted nor limited.
+- **cap N%**: the target drops while its provider's quota pressure on the resource map
+  (`llm-router map`) is at or above N%. No fresh map, or no measured or estimated pressure,
+  means the cap is not hit.
+- **only local for <task>**: for that task type the chain keeps only Ollama models on a
+  loopback daemon that are not `-cloud` tags. LM Studio, vLLM and llama.cpp do not count as
+  local for this rule. With no such model the request gets the usual no-route result. Other
+  task types are unchanged.
+- **no paid API**: keeps local runtimes (Ollama, LM Studio, vLLM, llama.cpp), Codex and
+  Gemini CLI (treated as unpaid because they run on your seat), an `openai_compat` endpoint
+  only when its base URL is loopback, and Claude only in Claude subscription mode. Every
+  API-key provider is dropped.
+- Bans, caps, no paid API and only-local also apply to a pinned model, including the proxy's
+  configured `--model` pin (an excluded pin keeps the call on Claude). Order rules do not move
+  a pin. The `--serve local-agent` pin has no task type, so only-local does not apply to it.
+- Not implemented: a ban or cap on a Claude model at the proxy's tier decision
+  (`proxy/tiers.py`). A cap that cannot be read never blocks routing.
 
 ## Where it is stored
 

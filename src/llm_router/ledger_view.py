@@ -326,6 +326,38 @@ def executed_by_provider(bounds: Bounds, *, db_path=None, proxy_path=None,
     return counts
 
 
+def router_executed_models(bounds: Bounds, *, db_path=None,
+                           timeout_s: float = 0.25) -> list[tuple[str, str]] | None:
+    """The router-executed calls in the window as ``(provider, model)``: the ``routing_decisions``
+    half of :func:`executed_rows` (same window, provenance and real-decision filter) with the model
+    kept. Proxy rows are left out: a ``prefer`` cap counts router-executed calls (D-125), and a
+    forwarded proxy row is the host session's own call. ``None`` when there is no database or no
+    ``routing_decisions`` table, so "no data" is not "0 calls". Unlike the other readers here, a
+    database that exists but cannot be read raises ``sqlite3.Error``: the P2.13 cap reader fails
+    open on it and records it (``CHZ-FO-USER-RULES-READ``)."""
+    con = _connect(db_path, timeout_s)
+    if con is None:
+        return None
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(routing_decisions)")}
+        if not cols:
+            return None
+        where, params = bounds.sql(cols)
+        if bounds.since_ts is not None:
+            # A raw text bound the timestamp index can range-seek on (``datetime(timestamp)``
+            # cannot use it). It is the DATE one day before the window starts, so no row inside
+            # the window is dropped whatever its spelling (``T`` or space separator, a UTC offset
+            # within a day); ``where`` still decides the exact window.
+            where = f"timestamp >= ? AND {where}"
+            params = [_utc_str(bounds.since_ts - 86400.0)[:10], *params]
+        prov = "AND provenance = 'runtime' " if "provenance" in cols else ""
+        return [(str(p), str(m)) for p, m in con.execute(
+            "SELECT COALESCE(NULLIF(final_provider, ''), 'unknown'), COALESCE(final_model, '') "
+            f"FROM routing_decisions WHERE {where} {prov}AND ({real_decision_sql(con)})", params)]
+    finally:
+        con.close()
+
+
 #: ``qa_policy.QA_STRIP_PROVIDERS`` copy (that module is not stdlib-only); a test pins equality.
 LOCAL_BY_CAUSE_PROVIDERS = LOCAL_PROVIDERS | {"openai_compat"}
 
