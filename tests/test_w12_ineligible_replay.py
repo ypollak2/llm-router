@@ -42,10 +42,12 @@ from pathlib import Path
 
 import pytest
 
-from llm_router import cost, decision_stamp, failopen, ineligible_routes as ir, map_reader
+from llm_router import cost, decision_stamp, failopen, ineligible_routes as ir, map_reader, repo_config
 from llm_router import resource_map as rm
 from llm_router.types import LLMResponse
 from tests import w12_replay_fixture as fx
+
+_REAL_LOAD_USER_CONFIG = repo_config.load_user_config   # conftest replaces it per test; routing.yaml tests need the real one
 
 #: One module-scoped replay (about 50 s on a loaded machine) feeds every test; pytest-timeout's default 30 s
 #: would kill the first test that builds it, and ``xdist_group`` keeps one worker from building it twice.
@@ -330,6 +332,15 @@ def _count(run: DoorRun) -> dict:
     return ir.compute(days=1.0, until=time.time() + 60, db_path=run.db, proxy_path=run.proxy)
 
 
+@pytest.fixture(autouse=True)
+def _no_ollama_port_connections():
+    """Every test of the module: nothing opened a socket to the Ollama port (the guard only exists once the
+    module-scoped replay has run, so the check also covers tests that never build it)."""
+    before = len(OLLAMA_CONNECTS)
+    yield
+    assert OLLAMA_CONNECTS[before:] == []
+
+
 @pytest.fixture(scope="module")
 def replay(tmp_path_factory):
     """The whole replay, once: ``{door: DoorRun}`` plus the still-active patch context for the controls."""
@@ -575,6 +586,96 @@ def test_subscription_override_fallback_honours_the_map(tmp_path, monkeypatch):
                                complexity_hint=Complexity.MODERATE, model_override=SUBSCRIPTION_MODEL))
     config_module._config = None
     assert seen.provider not in {"openai", "deepseek", "groq"}, seen.model
+
+
+BLOCK_VARIANTS = ["env", "routing.yaml", ".llm_router.yml"]
+
+
+def _block_openai(variant: str, tmp_path: Path, monkeypatch) -> None:
+    """Block ``openai`` the three ways a user can (the map says it is connected, so only the block can stop it)."""
+    import llm_router.router as router_module
+
+    if variant == "env":
+        monkeypatch.setenv("LLM_ROUTER_BLOCK_PROVIDERS", "openai")
+        return
+    where = (tmp_path / "home" / ".llm-router" / "routing.yaml") if variant == "routing.yaml" \
+        else (tmp_path / ".llm_router.yml")
+    where.write_text("block_providers:\n  - openai\n")
+    monkeypatch.setattr(router_module, "get_repo_config", repo_config.effective_config)  # undo conftest's empty one
+    monkeypatch.setattr(repo_config, "load_user_config", _REAL_LOAD_USER_CONFIG)
+
+
+def _all_connected_state() -> fx.MapState:
+    return fx.MapState(
+        statuses={"ollama": "connected", "gemini": "connected", "openai": "connected",
+                  "deepseek": "connected", "groq": "connected"},
+        base_chain=("ollama/qwen3:8b", "gemini/gemini-2.5-flash", "openai/gpt-4o-mini", "deepseek/deepseek-chat"),
+        task="query", complexity="moderate")
+
+
+@pytest.mark.parametrize("variant", BLOCK_VARIANTS)
+def test_subscription_override_fallback_honours_block_providers(variant, tmp_path, monkeypatch):
+    """Review M1' (fails on the previous head): the fallback for a named ``anthropic/*`` model skipped the user's
+    provider blocks (env hard block, routing.yaml, .llm_router.yml) that the auto chain applies."""
+    import llm_router.config as config_module
+    from llm_router.router import _build_and_filter_chain, route_and_call
+    from llm_router.types import Complexity, RoutingProfile, TaskType
+
+    _world_env(monkeypatch, tmp_path)
+    _stub_transport(monkeypatch)
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
+    _use_db(tmp_path / "m1b.db", monkeypatch)
+    _block_openai(variant, tmp_path, monkeypatch)
+    _install(_all_connected_state(), monkeypatch)
+    from llm_router.config import get_config
+    chain = _run(_build_and_filter_chain(TaskType.QUERY, RoutingProfile.BALANCED, SUBSCRIPTION_MODEL,
+                                         Complexity.MODERATE, Complexity.MODERATE, get_config()))
+    assert chain and not [m for m in chain if m.startswith("openai/")], chain
+    seen = _run(route_and_call(TaskType.QUERY, "summarise the retry policy in two lines",
+                               complexity_hint=Complexity.MODERATE, model_override=SUBSCRIPTION_MODEL))
+    config_module._config = None
+    assert seen.provider != "openai", seen.model
+
+
+def test_subscription_override_fallback_drops_unreachable_providers(tmp_path, monkeypatch):
+    """Review M1' (fails on the previous head): providers with no key (moonshot, zhipu, arcee...) were in the fallback."""
+    import llm_router.config as config_module
+    from llm_router.config import get_config
+    from llm_router.router import _build_and_filter_chain
+    from llm_router.types import Complexity, RoutingProfile, TaskType
+
+    _world_env(monkeypatch, tmp_path)
+    _stub_transport(monkeypatch)
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
+    _use_db(tmp_path / "m1c.db", monkeypatch)
+    _install(_all_connected_state(), monkeypatch)
+    config = get_config()
+    chain = _run(_build_and_filter_chain(TaskType.QUERY, RoutingProfile.BALANCED, SUBSCRIPTION_MODEL,
+                                         Complexity.MODERATE, Complexity.MODERATE, config))
+    config_module._config = None
+    reachable = config.available_providers | {"ollama", "codex", "gemini_cli"}
+    assert chain and all(m.split("/", 1)[0] in reachable for m in chain), chain
+
+
+@pytest.mark.parametrize("variant", BLOCK_VARIANTS)
+def test_subject_specialist_honours_the_provider_blocks(variant, tmp_path, monkeypatch):
+    """Review S2' (fails on the previous head): a specialist is not fronted when its provider is blocked."""
+    from llm_router.router import route_and_call
+    from llm_router.types import Complexity, TaskType
+    from tests.test_benchmark_cat_g import _policy
+
+    _world_env(monkeypatch, tmp_path)
+    _stub_transport(monkeypatch)
+    _use_db(tmp_path / "s2b.db", monkeypatch)
+    _block_openai(variant, tmp_path, monkeypatch)
+    monkeypatch.setattr("llm_router.policy.get_active_policy",
+                        lambda: _policy("w12", workhorses=["gemini/gemini-2.5-flash"],
+                                        specialists={"code": "openai/gpt-4o-mini"}))
+    state = _all_connected_state()
+    _install(state, monkeypatch)
+    out = _run(route_and_call(TaskType.CODE, "write a function that reverses a list",
+                              complexity_hint=Complexity.SIMPLE, classification_data={"subject": "code"}))
+    assert out.provider != "openai", out.model
 
 
 def test_subject_specialist_honours_the_map(tmp_path, monkeypatch):
