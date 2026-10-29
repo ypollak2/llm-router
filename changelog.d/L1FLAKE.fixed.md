@@ -1,0 +1,1 @@
+CI flake fix: the L1 latency bench tests no longer fail when a contended runner pushes the real engine over the 50 ms p95 bar (seen on PR #786). Structural checks (layer histogram, no fallback, id redaction, type-only worker errors) now run with a relaxed `--bar-p95-ms`; the 50 ms bar stays the script default and is asserted in a `timing`-marked test.

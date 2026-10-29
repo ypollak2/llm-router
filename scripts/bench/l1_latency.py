@@ -242,14 +242,14 @@ def measure(args) -> dict:
         "engine_spec": args.engine_spec,
         "latency": {**lat, "cold_first_ms": round(ms0[0], 3), "warm": summarize(warm),
                     "per_run_p95_ms": [round(pct(sorted(r["ms"]), 0.95), 3) for r in runs],
-                    "bar_p95_ms": P95_BAR_MS, "p95_within_bar": lat["p95_ms"] <= P95_BAR_MS},
+                    "bar_p95_ms": args.bar_p95_ms, "p95_within_bar": lat["p95_ms"] <= args.bar_p95_ms},
         "stability": stability,
         "network": {"guarded": True, "attempts": net},
         "machine": {"load1_before": round(load1, 2), "load1_after": round(load1_after, 2), "max_load": args.max_load,
                     "uncontended": max(load1, load1_after) < args.max_load, "python": sys.version.split()[0]},
         "n_ok": len(rows) == args.n,
         "ok": (not reasons and net == 0 and layers.get("fallback", 0) == 0 and len(rows) == args.n
-               and lat["p95_ms"] <= P95_BAR_MS and (stability is None or not stability["disagreeing_ids"])),
+               and lat["p95_ms"] <= args.bar_p95_ms and (stability is None or not stability["disagreeing_ids"])),
     }
 
 
@@ -271,6 +271,8 @@ def main(argv=None) -> int:
     ap.add_argument("--engine-spec", default="llm_router.engine:decide")
     ap.add_argument("--lexical", type=Path, help="engine_lexical.json to load (L3); default none = rules-only")
     ap.add_argument("--calibration", type=Path, help="calibration artifact to load; default none")
+    ap.add_argument("--bar-p95-ms", type=float, default=P95_BAR_MS,
+                    help="p95 latency bar in ms (default 50 = the gate bar; structural tests relax it)")
     ap.add_argument("--seed", type=int, default=1, help="seed of the default random sample (recorded)")
     ap.add_argument("--first-n", action="store_true", help="take the first n rows in file order instead of a sample")
     ap.add_argument("--label", default="unlabelled", help="e.g. rehearsal or gate")
