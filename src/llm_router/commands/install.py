@@ -152,6 +152,8 @@ Usage:
                                      entry: wire the other hosts, leave settings.json hooks alone
                                      (the plugin's SessionStart hook runs this, after consent;
                                      the installer also does this by itself when it finds the plugin)
+  llm-router install --no-plugin         With --auto: wire Claude Code hooks from the CLI even if the
+                                     plugin is installed (you then have them twice; for plugin removal)
   llm-router install --project           Write AGENTS.md + CLAUDE.md (link) into the current
                                      repository so both agents read one set of rules
   llm-router install --proxy-default     Make the per-call proxy the DEFAULT ANTHROPIC_BASE_URL
@@ -716,8 +718,9 @@ def claude_plugin_root() -> Path | None:
 
     ``CLAUDE_PLUGIN_ROOT`` (set by Claude Code for plugin hooks, and passed on to the detached
     ``--via-plugin`` run) wins; otherwise ``<claude dir>/plugins/installed_plugins.json`` is read
-    for an ``llm-router@...`` entry whose install path ships ``hooks/hooks.json`` and which
-    ``enabledPlugins`` in settings.json has not switched off. The plugin provides the Claude Code
+    for an ``llm-router@...`` entry that counts for this machine: user scope, or project/local
+    scope whose ``projectPath`` is the current directory; its install path ships
+    ``hooks/hooks.json``; and ``enabledPlugins`` (user settings, then the project's) says True. The plugin provides the Claude Code
     hooks and MCP entry, so a second copy in settings.json would fire every hook twice."""
     import json
 
@@ -730,18 +733,37 @@ def claude_plugin_root() -> Path | None:
     env_root = _usable(os.environ.get("CLAUDE_PLUGIN_ROOT"))
     if env_root is not None:
         return env_root
-    try:
-        installed = json.loads((ih.claude_dir() / "plugins" / "installed_plugins.json").read_text("utf-8"))
-        enabled = (json.loads(ih.settings_path().read_text("utf-8")).get("enabledPlugins") or {}
-                   if ih.settings_path().is_file() else {})
-    except (OSError, ValueError):
-        return None
-    plugins = installed.get("plugins") if isinstance(installed, dict) else None
-    for key, entries in sorted((plugins or {}).items()):
-        if not str(key).startswith("llm-router@") or enabled.get(key) is False:
+    cwd = Path.cwd().resolve()
+
+    def _read(path: Path) -> dict:
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    # enabledPlugins: user settings, overridden by the project's own settings files. A key
+    # that is absent anywhere means NOT enabled (never assume).
+    enabled: dict = {}
+    for f in (ih.settings_path(), cwd / ".claude" / "settings.json", cwd / ".claude" / "settings.local.json"):
+        value = _read(f).get("enabledPlugins")
+        if isinstance(value, dict):
+            enabled.update(value)
+    plugins = _read(ih.claude_dir() / "plugins" / "installed_plugins.json").get("plugins")
+    for key, entries in sorted((plugins if isinstance(plugins, dict) else {}).items()):
+        if not str(key).startswith("llm-router@") or enabled.get(key) is not True:
             continue
         for entry in entries if isinstance(entries, list) else []:
-            root = _usable(entry.get("installPath") if isinstance(entry, dict) else None)
+            if not isinstance(entry, dict):
+                continue
+            scope = entry.get("scope")
+            if scope != "user":
+                project = entry.get("projectPath")
+                if scope not in ("project", "local") or not isinstance(project, str) or not project:
+                    continue
+                if Path(project).expanduser().resolve() != cwd:
+                    continue  # another project's plugin entry
+            root = _usable(entry.get("installPath"))
             if root is not None:
                 return root
     return None
@@ -819,8 +841,12 @@ def run_full(interactive: bool = True, flags: list[str] | None = None, *,
     # P212-3: when the Claude Code plugin is active (asked for with --via-plugin, or found on
     # this machine), it provides the hooks and the MCP entry; writing them to settings.json
     # too would fire every hook twice. Every other host is wired as usual.
-    plugin_root = claude_plugin_root()
+    plugin_root = None if ("--no-plugin" in flags and "--via-plugin" not in flags) else claude_plugin_root()
     via_plugin = plugin_root is not None
+    if via_plugin and "--via-plugin" not in flags:
+        print(_dim(f"  Claude Code plugin found at {plugin_root}: it provides the hooks and MCP entry, so "
+                   "none are written to settings.json. To wire them from the CLI instead, run "
+                   "`llm-router install --auto --no-plugin`."))
     if "--via-plugin" in flags and not via_plugin:
         rows["claude-code"] = error_row("plugin", RuntimeError(
             "--via-plugin: no llm-router plugin found (CLAUDE_PLUGIN_ROOT unset and none in installed_plugins.json)"))

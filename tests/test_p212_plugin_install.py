@@ -54,15 +54,22 @@ def _llm_router_hook_commands(settings_file: Path) -> list[str]:
     return [s for s in install._json_strings(hooks) if "llm_router" in s or "llm-router" in s]
 
 
-def _register_plugin(home: Path, root: Path = REPO, enabled: bool | None = None) -> None:
-    """What Claude Code leaves behind after `/plugin install llm-router@ypollak2`."""
+def _register_plugin(home: Path, root: Path = REPO, enabled: bool | None = True,
+                     scope: str = "user", project: Path | None = None) -> None:
+    """What Claude Code leaves behind after `/plugin install llm-router@ypollak2`.
+    ``enabled=None`` leaves enabledPlugins out of settings.json altogether."""
     plugins = ih.claude_dir() / "plugins"
     plugins.mkdir(parents=True, exist_ok=True)
+    entry = {"scope": scope, "installPath": str(root)}
+    if project is not None:
+        entry["projectPath"] = str(project)
     (plugins / "installed_plugins.json").write_text(json.dumps(
-        {"version": 2, "plugins": {"llm-router@ypollak2": [{"scope": "user", "installPath": str(root)}]}}))
+        {"version": 2, "plugins": {"llm-router@ypollak2": [entry]}}))
     if enabled is not None:
         ih.settings_path().parent.mkdir(parents=True, exist_ok=True)
-        ih.settings_path().write_text(json.dumps({"enabledPlugins": {"llm-router@ypollak2": enabled}}))
+        existing = json.loads(ih.settings_path().read_text()) if ih.settings_path().is_file() else {}
+        existing["enabledPlugins"] = {"llm-router@ypollak2": enabled}
+        ih.settings_path().write_text(json.dumps(existing))
 
 
 @pytest.fixture
@@ -123,7 +130,7 @@ def test_matching_versions_are_silent(tmp_path):
     root = _fake_plugin(tmp_path, "9.9.9")
     _wired_receipt(tmp_path, "9.9.9")
     spawned, out = [], io.StringIO()
-    _hook().run(_env(tmp_path, root), lambda argv, env: spawned.append(argv), out)
+    _hook().run(_env(tmp_path, root), lambda argv, env, cwd: spawned.append(argv), out)
     assert spawned == [] and out.getvalue() == ""
 
 
@@ -134,9 +141,9 @@ def test_mismatch_without_consent_asks_once_and_spawns_nothing(tmp_path):
     spawned, first, second = [], io.StringIO(), io.StringIO()
     hook = _hook()
     t0 = time.perf_counter()
-    hook.run(_env(tmp_path, root), lambda argv, env: spawned.append(argv), first)
+    hook.run(_env(tmp_path, root), lambda argv, env, cwd: spawned.append(argv), first)
     assert time.perf_counter() - t0 < 0.2
-    hook.run(_env(tmp_path, root), lambda argv, env: spawned.append(argv), second)
+    hook.run(_env(tmp_path, root), lambda argv, env, cwd: spawned.append(argv), second)
     lines = first.getvalue().splitlines()
     assert len(lines) == 1 and "/llm-router:setup" in lines[0] and "9.9.9" in lines[0]
     assert second.getvalue() == "" and spawned == []
@@ -152,18 +159,19 @@ def test_mismatch_with_consent_spawns_one_detached_install_once(tmp_path):
     spawned, out = [], io.StringIO()
     hook = _hook()
     t0 = time.perf_counter()
-    hook.run(_env(tmp_path, root), lambda argv, env: spawned.append((argv, env)), out)
+    hook.run(_env(tmp_path, root), lambda argv, env, cwd: spawned.append((argv, env, cwd)), out)
     assert time.perf_counter() - t0 < 0.2
-    assert [a for a, _e in spawned] == [["npx", "-y", "llm-routing", "install", "--auto", "--via-plugin"]]
+    assert [a for a, _e, _c in spawned] == [["npx", "-y", "llm-routing@9.9.9", "install", "--auto", "--via-plugin"]]
+    assert spawned[0][2] == tmp_path / "state" and spawned[0][2] != Path.cwd()  # never the project dir
     assert spawned[0][1]["CLAUDE_PLUGIN_ROOT"] == str(root) and out.getvalue() == ""
-    hook.run(_env(tmp_path, root), lambda argv, env: spawned.append((argv, env)), out)
+    hook.run(_env(tmp_path, root), lambda argv, env, cwd: spawned.append((argv, env, cwd)), out)
     assert len(spawned) == 1  # once per version: a failing install is not retried every session
 
 
 def test_no_receipt_counts_as_a_mismatch(tmp_path):
     root = _fake_plugin(tmp_path, "9.9.9")
     out = io.StringIO()
-    _hook().run(_env(tmp_path, root), lambda *a: pytest.fail("spawned without consent"), out)
+    _hook().run(_env(tmp_path, root), lambda *a, **k: pytest.fail("spawned without consent"), out)
     assert "/llm-router:setup" in out.getvalue()
 
 
@@ -173,6 +181,58 @@ def test_hook_runs_as_the_script_the_plugin_executes(tmp_path):
     res = subprocess.run([sys.executable, str(REPO / "hooks" / "plugin-install.py")],
                          env={**os.environ, **_env(tmp_path, root)}, capture_output=True, text=True, timeout=10)
     assert res.returncode == 0 and "/llm-router:setup" in res.stdout, res.stderr
+
+
+def test_failed_spawn_is_retried_after_backoff_capped_and_cleared_by_a_matching_receipt(tmp_path):
+    root = _fake_plugin(tmp_path, "9.9.9")
+    _wired_receipt(tmp_path, "9.9.8")  # the stubbed spawn never produces a receipt: it "failed"
+    (tmp_path / "state" / "plugin_install_consent.json").write_text('{"consent": true}')
+    hook, spawned, clock = _hook(), [], [1000.0]
+
+    def run():
+        out = io.StringIO()
+        hook.run(_env(tmp_path, root), lambda argv, env, cwd: spawned.append(argv), out, now=lambda: clock[0])
+        return out.getvalue()
+
+    assert run() == "" and len(spawned) == 1                      # first attempt
+    clock[0] += 3600
+    msg = run()                                                    # inside the backoff: no spawn, but say so
+    assert len(spawned) == 1 and msg.count("\n") == 1 and "/llm-router:setup" in msg
+    clock[0] += hook.RETRY_AFTER_S
+    assert "/llm-router:setup" in run() and len(spawned) == 2      # retried after the backoff
+    clock[0] += hook.RETRY_AFTER_S
+    run()
+    assert len(spawned) == 3
+    clock[0] += hook.RETRY_AFTER_S
+    assert "/llm-router:setup" in run() and len(spawned) == 3      # capped at MAX_ATTEMPTS
+    _wired_receipt(tmp_path, "9.9.9")                              # the install finally landed
+    assert run() == ""
+    state = json.loads((tmp_path / "state" / "plugin_install_state.json").read_text())
+    assert "spawn_version" not in state
+
+
+def test_spawn_that_raises_is_recorded_and_reported_not_fatal(tmp_path, capsys):
+    root = _fake_plugin(tmp_path, "9.9.9")
+    _wired_receipt(tmp_path, "9.9.8")
+    (tmp_path / "state" / "plugin_install_consent.json").write_text('{"consent": true}')
+
+    def boom(argv, env, cwd):
+        raise FileNotFoundError("npx")
+
+    assert _hook().run(_env(tmp_path, root), boom, io.StringIO()) == 0
+    assert "skipped" in capsys.readouterr().err
+    state = json.loads((tmp_path / "state" / "plugin_install_state.json").read_text())
+    assert state["spawn_attempts"] == 1
+
+
+def test_real_spawn_runs_in_the_state_dir(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: seen.update(argv=argv, **kw))
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    _hook()._detached(["npx"], {"A": "b"}, tmp_path / "state")
+    assert seen["cwd"] == str(tmp_path / "state") and seen["cwd"] != str(project)
 
 
 # ── --via-plugin: no double wiring ────────────────────────────────────────────
@@ -245,6 +305,37 @@ def test_a_disabled_plugin_does_not_suppress_the_cli_wiring(home):
     install.cmd_install(["--auto"])
     assert install.read_receipt()["hosts"]["claude-code"]["via"] == "settings"
     assert _llm_router_hook_commands(ih.settings_path())
+
+
+def test_a_missing_enabled_plugins_key_is_not_enabled(home):
+    _register_plugin(home, enabled=None)
+    install.cmd_install(["--auto"])
+    assert install.read_receipt()["hosts"]["claude-code"]["via"] == "settings"
+    assert _llm_router_hook_commands(ih.settings_path())
+
+
+def test_another_projects_entry_does_not_suppress_cli_wiring(home, tmp_path):
+    other = tmp_path / "other-project"
+    other.mkdir()
+    _register_plugin(home, scope="project", project=other)
+    install.cmd_install(["--auto"])
+    assert install.read_receipt()["hosts"]["claude-code"]["via"] == "settings"
+    assert _llm_router_hook_commands(ih.settings_path())
+
+
+def test_this_projects_entry_counts(home):
+    _register_plugin(home, scope="project", project=Path.cwd())
+    install.cmd_install(["--auto"])
+    assert install.read_receipt()["hosts"]["claude-code"]["via"] == "plugin"
+
+
+def test_skip_names_the_plugin_path_and_no_plugin_forces_cli_wiring(home, capsys):
+    _register_plugin(home)
+    install.cmd_install(["--auto"])
+    out = capsys.readouterr().out
+    assert str(REPO) in out and "--no-plugin" in out
+    install.cmd_install(["--auto", "--no-plugin"])
+    assert install.read_receipt()["hosts"]["claude-code"]["via"] == "settings"
 
 
 def test_a_stale_install_path_is_not_a_plugin(home, tmp_path):
