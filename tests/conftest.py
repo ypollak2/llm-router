@@ -68,15 +68,19 @@ _real_home_guard.install()
 # (inherited by child processes), the autouse stub below, and this audit hook,
 # which refuses the spawn itself however Popen was imported or patched.
 _REGISTRY_CHILD = "llm_router.agentic_registry"
+# Every refused argv, so a test can prove the hook fired on a path that swallows it
+# (populate_in_background turns any exception into a silent False).
+_REGISTRY_REFUSALS: list = []
 
 
 def _refuse_registry_child(event: str, args: tuple) -> None:
-    if event != "subprocess.Popen":
+    if event not in ("subprocess.Popen", "os.posix_spawn"):  # both: (path, argv, ...)
         return
     argv = args[1] if len(args) > 1 else None
     parts = [argv] if isinstance(argv, (str, bytes, os.PathLike)) else list(argv or ())
     for part in parts:
         if isinstance(part, (str, bytes, os.PathLike)) and _REGISTRY_CHILD in os.fsdecode(part):
+            _REGISTRY_REFUSALS.append(argv)
             raise RuntimeError(
                 f"tests may not start `{_REGISTRY_CHILD}` (a detached live-Ollama probe that "
                 "outlives the test). See TESTLEAK in tests/conftest.py."
@@ -164,6 +168,14 @@ def real_populate_in_background(monkeypatch):
 
     monkeypatch.setattr(agentic_registry, "populate_in_background", _REAL_POPULATE_IN_BACKGROUND)
     return _REAL_POPULATE_IN_BACKGROUND
+
+
+@pytest.fixture
+def registry_spawn_refusals():
+    """The audit hook's refusal log, emptied for this test (TESTLEAK)."""
+    _REGISTRY_REFUSALS.clear()
+    yield _REGISTRY_REFUSALS
+    _REGISTRY_REFUSALS.clear()
 
 
 # ── G-D: prove the wheel is what is under test ──────────────────────────────
