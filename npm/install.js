@@ -8,15 +8,21 @@
 // the three they cannot run. Downloading the one that matches keeps the package
 // a few kilobytes and the install a single archive.
 //
-// Every failure here is fatal and loud. A postinstall that swallows an error
-// leaves `llm-router` on PATH as a command that does not work, and the user
-// discovers it mid-session rather than at install time.
+// Every failure to fetch or run the binary is fatal and loud. A postinstall that
+// swallows an error leaves `llm-router` on PATH as a command that does not
+// work, and the user discovers it mid-session rather than at install time.
+//
+// Once the binary runs, the postinstall wires the hosts it finds by running
+// `llm-router install --auto` (v16 P2.12). That step is NOT fatal: the binary
+// works, so `npm i` should not fail because, say, one host's config could not
+// be written. The installer records the failure in its receipt; here it is a
+// loud warning plus the manual command. LLM_ROUTER_NO_AUTO_INSTALL=1 skips it.
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const https = require('https');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const VERSION = require('./package.json').version;
 const REPO = 'ypollak2/llm-router';
@@ -126,11 +132,94 @@ async function main() {
     fail('the binary was downloaded but will not run.', hint);
   }
 
-  console.log('llm-routing: next step ->  llm-router install');
-  console.log(
-    'llm-routing: or, inside Claude Code ->  /plugin marketplace add ypollak2/llm-router' +
-      '  then  /plugin install llm-router@ypollak2'
-  );
+  runInstaller(bin, process.env);
 }
 
-main().catch((err) => fail('unexpected error during install.', err.stack || err.message));
+const OPT_OUT = 'LLM_ROUTER_NO_AUTO_INSTALL';
+const MANUAL = 'llm-router install';
+const PLUGIN_POINTER =
+  'llm-routing: or, inside Claude Code ->  /plugin marketplace add ypollak2/llm-router' +
+  '  then  /plugin install llm-router@ypollak2';
+// `install --auto` normally finishes in seconds; this bounds a hang (a lock, a
+// stuck CLI probe) so it cannot block `npm i` forever.
+const INSTALL_TIMEOUT_MS = 120000;
+
+// Run `<bin> install --auto` and echo its one `receipt:` line. Returns 0 in
+// every case, including failure: wiring hosts is a convenience on top of a
+// working binary, and a failed `npm i` would take the working binary away too.
+// `spawn` and `timeoutMs` are injectable so tests can observe the call without
+// a real binary and without waiting two minutes for the timeout path.
+function runInstaller(bin, env = process.env, spawn = spawnSync, timeoutMs = INSTALL_TIMEOUT_MS) {
+  const optOut = String(env[OPT_OUT] || '').trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(optOut)) {
+    console.log(`llm-routing: ${OPT_OUT} is set, so no host was wired.`);
+    console.log(`llm-routing: to wire your hosts later, run:  ${MANUAL}`);
+    // The plugin is an alternative only while nothing is wired: after a
+    // successful `install --auto` it would register the same hooks twice.
+    console.log(PLUGIN_POINTER);
+    return 0;
+  }
+
+  // `npx llm-routing ...` / `npm exec` (npm_command === 'exec', checked under
+  // npm 11.16 for npx -y, npx --package and npm exec; `npm i [-g]` reports
+  // 'install'). The Claude Code plugin starts its MCP server with
+  // `npx -y llm-routing`, and the plugin already provides the hooks and MCP
+  // entry, so wiring here would register them twice. Anyone else on npx is
+  // running a command next (`npx -y llm-routing install` wires the hosts).
+  if (env.npm_command === 'exec') {
+    console.log('llm-routing: run through npx / npm exec, so the postinstall wires no host.');
+    console.log(`llm-routing: to wire your hosts, run:  ${MANUAL}`);
+    console.log(PLUGIN_POINTER);
+    return 0;
+  }
+
+  // stdin is closed: `--auto` never prompts, and if something did, EOF beats a
+  // postinstall that hangs forever waiting for a keypress npm will not pass on.
+  let res;
+  try {
+    res = spawn(bin, ['install', '--auto'], {
+      env,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+    });
+  } catch (err) {
+    res = { error: err };
+  }
+  const stdout = String((res && res.stdout) || '');
+  const stderr = String((res && res.stderr) || '');
+  // run_full prints the line indented ("  receipt: ..."), so match it trimmed.
+  const receipt = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.startsWith('receipt: '));
+  if (receipt) console.log(`llm-routing: ${receipt}`);
+
+  if (res && !res.error && res.status === 0) {
+    if (!receipt) console.log('llm-routing: hosts wired (the installer printed no receipt line).');
+    return 0;
+  }
+
+  const why = res && res.error
+    ? res.error.message
+    : res && res.signal
+      ? `killed by ${res.signal}`
+      : `exit code ${res ? res.status : 'unknown'}`;
+  console.error(`\nllm-routing: WARNING: the binary is installed, but wiring your hosts failed (${why}).`);
+  const detail = stderr.trim();
+  if (detail) console.error(detail.split(/\r?\n/).slice(-20).map((l) => `  ${l}`).join('\n'));
+  console.error(
+    '  npm install still succeeded. To retry the host wiring, run:\n' +
+      `    ${MANUAL}\n` +
+      '  and check the result with:\n' +
+      '    llm-router doctor\n'
+  );
+  return 0;
+}
+
+module.exports = { runInstaller };
+
+if (require.main === module) {
+  main().catch((err) => fail('unexpected error during install.', err.stack || err.message));
+}
