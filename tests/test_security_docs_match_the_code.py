@@ -216,17 +216,8 @@ def _by_design_rows():
     return [(r[0], r[1]) for r in _table("lane", "command")]
 
 
-def _gap_rows():
-    """(lane, configuration, command): one per lane a row names (`llm_act`, `toolkit`)."""
-    out = []
-    for r in _table("lane", "configuration", "command", "effect", raw=True):
-        for lane in re.findall(r"`([^`]+)`", r[0]):
-            out.append((lane, _cell(r[1]), _cell(r[2])))
-    return out
-
-
 def _fill(cmd: str, w: dict) -> str:
-    """The gaps table writes `{OUT}` (outside the root) and `{HOME}`."""
+    """The refused tables write `{OUT}` (outside the root) and `{HOME}`."""
     return cmd.replace("{OUT}", str(w["outside"])).replace("{HOME}", str(w["home"]))
 
 
@@ -263,7 +254,7 @@ def contract_world(tmp_path, monkeypatch):
         return "[recorded, not run]"
 
     def refuse_to_execute(*a, **k):
-        # Not AssertionError: a gap xfail (raises=AssertionError) must not absorb it.
+        # RuntimeError, so it is never confused with a test assertion.
         raise RuntimeError("a lane reached Popen/os.system: this test would have executed it")
 
     monkeypatch.setattr(_sp, "run", record_run)
@@ -315,9 +306,8 @@ def test_contract_section_exists_with_every_table():
     assert len(_refused_rows()) >= 20, _refused_rows()
     assert len(_file_rows()) >= 4, _file_rows()
     assert _by_design_rows(), "the runs-by-design table is gone"
-    assert _gap_rows(), "the known-gaps table is gone; if every gap is fixed, delete this line"
-    assert {lane for lane, _c, _cmd in _gap_rows()} <= set(LANES), _gap_rows()
-    assert {c for _l, c, _cmd in _gap_rows()} <= set(CONFIGS), _gap_rows()
+    # SAFEFIX (D-322) closed every UN-15 gap: its rows moved into the refused tables.
+    assert len(_refused_rows()) >= 90, len(_refused_rows())
     lanes_named = {r[0] for r in _table("lane", "entry point", "code")}
     assert lanes_named == set(LANES), lanes_named
 
@@ -333,7 +323,7 @@ def test_contract_verdict_tokens_are_the_policy_constants():
 @pytest.mark.parametrize("cmd,verdict", _refused_rows(), ids=lambda v: str(v)[:40])
 def test_documented_verdict_is_what_check_action_returns(contract_world, cmd, verdict):
     from llm_router import write_policy as wp
-    got = wp.check_action(cmd, contract_world["root"])
+    got = wp.check_action(_fill(cmd, contract_world), contract_world["root"])
     assert got.decision == verdict, (cmd, got)
     if verdict == wp.NEEDS_APPROVAL:
         # No approval flow exists: the policy itself says the command is refused.
@@ -346,7 +336,7 @@ def test_documented_verdict_is_what_check_action_returns(contract_world, cmd, ve
 def test_documented_refusal_never_runs_on_any_lane(contract_world, monkeypatch, lane, config,
                                                    cmd, verdict):
     _use_config(monkeypatch, config)
-    executed, out = _run_command(lane, cmd, contract_world)
+    executed, out = _run_command(lane, _fill(cmd, contract_world), contract_world)
     assert not executed, f"{lane} ({config}) RAN {cmd!r}: {out[:200]}"
     assert _refused_output(lane, out), f"{lane} ({config}) did not say it refused {cmd!r}: {out[:200]}"
 
@@ -384,21 +374,30 @@ def test_documented_runs_by_design_really_run(contract_world, lane, cmd):
     assert executed, f"{lane} now refuses {cmd!r} ({out[:160]}): move it out of 'Runs by design'"
 
 
-def _gap_params():
-    return [pytest.param(lane, config, cmd, id=f"{lane}|{config}|{cmd}"[:70],
-                         marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-                             f"UN-15 finding: {lane} runs {cmd!r} under {config} "
-                             "(SECURITY.md known gaps)")))
-            for lane, config, cmd in _gap_rows()]
+def test_write_then_run_is_the_documented_residual(contract_world):
+    """SECURITY.md's accepted residual (D-322): on llm_act the model can write a
+    project file with write_file and then run it. The allowlist admits project
+    scripts by design, so this must keep working until the 16.1 OS sandbox."""
+    from llm_router.agentic.react import default_tool_executor
+    root = contract_world["root"]
+    ex = default_tool_executor(cwd=str(root))
+    assert ex("write_file", {"path": "s.py", "content": "print(1)\n"}).startswith("wrote")
+    assert (root / "s.py").read_text() == "print(1)\n"
+    contract_world["ran"].clear()
+    out = ex("bash", {"command": "python3 s.py"})
+    assert contract_world["ran"], f"llm_act refused a project script: {out[:160]}"
+    assert "Code the lane runs" in _contract_section()
 
 
-@pytest.mark.parametrize("lane,config,cmd", _gap_params())
-def test_known_gap_is_refused(contract_world, monkeypatch, lane, config, cmd):
-    """Strict xfail: each documented gap really runs. A fix XPASSes and fails here,
-    so the row has to move out of the known-gaps table in the same change."""
-    _use_config(monkeypatch, config)
-    executed, out = _run_command(lane, _fill(cmd, contract_world), contract_world)
-    assert not executed, f"{lane} ({config}) ran {cmd!r}"
+def test_mutant_allowlist_off_lets_refused_rows_run(contract_world, monkeypatch):
+    """Negative control for D-322: with the allowlist switched off, rows that only
+    the allowlist refuses run again on llm_act, so the lane test above can see it."""
+    from llm_router import write_policy as wp
+    rows = ["crontab -r", "diskutil eraseDisk JHFS+ x disk2", "python3 -m timeit -n1 1"]
+    assert not any(_run_command("llm_act", c, contract_world)[0] for c in rows)
+    monkeypatch.setattr(wp, "_allowed_program", lambda *a, **k: None)
+    leaked = [c for c in rows if _run_command("llm_act", c, contract_world)[0]]
+    assert leaked == rows, leaked
 
 
 def test_llm_act_without_a_root_refuses_bash_and_writes(contract_world):

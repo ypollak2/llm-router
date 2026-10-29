@@ -1,7 +1,6 @@
 """A3 — local ReAct/Ollama harness, driven by a FAKE client + executor (no model, no shell)."""
 from __future__ import annotations
 
-import sys
 
 from llm_router.agentic.acceptance import canary_check
 from llm_router.agentic.engine import MGEEEngine, Outcome
@@ -82,7 +81,8 @@ def test_react_carry_forward_in_prompt():
 def test_default_executor_runs_and_files_no_model(tmp_path):
     ex = default_tool_executor(cwd=str(tmp_path))
     (tmp_path / "p.py").write_text("print(42)")   # `python -c` needs approval (P2.9-b)
-    out = ex("bash", {"command": f"{sys.executable} p.py"})
+    # a bare name: since D-322 a program given as a path is refused (rv-785 S2)
+    out = ex("bash", {"command": "python3 p.py"})
     assert "42" in out and "[exit 0]" in out
     ex("write_file", {"path": str(tmp_path / "x.txt"), "content": "hello"})
     assert (tmp_path / "x.txt").read_text() == "hello"

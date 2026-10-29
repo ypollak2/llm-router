@@ -57,7 +57,7 @@ def is_secret_name(name: str) -> bool:
 
 def is_secret_relpath(rel: str) -> bool:
     parts = Path(rel).parts
-    if any(p in SECRET_DIR_NAMES for p in parts):
+    if any(p.casefold() in SECRET_DIR_NAMES for p in parts):     # `.GIT` on macOS (rv-785b S2)
         return True
     return bool(parts) and any(is_secret_name(p) for p in parts)
 
