@@ -17,7 +17,16 @@ llm-router prefer --list | --remove p1 | --clear
 
 - Deterministic: only the listed forms parse. Anything else is refused (exit 2) with
   three English and three Hebrew examples; nothing is written. Free-form parsing is a
-  separate, later item.
+  separate, later item. The forms that parse and are enforced identically at the router,
+  hook and proxy non-Claude doors are pinned by `tests/test_p213_round_b_doors.py`
+  (20 phrasings). Beyond the examples above they include `never use gemini`, `stop
+  using gemini`, `I don't want gemini`, `use openai before ollama`, `limit gemini to two calls a
+  day`, `cap gemini at eighty percent`, `keep gemini under <percent>%`, `keep code local`, and
+  `don't use paid APIs`; a count may be a digit or an English number word. Wordings that
+  still refuse (pinned as strict xfails in that test): `I'd rather use openai than ollama`,
+  `gemini is off limits`, `free providers only`, `gemini max 2 per day`, `don't let gemini
+  go over <percent>%`, `code stays local`. `avoid gemini` is refused on purpose: "avoid" reads as a soft
+  preference, not the hard ban `never use gemini` gives.
 - The parsed rule is echoed. A terminal asks `[y/N]`; without a terminal, pass `--yes`
   (exit 3 otherwise). `--dry-run` writes nothing. Over MCP, use
   `llm_router_admin(action="prefer", value="<text>")`: it returns the parsed rules and a
@@ -36,8 +45,9 @@ llm-router prefer --list | --remove p1 | --clear
   removes the target.
 - **cap N/day**: once the router has executed N calls for the target in the rolling 24 hours,
   the target drops from the chain until older calls age out. Only calls the router itself
-  sends count and are limited (MCP llm tools, hook- and SDK-routed calls). Claude Code
-  conversation turns, proxy-forwarded ones included, are neither counted nor limited.
+  sends count and are limited (MCP llm tools, hook- and SDK-routed calls). Calls the proxy
+  serves from a non-Claude model are limited by a hit cap but are not counted toward it.
+  Claude Code turns forwarded to Claude are neither counted nor limited.
 - **cap N%**: the target drops while its provider's quota pressure on the resource map
   (`llm-router map`) is at or above N%. No fresh map, or no measured or estimated pressure,
   means the cap is not hit.

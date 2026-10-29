@@ -24,7 +24,7 @@ import unicodedata
 from dataclasses import dataclass, field
 
 TASKS = {
-    "code": "code",
+    "code": "code", "coding": "code",
     "query": "query", "questions": "query", "question": "query",
     "research": "research",
     "analysis": "analyze", "analyze": "analyze",
@@ -164,20 +164,52 @@ def _bad_target(segment: str) -> ParseResult:
 
 _NO_PAID = {
     ("no", "paid", "api"), ("no", "paid", "apis"),
+    ("don't", "use", "paid", "apis"), ("don't", "use", "paid", "api"),
+    ("do", "not", "use", "paid", "apis"), ("do", "not", "use", "paid", "api"),
     ("בלי", "api", "בתשלום"), ("בלי", "תשלום"), ("בלי", "api", "משלם"),
 }
+_NUM_WORDS = {w: i for i, w in enumerate(
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+    "sixteen seventeen eighteen nineteen".split())}
+_NUM_WORDS.update({w: 10 * i for i, w in enumerate(
+    "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()) if w != "_"})
+_NUM_WORDS["hundred"] = 100
+_WORD = "|".join(sorted(_NUM_WORDS, key=len, reverse=True))
+_NUM = rf"(?P<n>\d+|(?:{_WORD})(?:[- ](?:{_WORD}))?)"
+_DAY_UNITS = r"(?:calls? |requests? )?(?:per day|a day|each day|/\s*day|daily)"
 _CAP_RES = (
+    re.compile(rf"^(?:cap|limit) (?P<x>.+?) (?:at|to) (?:no more than |at most )?{_NUM}\s*"
+               rf"(?:(?P<u>%|percent)|{_DAY_UNITS})$"),
     re.compile(r"^cap (?P<x>.+?) (?P<n>\d+)\s*(?P<u>%|/\s*day|per day)$"),
+    re.compile(rf"^no more than {_NUM} (?P<x>.+?) (?:calls? |requests? )?(?P<u>per day|a day|each day)$"),
+    re.compile(rf"^keep (?P<x>.+?) (?:under|below|within|at most) {_NUM}\s*(?P<u>%|percent)$"),
     re.compile(r"^הגבל(?: את)? (?P<x>.+?) ל-?\s*(?P<n>\d+)\s*(?P<u>%|ביום)$"),
     re.compile(r"^מקסימום (?P<n>\d+) ביום ל-?\s*(?P<x>.+)$"),
     re.compile(r"^(?P<x>.+?) עד (?P<n>\d+)\s*(?P<u>%|ביום)$"),
 )
 _BAN_PREFIXES = (
+    "never use ", "i don't want ", "i do not want ", "i dont want ", "stop using ",
     "never ", "no ", "don't use ", "do not use ", "dont use ",
     "אף פעם לא ", "לעולם לא ", "בלי ", "לא להשתמש ", "אל תשתמש ",
 )
-_ONLY_LOCAL = ("only local for ", "רק מקומי ", "רק לוקאלי ", "רק לוקל ")
+_ONLY_LOCAL = ("only local for ", "local only for ", "only use local models for ", "רק מקומי ", "רק לוקאלי ", "רק לוקל ")
 _ORDER_SEPS = (" before ", " ahead of ", " first then ", " לפני ")
+
+
+def _spoken_number(words: str) -> int | None:
+    """"five" -> 5, "twenty five" -> 25; anything else is not a number."""
+    parts = words.split()
+    if not parts or len(parts) > 2:
+        return None
+    values = [_NUM_WORDS.get(p) for p in parts]
+    if None in values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    return values[0] + values[1] if values[0] >= 20 and values[0] % 10 == 0 and values[1] < 10 else None
+
+
+_KEEP_LOCAL = re.compile(r"^keep (?P<t>\w+) local$")
 
 
 def _parse_cap(text: str) -> ParseResult | None:
@@ -186,8 +218,11 @@ def _parse_cap(text: str) -> ParseResult | None:
         if not m:
             continue
         groups = m.groupdict()
-        n = int(groups["n"])
-        unit = "pct" if groups.get("u") == "%" else "day"
+        word = groups["n"].replace("-", " ")
+        n = int(word) if word.isdigit() else _spoken_number(word)
+        if n is None:
+            continue
+        unit = "pct" if groups.get("u") in ("%", "percent") else "day"
         target = _target(groups["x"])
         if target is None:
             return _bad_target(groups["x"])
@@ -199,6 +234,9 @@ def _parse_cap(text: str) -> ParseResult | None:
 
 
 def _parse_only_local(text: str) -> ParseResult | None:
+    keep = _KEEP_LOCAL.match(text)
+    if keep and keep["t"] in TASKS:
+        return ParseResult(rules=[{"kind": "local_only", "task": TASKS[keep["t"]]}])
     for lead in _ONLY_LOCAL:
         if not text.startswith(lead):
             continue
@@ -215,6 +253,10 @@ def _parse_only_local(text: str) -> ParseResult | None:
 
 
 def _split_order(text: str) -> list[str] | None:
+    for lead in ("use ", "put ", "try "):
+        if text.startswith(lead) and any(s in f" {text} " for s in _ORDER_SEPS):
+            text = text[len(lead):]
+            break
     padded = f" {text} "
     if text.startswith("prefer "):
         padded = f" {text[len('prefer '):]} "
@@ -268,14 +310,15 @@ def _sentence(rule: dict) -> str:
     if kind == "no_paid_api":
         return "Never use a paid API (free providers and a connected Claude subscription stay allowed)"
     if kind == "cap":
-        doors = "only calls the router itself sends (MCP llm tools, hook- and SDK-routed calls)"
-        claude = ("Claude Code conversation turns, proxy-forwarded ones included, are {}, and a Claude "
+        claude = ("Claude Code turns forwarded to Claude are neither counted nor limited, and a Claude "
                   "cap at the proxy tier decision is not implemented")
         if rule["unit"] == "pct":
-            return (f"Cap {_describe(rule['target'])} at {rule['n']}% of quota; {doors} are limited: "
-                    + claude.format("not"))
-        return (f"Cap {_describe(rule['target'])} at {rule['n']} calls per rolling 24 h; {doors} are "
-                "counted and limited: " + claude.format("neither counted nor limited"))
+            return (f"Cap {_describe(rule['target'])} at {rule['n']}% of quota: calls the router itself sends "
+                    "(MCP llm tools, hook- and SDK-routed calls) and calls the proxy serves from a non-Claude "
+                    "model are limited while the quota pressure is at or above the cap; " + claude)
+        return (f"Cap {_describe(rule['target'])} at {rule['n']} calls per rolling 24 h: calls the router itself "
+                "sends (MCP llm tools, hook- and SDK-routed calls) are counted and limited; calls the proxy "
+                "serves from a non-Claude model are limited by a hit cap but not counted toward it; " + claude)
     return f"Use only local models (Ollama on this machine) for {rule['task']} tasks"
 
 
@@ -291,6 +334,8 @@ def parse(text: str) -> ParseResult:
         return _refuse("Empty input.")
     if norm.startswith("please "):
         norm = norm[len("please "):]
+    if norm.endswith(" please"):
+        norm = norm[: -len(" please")]
     result: ParseResult | None = None
     if tuple(norm.split(" ")) in _NO_PAID:
         result = ParseResult(rules=[{"kind": "no_paid_api"}])
