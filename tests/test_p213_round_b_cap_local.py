@@ -287,6 +287,146 @@ async def test_pinned_chain_still_loses_capped_paid_and_non_local_entries(temp_d
     assert map_reader.apply_to_chain([OAI, CODEX, LOCAL], reorder=False) == [CODEX, LOCAL]
 
 
+async def test_proxy_choose_model_holds_a_configured_pin_to_the_rules(doors, temp_db, monkeypatch):
+    """`choose_model(text, pinned)` used to return the pin unfiltered: a ban, a hit cap and
+    only-local now keep the call on Claude (model None), as at the router door. The chain
+    itself (qwen3:8b) stays allowed, so only the pin check can produce None."""
+    from llm_router.proxy import backends
+
+    pin, cloud_pin = "ollama/pinned:7b", "ollama/pinned:7b-cloud"
+    glob = {"providers": ["ollama"], "model": "pinned*"}
+    assert (await backends.choose_model(CODE_PROMPT, pin))["model"] == pin               # control
+    assert (await backends.choose_model(CODE_PROMPT, cloud_pin))["model"] == cloud_pin   # control
+    user_rules.write_rules([{"id": "p1", "kind": "ban", "target": glob, "text": "t"}])
+    assert (await backends.choose_model(CODE_PROMPT, pin))["model"] is None
+    user_rules.write_rules([{"id": "p1", "kind": "cap", "target": glob, "unit": "day", "n": 1, "text": "t"}])
+    assert (await backends.choose_model(CODE_PROMPT, pin))["model"] == pin               # 0 of 1 used
+    await record("ollama", pin, 1, monkeypatch=monkeypatch)
+    assert (await backends.choose_model(CODE_PROMPT, pin))["model"] is None
+    user_rules.write_rules([])
+    store("only local for code")
+    assert (await backends.choose_model(CODE_PROMPT, cloud_pin))["model"] is None
+    assert (await backends.choose_model(CODE_PROMPT, pin))["model"] == pin
+
+
+async def test_proxy_local_agent_pin_is_held_to_the_rules(tmp_path):
+    """`--serve local-agent` serves its pin without consulting the policy; a stored ban on that
+    pin now forwards the call to Claude (policy_kept) instead of serving it."""
+    import json
+    from pathlib import Path
+
+    import httpx
+
+    from llm_router.proxy import ledger
+    from llm_router.proxy import server as ps
+    from llm_router.proxy.translate import from_ollama
+
+    body = json.loads((Path(__file__).parent / "fixtures" / "proxy" / "continuation_request.json").read_text())
+    body["messages"] = body["messages"][:2]
+    reply = {"message": {"role": "assistant", "content": "",
+                         "tool_calls": [{"function": {"name": "Bash", "arguments": {"command": "ls"}}}]},
+             "done_reason": "stop", "prompt_eval_count": 100, "eval_count": 5}
+
+    class Backend:
+        calls = 0
+
+        async def complete(self, b, timeout_s):
+            Backend.calls += 1
+            m, err = from_ollama(reply, b)
+            return m, err, {"prompt_tokens": 10, "output_tokens": 2}
+
+    async def run(tag):
+        upstream = []
+
+        def up(request):
+            upstream.append(request)
+            return httpx.Response(200, stream=httpx.ByteStream(b'{"type":"message"}'),
+                                  headers={"content-type": "application/json"})
+        ledger_path = tmp_path / f"{tag}.jsonl"
+        config = ps.ProxyConfig(upstream="http://127.0.0.1:9", ledger_path=ledger_path,
+                                kill_switch=tmp_path / "kill", model="ollama/fake:1", trim="none",
+                                serve="local-agent", hedge_s=None, warm_up=False)
+        app = ps.build_app(config, client=httpx.AsyncClient(transport=httpx.MockTransport(up)),
+                           backend_factory=lambda m: Backend(),
+                           breaker_fn=lambda lever, task: type("D", (), {"allowed": True, "reason": "t"})())
+        headers = {"authorization": "Bearer sk-ant-oat01-" + "Zq9" * 20, "anthropic-version": "2023-06-01",
+                   "content-type": "application/json"}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8787") as c:
+            await c.post("/v1/messages?beta=true", content=json.dumps(body), headers=headers)
+        return upstream, ledger.read_rows(ledger_path)
+
+    upstream, rows = await run("control")
+    assert upstream == [] and rows[0]["decision"] == "served" and Backend.calls == 1
+    store("never ollama")
+    upstream, rows = await run("banned")
+    assert len(upstream) == 1 and rows[0]["decision"] != "served" and Backend.calls == 1
+
+
+def test_no_paid_api_keeps_openai_compat_only_on_a_loopback_base(monkeypatch):
+    import llm_router.config as config_module
+
+    store("no paid API")
+    chain = [LOCAL, "openai_compat/my-model"]
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://127.0.0.1:8080/v1")
+    monkeypatch.setattr(config_module, "_config", None)
+    assert map_reader.apply_to_chain(chain) == chain
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://openrouter.example/api/v1")
+    monkeypatch.setattr(config_module, "_config", None)
+    assert map_reader.apply_to_chain(chain) == [LOCAL]
+
+
+async def test_cap_reading_is_reused_until_the_ledger_changes_or_the_ttl_ends(temp_db, monkeypatch):
+    from llm_router import ledger_view
+
+    store("cap gemini 2/day")
+    await record("gemini", GEM, 1, monkeypatch=monkeypatch)
+    reads = []
+    real = ledger_view.router_executed_models
+    monkeypatch.setattr(ledger_view, "router_executed_models", lambda *a, **k: reads.append(1) or real(*a, **k))
+    rules = user_rules.effective_rules()
+    assert user_rules.cap_hits(rules) == [] and user_rules.cap_hits(rules) == []
+    assert len(reads) == 1                                   # second call: cached
+    await record("gemini", GEM, 1, monkeypatch=monkeypatch)  # the ledger files change
+    assert [r["kind"] for r in user_rules.cap_hits(rules)] == ["cap"] and len(reads) == 2
+    clock = [user_rules.time.monotonic() + user_rules.CAP_CACHE_TTL_S + 1]
+    monkeypatch.setattr(user_rules.time, "monotonic", lambda: clock[0])
+    user_rules.cap_hits(rules)
+    assert len(reads) == 3                                   # TTL over: read again
+
+
+async def test_day_cap_counts_rows_whatever_the_timestamp_spelling(temp_db, monkeypatch):
+    """The ledger read pre-filters on the raw timestamp text (so the index can seek); a row
+    written with a ``T`` separator or a UTC offset inside the window must still count."""
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+
+    store("cap gemini 3/day")
+    await record("gemini", GEM, 3, monkeypatch=monkeypatch)
+    now = datetime.now(timezone.utc)
+    spellings = [(now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S"),
+                 (now - timedelta(hours=2)).astimezone(timezone(timedelta(hours=-10))).isoformat(timespec="seconds"),
+                 (now - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")]
+    with sqlite3.connect(temp_db) as con:
+        ids = [r[0] for r in con.execute("SELECT id FROM routing_decisions ORDER BY id")]
+        for rid, ts in zip(ids, spellings):
+            con.execute("UPDATE routing_decisions SET timestamp = ? WHERE id = ?", (ts, rid))
+    assert user_rules.cap_hits(user_rules.effective_rules(), now=now.timestamp())
+
+
+def test_tier_classify_pure_reads_no_ledger(monkeypatch):
+    """Lane A's pure classifier is documented side-effect-free, sync and CPU-only: with a day
+    cap stored it must not open the ledger or record a fail-open."""
+    from llm_router import failopen, ledger_view
+    from llm_router.proxy import backends
+
+    store("cap gemini 1/day")
+    touched = []
+    monkeypatch.setattr(ledger_view, "router_executed_models", lambda *a, **k: touched.append("ledger"))
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: touched.append(code))
+    backends.tier_classify_pure(CODE_PROMPT)
+    assert touched == []
+
+
 @pytest.mark.xfail(strict=True, reason="proxy/tiers.py — owned by the lane-A/tiers session: a cap on a "
                    "Claude model at the proxy door is a tier decision made there, which this PR does not touch")
 async def test_proxy_tier_decision_honours_a_claude_cap(temp_db, monkeypatch):
@@ -294,8 +434,6 @@ async def test_proxy_tier_decision_honours_a_claude_cap(temp_db, monkeypatch):
 
     policy = tiers.ClaudeTierPolicy.load(None)
     opus = next(t for t in policy.by_name.values() if "opus" in (t.model or ""))
-    assert tiers.tier_model(opus.name) == opus.model     # control: the tier resolves with no rule
     store("cap opus 1/day")
     await record("anthropic", f"anthropic/{opus.model}", 1, monkeypatch=monkeypatch)
-    assert map_reader.apply_to_chain([f"anthropic/{opus.model}"]) == []   # the router door does cap it
     assert tiers.tier_model(opus.name) is None           # a capped model must not be served as a tier

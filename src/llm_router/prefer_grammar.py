@@ -268,9 +268,15 @@ def _sentence(rule: dict) -> str:
     if kind == "no_paid_api":
         return "Never use a paid API (free providers and a connected Claude subscription stay allowed)"
     if kind == "cap":
-        unit = "% of quota" if rule["unit"] == "pct" else " calls per rolling 24 h"
-        return f"Cap {_describe(rule['target'])} at {rule['n']}{unit}"
-    return f"Use only local models for {rule['task']} tasks"
+        doors = "only calls the router itself sends (MCP llm tools, hook- and SDK-routed calls)"
+        claude = ("Claude Code conversation turns, proxy-forwarded ones included, are {}, and a Claude "
+                  "cap at the proxy tier decision is not implemented")
+        if rule["unit"] == "pct":
+            return (f"Cap {_describe(rule['target'])} at {rule['n']}% of quota; {doors} are limited: "
+                    + claude.format("not"))
+        return (f"Cap {_describe(rule['target'])} at {rule['n']} calls per rolling 24 h; {doors} are "
+                "counted and limited: " + claude.format("neither counted nor limited"))
+    return f"Use only local models (Ollama on this machine) for {rule['task']} tasks"
 
 
 def describe(rule: dict) -> str:

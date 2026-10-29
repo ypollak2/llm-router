@@ -343,6 +343,13 @@ def router_executed_models(bounds: Bounds, *, db_path=None,
         if not cols:
             return None
         where, params = bounds.sql(cols)
+        if bounds.since_ts is not None:
+            # A raw text bound the timestamp index can range-seek on (``datetime(timestamp)``
+            # cannot use it). It is the DATE one day before the window starts, so no row inside
+            # the window is dropped whatever its spelling (``T`` or space separator, a UTC offset
+            # within a day); ``where`` still decides the exact window.
+            where = f"timestamp >= ? AND {where}"
+            params = [_utc_str(bounds.since_ts - 86400.0)[:10], *params]
         prov = "AND provenance = 'runtime' " if "provenance" in cols else ""
         return [(str(p), str(m)) for p, m in con.execute(
             "SELECT COALESCE(NULLIF(final_provider, ''), 'unknown'), COALESCE(final_model, '') "

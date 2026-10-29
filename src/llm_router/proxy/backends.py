@@ -488,11 +488,13 @@ def _classify_class(text: str, *, capabilities: bool = True) -> tuple[str, str]:
     return task, cx
 
 
-def _chain_token() -> tuple:
+def _chain_token(*, read_caps: bool = True) -> tuple:
     """Cache-key token of a policy chain: the map's mtime plus the stored user
     rules' (mtime_ns, size) -- a changed ``prefer`` rule must rebuild the chain
     with the map unchanged (UN-01) -- plus the caps hit now, so a cap that is hit
-    or rolls over rebuilds it with both files unchanged (UN-02)."""
+    or rolls over rebuilds it with both files unchanged (UN-02). ``read_caps=False``
+    reads no ledger and records nothing: it reuses the cap part of the token the
+    last :func:`policy_chain` computed (for :func:`tier_classify_pure`)."""
     from llm_router import map_reader, user_rules
 
     try:
@@ -500,6 +502,9 @@ def _chain_token() -> tuple:
         rules_tok: tuple | None = (st.st_mtime_ns, st.st_size)
     except OSError:
         rules_tok = None
+    if not read_caps:
+        last = _chain_cache_token
+        return (map_reader.token(), rules_tok, last[2] if last is not None and len(last) > 2 else None)
     try:
         cap_tok = user_rules.cap_token()
     except Exception as exc:  # noqa: BLE001 - a cap read never blocks routing
@@ -566,7 +571,7 @@ def tier_classify_pure(text: str) -> dict:
 
     sig = classify_signals(text, GATEWAY_POLICY, capabilities=False)
     task, cx = sig.task_type.value, sig.complexity.value
-    chain = _chain_cache.get((task, cx, _chain_token())) or []
+    chain = _chain_cache.get((task, cx, _chain_token(read_caps=False))) or []
     return {"task_type": task, "complexity": cx, "chain_head": chain[:4], "model": None}
 
 
@@ -586,9 +591,15 @@ async def choose_model(text: str, pinned: str | None, *, anthropic: bool = False
         chain = capability_filter.filter_chain(chain, needs)
     model = next((m for m in chain if tool_capable(m, anthropic=anthropic)), None)
     # A pin changes WHICH model serves, never WHETHER: the policy's decision to
-    # keep a step on Claude (no tool-capable entry) stands.
+    # keep a step on Claude (no tool-capable entry) stands. The stored ``prefer``
+    # exclusions (ban, hit cap, no paid API, local-only for this task) hold the pin
+    # too, as at the router door: an excluded pin keeps the call on Claude (UN-02).
     if model is not None and pinned:
+        from llm_router import user_rules
+
         model = pinned if tool_capable(pinned, anthropic=anthropic) else None
+        if model is not None and not user_rules.allows(model, task=task):
+            model = None
         if model is not None and needs is not None:
             from llm_router import capability_filter
 

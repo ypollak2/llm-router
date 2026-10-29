@@ -88,7 +88,7 @@ async def build_chain(
     ) as span:
         try:
             chain = await _build_dynamic_chain(task_type, complexity, profile)
-            chain = await _apply_subscription_local(chain, complexity, profile)
+            chain = await _apply_subscription_local(chain, complexity, profile, task_type)
             chain = _apply_quota_score(chain, task_type, profile)
             top = chain[0] if chain else None
             set_span_attributes(span, chain_length=len(chain), top_model=top)
@@ -96,7 +96,7 @@ async def build_chain(
         except Exception as e:
             log.debug("dynamic chain builder failed, using static: %s", e)
             chain = _static_chain(task_type, profile)
-            chain = await _apply_subscription_local(chain, complexity, profile)
+            chain = await _apply_subscription_local(chain, complexity, profile, task_type)
             chain = _apply_quota_score(chain, task_type, profile)
             set_span_attributes(
                 span,
@@ -131,7 +131,7 @@ def _apply_quota_score(chain, task_type, profile):
 
 
 async def _apply_subscription_local(
-    chain: list[str], complexity: str, profile: "RoutingProfile"
+    chain: list[str], complexity: str, profile: "RoutingProfile", task_type=None
 ) -> list[str]:
     """Apply the cost-inverted SUBSCRIPTION_LOCAL reorder, if it is active.
 
@@ -154,7 +154,7 @@ async def _apply_subscription_local(
 
         view = map_reader.load_view()
         if view is not None:
-            chain = map_reader.apply_to_chain(chain, view=view)
+            chain = map_reader.apply_to_chain(chain, view=view, task=getattr(task_type, "value", task_type))
             if view.orders or not chain:
                 return chain   # [] = nothing connected: callers' no-route path
             # a balanced map only filters: the no-map result (incl. the reorder below) stays
