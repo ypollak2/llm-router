@@ -176,7 +176,7 @@ def _lexical_artifact(tmp_path: Path) -> Path:
 def test_real_lexical_artifact_gives_rules_plus_lexical(tmp_path):  # SHOULD1
     import hashlib
     lex = _lexical_artifact(tmp_path)
-    res, _ = _run(tmp_path, _corpus(tmp_path, 4), "--n", "4", "--lexical", str(lex))
+    res, _ = _run(tmp_path, _corpus(tmp_path, 4), "--n", "4", "--lexical", str(lex), *NO_BAR)
     assert res["scope"] == "rules+lexical" and res["artifacts"]["lexical_loaded"] is True
     assert res["artifacts"]["lexical_sha256"] == hashlib.sha256(lex.read_bytes()).hexdigest() and res["ok"] is True
 
