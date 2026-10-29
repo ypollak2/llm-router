@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 3
+# llm_router-hook-version: 4
 """Claude Code plugin SessionStart hook (P2.12, P212-3): keep the wired hosts on the plugin's version.
 
 The plugin bundle (``${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json``) can move ahead of what
@@ -76,8 +76,10 @@ def _attempts(state: dict, plugin: str) -> tuple[int, float]:
     if state.get("spawn_version") != plugin:
         return 0, 0.0
     try:
-        n = state.get("spawn_attempts", 0)
-        ts = state.get("spawn_ts", 0)
+        n = state.get("spawn_attempts")
+        ts = state.get("spawn_ts")
+        if n is None and ts is None:  # no attempt recorded for this version: unknown, not zero
+            return 0, 0.0
         if isinstance(n, bool) or isinstance(ts, bool) or not isinstance(n, int) or not isinstance(ts, (int, float)):
             raise ValueError("bad types")
         if n < 0 or not math.isfinite(ts):
