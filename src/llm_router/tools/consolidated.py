@@ -335,7 +335,9 @@ async def llm_router_admin(action: str, value: str = "") -> str:
     *action* selector: set_profile (value=profile) · import_profile (value=url) ·
     clear_cache · policy · budget · prefer (value=priority text, e.g. "codex before claude";
     returns the parsed rules and a confirm token, stores nothing; store by calling again with
-    value=JSON {"text": ..., "confirm": token}). Old tools stay as aliases underneath."""
+    value=JSON {"text": ..., "confirm": token}) · install (value empty: lists the hosts it
+    would wire and returns a confirm token, writes nothing; run it with value=JSON
+    {"confirm": token}; same receipt as `llm-router install --auto`). Old tools stay as aliases underneath."""
     a = (action or "").lower()
     if a == "set_profile":
         return await llm_set_profile(value)
@@ -351,7 +353,12 @@ async def llm_router_admin(action: str, value: str = "") -> str:
         from llm_router.commands.prefer import admin_prefer
 
         return admin_prefer(value)
-    return f"unknown admin action: {action!r} (try set_profile/import_profile/clear_cache/policy/budget/prefer)"
+    if a == "install":
+        from llm_router.commands.install import admin_install
+
+        return admin_install(value)
+    return (f"unknown admin action: {action!r} "
+            "(try set_profile/import_profile/clear_cache/policy/budget/prefer/install)")
 
 
 async def llm_router_session(

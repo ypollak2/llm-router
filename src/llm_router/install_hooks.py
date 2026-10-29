@@ -1084,6 +1084,7 @@ def _install_claude_code_cli(mcp_entry: dict) -> list[str]:
             result = _sp.run(
                 [claude_bin, "mcp", "add", "--scope", "user", "llm_router", cmd_str] + args,
                 capture_output=True, text=True, timeout=15,
+                stdin=_sp.DEVNULL,  # P212-4: never read the MCP stdio stream
             )
             if result.returncode == 0:
                 return ["Registered llm_router MCP server in ~/.claude.json (via claude mcp add)"]

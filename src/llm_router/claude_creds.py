@@ -41,7 +41,8 @@ def keychain_query(service: str, *, want_secret: bool, platform: str | None = No
         return False, None
     try:
         kw = {} if env is None else {"env": env}
-        proc = run(argv, capture_output=True, text=True, timeout=timeout, check=False, **kw)
+        proc = run(argv, capture_output=True, text=True, timeout=timeout, check=False,
+                   stdin=subprocess.DEVNULL, **kw)  # P212-4: never read the MCP stdio stream
     except (OSError, subprocess.SubprocessError):
         return False, None
     if proc.returncode != 0:
