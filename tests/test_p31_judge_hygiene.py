@@ -210,38 +210,108 @@ def test_enqueue_reads_a_large_queue_at_most_once_per_stride(home, monkeypatch):
         "without crossing a stride boundary")
 
 
+class _PinnedClock:
+    """judge / judge_hygiene see this as ``time``: time() is a set value, the rest is real.
+
+    A pinned ``queued_at`` keeps every enqueued line the same length (a real float repr
+    varies by a byte or two), so the full-check counts below are deterministic.
+    """
+
+    def __init__(self, t):
+        self.t = t
+
+    def time(self):
+        return self.t
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+def _pin_clock(monkeypatch, t):
+    clock = _PinnedClock(t)
+    monkeypatch.setattr(judge, "time", clock)
+    monkeypatch.setattr(judge_hygiene, "time", clock)
+    return clock
+
+
+def _count_full_checks(home, monkeypatch, q, cap, n, first_id, clock=None, t_first=0.0):
+    """Enqueue n entries; return (full checks, n). Counted with the read spy, no timing."""
+    reads = _spy_queue_reads(monkeypatch, q)
+    checks = 0
+    for i in range(n):
+        if clock is not None:
+            clock.t = t_first + i
+        before = len(reads)
+        assert _enq(first_id + i)
+        if len(reads) > before:  # a full check ran: it must leave the queue within the cap
+            checks += 1
+            assert cap <= 0 or len(_queue(home)) <= cap
+    return checks, n
+
+
 def test_queue_at_the_cap_just_below_a_stride_line_is_not_reread_per_enqueue(home, monkeypatch):
     """JUDGECAP: a queue AT the entry cap whose size sits just under a stride line.
 
     Each append crossed the line and each trim took the file back under it, so every
     enqueue paid a full read + rewrite (reviewer probe on main: 100 checks in 100 enqueues,
-    185-byte entries, cap 2833, 524,105 B vs the 524,288 B line). The trim now leaves a
-    quarter stride of headroom below the next line, so a full check costs at least that
-    many appended bytes. Counted with the read spy, no clock.
+    185-byte entries, cap 2833, 524,105 B vs the 524,288 B line). A trim now leaves
+    judge._TRIM_HEADROOM_BYTES below the next line, so a full check costs at least that
+    many appended bytes. queued_at is pinned: on main this is exactly 400 checks in 400.
     """
+    _pin_clock(monkeypatch, 1_700_000_000.0)
     q = home / "judge_queue.jsonl"
     assert _enq(100_000)
     line = q.read_text()
+    size = len(line.encode())
     stride = judge._CHECK_STRIDE_BYTES
-    cap = (2 * stride) // len(line.encode())
+    cap = (2 * stride) // size
     monkeypatch.setenv("LLM_ROUTER_JUDGE_QUEUE_MAX_ENTRIES", str(cap))
     q.write_text(line * cap)
-    assert 2 * stride - len(line.encode()) < q.stat().st_size < 2 * stride  # at the cap, just under a line
+    assert 2 * stride - size < q.stat().st_size < 2 * stride  # at the cap, just under a line
 
-    reads = _spy_queue_reads(monkeypatch, q)
-    checks, appended, n = 0, 0, 400
-    for i in range(n):
-        before = len(reads)
-        assert _enq(100_001 + i)
-        appended += len(line.encode())
-        if len(reads) > before:  # a full check ran: it must leave the queue within the cap
-            checks += 1
-            assert len(_queue(home)) <= cap
+    checks, n = _count_full_checks(home, monkeypatch, q, cap, 400, 100_001)
     assert checks >= 1, "anti-vacuity: the first append crosses the line and must run the full check"
-    bound = 1 + appended // (stride // 4)
+    bound = 1 + n * size // (stride // 4)
     assert checks <= bound, f"{checks} full checks in {n} enqueues at the cap (bound {bound})"
     assert _queue(home)[-1]["routing_decision_id"] == 100_000 + n  # newest kept
     assert q.stat().st_size <= 3 * stride  # between checks: at most one stride over the cap's bytes
+
+
+@pytest.mark.parametrize("cap_offset", [0, 500, None], ids=["at-cap", "below-cap", "cap-off"])
+def test_expiry_purge_just_below_a_stride_line_is_not_a_full_check_per_enqueue(home, monkeypatch, cap_offset):
+    """JUDGECAP review: one entry expires per enqueue on a queue just under a stride line.
+
+    The append crossed the line, the retention purge removed one entry and took the file
+    back under it, so every enqueue was a full check whatever the cap (reviewer probe
+    rv800probe/p_expiry.py: 400/400 on main and on the first fix). Any large-queue check
+    that removes something now also leaves judge._TRIM_HEADROOM_BYTES below the next line.
+    A pinned clock drives expiry; no timing is measured.
+    """
+    t0 = 1_000_000_000.0
+    clock = _pin_clock(monkeypatch, t0)
+    q = home / "judge_queue.jsonl"
+    assert _enq(100_000)
+    proto = json.loads(q.read_text())
+    stride = judge._CHECK_STRIDE_BYTES
+
+    def row(i):
+        return json.dumps({**proto, "routing_decision_id": 100_000 + i, "queued_at": t0 + i}) + "\n"
+
+    size = len(row(0).encode())
+    assert all(len(row(i).encode()) == size for i in (1, 9_999))
+    m = (2 * stride - 1) // size  # m entries sit just under the 2-stride line
+    q.write_text("".join(row(i) for i in range(m)))
+    assert 2 * stride - size < q.stat().st_size < 2 * stride
+    cap = 0 if cap_offset is None else m + cap_offset
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_QUEUE_MAX_ENTRIES", str(cap))
+    # retention of (m - 0.5) s: at t0 + m + k the entry queued at t0 + k is the one that expires
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_QUEUE_MAX_AGE_DAYS", repr((m - 0.5) / 86400))
+
+    checks, n = _count_full_checks(home, monkeypatch, q, cap, 400, 100_000 + m, clock, t0 + m)
+    assert checks >= 1, "anti-vacuity: the first append crosses the line and must run the full check"
+    bound = 1 + n * size // (stride // 4)
+    assert checks <= bound, f"{checks} full checks in {n} enqueues (cap={cap}, bound {bound})"
+    assert _queue(home)[-1]["routing_decision_id"] == 100_000 + m + n - 1  # newest kept
 
 
 @pytest.mark.timing

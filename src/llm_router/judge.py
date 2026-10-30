@@ -207,11 +207,12 @@ def _queue_max_entries() -> int:
 #: path. Between checks the queue can overshoot the entry cap by at most a stride.
 _EXACT_CHECK_BYTES = 64 * 1024
 _CHECK_STRIDE_BYTES = 256 * 1024
-#: JUDGECAP: a cap trim on a large queue leaves at least this much room below the next
-#: stride line, dropping extra oldest entries when it must. Without it a queue AT the cap
-#: sitting just under a line was fully read and rewritten on every enqueue (each append
-#: crossed the line, each trim went back under it). With it, a full check at the cap needs
-#: at least this many appended bytes since the last trim: at most one per quarter stride.
+#: JUDGECAP: a large-queue check that removes anything (cap trim or expiry purge) leaves
+#: at least this much room below the next stride line, dropping extra oldest entries when
+#: it must. Without it a queue sitting just under a line was fully read and rewritten on
+#: every enqueue: each append crossed the line, and each trim (queue at the cap) or expiry
+#: purge (one entry expiring per enqueue) took it back under. With it, the next full check
+#: needs at least this many appended bytes: at most one per quarter stride.
 _TRIM_HEADROOM_BYTES = _CHECK_STRIDE_BYTES // 4
 
 
@@ -224,16 +225,18 @@ def _enforce_queue_cap(path, size_before: int = 0) -> int:
     bounded even if nothing ever drains the queue; the same pass physically
     purges entries past the retention bound (``judge_hygiene.purge_expired``).
 
-    On a queue above ``_EXACT_CHECK_BYTES`` the trim may drop a few more of the
-    oldest entries than the cap requires (at most ``_TRIM_HEADROOM_BYTES``), so the
-    file ends at least that far below the next stride line and the following full
-    check needs that many appended bytes. Bound at the cap: one full read + rewrite
-    per ``_TRIM_HEADROOM_BYTES`` appended (plus re-crossings caused by the expired /
-    orphan purges, which remove each entry at most once), not one per enqueue.
+    On a queue above ``_EXACT_CHECK_BYTES``, a check that removes anything (the cap
+    trim or the expiry purge) also drops the oldest entries needed to end at least
+    ``_TRIM_HEADROOM_BYTES`` below the next stride line: less than that plus one entry
+    beyond what the cap and retention require (up to ~25% of a queue near the 256 KiB
+    line, ~6% near 1 MiB; one entry of two at cap 2 with entries over 64 KiB). The
+    newest entry is always kept. Bound: after any check that removed something, the
+    next full read needs ``_TRIM_HEADROOM_BYTES`` of appends; after one that removed
+    nothing, the file did not shrink, so the next needs a stride. Not one per enqueue.
 
     Never raises — a failure here must not break the enqueue that triggered
-    it. Returns the number of entries dropped for the cap (0 if within cap or
-    not checked this time).
+    it. Returns the number of entries dropped for the cap and the headroom, not
+    counting expired ones (0 if nothing was dropped or not checked this time).
     """
     cap = _queue_max_entries()
     dropped = 0
@@ -242,22 +245,24 @@ def _enforce_queue_cap(path, size_before: int = 0) -> int:
         if size > _EXACT_CHECK_BYTES and size_before // _CHECK_STRIDE_BYTES == size // _CHECK_STRIDE_BYTES:
             return 0
         from llm_router import judge_hygiene
-        judge_hygiene.purge_expired(path)  # retention holds even when the entry cap is off
+        purged = judge_hygiene.purge_expired(path)  # retention holds even when the entry cap is off
         judge_hygiene.purge_orphans(path)
-        if cap <= 0:
+        large = size > _EXACT_CHECK_BYTES
+        if cap <= 0 and not (purged and large):
             return 0
         with open(path) as f:
             lines = [line for line in f.readlines() if line.strip()]
-        if len(lines) <= cap:
+        kept = lines[-cap:] if 0 < cap < len(lines) else lines
+        if large and (purged or len(kept) < len(lines)):
+            kept_bytes = sum(len(line.encode("utf-8")) + (not line.endswith("\n")) for line in kept)
+            start = 0
+            while (start < len(kept) - 1 and kept_bytes > _EXACT_CHECK_BYTES
+                   and _CHECK_STRIDE_BYTES - kept_bytes % _CHECK_STRIDE_BYTES < _TRIM_HEADROOM_BYTES):
+                kept_bytes -= len(kept[start].encode("utf-8")) + (not kept[start].endswith("\n"))
+                start += 1
+            kept = kept[start:]
+        if len(kept) == len(lines):
             return 0
-        kept = lines[-cap:]
-        kept_bytes = sum(len(line.encode("utf-8")) + (not line.endswith("\n")) for line in kept)
-        start = 0
-        while (start < len(kept) - 1 and kept_bytes > _EXACT_CHECK_BYTES
-               and _CHECK_STRIDE_BYTES - kept_bytes % _CHECK_STRIDE_BYTES < _TRIM_HEADROOM_BYTES):
-            kept_bytes -= len(kept[start].encode("utf-8")) + (not kept[start].endswith("\n"))
-            start += 1
-        kept = kept[start:]
         dropped = len(lines) - len(kept)
         judge_hygiene.rewrite_private(path, kept)
     except Exception as exc:
