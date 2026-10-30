@@ -90,16 +90,42 @@ def test_ordinary_words_ending_in_a_key_prefix_are_not_keys():
     assert [t[:24] for t in shapes if local_privacy.scan_secrets(t)] == []
 
 
-@pytest.mark.parametrize("kind", ("anthropic_key", "openai_key", "openrouter_key", "github_token", "slack_token"))
+@pytest.mark.parametrize("kind", ("anthropic_key", "openai_key", "openrouter_key", "github_token", "slack_token",
+                                  "google_key", "aws_key_id"))
 def test_filler_glued_after_or_spliced_into_a_real_token_does_not_make_it_a_placeholder(kind):
     key = fx.real_shaped(kind, 7)
     texts = [key + "xxxxxxxx", key + "abcdefgh", key + "-example", key + "01234567"]
-    if kind in ("anthropic_key", "openai_key"):
+    if kind != "aws_key_id":  # an AWS id is upper-case + digits: lower-case filler spliced in breaks its shape (SECURITY.md)
         mid = len(key) // 2
         texts += [key[:mid] + "xxxxxxxx" + key[mid:], key[:mid] + "01234567" + key[mid:]]
     for text in texts:
         assert local_privacy.scan_secrets(text), (kind, text[-12:])
         assert scrub_text(text) != text
+
+
+def _legacy_openai_key(seed: int) -> str:
+    """``sk-`` + 48 base62, the pre-project OpenAI shape; drawn at run time like every fixture."""
+    return "sk-" + fx._with_digit(fx._draw(random.Random(f"legacy-openai:{seed}"), fx.B62, 48))
+
+
+@pytest.mark.parametrize("kind", KINDS + ("openrouter_key", "legacy_openai_key"))
+def test_a_key_glued_after_letters_digits_underscore_or_cjk_is_found(kind):
+    # requirement G; repair 1 lost the plain ``sk-`` (behind a word boundary) and AWS after a digit
+    for seed in range(5):
+        key = _legacy_openai_key(seed) if kind == "legacy_openai_key" else fx.real_shaped(kind, 20 + seed)
+        for pre in ("mykey", "9", "123", "my_", "_", "\u952e", "\uff4b\uff45\uff59", "task"):
+            assert local_privacy.scan_secrets(pre + key), (kind, pre)
+            assert key[-16:] not in scrub_text(pre + key), (kind, pre)
+
+
+@pytest.mark.parametrize("kind", ("github_token", "google_key"))
+def test_text_glued_after_an_unglued_key_never_hides_it(kind):
+    # repair 1 matched GitHub/Google bodies at exactly 36/35 characters, so one appended character hid a real key,
+    # and the cls self-test fakes (``ghp_`` + 40, ``AIza`` + 36) stopped firing (tests/test_cls_dev_run.py red)
+    key = fx.real_shaped(kind, 9)
+    for text in (key + "Q", key + "Zq9AbC", f"key {key}Q7 tail", f"url=https://h/?k={key}AbCd&x=1"):
+        assert local_privacy.scan_secrets(text), (kind, text[-10:])
+        assert key[-16:] not in scrub_text(text), kind
 
 
 def test_a_glued_jwt_and_bearer_are_found():
@@ -122,6 +148,15 @@ def test_a_long_run_with_a_stray_percent_is_scrubbed_once_and_unchanged(monkeypa
     text = "x" * 300_000 + "%zz"
     assert scrub_text(text) == text
     assert calls == [len(text)]          # one pass over the run, no per-position restart
+
+
+@pytest.mark.timing
+@pytest.mark.parametrize("text", ("a-" * 50_000, "a.b-" * 25_000, "sk%2Dant-" * 12_000), ids=("a-", "a.b-", "pct-sk-ant"))
+def test_scrubber_is_linear_on_a_long_scheme_like_run(text):
+    # db_url_credentials had an unbounded scheme ``[a-z0-9+.-]*``: 100k chars of ``a-a-...`` took 23 s on main (200k: 93 s)
+    t0 = time.perf_counter()
+    scrub_text(text)
+    assert time.perf_counter() - t0 < 3.0
 
 
 @pytest.mark.timing

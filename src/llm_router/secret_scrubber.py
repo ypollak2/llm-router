@@ -32,8 +32,9 @@ SECRET_PATTERNS = {
     # Redacts the credential portion only; the host and database survive,
     # because an alert whose whole URL is [REDACTED] cannot be acted on and
     # an operator who cannot act will turn the scrubbing off.
+    # The scheme is bounded (as in engine.db_url_password): unbounded, a 1 MB run of ``a-a-a-...`` was quadratic (SECDET).
     "db_url_credentials": re.compile(
-        r"\b([a-z][a-z0-9+.\-]*)://([^:/@\s]*):([^@/\s]+)@",
+        r"\b([a-z][a-z0-9+.\-]{0,31})://([^:/@\s]*):([^@/\s]+)@",
         re.IGNORECASE,
     ),
     # Other tokens and secrets

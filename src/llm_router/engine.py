@@ -36,7 +36,6 @@ import re
 import sqlite3
 import threading
 import time
-import urllib.parse
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -323,17 +322,26 @@ def _reason(s: str) -> str:
 #: Secret shapes. Every quantifier is bounded, so a scan is linear in the text (a 48k-char run of ``[a-z0-9+.-]``
 #: took 1.6 s with the unbounded ``db_url_password`` scheme; LC-12h repair). Which shapes may REFUSE a call is
 #: ``HIGH_PRECISION`` below; the rest are counted by category (``local_privacy``) and nothing more.
-#: After a fixed-length body (GitHub 36, Google 35): anything but more key characters, or a typed filler run glued on to
-#: slip the token past the door (``...xxxxxxxx``, ``...abcdefgh``). SECDET.
-_TAIL_FILLER = r"(?=[xX]{8}|abcdefgh|ABCDEFGH|01234567|example|dummy)"
+#: A key glued to preceding text is found (SECDET requirement G), but ``task-`` / ``highp_`` / ``MAIza`` are ordinary words
+#: that end in a key prefix. So a glued prefix needs the key's own evidence: a generic ``sk-`` after a word character
+#: needs a 20-character alphanumeric run in mixed case with a digit (slugs, BEM classes, UUIDs and git SHAs are
+#: lower-case); ``AIza`` / ``gh[pousr]_`` after an ASCII letter, digit or ``_`` need exactly the issued body length
+#: (35, 36). An unglued key keeps any length, so text glued AFTER it never hides it (repair 1 cut GitHub/Google to the
+#: exact length everywhere: one appended character hid a key). AWS ids (upper-case + digits) are not read after an
+#: upper-case letter.
+_GLUED = r"(?<=[A-Za-z0-9_])"
+_UNGLUED = r"(?<![A-Za-z0-9_])"
+_MIXED_RUN = r"(?=[A-Za-z0-9_-]{0,40}?(?=[A-Za-z0-9]{20})(?=[a-z0-9]{0,19}[A-Z])(?=[A-Z0-9]{0,19}[a-z])(?=[A-Za-z]{0,19}\d))"
+#: After an AWS id: no more id characters, or a typed filler run glued on to slip it past the door (``...XXXXXXXX``).
+_TAIL_FILLER = r"(?=[xX]{8}|abcdefgh|ABCDEFGH|01234567|example|EXAMPLE|dummy)"
 _SECRET_SHAPES = {
     "anthropic_key": re.compile(r"sk-ant-[A-Za-z0-9_-]{32,256}"),
     # Listed before openai_key; openai_key excludes this exact shape so one key yields one name.
     "openrouter_key": re.compile(r"sk-or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-])"),
-    "openai_key": re.compile(r"(?:\bsk-|sk-(?=(?:proj|svcacct)-))(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-]))(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]{0,300}\d)(?=[A-Za-z0-9_-]{0,300}[A-Za-z])[A-Za-z0-9_-]{32,256}"),
-    "google_key": re.compile(r"AIza[0-9A-Za-z_-]{35}(?:(?![0-9A-Za-z_-])|" + _TAIL_FILLER + ")"),
-    "aws_key_id": re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
-    "github_token": re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{36}(?:(?![A-Za-z0-9])|" + _TAIL_FILLER + r")|github_pat_[A-Za-z0-9_]{50,255})"),
+    "openai_key": re.compile(r"(?:\bsk-|\Bsk-" + _MIXED_RUN + r")(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-]))(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]{0,300}\d)(?=[A-Za-z0-9_-]{0,300}[A-Za-z])[A-Za-z0-9_-]{32,256}"),
+    "google_key": re.compile(_UNGLUED + r"AIza[0-9A-Za-z_-]{35,128}|" + _GLUED + r"AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z])"),
+    "aws_key_id": re.compile(r"(?<![A-Z])(?:AKIA|ASIA)[0-9A-Z]{16}(?:\b|" + _TAIL_FILLER + ")"),
+    "github_token": re.compile(_UNGLUED + r"gh[pousr]_[A-Za-z0-9]{36,255}|" + _GLUED + r"gh[pousr]_[A-Za-z0-9]{36}(?![A-Za-z0-9])|github_pat_[A-Za-z0-9_]{50,255}"),
     "slack_token": re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,256}"),
     "private_key": re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----"),
     "jwt": re.compile(r"eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}"),
@@ -524,16 +532,21 @@ def _windows(text: str):
             return
 
 
+#: An ASCII percent escape. Every secret shape is ASCII, so the rest stay as typed; decoded here rather than with
+#: ``urllib.parse.unquote`` because the engine imports nothing network-capable (tests/test_engine_core.py, P1.6k).
+_PCT_ASCII = re.compile(r"%([0-7][0-9A-Fa-f])")
+
+
 def secret_findings(text: str) -> dict[str, bool]:
     """``{shape name: is_high}`` for the secret shapes in ``text`` (names only, never the secret).
 
     ``is_high`` is True when some match of a ``HIGH_PRECISION`` shape is a real-looking value: not a placeholder
     (``AKIA...EXAMPLE``, ``ghp_xxxx...``, ``YOUR_API_KEY_HERE``, ``postgres:postgres@``), long and random enough.
-    A text holding a ``%XX`` escape is also scanned percent-decoded (``sk%2Dant-...``).
+    A text holding a ``%XX`` escape is also scanned with its ASCII escapes decoded (``sk%2Dant-...``).
     Linear in ``len(text)``."""
     found = _findings(text)
     if "%" in text:
-        decoded = urllib.parse.unquote(text)
+        decoded = _PCT_ASCII.sub(lambda m: chr(int(m.group(1), 16)), text)
         if decoded != text:
             for name, high in _findings(decoded).items():
                 found[name] = found.get(name, False) or high

@@ -62,14 +62,20 @@ label near a value (`.env.example`, a `.example` host, "sample config") exempts 
 site-controlled, so only the value's own placeholder look exempts it (SECDET). Free-text words (`fake`, `dummy`, "for
 illustration") are not cues either: `fake? no. <key>` is refused. Residual: the placeholder-value exemptions look at the
 value itself (a stopword list and substrings such as `example`, `dummy`, `placeholder`, `changeme`), so a real secret that
-happens to contain one of those words is exempt. A percent-encoded prefix (`sk%2Dant-`) is read decoded. A key glued to preceding
-letters (`mykeysk-ant-...`) is found for the distinctive shapes only: `sk-ant-`, `sk-or-v1-`, `sk-proj-` / `sk-svcacct-`,
-`gh[pousr]_` + exactly 36, `xox[baprs]-`, `AIza` + exactly 35, `AKIA` / `ASIA` + exactly 16 (not after an uppercase letter or
-digit), a JWT (`eyJ` + two dots) and `Bearer`. The generic `sk-` keeps a leading word boundary (`task-...`, `disk-<uuid>` are
-text, not keys); the scrubber's `pk-` / `rk-` keep theirs. A placeholder look exempts a token only when no long random body
-is left once the filler is cut out, so `<real key>xxxxxxxx`, `<real key>-example` or a spliced `01234567` does not exempt it.
-Not detected (door and scrubber): double percent-encoding (`%252D`), HTML entities (`&#45;`), JSON `\u002d`, `+` for `-`,
-base64 of a token, zero-width characters and spaces inside a token. Quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a
+happens to contain one of those words is exempt. A percent-encoded key character (`sk%2Dant-`, `ghp%5F`) is read decoded, once. A key glued to
+preceding text (`mykeysk-ant-...`, `123AKIA...`, `键ghp_...`) is found. Words that end in a key prefix are not keys:
+a generic `sk-` after a letter, digit or `_` must carry a 20-character alphanumeric run in mixed case with a digit
+(`task-<slug>`, `disk-<uuid>`, `risk-<git sha>` and BEM classes are lower-case and stay text), `gh[pousr]_` / `AIza`
+after an ASCII letter, digit or `_` must be exactly the issued length (36 / 35), and `AKIA` / `ASIA` is not read after an
+upper-case letter. Residual of that rule: `highp_` + exactly 36 random mixed-case characters is still refused, and a
+GitHub/Google key glued on BOTH sides (`x<key>y`) is missed. An unglued key is matched at any length, so text glued after
+it never hides it. A placeholder look (filler run, sequential typing, `example` / `your-key` words) exempts a token only
+when no long random body is left once the filler is cut out, so `<real key>xxxxxxxx`, `<real key>-example` or a spliced
+`01234567` does not exempt it; `<...>` / `${...}` markers always do. Residual: an AWS id with lower-case filler spliced
+into it (`AKIA<10>xxxxxxxx<6>`) no longer has the AWS shape: neither the door nor the scrubber finds it. Not detected
+by the door or the scrubber (pre-existing): double percent-encoding (`%252D`), HTML entities (`&#45;`, `&#x2d;`,
+`&minus;`), JSON `\u002d`, `+` for `-`, base64 of a token, and zero-width characters or spaces inside a token. The
+scrubber's `pk-` / `rk-` shapes keep their leading word boundary. Quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a
 counter and the category, never the value) and never refused. `engine.secret_findings` is the detector; its quantifiers
 are bounded and it scans long text in overlapping windows, so it is linear in the text and misses nothing at a
 window edge. A refused call skips the semantic cache and the judge queue, gets no emergency fallback to the budget
