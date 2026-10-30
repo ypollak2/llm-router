@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
+import io
 import json
 import os
 import statistics
@@ -141,22 +143,105 @@ def test_large_queue_is_not_reread_per_enqueue(home):
     purge.assert_not_called()
 
 
-@pytest.mark.timing
-def test_enqueue_p95_under_5ms_on_a_2000_entry_queue(home):
+def _fill_queue(q, n):
+    """n realistic ~1.8 KB entries, all fresh (nothing for the retention purge to drop)."""
     now = time.time()
     body = "x" * 800
-    q = home / "judge_queue.jsonl"
+    q.parent.mkdir(parents=True, exist_ok=True)
     q.write_text("".join(
         json.dumps({"routing_decision_id": i, "queued_at": now, "prompt": body, "response": body,
                     "task_type": "query", "answering_model": "m", "door": "mcp"}) + "\n"
-        for i in range(2000)))
-    times = []
+        for i in range(n)))
+    return q
+
+
+def _spy_queue_reads(monkeypatch, q):
+    """Record every open of `q` that can read it (builtins/io open, os.open). Returns the log."""
+    target = os.path.realpath(q)
+    log = []
+    real_open, real_os_open = builtins.open, os.open
+
+    def is_q(f):
+        return isinstance(f, (str, bytes, os.PathLike)) and os.path.realpath(f) == target
+
+    def spy_open(file, mode="r", *a, **k):
+        if is_q(file) and ("r" in mode or "+" in mode):
+            log.append(mode)
+        return real_open(file, mode, *a, **k)
+
+    def spy_os_open(path, flags, *a, **k):
+        if is_q(path) and flags & os.O_ACCMODE != os.O_WRONLY:
+            log.append(flags)
+        return real_os_open(path, flags, *a, **k)
+
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(io, "open", spy_open)
+    monkeypatch.setattr(os, "open", spy_os_open)
+    return log
+
+
+def test_enqueue_reads_a_large_queue_at_most_once_per_stride(home, monkeypatch):
+    """The hook-path property itself, with no clock: a large queue is not re-read per enqueue.
+
+    The cap/retention check reads the whole file, so on a large queue it may run only when
+    an append crosses a multiple of judge._CHECK_STRIDE_BYTES (judge.py). Counting reads
+    is immune to runner contention and also catches a plain re-read too cheap to time.
+    """
+    q = home / "judge_queue.jsonl"
+    reads = _spy_queue_reads(monkeypatch, q)
+    _fill_queue(q, 5)
+    assert q.stat().st_size < judge._EXACT_CHECK_BYTES
+    assert _enq(1)
+    assert reads, "anti-vacuity: the spy must see the exact check a small queue gets on every enqueue"
+
+    _fill_queue(q, 1500)  # below the entry cap even after 150 appends: no trim moves the size
+    assert judge._queue_max_entries() > 1650
+    assert q.stat().st_size > judge._EXACT_CHECK_BYTES
+    stride = judge._CHECK_STRIDE_BYTES
+    unexpected = []
     for i in range(150):
-        t = time.perf_counter()
-        _enq(10_000 + i)
-        times.append((time.perf_counter() - t) * 1000)
-    p95 = statistics.quantiles(times, n=20)[18]
-    assert p95 < 5.0, f"enqueue p95 {p95:.2f} ms on a 2000-entry queue"
+        before, size_before = len(reads), q.stat().st_size
+        assert _enq(10_000 + i)
+        crossed = size_before // stride != q.stat().st_size // stride
+        if len(reads) > before and not crossed:
+            unexpected.append(i)
+    assert not unexpected, (
+        f"{len(unexpected)} of 150 enqueues read the {size_before}-byte queue "
+        "without crossing a stride boundary")
+
+
+@pytest.mark.timing
+def test_enqueue_cost_does_not_grow_with_queue_length(home, monkeypatch):
+    """Enqueue on a 2,000-entry queue costs about what it costs on a 50-entry one.
+
+    Was an absolute `p95 < 5 ms`, which failed on a contended GitHub runner (11.68 ms, PR #788,
+    which does not touch the judge queue; a re-run passed). Now the two queues are timed in
+    interleaved pairs, so contention lands on both, and the bar is the ratio of medians. Both
+    queues are above judge._EXACT_CHECK_BYTES, so both take the same stat-only path; the large
+    one holds 40x the bytes, so per-enqueue O(n) work moves the ratio far past 2 while a clean
+    or uniformly stalled run sits near 1. Medians, not p95: the design allows one full check
+    per stride crossed (an occasional slow sample on the large queue), which the read-count
+    test above bounds exactly. The absolute p95 bar catches a constant cost the ratio cannot
+    see (e.g. a synchronous network call); 50 ms is about 4x the one contended CI p95 on
+    record (11.68 ms: job 123384734519, run 40855328190, timing (3.13), PR #788).
+    """
+    small = _fill_queue(home / "small" / "judge_queue.jsonl", 50)
+    large = _fill_queue(home / "large" / "judge_queue.jsonl", 2000)
+    assert small.stat().st_size > judge._EXACT_CHECK_BYTES
+    assert large.stat().st_size >= 20 * small.stat().st_size
+    current = [small]
+    monkeypatch.setattr(judge, "_queue_path", lambda: current[0])
+    times = {small: [], large: []}
+    for i in range(150):
+        for q in ((small, large) if i % 2 else (large, small)):
+            current[0] = q
+            t = time.perf_counter()
+            assert _enq(10_000 + i)
+            times[q].append((time.perf_counter() - t) * 1000)
+    ratio = statistics.median(times[large]) / statistics.median(times[small])
+    p95 = statistics.quantiles(times[large], n=20)[18]
+    assert ratio < 2.0, f"enqueue median on a 2000-entry queue is {ratio:.2f}x the 50-entry one"
+    assert p95 < 50.0, f"enqueue p95 {p95:.2f} ms on a 2000-entry queue"
 
 
 # ── spend ───────────────────────────────────────────────────────────────────
