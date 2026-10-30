@@ -129,6 +129,47 @@ jobs:
           fetch-depth: 0
       - run: python3 scripts/changelog_fragments.py check --base "origin/${{ github.base_ref }}"
 
+  # P212-8 / gate row P2.12-a3 (D-315): the installer wires Pi's MCP config and the REAL pi CLI
+  # lists llm_router. `pi mcp list` starts the llm_router stdio server and reads its tool list
+  # over MCP, so it needs no network and no key. PI_SMOKE_REQUIRED=1 turns a missing pi into a
+  # failure (the test skips without it); the last step also fails if any test was skipped.
+  pi-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22.19"
+      - run: npm install -g @earendil-works/pi-coding-agent@0.99.1
+      - run: pi --version
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.11
+      - run: uv sync --extra dev
+      - name: Pi smoke (real pi, temp HOME)
+        env:
+          PI_SMOKE_REQUIRED: "1"
+        run: |
+          uv run pytest tests/test_p212_pi_ci_smoke.py -q -s -p no:cacheprovider -p no:xdist \
+            -o addopts="" --junitxml=pi-smoke-junit.xml
+      - name: Fail if any Pi smoke test was skipped
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          r = ET.parse("pi-smoke-junit.xml").getroot()
+          s = r if r.tag == "testsuite" else r[0]
+          n, skipped = int(s.get("tests")), int(s.get("skipped"))
+          print(f"pi smoke: tests={n} skipped={skipped}")
+          assert n >= 3 and skipped == 0, "the Pi smoke must run, not skip"
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: pi-smoke-junit
+          path: pi-smoke-junit.xml
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 58
