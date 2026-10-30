@@ -210,6 +210,40 @@ def test_enqueue_reads_a_large_queue_at_most_once_per_stride(home, monkeypatch):
         "without crossing a stride boundary")
 
 
+def test_queue_at_the_cap_just_below_a_stride_line_is_not_reread_per_enqueue(home, monkeypatch):
+    """JUDGECAP: a queue AT the entry cap whose size sits just under a stride line.
+
+    Each append crossed the line and each trim took the file back under it, so every
+    enqueue paid a full read + rewrite (reviewer probe on main: 100 checks in 100 enqueues,
+    185-byte entries, cap 2833, 524,105 B vs the 524,288 B line). The trim now leaves a
+    quarter stride of headroom below the next line, so a full check costs at least that
+    many appended bytes. Counted with the read spy, no clock.
+    """
+    q = home / "judge_queue.jsonl"
+    assert _enq(100_000)
+    line = q.read_text()
+    stride = judge._CHECK_STRIDE_BYTES
+    cap = (2 * stride) // len(line.encode())
+    monkeypatch.setenv("LLM_ROUTER_JUDGE_QUEUE_MAX_ENTRIES", str(cap))
+    q.write_text(line * cap)
+    assert 2 * stride - len(line.encode()) < q.stat().st_size < 2 * stride  # at the cap, just under a line
+
+    reads = _spy_queue_reads(monkeypatch, q)
+    checks, appended, n = 0, 0, 400
+    for i in range(n):
+        before = len(reads)
+        assert _enq(100_001 + i)
+        appended += len(line.encode())
+        if len(reads) > before:  # a full check ran: it must leave the queue within the cap
+            checks += 1
+            assert len(_queue(home)) <= cap
+    assert checks >= 1, "anti-vacuity: the first append crosses the line and must run the full check"
+    bound = 1 + appended // (stride // 4)
+    assert checks <= bound, f"{checks} full checks in {n} enqueues at the cap (bound {bound})"
+    assert _queue(home)[-1]["routing_decision_id"] == 100_000 + n  # newest kept
+    assert q.stat().st_size <= 3 * stride  # between checks: at most one stride over the cap's bytes
+
+
 @pytest.mark.timing
 def test_enqueue_cost_does_not_grow_with_queue_length(home, monkeypatch):
     """Enqueue on a 2,000-entry queue costs about what it costs on a 50-entry one.
