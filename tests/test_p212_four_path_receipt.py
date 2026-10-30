@@ -47,16 +47,21 @@ REPO = Path(__file__).resolve().parent.parent
 PATHS = ("cli", "npm", "plugin", "nl")
 #: Detected on every twin HOME. Three are wired with hook scripts; the other three cover
 #: each not_wired branch of run_full: a snippet host (cursor), a host that cannot be wired
-#: globally (windsurf) and an unsupported one (pi).
-HOSTS = ("claude-code", "codex", "gemini-cli", "cursor", "windsurf", "pi")
-#: pi's expected receipt status. "not_wired" (unsupported) on main today. When P212-6 (#797)
-#: wires pi, flipping this alone is NOT enough: pi's wired row has hook_version None and an
-#: extra `smoke` field, so the WIRED/ROW_FIELDS checks must allow both for pi; a host such as
-#: kimi must take pi's place as the unsupported one in HOSTS; and install._pi_binary must be
-#: stubbed in _twin and in the npm child _BOOT so a machine with a real pi never runs it.
-PI_STATUS = "not_wired"
-WIRED = {"claude-code", "codex", "gemini-cli"} | ({"pi"} if PI_STATUS == "wired" else set())
+#: globally (windsurf), one wired with an MCP config only (pi, P212-6 / D-315) and an
+#: unsupported one (kimi).
+HOSTS = ("claude-code", "codex", "gemini-cli", "cursor", "windsurf", "pi", "kimi")
+#: pi's expected receipt status: wired (MCP config only, P212-6). Its row has hook_version None
+#: and an extra `smoke` field (``skipped``: install._pi_binary is stubbed in _twin and in the
+#: npm child _BOOT, so a machine with a real pi never runs it).
+PI_STATUS = "wired"
+WIRED = {"claude-code", "codex", "gemini-cli"}  # wired WITH hook scripts (hook_version set)
+MCP_ONLY = {"pi"}  # wired, hook_version None
 ROW_FIELDS = ("status", "reason", "via", "hook_version")
+PI_SMOKE_SKIPPED = {"status": "skipped", "detail": "pi binary not on PATH"}
+
+
+def _fields(host: str) -> tuple[str, ...]:
+    return ROW_FIELDS + ("smoke",) if host in MCP_ONLY else ROW_FIELDS
 #: §2's only allowed per-row difference: {(path, host): {field: (expected on that path, elsewhere)}}
 ALLOWED = {("plugin", "claude-code"): {"via": ("plugin", "settings")}}
 
@@ -84,10 +89,10 @@ def receipt_differences(receipts: dict[str, dict | None], base: str = "cli") -> 
             out.append(f"{name}: hosts {sorted(got.get('hosts') or {})} != {base} {sorted(ref['hosts'])}")
         for host in sorted(set(got.get("hosts") or {}) & set(ref.get("hosts") or {})):
             row, ref_row = got["hosts"][host], ref["hosts"][host]
-            if set(row) != set(ROW_FIELDS):
-                out.append(f"{name}: hosts[{host}] fields {sorted(row)} != {sorted(ROW_FIELDS)}")
+            if set(row) != set(_fields(host)):
+                out.append(f"{name}: hosts[{host}] fields {sorted(row)} != {sorted(_fields(host))}")
             allowed = ALLOWED.get((name, host), {})
-            for field in ROW_FIELDS:
+            for field in _fields(host):
                 if field in allowed:
                     want_here, want_base = allowed[field]
                     if (row.get(field), ref_row.get(field)) != (want_here, want_base):
@@ -123,6 +128,7 @@ def _twin(root: Path, monkeypatch) -> dict:
                         lambda **k: detect(**{"home": root, "which": lambda b: None, **k}))
     monkeypatch.setattr(seats, "refresh_seats",
                         lambda *a, **k: (_ for _ in ()).throw(OSError("no seat probe in tests")))
+    monkeypatch.setattr(install, "_pi_binary", lambda: None)  # the pi smoke never runs a real pi
     for host in HOSTS:
         d = host_detect._config_dir(host_detect._HOSTS[host][1], root, sys.platform, os.environ)
         d.mkdir(parents=True, exist_ok=True)
@@ -189,6 +195,8 @@ host_detect.detect_hosts = lambda **k: _detect(**{"home": _home, "which": lambda
 def _no_probe(*a, **k):
     raise OSError("no seat probe in tests")
 seats.refresh_seats = _no_probe
+from llm_router.commands import install as _install
+_install._pi_binary = lambda: None  # the pi smoke never runs a real pi
 from tests import _real_home_guard  # the suite's real-HOME tripwire, in this process too
 _real_home_guard.install()
 from llm_router.cli import main
@@ -335,8 +343,10 @@ def test_four_install_paths_leave_the_same_receipt(tmp_path, monkeypatch):
     cli = receipts["cli"]
     assert sorted(cli["hosts"]) == sorted(HOSTS), cli["hosts"]
     assert {h for h, r in cli["hosts"].items() if r["status"] == "wired" and r["hook_version"]} == WIRED, cli["hosts"]
-    assert cli["hosts"]["pi"]["status"] == PI_STATUS, cli["hosts"]["pi"]
-    assert all(cli["hosts"][h]["reason"] for h in set(HOSTS) - WIRED), cli["hosts"]
+    assert cli["hosts"]["pi"] == {"status": PI_STATUS, "reason": None, "via": "files", "hook_version": None,
+                                  "smoke": PI_SMOKE_SKIPPED}, cli["hosts"]["pi"]
+    assert all(cli["hosts"][h]["reason"] for h in set(HOSTS) - WIRED - MCP_ONLY), cli["hosts"]
+    assert cli["hosts"]["kimi"]["status"] == "not_wired", cli["hosts"]["kimi"]
     assert len(owned := homes.user_owned_files(tmp_path / "cli" / "upgrade")) >= 5, owned
 
     problems += receipt_differences(receipts)
@@ -352,7 +362,8 @@ def _row(via: str | None = "settings", status: str = "wired", version: int | Non
 
 
 def _receipts(**override: dict) -> dict[str, dict]:
-    base = {"claude-code": _row(), "codex": _row(via="files"), "pi": _row(None, "not_wired", None, "unsupported")}
+    base = {"claude-code": _row(), "codex": _row(via="files"), "kimi": _row(None, "not_wired", None, "unsupported"),
+            "pi": {**_row("files", "wired", None), "smoke": dict(PI_SMOKE_SKIPPED)}}
     rows = {name: json.loads(json.dumps(base)) for name in PATHS}
     rows["plugin"]["claude-code"]["via"] = "plugin"
     for name, hosts in override.items():
@@ -367,11 +378,14 @@ def test_comparison_accepts_the_one_difference_section_2_allows():
 @pytest.mark.parametrize("override,expect", [
     ({"nl": {"codex": _row(None, "not_wired", None, "skipped: --no-hosts")}}, "nl: digest"),
     ({"npm": {"codex": _row(via="settings")}}, "npm: hosts[codex].via"),
-    ({"npm": {"pi": _row(None, "not_wired", None, "other reason")}}, "npm: hosts[pi].reason"),
+    ({"npm": {"kimi": _row(None, "not_wired", None, "other reason")}}, "npm: hosts[kimi].reason"),
+    ({"npm": {"pi": {**_row("files", "wired", None), "smoke": {"status": "passed", "detail": "x"}}}},
+     "npm: hosts[pi].smoke"),
+    ({"nl": {"pi": _row("files", "wired", None)}}, "nl: hosts[pi] fields"),
     ({"plugin": {"claude-code": _row(via="settings")}}, "plugin: hosts[claude-code].via 'settings' (want 'plugin')"),
     ({"cli": {"claude-code": _row(via="plugin")}}, "plugin: hosts[claude-code].via 'plugin' (want 'plugin'), cli 'plugin'"),
     ({"nl": {"claude-code": _row(via="plugin")}}, "nl: hosts[claude-code].via 'plugin' != cli 'settings'"),
-    ({"plugin": {"kimi": _row(None, "not_wired", None, "x")}}, "plugin: hosts ["),
+    ({"plugin": {"cursor": _row(None, "not_wired", None, "x")}}, "plugin: hosts ["),
 ])
 def test_comparison_is_red_on_each_difference_and_names_the_path(override, expect):
     diffs = receipt_differences(_receipts(**override))

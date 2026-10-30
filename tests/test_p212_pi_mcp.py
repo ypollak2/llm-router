@@ -454,3 +454,41 @@ def test_legacy_uninstall_removes_only_our_entry(home):
     assert json.loads(path.read_text()) == json.loads(USER_FILE)
     assert f"✓ Removed llm_router MCP server from {path}" in actions
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+# ── rv-797b Sa: a lone surrogate in the user's file ───────────────────────────
+
+LONE_SURROGATE = '{"mcpServers": {"a": {"command": "true", "x": "\\ud800"}}}'
+
+
+def test_a_lone_surrogate_value_is_kept_and_no_temp_file_is_left(home):
+    path = _seed(home, LONE_SURROGATE)
+
+    actions = install._install_pi_files()
+
+    assert actions == [f"✓ Added llm_router MCP server to {path}"]
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after["mcpServers"]["a"] == {"command": "true", "x": "\ud800"}  # the user's value, unchanged
+    assert after["mcpServers"]["llm_router"] == ENTRY
+    assert sorted(p.name for p in path.parent.iterdir()) == ["mcp.json"]
+
+
+def test_host_pi_with_a_lone_surrogate_exits_0(home, capsys):
+    _seed(home, LONE_SURROGATE)
+    install._run_install(["--host", "pi"])  # a traceback / SystemExit here fails the test
+    assert "Added llm_router MCP server" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("boom", [UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed"),
+                                  ValueError("bad"), KeyboardInterrupt()])
+def test_any_write_failure_removes_the_temp_file_and_keeps_the_original(home, monkeypatch, boom):
+    path = _seed(home)
+
+    def fail(*_a, **_k):
+        raise boom
+
+    monkeypatch.setattr(install.os, "fsync", fail)
+    with pytest.raises(type(boom)):
+        install._write_pi_mcp(path, "{}\n")
+    assert path.read_text() == USER_FILE
+    assert sorted(p.name for p in path.parent.iterdir()) == ["mcp.json"]

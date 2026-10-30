@@ -2385,7 +2385,7 @@ def _write_pi_mcp(path: Path, text: str) -> None:
         if path.exists():
             shutil.copymode(path, tmp)
         os.replace(tmp, path)
-    except OSError:
+    except BaseException:  # any failure (OSError, an encode error, ^C): no temp left, original untouched
         Path(tmp).unlink(missing_ok=True)
         raise
 
@@ -2410,7 +2410,12 @@ def _install_pi_files() -> list[str]:
         actions.append(f"  llm_router already in {path} (left as it is)")
     else:
         servers[PI_SERVER] = {"command": "llm-router", "args": []}
-        _write_pi_mcp(path, _json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        text = _json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:  # a lone surrogate (valid as a JSON escape): keep it escaped
+            text = _json.dumps(data, indent=2) + "\n"
+        _write_pi_mcp(path, text)
         install_manifest.record("json_mcp", path, root_key="mcpServers", server=PI_SERVER)
         actions.append(f"✓ Added llm_router MCP server to {path}")
     for name in _PI_LEGACY_NAMES:
