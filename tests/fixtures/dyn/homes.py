@@ -22,6 +22,9 @@ GENERATED = (
     "grandfathered_models.json", "grandfathered_models.init",
     "seats.json", "usage.json", "install-manifest.json", ".claude.json",
     "install_receipt.json",  # P212-1: rewritten by every full install
+    # P212-3: the plugin's SessionStart hook (asked/attempt record) and the --via-plugin run
+    # (consent); P212-5 found the first undeclared on the plugin path's HOME
+    "plugin_install_state.json", "plugin_install_consent.json",
 )
 #: directories the installer owns wholesale inside the state dir
 GENERATED_DIRS = ("hooks",)
