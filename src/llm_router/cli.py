@@ -635,29 +635,14 @@ def _install_trae_files() -> list[str]:
 
 
 def _install_pi_files() -> list[str]:
-    """Install llm_router MCP config for Pi coding agent (pi.dev)."""
-    actions = []
-    home = Path.home()
+    """Install llm_router MCP config for Pi coding agent (pi.dev).
 
-    # Pi agent MCP config: ~/.pi/agent/mcp.json
-    mcp_json = home / ".pi" / "agent" / "mcp.json"
-    actions.extend(
-        _merge_json_mcp_block(
-            mcp_json,
-            "llm_router",
-            {
-                "command": "llm-router",
-                "args": [],
-                "lifecycle": "lazy",
-            },
-        )
-    )
+    One implementation only (P212-6, as RED8-06 for Codex): the writer lives in
+    commands/install.py. Pi reads ~/.pi/agent/mcp.json; it never read the
+    INSTRUCTIONS.md this function used to write, nor its ``lifecycle`` key."""
+    from llm_router.commands.install import _install_pi_files as _write
 
-    # Pi agent instructions
-    instructions = home / ".pi" / "agent" / "INSTRUCTIONS.md"
-    actions.extend(_append_routing_rules(instructions, "pi-rules.md"))
-
-    return actions
+    return _write()
 
 
 def _print_claude_desktop_config() -> list[str]:

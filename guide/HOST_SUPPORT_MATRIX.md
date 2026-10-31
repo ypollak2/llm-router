@@ -6,14 +6,14 @@ This page documents **exactly which features work where**, without sugar-coating
 
 | Feature | Claude Code | Codex CLI | Gemini CLI | Pi (pi.dev) | VS Code/Cursor | Browser | Local CLI |
 |---------|:-----------:|:---------:|:----------:|:-----------:|:--------------:|:-------:|:---------:|
-| **Auto-Routing Hooks** | ✅ Full | ⚠️ Prompt hook only | ⚠️ Prompt hook only | ❌ Not installable | 🔜 Not yet | ❌ No | ✅ Limited |
-| **Session-End Tracking** | ✅ Yes | ❌ No | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Manual |
+| **Auto-Routing Hooks** | ✅ Full | ⚠️ Prompt hook only | ⚠️ Prompt hook only | ❌ None (MCP only) | 🔜 Not yet | ❌ No | ✅ Limited |
+| **Session-End Tracking** | ✅ Yes | ❌ No | ✅ Yes | 🔜 Not yet (16.1) | ❌ No | ❌ No | ✅ Manual |
 | **Quota Pressure Display** | ✅ Yes | ❌ No | ✅ Yes | ❌ No | ❌ No | ❌ No | ❌ No |
 | **60 MCP Tools (Direct)** | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Yes |
-| **Cost Optimization** | ✅ — | ⚠️ Opt-in* | ✅ — | ✅ — | ⚠️ Partial* | ❌ No | ✅ Manual |
-| **Free-First Routing** | ✅ Yes | ⚠️ Opt-in | ✅ Yes | ✅ Yes | ⚠️ Opt-in | ❌ No | ⚠️ Opt-in |
-| **Saved Usage Analytics** | ✅ Yes | ⚠️ Routed calls only | ✅ Yes | ✅ Yes | ⚠️ Manual** | ❌ No | ✅ Yes |
-| **Decision Replay** | ✅ Yes | ⚠️ Routed calls only | ✅ Yes | ✅ Yes | ❌ No | ❌ No | ✅ Yes |
+| **Cost Optimization** | ✅ — | ⚠️ Opt-in* | ✅ — | ⚠️ Routed calls only | ⚠️ Partial* | ❌ No | ✅ Manual |
+| **Free-First Routing** | ✅ Yes | ⚠️ Opt-in | ✅ Yes | ⚠️ Routed calls only | ⚠️ Opt-in | ❌ No | ⚠️ Opt-in |
+| **Saved Usage Analytics** | ✅ Yes | ⚠️ Routed calls only | ✅ Yes | ⚠️ Routed calls only | ⚠️ Manual** | ❌ No | ✅ Yes |
+| **Decision Replay** | ✅ Yes | ⚠️ Routed calls only | ✅ Yes | ⚠️ Routed calls only | ❌ No | ❌ No | ✅ Yes |
 
 **Legend:**
 - ✅ **Yes** — Fully supported, automatic
@@ -161,40 +161,31 @@ llm-router install --host gemini-cli
 
 ---
 
-### ⚪ Pi Coding Agent (not installable today)
+### 🟡 Pi Coding Agent (MCP server only)
 
-> **Status (v16 P0.4):** `llm-router install --host pi` prints `unsupported: <reason>; planned
-> in v16 P2.12` and exits 2. A plain `llm-router install` on a machine with Pi reports
-> `pi: detected, not wired: <reason>`. Everything below describes the intended integration
-> (v16 P2.12), not something you can install today.
-
-**Tier: Full Cost Optimization**
-
-Inflection AI's coding agent. MCP support via `~/.pi/agent/mcp.json`, lazy lifecycle by default.
+> **Status (v16, D-315):** `llm-router install --host pi`, or a plain `llm-router install` on a
+> machine with Pi, adds `mcpServers.llm_router` to `~/.pi/agent/mcp.json` (the file and shape
+> Pi 0.99.1 documents in its `docs/mcp.md`). Other servers and keys in the file are kept. A file
+> that is not valid JSON, a symlink or read-only is refused and left unchanged. When the `pi`
+> binary is on PATH both commands run `pi mcp list --json` (it starts every enabled server in the
+> file) and print the result; `--host pi` exits 1 on a refusal or a failed check, and a plain or
+> `--auto` install also records it in the install receipt (`skipped` without the binary). No hooks
+> and no end-of-turn line: the Pi end-of-turn line is planned in 16.1.
 
 **Activation:**
 ```bash
 llm-router install --host pi
+pi mcp list        # llm_router: connected
 ```
 
-**Features:**
-- ✅ All 70 MCP tools available (via MCP proxy or directTools)
-- ✅ Session tracking (cost breakdown logged)
-- ✅ Free-first routing (Ollama → Gemini Flash → GPT-4o)
-- ✅ Budget tracking
-- ✅ Lazy lifecycle (connects on first tool call, auto-disconnects)
-
-**Cost savings:** not measured (see the Claude Code section above).
-
-**Why it's good:**
-- Pi's MCP adapter supports importing configs from other agents
-- Lazy lifecycle means zero overhead when not routing
-- `directTools` option makes key tools visible without proxy discovery
-- Works alongside Pi's native model
+**What works:** the llm-router MCP tools, reached as `mcp__llm_router__<tool>` (through Pi's
+`codemode` exposure by default).
 
 **Limitations:**
-- No real-time quota display
-- Pi's native model isn't tracked by llm-router (only routed calls)
+- No hooks: nothing routes a prompt automatically; the model has to call the tools.
+- No end-of-turn line yet (16.1).
+- Pi's native model isn't tracked by llm-router (only routed calls).
+- `llm-router uninstall` removes the `llm_router` entry and nothing else.
 
 ---
 

@@ -18,7 +18,7 @@ from llm_router import host_detect
 from llm_router.commands import install
 
 _README = Path(__file__).resolve().parents[1] / "README.md"
-_PLANNED = "planned (v16 P2.12)"
+_PLANNED = "planned (16.1)"
 
 
 def _readme_host_rows() -> list[tuple[str, str]]:
@@ -64,7 +64,8 @@ def test_every_readme_row_is_installable_or_labelled_planned() -> None:
     assert bad == []
 
 
-def test_every_advertised_host_installs_without_unknown(isolated_install_env) -> None:
+def test_every_advertised_host_installs_without_unknown(isolated_install_env, monkeypatch) -> None:
+    monkeypatch.setattr(install, "_pi_binary", lambda: None)  # `--host pi` smoke: never the real pi
     checked = 0
     for host, row in _readme_host_rows():
         if host == "claude-code" or _PLANNED in row:
@@ -73,18 +74,18 @@ def test_every_advertised_host_installs_without_unknown(isolated_install_env) ->
         assert "Unknown host" not in out, host
         assert code == 0, host
         checked += 1
-    assert checked == 12  # 15 rows minus claude-code, pi, kimi
+    assert checked == 13  # 15 rows minus claude-code and kimi (pi is wired since P212-6, D-315)
 
 
-@pytest.mark.parametrize("host", ["pi", "kimi"])
+@pytest.mark.parametrize("host", ["kimi"])
 def test_planned_host_reports_reason_and_exits_2(host, isolated_install_env) -> None:
     out, code = _run(["--host", host])
     assert code == 2
     assert "Unknown host" not in out
     line = out.strip().splitlines()[-1]
     assert line.startswith("unsupported: ")
-    assert line.endswith("; planned in v16 P2.12")
-    reason = line[len("unsupported: "):-len("; planned in v16 P2.12")]
+    assert line.endswith("; planned in 16.1")
+    reason = line[len("unsupported: "):-len("; planned in 16.1")]
     assert reason.strip(), "the reason must not be empty"
 
 
@@ -122,7 +123,7 @@ def test_plain_install_wires_detected_hosts_and_reports_the_rest(isolated_instal
     assert reported[0].split("not wired: ", 1)[1].strip()
 
 
-def test_plain_install_reports_pi_and_kimi_with_their_reason(isolated_install_env, monkeypatch) -> None:
+def test_plain_install_wires_pi_and_reports_kimi_with_its_reason(isolated_install_env, monkeypatch) -> None:
     home = isolated_install_env / "home"
     (home / ".pi").mkdir()
     (home / ".kimi").mkdir()
@@ -131,13 +132,14 @@ def test_plain_install_reports_pi_and_kimi_with_their_reason(isolated_install_en
     real = host_detect.detect_hosts
     monkeypatch.setattr(host_detect, "detect_hosts",
                         lambda **kw: real(home=home, which=lambda b: None))
+    monkeypatch.setattr(install, "_pi_binary", lambda: None)  # never the developer's real pi
 
     out, _ = _run([])
 
-    for host in ("pi", "kimi"):
-        lines = [ln.strip() for ln in out.splitlines() if ln.strip().startswith(f"{host}: detected")]
-        assert lines == [f"{host}: detected, not wired: {install._UNSUPPORTED_HOSTS[host]}"]
-    assert sum("detected, not wired" in ln for ln in out.splitlines()) == 2
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip().startswith("kimi: detected")]
+    assert lines == [f"kimi: detected, not wired: {install._UNSUPPORTED_HOSTS['kimi']}"]
+    assert sum("detected, not wired" in ln for ln in out.splitlines()) == 1
+    assert "llm_router" in (home / ".pi" / "agent" / "mcp.json").read_text()
 
 
 def test_plain_install_silent_for_absent_hosts(isolated_install_env, monkeypatch) -> None:
