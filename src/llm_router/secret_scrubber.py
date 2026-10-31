@@ -77,7 +77,14 @@ SECRET_PATTERNS = {
     # been measuring a gap both scrubbers shared. Three base64url segments
     # separated by dots, anchored on the "eyJ" that every JSON header
     # encodes to, so ordinary dotted identifiers are not swept up.
-    "jwt": re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"),
+    # SECDET: a JWT glued to preceding text is found, so the match may start inside a run of base64url characters.
+    # Starting at every ``eyJ`` made a long ``eyJeyJ...`` run quadratic (200k chars: 6.8 s). So a match starts only
+    # at the start of a run, the lookahead checks once per run that two dotted segments follow, and only then is the
+    # ``eyJ`` looked for; only the ``secret`` group (from ``eyJ``) is redacted.
+    "jwt": re.compile(
+        r"(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8})[A-Za-z0-9_-]*?"
+        r"(?P<secret>eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
+    ),
     "env_key_assignment": re.compile(r"\b[A-Z][A-Z0-9_]*_(?:API_)?KEY\s*[=:]\s*\S+"),
     "private_key": re.compile(
         r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
@@ -168,16 +175,25 @@ def scrub_text(text: str) -> str:
     return _scrub_plain(text)
 
 
+def _secret_span(m: "re.Match[str]") -> tuple[int, int]:
+    """The part of a match that is the secret: the ``secret`` group when the pattern has one, else the whole match."""
+    return m.span("secret") if "secret" in m.re.groupindex else m.span()
+
+
 def _scrub_plain(text: str) -> str:
     for pattern_name, pattern in SECRET_PATTERNS.items():
-        text = pattern.sub(f"[REDACTED-{pattern_name.upper()}]", text)
+        label = f"[REDACTED-{pattern_name.upper()}]"
+        if "secret" in pattern.groupindex:
+            text = pattern.sub(lambda m, label=label: m.group(0)[:m.start("secret") - m.start()] + label, text)
+        else:
+            text = pattern.sub(label, text)
     return text
 
 
 _NONSPACE_RUN = re.compile(r"\S+")
-_PCT_OR_CHAR = re.compile(r"%[0-9A-Fa-f]{2}|.", re.DOTALL)
-#: What a key can be made of. An escape that decodes to one of these is read decoded; every other escape stays as typed.
-_KEY_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~")
+#: An ASCII escape is read decoded, exactly as ``engine.secret_findings`` reads it (``sk%2Dant-``, ``Bearer%20...``),
+#: so the door and the scrubber agree; a non-ASCII escape stays as typed.
+_PCT_OR_CHAR = re.compile(r"%[0-7][0-9A-Fa-f]|.", re.DOTALL)
 
 
 def _scrub_percent_runs(text: str) -> str:
@@ -206,7 +222,7 @@ def _scrub_percent_run(run: str) -> str:
     changed = False
     for m in _PCT_OR_CHAR.finditer(run):
         tok = m.group(0)
-        if len(tok) == 3 and chr(int(tok[1:], 16)) in _KEY_CHARS:
+        if len(tok) == 3:
             tok, changed = chr(int(tok[1:], 16)), True
         norm.append(tok)
         starts.extend([m.start()] * len(tok))
@@ -215,11 +231,23 @@ def _scrub_percent_run(run: str) -> str:
         return run
     normalised = "".join(norm)
     spans: list[tuple[int, int, str]] = []
+    covered: list[int] | None = None   # prefix sums of the characters an earlier pattern already claimed
     for name, pattern in SECRET_PATTERNS.items():
-        for sm in pattern.finditer(normalised):
-            a, b = sm.span()
-            if b > a and not any(a < e and s_ < b for s_, e, _ in spans):
-                spans.append((a, b, name))
+        found = [(a, b) for a, b in map(_secret_span, pattern.finditer(normalised)) if b > a]
+        if not found:
+            continue
+        if covered is not None:   # an earlier pattern wins an overlap; one prefix-sum check per span keeps it linear
+            found = [(a, b) for a, b in found if covered[b] == covered[a]]
+        spans.extend((a, b, name) for a, b in found)
+        mark = [0] * (len(normalised) + 1)
+        for a, b, _ in spans:
+            mark[a] += 1
+            mark[b] -= 1
+        covered, depth, total = [0], 0, 0
+        for i in range(len(normalised)):
+            depth += mark[i]
+            total += 1 if depth > 0 else 0
+            covered.append(total)
     if not spans:
         return run
     out, pos = [], 0

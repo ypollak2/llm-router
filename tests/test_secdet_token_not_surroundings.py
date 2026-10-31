@@ -5,8 +5,10 @@ case. Every secret is generated at run time (tests/secret_fixtures.py); nothing 
 """
 from __future__ import annotations
 
+import base64
 import random
 import time
+import uuid
 
 import pytest
 
@@ -108,14 +110,72 @@ def _legacy_openai_key(seed: int) -> str:
     return "sk-" + fx._with_digit(fx._draw(random.Random(f"legacy-openai:{seed}"), fx.B62, 48))
 
 
-@pytest.mark.parametrize("kind", KINDS + ("openrouter_key", "legacy_openai_key"))
+@pytest.mark.parametrize("kind", KINDS + ("openrouter_key",))
 def test_a_key_glued_after_letters_digits_underscore_or_cjk_is_found(kind):
-    # requirement G; repair 1 lost the plain ``sk-`` (behind a word boundary) and AWS after a digit
+    # requirement G for the distinctive prefixes; repair 1 lost AWS after a digit
     for seed in range(5):
-        key = _legacy_openai_key(seed) if kind == "legacy_openai_key" else fx.real_shaped(kind, 20 + seed)
+        key = fx.real_shaped(kind, 20 + seed)
         for pre in ("mykey", "9", "123", "my_", "_", "\u952e", "\uff4b\uff45\uff59", "task"):
             assert local_privacy.scan_secrets(pre + key), (kind, pre)
             assert key[-16:] not in scrub_text(pre + key), (kind, pre)
+
+
+def test_an_unglued_legacy_key_is_found_and_a_word_glued_generic_sk_is_not_read():
+    # a word-glued unmarked ``sk-`` is ordinary text far more often than a key (review rv-792b: 97 of 192 look-alikes
+    # refused); the scrubber still redacts it, so it is never stored
+    key = _legacy_openai_key(1)
+    for text in (key, f"key {key}", f"k={key}", f"-{key}", f"{key}xxxxxxxx"):
+        assert local_privacy.scan_secrets(text), text[:6]
+    assert not local_privacy.scan_secrets("mykey" + key)
+    assert key[-16:] not in scrub_text("mykey" + key)
+
+
+def _draw(rng: random.Random, n: int, alphabet: str = fx.B62) -> str:
+    return "".join(rng.choice(alphabet) for _ in range(n))
+
+
+def test_review_look_alikes_after_words_ending_in_a_key_prefix_are_not_refused():
+    # the rv-792b classes: PascalCase ids with a digit, IPFS / Drive / nanoid ids, a lower-case ``-ant-`` kebab,
+    # ``highs_`` + 36 camelCase, upper-case UUIDs; every one was refused at b29f2bef
+    rng = random.Random("rv792b-classes")
+    b58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    texts = []
+    for w in "task disk risk ask desk mask brisk whisk flask bask tusk husk kiosk".split():
+        texts += [f"{w}-OAuth2ClientCredentialsFlowHandler", f"{w}-Http2ServerPushConfigurationV3Test",
+                  f"{w}-Qm{_draw(rng, 44, b58)}", f"{w}-1{_draw(rng, 32, fx.B64URL)}",
+                  f"{w}-{_draw(rng, 21, fx.B64URL)}-{_draw(rng, 21, fx.B64URL)}",
+                  f"{w}-ant-colony-simulation-module-v2-final-build", f"{w}-" + str(uuid.UUID(int=rng.getrandbits(128))).upper()]
+    texts += [f"{p}_computeTheWeightedAverageOfAllValues" for p in ("weighs", "highs", "laughs", "sighs", "toughs")]
+    assert len(texts) == 96
+    assert [t[:24] for t in texts if local_privacy.scan_secrets(t)] == []
+
+
+def test_random_base64url_blobs_are_not_refused():
+    rng = random.Random("secdet-blobs")
+    blobs = [base64.urlsafe_b64encode(rng.randbytes(768)).decode() for _ in range(400)]
+    blobs += [base64.urlsafe_b64encode(rng.randbytes(75_000)).decode() for _ in range(4)]
+    assert [i for i, b in enumerate(blobs) if local_privacy.scan_secrets("payload: " + b)] == []
+
+
+def test_a_jwt_with_filler_glued_to_its_signature_is_still_refused():
+    from tests.test_lc12h_repair3 import real_jwt
+    jwt = real_jwt()
+    for text in (jwt + "xxxxxxxx", jwt + "abcdefgh", jwt + "-example", jwt + "01234567", "my" + jwt + "xxxxxxxx"):
+        assert local_privacy.scan_secrets(text), text[-10:]
+
+
+def test_an_openrouter_key_glued_on_both_sides_or_with_filler_is_found():
+    key = fx.real_shaped("openrouter_key", 3)
+    for text in ("x" + key + "y", "1" + key + "_", key + "xxxxxxxx", key + "01234567", "my" + key + "xxxxxxxx"):
+        assert local_privacy.scan_secrets(text), text[:4]
+        assert key[-16:] not in scrub_text(text)
+
+
+def test_a_percent_encoded_bearer_is_refused_and_scrubbed():
+    token = fx.real_shaped("bearer_token", 4).split(None, 1)[1]
+    for text in (f"https://h/?auth=Bearer%20{token}&x=1", f"Bearer%20{token}"):
+        assert local_privacy.scan_secrets(text), text[:20]
+        assert token[4:20] not in scrub_text(text), text[:20]
 
 
 @pytest.mark.parametrize("kind", ("github_token", "google_key"))
@@ -148,6 +208,25 @@ def test_a_long_run_with_a_stray_percent_is_scrubbed_once_and_unchanged(monkeypa
     text = "x" * 300_000 + "%zz"
     assert scrub_text(text) == text
     assert calls == [len(text)]          # one pass over the run, no per-position restart
+
+
+@pytest.mark.timing
+@pytest.mark.parametrize("n", (200_000, 1_000_000))
+@pytest.mark.parametrize("unit", ("eyJ", "eyJaaaaaaaa.", "eyJaaaaaaaa.eyJaaaaaaaa"))
+def test_scrubber_jwt_is_linear_on_a_long_eyj_run(unit, n):
+    # rv-792b MUST-1: without its leading ``\b`` the scrubber's jwt started at every ``eyJ`` (200k: 6.8 s, 1M: > 60 s)
+    text = (unit * (n // len(unit) + 1))[:n]
+    for t in (text, text + "."):
+        t0 = time.perf_counter()
+        scrub_text(t)
+        assert time.perf_counter() - t0 < 3.0
+
+
+def test_the_scrubber_still_redacts_a_glued_or_dotted_jwt_from_its_eyj():
+    from tests.test_lc12h_repair3 import real_jwt
+    jwt = real_jwt()
+    assert scrub_text("mykey" + jwt + " end") == "mykey[REDACTED-JWT] end"
+    assert scrub_text("a.bcdefghijkl.mnopqrstu." + jwt) == "a.bcdefghijkl.mnopqrstu.[REDACTED-JWT]"
 
 
 @pytest.mark.timing

@@ -322,26 +322,39 @@ def _reason(s: str) -> str:
 #: Secret shapes. Every quantifier is bounded, so a scan is linear in the text (a 48k-char run of ``[a-z0-9+.-]``
 #: took 1.6 s with the unbounded ``db_url_password`` scheme; LC-12h repair). Which shapes may REFUSE a call is
 #: ``HIGH_PRECISION`` below; the rest are counted by category (``local_privacy``) and nothing more.
-#: A key glued to preceding text is found (SECDET requirement G), but ``task-`` / ``highp_`` / ``MAIza`` are ordinary words
-#: that end in a key prefix. So a glued prefix needs the key's own evidence: a generic ``sk-`` after a word character
-#: needs a 20-character alphanumeric run in mixed case with a digit (slugs, BEM classes, UUIDs and git SHAs are
-#: lower-case); ``AIza`` / ``gh[pousr]_`` after an ASCII letter, digit or ``_`` need exactly the issued body length
-#: (35, 36). An unglued key keeps any length, so text glued AFTER it never hides it (repair 1 cut GitHub/Google to the
-#: exact length everywhere: one appended character hid a key). AWS ids (upper-case + digits) are not read after an
-#: upper-case letter.
+#: A key glued to preceding text is found (SECDET requirement G) when its prefix is distinctive, but ``task-`` /
+#: ``highs_`` / ``MAIza`` are ordinary words that end in a key prefix. So a prefix glued to a word character needs
+#: the key's own evidence:
+#:   * ``sk-ant-`` needs ``api03-`` / ``admin01-`` / ``oat01-`` or a 20-character alphanumeric run in mixed case with a
+#:     digit (``task-ant-colony-...`` is lower-case kebab);
+#:   * ``sk-`` needs ``proj-`` / ``svcacct-`` AND that mixed-case run: a word-glued generic ``sk-`` is not read at all
+#:     (PascalCase ids, IPFS / Drive ids and random base64url blobs hold ``<letter>sk-`` + a mixed run), and an
+#:     unglued unmarked ``sk-`` must end within 256 key characters;
+#:   * ``AIza`` / ``gh[pousr]_`` (after an ASCII letter, digit or ``_``) need exactly the issued body length (35, 36),
+#:     and the GitHub body may not hold 7 lower-case letters in a row (``highs_computeTheWeightedAverage...``);
+#:   * ``AKIA`` / ``ASIA`` is not read after an upper-case letter.
+#: ``sk-or-v1-`` + 64 hex is distinctive: read glued on either side, unless a 65th hex digit follows (D-85). Unglued variable-length keys match at any length,
+#: so text glued after them never hides them (repair 1 cut GitHub/Google to the exact length everywhere: one
+#: appended character hid a key). An AWS id is exactly 20 and needs a non-word character or a filler run after it.
 _GLUED = r"(?<=[A-Za-z0-9_])"
 _UNGLUED = r"(?<![A-Za-z0-9_])"
 _MIXED_RUN = r"(?=[A-Za-z0-9_-]{0,40}?(?=[A-Za-z0-9]{20})(?=[a-z0-9]{0,19}[A-Z])(?=[A-Z0-9]{0,19}[a-z])(?=[A-Za-z]{0,19}\d))"
 #: After an AWS id: no more id characters, or a typed filler run glued on to slip it past the door (``...XXXXXXXX``).
 _TAIL_FILLER = r"(?=[xX]{8}|abcdefgh|ABCDEFGH|01234567|example|EXAMPLE|dummy)"
+_OPENAI_BODY = r"(?=[A-Za-z0-9_-]{0,300}\d)(?=[A-Za-z0-9_-]{0,300}[A-Za-z])[A-Za-z0-9_-]{32,256}"
 _SECRET_SHAPES = {
-    "anthropic_key": re.compile(r"sk-ant-[A-Za-z0-9_-]{32,256}"),
+    "anthropic_key": re.compile(r"(?:\bsk-ant-|\Bsk-ant-(?=(?:api|admin|oat)\d\d-|" + _MIXED_RUN[3:-1] + r"))[A-Za-z0-9_-]{32,256}"),
     # Listed before openai_key; openai_key excludes this exact shape so one key yields one name.
-    "openrouter_key": re.compile(r"sk-or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-])"),
-    "openai_key": re.compile(r"(?:\bsk-|\Bsk-" + _MIXED_RUN + r")(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-]))(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]{0,300}\d)(?=[A-Za-z0-9_-]{0,300}[A-Za-z])[A-Za-z0-9_-]{32,256}"),
+    # 64 hex then anything but a 65th hex digit (D-85: that is a longer string, named openai_key), or a filler run.
+    "openrouter_key": re.compile(r"sk-or-v1-[0-9a-f]{64}(?:(?![0-9a-f])|" + _TAIL_FILLER + ")"),
+    # Unglued: a marked key (``sk-proj-`` / ``sk-svcacct-``) at any length; an unmarked ``sk-`` must END within 256 key
+    # characters (a legacy key is 48), so an ``sk-`` inside a long base64url blob is not a key. Glued: marked only.
+    "openai_key": re.compile(
+        r"(?:\bsk-(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?:(?![0-9a-f])|" + _TAIL_FILLER + r"))(?:(?:proj-|svcacct-)" + _OPENAI_BODY + r"|(?!proj-|svcacct-)"
+        + _OPENAI_BODY + r"(?![A-Za-z0-9_-]))|\Bsk-(?=(?:proj|svcacct)-)" + _MIXED_RUN + r"(?:proj-|svcacct-)" + _OPENAI_BODY + ")"),
     "google_key": re.compile(_UNGLUED + r"AIza[0-9A-Za-z_-]{35,128}|" + _GLUED + r"AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z])"),
     "aws_key_id": re.compile(r"(?<![A-Z])(?:AKIA|ASIA)[0-9A-Z]{16}(?:\b|" + _TAIL_FILLER + ")"),
-    "github_token": re.compile(_UNGLUED + r"gh[pousr]_[A-Za-z0-9]{36,255}|" + _GLUED + r"gh[pousr]_[A-Za-z0-9]{36}(?![A-Za-z0-9])|github_pat_[A-Za-z0-9_]{50,255}"),
+    "github_token": re.compile(_UNGLUED + r"gh[pousr]_[A-Za-z0-9]{36,255}|" + _GLUED + r"gh[pousr]_(?![A-Za-z0-9]{0,29}[a-z]{7})[A-Za-z0-9]{36}(?![A-Za-z0-9])|github_pat_[A-Za-z0-9_]{50,255}"),
     "slack_token": re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,256}"),
     "private_key": re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----"),
     "jwt": re.compile(r"eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}"),
@@ -507,7 +520,7 @@ def _jwt_is_real(token: str) -> bool:
     head, body = _b64json(header), _b64json(payload)
     if head is None or body is None or str(head.get("alg", "")).lower() == "none":
         return False
-    if signature.startswith(_JWT_IO_SIGNATURE) or _is_placeholder(signature) or not _random_looking(signature, bits=3.0, distinct=12):
+    if signature.startswith(_JWT_IO_SIGNATURE) or _is_placeholder_value(signature) or not _random_looking(signature, bits=3.0, distinct=12):
         return False
     ids = [str(body[k]) for k in _JWT_ID_CLAIMS if isinstance(body.get(k), (str, int))]
     return not (ids and all(_dummy_claim(v) for v in ids))
