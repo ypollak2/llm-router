@@ -45,7 +45,7 @@ status: fixed in this change
   only as a prompt prefix, and answered the gateway's 422 with a bare string; its tests faked Ollama through
   `urllib.request.urlopen` while the code now used `open_url` (CI red).
 - **Fix.** `local_privacy.scan_secrets` is called with the new request only (router, stream, SDK);
-  `engine._labelled_example`, `engine._jwt_is_real`; `allow_cloud` flag, `/route` body field and
+  `engine._jwt_is_real` (the `_labelled_example` label exemption it first shipped was removed by SECDET: only the value's own placeholder look exempts); `allow_cloud` flag, `/route` body field and
   `X-LLM-Router-Allow-Cloud` header; typed 422 body (`SecretLocalOnlyRefused.body`); the tests that fake the network
   use the `open_url_via_urlopen` fixture; hook versions rebased onto main (auto-route 77).
 - **Test.** `tests/test_lc12h_repair3.py`. Rule: a door scans the new turn only and says so in its docs; a shape that

@@ -39,17 +39,17 @@ def test_the_placeholder_corpus_is_still_not_refused():
     assert [t[:40] for t in cases if local_privacy.scan_secrets(t)] == []
 
 
-def test_an_exemption_by_filename_cue_is_counted_by_category():
+def test_a_filename_cue_exempts_nothing_and_counts_no_exemption():
     key = fx.real_shaped("openai_key", 11)
-    assert local_privacy.scan_secrets(f"# .env.example\nOPENAI_API_KEY={key}") == []
-    assert sum(v for k, v in local_privacy.secret_counts.items() if k.startswith("exempted_by_label:")) == 1
+    assert local_privacy.scan_secrets(f"# .env.example\nOPENAI_API_KEY={key}")      # SECDET: only the value can exempt
+    assert not any(k.startswith("exempted_by_label:") for k in local_privacy.secret_counts)
     assert not any(key in k for k in local_privacy.secret_counts)           # category only
 
 
-def test_a_free_text_word_beside_a_filename_cue_still_needs_the_cue():
+def test_a_free_text_word_beside_a_filename_cue_is_refused():
     key = fx.real_shaped("github_token", 12)
     assert high(f"fake token {key}") == ["github_token"]
-    assert high(f"see config.env.sample\nT={key}") == []
+    assert high(f"see config.env.sample\nT={key}") == ["github_token"]
 
 
 def test_split_override_strips_only_when_a_secret_is_found():

@@ -57,13 +57,34 @@ a bearer token with entropy, a database URL whose password is not a common word,
 not refused: AWS documentation keys (`...EXAMPLE`), runs of `x` / `*` / `0` / `.`, `YOUR_...` / `<...>` /
 `${...}` / `changeme` / `placeholder` / `dummy` / `test` values (a value that is itself shaped like one), sequential typing, URL passwords equal to the
 user name or in a short common-word list (`postgres:postgres@`, `user:password@`, `admin:admin@`), the jwt.io sample
-and JWTs whose identity claims are all test/demo values (or `alg: none`, or whose signature is a placeholder). A value on
-a line, or up to two lines under a line, that carries a filename or config cue (`.env.example` / `.env.sample` /
-`.env.template` / `example.env`, "sample config" / "example env", or a path ending `.example` / `.sample` /
-`.template`) is not refused either: the cue is the author's statement that it is an example, so a real secret next to
-such a cue is exempt too (residual: anyone can type the cue). Free-text words (`fake`, `dummy`, `placeholder`, "not a
-real", "for illustration") are not cues and exempt nothing: `fake? no. <key>` is refused. Separate residual: the placeholder-value exemptions look at the value itself (a stopword list and substrings such as `example`, `dummy`, `placeholder`, `changeme`), so a real secret that happens to contain one of those words is exempt. Every exemption is counted
-as `exempted_by_label:<category>`. Quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a
+and JWTs whose identity claims are all test/demo values (or `alg: none`, or whose signature is a placeholder). A filename or config
+label near a value (`.env.example`, a `.example` host, "sample config") exempts nothing: that text is page- or
+site-controlled, so only the value's own placeholder look exempts it (SECDET). Free-text words (`fake`, `dummy`, "for
+illustration") are not cues either: `fake? no. <key>` is refused. Residual: the placeholder-value exemptions look at the
+value itself (a stopword list and substrings such as `example`, `dummy`, `placeholder`, `changeme`), so a real secret that
+happens to contain one of those words is exempt. Every ASCII percent escape (`sk%2Dant-`, `ghp%5F`, `Bearer%20...`) is read decoded, once, by the door and the
+scrubber alike. A key with a distinctive prefix glued to preceding text (`mykeysk-ant-api03-...`, `123AKIA...`,
+`键ghp_...`, `xsk-or-v1-...`, `my_sk-proj-...`) is found. Words that end in a key prefix are not keys, so a prefix glued to a
+word character needs the key's own evidence: `sk-ant-` needs `api03-` / `admin01-` / `oat01-` or a 20-character
+alphanumeric run in mixed case with a digit; `sk-` needs `proj-` / `svcacct-` and that run (a word-glued unmarked `sk-`
+is not read: `task-OAuth2Client...`, `desk-Qm<IPFS id>` and `sk-` inside a base64url blob stay text); `gh[pousr]_` /
+`AIza` after an ASCII letter, digit or `_` must be exactly 36 / 35 characters, and the GitHub body may not hold 7
+lower-case letters in a row (`highs_computeTheWeighted...`); `AKIA` / `ASIA` is not read after an upper-case letter.
+An unglued unmarked `sk-` must end within 256 key characters. Length after the prefix, per shape: `sk-ant-`,
+`sk-proj-` / `sk-svcacct-`, unglued `gh[pousr]_`, unglued `AIza` and `xox[baprs]-` match at any length, so text glued after
+them never hides them; `sk-or-v1-` reads its 64 hex whatever follows except a 65th hex digit (that longer string is named an OpenAI-shaped key, D-85); an AWS id is exactly 20 and needs a non-word
+character or a filler run after it. A placeholder look (filler run, sequential typing, `example` / `your-key` words)
+exempts a token, a JWT signature included, only when no long random body is left once the filler is cut out, so
+`<real key>xxxxxxxx`, `<real key>-example` or a spliced `01234567` does not exempt it; `<...>` / `${...}` markers always
+do. Residuals of these rules. The door does not refuse the following; the scrubber still redacts each one:
+a word-glued unmarked legacy key (`mykeysk-<48>`); an unmarked `sk-` run longer than 256 characters; a glued GitHub token
+whose body has 7 lower-case letters in a row (about 4% of random bodies, n=100,000 drawn 2026-10-31); a GitHub/Google
+key glued on both sides (`x<key>y`), and an OpenRouter key glued in front with a hex digit right after it; an AWS id followed by a letter, digit or `_` (`AKIA<16>Z`) or after an upper-case
+letter; filler spliced into a JWT header or payload (it no longer decodes). Neither the door nor the scrubber finds:
+an AWS id or GitHub token with filler spliced in (`AKIA<10>xxxxxxxx<6>`, `ghp_<10>-example-<26>`), and (pre-existing)
+double percent-encoding (`%252D`), HTML entities (`&#45;`, `&#x2d;`, `&minus;`), JSON `\u002d`, `+` for `-` (also
+`Bearer+<token>`), base64 of a token, and zero-width characters or spaces inside a token. The scrubber's `pk-` / `rk-`
+shapes keep their leading word boundary. Quoted `api_key = "..."` literals are log-only: counted by category (`local_privacy.secret_counts`, a
 counter and the category, never the value) and never refused. `engine.secret_findings` is the detector; its quantifiers
 are bounded and it scans long text in overlapping windows, so it is linear in the text and misses nothing at a
 window edge. A refused call skips the semantic cache and the judge queue, gets no emergency fallback to the budget
