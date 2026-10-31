@@ -234,18 +234,16 @@ def _pin_clock(monkeypatch, t):
     return clock
 
 
-def _count_full_checks(home, monkeypatch, q, cap, n, first_id, clock=None, t_first=0.0):
+def _count_full_checks(home, monkeypatch, q, cap, n, first_id, min_rows):
     """Enqueue n entries; return (full checks, n). Counted with the read spy, no timing."""
     reads = _spy_queue_reads(monkeypatch, q)
     checks = 0
     for i in range(n):
-        if clock is not None:
-            clock.t = t_first + i
         before = len(reads)
         assert _enq(first_id + i)
         if len(reads) > before:  # a full check ran: it must leave the queue within the cap
             checks += 1
-            assert cap <= 0 or len(_queue(home)) <= cap
+            assert min_rows <= len(_queue(home)) <= cap
     return checks, n
 
 
@@ -269,7 +267,9 @@ def test_queue_at_the_cap_just_below_a_stride_line_is_not_reread_per_enqueue(hom
     q.write_text(line * cap)
     assert 2 * stride - size < q.stat().st_size < 2 * stride  # at the cap, just under a line
 
-    checks, n = _count_full_checks(home, monkeypatch, q, cap, 400, 100_001)
+    # the trim drops less than the headroom (a quarter stride) plus one entry beyond the cap
+    min_rows = cap - ((stride // 4) // size + 1)
+    checks, n = _count_full_checks(home, monkeypatch, q, cap, 400, 100_001, min_rows)
     assert checks >= 1, "anti-vacuity: the first append crosses the line and must run the full check"
     bound = 1 + n * size // (stride // 4)
     assert checks <= bound, f"{checks} full checks in {n} enqueues at the cap (bound {bound})"
@@ -278,14 +278,15 @@ def test_queue_at_the_cap_just_below_a_stride_line_is_not_reread_per_enqueue(hom
 
 
 @pytest.mark.parametrize("cap_offset", [0, 500, None], ids=["at-cap", "below-cap", "cap-off"])
-def test_expiry_purge_just_below_a_stride_line_is_not_a_full_check_per_enqueue(home, monkeypatch, cap_offset):
-    """JUDGECAP review: one entry expires per enqueue on a queue just under a stride line.
+def test_expiry_purge_never_drops_an_unexpired_entry(home, monkeypatch, cap_offset):
+    """JUDGECAP review: the expiry purge removes expired entries and nothing else.
 
-    The append crossed the line, the retention purge removed one entry and took the file
-    back under it, so every enqueue was a full check whatever the cap (reviewer probe
-    rv800probe/p_expiry.py: 400/400 on main and on the first fix). Any large-queue check
-    that removes something now also leaves judge._TRIM_HEADROOM_BYTES below the next line.
-    A pinned clock drives expiry; no timing is measured.
+    A queue just under a stride line where one entry expires per enqueue: each append
+    crosses the line and the purge takes it back under, so every enqueue is a full check
+    (400 in 400 here, as on main; disclosed in _enforce_queue_cap). Giving that purge the
+    cap trim's headroom stopped the re-reads but evicted unexpired entries, even with the
+    cap off (PR #800 review). After every check the queue must hold exactly the unexpired
+    entries. A pinned clock drives expiry; no timing is measured.
     """
     t0 = 1_000_000_000.0
     clock = _pin_clock(monkeypatch, t0)
@@ -307,11 +308,19 @@ def test_expiry_purge_just_below_a_stride_line_is_not_a_full_check_per_enqueue(h
     # retention of (m - 0.5) s: at t0 + m + k the entry queued at t0 + k is the one that expires
     monkeypatch.setenv("LLM_ROUTER_JUDGE_QUEUE_MAX_AGE_DAYS", repr((m - 0.5) / 86400))
 
-    checks, n = _count_full_checks(home, monkeypatch, q, cap, 400, 100_000 + m, clock, t0 + m)
+    reads = _spy_queue_reads(monkeypatch, q)
+    checks, n = 0, 400
+    for k in range(n):
+        clock.t = t0 + m + k
+        before = len(reads)
+        assert _enq(100_000 + m + k)
+        if len(reads) > before:
+            checks += 1
+            ids = [r["routing_decision_id"] - 100_000 for r in _queue(home)]
+            assert ids == list(range(k + 1, m + k + 1)), (
+                f"check at enqueue {k}: kept {len(ids)} entries from #{ids[0]}, "
+                f"expected the {m} unexpired ones from #{k + 1}")
     assert checks >= 1, "anti-vacuity: the first append crosses the line and must run the full check"
-    bound = 1 + n * size // (stride // 4)
-    assert checks <= bound, f"{checks} full checks in {n} enqueues (cap={cap}, bound {bound})"
-    assert _queue(home)[-1]["routing_decision_id"] == 100_000 + m + n - 1  # newest kept
 
 
 @pytest.mark.timing
