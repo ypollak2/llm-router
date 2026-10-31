@@ -451,17 +451,13 @@ async def _build_and_filter_chain(
                 model_override,
             )
             blocked_provider = "anthropic/" if model_override.startswith("anthropic/") else "gemini/"
-            fallback_chain = [
-                m for m in get_model_chain(
-                    RoutingProfile.BALANCED, task_type,
-                    is_subscription_mode=True,
-                )
-                if not m.startswith(blocked_provider)
-            ]
-            return fallback_chain or get_model_chain(
-                RoutingProfile.BALANCED, task_type,
-                is_subscription_mode=True,
+            # W1-2 (UN-09 review M1'): no hand-picked filters. Build the chain exactly as an un-pinned
+            # call would (reachability, block lists, policy, map, user rules), then drop the blocked provider.
+            built = await _build_and_filter_chain(
+                task_type, RoutingProfile.BALANCED, None, complexity_hint, c, config,
+                last_resort_floor=last_resort_floor,
             )
+            return [m for m in built if not m.startswith(blocked_provider)]
         return [model_override]
 
     # ── Pre-fetch penalty data ────────────────────────────────────────────────
@@ -1471,6 +1467,36 @@ def _budget_lock() -> "_AsyncProcLock":
 def _disabled_subprocess_backends() -> set[str]:
     raw = os.environ.get("LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS", "")
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+def _front_allowed(model: str, config, task_type: TaskType) -> bool:
+    """W1-2: may *model*, injected at the front of a built chain, stay? Same answers as the main build:
+    reachable provider, no hard block (LLM_ROUTER_BLOCK_PROVIDERS), no repo block, policy block / allow lists,
+    then the resource map and the user's stored rules."""
+    try:
+        if not _keep_reachable_providers([model], config):
+            return False
+        prov = provider_from_model(model)
+        if prov in _blocked_providers():
+            return False
+        repo_cfg = get_repo_config()
+        if prov in set(repo_cfg.block_providers or ()):
+            return False
+        from llm_router.policy import OrgPolicy, apply_policy
+        from llm_router.policy_runtime import get_effective_org_policy
+        _org = get_effective_org_policy()
+        _blk = list({*_org.block_models, *repo_cfg.block_models})
+        _alw = list({*_org.allow_models, *repo_cfg.allow_models})
+        if _blk or _alw:
+            kept, _ = apply_policy([model], task_type.value, OrgPolicy(
+                block_providers=list({*_org.block_providers}), block_models=_blk, allow_models=_alw,
+                task_caps=_org.task_caps, source="merged"))
+            if not kept:
+                return False
+        from llm_router import map_reader
+        return bool(map_reader.apply_to_chain([model], reorder=False, task=task_type.value))
+    except Exception:  # noqa: BLE001 - an injection that cannot be vetted is not injected
+        return False
 
 
 def _blocked_providers() -> frozenset[str]:
@@ -5096,8 +5122,12 @@ async def route_and_call(
             and "openai" not in _blocked_providers()
         ):
             _ptier = "openai/gpt-4o-mini"
-            models_to_try = [_ptier] + [m for m in models_to_try if m != _ptier]
-            log.debug("Precision-tier: fronting %s for an exact-answer prompt", _ptier)
+            # W1-2 (UN-09 replay): an entry injected after the chain build still answers to the resource map and
+            # the user's rules. Without this the tier fronted a provider the map had disconnected (1 of 118
+            # router and 1 of 118 gateway replay requests routed to it).
+            if _front_allowed(_ptier, config, task_type):
+                models_to_try = [_ptier] + [m for m in models_to_try if m != _ptier]
+                log.debug("Precision-tier: fronting %s for an exact-answer prompt", _ptier)
 
         # Subject specialist override (Plan 07 Phase 3 B.2b).
         # If the active routing policy declares a specialist for the
@@ -5113,9 +5143,14 @@ async def route_and_call(
                 )
                 subject_str = (classification_data or {}).get("subject")
                 if subject_str:
+                    _before_spec = models_to_try
                     models_to_try = apply_subject_specialist_by_subject(
                         models_to_try, subject_str, get_active_policy()
                     )
+                    # W1-2 (UN-09 review S2): a specialist fronted after the build answers to the map and rules too.
+                    if models_to_try[:1] != _before_spec[:1] and not _front_allowed(
+                            models_to_try[0], config, task_type):
+                        models_to_try = _before_spec
             except Exception as _spec_err:
                 log.debug(
                     "Subject specialist override skipped (continuing): %s",
