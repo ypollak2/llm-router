@@ -48,7 +48,8 @@ def run(tmp_path_factory):
         "LLM_ROUTER_HOME": str(home / ".llm-router"),
         "PATH": os.pathsep.join(bindirs + ["/usr/bin", "/bin"]),
         "LLM_ROUTER_NO_DETACHED_SPAWN": "1",  # the installer's background model probe never starts
-        "OLLAMA_HOST": "http://127.0.0.1:9",
+        # every Ollama base-URL variable the installer or router reads, pointed at a dead port
+        **{k: "http://127.0.0.1:9" for k in ("OLLAMA_HOST", "OLLAMA_URL", "OLLAMA_BASE_URL", "OLLAMA_API_BASE", "OLLAMA_BASE")},
         "NO_COLOR": "1",
     }
     assert Path(shutil.which("llm-router", path=env["PATH"]) or "").exists(), "llm-router not on the child PATH"

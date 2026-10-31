@@ -135,6 +135,8 @@ jobs:
   # failure (the test skips without it); the last step also fails if any test was skipped.
   pi-smoke:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
