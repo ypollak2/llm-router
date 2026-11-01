@@ -384,6 +384,43 @@ def test_gemini_backup_failure_reports_no_added_hooks(home, monkeypatch):
     assert not any("reset non-list" in a or "Backed up" in a for a in actions), actions
 
 
+def test_gemini_missing_event_keys_are_not_reported_as_reset(home):
+    """QHYG2: an event key that is simply absent is not a "reset non-list" (only an existing non-list value is)."""
+    _add_host(home, "gemini-cli")
+    hj = _gemini_hj(home)
+    hj.write_text("{}")
+
+    actions = install._install_gemini_cli_files()
+
+    assert not any("reset non-list" in a for a in actions), actions
+    assert len([a for a in actions if a.startswith("✓ Added") and a.endswith("hook to Gemini CLI")]) == 5, actions
+
+    hj.write_text(json.dumps({"hooks": {"SessionEnd": "oops"}}))
+    again = install._install_gemini_cli_files()
+    assert [a for a in again if "reset non-list" in a] == ["  reset non-list SessionEnd (backed up)"], again
+
+
+def test_gemini_write_failure_reports_only_could_not_update(home, monkeypatch):
+    """QHYG2 (#802): when the atomic write of hooks.json raises, no "Added ... hook" or reset line may claim
+    success; only "Could not update ..." is reported and the file keeps its bytes."""
+    _add_host(home, "gemini-cli")
+    hj = _gemini_hj(home)
+    original = json.dumps({"hooks": {"SessionEnd": "oops"}})
+    hj.write_text(original)
+
+    def boom(path, text):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(install, "_write_text_atomic", boom)
+
+    actions = install._install_gemini_cli_files()
+
+    assert hj.read_text() == original
+    assert any(f"Could not update {hj}: disk full" in a for a in actions), actions
+    assert not any("Added" in a and "hook to Gemini CLI" in a for a in actions), actions
+    assert not any("reset non-list" in a or "Backed up" in a for a in actions), actions
+
+
 def test_gemini_second_run_adds_nothing_and_leaves_the_file_alone(home):
     """QHYG: the first run on a hooks.json without our hooks adds all five and backs it up;
     the second run reports no added hook, takes no backup and leaves the bytes as they were."""

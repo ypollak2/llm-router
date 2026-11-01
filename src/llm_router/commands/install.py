@@ -2252,7 +2252,8 @@ def _install_gemini_cli_files() -> list[str]:
             # Lines that describe the merge; reported only once the file is written.
             merged: list[str] = []
             for _event in _GEMINI_EVENTS:
-                hooks[_event], _note = _gemini_event_list(hooks.get(_event))
+                # A key that is simply absent is not a "reset": only an existing non-list value is.
+                hooks[_event], _note = _gemini_event_list(hooks[_event]) if _event in hooks else ([], None)
                 if _note:
                     merged.append("  " + _note.format(event=_event))
 
