@@ -4786,6 +4786,7 @@ async def route_and_call(
     prompt, _secret_override = _lp.split_override(prompt, system_prompt, caller_context)
     _secret_override = _lp.override_requested(prefix=_secret_override, flag=allow_cloud)
     correlation_id = uuid4().hex[:8]
+    _call_started = time.monotonic()  # QHYG3: pre-dispatch refusals report the real elapsed time
     # Phase 0.5 (Option A sidecar bridge): when the hook minted a directive id
     # for this turn (threaded down from an MCP door), the BILLABLE-ROW
     # route_id uses that id so it matches the adoption row's route_id and the
@@ -5484,7 +5485,7 @@ async def route_and_call(
                     task_type, profile,
                 )
                 await _record_route_error(_sub_refusal, task_type, profile, correlation_id, [], [],
-                                          time.monotonic(), reason=REASON_ERROR_NAMED_MODEL_BLOCKED)
+                                          _call_started, reason=REASON_ERROR_NAMED_MODEL_BLOCKED)
                 raise _sub_refusal
             from llm_router.runtime_offer import runtime_offer
 
