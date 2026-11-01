@@ -238,7 +238,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
     ``headless_main_ids``: session ids of main sessions run headless with the launcher tool disabled (the
     synth-live driver's manifest; S1FIX). A ``subagent_first`` / ``subagent_turn`` row of such a session
     whose transcript role is None (``claude -p --no-session-persistence`` writes no transcript) begins a
-    turn. A transcript role, when there is one, still wins; sessions outside the set are unchanged.
+    turn. Side effect: this also numbers the session's turns, so the redo / escalation windows of manifest sessions become real per-turn windows (before: all turn 0) and synthetic action redo verdicts can shift. A transcript role, when there is one, still wins; sessions outside the set are unchanged.
     Default empty: every other caller behaves exactly as before.
 
     ``kind_of(session_id, stamp)`` returns the resolved session kind or None.

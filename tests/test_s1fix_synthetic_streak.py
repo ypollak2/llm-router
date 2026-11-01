@@ -29,11 +29,11 @@ def _rows(prefix: str, n_sessions: int = 3, per: int = 12) -> list[dict]:
     base = do.day_bounds(DAY)[0] + 3600
     out, i = [], 0
     for s in range(n_sessions):
-        for k in range(per):
+        for k in range(per + 2 * per):   # per turns, each followed by two tool-result continuations
             i += 1
+            step = ("subagent_first" if k == 0 else "subagent_turn") if k < per else "continuation"
             out.append(proxy_row(i, sid=f"{prefix}-{s}", ts=base + i, tier="haiku", msg_id=f"m{prefix}{i}",
-                                 step="subagent_first" if k == 0 else "subagent_turn",
-                                 **{"tier_task_type": "query"}))
+                                 step=step, **{"tier_task_type": "query"}))
     return out
 
 
@@ -118,6 +118,17 @@ def test_installer_omits_env_when_unset(home):
     out = ds.install(system="Darwin", home=home, python="/opt/py", runner=_Runner(), now=NOW)
     assert out["status"] == "installed" and ENV not in _plist_env(home)
     assert ds.scheduled_env() == {"LLM_ROUTER_SCHEDULED": "1"}
+
+
+def test_empty_manifest_is_refused(home, tmp_path, monkeypatch, capsys):
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("")
+    for flag, env in ((str(empty), None), (None, str(empty))):
+        if env:
+            monkeypatch.setenv(ENV, env)
+        rc = do.run_daily(date=str(DAY), backfill=0, force=False, partial=False, manifest=flag,
+                          inputs=_inputs(_rows("syn")), now=NOW)
+        assert rc == 2 and "0 session ids" in capsys.readouterr().err
 
 
 # ---- (3) manifest session, subagent_* rows, no transcript -> turns in release_clock, organic untouched

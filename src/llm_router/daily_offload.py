@@ -300,7 +300,7 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
     Synthetic turn rule (S1FIX): a ``subagent_first`` / ``subagent_turn`` proxy row of a session in
     ``manifest_ids`` with no transcript role counts as a turn (the driver runs ``claude -p`` with no launcher
     tool and no session persistence, so those are the only rows it can produce). A transcript role, when one
-    exists, still decides; sessions outside the manifest are unchanged. ``manifest_source`` names where the
+    exists, still decides; sessions outside the manifest are unchanged. Side effect: this also numbers the session's turns, so the redo / escalation windows of manifest sessions become real per-turn windows (before: all turn 0) and synthetic action redo verdicts can shift. ``manifest_source`` names where the
     ids came from (``flag`` or ``env``) and is stated in the release_clock note."""
     from llm_router import offload_share as osh
     from llm_router import session_kind as sk
@@ -735,6 +735,7 @@ def _run_daily(date, backfill, force, partial, manifest, as_json, inputs, now, s
             raise DailyError("--backfill: must be >= 0")
         msrc = "flag" if manifest else None
         if not manifest:
+            # literal on purpose: tests/test_env_registry.py's AST scan cannot see a read through the constant
             manifest = os.environ.get("LLM_ROUTER_SYNTH_MANIFEST", "").strip() or None
             msrc = "env" if manifest else None
         try:
@@ -743,6 +744,10 @@ def _run_daily(date, backfill, force, partial, manifest, as_json, inputs, now, s
             if msrc == "env":
                 raise DailyError(f"{exc} [path came from {SYNTH_MANIFEST_ENV}]") from exc
             raise
+        if manifest and not ids:
+            raise DailyError(f"synthetic manifest {manifest} is readable but holds 0 session ids"
+                             + (f" [path came from {SYNTH_MANIFEST_ENV}]" if msrc == "env" else "")
+                             + ": refused rather than writing an organic-only row")
         if day_bounds(target)[1] > now and not partial:
             raise DailyError(f"{target} is not a closed UTC day: refused (use --partial for a snapshot that "
                              "never counts toward the streak)")
