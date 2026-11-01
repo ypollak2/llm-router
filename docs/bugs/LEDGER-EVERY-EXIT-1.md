@@ -16,7 +16,7 @@ status: fixed in `fix/llm-ledger-every-exit` (deploy: restart the MCP server; ca
   (`call_identity.note_ledger_write`, a ContextVar, no-op outside a guarded call). On exit (return, raised error,
   timeout, cancel) it writes whichever of the two rows is missing through `cost.log_route_error(only=...)`:
   reason `breaker_open` for a refusal, `_route_error_reason(exc)` for an exception (`error_budget_exceeded`,
-  `error_timeout`, `error_cancelled`, `error_routing_denied`, `error_all_models_failed`, `error_exception`),
+  `error_timeout`, `error_cancelled`, `error_routing_denied`, `error_all_models_failed`, `error_named_model_blocked`, `error_exception`),
   `error_unledgered_exit` for a normal return that wrote nothing. A table the path already wrote is never written
   again, so cache hits, served calls and the #398/#409 rows are unchanged. All reasons start `error_` or are
   `breaker_open`, so `SQL_NOT_ERROR_ROW`, `SQL_REAL_DECISION` and `is_non_decision_reason` keep them out of

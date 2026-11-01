@@ -542,7 +542,13 @@ def _windows(text: str):
         return
     step = _SCAN_WINDOW - _SCAN_OVERLAP
     for start in range(0, n, step):
-        yield start, text[start:start + _SCAN_WINDOW]
+        # One character of left context after the first window: the ``-`` before an ``sk-`` the window starts on
+        # (the lookbehind that separates a token start from the inside of a base64url run) and the ``\b`` / ``\B``
+        # before a prefix must see the same character the whole-text scan sees. The window end is unchanged. The
+        # context character itself is not a place a match may start (``_findings`` skips it): the previous window,
+        # which overlaps by 2048, read that match with its own left context.
+        begin = max(start - 1, 0)
+        yield begin, text[begin:start + _SCAN_WINDOW]
         if start + _SCAN_WINDOW >= n:
             return
 
@@ -573,6 +579,8 @@ def _findings(text: str) -> dict[str, bool]:
     for offset, window in _windows(text):
         for name, pat in _SECRET_SHAPES.items():
             for m in pat.finditer(window):
+                if offset and m.start() == 0:
+                    continue  # begins on the left-context character: the previous window read it with its own context
                 if found.get(name):
                     break  # already high: nothing more to learn from this shape
                 found.setdefault(name, False)
@@ -596,6 +604,8 @@ def _findings(text: str) -> dict[str, bool]:
                     found[name] = True
         if "assigned_literal" not in found:
             for m in _ASSIGN.finditer(window):
+                if offset and m.start() == 0:
+                    continue
                 lit = m.group(1)
                 if any(c.isdigit() for c in lit) and any(c.isalpha() for c in lit) and _entropy(lit) >= 3.3:
                     found["assigned_literal"] = False

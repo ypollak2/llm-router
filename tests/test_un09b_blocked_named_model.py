@@ -541,3 +541,37 @@ def test_control_an_unnamed_call_fronts_the_claude_specialist_in_subscription_mo
                      policy=qa._specialist_policy("general", SONNET),
                      classification_data={"subject": "general"})
     assert called == [SONNET], called
+
+
+# ── QHYG3: the main-chain refusal leaves a readable route-error row ─────────────────────────────────
+
+def test_the_main_chain_refusal_of_a_blocked_named_model_writes_a_dedicated_ledger_reason(calls):
+    from llm_router.cost import REASON_ERROR_NAMED_MODEL_BLOCKED
+
+    assert REASON_ERROR_NAMED_MODEL_BLOCKED == "error_named_model_blocked"
+    now = [100.0]
+    real_prefix = router_module._subscription_blocked_prefix
+
+    def prefix_after_3s(*a, **k):      # runs after the call start and before the refusal: 3 s of work in between
+        now[0] += 3.0
+        return real_prefix(*a, **k)
+
+    with _stubbed([CLAUDE, SONNET]) as rec:
+        with patch("llm_router.router.time.monotonic", side_effect=lambda: now[0]), \
+                patch("llm_router.router._subscription_blocked_prefix", prefix_after_3s):
+            with pytest.raises(NoRoutableModelsError):
+                _route(CLAUDE)
+    assert rec.called == [], rec.called
+    latency = rec.route_error.await_args.kwargs["latency_ms"]
+    assert latency == pytest.approx(3_000.0), latency
+    assert [c.kwargs["reason"] for c in rec.route_error.await_args_list] == [REASON_ERROR_NAMED_MODEL_BLOCKED]
+    assert rec.route_error.await_args.kwargs["attempted_model"] is None
+
+
+def test_control_an_unblocked_empty_chain_refusal_writes_no_blocked_name_row(calls):
+    from llm_router.cost import REASON_ERROR_NAMED_MODEL_BLOCKED
+
+    with _stubbed([], subscription=False) as rec:
+        with pytest.raises(NoRoutableModelsError):
+            _route(None)
+    assert REASON_ERROR_NAMED_MODEL_BLOCKED not in [c.kwargs["reason"] for c in rec.route_error.await_args_list]

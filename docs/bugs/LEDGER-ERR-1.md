@@ -13,7 +13,7 @@ status: fixed in `fix/llm-error-path-ledger-row`
   qwen3-coder:30b both litellm Timeout 120 s (244 s); B7 (09:25:03) `failed` with an empty chain_attempts: every candidate skipped before any
   attempt, so the exhaustion `RuntimeError` came after 3 s. `route_and_call` only released budget in its Cancelled / Timeout / Exception handlers.
 - **Fix.** `cost.log_route_error` writes one `usage` row (success=0, 0 tokens, $0, elapsed latency, attempted model, caller's session via `log_usage`,
-  reason `error_all_models_failed | error_timeout | error_cancelled | error_budget_exceeded | error_routing_denied | error_exception`).
+  reason `error_all_models_failed | error_timeout | error_cancelled | error_budget_exceeded | error_routing_denied | error_named_model_blocked | error_exception`).
   `route_and_call` calls it from the three handlers around dispatch, shielded and fail-open; it skips when a row with the call's correlation id exists,
   so there is never a second row for one call. The dispatch loop shares its attempt list so the row names the model actually being tried.
   Pre-dispatch failures (empty chain, budget refusal before dispatch) are not covered.

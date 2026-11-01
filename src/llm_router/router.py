@@ -33,6 +33,7 @@ from llm_router.cost import (  # constants, so a test that patches ``cost`` keep
     REASON_ERROR_BUDGET,
     REASON_ERROR_CANCELLED,
     REASON_ERROR_DENIED,
+    REASON_ERROR_NAMED_MODEL_BLOCKED,
     REASON_ERROR_OTHER,
     REASON_ERROR_TIMEOUT,
     REASON_ROUTER_BUDGET_FALLBACK,
@@ -4578,6 +4579,7 @@ async def _record_route_error(
     models_to_try: list[str],
     started_monotonic: float,
     complexity: str = "moderate",
+    reason: str | None = None,
 ) -> None:
     """LEDGER-ERR-1: leave the failed call's one per-session ledger row. FAIL-OPEN.
 
@@ -4600,7 +4602,7 @@ async def _record_route_error(
         await asyncio.shield(
             cost.log_route_error(
                 task_type, profile,
-                reason=_route_error_reason(exc),
+                reason=reason or _route_error_reason(exc),
                 correlation_id=correlation_id,
                 attempted_model=attempted,
                 latency_ms=(_time.monotonic() - started_monotonic) * 1000.0,
@@ -4784,6 +4786,7 @@ async def route_and_call(
     prompt, _secret_override = _lp.split_override(prompt, system_prompt, caller_context)
     _secret_override = _lp.override_requested(prefix=_secret_override, flag=allow_cloud)
     correlation_id = uuid4().hex[:8]
+    _call_started = time.monotonic()  # QHYG3: pre-dispatch refusals report the real elapsed time
     # Phase 0.5 (Option A sidecar bridge): when the hook minted a directive id
     # for this turn (threaded down from an MCP door), the BILLABLE-ROW
     # route_id uses that id so it matches the adoption row's route_id and the
@@ -5474,13 +5477,16 @@ async def route_and_call(
                 )
             if _sub_blocked:
                 # UN-09 review S7: the named model was blocked by subscription mode and nothing else reachable is left.
-                raise NoRoutableModelsError(
+                _sub_refusal = NoRoutableModelsError(
                     f"No routable models for {task_type.value}/{profile.value}: {_sub_blocked_name} is not served "
                     f"in subscription mode (every {_sub_blocked}* model is dropped from a named request), and no "
                     f"other provider is reachable. Configured providers: {sorted(available) or 'none'}. Fix: call "
                     "without a model name, or connect another provider (an API key or a local ollama model).",
                     task_type, profile,
                 )
+                await _record_route_error(_sub_refusal, task_type, profile, correlation_id, [], [],
+                                          _call_started, reason=REASON_ERROR_NAMED_MODEL_BLOCKED)
+                raise _sub_refusal
             from llm_router.runtime_offer import runtime_offer
 
             # The install offer only when no Ollama is configured; with one, the
