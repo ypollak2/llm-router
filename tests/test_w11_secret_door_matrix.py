@@ -693,7 +693,7 @@ test_ensemble_classifier_with_an_explicit_cloud_primary_would_leak = pytest.mark
     test_ensemble_classifier_with_an_explicit_cloud_primary_would_leak)
 
 
-# ------------------------------------------------------------------------------------------------ sink leaks (UN-04b)
+# ------------------------------------------------------------------------------------------------ sink leaks (UN-04d)
 MARK = "w11-marker-7f3a"  # non-secret words that ride along with the secret, to see the prompt arrive
 
 
@@ -854,6 +854,23 @@ def test_reach_a_plain_prompt_reaches_the_sink(sink, request):
     assert any(MARK in x for x in sunk), f"{sink}: the plain prompt never reached the sink"
 
 
+def test_reach_direct_subagent_tool_loop_reaches_execute_agent(request, monkeypatch):
+    """Positive control for the ``_try_direct_subagent -> execute_agent`` row: with a tool-needing prompt the helper
+    hands the prompt to execute_agent (stubbed here, so nothing runs), so the row's `guarded` verdict is not vacuous."""
+    from llm_router.hooks import chain_builder
+    from llm_router.hooks import direct_executor as de
+    request.getfixturevalue("hook_net")
+    seen: list[str] = []
+    monkeypatch.setattr(de, "execute_agent", lambda prompt, *a, **k: seen.append(prompt))
+    mod = _load_hook("agent-route")
+    monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "on")
+    monkeypatch.setattr(chain_builder, "build_chain", lambda *a, **k: [de.ModelSpec("gemini", "gemini-2.5-flash")])
+    monkeypatch.setattr(chain_builder, "needs_claude_tools", lambda *a, **k: True)
+    monkeypatch.setattr(chain_builder, "get_current_pressure", lambda: ("green", 5))
+    _quiet(mod._try_direct_subagent, f"explain {MARK} hello world", "query", "simple", "s1")
+    assert any(MARK in x for x in seen), "the tool-loop path never reached execute_agent"
+
+
 def _leak(sink, request):
     run, fixture, _where = LEAK_RUNNERS[sink]
     sunk = request.getfixturevalue(fixture)
@@ -894,7 +911,9 @@ def test_leak_direct_executor_call_openai(request):
 def test_guarded_agent_route_secret_door_holds_a_secret_and_only_a_secret():
     """The agent-route sinks (_try_direct_subagent, _try_cli_delegation, _run_codex_agent_inner) are guarded by
     main()'s ``_secret_door`` (UN-04b, #772), not inside each helper, so a helper called directly still reaches its
-    sink (``test_reach_*``). The end-to-end main() traces are tests/test_un04b_secret_door_cli_and_agent_route.py;
+    sink (``test_reach_*``: ``_try_direct_subagent`` reaches call_gemini through execute_chain, ``_try_cli_delegation``
+    reaches the codex and gemini CLI runners, and ``test_reach_direct_subagent_tool_loop_reaches_execute_agent`` reaches
+    execute_agent through a stub). The end-to-end main() traces are tests/test_un04b_secret_door_cli_and_agent_route.py;
     this pins the door's verdict that the rows rely on."""
     door = _load_hook("agent-route")._secret_door
     assert door(f"explain {_secret()}")[1] is True
