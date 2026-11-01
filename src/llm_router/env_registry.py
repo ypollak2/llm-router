@@ -416,6 +416,9 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_STATUSLINE_TIMING": ("llm_router", "hooks/statusline-command.sh", 1),
     # Set to 1 by the P3.3 daily scheduler entry; stamps run_by="scheduler" on daily rows.
     "LLM_ROUTER_SCHEDULED": ("llm_router", "daily_offload.py", 1),
+    # S1FIX: path of the synth-live manifest.jsonl; `kpi --daily` uses it when --synthetic-manifest is absent,
+    # and the daily scheduler install copies it into the job's environment.
+    "LLM_ROUTER_SYNTH_MANIFEST": ("llm_router", "daily_offload.py", 1),
     # Read by scripts/release/eval_gate.py (--skip-quality tag policy, PLAN v16 P3.2),
     # a release script outside src/ -- hand-declared, like the other out-of-scan readers.
     "LLM_ROUTER_RELEASE_OWNER_OVERRIDE": ("llm_router", "scripts/release/eval_gate.py", 1),

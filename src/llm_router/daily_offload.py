@@ -45,6 +45,7 @@ TARGET = 0.60                    # == offload_share.TARGET (asserted by a test)
 SYNTH_LABEL = "synthetic (D-167)"
 OLD_SCHEMA = "daily-offload/1"      # pre-D-210 rows: no release_clock block
 SYNTH_SCHEMA = "synth-live-manifest/1"
+SYNTH_MANIFEST_ENV = "LLM_ROUTER_SYNTH_MANIFEST"
 T_P2_FILE = "prereg_t_p2.json"
 _REV_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.rev(\d+)\.json$")
 _MAX_WALK = 400
@@ -290,10 +291,17 @@ def classifier_agreement(start: float, until: float, rows: Iterable[dict] | None
 
 def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
                 manifest_ids: Iterable[str] = (), code_rev: str | None = None,
-                local_by_cause=None, agreement_rows: Iterable[dict] | None = None) -> dict:
+                local_by_cause=None, agreement_rows: Iterable[dict] | None = None,
+                manifest_source: str | None = None) -> dict:
     """The row for one UTC ``day`` (see the module docstring). ``partial`` is True when the day has not
     ended at ``now``; the window then ends at ``now``. ``local_by_cause``: None reads ``usage.db``
-    (``ledger_view.local_by_cause``, F23), or pass a dict / ``False`` (skip)."""
+    (``ledger_view.local_by_cause``, F23), or pass a dict / ``False`` (skip).
+
+    Synthetic turn rule (S1FIX): a ``subagent_first`` / ``subagent_turn`` proxy row of a session in
+    ``manifest_ids`` with no transcript role counts as a turn (the driver runs ``claude -p`` with no launcher
+    tool and no session persistence, so those are the only rows it can produce). A transcript role, when one
+    exists, still decides; sessions outside the manifest are unchanged. Side effect: this also numbers the session's turns, so the redo / escalation windows of manifest sessions become real per-turn windows (before: all turn 0) and synthetic action redo verdicts can shift. ``manifest_source`` names where the
+    ids came from (``flag`` or ``env``) and is stated in the release_clock note."""
     from llm_router import offload_share as osh
     from llm_router import session_kind as sk
 
@@ -314,7 +322,10 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
         start, until, proxy_rows=inputs.proxy_rows, mcp_rows=inputs.mcp_rows, techops=inputs.techops,
         edit_rows=inputs.edit_rows, kind_of=kind_of, allowed=frozenset(sk.VALID_KINDS),
         thread_of=inputs.thread_of, band_redone=inputs.band_redone, outcome_redos=inputs.outcome_redos,
-        quality_rows=inputs.quality_rows)
+        quality_rows=inputs.quality_rows,
+        # S1FIX: manifest sessions are headless mains with no launcher tool and no transcript; their
+        # subagent_* proxy rows are the turns (rule stated in the row's synthetic_turn_rule).
+        headless_main_ids=ids)
 
     def pop_of(sid) -> str:
         k = kinds.get(sid)
@@ -341,7 +352,8 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
     if not res["sampled"]:
         base_cav.insert(0, "no quality-sampled lane: the action numerator is 0 by rule (PLAN section 1.1); see "
                            "diagnostics.k_if_all_lanes_sampled")
-    rc_note = ("release_clock = organic + synthetic (D-210); synthetic membership from --synthetic-manifest" if ids
+    src = f" ({manifest_source})" if manifest_source else ""
+    rc_note = (f"release_clock = organic + synthetic (D-210); synthetic membership from the synthetic manifest{src}" if ids
                else "no --synthetic-manifest given: release_clock = organic only (D-210)")
     rc = _population("release_clock (organic + synthetic, D-210)", ds, "release_clock",
                      by_pop["organic"][0] + by_pop["synthetic"][0], by_pop["organic"][1] + by_pop["synthetic"][1],
@@ -388,6 +400,9 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
         "code_rev": code_rev if code_rev is not None else _code_rev(),
         "partial": partial,
         "synthetic_manifest_ids": len(ids),
+        "synthetic_manifest_source": manifest_source if ids else None,
+        "synthetic_turn_rule": ("manifest-session subagent_first/subagent_turn rows with no transcript role count "
+                                "as turns (S1FIX); other sessions unchanged" if ids else None),
         "classifier_agreement": (classifier_agreement(start, until, agreement_rows) or {
             "n": 0, "agree_pct": None, "window": {"since": start, "until": until},
             "source": "classifier_agreement.jsonl", "status": "not_measured",
@@ -718,7 +733,21 @@ def _run_daily(date, backfill, force, partial, manifest, as_json, inputs, now, s
         target = _parse_day(date, "--date") if date else last_closed_day(now)
         if backfill < 0:
             raise DailyError("--backfill: must be >= 0")
-        ids = read_manifest(manifest) if manifest else frozenset()
+        msrc = "flag" if manifest else None
+        if not manifest:
+            # literal on purpose: tests/test_env_registry.py's AST scan cannot see a read through the constant
+            manifest = os.environ.get("LLM_ROUTER_SYNTH_MANIFEST", "").strip() or None
+            msrc = "env" if manifest else None
+        try:
+            ids = read_manifest(manifest) if manifest else frozenset()
+        except DailyError as exc:
+            if msrc == "env":
+                raise DailyError(f"{exc} [path came from {SYNTH_MANIFEST_ENV}]") from exc
+            raise
+        if manifest and not ids:
+            raise DailyError(f"synthetic manifest {manifest} is readable but holds 0 session ids"
+                             + (f" [path came from {SYNTH_MANIFEST_ENV}]" if msrc == "env" else "")
+                             + ": refused rather than writing an organic-only row")
         if day_bounds(target)[1] > now and not partial:
             raise DailyError(f"{target} is not a closed UTC day: refused (use --partial for a snapshot that "
                              "never counts toward the streak)")
@@ -741,7 +770,7 @@ def _run_daily(date, backfill, force, partial, manifest, as_json, inputs, now, s
             out.append({"date": d.isoformat(), "status": "exists", "path": str(day_file(d.isoformat(), base))})
             stats["days_existing"] += 1
             continue
-        row = compute_day(d, inp, now=now, manifest_ids=ids)
+        row = compute_day(d, inp, now=now, manifest_ids=ids, manifest_source=msrc)
         res = write_day(row, force=force, partial=partial, base=base)
         org = row["populations"]["organic"]
         rc = row["populations"]["release_clock"]
