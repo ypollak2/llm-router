@@ -1480,15 +1480,15 @@ def _subscription_blocked_prefix(model_override: str | None, config) -> str | No
 
 
 def _subscription_refusal(task_type: TaskType, profile: RoutingProfile, name: str, prefix: str,
-                          available, detail: str = "") -> NoRoutableModelsError:
+                          available) -> NoRoutableModelsError:
     """UN-09 review S7: the named model was blocked by subscription mode and nothing else reachable is left.
-    One text for both places that refuse: an empty chain (route_and_call) and an exhausted one whose
-    emergency chain lost the blocked provider (_dispatch_model_loop, UN-09b S1; *detail* = its chain failures)."""
+    One text for both places that refuse: an empty chain (route_and_call) and an emergency chain the block
+    emptied (_dispatch_model_loop, UN-09b S1). It carries no provider text: a door returns it to the client."""
     return NoRoutableModelsError(
         f"No routable models for {task_type.value}/{profile.value}: {name} is not served "
         f"in subscription mode (every {prefix}* model is dropped from a named request), and no "
         f"other provider is reachable. Configured providers: {sorted(available) or 'none'}. Fix: call "
-        "without a model name, or connect another provider (an API key or a local ollama model)." + detail,
+        "without a model name, or connect another provider (an API key or a local ollama model).",
         task_type, profile,
     )
 
@@ -4145,7 +4145,8 @@ async def _dispatch_model_loop(
     _pass_only_call = eligibility_routing.pass_only_call(eligibility_exempt_reason)
     _secret_call = local_privacy.secret_dispatch_active()
     _sub_prefix = _subscription_blocked_prefix(sub_blocked_name, config)
-    _sub_dropped = False  # UN-09b S1: the emergency chain lost the blocked provider -> refuse, as route_and_call does
+    _sub_dropped = False  # UN-09b S1: the block removed an entry from the emergency chain
+    _sub_emptied = False  # ... and nothing else was left in it -> route_and_call's refusal
     if (_pass_only_call or _secret_call) and _would_fall_back:
         route_log.info(
             "emergency_fallback_skipped",
@@ -4167,6 +4168,7 @@ async def _dispatch_model_loop(
         if _sub_prefix:  # UN-09b S1: the named request's block holds on this chain too
             _kept = [m for m in emergency_chain if not m.startswith(_sub_prefix)]
             _sub_dropped = len(_kept) < len(emergency_chain)
+            _sub_emptied = _sub_dropped and not _kept
             emergency_chain = _kept
         # D-116: apply shared Q&A ordering here too; timeout demotion below still wins.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
@@ -4511,13 +4513,16 @@ async def _dispatch_model_loop(
         complexity=effective_complexity,
         classification_method=_classification_method(classification_data),
     )
-    if _sub_dropped:
-        # UN-09b S1 (owner decision): the blocked provider was the emergency chain's remaining offer. Refuse with
-        # route_and_call's own text, not a generic exhaustion, so the caller learns why Claude was not used.
+    if _sub_emptied:
+        # UN-09b S1 (owner decision): the blocked provider was all the emergency chain held. Refuse with
+        # route_and_call's own text (no provider text: a door returns a RouterInputError to the client verbatim).
         raise _subscription_refusal(task_type, profile, sub_blocked_name, _sub_prefix,
-                                    config.available_providers, detail=chain_summary) from last_error
+                                    config.available_providers) from last_error
+    # UN-09b S1: otherwise the base failure (same type and prefix: 502 at the doors, error_all_models_failed in
+    # the ledger), with one fixed clause saying why the blocked provider was not tried.
+    _sub_note = f" {_sub_prefix}* was not tried: the named model is blocked in subscription mode." if _sub_dropped else ""
     raise RuntimeError(
-        f"All models failed for {task_type.value}/{profile.value}. "
+        f"All models failed for {task_type.value}/{profile.value}.{_sub_note} "
         f"Last error: {last_error}.{chain_summary}{setup_hint}"
     ) from last_error  # LC-12g: llm_text_job reads an OverflowSwitchRefused cause
 
@@ -5548,7 +5553,8 @@ async def route_and_call(
         # /api/embeddings (urllib: honours HTTP_PROXY, no loopback check), and a hit could return an
         # answer a cloud model wrote, which breaks "the local model alone".
         # LC-12h: nor on the secret door (same two reasons: the embedding POST, and a cached cloud answer).
-        if task_type not in MEDIA_TASK_TYPES and not model_override and not _private:
+        # UN-09b S1: nor for a request whose named model subscription mode blocked: a cached answer may be Claude's.
+        if task_type not in MEDIA_TASK_TYPES and not model_override and not _private and not _sub_blocked:
             try:
                 from llm_router import semantic_cache
                 cached = await semantic_cache.check(prompt, task_type, key=_semantic_key)
