@@ -4,7 +4,8 @@ PR #795 (UN-09, 937274c0) made ``route_and_call`` treat a subscription-blocked `
 un-named call and drop every ``anthropic/*`` entry right after the chain build. Its review found that no test
 pinned the drop: removing it left all 66 tests of ``tests/test_w12_ineligible_replay.py`` and
 ``tests/test_mcp_qa_no_local.py`` green, because none of their chains carried a Claude entry the router could
-serve. Every chain here does, so each test sees a Claude call when the block is gone.
+serve. Every chain here does, so each test sees a Claude call when the block is gone. The chains hold a second
+Claude model besides the named one, so a block that dropped only the exact name would be caught too.
 
 Entry points:
 
@@ -34,6 +35,9 @@ from llm_router.types import TaskType
 from tests import w12_replay_fixture as fx
 
 CLAUDE = w12.SUBSCRIPTION_MODEL        # "anthropic/claude-haiku-4-5", what an Anthropic-format client names
+#: A second Claude model in every chain the block is tested on. The block drops the whole provider, not just the
+#: named model: a drop of the exact name alone (``m != named``) would leave this one to serve (review S1, mutant B).
+SONNET = "anthropic/claude-sonnet-4-6"
 PROMPT = "summarise the retry policy in two lines"
 
 
@@ -44,6 +48,7 @@ class _ClaudeCalls:
     def __init__(self) -> None:
         self.llm: list[str] = []
         self.cli: list[str] = []
+        self.fail: set[str] = set()     # models whose LiteLLM call raises (real-chain controls only)
 
     @property
     def claude(self) -> list[str]:
@@ -73,6 +78,8 @@ def _record_llm_calls(monkeypatch, rec: _ClaudeCalls) -> None:
 
     async def recording(model, messages, **kw):
         rec.llm.append(model)
+        if model in rec.fail:
+            raise RuntimeError(f"stub failure for {model} (UN-09b)")
         return await inner(model, messages, **kw)
 
     monkeypatch.setattr(providers, "call_llm", recording)
@@ -87,10 +94,10 @@ def _state(*chain: str, status: str = "connected") -> fx.MapState:
                        complexity="complex")
 
 
-#: Claude leads the built chain, so a Claude entry that survives the build is the first one served.
-CLAUDE_FIRST = _state(CLAUDE, "gemini/gemini-2.5-flash", "openai/gpt-4o-mini")
-#: Every mapped provider disconnected: Claude (no map row) is the only entry the build keeps.
-CLAUDE_ONLY = _state(CLAUDE, "gemini/gemini-2.5-flash", "openai/gpt-4o-mini", status="disconnected")
+#: Two Claude models lead the built chain, so a Claude entry that survives the build is the first one served.
+CLAUDE_FIRST = _state(CLAUDE, SONNET, "gemini/gemini-2.5-flash", "openai/gpt-4o-mini")
+#: Every mapped provider disconnected: the two Claude models (no map row) are the only entries the build keeps.
+CLAUDE_ONLY = _state(CLAUDE, SONNET, "gemini/gemini-2.5-flash", "openai/gpt-4o-mini", status="disconnected")
 
 
 @pytest.fixture
@@ -152,6 +159,17 @@ def test_control_the_unnamed_subscription_chain_does_serve_claude(world, calls, 
 
 
 @pytest.mark.parametrize("door", ROUTE_DOORS)
+def test_control_the_second_claude_model_is_servable_too(world, calls, door):
+    """Non-vacuity for the second Claude model: un-named, with the first Claude model failing, the subscription
+    chain is served by ``SONNET`` before any other provider. A block that dropped only the named model would let
+    it serve the named request."""
+    world.mode(subscription=True)
+    calls.fail = {CLAUDE}
+    assert _serve(world, door, None) == SONNET
+    assert calls.claude == [CLAUDE, SONNET], calls.llm
+
+
+@pytest.mark.parametrize("door", ROUTE_DOORS)
 def test_control_with_the_block_lifted_the_named_claude_model_is_served(world, calls, door):
     """Positive control: subscription mode off, an Anthropic key present, the same named request is a pin and
     Claude serves it."""
@@ -190,6 +208,9 @@ def test_route_and_call_refuses_when_only_the_named_claude_model_is_left(world, 
     assert calls.llm == [] and calls.cli == [], (calls.llm, calls.cli)
     served = w12._run(route_and_call(TaskType.QUERY, PROMPT, complexity_hint=Complexity.COMPLEX))
     assert served.model == CLAUDE and calls.claude == [CLAUDE], (served.model, calls.llm)
+    calls.fail = {CLAUDE}
+    served = w12._run(route_and_call(TaskType.QUERY, PROMPT, complexity_hint=Complexity.COMPLEX))
+    assert served.model == SONNET, (served.model, calls.llm)
 
 
 # ── MCP doors: llm_query(model=...) and llm("haiku: ...") ───────────────────────────────────────
@@ -248,7 +269,7 @@ def test_control_mcp_llm_claude_prefix_is_served_with_the_block_lifted(world, ca
 # ── route_and_call with a stubbed chain, per task type (tests/test_mcp_qa_no_local._run) ──────────
 
 TASKS = [*qa.MCP_QA, TaskType.CODE]
-STUB_CHAIN = [CLAUDE, "openai/gpt-4o"]
+STUB_CHAIN = [CLAUDE, SONNET, "openai/gpt-4o"]
 
 
 def _qa_run(**kw):
@@ -258,6 +279,7 @@ def _qa_run(**kw):
 @pytest.mark.parametrize("task_type", TASKS)
 def test_stubbed_chain_named_claude_is_never_served_in_subscription_mode(calls, task_type):
     called = _qa_run(task_type=task_type, chain=STUB_CHAIN, model_override=CLAUDE, subscription=True)
+    assert not [m for m in called if m.startswith("anthropic/")], called
     assert called == ["openai/gpt-4o"], called
     assert calls.cli == []
 
@@ -266,6 +288,8 @@ def test_stubbed_chain_named_claude_is_never_served_in_subscription_mode(calls, 
 def test_control_stubbed_chain_unnamed_subscription_call_serves_claude(calls, task_type):
     called = _qa_run(task_type=task_type, chain=STUB_CHAIN, subscription=True)
     assert called == [CLAUDE], called
+    called = _qa_run(task_type=task_type, chain=STUB_CHAIN, subscription=True, fail={CLAUDE})
+    assert called == [CLAUDE, SONNET], called      # the second Claude model is servable too
 
 
 @pytest.mark.parametrize("task_type", TASKS)
@@ -277,7 +301,7 @@ def test_control_stubbed_chain_named_claude_is_served_with_the_block_lifted(call
 def test_a_claude_only_chain_refuses_with_the_subscription_notice(calls):
     """Nothing but Claude is left: the router refuses with its own message instead of serving Claude."""
     with pytest.raises(NoRoutableModelsError) as exc:
-        _qa_run(task_type=TaskType.QUERY, chain=[CLAUDE], model_override=CLAUDE, subscription=True)
+        _qa_run(task_type=TaskType.QUERY, chain=[CLAUDE, SONNET], model_override=CLAUDE, subscription=True)
     assert (f"{CLAUDE} is not served in subscription mode (every anthropic/* model is dropped from a named "
             "request), and no other provider is reachable.") in str(exc.value)
     assert calls.cli == []
@@ -285,7 +309,7 @@ def test_a_claude_only_chain_refuses_with_the_subscription_notice(calls):
 
 # ── known open limits (UN-09b S1: owner decision) ─────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="UN-09b S1: owner decision")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="UN-09b S1: owner decision")
 def test_known_limit_the_emergency_budget_chain_can_serve_claude(calls):
     """The primary chain fails, so route_and_call walks the emergency BUDGET chain (router.py, "Emergency
     fallback"). That chain is built un-named and the subscription block is not applied to it: Claude serves."""
@@ -294,11 +318,11 @@ def test_known_limit_the_emergency_budget_chain_can_serve_claude(calls):
     assert not [m for m in called if m.startswith("anthropic/")], called
 
 
-@pytest.mark.xfail(strict=True, reason="UN-09b S1: owner decision")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="UN-09b S1: owner decision")
 def test_known_limit_a_policy_specialist_naming_claude_can_serve_it(calls):
     """A policy specialist fronted after the chain build is vetted by ``_front_allowed``, which does not know the
     request named a subscription-blocked model: a specialist naming ``anthropic/*`` serves Claude."""
     called = _qa_run(task_type=TaskType.CODE, chain=STUB_CHAIN, model_override=CLAUDE, subscription=True,
-                     policy=qa._specialist_policy("general", "anthropic/claude-sonnet-4-6"),
+                     policy=qa._specialist_policy("general", SONNET),
                      classification_data={"subject": "general"})
     assert not [m for m in called if m.startswith("anthropic/")], called
