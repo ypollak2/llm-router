@@ -112,12 +112,24 @@ def _response(model: str) -> LLMResponse:
     )
 
 
+class _Cfg(t._Cfg):
+    """``t._Cfg`` lists ollama as available but has no ``all_ollama_models``, which every RouterConfig has and
+    the front-entry vetting (``router._keep_reachable_providers``) calls. Without it the vetting raised and the
+    specialist step was dropped, so the specialist tests below passed or failed for the wrong reason."""
+
+    def __init__(self, subscription: bool = False):
+        self.llm_router_claude_subscription = subscription
+
+    def all_ollama_models(self) -> list[str]:
+        return [OLLAMA]
+
+
 async def _run(task_type, chain, model_override=None, emergency=None, fail=(), policy=None,
-               classification_data=None):
+               classification_data=None, subscription=False):
     """route_and_call with a stubbed chain, so only the post-build stages are under test.
 
     ``policy`` (a RoutingPolicy) and ``classification_data`` feed the real subject-specialist
-    step, which runs after the chain build."""
+    step, which runs after the chain build. ``subscription`` turns Claude subscription mode on."""
     called: list[str] = []
 
     async def fake_call_llm(model, *a, **k):
@@ -140,7 +152,7 @@ async def _run(task_type, chain, model_override=None, emergency=None, fail=(), p
     with ExitStack() as es:
         p = es.enter_context
         p(patch.dict(os.environ, env))
-        p(patch("llm_router.router.get_config", return_value=t._Cfg()))
+        p(patch("llm_router.router.get_config", return_value=_Cfg(subscription)))
         p(patch("llm_router.router.get_tracker", return_value=tracker))
         p(patch("llm_router.router.log", mock_log))
         p(patch("llm_router.router._native_notify", lambda *a, **k: None))
@@ -186,6 +198,35 @@ async def test_an_explicit_model_override_is_not_rerouted():
     """model_override is the caller's own pin, not routing: it is honored for Q&A too."""
     called = await _run(TaskType.QUERY, [OLLAMA, "openai/gpt-4o"], model_override=OLLAMA)
     assert called[:1] == [OLLAMA], called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_type", MCP_QA)
+async def test_a_subscription_blocked_claude_name_is_not_a_pin(task_type):
+    """UN-09 review M2 (fails on c5eb98ca): in subscription mode a named ``anthropic/*`` model is blocked and the
+    chain is the un-named fallback. That is routing, not the caller's pin, so D-116 applies: the same order as
+    the un-named request, never a local model first."""
+    chain = [OLLAMA, "openai/gpt-4o"]
+    unnamed = await _run(task_type, chain, subscription=True)
+    named = await _run(task_type, chain, model_override="anthropic/claude-haiku-4-5", subscription=True)
+    assert named == unnamed == ["openai/gpt-4o"], (named, unnamed)
+
+
+def test_a_front_entry_vetting_error_is_counted_and_fails_closed(monkeypatch):
+    """UN-09 review M1: a vetting error leaves the entry out (fail closed) and records a fail-open event."""
+    from llm_router import failopen
+
+    def boom():
+        raise RuntimeError("policy load failed")
+
+    monkeypatch.setattr(router_module, "get_repo_config", boom)
+    failopen.clear()
+    try:
+        assert router_module._front_allowed(OLLAMA, _Cfg(), TaskType.CODE) is False
+        failopen.reset_cache()
+        assert failopen.snapshot().by_code.get("CHZ-FO-ROUTER-FRONT-VET") == 1
+    finally:
+        failopen.clear()  # the recorded event must not leak into a later test's fail-open totals
 
 
 def _specialist_policy(subject: str, model: str):
