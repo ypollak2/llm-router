@@ -16,9 +16,9 @@ Entry points:
 
 Each door has a positive control: with subscription mode off the same named request IS served by Claude.
 
-Known open limits, NOT closed here (owner decision, UN-09b S1): the emergency BUDGET fallback chain and a policy
-specialist naming ``anthropic/*`` can still serve Claude. Both are pinned below as ``xfail(strict=True)``, so the
-day one of them is fixed the xfail turns into an XPASS failure and must be promoted to a plain test.
+UN-09b S1 (owner decision 2026-11-01, "make the message true"): the emergency BUDGET fallback chain and a policy
+specialist drop ``anthropic/*`` for such a request too. A named request whose other providers all fail ends in the
+router's subscription refusal, not in Claude. Each has an un-named control in which the same step does serve Claude.
 """
 from __future__ import annotations
 
@@ -307,22 +307,50 @@ def test_a_claude_only_chain_refuses_with_the_subscription_notice(calls):
     assert calls.cli == []
 
 
-# ── known open limits (UN-09b S1: owner decision) ─────────────────────────────────────────────────
+# ── UN-09b S1: the emergency BUDGET chain and a policy specialist (owner decision 2026-11-01) ────────
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="UN-09b S1: owner decision")
-def test_known_limit_the_emergency_budget_chain_can_serve_claude(calls):
+def test_the_emergency_budget_chain_never_serves_a_blocked_named_claude_model(calls):
     """The primary chain fails, so route_and_call walks the emergency BUDGET chain (router.py, "Emergency
-    fallback"). That chain is built un-named and the subscription block is not applied to it: Claude serves."""
+    fallback"), which is built un-named. Claude is its only entry: the named request is refused with the router's
+    own subscription message instead of being served by Claude (a Claude call would have succeeded and returned)."""
+    with pytest.raises(NoRoutableModelsError) as exc:
+        _qa_run(task_type=TaskType.QUERY, chain=STUB_CHAIN, model_override=CLAUDE, subscription=True,
+                emergency=[CLAUDE], fail={"openai/gpt-4o"})
+    msg = str(exc.value)
+    assert (f"{CLAUDE} is not served in subscription mode (every anthropic/* model is dropped from a named "
+            "request), and no other provider is reachable.") in msg, msg
+    tried = msg.split("Chain failures:", 1)[1]
+    assert "openai/gpt-4o" in tried and "anthropic/" not in tried, msg
+    assert calls.cli == []
+
+
+def test_the_emergency_budget_chain_still_serves_its_non_claude_entries_for_a_blocked_name(calls):
+    """Only the blocked provider leaves the emergency chain: its other entries still serve the named request."""
     called = _qa_run(task_type=TaskType.QUERY, chain=STUB_CHAIN, model_override=CLAUDE, subscription=True,
+                     emergency=[CLAUDE, "openai/gpt-4o-mini"], fail={"openai/gpt-4o"})
+    assert called == ["openai/gpt-4o", "openai/gpt-4o-mini"], called
+
+
+def test_control_the_unnamed_emergency_budget_chain_serves_claude_in_subscription_mode(calls):
+    """Non-vacuity: un-named, the same emergency chain IS served by Claude in subscription mode (existing
+    behaviour, unchanged)."""
+    called = _qa_run(task_type=TaskType.QUERY, chain=["openai/gpt-4o"], subscription=True,
                      emergency=[CLAUDE], fail={"openai/gpt-4o"})
-    assert not [m for m in called if m.startswith("anthropic/")], called
+    assert called == ["openai/gpt-4o", CLAUDE], called
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="UN-09b S1: owner decision")
-def test_known_limit_a_policy_specialist_naming_claude_can_serve_it(calls):
-    """A policy specialist fronted after the chain build is vetted by ``_front_allowed``, which does not know the
-    request named a subscription-blocked model: a specialist naming ``anthropic/*`` serves Claude."""
+def test_a_policy_specialist_naming_claude_is_not_fronted_for_a_blocked_name(calls):
+    """A policy specialist fronted after the chain build is vetted by ``_front_allowed``, which now also knows the
+    request named a subscription-blocked model: a specialist naming ``anthropic/*`` is not fronted."""
     called = _qa_run(task_type=TaskType.CODE, chain=STUB_CHAIN, model_override=CLAUDE, subscription=True,
                      policy=qa._specialist_policy("general", SONNET),
                      classification_data={"subject": "general"})
-    assert not [m for m in called if m.startswith("anthropic/")], called
+    assert called == ["openai/gpt-4o"], called
+
+
+def test_control_an_unnamed_call_fronts_the_claude_specialist_in_subscription_mode(calls):
+    """Non-vacuity: un-named, the same policy specialist IS fronted and serves (existing behaviour)."""
+    called = _qa_run(task_type=TaskType.CODE, chain=["openai/gpt-4o"], subscription=True,
+                     policy=qa._specialist_policy("general", SONNET),
+                     classification_data={"subject": "general"})
+    assert called == [SONNET], called
