@@ -441,16 +441,13 @@ async def _build_and_filter_chain(
                 # llm_providers was one of the 11 names the hand-list omitted.
                 f"Run {route_call('llm_providers')} to see all available models."
             )
-        if (
-            (config.llm_router_claude_subscription and model_override.startswith("anthropic/"))
-            or (config.llm_router_gemini_subscription and model_override.startswith("gemini/"))
-        ):
+        blocked_provider = _subscription_blocked_prefix(model_override, config)
+        if blocked_provider:
             log.warning(
                 "model_override %r blocked in subscription mode — "
                 "routing to balanced chain instead",
                 model_override,
             )
-            blocked_provider = "anthropic/" if model_override.startswith("anthropic/") else "gemini/"
             # W1-2 (UN-09 review M1'): no hand-picked filters. Build the chain exactly as an un-pinned
             # call would (reachability, block lists, policy, map, user rules), then drop the blocked provider.
             built = await _build_and_filter_chain(
@@ -1469,6 +1466,19 @@ def _disabled_subprocess_backends() -> set[str]:
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
 
 
+def _subscription_blocked_prefix(model_override: str | None, config) -> str | None:
+    """The provider prefix (``"anthropic/"`` / ``"gemini/"``) when subscription mode blocks a named model,
+    else None. Such a name is not served: ``route_and_call`` routes the call as un-named without that provider,
+    and ``_build_and_filter_chain`` (for its other callers) returns the un-named chain without it."""
+    if not model_override:
+        return None
+    if config.llm_router_claude_subscription and model_override.startswith("anthropic/"):
+        return "anthropic/"
+    if config.llm_router_gemini_subscription and model_override.startswith("gemini/"):
+        return "gemini/"
+    return None
+
+
 def _front_allowed(model: str, config, task_type: TaskType) -> bool:
     """W1-2: may *model*, injected at the front of a built chain, stay? Same answers as the main build:
     reachable provider, no hard block (LLM_ROUTER_BLOCK_PROVIDERS), no repo block, policy block / allow lists,
@@ -1495,7 +1505,11 @@ def _front_allowed(model: str, config, task_type: TaskType) -> bool:
                 return False
         from llm_router import map_reader
         return bool(map_reader.apply_to_chain([model], reorder=False, task=task_type.value))
-    except Exception:  # noqa: BLE001 - an injection that cannot be vetted is not injected
+    except Exception as exc:  # noqa: BLE001 - fail closed: an injection that cannot be vetted is not injected
+        # UN-09 review M1: counted, not silent. A vetting error turns the precision tier / specialist off.
+        log.debug("Front-entry vetting failed for %s: %s", model, exc)
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ROUTER-FRONT-VET", exc, detail=model)
         return False
 
 
@@ -4888,6 +4902,19 @@ async def route_and_call(
         _ctx_payload["tenant_id"] = identity.tenant_id
     structlog.contextvars.bind_contextvars(**_ctx_payload)
 
+    # UN-09 review M2: subscription mode blocks a named anthropic/* (or gemini/*) model, so the name is not served.
+    # From here on the call is un-named: the profile, the chain build and every post-build pass (D-116 Q&A order,
+    # F106, precision tier, specialist, bandit, secret door) apply exactly as for an un-named call. The blocked
+    # provider is dropped right after the build. Keeping the name made all those passes skip the fallback chain.
+    _sub_blocked = _subscription_blocked_prefix(model_override, config)
+    _sub_blocked_name = model_override if _sub_blocked else None
+    if _sub_blocked:
+        log.warning(
+            "model_override %r blocked in subscription mode — routing as an un-named call without %s",
+            model_override, _sub_blocked,
+        )
+        model_override = None
+
     # ── Profile resolution (foundational routing rule) ────────────────────────
     profile, c, use_thinking = _resolve_profile(
         profile, complexity_hint, classification_data, prompt, model_override, config
@@ -5088,6 +5115,8 @@ async def route_and_call(
         models_to_try = await _build_and_filter_chain(
             task_type, profile, model_override, complexity_hint, c, config
         )
+        if _sub_blocked:
+            models_to_try = [m for m in models_to_try if not m.startswith(_sub_blocked)]
 
         # GH#64: recompute the same explicit per-task pin _build_and_filter_chain
         # derives internally (repo_cfg.model_override), so the quality
@@ -5424,6 +5453,15 @@ async def route_and_call(
                     f"providers: {sorted(available) or 'none'}. Fix: remove a provider "
                     f"from LLM_ROUTER_BLOCK_PROVIDERS, or ensure a non-blocked provider "
                     f"(e.g. ollama/*) has a reachable model.",
+                    task_type, profile,
+                )
+            if _sub_blocked:
+                # UN-09 review S7: the named model was blocked by subscription mode and nothing else reachable is left.
+                raise NoRoutableModelsError(
+                    f"No routable models for {task_type.value}/{profile.value}: {_sub_blocked_name} is not served "
+                    f"in subscription mode (every {_sub_blocked}* model is dropped from a named request), and no "
+                    f"other provider is reachable. Configured providers: {sorted(available) or 'none'}. Fix: call "
+                    "without a model name, or connect another provider (an API key or a local ollama model).",
                     task_type, profile,
                 )
             from llm_router.runtime_offer import runtime_offer

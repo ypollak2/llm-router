@@ -638,6 +638,31 @@ def test_subscription_override_fallback_honours_block_providers(variant, tmp_pat
     assert seen.provider != "openai", seen.model
 
 
+@pytest.mark.parametrize("door", ["router", "gateway"])
+def test_subscription_blocked_named_model_serves_the_unnamed_qa_order(door, tmp_path, monkeypatch):
+    """Review M2 (fails on c5eb98ca): subscription mode blocks a named ``anthropic/*`` model, so the router serves
+    the un-named fallback chain. That chain is routing, not the caller's pin, so the post-build passes apply:
+    D-116 keeps a local model off the front of a Q&A chain. c5eb98ca served ollama/qwen3:8b here; the same
+    request un-named serves gemini."""
+    import llm_router.config as config_module
+
+    _world_env(monkeypatch, tmp_path)
+    _stub_transport(monkeypatch)
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
+    config_module._config = None
+    state = _all_connected_state()
+    doc = _install(state, monkeypatch)
+    run = _new_db(tmp_path, door, monkeypatch)
+    prompt = "summarise the retry policy in two lines"
+    _DRIVERS[door](run, state, prompt, doc)
+    _DRIVERS[door](run, state, prompt, doc, model=SUBSCRIPTION_MODEL)
+    config_module._config = None
+    assert run.no_route == 0 and len(run.served) == 2, (run.no_route, run.served)
+    (unnamed, _), (named, _) = run.served
+    assert not named.startswith("ollama/"), named
+    assert named == unnamed, (named, unnamed)
+
+
 def test_subscription_override_fallback_drops_unreachable_providers(tmp_path, monkeypatch):
     """Review M1' (fails on the previous head): providers with no key (moonshot, zhipu, arcee...) were in the fallback."""
     import llm_router.config as config_module
