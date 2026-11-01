@@ -16,22 +16,30 @@ Entry points:
 
 Each door has a positive control: with subscription mode off the same named request IS served by Claude.
 
-Known open limits, NOT closed here (owner decision, UN-09b S1): the emergency BUDGET fallback chain and a policy
-specialist naming ``anthropic/*`` can still serve Claude. Both are pinned below as ``xfail(strict=True)``, so the
-day one of them is fixed the xfail turns into an XPASS failure and must be promoted to a plain test.
+UN-09b S1 (owner decision 2026-11-01, "make the message true"): the emergency BUDGET fallback chain and a policy
+specialist drop ``anthropic/*`` for such a request too, and the semantic cache is not consulted for it (a stored
+answer may be Claude's). When nothing in the emergency chain serves (only Claude was in it, or its other entries
+fail), the request ends in the base "All models failed" RuntimeError (502 at the HTTP doors, no provider text to
+the client, ``error_all_models_failed`` in the ledger) with one fixed clause saying anthropic/* was not tried; a
+model was tried and failed, so it is not the no-provider refusal. Each step has an un-named control in which it
+does serve Claude.
 """
 from __future__ import annotations
 
+import contextlib
+import json
+import os
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import tests.test_mcp_qa_no_local as qa
 import tests.test_w12_ineligible_replay as w12
 from llm_router import router as router_module
+from llm_router.cost import REASON_ERROR_ALL_FAILED
 from llm_router.router import NoRoutableModelsError
-from llm_router.types import TaskType
+from llm_router.types import RoutingProfile, TaskType
 from tests import w12_replay_fixture as fx
 
 CLAUDE = w12.SUBSCRIPTION_MODEL        # "anthropic/claude-haiku-4-5", what an Anthropic-format client names
@@ -89,7 +97,8 @@ def _state(*chain: str, status: str = "connected") -> fx.MapState:
     """Every mapped provider has *status*. ``anthropic`` has no map row, so the map filter leaves it alone;
     whether it survives is decided by the router alone. A complex task: in a Claude Code subscription session
     ``_reorder_for_agent_context`` puts Claude FIRST for complex work (simple / moderate put it last, where only
-    a failing chain reaches it, and a failing chain walks the emergency BUDGET chain, a known open limit)."""
+    a failing chain reaches it, and a failing chain walks the emergency BUDGET chain, covered at the end of
+    this file)."""
     return fx.MapState(statuses={p: status for p in fx.PROVIDERS}, base_chain=chain, task="query",
                        complexity="complex")
 
@@ -307,22 +316,228 @@ def test_a_claude_only_chain_refuses_with_the_subscription_notice(calls):
     assert calls.cli == []
 
 
-# ── known open limits (UN-09b S1: owner decision) ─────────────────────────────────────────────────
+# ── UN-09b S1: the emergency BUDGET chain, a policy specialist, the semantic cache (owner decision 2026-11-01) ─
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="UN-09b S1: owner decision")
-def test_known_limit_the_emergency_budget_chain_can_serve_claude(calls):
+MINI = "openai/gpt-4o-mini"
+#: Provider exception text can echo the prompt (F76/F87/F91): it must never reach an HTTP client body.
+SEED = "SEEDED-UN09B-PROVIDER-ECHO-do-not-return"
+NOT_TRIED = " anthropic/* was not tried: the named model is blocked in subscription mode."
+
+
+@contextlib.contextmanager
+def _stubbed(chain, emergency=None, fail=(), subscription=True, cached=None):
+    """``tests/test_mcp_qa_no_local._run``'s patches as a context, so any door can drive route_and_call: a stubbed
+    chain build (``emergency`` = the BUDGET chain), a stubbed provider call (a model in ``fail`` raises with SEED in
+    its text), a semantic cache that returns ``cached``, and a recorded route-error ledger write."""
+    rec = SimpleNamespace(called=[], cache_checks=0, route_error=AsyncMock())
+
+    async def fake_call_llm(model, *a, **k):
+        rec.called.append(model)
+        if model in fail:
+            raise RuntimeError(f"stub failure for {model}: upstream echoed {SEED}")
+        return qa._response(model)
+
+    async def fake_build(task_type, profile, *a, **k):
+        if profile == RoutingProfile.BUDGET and emergency is not None:
+            return list(emergency)
+        return list(chain)
+
+    async def fake_check(*a, **k):
+        rec.cache_checks += 1
+        return cached
+
+    mock_log = MagicMock()
+    mock_log.bind.return_value = MagicMock()
+    tracker = MagicMock()
+    tracker.is_healthy.return_value = True
+    with contextlib.ExitStack() as es:
+        p = es.enter_context
+        p(patch.dict(os.environ, {"LLM_ROUTER_ENFORCE": "off", "LLM_ROUTER_BANDIT": "off"}))
+        p(patch("llm_router.router.get_config", return_value=qa._Cfg(subscription)))
+        p(patch("llm_router.router.get_tracker", return_value=tracker))
+        p(patch("llm_router.router.log", mock_log))
+        p(patch("llm_router.router._native_notify", lambda *a, **k: None))
+        for fn in ("get_monthly_spend", "get_daily_spend", "get_daily_spend_by_task_type"):
+            p(patch(f"llm_router.router.cost.{fn}", new_callable=AsyncMock, return_value=0.0))
+        p(patch("llm_router.router.cost.log_usage", new_callable=AsyncMock))
+        p(patch("llm_router.router.cost.log_route_error", rec.route_error))
+        p(patch("llm_router.policy.load_org_policy", return_value=None))
+        p(patch("llm_router.policy.get_active_policy", return_value=None))
+        p(patch("llm_router.router.reserve_envelope", new_callable=AsyncMock, return_value=(None, True, "k")))
+        p(patch("llm_router.router.commit_envelope", new_callable=AsyncMock))
+        p(patch("llm_router.router.release_envelope", new_callable=AsyncMock))
+        p(patch("llm_router.semantic_cache.check", side_effect=fake_check))
+        p(patch("llm_router.semantic_cache.store", new_callable=AsyncMock))
+        p(patch("llm_router.router._build_and_filter_chain", side_effect=fake_build))
+        p(patch("llm_router.router.providers.call_llm", side_effect=fake_call_llm))
+        yield rec
+
+
+def _route(model_override=None):
+    async def go():
+        try:
+            return await router_module.route_and_call(
+                TaskType.QUERY, PROMPT, profile=RoutingProfile.BALANCED, complexity_hint="moderate",
+                model_override=model_override)
+        finally:
+            await router_module.drain_bg_tasks(2.0)
+    return w12._run(go())
+
+
+def test_an_emergency_chain_of_only_claude_models_ends_in_the_base_failure(calls):
     """The primary chain fails, so route_and_call walks the emergency BUDGET chain (router.py, "Emergency
-    fallback"). That chain is built un-named and the subscription block is not applied to it: Claude serves."""
-    called = _qa_run(task_type=TaskType.QUERY, chain=STUB_CHAIN, model_override=CLAUDE, subscription=True,
-                     emergency=[CLAUDE], fail={"openai/gpt-4o"})
-    assert not [m for m in called if m.startswith("anthropic/")], called
+    fallback"), built un-named. It holds a Claude model other than the named one (a drop of the exact name only
+    would leave it to serve). Nothing is left after the drop: the base RuntimeError with the fixed clause (a model
+    was tried and failed, so not the no-provider refusal), and the base ledger reason."""
+    with _stubbed(STUB_CHAIN, emergency=[SONNET], fail={"openai/gpt-4o"}) as rec:
+        with pytest.raises(RuntimeError) as exc:
+            _route(CLAUDE)
+    assert type(exc.value) is RuntimeError, type(exc.value)
+    assert str(exc.value).startswith(f"All models failed for query/balanced.{NOT_TRIED} Last error: "), str(exc.value)
+    assert [c.kwargs["reason"] for c in rec.route_error.await_args_list] == [REASON_ERROR_ALL_FAILED]
+    assert rec.called == ["openai/gpt-4o"], rec.called
+    assert calls.cli == []
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="UN-09b S1: owner decision")
-def test_known_limit_a_policy_specialist_naming_claude_can_serve_it(calls):
-    """A policy specialist fronted after the chain build is vetted by ``_front_allowed``, which does not know the
-    request named a subscription-blocked model: a specialist naming ``anthropic/*`` serves Claude."""
+def test_an_emergency_chain_whose_other_entries_fail_ends_in_the_base_failure(calls):
+    """Claude models dropped, the remaining entry fails too: the base RuntimeError ("All models failed"), with one
+    fixed clause saying why anthropic/* was not tried. The ledger reason is the base one."""
+    with _stubbed(STUB_CHAIN, emergency=[CLAUDE, SONNET, MINI], fail={"openai/gpt-4o", MINI}) as rec:
+        with pytest.raises(RuntimeError) as exc:
+            _route(CLAUDE)
+    assert type(exc.value) is RuntimeError, type(exc.value)
+    msg = str(exc.value)
+    assert msg.startswith(f"All models failed for query/balanced.{NOT_TRIED} Last error: "), msg
+    assert router_module._route_error_reason(exc.value) == REASON_ERROR_ALL_FAILED
+    assert [c.kwargs["reason"] for c in rec.route_error.await_args_list] == [REASON_ERROR_ALL_FAILED]
+    assert rec.called == ["openai/gpt-4o", MINI], rec.called
+
+
+def test_a_blocked_name_whose_emergency_chain_holds_no_claude_gets_no_clause(calls):
+    """The clause says the block removed something. A BUDGET chain with no Claude model loses nothing to the block:
+    the base text, unchanged, for the blocked named request too."""
+    with _stubbed(STUB_CHAIN, emergency=[MINI], fail={"openai/gpt-4o", MINI}) as rec:
+        with pytest.raises(RuntimeError) as exc:
+            _route(CLAUDE)
+    assert str(exc.value).startswith("All models failed for query/balanced. Last error: "), str(exc.value)
+    assert rec.called == ["openai/gpt-4o", MINI], rec.called
+
+
+def test_control_an_unnamed_failure_has_no_subscription_clause(calls):
+    """The clause is the block's: an un-named request whose chains all fail gets the base text unchanged."""
+    with _stubbed(["openai/gpt-4o"], emergency=[MINI], fail={"openai/gpt-4o", MINI}):
+        with pytest.raises(RuntimeError) as exc:
+            _route(None)
+    assert str(exc.value).startswith("All models failed for query/balanced. Last error: "), str(exc.value)
+
+
+def test_the_emergency_budget_chain_still_serves_its_non_claude_entries_for_a_blocked_name(calls):
+    """Only the blocked provider leaves the emergency chain: its other entries still serve the named request."""
+    with _stubbed(STUB_CHAIN, emergency=[CLAUDE, SONNET, MINI], fail={"openai/gpt-4o"}) as rec:
+        served = _route(CLAUDE)
+    assert served.model == MINI and rec.called == ["openai/gpt-4o", MINI], (served.model, rec.called)
+
+
+def test_control_the_unnamed_emergency_budget_chain_serves_claude_in_subscription_mode(calls):
+    """Non-vacuity: un-named, the same emergency chain IS served by Claude in subscription mode (existing
+    behaviour, unchanged)."""
+    with _stubbed(["openai/gpt-4o"], emergency=[SONNET], fail={"openai/gpt-4o"}) as rec:
+        served = _route(None)
+    assert served.model == SONNET and rec.called == ["openai/gpt-4o", SONNET], (served.model, rec.called)
+
+
+# The HTTP doors (F76/F87/F91): a RouterInputError's text goes to the client as a 400, anything else is a 502 with
+# the class and a fixed message. The emergency path must keep the provider's text out of both.
+
+def _gateway_route(model):
+    from fastapi.testclient import TestClient
+
+    from llm_router.gateway import app
+    r = TestClient(app, base_url="http://127.0.0.1").post(
+        "/route", json={"prompt": PROMPT, "model": model, "task_type": "query", "complexity": "moderate"})
+    return r.status_code, r.text
+
+
+def _route_server_route(model):
+    import threading
+    import urllib.error
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+
+    import llm_router.route_server as route_server
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), route_server.make_handler())
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        body = json.dumps({"prompt": PROMPT, "model": model, "task_type": "query",
+                           "complexity": "moderate"}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/route", data=body, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status, resp.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        t.join(timeout=5)
+
+
+HTTP_DOORS = {"gateway": _gateway_route, "route_server": _route_server_route}
+
+
+@pytest.mark.parametrize("door", sorted(HTTP_DOORS))
+def test_http_door_a_failed_emergency_chain_is_a_502_without_provider_text(calls, door):
+    pytest.importorskip("fastapi")
+    with _stubbed(STUB_CHAIN, emergency=[CLAUDE, SONNET, MINI], fail={"openai/gpt-4o", MINI}) as rec:
+        status, body = HTTP_DOORS[door](CLAUDE)
+    assert status == 502 and SEED not in body and "RuntimeError: routing failed" in body, (status, body)
+    assert rec.called == ["openai/gpt-4o", MINI], rec.called
+    assert [c.kwargs["reason"] for c in rec.route_error.await_args_list] == [REASON_ERROR_ALL_FAILED]
+
+
+@pytest.mark.parametrize("door", sorted(HTTP_DOORS))
+def test_http_door_an_all_claude_emergency_chain_is_a_502_without_provider_text(calls, door):
+    """Nothing is left after the drop, but a model was tried and failed: a retryable 502, as on base."""
+    pytest.importorskip("fastapi")
+    with _stubbed(STUB_CHAIN, emergency=[SONNET], fail={"openai/gpt-4o"}) as rec:
+        status, body = HTTP_DOORS[door](CLAUDE)
+    assert status == 502 and SEED not in body and "RuntimeError: routing failed" in body, (status, body)
+    assert rec.called == ["openai/gpt-4o"], rec.called
+    assert [c.kwargs["reason"] for c in rec.route_error.await_args_list] == [REASON_ERROR_ALL_FAILED]
+
+
+# ── the semantic cache (review S4) ──────────────────────────────────────────────────────────────
+
+def test_a_blocked_named_request_is_not_served_a_cached_claude_answer(calls):
+    """The cache holds a Claude answer for this prompt. After the block the request is un-named, so without the skip
+    the cache lookup runs and returns Claude's answer (semantic_cache.check does not filter by model)."""
+    with _stubbed(["openai/gpt-4o"], cached=qa._response(CLAUDE)) as rec:
+        served = _route(CLAUDE)
+    assert served.model == "openai/gpt-4o" and rec.cache_checks == 0, (served.model, rec.cache_checks)
+
+
+def test_control_an_unnamed_request_is_served_the_cached_claude_answer(calls):
+    with _stubbed(["openai/gpt-4o"], cached=qa._response(CLAUDE)) as rec:
+        served = _route(None)
+    assert served.model == CLAUDE and rec.called == [] and rec.cache_checks == 1, (served.model, rec.called)
+
+
+# ── a policy specialist ─────────────────────────────────────────────────────────────────────────
+
+def test_a_policy_specialist_naming_claude_is_not_fronted_for_a_blocked_name(calls):
+    """A policy specialist fronted after the chain build is vetted by ``_front_allowed``, which now also knows the
+    request named a subscription-blocked model: a specialist naming ``anthropic/*`` is not fronted."""
     called = _qa_run(task_type=TaskType.CODE, chain=STUB_CHAIN, model_override=CLAUDE, subscription=True,
                      policy=qa._specialist_policy("general", SONNET),
                      classification_data={"subject": "general"})
-    assert not [m for m in called if m.startswith("anthropic/")], called
+    assert called == ["openai/gpt-4o"], called
+
+
+def test_control_an_unnamed_call_fronts_the_claude_specialist_in_subscription_mode(calls):
+    """Non-vacuity: un-named, the same policy specialist IS fronted and serves (existing behaviour)."""
+    called = _qa_run(task_type=TaskType.CODE, chain=["openai/gpt-4o"], subscription=True,
+                     policy=qa._specialist_policy("general", SONNET),
+                     classification_data={"subject": "general"})
+    assert called == [SONNET], called

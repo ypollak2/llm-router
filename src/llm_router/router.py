@@ -1479,10 +1479,13 @@ def _subscription_blocked_prefix(model_override: str | None, config) -> str | No
     return None
 
 
-def _front_allowed(model: str, config, task_type: TaskType) -> bool:
+def _front_allowed(model: str, config, task_type: TaskType, blocked_prefix: str | None = None) -> bool:
     """W1-2: may *model*, injected at the front of a built chain, stay? Same answers as the main build:
     reachable provider, no hard block (LLM_ROUTER_BLOCK_PROVIDERS), no repo block, policy block / allow lists,
-    then the resource map and the user's stored rules."""
+    then the resource map and the user's stored rules. UN-09b S1: never the provider a subscription-blocked
+    named request dropped (*blocked_prefix*, from ``_subscription_blocked_prefix``)."""
+    if blocked_prefix and model.startswith(blocked_prefix):
+        return False
     try:
         if not _keep_reachable_providers([model], config):
             return False
@@ -3095,6 +3098,9 @@ async def _dispatch_model_loop(
     # A.2-t: the caller's tools array / tool_choice (OpenAI form), sent to every API attempt.
     tools: list[dict] | None = None,
     tool_choice: object | None = None,
+    # UN-09b S1: the model name a subscription-blocked request named (route_and_call's ``_sub_blocked_name``;
+    # None = not blocked). Its provider is dropped from the emergency BUDGET chain too.
+    sub_blocked_name: str | None = None,
 ) -> LLMResponse:
     """Execute the main model dispatch loop with primary + emergency fallback chains.
 
@@ -4124,6 +4130,8 @@ async def _dispatch_model_loop(
     from llm_router import eligibility_routing, local_privacy
     _pass_only_call = eligibility_routing.pass_only_call(eligibility_exempt_reason)
     _secret_call = local_privacy.secret_dispatch_active()
+    _sub_prefix = _subscription_blocked_prefix(sub_blocked_name, config)
+    _sub_dropped = False  # UN-09b S1: the block removed an entry from the emergency chain
     if (_pass_only_call or _secret_call) and _would_fall_back:
         route_log.info(
             "emergency_fallback_skipped",
@@ -4142,6 +4150,10 @@ async def _dispatch_model_loop(
         emergency_chain = await _build_and_filter_chain(
             task_type, RoutingProfile.BUDGET, None, complexity_hint, Complexity.SIMPLE, config
         )
+        if _sub_prefix:  # UN-09b S1: the named request's block holds on this chain too
+            _kept = [m for m in emergency_chain if not m.startswith(_sub_prefix)]
+            _sub_dropped = len(_kept) < len(emergency_chain)
+            emergency_chain = _kept
         # D-116: apply shared Q&A ordering here too; timeout demotion below still wins.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
         emergency_chain = _drop_failed_eligibility(  # F106: the call's lane tier, not BUDGET's
@@ -4485,8 +4497,12 @@ async def _dispatch_model_loop(
         complexity=effective_complexity,
         classification_method=_classification_method(classification_data),
     )
+    # UN-09b S1: the base failure (same type and prefix: 502 at the doors, error_all_models_failed in the ledger;
+    # a model WAS tried and failed, so this is not the no-provider refusal), with one fixed clause when the block
+    # removed an emergency entry.
+    _sub_note = f" {_sub_prefix}* was not tried: the named model is blocked in subscription mode." if _sub_dropped else ""
     raise RuntimeError(
-        f"All models failed for {task_type.value}/{profile.value}. "
+        f"All models failed for {task_type.value}/{profile.value}.{_sub_note} "
         f"Last error: {last_error}.{chain_summary}{setup_hint}"
     ) from last_error  # LC-12g: llm_text_job reads an OverflowSwitchRefused cause
 
@@ -5177,8 +5193,9 @@ async def route_and_call(
                         models_to_try, subject_str, get_active_policy()
                     )
                     # W1-2 (UN-09 review S2): a specialist fronted after the build answers to the map and rules too.
+                    # UN-09b S1: and to the subscription block of a named request.
                     if models_to_try[:1] != _before_spec[:1] and not _front_allowed(
-                            models_to_try[0], config, task_type):
+                            models_to_try[0], config, task_type, blocked_prefix=_sub_blocked):
                         models_to_try = _before_spec
             except Exception as _spec_err:
                 log.debug(
@@ -5523,7 +5540,8 @@ async def route_and_call(
         # /api/embeddings (urllib: honours HTTP_PROXY, no loopback check), and a hit could return an
         # answer a cloud model wrote, which breaks "the local model alone".
         # LC-12h: nor on the secret door (same two reasons: the embedding POST, and a cached cloud answer).
-        if task_type not in MEDIA_TASK_TYPES and not model_override and not _private:
+        # UN-09b S1: nor for a request whose named model subscription mode blocked: a cached answer may be Claude's.
+        if task_type not in MEDIA_TASK_TYPES and not model_override and not _private and not _sub_blocked:
             try:
                 from llm_router import semantic_cache
                 cached = await semantic_cache.check(prompt, task_type, key=_semantic_key)
@@ -5862,6 +5880,7 @@ async def route_and_call(
             capability_needs=_cap_needs,
             tools=tools,
             tool_choice=tool_choice,
+            sub_blocked_name=_sub_blocked_name,  # UN-09b S1
         )
         # T3-S2 + T3-M1: combined timeout + cancel handling. Both failure
         # modes share the same cleanup contract — release the budget
