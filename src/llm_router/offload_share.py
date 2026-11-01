@@ -231,8 +231,15 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
                 kind_of, allowed: frozenset, band_redone: set[str] | frozenset = frozenset(),
                 outcome_redos: Iterable[dict] = (), edit_rows: Iterable[dict] = (),
                 thread_of=None, detector_flags=None,
-                band_kept: set[str] | frozenset = frozenset()) -> dict:
+                band_kept: set[str] | frozenset = frozenset(),
+                headless_main_ids: frozenset = frozenset()) -> dict:
     """Classified, redo-judged units in the window.
+
+    ``headless_main_ids``: session ids of main sessions run headless with the launcher tool disabled (the
+    synth-live driver's manifest; S1FIX). A ``subagent_first`` / ``subagent_turn`` row of such a session
+    whose transcript role is None (``claude -p --no-session-persistence`` writes no transcript) begins a
+    turn. A transcript role, when there is one, still wins; sessions outside the set are unchanged.
+    Default empty: every other caller behaves exactly as before.
 
     ``kind_of(session_id, stamp)`` returns the resolved session kind or None.
     ``band_redone``: msg_ids whose last receipt-band press is ``redone``.
@@ -310,7 +317,7 @@ def build_units(proxy_rows: list[dict], local_units: Iterable[dict], *, now: flo
             # The proxy infers this label from a missing Agent/Task launcher in the tool list, so a main
             # session run with that tool disabled gets it too. Only a transcript join that places the
             # message on the main thread as a typed prompt's answer keeps the row a turn.
-            return role == ROLE_TURN
+            return role == ROLE_TURN or (role is None and r.get("session_id") in headless_main_ids)
         if step not in _BEGINS_TURN_KINDS:
             return False
         if role in (ROLE_SIDECHAIN, ROLE_ORPHAN, ROLE_META):
@@ -721,7 +728,8 @@ def action_units(since: float, until: float, *, proxy_rows: list[dict] | None = 
                  edit_rows: Iterable[dict] | None = None, kind_of=None,
                  allowed: frozenset = frozenset({"organic"}), thread_of=None,
                  band_redone: set[str] | frozenset = frozenset(), outcome_redos: Iterable[dict] | None = None,
-                 quality_rows: Iterable[dict] | None = None) -> dict:
+                 quality_rows: Iterable[dict] | None = None,
+                 headless_main_ids: frozenset = frozenset()) -> dict:
     """Every organic ACTION in ``[since, until]`` with its lane and verdict (module section above).
 
     Inputs default to the live files; pass them to measure something else (the fixture does):
@@ -730,6 +738,8 @@ def action_units(since: float, until: float, *, proxy_rows: list[dict] | None = 
     (``technical_ops.jsonl``), ``edit_rows`` (``edit_outcomes.jsonl``), ``kind_of(session_id, stamp)`` (session
     kind, default ``session_kind.KindIndex``), ``outcome_redos`` (``usage_outcome`` rows), ``quality_rows``
     (``lane_quality.jsonl``).
+
+    ``headless_main_ids``: see :func:`build_units` (S1FIX; default empty = unchanged).
 
     Returns ``{"actions": [...], "excluded": {...}, "sampled": {lane: batch}, "built": build_units result}``.
     Each action: ``ts, session_id, door, task_group, served_class, model, first, redone, reread, window_open,
@@ -759,7 +769,8 @@ def action_units(since: float, until: float, *, proxy_rows: list[dict] | None = 
         quality_rows = lane_quality.read_rows()
     built = build_units(proxy_rows, mcp_rows, now=now, days=days, kind_of=kind_of, allowed=allowed,
                         band_redone=band_redone, outcome_redos=list(outcome_redos or ()),
-                        edit_rows=edit_rows or (), thread_of=thread_of)
+                        edit_rows=edit_rows or (), thread_of=thread_of,
+                        headless_main_ids=frozenset(headless_main_ids))
     from llm_router import lane_a_shadow
     compared = lane_a_shadow.current_identities()   # D-303: the proxy's recorded identity, what S1 compares to
     sampled, invalidated = lane_quality.sampled_report(quality_rows, now, compared)

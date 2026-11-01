@@ -36,7 +36,7 @@ from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable
 
-from llm_router import install_manifest, paths, proxy_default
+from llm_router import daily_offload, install_manifest, paths, proxy_default
 
 LABEL = "com.llm_router.kpi-daily"
 UNIT = "llm_router-kpi-daily"
@@ -50,12 +50,22 @@ def daily_command(python: str | None = None) -> list[str]:
     return [python or sys.executable, "-m", "llm_router.cli", "kpi", "--daily", "--backfill", str(BACKFILL)]
 
 
-def scheduled_env(home_override: str | None = None) -> dict[str, str]:
-    """``LLM_ROUTER_SCHEDULED=1`` always; ``LLM_ROUTER_HOME`` only when given (see :func:`install_home_override`)."""
+def scheduled_env(home_override: str | None = None, synth_manifest: str | None = None) -> dict[str, str]:
+    """``LLM_ROUTER_SCHEDULED=1`` always; ``LLM_ROUTER_HOME`` only when given (see :func:`install_home_override`);
+    ``LLM_ROUTER_SYNTH_MANIFEST`` only when given (S1FIX: the scheduled run then counts the synth-live
+    sessions in the release clock; see :func:`install_synth_manifest`)."""
     env = {"LLM_ROUTER_SCHEDULED": "1"}
     if home_override:
         env["LLM_ROUTER_HOME"] = home_override
+    if synth_manifest:
+        env[daily_offload.SYNTH_MANIFEST_ENV] = synth_manifest
     return env
+
+
+def install_synth_manifest() -> str | None:
+    """The ``LLM_ROUTER_SYNTH_MANIFEST`` to bake into the job: its value at install time, expanded, or None."""
+    raw = os.environ.get(daily_offload.SYNTH_MANIFEST_ENV, "").strip()
+    return str(Path(raw).expanduser()) if raw else None
 
 
 def install_home_override(home: Path) -> str | None:
@@ -184,11 +194,11 @@ def manual_command(python: str, env: dict[str, str]) -> str:
 
 def build_plan(*, system: str, home: Path, state_dir: Path, python: str, now: float | None = None,
                tz: tzinfo | None = None, home_override: str | None = None, user: str | None = None,
-               pythonw: str | None = None) -> dict[str, Any]:
+               pythonw: str | None = None, synth_manifest: str | None = None) -> dict[str, Any]:
     """What an install would write and run. ``files`` is ``[(path, text)]``; ``activate`` / ``deactivate`` are
     shell command strings (None = nothing to run); ``manual`` is set when the platform has no usable entry."""
     hour, minute = local_run_time(now, tz)
-    env = scheduled_env(home_override)
+    env = scheduled_env(home_override, synth_manifest)
     plan: dict[str, Any] = {"system": system, "run_time_local": f"{hour:02d}:{minute:02d}",
                             "run_time_utc": f"{UTC_HM[0]:02d}:{UTC_HM[1]:02d}", "command": daily_command(python),
                             "env": env, "files": [], "activate": None, "deactivate": None, "manual": None}
@@ -223,7 +233,8 @@ def _user_systemd_ok(runner: Callable) -> bool:
 
 def install(*, system: str | None = None, home: Path | None = None, state_dir: Path | None = None,
             python: str | None = None, runner: Callable = subprocess.run, now: float | None = None,
-            tz: tzinfo | None = None, user: str | None = None, home_override: str | None = ...) -> dict[str, Any]:  # type: ignore[assignment]
+            tz: tzinfo | None = None, user: str | None = None, home_override: str | None = ...,  # type: ignore[assignment]
+            synth_manifest: str | None = ...) -> dict[str, Any]:  # type: ignore[assignment]
     """Write the files, record them in the install manifest, activate. Returns the plan plus ``status``:
     ``installed``, ``activation_failed`` (files written and recorded; ``detail`` says why), ``no_user_systemd``
     or ``unsupported`` (nothing written; ``manual`` holds the command)."""
@@ -233,12 +244,14 @@ def install(*, system: str | None = None, home: Path | None = None, state_dir: P
     python = python or sys.executable
     if home_override is ...:
         home_override = install_home_override(home)
+    if synth_manifest is ...:
+        synth_manifest = install_synth_manifest()
     pythonw = None
     if system == "Windows":
         cand = Path(python).with_name("pythonw.exe")
         pythonw = str(cand) if cand.exists() else None
     plan = build_plan(system=system, home=home, state_dir=state_dir, python=python, now=now, tz=tz,
-                      home_override=home_override, user=user, pythonw=pythonw)
+                      home_override=home_override, user=user, pythonw=pythonw, synth_manifest=synth_manifest)
     if plan["manual"] is not None:
         return {**plan, "status": "unsupported", "detail": f"no automatic entry on {system!r}"}
     if system == "Linux" and not _user_systemd_ok(runner):
@@ -299,7 +312,7 @@ def render_default_plist() -> str:
     """``kpi --daily-render-plist``: the plist :func:`install` would write on this machine, now."""
     home, sd = Path.home(), paths.llm_router_home()
     h, m = local_run_time(time.time())
-    return render_plist(sys.executable, sd / "logs", h, m, scheduled_env(install_home_override(home)))
+    return render_plist(sys.executable, sd / "logs", h, m, scheduled_env(install_home_override(home), install_synth_manifest()))
 
 
 def plan_lines(plan: dict[str, Any], system: str) -> list[str]:
@@ -318,7 +331,8 @@ def run_install(*, yes: bool, runner: Callable = subprocess.run, system: str | N
     system = system or platform.system()
     home = home or Path.home()
     plan = build_plan(system=system, home=home, state_dir=paths.llm_router_home(), python=sys.executable,
-                      now=time.time(), home_override=install_home_override(home))
+                      now=time.time(), home_override=install_home_override(home),
+                      synth_manifest=install_synth_manifest())
     print("\n".join(plan_lines(plan, system)))
     if not yes:
         tty = sys.stdin.isatty() if stdin_tty is None else stdin_tty
