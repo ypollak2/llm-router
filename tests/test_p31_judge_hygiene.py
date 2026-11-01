@@ -320,7 +320,9 @@ def test_expiry_purge_never_drops_an_unexpired_entry(home, monkeypatch, cap_offs
             assert ids == list(range(k + 1, m + k + 1)), (
                 f"check at enqueue {k}: kept {len(ids)} entries from #{ids[0]}, "
                 f"expected the {m} unexpired ones from #{k + 1}")
-    assert checks >= 1, "anti-vacuity: the first append crosses the line and must run the full check"
+    # Pins the cost judge._enforce_queue_cap's docstring discloses: one full check per enqueue
+    # (also the anti-vacuity check: every post-check assertion above ran n times).
+    assert checks == n, f"{checks} full checks in {n} enqueues; the disclosed cost is one per enqueue"
 
 
 @pytest.mark.timing

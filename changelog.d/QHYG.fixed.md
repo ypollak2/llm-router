@@ -1,0 +1,1 @@
+The Gemini CLI installer no longer prints "Added ... hook" or "reset non-list ... (backed up)" lines when it could not back up `hooks.json`: the file is left unchanged and only "Could not back up ...; left unchanged" is reported (follow-up to PR #776).

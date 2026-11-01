@@ -2249,38 +2249,40 @@ def _install_gemini_cli_files() -> list[str]:
                 actions.append(f"  {hooks_json}: enabled:false -- hooks left unregistered")
                 actions += _append_routing_rules(ext_dir / "INSTRUCTIONS.md", "gemini-cli-rules.md")
                 return actions
+            # Lines that describe the merge; reported only once the file is written.
+            merged: list[str] = []
             for _event in _GEMINI_EVENTS:
                 hooks[_event], _note = _gemini_event_list(hooks.get(_event))
                 if _note:
-                    actions.append("  " + _note.format(event=_event))
+                    merged.append("  " + _note.format(event=_event))
 
             # SessionStart
             start_hooks = hooks.setdefault("SessionStart", [])
             if not any(start_hook_dest in str(h) for h in start_hooks):
                 start_hooks.append({"matcher": "*", "command": start_hook_dest})
-                actions.append("✓ Added SessionStart hook to Gemini CLI")
+                merged.append("✓ Added SessionStart hook to Gemini CLI")
             
             # PostToolUse
             post_hooks = hooks.setdefault("PostToolUse", [])
             if not any(post_hook_dest in str(h) for h in post_hooks):
                 post_hooks.append({"matcher": "*", "command": post_hook_dest})
-                actions.append("✓ Added PostToolUse hook to Gemini CLI")
+                merged.append("✓ Added PostToolUse hook to Gemini CLI")
             
             # UserPromptSubmit
             auto_hooks = hooks.setdefault("UserPromptSubmit", [])
             if not any(auto_hook_dest in str(h) for h in auto_hooks):
                 auto_hooks.append({"matcher": "*", "command": auto_hook_dest})
-                actions.append("✓ Added UserPromptSubmit hook to Gemini CLI")
+                merged.append("✓ Added UserPromptSubmit hook to Gemini CLI")
             
             if not any(status_hook_dest in str(h) for h in auto_hooks):
                 auto_hooks.append({"matcher": "*", "command": status_hook_dest})
-                actions.append("✓ Added status-bar hook to Gemini CLI")
+                merged.append("✓ Added status-bar hook to Gemini CLI")
 
             # SessionEnd
             end_hooks = hooks.setdefault("SessionEnd", [])
             if not any(end_hook_dest in str(h) for h in end_hooks):
                 end_hooks.append({"matcher": "*", "command": end_hook_dest})
-                actions.append("✓ Added SessionEnd hook to Gemini CLI")
+                merged.append("✓ Added SessionEnd hook to Gemini CLI")
             
             new_text = _json.dumps(current, indent=2)
             if _json.loads(new_text) != _json.loads(original_text):
@@ -2290,6 +2292,7 @@ def _install_gemini_cli_files() -> list[str]:
                     actions.append(f"  Could not back up {hooks_json}; left unchanged")
                 else:
                     _write_text_atomic(hooks_json, new_text)
+                    actions += merged
                     actions.append(f"✓ Backed up {hooks_json} to {backup}")
         except Exception as e:
             actions.append(f"  Could not update {hooks_json}: {e}")
