@@ -491,4 +491,5 @@ def test_any_write_failure_removes_the_temp_file_and_keeps_the_original(home, mo
     with pytest.raises(type(boom)):
         install._write_pi_mcp(path, "{}\n")
     assert path.read_text() == USER_FILE
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640  # _seed's mode, kept
     assert sorted(p.name for p in path.parent.iterdir()) == ["mcp.json"]

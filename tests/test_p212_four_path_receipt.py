@@ -45,10 +45,11 @@ from tests.test_p212_preservation_floor import _tree, undeclared_changes
 
 REPO = Path(__file__).resolve().parent.parent
 PATHS = ("cli", "npm", "plugin", "nl")
-#: Detected on every twin HOME. Three are wired with hook scripts; the other three cover
-#: each not_wired branch of run_full: a snippet host (cursor), a host that cannot be wired
-#: globally (windsurf), one wired with an MCP config only (pi, P212-6 / D-315) and an
-#: unsupported one (kimi).
+#: Detected on every twin HOME. Three are wired with hook scripts and one with an MCP config
+#: only (pi, P212-6 / D-315); the other three cover each not_wired branch of run_full's
+#: detected-host loop that needs no flag or user file: a snippet host (cursor), a host that
+#: cannot be wired globally (windsurf) and an unsupported one (kimi). The other not_wired rows
+#: (``--no-hosts``, an installer's ``SKIP``) are not exercised here.
 HOSTS = ("claude-code", "codex", "gemini-cli", "cursor", "windsurf", "pi", "kimi")
 #: pi's expected receipt status: wired (MCP config only, P212-6). Its row has hook_version None
 #: and an extra `smoke` field (``skipped``: install._pi_binary is stubbed in _twin and in the
@@ -58,12 +59,12 @@ WIRED = {"claude-code", "codex", "gemini-cli"}  # wired WITH hook scripts (hook_
 MCP_ONLY = {"pi"}  # wired, hook_version None
 ROW_FIELDS = ("status", "reason", "via", "hook_version")
 PI_SMOKE_SKIPPED = {"status": "skipped", "detail": "pi binary not on PATH"}
+#: §2's only allowed per-row difference: {(path, host): {field: (expected on that path, elsewhere)}}
+ALLOWED = {("plugin", "claude-code"): {"via": ("plugin", "settings")}}
 
 
 def _fields(host: str) -> tuple[str, ...]:
     return ROW_FIELDS + ("smoke",) if host in MCP_ONLY else ROW_FIELDS
-#: §2's only allowed per-row difference: {(path, host): {field: (expected on that path, elsewhere)}}
-ALLOWED = {("plugin", "claude-code"): {"via": ("plugin", "settings")}}
 
 
 # ── comparison (§2) ────────────────────────────────────────────────────────────

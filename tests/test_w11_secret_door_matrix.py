@@ -205,7 +205,7 @@ def test_judge_cascade_is_not_reachable():
 # anthropic / openai SDK client, a bare ``from litellm import completion``. This second scan keys every such call
 # ``(file, function, callee)``. A hit needs a SINK_FUNCS row or, failing that, its file in SINK_FILES (the count of
 # the file's remaining hits is pinned, so a new sink in an audited file fails too). Classes:
-#   LEAK        a secret prompt reaches the sink; a strict xfail below traces it (fix PR: UN-04b)
+#   LEAK        a secret prompt reaches the sink; a strict xfail below traces it (fix PR: UN-04d)
 #   probe       audited: carries no prompt text (reason on the row)
 #   local       prompt text to the configured Ollama base (loopback unless the user configured otherwise)
 #   router door / proxy / primitive / fixed prompt / opt-in: see the row's reason
@@ -702,7 +702,7 @@ MARK = "w11-marker-7f3a"  # non-secret words that ride along with the secret, to
 # any DNS, nothing is sent). Per sink two tests:
 #   test_reach_*  (plain test)  a NON-secret prompt reaches the sink, so the harness can see it: the positive control
 #   test_leak_*   (strict xfail) the ONE assertion "the secret is not in what reached the sink". It fails today and
-#                 XPASSes once the sink is guarded (refused before the sink), which is the signal UN-04b gets.
+#                 XPASSes once the sink is guarded (refused before the sink), which is the signal UN-04d gets.
 # Fixed sinks (UN-04b #772, UN-04c #775) are plain tests named test_guarded_*; the rest stay strict xfails.
 class _FakeProc:
     returncode = 0
@@ -866,7 +866,7 @@ def _leak(sink, request):
         f"{any(secret in x for x in sunk)}")
 
 
-_LEAK = pytest.mark.xfail(strict=True, reason="UN-04 leak: a secret prompt reaches a cloud sink; fix in UN-04b")
+_LEAK = pytest.mark.xfail(strict=True, reason="UN-04 leak: a secret prompt reaches a cloud sink; fix in UN-04d")
 
 
 def test_guarded_llm_codex_refuses_a_secret(request):

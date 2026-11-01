@@ -365,3 +365,38 @@ def test_gemini_rewrite_backs_up_the_original_bytes(home):
     hj.write_text(original)
     install._install_gemini_cli_files()
     assert hj.with_suffix(".json.bak").read_bytes() == original.encode()
+
+
+def test_gemini_backup_failure_reports_no_added_hooks(home, monkeypatch):
+    """QHYG (GEMFIX review): when the backup cannot be written, hooks.json is left unchanged,
+    so no "Added ... hook" or reset line may claim otherwise."""
+    _add_host(home, "gemini-cli")
+    hj = _gemini_hj(home)
+    original = json.dumps({"hooks": {"SessionEnd": "oops", "PostToolUse": {"enabled": True}}})
+    hj.write_text(original)
+    monkeypatch.setattr(ih, "_backup_before_overwrite", lambda dst: None)
+
+    actions = install._install_gemini_cli_files()
+
+    assert hj.read_text() == original
+    assert any(f"Could not back up {hj}; left unchanged" in a for a in actions), actions
+    assert not any("Added" in a and "hook to Gemini CLI" in a for a in actions), actions
+    assert not any("reset non-list" in a or "Backed up" in a for a in actions), actions
+
+
+def test_gemini_second_run_adds_nothing_and_leaves_the_file_alone(home):
+    """QHYG: the first run on a hooks.json without our hooks adds all five and backs it up;
+    the second run reports no added hook, takes no backup and leaves the bytes as they were."""
+    _add_host(home, "gemini-cli")
+    hj = _gemini_hj(home)
+    hj.write_text(json.dumps({"hooks": {"BeforeTool": [{"matcher": "x", "command": "/user/own.sh"}]}}))
+
+    first = install._install_gemini_cli_files()
+    added = [a for a in first if a.startswith("✓ Added") and a.endswith("hook to Gemini CLI")]
+    assert len(added) == 5 and any(a.startswith("✓ Backed up") for a in first), first
+    after_first = hj.read_bytes()
+
+    second = install._install_gemini_cli_files()
+    assert not any(a.startswith("✓ Added") and a.endswith("hook to Gemini CLI") for a in second), second
+    assert not any("Backed up" in a or "Could not" in a for a in second), second
+    assert hj.read_bytes() == after_first
