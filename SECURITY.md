@@ -70,14 +70,14 @@ alphanumeric run in mixed case with a digit; `sk-` needs `proj-` / `svcacct-` an
 is not read: `task-OAuth2Client...`, `desk-Qm<IPFS id>` and `sk-` inside a base64url blob stay text); `gh[pousr]_` /
 `AIza` after an ASCII letter, digit or `_` must be exactly 36 / 35 characters, and the GitHub body may not hold 7
 lower-case letters in a row (`highs_computeTheWeighted...`); `AKIA` / `ASIA` is not read after an upper-case letter.
-An unglued unmarked `sk-` must end within 256 key characters. Length after the prefix, per shape: `sk-ant-`,
+An unmarked `sk-` that follows `-` (a base64url character, so possibly inside a blob) must end within 256 key characters; at a token start (any other character before it) it is read at any length. Length after the prefix, per shape: `sk-ant-`,
 `sk-proj-` / `sk-svcacct-`, unglued `gh[pousr]_`, unglued `AIza` and `xox[baprs]-` match at any length, so text glued after
 them never hides them; `sk-or-v1-` reads its 64 hex whatever follows except a 65th hex digit (that longer string is named an OpenAI-shaped key, D-85); an AWS id is exactly 20 and needs a non-word
 character or a filler run after it. A placeholder look (filler run, sequential typing, `example` / `your-key` words)
 exempts a token, a JWT signature included, only when no long random body is left once the filler is cut out, so
 `<real key>xxxxxxxx`, `<real key>-example` or a spliced `01234567` does not exempt it; `<...>` / `${...}` markers always
 do. Residuals of these rules. The door does not refuse the following; the scrubber still redacts each one:
-a word-glued unmarked legacy key (`mykeysk-<48>`); an unmarked `sk-` run longer than 256 characters; a glued GitHub token
+a word-glued unmarked legacy key (`mykeysk-<48>`); an unmarked `sk-` after `-` whose run is longer than 256 characters (`x-sk-<48 chars><glued run of more than 256 chars>` is not refused by the door); a glued GitHub token
 whose body has 7 lower-case letters in a row (about 4% of random bodies, n=100,000 drawn 2026-10-31); a GitHub/Google
 key glued on both sides (`x<key>y`), and an OpenRouter key glued in front with a hex digit right after it; an AWS id followed by a letter, digit or `_` (`AKIA<16>Z`) or after an upper-case
 letter; filler spliced into a JWT header or payload (it no longer decodes). Neither the door nor the scrubber finds:

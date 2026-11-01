@@ -329,7 +329,7 @@ def _reason(s: str) -> str:
 #:     digit (``task-ant-colony-...`` is lower-case kebab);
 #:   * ``sk-`` needs ``proj-`` / ``svcacct-`` AND that mixed-case run: a word-glued generic ``sk-`` is not read at all
 #:     (PascalCase ids, IPFS / Drive ids and random base64url blobs hold ``<letter>sk-`` + a mixed run), and an
-#:     unglued unmarked ``sk-`` must end within 256 key characters;
+#:     unmarked ``sk-`` after ``-`` (inside a base64url run) must end within 256 key characters;
 #:   * ``AIza`` / ``gh[pousr]_`` (after an ASCII letter, digit or ``_``) need exactly the issued body length (35, 36),
 #:     and the GitHub body may not hold 7 lower-case letters in a row (``highs_computeTheWeightedAverage...``);
 #:   * ``AKIA`` / ``ASIA`` is not read after an upper-case letter.
@@ -347,11 +347,13 @@ _SECRET_SHAPES = {
     # Listed before openai_key; openai_key excludes this exact shape so one key yields one name.
     # 64 hex then anything but a 65th hex digit (D-85: that is a longer string, named openai_key), or a filler run.
     "openrouter_key": re.compile(r"sk-or-v1-[0-9a-f]{64}(?:(?![0-9a-f])|" + _TAIL_FILLER + ")"),
-    # Unglued: a marked key (``sk-proj-`` / ``sk-svcacct-``) at any length; an unmarked ``sk-`` must END within 256 key
-    # characters (a legacy key is 48), so an ``sk-`` inside a long base64url blob is not a key. Glued: marked only.
+    # Unglued: a marked key (``sk-proj-`` / ``sk-svcacct-``) at any length; an unmarked ``sk-`` at a token start (the
+    # character before it is not base64url) at any length too, but after ``-`` (inside a base64url blob) it must END
+    # within 256 key characters (a legacy key is 48), so an ``sk-`` inside a long blob is not a key (SECDETb: the cap
+    # alone let ``sk-`` + 48 + a glued 209-character run through). Glued: marked only.
     "openai_key": re.compile(
-        r"(?:\bsk-(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?:(?![0-9a-f])|" + _TAIL_FILLER + r"))(?:(?:proj-|svcacct-)" + _OPENAI_BODY + r"|(?!proj-|svcacct-)"
-        + _OPENAI_BODY + r"(?![A-Za-z0-9_-]))|\Bsk-(?=(?:proj|svcacct)-)" + _MIXED_RUN + r"(?:proj-|svcacct-)" + _OPENAI_BODY + ")"),
+        r"(?:\bsk-(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?:(?![0-9a-f])|" + _TAIL_FILLER + r"))(?:(?:proj-|svcacct-)" + _OPENAI_BODY + r"|(?!proj-|svcacct-)(?:(?<![A-Za-z0-9_-]sk-)"
+        + _OPENAI_BODY + "|" + _OPENAI_BODY + r"(?![A-Za-z0-9_-])))|\Bsk-(?=(?:proj|svcacct)-)" + _MIXED_RUN + r"(?:proj-|svcacct-)" + _OPENAI_BODY + ")"),
     "google_key": re.compile(_UNGLUED + r"AIza[0-9A-Za-z_-]{35,128}|" + _GLUED + r"AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z])"),
     "aws_key_id": re.compile(r"(?<![A-Z])(?:AKIA|ASIA)[0-9A-Z]{16}(?:\b|" + _TAIL_FILLER + ")"),
     "github_token": re.compile(_UNGLUED + r"gh[pousr]_[A-Za-z0-9]{36,255}|" + _GLUED + r"gh[pousr]_(?![A-Za-z0-9]{0,29}[a-z]{7})[A-Za-z0-9]{36}(?![A-Za-z0-9])|github_pat_[A-Za-z0-9_]{50,255}"),
