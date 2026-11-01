@@ -21,9 +21,8 @@ day one of them is fixed the xfail turns into an XPASS failure and must be promo
 """
 from __future__ import annotations
 
-from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
