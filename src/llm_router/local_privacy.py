@@ -15,8 +15,8 @@ loopback: the call gets its own client that ignores proxy env and never follows 
 LiteLLM's model map gets the model's entry from our own direct ``/api/show`` (:func:`ensure_ollama_model_info`),
 so LiteLLM does not look it up. That is guaranteed on every call, not once: the entry is written (failure-shaped) before
 the fetch, concurrent callers wait for the fetch, and a missing entry is re-inserted. Residuals: an insert that
-raises (failopen-counted) leaves LiteLLM its own lookup; a value next to a filename/config example cue
-(``.env.example``) is exempt from the secret door and counted (``exempted_by_label``); earlier turns are not
+raises (failopen-counted) leaves LiteLLM its own lookup; a filename/config example label (``.env.example``) near a
+value exempts nothing (SECDET: the text around a token is not the token's own placeholder look); earlier turns are not
 scanned (counted: ``history_secret_shape``), and assistant ``tool_calls`` arguments are never read. A non-loopback Ollama base (a LAN GPU box, say) is left exactly as it was:
 proxy policy there is the user's environment, NO_PROXY included.
 
@@ -190,8 +190,7 @@ class SecretHit:
 
 
 #: Counts by category only, never a value: ``refused:<label>``, ``overridden:<label>``, ``logged:<label>`` (a shape
-#: too weak to refuse on: JWTs, quoted literals, placeholders), ``exempted_by_label:<label>`` (a real-looking value
-#: a filename/config cue exempted), ``history_secret_shape:<label>`` (an earlier turn holds a secret shape). Per process; ``llm-router`` log lines carry the same.
+#: too weak to refuse on: JWTs, quoted literals, placeholders), ``history_secret_shape:<label>`` (an earlier turn holds a secret shape). Per process; ``llm-router`` log lines carry the same.
 secret_counts: collections.Counter = collections.Counter()
 _counts_lock = threading.Lock()
 
@@ -203,8 +202,7 @@ def count_secret_event(kind: str, label: str) -> None:
 
 
 def _scan_text(text: str, where: str, hits: list[SecretHit], seen: set[tuple[str, str]]) -> None:
-    exempt = lambda name: count_secret_event("exempted_by_label", engine.SECRET_LABELS.get(name, name))  # noqa: E731
-    for name, high in engine.secret_findings(text, on_exempt=exempt).items():
+    for name, high in engine.secret_findings(text).items():
         label = engine.SECRET_LABELS.get(name, name)
         if high:
             if (label, where) not in seen:

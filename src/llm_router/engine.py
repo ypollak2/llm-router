@@ -39,7 +39,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 from llm_router import capped_log, decision_ledger, failopen, ml_lexical, prompt_key
 from llm_router.classify import GATEWAY_POLICY, _score_categories, classify_signals
@@ -322,18 +322,43 @@ def _reason(s: str) -> str:
 #: Secret shapes. Every quantifier is bounded, so a scan is linear in the text (a 48k-char run of ``[a-z0-9+.-]``
 #: took 1.6 s with the unbounded ``db_url_password`` scheme; LC-12h repair). Which shapes may REFUSE a call is
 #: ``HIGH_PRECISION`` below; the rest are counted by category (``local_privacy``) and nothing more.
+#: A key glued to preceding text is found (SECDET requirement G) when its prefix is distinctive, but ``task-`` /
+#: ``highs_`` / ``MAIza`` are ordinary words that end in a key prefix. So a prefix glued to a word character needs
+#: the key's own evidence:
+#:   * ``sk-ant-`` needs ``api03-`` / ``admin01-`` / ``oat01-`` or a 20-character alphanumeric run in mixed case with a
+#:     digit (``task-ant-colony-...`` is lower-case kebab);
+#:   * ``sk-`` needs ``proj-`` / ``svcacct-`` AND that mixed-case run: a word-glued generic ``sk-`` is not read at all
+#:     (PascalCase ids, IPFS / Drive ids and random base64url blobs hold ``<letter>sk-`` + a mixed run), and an
+#:     unglued unmarked ``sk-`` must end within 256 key characters;
+#:   * ``AIza`` / ``gh[pousr]_`` (after an ASCII letter, digit or ``_``) need exactly the issued body length (35, 36),
+#:     and the GitHub body may not hold 7 lower-case letters in a row (``highs_computeTheWeightedAverage...``);
+#:   * ``AKIA`` / ``ASIA`` is not read after an upper-case letter.
+#: ``sk-or-v1-`` + 64 hex is distinctive: read glued on either side, unless a 65th hex digit follows (D-85). Unglued variable-length keys match at any length,
+#: so text glued after them never hides them (repair 1 cut GitHub/Google to the exact length everywhere: one
+#: appended character hid a key). An AWS id is exactly 20 and needs a non-word character or a filler run after it.
+_GLUED = r"(?<=[A-Za-z0-9_])"
+_UNGLUED = r"(?<![A-Za-z0-9_])"
+_MIXED_RUN = r"(?=[A-Za-z0-9_-]{0,40}?(?=[A-Za-z0-9]{20})(?=[a-z0-9]{0,19}[A-Z])(?=[A-Z0-9]{0,19}[a-z])(?=[A-Za-z]{0,19}\d))"
+#: After an AWS id: no more id characters, or a typed filler run glued on to slip it past the door (``...XXXXXXXX``).
+_TAIL_FILLER = r"(?=[xX]{8}|abcdefgh|ABCDEFGH|01234567|example|EXAMPLE|dummy)"
+_OPENAI_BODY = r"(?=[A-Za-z0-9_-]{0,300}\d)(?=[A-Za-z0-9_-]{0,300}[A-Za-z])[A-Za-z0-9_-]{32,256}"
 _SECRET_SHAPES = {
-    "anthropic_key": re.compile(r"\bsk-ant-[A-Za-z0-9_-]{32,256}"),
+    "anthropic_key": re.compile(r"(?:\bsk-ant-|\Bsk-ant-(?=(?:api|admin|oat)\d\d-|" + _MIXED_RUN[3:-1] + r"))[A-Za-z0-9_-]{32,256}"),
     # Listed before openai_key; openai_key excludes this exact shape so one key yields one name.
-    "openrouter_key": re.compile(r"\bsk-or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-])"),
-    "openai_key": re.compile(r"\bsk-(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?![A-Za-z0-9_-]))(?:proj-|svcacct-)?(?=[A-Za-z0-9_-]{0,300}\d)(?=[A-Za-z0-9_-]{0,300}[A-Za-z])[A-Za-z0-9_-]{32,256}"),
-    "google_key": re.compile(r"\bAIza[0-9A-Za-z_-]{35,128}"),
-    "aws_key_id": re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
-    "github_token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{50,255})"),
-    "slack_token": re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,256}"),
+    # 64 hex then anything but a 65th hex digit (D-85: that is a longer string, named openai_key), or a filler run.
+    "openrouter_key": re.compile(r"sk-or-v1-[0-9a-f]{64}(?:(?![0-9a-f])|" + _TAIL_FILLER + ")"),
+    # Unglued: a marked key (``sk-proj-`` / ``sk-svcacct-``) at any length; an unmarked ``sk-`` must END within 256 key
+    # characters (a legacy key is 48), so an ``sk-`` inside a long base64url blob is not a key. Glued: marked only.
+    "openai_key": re.compile(
+        r"(?:\bsk-(?!ant-[A-Za-z0-9_-]{32}|or-v1-[0-9a-f]{64}(?:(?![0-9a-f])|" + _TAIL_FILLER + r"))(?:(?:proj-|svcacct-)" + _OPENAI_BODY + r"|(?!proj-|svcacct-)"
+        + _OPENAI_BODY + r"(?![A-Za-z0-9_-]))|\Bsk-(?=(?:proj|svcacct)-)" + _MIXED_RUN + r"(?:proj-|svcacct-)" + _OPENAI_BODY + ")"),
+    "google_key": re.compile(_UNGLUED + r"AIza[0-9A-Za-z_-]{35,128}|" + _GLUED + r"AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z])"),
+    "aws_key_id": re.compile(r"(?<![A-Z])(?:AKIA|ASIA)[0-9A-Z]{16}(?:\b|" + _TAIL_FILLER + ")"),
+    "github_token": re.compile(_UNGLUED + r"gh[pousr]_[A-Za-z0-9]{36,255}|" + _GLUED + r"gh[pousr]_(?![A-Za-z0-9]{0,29}[a-z]{7})[A-Za-z0-9]{36}(?![A-Za-z0-9])|github_pat_[A-Za-z0-9_]{50,255}"),
+    "slack_token": re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,256}"),
     "private_key": re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----"),
-    "jwt": re.compile(r"\beyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}"),
-    "bearer_token": re.compile(r"\bBearer\s{1,8}(?=[A-Za-z0-9._~+/-]{0,300}\d)[A-Za-z0-9._~+/-]{30,512}=*"),
+    "jwt": re.compile(r"eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}"),
+    "bearer_token": re.compile(r"Bearer\s{1,8}(?=[A-Za-z0-9._~+/-]{0,300}\d)[A-Za-z0-9._~+/-]{30,512}=*"),
     "db_url_password": re.compile(
         r"\b[a-z][a-z0-9+.-]{0,31}://([^\s:/@]{1,64}):(?![$<{])([^\s@/]{8,128})@[\w.-]{1,255}", re.I),
 }
@@ -346,9 +371,9 @@ _ASSIGN = re.compile(
 #: and entropy and no placeholder look, a PEM private-key block with a body, a bearer token with entropy, a
 #: database URL whose password is not a common word, and a JWT that decodes to real-looking claims (not the jwt.io
 #: sample or a test fixture). ``assigned_literal`` (any quoted 20-char mixed literal after "token =") is LOG-ONLY:
-#: counted, never refused. Whatever a line, or the two lines above it, labels with a filename or config cue
-#: (``.env.example``, ``example.env``, "sample config", a ``.example`` / ``.sample`` / ``.template`` path) is never
-#: high either: :func:`_labelled_example`. Free-text words ("fake", "dummy", "placeholder") are not cues.
+#: counted, never refused. Only the value itself can exempt it (placeholder look); text around it never does: a
+#: nearby ``.env.example`` / ``.example`` host / "sample config" label is page- or site-controlled text and exempts nothing
+#: (SECDET). A percent-encoded prefix (``sk%2Dant-``) is read decoded; a key glued to preceding letters is found.
 HIGH_PRECISION = frozenset({"anthropic_key", "openrouter_key", "openai_key", "google_key", "aws_key_id",
                             "github_token", "slack_token", "private_key", "bearer_token", "db_url_password", "jwt"})
 #: What a person reads in a refusal (the category, never the value).
@@ -384,7 +409,7 @@ def _sequential(s: str) -> bool:
     """8+ consecutive ascending or descending characters (``01234567``, ``abcdefgh``): a typed placeholder."""
     run = 1
     for i in range(1, len(s)):
-        step = ord(s[i]) - ord(s[i - 1])
+        step = ord(s[i].lower()) - ord(s[i - 1].lower())
         run = run + 1 if (step == 1 and s[i].isalnum() and s[i - 1].isalnum()) else 1
         if run >= 8:
             return True
@@ -403,6 +428,39 @@ def _is_placeholder(value: str) -> bool:
         return True
     # whole delimiter-separated words only: a random key never splits into "key" or "test"
     return any(tok in _PLACEHOLDER_TOKENS for tok in re.split(r"[_\-. :/]+", low) if tok)
+
+
+def _strip_sequential(s: str) -> str:
+    """``s`` without its runs of 8+ consecutive ascending alphanumerics (the runs :func:`_sequential` flags)."""
+    keep = [True] * len(s)
+    run = 1
+    for i in range(1, len(s)):
+        run = run + 1 if (ord(s[i].lower()) - ord(s[i - 1].lower()) == 1 and s[i].isalnum() and s[i - 1].isalnum()) else 1
+        if run >= 8:
+            for k in range(i - run + 1, i + 1):
+                keep[k] = False
+    return "".join(c for c, k in zip(s, keep) if k)
+
+
+_PLACEHOLDER_SUBSTR_RE = re.compile("|".join(map(re.escape, _PLACEHOLDER_SUBSTR)), re.I)
+
+
+def _residue_is_real(value: str) -> bool:
+    """SECDET: after the filler a page can glue to or splice into a real token (``xxxxxxxx``, ``abcdefgh``, ``-example``,
+    ``your-key`` words) is cut out, is a long random body left? Then the filler did not make it a placeholder."""
+    s = _KEY_PREFIX.sub("", value, count=1)
+    s = _strip_sequential(_PLACEHOLDER_SUBSTR_RE.sub("", _FILLER_RUN.sub("", s)))
+    s = "".join(t for t in re.split(r"([_\-. :/]+)", s) if t.lower() not in _PLACEHOLDER_TOKENS)
+    s = re.sub(r"[_\-. :/]+", "", s)
+    return len(s) >= 24 and _random_looking(s, bits=3.5, distinct=12)
+
+
+def _is_placeholder_value(value: str) -> bool:
+    """A placeholder is judged on the token's own look: the markers ``<...>`` / ``${...}`` always are; any other
+    placeholder look counts only when no long random residue is left once the filler is removed."""
+    if "<" in value or ">" in value or "${" in value or "{{" in value:
+        return True
+    return _is_placeholder(value) and not _residue_is_real(value)
 
 
 def _random_looking(body: str, *, bits: float = 3.5, distinct: int = 10) -> bool:
@@ -430,29 +488,6 @@ def _db_password_is_real(user: str, password: str) -> bool:
 def _entropy(s: str) -> float:
     n = len(s)
     return -sum(c / n * math.log2(c / n) for c in (s.count(ch) for ch in set(s)))
-
-
-#: A filename or config cue near a value that says the value is an example: ``.env.example`` / ``.env.sample`` /
-#: ``example.env``, "sample config" / "example env file", or a path ending ``.example`` / ``.sample`` /
-#: ``.template``. Free-text words ("fake", "dummy", "placeholder", "not a real", "for illustration") are NOT cues:
-#: anyone can write them next to a real key (#721 review, round 2), so they exempt nothing.
-_EXAMPLE_LABEL = re.compile(
-    r"\.env\.(?:example|sample|template)\b|\b(?:example|sample)\.env\b|"
-    r"\b(?:example|sample)\s+(?:env|config|configuration)\b|"
-    r"[\w./-]+\.(?:example|sample|template)(?![\w-]|\.\w)", re.I)
-
-
-def _labelled_example(text: str, start: int, end: int) -> bool:
-    """True when the line holding ``text[start:end]``, or one of the two lines above it (a fence or heading), carries
-    a filename/config example cue (:data:`_EXAMPLE_LABEL`). The cue is the author's statement that the value is not
-    real; it exempts a real-looking value on purpose, and the door counts every exemption
-    (``exempted_by_label:<label>``). Bounded to 300 characters before and 200 after the value."""
-    window_start = text.rfind("\n", 0, start) + 1
-    for _ in range(2):
-        window_start = text.rfind("\n", 0, max(0, window_start - 1)) + 1
-    line_end = text.find("\n", end)
-    lo, hi = max(window_start, start - 300), min(len(text) if line_end < 0 else line_end, end + 200)
-    return bool(_EXAMPLE_LABEL.search(text, lo, hi))
 
 
 _JWT_DUMMY_CLAIM = re.compile(
@@ -485,7 +520,7 @@ def _jwt_is_real(token: str) -> bool:
     head, body = _b64json(header), _b64json(payload)
     if head is None or body is None or str(head.get("alg", "")).lower() == "none":
         return False
-    if signature.startswith(_JWT_IO_SIGNATURE) or _is_placeholder(signature) or not _random_looking(signature, bits=3.0, distinct=12):
+    if signature.startswith(_JWT_IO_SIGNATURE) or _is_placeholder_value(signature) or not _random_looking(signature, bits=3.0, distinct=12):
         return False
     ids = [str(body[k]) for k in _JWT_ID_CLAIMS if isinstance(body.get(k), (str, int))]
     return not (ids and all(_dummy_claim(v) for v in ids))
@@ -510,13 +545,28 @@ def _windows(text: str):
             return
 
 
-def secret_findings(text: str, on_exempt: Callable[[str], None] | None = None) -> dict[str, bool]:
+#: An ASCII percent escape. Every secret shape is ASCII, so the rest stay as typed; decoded here rather than with
+#: ``urllib.parse.unquote`` because the engine imports nothing network-capable (tests/test_engine_core.py, P1.6k).
+_PCT_ASCII = re.compile(r"%([0-7][0-9A-Fa-f])")
+
+
+def secret_findings(text: str) -> dict[str, bool]:
     """``{shape name: is_high}`` for the secret shapes in ``text`` (names only, never the secret).
 
     ``is_high`` is True when some match of a ``HIGH_PRECISION`` shape is a real-looking value: not a placeholder
     (``AKIA...EXAMPLE``, ``ghp_xxxx...``, ``YOUR_API_KEY_HERE``, ``postgres:postgres@``), long and random enough.
-    ``on_exempt(name)`` is called for each real-looking match a filename/config label exempted (the door counts them).
+    A text holding a ``%XX`` escape is also scanned with its ASCII escapes decoded (``sk%2Dant-...``).
     Linear in ``len(text)``."""
+    found = _findings(text)
+    if "%" in text:
+        decoded = _PCT_ASCII.sub(lambda m: chr(int(m.group(1), 16)), text)
+        if decoded != text:
+            for name, high in _findings(decoded).items():
+                found[name] = found.get(name, False) or high
+    return found
+
+
+def _findings(text: str) -> dict[str, bool]:
     found: dict[str, bool] = {}
     for offset, window in _windows(text):
         for name, pat in _SECRET_SHAPES.items():
@@ -534,16 +584,12 @@ def secret_findings(text: str, on_exempt: Callable[[str], None] | None = None) -
                     high = _jwt_is_real(m.group(0))
                 elif name == "bearer_token":
                     value = m.group(0).split(None, 1)[1].rstrip("=")
-                    high = not value.startswith("eyJ") and not _is_placeholder(value) and _random_looking(value)
+                    high = not value.startswith("eyJ") and not _is_placeholder_value(value) and _random_looking(value)
                 else:
                     value = m.group(0)
                     body = _KEY_PREFIX.sub("", value, count=1)
-                    high = not _is_placeholder(value) and _random_looking(
+                    high = not _is_placeholder_value(value) and _random_looking(
                         body, bits=3.0 if name == "aws_key_id" else 3.5, distinct=9 if name == "aws_key_id" else 12)
-                if high and _labelled_example(window, m.start(), m.end()):
-                    high = False  # a filename/config cue labels it an example (.env.example, sample config, ...)
-                    if on_exempt is not None:
-                        on_exempt(name)
                 if high:
                     found[name] = True
         if "assigned_literal" not in found:
