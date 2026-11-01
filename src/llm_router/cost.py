@@ -787,6 +787,8 @@ REASON_ERROR_CANCELLED = "error_cancelled"
 REASON_ERROR_BUDGET = "error_budget_exceeded"
 REASON_ERROR_DENIED = "error_routing_denied"
 REASON_ERROR_OTHER = "error_exception"
+# UN-09b: a named Claude model blocked by subscription mode with nothing else reachable: refused before dispatch.
+REASON_ERROR_NAMED_MODEL_BLOCKED = "error_named_model_blocked"
 # N21: the quality breaker refused the call before dispatch (mirrors provider_classes.REASON_BREAKER_OPEN).
 REASON_BREAKER_OPEN = "breaker_open"
 # F25 / D-170: a research call refused before dispatch because its chain was empty (no reachable research

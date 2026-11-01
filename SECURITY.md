@@ -70,7 +70,7 @@ alphanumeric run in mixed case with a digit; `sk-` needs `proj-` / `svcacct-` an
 is not read: `task-OAuth2Client...`, `desk-Qm<IPFS id>` and `sk-` inside a base64url blob stay text); `gh[pousr]_` /
 `AIza` after an ASCII letter, digit or `_` must be exactly 36 / 35 characters, and the GitHub body may not hold 7
 lower-case letters in a row (`highs_computeTheWeighted...`); `AKIA` / `ASIA` is not read after an upper-case letter.
-An unmarked `sk-` that follows `-` (a base64url character, so possibly inside a blob) must end within 256 key characters; at a token start (the character before it is not a letter, digit, `_` or `-`) it is read at any length. Length after the prefix, per shape: `sk-ant-`,
+An unmarked `sk-` that follows `-` (a base64url character, so possibly inside a blob) must end within 256 key characters; at a token start (the character before it is not a Unicode letter or digit, `_` or `-`; the regex word boundary `\b` uses Python's Unicode `\w`, so e.g. a superscript 2 before `sk-` counts as a word character) it is read at any length. Length after the prefix, per shape: `sk-ant-`,
 `sk-proj-` / `sk-svcacct-`, unglued `gh[pousr]_`, unglued `AIza` and `xox[baprs]-` match at any length, so text glued after
 them never hides them; `sk-or-v1-` reads its 64 hex whatever follows except a 65th hex digit (that longer string is named an OpenAI-shaped key, D-85); an AWS id is exactly 20 and needs a non-word
 character or a filler run after it. A placeholder look (filler run, sequential typing, `example` / `your-key` words)

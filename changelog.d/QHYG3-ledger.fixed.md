@@ -1,0 +1,1 @@
+QHYG3: a named Claude model blocked by subscription mode with nothing else reachable (the main-chain refusal in `router.py`) now leaves a route-error ledger row with the reason `error_named_model_blocked`, written through the existing `cost.log_route_error`; the client-facing refusal text is unchanged. Test: `tests/test_un09b_blocked_named_model.py`.
