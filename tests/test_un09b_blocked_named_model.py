@@ -18,10 +18,11 @@ Each door has a positive control: with subscription mode off the same named requ
 
 UN-09b S1 (owner decision 2026-11-01, "make the message true"): the emergency BUDGET fallback chain and a policy
 specialist drop ``anthropic/*`` for such a request too, and the semantic cache is not consulted for it (a stored
-answer may be Claude's). When the emergency chain held nothing but Claude, the request ends in the router's
-subscription refusal; when its other entries fail, in the base "All models failed" RuntimeError (502 at the HTTP
-doors, ``error_all_models_failed`` in the ledger, no provider text to the client). Each step has an un-named
-control in which it does serve Claude.
+answer may be Claude's). When nothing in the emergency chain serves (only Claude was in it, or its other entries
+fail), the request ends in the base "All models failed" RuntimeError (502 at the HTTP doors, no provider text to
+the client, ``error_all_models_failed`` in the ledger) with one fixed clause saying anthropic/* was not tried; a
+model was tried and failed, so it is not the no-provider refusal. Each step has an un-named control in which it
+does serve Claude.
 """
 from __future__ import annotations
 
@@ -320,8 +321,6 @@ def test_a_claude_only_chain_refuses_with_the_subscription_notice(calls):
 MINI = "openai/gpt-4o-mini"
 #: Provider exception text can echo the prompt (F76/F87/F91): it must never reach an HTTP client body.
 SEED = "SEEDED-UN09B-PROVIDER-ECHO-do-not-return"
-REFUSAL = (f"{CLAUDE} is not served in subscription mode (every anthropic/* model is dropped from a named "
-           "request), and no other provider is reachable.")
 NOT_TRIED = " anthropic/* was not tried: the named model is blocked in subscription mode."
 
 
@@ -385,15 +384,17 @@ def _route(model_override=None):
     return w12._run(go())
 
 
-def test_an_emergency_chain_of_only_claude_models_ends_in_the_subscription_refusal(calls):
+def test_an_emergency_chain_of_only_claude_models_ends_in_the_base_failure(calls):
     """The primary chain fails, so route_and_call walks the emergency BUDGET chain (router.py, "Emergency
     fallback"), built un-named. It holds a Claude model other than the named one (a drop of the exact name only
-    would leave it to serve). The named request is refused with the router's own text, no provider text."""
+    would leave it to serve). Nothing is left after the drop: the base RuntimeError with the fixed clause (a model
+    was tried and failed, so not the no-provider refusal), and the base ledger reason."""
     with _stubbed(STUB_CHAIN, emergency=[SONNET], fail={"openai/gpt-4o"}) as rec:
-        with pytest.raises(NoRoutableModelsError) as exc:
+        with pytest.raises(RuntimeError) as exc:
             _route(CLAUDE)
-    msg = str(exc.value)
-    assert REFUSAL in msg and SEED not in msg and "Chain failures" not in msg, msg
+    assert type(exc.value) is RuntimeError, type(exc.value)
+    assert str(exc.value).startswith(f"All models failed for query/balanced.{NOT_TRIED} Last error: "), str(exc.value)
+    assert [c.kwargs["reason"] for c in rec.route_error.await_args_list] == [REASON_ERROR_ALL_FAILED]
     assert rec.called == ["openai/gpt-4o"], rec.called
     assert calls.cli == []
 
@@ -409,6 +410,16 @@ def test_an_emergency_chain_whose_other_entries_fail_ends_in_the_base_failure(ca
     assert msg.startswith(f"All models failed for query/balanced.{NOT_TRIED} Last error: "), msg
     assert router_module._route_error_reason(exc.value) == REASON_ERROR_ALL_FAILED
     assert [c.kwargs["reason"] for c in rec.route_error.await_args_list] == [REASON_ERROR_ALL_FAILED]
+    assert rec.called == ["openai/gpt-4o", MINI], rec.called
+
+
+def test_a_blocked_name_whose_emergency_chain_holds_no_claude_gets_no_clause(calls):
+    """The clause says the block removed something. A BUDGET chain with no Claude model loses nothing to the block:
+    the base text, unchanged, for the blocked named request too."""
+    with _stubbed(STUB_CHAIN, emergency=[MINI], fail={"openai/gpt-4o", MINI}) as rec:
+        with pytest.raises(RuntimeError) as exc:
+            _route(CLAUDE)
+    assert str(exc.value).startswith("All models failed for query/balanced. Last error: "), str(exc.value)
     assert rec.called == ["openai/gpt-4o", MINI], rec.called
 
 
@@ -487,12 +498,14 @@ def test_http_door_a_failed_emergency_chain_is_a_502_without_provider_text(calls
 
 
 @pytest.mark.parametrize("door", sorted(HTTP_DOORS))
-def test_http_door_an_all_claude_emergency_chain_is_the_refusal_without_provider_text(calls, door):
+def test_http_door_an_all_claude_emergency_chain_is_a_502_without_provider_text(calls, door):
+    """Nothing is left after the drop, but a model was tried and failed: a retryable 502, as on base."""
     pytest.importorskip("fastapi")
     with _stubbed(STUB_CHAIN, emergency=[SONNET], fail={"openai/gpt-4o"}) as rec:
         status, body = HTTP_DOORS[door](CLAUDE)
-    assert status == 400 and SEED not in body and "is not served in subscription mode" in body, (status, body)
+    assert status == 502 and SEED not in body and "RuntimeError: routing failed" in body, (status, body)
     assert rec.called == ["openai/gpt-4o"], rec.called
+    assert [c.kwargs["reason"] for c in rec.route_error.await_args_list] == [REASON_ERROR_ALL_FAILED]
 
 
 # ── the semantic cache (review S4) ──────────────────────────────────────────────────────────────

@@ -1479,20 +1479,6 @@ def _subscription_blocked_prefix(model_override: str | None, config) -> str | No
     return None
 
 
-def _subscription_refusal(task_type: TaskType, profile: RoutingProfile, name: str, prefix: str,
-                          available) -> NoRoutableModelsError:
-    """UN-09 review S7: the named model was blocked by subscription mode and nothing else reachable is left.
-    One text for both places that refuse: an empty chain (route_and_call) and an emergency chain the block
-    emptied (_dispatch_model_loop, UN-09b S1). It carries no provider text: a door returns it to the client."""
-    return NoRoutableModelsError(
-        f"No routable models for {task_type.value}/{profile.value}: {name} is not served "
-        f"in subscription mode (every {prefix}* model is dropped from a named request), and no "
-        f"other provider is reachable. Configured providers: {sorted(available) or 'none'}. Fix: call "
-        "without a model name, or connect another provider (an API key or a local ollama model).",
-        task_type, profile,
-    )
-
-
 def _front_allowed(model: str, config, task_type: TaskType, blocked_prefix: str | None = None) -> bool:
     """W1-2: may *model*, injected at the front of a built chain, stay? Same answers as the main build:
     reachable provider, no hard block (LLM_ROUTER_BLOCK_PROVIDERS), no repo block, policy block / allow lists,
@@ -4146,7 +4132,6 @@ async def _dispatch_model_loop(
     _secret_call = local_privacy.secret_dispatch_active()
     _sub_prefix = _subscription_blocked_prefix(sub_blocked_name, config)
     _sub_dropped = False  # UN-09b S1: the block removed an entry from the emergency chain
-    _sub_emptied = False  # ... and nothing else was left in it -> route_and_call's refusal
     if (_pass_only_call or _secret_call) and _would_fall_back:
         route_log.info(
             "emergency_fallback_skipped",
@@ -4168,7 +4153,6 @@ async def _dispatch_model_loop(
         if _sub_prefix:  # UN-09b S1: the named request's block holds on this chain too
             _kept = [m for m in emergency_chain if not m.startswith(_sub_prefix)]
             _sub_dropped = len(_kept) < len(emergency_chain)
-            _sub_emptied = _sub_dropped and not _kept
             emergency_chain = _kept
         # D-116: apply shared Q&A ordering here too; timeout demotion below still wins.
         emergency_chain = _strip_local_for_qa(emergency_chain, task_type)
@@ -4513,13 +4497,9 @@ async def _dispatch_model_loop(
         complexity=effective_complexity,
         classification_method=_classification_method(classification_data),
     )
-    if _sub_emptied:
-        # UN-09b S1 (owner decision): the blocked provider was all the emergency chain held. Refuse with
-        # route_and_call's own text (no provider text: a door returns a RouterInputError to the client verbatim).
-        raise _subscription_refusal(task_type, profile, sub_blocked_name, _sub_prefix,
-                                    config.available_providers) from last_error
-    # UN-09b S1: otherwise the base failure (same type and prefix: 502 at the doors, error_all_models_failed in
-    # the ledger), with one fixed clause saying why the blocked provider was not tried.
+    # UN-09b S1: the base failure (same type and prefix: 502 at the doors, error_all_models_failed in the ledger;
+    # a model WAS tried and failed, so this is not the no-provider refusal), with one fixed clause when the block
+    # removed an emergency entry.
     _sub_note = f" {_sub_prefix}* was not tried: the named model is blocked in subscription mode." if _sub_dropped else ""
     raise RuntimeError(
         f"All models failed for {task_type.value}/{profile.value}.{_sub_note} "
@@ -5493,7 +5473,14 @@ async def route_and_call(
                     task_type, profile,
                 )
             if _sub_blocked:
-                raise _subscription_refusal(task_type, profile, _sub_blocked_name, _sub_blocked, available)
+                # UN-09 review S7: the named model was blocked by subscription mode and nothing else reachable is left.
+                raise NoRoutableModelsError(
+                    f"No routable models for {task_type.value}/{profile.value}: {_sub_blocked_name} is not served "
+                    f"in subscription mode (every {_sub_blocked}* model is dropped from a named request), and no "
+                    f"other provider is reachable. Configured providers: {sorted(available) or 'none'}. Fix: call "
+                    "without a model name, or connect another provider (an API key or a local ollama model).",
+                    task_type, profile,
+                )
             from llm_router.runtime_offer import runtime_offer
 
             # The install offer only when no Ollama is configured; with one, the
