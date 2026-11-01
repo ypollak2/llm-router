@@ -549,14 +549,14 @@ def test_the_main_chain_refusal_of_a_blocked_named_model_writes_a_dedicated_ledg
     from llm_router.cost import REASON_ERROR_NAMED_MODEL_BLOCKED
 
     assert REASON_ERROR_NAMED_MODEL_BLOCKED == "error_named_model_blocked"
-    clock = iter(x * 0.5 for x in range(1, 100_000))    # every read advances 0.5 s: elapsed = reads since the call start
+    clock = iter([100.0])      # the first read is the call start; every later read is 100 s on (a start taken at the refusal gives 0)
     with _stubbed([CLAUDE, SONNET]) as rec:
-        with patch("llm_router.router.time.monotonic", side_effect=lambda: next(clock)):
+        with patch("llm_router.router.time.monotonic", side_effect=lambda: next(clock, 200.0)):
             with pytest.raises(NoRoutableModelsError):
                 _route(CLAUDE)
     assert rec.called == [], rec.called
     latency = rec.route_error.await_args.kwargs["latency_ms"]
-    assert latency > 500.0, latency   # more than the one read of the old start-at-refusal; clock reads before the refusal count
+    assert latency == pytest.approx(100_000.0), latency
     assert [c.kwargs["reason"] for c in rec.route_error.await_args_list] == [REASON_ERROR_NAMED_MODEL_BLOCKED]
     assert rec.route_error.await_args.kwargs["attempted_model"] is None
 
