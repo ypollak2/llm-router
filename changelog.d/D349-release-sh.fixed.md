@@ -1,0 +1,1 @@
+`scripts/release/release.sh` no longer uploads to PyPI itself (publishing is only `publish.yml` via OIDC behind eval-gate); release notes are extracted portably (BSD `head -n -1` bug), written to a file, and replaced by a CHANGELOG link plus "Known issues" when over 100,000 bytes; `rollback()` never pushes or deletes a public tag. (D-349)
