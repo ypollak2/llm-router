@@ -50,6 +50,9 @@ rollback() {
     if git ls-remote --exit-code --tags origin "refs/tags/v${current_version}" >/dev/null 2>&1; then
         log_error "Tag v${current_version} is already public on origin. NOT deleting or re-pushing it."
         log_error "Check: gh run list --workflow publish.yml ; gh release view v${current_version}"
+        log_error "If 'gh release view' finds no release, create it by hand with the eval asset, then re-run the failed publish run:"
+        log_error "  run Step 5's release command by hand for v${current_version}, attaching ${eval_asset:-release_evals/<sha>.json} with --notes-file ${notes_file:-<notes file>}"
+        log_error "  gh run rerun <publish.yml run id for v${current_version}> --failed   (eval-gate fetches the asset from the release)"
         log_error "If the release is bad, cut a new patch version; do not move this tag."
         exit 1
     fi
@@ -225,6 +228,7 @@ main() {
        git push origin "v${current_version}" && \
        gh release create "v${current_version}" "$eval_asset" --title "v${current_version}" --latest --notes-file "$notes_file" 2>&1; then
         log_success "GitHub release created"
+        rm -f "$notes_file"
     else
         log_error "Failed to create GitHub release"
         rollback "$current_version" "$previous_version"
