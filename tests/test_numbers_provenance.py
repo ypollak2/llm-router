@@ -168,6 +168,7 @@ def test_real_repo_at_head_is_green_and_scans_something():
 
 
 def test_this_changelog_fragment_passes_on_its_own():
-    frag = ROOT / "changelog.d" / "UN-10.added.md"
+    # The fragment was folded into CHANGELOG.md at the 16.0.0 release prep; a verbatim copy is kept as a fixture.
+    frag = ROOT / "tests" / "fixtures" / "numbers_provenance" / "UN-10.added.md"
     assert frag.exists()
     assert not any(np_.analyse_unit(u) for _, u in np_.split_units(frag.read_text()))

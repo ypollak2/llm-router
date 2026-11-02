@@ -1,1 +1,0 @@
-CI-SUITE-BUDGET-2: the `test` job's pytest budget is raised from 2100s to 3000s (job `timeout-minutes` 45 -> 58). Healthy runs had grown past the old budget, so it failed working suites with "suite exceeded the 2100s budget" on main and on PRs. Nothing in the suite changed.

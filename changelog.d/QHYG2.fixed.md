@@ -1,1 +1,0 @@
-The Gemini CLI installer no longer prints a false "reset non-list <event>" line for a hooks.json event key that is simply absent (for example a `{}` file); the note appears only when the key exists and is not a list.
