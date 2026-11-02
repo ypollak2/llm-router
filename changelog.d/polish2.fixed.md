@@ -1,1 +1,0 @@
-Tests: pooled FAIL-then-INCONCLUSIVE status test now uses real runs, the all-lanes-lane_guard fallback verdict is pinned, the redo-label lock-create-failure test asserts no run artefacts, and the d154 grandchild.pid wait no longer races an empty file; 'different model digest' wording aligned in the LC10n fragment.

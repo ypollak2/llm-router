@@ -1,1 +1,0 @@
-`routing_decisions.session_id` is never NULL (P0.8-d), with the same fallback as `usage` (`unknown:mcp` / `unknown:non_mcp`; `unknown:script` for the judge-eval and sidecar-backfill scripts). The Claude Code usage hook writes `unknown:hook` when its payload has no session id. G3 counts every `unknown:*` as missing.
