@@ -12,7 +12,7 @@ plus a top-level "provenance" object the gate ignores.
   rt_agt_50      performance  50   tests/fixtures/agt/a1_prompts_50.jsonl; pass iff task_type
                                    matches (tier not scored, ROUTER_POLICY)
   fid_syn_60     fidelity     60   scripts/g1_synthetic_evidence.py generator (seed 20261014,
-                                   window 8192); full/pack = the answer token is retained in
+                                   window 65536, AMEND2); full/pack = the answer token is retained in
                                    the FULL / PACK context (model-free retention)
   stab_syn_500   stability    500  the 110 fixtures (106 unique texts) + 394 from the seeded
                                    template generator here; a/b = canonical-JSON decision from two separate
@@ -56,6 +56,9 @@ GATE_REL = "scripts/release/classifier_gate.py"
 AGT_REL = "tests/fixtures/agt/a1_prompts_50.jsonl"
 G1_REL = "scripts/g1_synthetic_evidence.py"
 FID_PROVIDER = "anthropic"
+# PREREG-P32-AMEND2 (post-hoc, D-351): the production cloud-door cap (D-101, PR #514). Was 8192 in PREREG-P32.
+# g1_synthetic_evidence.py keeps WINDOW = 8192 (its own pin, AMEND1); run_fid overrides it.
+FID_WINDOW = 65536
 STAB_SEED = 20261018
 STAB_N = 500
 STAB_HASHSEEDS = (0, 1)
@@ -276,6 +279,7 @@ def run_fid(root: Path = ROOT, indices: list[int] | None = None) -> list[dict]:
     from llm_router import context_summary
 
     g1 = load_g1(root)
+    g1.WINDOW = FID_WINDOW
     chosen = g1.items()
     if indices is not None:
         chosen = [chosen[i] for i in indices]
@@ -465,7 +469,8 @@ def dry_run(root: Path, sets: list[str], baseline_ref: str) -> tuple[int, list[s
             cats: dict[str, int] = {}
             for i in items:
                 cats[i["category"]] = cats.get(i["category"], 0) + 1
-            lines.append("  categories: " + ", ".join(f"{k}={v}" for k, v in sorted(cats.items())))
+            lines.append("  categories: " + ", ".join(f"{k}={v}" for k, v in sorted(cats.items()))
+                         + f"; FID_WINDOW={FID_WINDOW}")
         elif sid == "stab_syn_500":
             gh = stab_texts_hash(items)
             pinned = gh == STAB_GEN_TEXTS_SHA256

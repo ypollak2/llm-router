@@ -398,6 +398,31 @@ def _spawn_checked(inner, items, hashseed):
     return inner(items, hashseed)
 
 
+def check_fid_window_reaches_build_pack(M):
+    """PREREG-P32-AMEND2: run_fid builds every pack at FID_WINDOW, not at g1's own WINDOW (8192)."""
+    from llm_router import context_pack
+
+    seen = []
+    real_build, real_load = context_pack.build_pack, M.load_g1
+
+    def spy(request, *a, **kw):
+        seen.append(kw["target_window"])
+        return real_build(request, *a, **kw)
+
+    def load(root=REPO):
+        g1 = real_load(root)                           # the module itself, so `g1.WINDOW = ...` takes effect
+        mine = [g1.build_item(1000, "early_tool")]     # invented: outside the real indices 0..59
+        g1.items = lambda: list(mine)
+        return g1
+
+    context_pack.build_pack, M.load_g1 = spy, load
+    try:
+        M.run_fid(REPO)
+    finally:
+        context_pack.build_pack, M.load_g1 = real_build, real_load
+    assert M.FID_WINDOW == 65536 and seen == [65536], seen
+
+
 CHECKS = {fn.__name__: fn for fn in (
     check_loaders_n_unique_prefix, check_ids_stable_across_runs_and_order,
     check_stab_generator_pinned_and_hashseed_independent, check_hand_outcome, check_agt_outcome,
@@ -406,7 +431,7 @@ CHECKS = {fn.__name__: fn for fn in (
     check_provenance_refusals, check_dirty_tree_refusal, check_candidate_worktree_must_be_root,
     check_cli_refuses_and_writes_nothing,
     check_end_to_end_file_passes_the_gate_and_manifests_match_freeze, check_dry_run_counts,
-    check_fixtures_identity_detects_an_edit,
+    check_fixtures_identity_detects_an_edit, check_fid_window_reaches_build_pack,
 )}
 
 
@@ -517,6 +542,7 @@ MUTANTS = [
      "check_hand_outcome"),
     ("MG fixtures identity always true", [('"identical": a[name][1].encode() == b[name][1].encode()', '"identical": True')],
      "check_fixtures_identity_detects_an_edit"),
+    ("MJ run_fid ignores FID_WINDOW", [("    g1.WINDOW = FID_WINDOW\n", "")], "check_fid_window_reaches_build_pack"),
 ]
 
 

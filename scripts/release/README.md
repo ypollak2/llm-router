@@ -8,7 +8,7 @@
 |---|---|---|---|
 | `rt_hand_60` | performance | 60 | `classify_signals` (task_type, complexity) equals the `classifier_gate.py` label |
 | `rt_agt_50` | performance | 50 | task_type equals the `a1_prompts_50.jsonl` label (tier not scored; ROUTER_POLICY) |
-| `fid_syn_60` | fidelity | 60 | answer token kept in the PACK vs the FULL context (g1 generator, seed 20261014, window 8192) |
+| `fid_syn_60` | fidelity | 60 | answer token kept in the PACK vs the FULL context (g1 generator, seed 20261014, window 65536, PREREG-P32-AMEND2) |
 | `stab_syn_500` | stability | 500 | decision identical across two processes, PYTHONHASHSEED 0 vs 1 |
 
 `stab_syn_500` = 106 unique fixture texts (the 110 fixtures; the 4 floor prompts repeat a
