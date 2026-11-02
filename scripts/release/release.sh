@@ -38,32 +38,74 @@ get_previous_version() {
     git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "unknown"
 }
 
+# rollback only ever undoes LOCAL state. It never pushes, never deletes a tag on
+# origin and never rewrites main: a tag that is public triggers publish.yml
+# (OIDC, behind eval-gate), and re-pushing or deleting a public tag is forbidden.
 rollback() {
     local current_version=$1
     local previous_version=$2
 
-    log_warning "Rolling back from v${current_version} to v${previous_version}..."
+    log_warning "Release of v${current_version} failed (previous: v${previous_version})."
 
-    # Revert version files
-    git checkout HEAD~1 -- \
-        pyproject.toml \
-        .claude-plugin/plugin.json \
-        .claude-plugin/marketplace.json \
-        .codex-plugin/plugin.json \
-        .codex-plugin/marketplace.json \
-        .factory-plugin/plugin.json \
-        .factory-plugin/marketplace.json \
-        src/llm_router/__init__.py \
-        CHANGELOG.md
-    git commit -m "rollback: revert v${current_version} due to release failure" || true
-    git push || true
+    if git ls-remote --exit-code --tags origin "refs/tags/v${current_version}" >/dev/null 2>&1; then
+        log_error "Tag v${current_version} is already public on origin. NOT deleting or re-pushing it."
+        log_error "Check: gh run list --workflow publish.yml ; gh release view v${current_version}"
+        log_error "If 'gh release view' finds no release, create it by hand with the eval asset, then re-run the failed publish run:"
+        log_error "  run Step 5's release command by hand for v${current_version}, attaching ${eval_asset:-release_evals/<sha>.json} with --notes-file ${notes_file:-<notes file>}"
+        log_error "  gh run rerun <publish.yml run id for v${current_version}> --failed   (eval-gate fetches the asset from the release)"
+        log_error "If the release is bad, cut a new patch version; do not move this tag."
+        exit 1
+    fi
 
-    # Delete tags if they exist
+    # Tag never reached origin: dropping the local tag is safe.
     git tag -d "v${current_version}" 2>/dev/null || true
-    git push origin --delete "v${current_version}" 2>/dev/null || true
-
-    log_error "Rolled back to v${previous_version}. Fix the issues and try again."
+    log_error "Local tag removed; nothing was pushed or published. Fix the issue and re-run."
     exit 1
+}
+
+# Release notes for $1 (version) from CHANGELOG file $2, written to file $3.
+# Portable (BSD/macOS and GNU): awk only (no GNU-only head flags).
+# Body is everything between `## [X.Y.Z]` and the next `## ` heading.
+# GitHub caps release bodies at ~125,000 chars; above NOTES_MAX_BYTES the body is
+# replaced by a link to CHANGELOG.md plus the section's "Known issues" subsection
+# (never a truncated prefix, which would cut mid-entry).
+NOTES_MAX_BYTES="${NOTES_MAX_BYTES:-100000}"
+
+extract_changelog_section() {
+    awk -v h="## [$1]" '
+        index($0, h) == 1 { f = 1; next }
+        f && /^## / { exit }
+        f { print }
+    ' "$2"
+}
+
+extract_known_issues() {
+    awk '
+        /^### Known issues/ { f = 1 }
+        f && /^## / { exit }
+        f && /^### / && !/^### Known issues/ { exit }
+        f { print }
+    '
+}
+
+write_release_notes() {
+    local version=$1 changelog=$2 out=$3
+    extract_changelog_section "$version" "$changelog" > "$out"
+    local size
+    size=$(wc -c < "$out" | tr -d ' ')
+    if [ "$size" -gt "$NOTES_MAX_BYTES" ]; then
+        local known
+        known=$(extract_known_issues < "$out")
+        {
+            echo "Full notes: CHANGELOG.md section [${version}]"
+            echo "https://github.com/${REPO}/blob/v${version}/CHANGELOG.md"
+            if [ -n "$known" ]; then
+                echo ""
+                echo "$known"
+            fi
+        } > "$out.short"
+        mv "$out.short" "$out"
+    fi
 }
 
 main() {
@@ -140,16 +182,18 @@ main() {
     fi
     echo ""
 
-    # Step 4: Build, verify contents, and publish
-    log_info "Step 4/5: Building and publishing to PyPI..."
-    rm -rf dist/
-    uv build
+    # Step 4: Build and verify contents. NO upload here: PyPI publishing happens
+    # only in .github/workflows/publish.yml (OIDC) on tag push, behind eval-gate.
+    log_info "Step 4/5: Building locally (sanity check only, no upload)..."
+    local _build_dir
+    _build_dir=$(mktemp -d)
+    uv build --out-dir "$_build_dir"
 
-    # Safety: verify sdist contains no private files before publishing
+    # Safety: verify sdist contains no private files before tagging
     log_info "Verifying sdist contents..."
-    SDIST_FILE=$(ls dist/*.tar.gz 2>/dev/null | head -1)
+    SDIST_FILE=$(ls "$_build_dir"/*.tar.gz 2>/dev/null | head -1)
     if [ -z "$SDIST_FILE" ]; then
-        log_error "No sdist file found in dist/"
+        log_error "No sdist file found in $_build_dir"
         exit 1
     fi
 
@@ -161,27 +205,15 @@ main() {
         exit 1
     fi
     log_success "sdist is clean — no private files detected"
-
-    PYPI_TOKEN=$(grep "password" ~/.pypirc 2>/dev/null | cut -d' ' -f3)
-    if [ -z "$PYPI_TOKEN" ]; then
-        log_error "PyPI token not found in ~/.pypirc"
-        exit 1
-    fi
-
-    if uv publish --token "$PYPI_TOKEN" 2>&1; then
-        log_success "Published to PyPI"
-    else
-        log_error "Failed to publish to PyPI"
-        rollback "$current_version" "$previous_version"
-    fi
+    rm -rf "$_build_dir"
     echo ""
 
     # Step 5: Create GitHub release
     log_info "Step 5/5: Creating GitHub release..."
 
-    # Get changelog entry for this version
-    # Headings are Keep-a-Changelog form: `## [12.0.0] — Subtitle (date)`.
-    changelog_entry=$(sed -n "/^## \[${current_version}\]/,/^## /p" CHANGELOG.md | head -n -1 | tail -n +2)
+    # Notes go to a file (size cap + portable extraction: see write_release_notes).
+    notes_file=$(mktemp)
+    write_release_notes "$current_version" CHANGELOG.md "$notes_file"
 
     # P3.2: .github/workflows/release.yml fetches release_evals/<sha>.json from
     # this release's assets and gates publish on it. Refuse BEFORE tagging: a tag
@@ -193,30 +225,37 @@ main() {
     fi
 
     if git tag "v${current_version}" && \
-       git push origin --tags && \
-       gh release create "v${current_version}" "$eval_asset" --title "v${current_version}" --latest --notes "${changelog_entry}" 2>&1; then
+       git push origin "v${current_version}" && \
+       gh release create "v${current_version}" "$eval_asset" --title "v${current_version}" --latest --notes-file "$notes_file" 2>&1; then
         log_success "GitHub release created"
+        rm -f "$notes_file"
     else
         log_error "Failed to create GitHub release"
         rollback "$current_version" "$previous_version"
     fi
     echo ""
 
-    # Verification
-    log_info "Verifying release was successful..."
-    if python3 scripts/release/verify-release.py; then
+    # Verification. verify-release.py checks PyPI, which cannot be live yet:
+    # publish.yml runs after the tag, behind eval-gate. So verify only what this
+    # script did (the GitHub release); never roll back over PyPI lag.
+    log_info "Verifying GitHub release exists..."
+    if gh release view "v${current_version}" >/dev/null 2>&1; then
         echo ""
         echo "╔════════════════════════════════════════════════════════╗"
-        echo "║           🎉 Release v${current_version} Complete!          ║"
+        echo "║        🎉 Release v${current_version} tagged and created!     ║"
         echo "╚════════════════════════════════════════════════════════╝"
         echo ""
-        log_success "All checks passed!"
-        log_info "Users can upgrade with: pip install --upgrade ${PACKAGE_NAME}"
+        log_success "Tag pushed and GitHub release created."
+        log_info "PyPI is NOT published by this script. publish.yml publishes via OIDC after eval-gate passes."
+        log_info "Watch it: gh run list --workflow publish.yml"
+        log_info "Then verify: python3 scripts/release/verify-release.py"
         return 0
     else
-        log_error "Post-release verification failed"
+        log_error "GitHub release v${current_version} not found after creation"
         rollback "$current_version" "$previous_version"
     fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

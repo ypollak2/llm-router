@@ -25,7 +25,7 @@ bash scripts/<bucket>/<script>.sh
 | Script | Purpose |
 |---|---|
 | `release/pre-release-verify.sh` | Pre-flight checklist: clean tree, version sync, plugin sync, tests. Run this first. |
-| `release.sh` | Full release flow — tag, build, sdist leak-check, publish. |
+| `release.sh` | Release flow — checks, local build + sdist leak-check (no upload), tag, GitHub Release with the eval asset; PyPI publish is `publish.yml` (OIDC) after eval-gate. |
 | `release.py` | Python half of the release flow (changelog/tag/artifact handling). |
 | `verify-release.py` | Post-release verification of the published artifact. |
 | `sync-versions.py` | Rewrites the version across `pyproject.toml` and every plugin manifest. |
