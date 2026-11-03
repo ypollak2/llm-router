@@ -103,7 +103,6 @@ Usage:
     llm-router explain-dashboard — explain what each dashboard figure means
     llm-router invoice          — provider invoice reconciliation
     llm-router audit            — audit-trail queries
-    llm-router share            — export a shareable savings summary
     llm-router team-sync        — sync team savings to the configured channel
     llm-router tui              — full-screen dashboard (needs the `tui` extra)
 
@@ -885,7 +884,6 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "pi",
         "invoice",
         "cp",
-        "share",
         "summary",
         "onboard",
         "quickstart",
@@ -1278,9 +1276,6 @@ def main() -> None:
             )
             sys.exit(1)
         _tui_run()
-    elif args and args[0] == "share":
-        from llm_router.commands.share import cmd_share
-        sys.exit(cmd_share(args[1:]))
     elif args and args[0] == "test":
         from llm_router.commands.test import cmd_test
         sys.exit(cmd_test(args[1:]))

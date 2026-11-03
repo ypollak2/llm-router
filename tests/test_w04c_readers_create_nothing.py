@@ -1,6 +1,6 @@
 """W0-4c -- a sqlite READER never creates usage.db.
 
-W0-4b review N2: demo, last, replay, share, verify, gain, invoice, dashboard_data, tui,
+W0-4b review N2: demo, last, replay, verify, gain, invoice, dashboard_data, tui,
 quota_savings and ui/status_premium opened usage.db with a bare ``sqlite3.connect``. When the
 state directory existed but the file did not, that created an empty 0644 usage.db. They now use
 ``state_files.connect_sqlite(..., create=False)``. ``gain`` also reached ``cost._get_db`` through
@@ -24,7 +24,6 @@ _CASES = [  # (argv, exit code on main)
     (["demo"], 0),
     (["last"], 1),
     (["replay"], 1),
-    (["share"], 0),
     (["verify"], 1),
     (["gain"], 0),
     (["status"], 0),
