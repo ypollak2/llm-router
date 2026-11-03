@@ -712,9 +712,9 @@ def money_window(bounds: Bounds, *, db_path=None, timeout_s: float = 1.0) -> Mon
     and cache rows (provider ``cache``: 0 tokens, $0, not a call anyone made).
 
     The estimate counts a CALL once (W8): the router records one local call in ``usage``,
-    ``claude_usage`` and ``savings_stats`` (measured 2026-11-03: 5 local calls were 15 rows, so 10 of the
-    46 rows and 43% of the dollars behind ``~$0.35 est. saved`` were repeats). :func:`duplicate_calls`
-    names the repeats; they leave ``unverified_usd`` and ``unverified_calls`` and are reported in
+    ``claude_usage`` and ``savings_stats`` (one dated copy of ``usage.db``, newest row 2026-11-03 19:16:36Z:
+    the local day's 53 rows were 43 calls, the 10 repeats carrying 38% of the dollars; ``docs/bugs/MONEY3X-1.md``).
+    :func:`duplicate_calls` names the repeats; they leave ``unverified_usd`` and ``unverified_calls`` and are reported in
     ``duplicate_calls`` / ``duplicate_usd``. ``calls``, ``tokens`` and ``by_source`` stay the raw per-table
     sums."""
     from llm_router import pricing

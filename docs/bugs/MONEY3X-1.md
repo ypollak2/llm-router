@@ -4,9 +4,7 @@ status: fixed in `bind/honest-statusline` (deploy: restart the MCP server and ev
 ---
 ## MONEY3X-1. The estimated saving counted one local call three times: `today n=46` was rows over three tables
 
-- **Symptom (2026-11-03).** The status line printed `~$0.35 est. saved` with `today n=46`, while the session mix saw 5 local calls. The
-  same 5 calls sat in `usage`, `claude_usage` and `savings_stats` (15 rows), so 10 of the 46 rows and 43% of the dollars
-  were repeats (copy of `usage.db`, window today 2026-11-03, n=46 rows, `~/.rsi/research/primary-plan/v16/coord/NS-STATUSLINE-ANALYSIS-20261103.md`). Over 7 d the same defect was 287 of 940 rows.
+- **Symptom (2026-11-03).** The status line printed `~$0.35 est. saved` with `today n=46` while the session mix saw 5 local calls (the owner's screen; the analysis recorded `n=44`, `~/.rsi/research/primary-plan/v16/coord/NS-STATUSLINE-ANALYSIS-20261103.md`; neither time was recorded). The same 5 calls sat in `usage`, `claude_usage` and `savings_stats` (15 rows). Measured on ONE dated copy of `usage.db` (newest row 2026-11-03 19:16:36Z, PR #821 body): the local day held n=53 rows, which were 43 calls; the 10 repeated rows (19% of the rows) carried $0.1499 of $0.3994 (38% of the dollars), leaving $0.2495. Over 7 d: 940 rows were 653 calls (287 repeats, 31% of the rows; $3.1163 of $8.1737, 38% of the dollars). Other moments differ because the day moves: the analysis estimated about 61% of the dollars at its own moment (n=44 rows), and the review's later copy (2026-11-03 20:53Z, n=49 rows) measured $0.1499 of $0.3628, 41% (`~/.rsi/research/primary-plan/v16/coord/rv-PR821-20261103.md`).
 - **Cause.** `ledger_view.money_window` summed COUNT(*) and the saved dollars of each table, and the router records one local call in
   all three: they share the model and token counts, `usage.correlation_id` equals `savings_stats.session_id`, and the timestamps are
   written a moment apart (13 of 800 id-sharing pairs differed by one second, `src/llm_router/ledger_view.py`).
