@@ -89,6 +89,7 @@ def test_the_raw_envelope_never_reached_the_used_threshold_but_the_body_does():
     ("Owner instruction: use the newer local model for the benchmark. Reply OK.", True),
     ("Reply with one word: does appending a line with echo count as writing code? (yes/no)", False),  # a real question
     ("Reply with the migration plan for the schema change in full detail please " + "x" * 120, False),  # too long to be a probe
+    ("Reply with a one-line commit message for this change:\nfix the retry backoff", False),   # context on the next line
     ("What does git rev-parse --short HEAD print", False),
     ("", False),
     (None, False),

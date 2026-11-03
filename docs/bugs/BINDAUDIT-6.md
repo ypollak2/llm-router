@@ -12,8 +12,9 @@ status: fixed in this change (BIND W3, branch `bind/audit-metrics`; audit v2)
   carries nothing to relay.
 - **Fix.** Label `not_applicable`, outside `attempted` (`is_probe_prompt`, `NON_CONTENT_TOOLS`; signals
   `probe_fixed_reply`, `hold_release_probe` when issued in the turn after a `Routing directive BLOCKED` deny, and
-  `status_view`). The rule is the prompt's shape, not its outcome: it starts with "reply" (under 150 characters) or
-  ends with "reply OK" (under 200), and a question mark makes it a real question. On the 16.0.0 population it finds
+  `status_view`). The rule is the prompt's shape, not its outcome: one line that starts with "reply" (under 150 characters)
+  or ends with "reply OK" (under 200); a question mark makes it a real question and a second line means it carries
+  context (0 of the 82 has a newline; median 11 characters, longest 129). On the 16.0.0 population it finds
   82 probe rows (R2: 82) and 7 views, 89 in all (R2: about 89); attempted falls to 61 (R2: about 61). Because leaving
   the denominator raises the rate, `outcome_gate.py` accepts a `not_applicable` row only with a signal from
   `NOT_APPLICABLE_SIGNALS`, recounts `attempted` without them, prints how many there are, and the summary carries

@@ -297,7 +297,9 @@ def report(units, ctx: dict, gate, audit, since: float, until: float, args, proj
                       f"{'n/a' if per100 is None else f'{per100:.2f}'} per 100; {len(probes)} fixed-reply probes",
                       f"holds < {HOLDS_PER_100_MAX:g} per 100 prompts and 0 'Reply OK' probes",
                       f"{prompts} organic prompts (floor {MIN_PROMPTS}), {len(probes)} probes", window,
-                      f"{how}; probes from the transcripts' MCP calls in {src_tr}",
+                      f"{how}; probes from the transcripts' MCP calls in {src_tr}"
+                      + (f"; probe units (first 5, to check for a false positive): "
+                         f"{', '.join(u.unit_id for u in probes[:5])}" if probes else ""),
                       "" if prompts >= MIN_PROMPTS else f"needs >= {MIN_PROMPTS} organic prompts to show a rate under 1 per 100"))
 
     # 4. outcome gate (fixed audit)

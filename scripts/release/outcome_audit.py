@@ -390,10 +390,12 @@ def is_probe_prompt(prompt: str | None) -> bool:
     """A prompt that asks for a fixed reply ("Reply OK", "Reply with the single word:
     ready"): there is nothing to relay. Hold-release calls are of this shape (the
     hold's text says "call ANY llm_* tool"). A question mark makes it a real
-    question asked in reply-with-one-word form. Reproduces R2's 82 ack/ping rows
-    on the 16.0.0 window (BIND-R2 section 2) and none of its 76 non-probe ones."""
+    question asked in reply-with-one-word form, and a prompt of several lines
+    carries context, which a probe never does (0 of the 82 has a newline; median
+    11 characters, longest 129). Reproduces R2's 82 ack/ping rows on the 16.0.0
+    window (BIND-R2 section 2) and none of its 76 non-probe ones."""
     p = (prompt or "").strip()
-    if not p or "?" in p:
+    if not p or "?" in p or "\n" in p:
         return False
     if _PROBE_START.match(p):
         return len(p) < 150
