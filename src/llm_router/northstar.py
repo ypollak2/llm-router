@@ -1319,6 +1319,87 @@ def _subagent_files(root: Path | None = None) -> list[tuple[Path, str, str]]:
     return out
 
 
+# ── the sub-agent index: a steady-state scan re-reads only the files that changed ─────────────────
+#
+# Decoding every record of every sub-agent transcript is what the opt-in scan costs (a week of a busy
+# session holds hundreds of files; ``statusline --refresh`` measured +3 s per run for it). The unit
+# builder needs three facts of a plain message (id, model, time), so they are kept per file, keyed by
+# the file's state ``(size, mtime_ns)``: an unchanged file is never decoded again. A file with an MCP
+# call is always read in full (its units take a model from the routing table, a verdict from the
+# records that follow, and a fold against the edit ledger: all state outside the file), and so is a
+# file that holds a message a proxy served (its verdict is read from the records).
+
+SUBAGENT_INDEX_NAME = "northstar_subagent_index.json"
+_SUBAGENT_INDEX_VERSION = 1
+
+
+def _subagent_extract(records: list[dict]) -> dict:
+    """What the unit builder needs of one sub-agent file, in record order: ``msgs`` is ``[id, model,
+    ts]`` of the FIRST record of each message (later records of a message add no unit), ``mcp`` is
+    whether any record holds an ``mcp__llm_router__`` tool call."""
+    msgs: list[list] = []
+    seen: set[str] = set()
+    mcp = False
+    for obj in records:
+        if obj.get("type") != "assistant":
+            continue
+        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        msg_id = message.get("id") if isinstance(message.get("id"), str) else ""
+        model = message.get("model") if isinstance(message.get("model"), str) else None
+        if not mcp:
+            mcp = any((tu.get("name") or "").startswith("mcp__llm_router__") for tu in _assistant_tool_uses(obj))
+        if msg_id:
+            if msg_id in seen:
+                continue
+            seen.add(msg_id)
+        msgs.append([msg_id, model, _ts_of(obj)])
+    return {"mcp": mcp, "msgs": msgs}
+
+
+def _load_subagent_index() -> dict[str, dict]:
+    """``path -> {"sig", "mcp", "msgs"}`` from the index file; ``{}`` when it is absent, unreadable or
+    written by another version (a derived file: the scan rebuilds it)."""
+    try:
+        data = json.loads(paths.state_path(SUBAGENT_INDEX_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("v") != _SUBAGENT_INDEX_VERSION or not isinstance(data.get("files"), dict):
+        return {}
+    return data["files"]
+
+
+def _indexed_messages(entry: Any, sig: tuple[int, int]) -> list[list] | None:
+    """The indexed messages of a file whose state is ``sig``, or None: no entry, another file state, an
+    MCP-bearing file, or an entry that is not shaped as :func:`_subagent_extract` writes it."""
+    if not isinstance(entry, dict) or entry.get("sig") != list(sig) or entry.get("mcp") is not False:
+        return None
+    msgs = entry.get("msgs")
+    if not isinstance(msgs, list):
+        return None
+    for m in msgs:
+        if not (isinstance(m, list) and len(m) == 3 and isinstance(m[0], str)
+                and (m[1] is None or isinstance(m[1], str))
+                and (m[2] is None or (isinstance(m[2], (int, float)) and not isinstance(m[2], bool)))):
+            return None
+    return msgs
+
+
+def _save_subagent_index(files: dict[str, dict]) -> None:
+    """Replace the index atomically. A failed write costs the next scan its speed, never a number."""
+    path = paths.state_path(SUBAGENT_INDEX_NAME)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8", opener=paths.private_opener) as fh:
+            json.dump({"v": _SUBAGENT_INDEX_VERSION, "files": files}, fh, separators=(",", ":"))
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            return
+
+
 def _load_mcp_models(db_path: Path | None = None, days: int | None = None) -> dict[str, str]:
     """``tool_use_id -> model`` of the router row that answered that MCP call.
 
@@ -1465,30 +1546,37 @@ def build_sessions(days: int | None, root: Path | None = None,
     # its legacy children and its sub-agent files.
     seen_msg: dict[str, set[str]] = {}
 
-    def _add_assistant(su: SessionUnits, target_sid: str, obj: dict, records: list[dict], kind: str,
-                       edit_call_units: list[Unit], file_mcp_units: list[Unit]) -> None:
-        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-        msg_id = message.get("id") if isinstance(message.get("id"), str) else ""
-        model = message.get("model") if isinstance(message.get("model"), str) else None
+    def _count_message(su: SessionUnits, target_sid: str, msg_id: str, model: str | None, ts: float | None,
+                       kind: str, records: list[dict] | None) -> None:
+        """The unit of one transcript record's message, once per ``message.id`` per session. ``records``
+        (the file's) is read only for a message a proxy served; the sub-agent index passes None for a
+        file that holds none."""
         # Claude Code writes one record per content block, all sharing message.id: the FIRST record
-        # is the call, the rest add nothing (their tool_use blocks are still read below).
+        # is the call, the rest add nothing (their tool_use blocks are still read by the caller).
         first_of_message = True
         if msg_id:
             ids = seen_msg.setdefault(target_sid, set())
             first_of_message = msg_id not in ids
             ids.add(msg_id)
         if first_of_message and not (model or "").startswith("<"):   # "<synthetic>": not an API call
-            turn = Unit(kind=kind, session_id=target_sid, ts=_ts_of(obj), model=model)
+            turn = Unit(kind=kind, session_id=target_sid, ts=ts, model=model)
             served = proxy_served.get(msg_id) if msg_id else None
             if served is not None:
                 # A local backend answered this message: it carries the SERVED model, not the one
                 # Claude Code asked for. One served call is one attempted unit.
                 turn.lever = "proxy"
-                turn.outcome, turn.signal = _judge_proxy_turn(served["msg_id"], records)
+                turn.outcome, turn.signal = _judge_proxy_turn(served["msg_id"], records or [])
                 turn.confidence = "high"
                 turn.task_type = served.get("task_type")
                 turn.model = served.get("model") or "proxy-served"
             su.units.append(turn)
+
+    def _add_assistant(su: SessionUnits, target_sid: str, obj: dict, records: list[dict], kind: str,
+                       edit_call_units: list[Unit], file_mcp_units: list[Unit]) -> None:
+        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        msg_id = message.get("id") if isinstance(message.get("id"), str) else ""
+        model = message.get("model") if isinstance(message.get("model"), str) else None
+        _count_message(su, target_sid, msg_id, model, _ts_of(obj), kind, records)
         for tu in _assistant_tool_uses(obj):
             name = tu.get("name") or ""
             if not name.startswith("mcp__llm_router__"):
@@ -1514,16 +1602,30 @@ def build_sessions(days: int | None, root: Path | None = None,
     # MB of them, and only the units (and the llm_edit calls the fold needs) outlive a file.
     sub_edit_calls: dict[str, list[Unit]] = {}
     if subagents:
-        for path, parent, project in _subagent_files(root):
+        # An unchanged file is not decoded again (the sub-agent index above): a file whose state matches its
+        # entry, with no MCP call and no message a proxy served, yields its units from the entry alone.
+        index = _load_subagent_index()
+        index_changed = False
+        listing = _subagent_files(root)
+        for path, parent, project in listing:
             if _sources.is_synthetic_session(parent) or _sources._SANDBOX_PROJECT.match(project):
                 continue
-            mtime = path.stat().st_mtime if path.exists() else None
-            if cutoff is not None and mtime is not None and mtime < cutoff:
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if cutoff is not None and st.st_mtime < cutoff:
                 continue  # the same cheap pre-filter as the top-level files above
             target_sid = _root_of(parent)
             if session_id and target_sid != session_id:
                 continue  # one session asked for: another session's sub-agents are never read
             su = per_session.setdefault(target_sid, SessionUnits(session_id=target_sid))
+            sig = (st.st_size, st.st_mtime_ns)
+            indexed = _indexed_messages(index.get(str(path)), sig)
+            if indexed is not None and not (proxy_served and any(m[0] in proxy_served for m in indexed)):
+                for msg_id, model, ts in indexed:
+                    _count_message(su, target_sid, msg_id, model, ts, UNIT_SIDECHAIN, None)
+                continue  # no MCP call in it, so there is nothing for the folds below to add
             records = list(_iter_jsonl(path))
             edit_call_units: list[Unit] = []
             file_mcp_units: list[Unit] = []
@@ -1532,6 +1634,16 @@ def build_sessions(days: int | None, root: Path | None = None,
                     _add_assistant(su, target_sid, obj, records, UNIT_SIDECHAIN, edit_call_units, file_mcp_units)
             sub_edit_calls.setdefault(target_sid, []).extend(edit_call_units)
             _judge_routed_mcp(su, records, file_mcp_units)
+            index[str(path)] = {"sig": list(sig), **_subagent_extract(records)}
+            index_changed = True
+        # forget the files of this root that are gone; another root's entries (another project dir) stay
+        prefix = str(root) + os.sep
+        live = {str(p) for p, _parent, _project in listing}
+        for key in [k for k in index if k.startswith(prefix) and k not in live]:
+            del index[key]
+            index_changed = True
+        if index_changed:
+            _save_subagent_index(index)
 
     for sid, records in loaded.items():
         target_sid = _root_of(sid)
