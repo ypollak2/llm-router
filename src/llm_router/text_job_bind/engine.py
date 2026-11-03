@@ -421,8 +421,8 @@ def _decide(payload, generate, t0, budget_s, root, record, now, mono) -> Decisio
     except Exception as exc:  # noqa: BLE001 -- an unverified rewrite is never emitted
         try:
             path.unlink()
-        except OSError:
-            pass
+        except OSError as unlink_exc:
+            _failopen("CHZ-FO-TEXTJOB-BIND-CLEANUP", unlink_exc)
         code = exc.code if isinstance(exc, Unsupported) else "rewrite_failed"
         if not isinstance(exc, Unsupported):
             _failopen("CHZ-FO-TEXTJOB-BIND-REWRITE", exc)
