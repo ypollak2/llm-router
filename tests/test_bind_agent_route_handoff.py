@@ -424,10 +424,12 @@ def test_the_allowance_never_exceeds_what_the_hook_has_left(hook_mod, monkeypatc
 # =========================================================================== D-357: sandbox and cwd
 
 
-def test_exec_args_default_is_unchanged_for_every_pure_llm_caller():
+def test_exec_args_default_is_the_old_argv_plus_ignore_rules_for_every_pure_llm_caller():
+    """The router chain and the MCP tools pass no sandbox: their argv is what it was, with ``--ignore-rules`` added
+    (BIND-8). No sandbox flag appears, so ``codex exec`` keeps its own read-only default."""
     args = codex_exec_args("/bin/codex", model="m", cwd="/w", prompt="p")
-    assert args == ["/bin/codex", "exec", "--json", "--ignore-user-config", "-m", "m", "-c", "model_provider=openai",
-                    "--color", "never", "--skip-git-repo-check", "-C", "/w", "p"]
+    assert args == ["/bin/codex", "exec", "--json", "--ignore-user-config", "--ignore-rules", "-m", "m", "-c",
+                    "model_provider=openai", "--color", "never", "--skip-git-repo-check", "-C", "/w", "p"]
     assert "--sandbox" not in args
 
 
@@ -455,7 +457,7 @@ def test_exec_args_of_every_delegated_mode_ignore_user_and_project_rules(mode):
     assert "--ignore-user-config" in args and "--ignore-rules" in args
     assert args.index("--ignore-rules") < args.index("-m")
     assert args[args.index("--sandbox") + 1] == mode
-    assert "--ignore-rules" not in codex_exec_args("/bin/codex", model="m", cwd="/proj", prompt="p")  # pure-LLM: unchanged
+    assert "--ignore-rules" in codex_exec_args("/bin/codex", model="m", cwd="/proj", prompt="p")  # and every pure-LLM caller (BIND-8)
 
 
 def test_no_caller_can_ask_for_an_unsandboxed_run(monkeypatch):

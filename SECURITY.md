@@ -789,7 +789,10 @@ execpolicy `.rules` file, user or project, is loaded. Without `--ignore-rules` a
 `prefix_rule(pattern=["curl"], decision="allow")` makes Codex run a matching command outside the sandbox, with network,
 in either mode (the owner's rules allow `curl`, `git push`, `gh pr merge` and `gh run`); `tests/test_bind_codex_sandbox_live.py`
 reproduces it on the real binary, with a stub model and a canary listener on loopback, and fails if it comes back
-(docs/bugs/BIND-6.md; it is marked `requires_codex`, so CI runs the argv pins instead). The sandbox is chosen from the session's directory, the hook payload's `cwd`. Inside a git work
+(docs/bugs/BIND-6.md; it is marked `requires_codex`, so CI runs the argv pins instead). Both modes also remove Codex's
+hosted `web_search` tool (`-c web_search="disabled"`): the model provider runs it outside the local sandbox, it is offered by
+default, and `network_access=false` does not touch it (docs/bugs/BIND-9.md; the live test reads the tool list a stub model is
+sent). The sandbox is chosen from the session's directory, the hook payload's `cwd`. Inside a git work
 tree (`git -C <cwd> rev-parse --show-toplevel` succeeds) the run gets `--sandbox workspace-write` with the network off
 (`sandbox_workspace_write.network_access=false`) and that work tree's top level as its only writable root: `/tmp` and
 `$TMPDIR` are excluded (`exclude_slash_tmp`, `exclude_tmpdir_env_var`) and the child's `TMPDIR` is a per-run directory in
@@ -802,10 +805,19 @@ rooted at `/` is not delegated to Codex at all (`codex_unsafe_cwd`). git is aske
 `GIT_COMMON_DIR` (set, `GIT_DIR` makes any directory a work tree), and a top level that is not the nearest directory at
 or above the session directory with a `.git` entry (a repository's own `core.worktree` can point elsewhere, or at an
 ancestor) counts as no repository (docs/bugs/BIND-7.md). `danger-full-access` cannot
-be requested through `run_codex`. **Not covered:** the router chain and the MCP tools call `codex exec` with no sandbox
-flag and no `--ignore-rules`, and the same scenario shows a rule-allowed `curl` leaving their read-only sandbox (open,
-docs/bugs/BIND-6.md). Verified on the macOS seatbelt with codex-cli 0.161.0; other Codex versions and the Linux sandboxes
-are untested. Tests: `tests/test_bind_agent_route_handoff.py`, `tests/test_bind_codex_run_tmpdir.py`.
+be requested through `run_codex`. **Every other `codex exec` passes `--ignore-rules` as well** (docs/bugs/BIND-8.md): the
+router chain, the MCP tool `llm_codex`, the session broker, the model evaluator, calibration, the agentic adapter (which
+also passes `--ignore-user-config`) and the two scripts that call Codex. The argv of each is pinned, and a test walks the
+source for any new `codex exec` (`tests/test_bind_codex_ignore_rules_everywhere.py`). The router paths do not start a Codex
+CLI whose `exec --help` does not list the flag, asked once per binary: the call fails with `reason_code` `no_ignore_rules`,
+one WARNING and one `CHZ-FO-CODEX-NO-IGNORE-RULES` fail-open row, and routing falls back; a probe that cannot answer counts
+as "no". The two scripts rely on the CLI rejecting an unknown flag. Without the flag, a user rule makes the router chain's
+and the MCP tool's `curl` leave Codex's default (read-only) sandbox with network; with it, it does not
+(`tests/test_bind_codex_sandbox_live.py`, `requires_codex`). **Not covered:** those pure-LLM callers run in Codex's own
+default sandbox and keep its hosted `web_search` tool; the agentic adapter's `workspace-write` run keeps Codex's defaults
+for `/tmp` and passes no `sandbox_workspace_write.*` flags (the D-357 hardening above is agent-route's); the two scripts do
+not pass `--ignore-user-config`. Verified on the macOS seatbelt with codex-cli 0.161.0; other Codex versions and the Linux
+sandboxes are untested. Tests: `tests/test_bind_agent_route_handoff.py`, `tests/test_bind_codex_run_tmpdir.py`.
 
 `tests/test_security_docs_match_the_code.py` reads the tables in this section and
 runs every row through the real lane executors. `tests/test_write_policy_one_policy.py`

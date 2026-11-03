@@ -139,10 +139,22 @@ class CodexAdapter:
         except Exception:  # noqa: BLE001 — resolver failure falls back to PATH lookup
             return "codex"
 
+    @staticmethod
+    def _unprotected_refusal(binary: str) -> str | None:
+        """Why this CLI must not be started (it lacks ``--ignore-rules``), with the log line and fail-open row, else None."""
+        try:
+            from llm_router.codex_agent import unprotected_refusal
+            return unprotected_refusal(binary)
+        except Exception:  # noqa: BLE001 -- no probe available: the flag is still in the argv, an old CLI rejects it and exits
+            return None
+
     def _codex_argv(self, binary: str, prompt: str) -> list[str]:
-        argv = [binary, "exec", "--json", "--color", "never", "--skip-git-repo-check"]
+        # --ignore-user-config: no config.toml can widen the sandbox or point Codex at the router's own gateway (as in
+        # codex_agent.codex_exec_args). --ignore-rules: a user execpolicy `allow` rule would run its command outside the
+        # sandbox, with network (BIND-8). A sandboxed run also loses the provider-side web_search tool (BIND-9).
+        argv = [binary, "exec", "--json", "--ignore-user-config", "--ignore-rules", "--color", "never", "--skip-git-repo-check"]
         if self.sandbox_mode:
-            argv += ["--sandbox", self.sandbox_mode]
+            argv += ["--sandbox", self.sandbox_mode, "-c", 'web_search="disabled"']
         if self.model:
             argv += ["-m", self.model, "-c", "model_provider=openai"]
         if self.cwd:
@@ -156,10 +168,15 @@ class CodexAdapter:
         prompt = pack_prompt(milestone, frozen_context)
         assert self.runner is not None  # set in __post_init__
         binary = self._resolve_binary()
-        proc = self.runner(self._codex_argv(binary, prompt), "")
+        refusal = self._unprotected_refusal(binary)
+        if refusal is not None:
+            # a CLI without --ignore-rules is not started: this tier is unavailable and the escalation moves on
+            proc = ProcResult(127, "", refusal)
+        else:
+            proc = self.runner(self._codex_argv(binary, prompt), "")
 
         diff, files = "", []
-        if self.capture_diff and self.cwd:
+        if refusal is None and self.capture_diff and self.cwd:
             # `git diff HEAD` captures staged + unstaged work. Codex often COMMITS
             # its changes, in which case that's empty — fall back to the last
             # commit's diff so produced files are still captured.

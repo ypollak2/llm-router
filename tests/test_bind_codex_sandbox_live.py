@@ -14,6 +14,8 @@ file where the sandbox forbids one.
 
 Every claim is paired with a control: the same scenario with the flag removed must show the escape, or the test is
 skipped (this machine's Codex or sandbox cannot show it) rather than passed. A test that cannot fail proves nothing.
+The last test (BIND-8) is the same escape through a CALL SITE: the MCP tool ``llm_codex``, which reaches Codex through
+the ``run_codex`` that the router chain, the session broker, the evaluator and calibrate share, with no sandbox flag.
 Marked ``requires_codex``, so CI and the default run deselect it: run ``pytest -m requires_codex
 tests/test_bind_codex_sandbox_live.py`` where ``codex`` is installed, without an outer ``sandbox-exec`` (a nested sandbox
 cannot be applied: every test then skips). Also skipped without ``codex`` or ``curl``.
@@ -24,6 +26,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +36,7 @@ from pathlib import Path
 
 import pytest
 
+from llm_router import codex_agent
 from llm_router.codex_agent import codex_exec_args, make_run_tmpdir, remove_run_tmpdir
 from tests._bind_support import init_repo
 
@@ -99,7 +103,11 @@ def _stub_model(commands: list[str]) -> http.server.ThreadingHTTPServer:
                 return self._send(b'{"error":"unknown"}', "application/json", 404)
             inputs = req.get("input") or []
             done = sum(1 for i in inputs if isinstance(i, dict) and str(i.get("type", "")).endswith("_output"))
+            for i in inputs:  # what each command printed, as Codex reported it back (BIND-8 reads this)
+                if isinstance(i, dict) and str(i.get("type", "")).endswith("_output"):
+                    self.server.seen_outputs[str(i.get("call_id"))] = json.dumps(i.get("output"), default=str)  # type: ignore[attr-defined]
             tools = [t.get("name") or t.get("type") for t in (req.get("tools") or []) if isinstance(t, dict)]
+            self.server.seen_tools.append(tools)  # type: ignore[attr-defined]  # what Codex offers the model (BIND-9)
             if done < len(commands):
                 cmd = commands[done]
                 if "shell_command" in tools:
@@ -130,7 +138,10 @@ def _stub_model(commands: list[str]) -> http.server.ThreadingHTTPServer:
                             for e in events)
             self._send(body, "text/event-stream")
 
-    return http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.seen_outputs = {}  # type: ignore[attr-defined]
+    server.seen_tools = []  # type: ignore[attr-defined]
+    return server
 
 
 class _Run:
@@ -252,6 +263,7 @@ def scenarios(tmp_path_factory):
             canary.shutdown()
         result = _Run(list(canary.hits), slash_tmp_file, outside_tmp, repo, rc, out, err)  # type: ignore[attr-defined]
         result.run_tmp = run_tmp  # type: ignore[attr-defined]
+        result.tools_seen = list(model.seen_tools)  # type: ignore[attr-defined]
         result.run_tmp_wrote = bool(run_tmp) and (Path(run_tmp) / "t.txt").exists()  # type: ignore[attr-defined]
         remove_run_tmpdir(run_tmp)
         cache[name] = result
@@ -327,3 +339,116 @@ def test_the_git_dir_inside_the_root_is_read_only_on_this_codex(scenarios):
     if fixed.wrote_git_dir:
         pytest.skip("this Codex lets a delegated run write .git: the BIND-6 note that commits end blocked no longer holds")
     assert not fixed.wrote_git_dir
+
+
+def test_the_hosted_web_search_tool_is_not_offered_to_a_delegated_run(scenarios):
+    """BIND-9. ``web_search`` is a tool the model provider runs, outside the local sandbox, so ``network_access=false`` does
+    not touch it; this Codex offers it by default in every mode. The stub model records the tools each request advertises,
+    so this needs no model call. The control drops ``-c web_search="disabled"`` and must still see the tool offered."""
+    control = scenarios("write-search-open", "workspace-write", drop=('web_search="disabled"',))
+    if not control.tools_seen:  # type: ignore[attr-defined]
+        pytest.skip(f"no request reached the stub model here: rc={control.rc} err={control.err[-200:]!r}")
+    if not any("web_search" in tools for tools in control.tools_seen):  # type: ignore[attr-defined]
+        pytest.skip("this Codex does not offer web_search by default, so there is nothing to disable")
+    for name, mode in (("write-fixed", "workspace-write"), ("ro-fixed", "read-only")):
+        fixed = scenarios(name, mode)
+        assert fixed.tools_seen, f"{name}: no request reached the stub model"  # type: ignore[attr-defined]
+        offered = [tools for tools in fixed.tools_seen if "web_search" in tools]  # type: ignore[attr-defined]
+        assert not offered, f"{name}: the hosted web_search tool is still offered to the model: {offered}"
+
+
+# ======================================================================= BIND-8: the call sites with no sandbox flag
+
+
+class _Site:
+    """What one ``llm_codex`` call left behind: the canary hits, what each scripted command printed (as Codex reported it
+    back to the stub model), and the text the tool returned."""
+
+    def __init__(self, hits, outputs, text):
+        self.hits, self.outputs, self.text = hits, outputs, text
+
+    @property
+    def curl_escaped(self) -> bool:
+        return bool(self.hits)
+
+    @property
+    def curl_http(self) -> int | None:
+        """The HTTP status ``curl`` itself printed (``-w CURL_HTTP=%{http_code}``: 200 when it reached the canary, 0 when
+        it could not connect), so this does not depend on how this Codex formats a command's result. The command stays a
+        single ``curl`` on purpose: a rule matches a command, and ``curl ...; echo`` is not one the rule allows. None: the
+        command never reported back."""
+        for out in self.outputs.values():
+            found = re.search(r"CURL_HTTP=(\d+)", out)
+            if found:
+                return int(found.group(1))
+        return None
+
+
+async def _call_site_run(base: Path, monkeypatch, *, drop_flag: bool) -> _Site:
+    """One ``llm_codex`` call against the real ``codex``: a stub model on loopback that asks for one ``curl`` to a canary, a
+    rules file that allows ``curl``, a temp HOME and CODEX_HOME, dead proxies. ``run_codex`` builds the argv itself (no
+    sandbox flag: this is the router chain's and the MCP tool's argv); only the model provider is swapped in, and for the
+    control the flag is taken out again, which is the argv these call sites had before BIND-8."""
+    from llm_router.tools.codex import llm_codex
+
+    base.mkdir(parents=True)
+    rules_home = base / "codexhome"
+    (rules_home / "rules").mkdir(parents=True)
+    (rules_home / "rules" / "default.rules").write_text('prefix_rule(pattern=["curl"], decision="allow")\n')
+    repo = init_repo(base / "repo")
+    canary = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Hits)
+    canary.hits = []  # type: ignore[attr-defined]
+    threading.Thread(target=canary.serve_forever, daemon=True).start()
+    model = _stub_model([f"curl -s -m 5 -w 'CURL_HTTP=%{{http_code}}' http://127.0.0.1:{canary.server_address[1]}/probe"])
+    threading.Thread(target=model.serve_forever, daemon=True).start()
+    provider = ('model_providers.stub={name="stub", base_url="http://127.0.0.1:%d/v1", wire_api="responses"}'
+                % model.server_address[1])
+    real_args = codex_exec_args  # the module-level original: an earlier call's wrapper is still patched in
+
+    def _spliced(binary, **kw):
+        argv = real_args(binary, **kw)
+        assert kw.get("sandbox") is None, "a call site with no sandbox flag is what this case is about"
+        if drop_flag:
+            argv = _without(argv, "--ignore-rules")
+        i = argv.index("model_provider=openai")
+        argv[i] = 'model_provider="stub"'
+        argv[i + 1:i + 1] = ["-c", provider]
+        return argv
+
+    monkeypatch.setattr(codex_agent, "codex_exec_args", _spliced)
+    monkeypatch.setenv("CODEX_PATH", CODEX)
+    monkeypatch.setenv("CODEX_HOME", str(rules_home))
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):  # nothing may leave the machine
+        monkeypatch.setenv(key, "http://127.0.0.1:9")
+    for key in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(key, "127.0.0.1,localhost")
+    monkeypatch.chdir(repo)
+    codex_agent._reset_codex_cache_for_tests()
+    try:
+        text = await llm_codex("run the scripted command", model="stub-model")
+    finally:
+        model.shutdown()
+        canary.shutdown()
+        codex_agent._reset_codex_cache_for_tests()
+    return _Site(list(canary.hits), dict(model.seen_outputs), text)  # type: ignore[attr-defined]
+
+
+@pytest.mark.real_codex_probe  # the real `exec --help` capability check runs against this codex
+async def test_a_rules_allowed_command_does_not_leave_the_sandbox_at_the_mcp_and_router_call_sites(tmp_path, monkeypatch):
+    """Before BIND-8 the MCP tool, the router chain, the session broker, the evaluator and calibrate started
+    ``codex exec`` with no sandbox flag and no ``--ignore-rules``: the user's allow rule ran the model's ``curl`` outside
+    Codex's own default sandbox, with network. The control is that argv; the fixed run is what ``run_codex`` builds now."""
+    control = await _call_site_run(tmp_path / "open", monkeypatch, drop_flag=True)
+    if control.curl_http is None:
+        pytest.skip(f"the scripted command did not run here: {control.text[:200]!r} {control.outputs}")
+    if not control.curl_escaped:
+        pytest.skip("without --ignore-rules this Codex no longer runs a rule-allowed curl outside its sandbox "
+                    f"(curl printed {control.curl_http}; outputs {control.outputs})")
+    fixed = await _call_site_run(tmp_path / "fixed", monkeypatch, drop_flag=False)
+    assert fixed.text.startswith("\u2705"), f"the call with the flag did not finish: {fixed.text[:300]!r}"
+    if fixed.curl_http is None:
+        pytest.skip("the sandboxed curl did not run here (a sandbox cannot be applied?)")
+    print(f"BIND-8 call site: without the flag canary_hits={len(control.hits)} curl_http={control.curl_http}; "
+          f"with it canary_hits={len(fixed.hits)} curl_http={fixed.curl_http}")  # -s shows it: the evidence line
+    assert fixed.curl_http == 0, f"the curl reached something inside Codex's default sandbox: {fixed.curl_http}"
+    assert not fixed.curl_escaped, f"a curl allowed by a user rule reached the network: {fixed.hits}"

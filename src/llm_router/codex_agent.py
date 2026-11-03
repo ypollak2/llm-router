@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import time
@@ -132,6 +133,81 @@ _CODEX_PLUGIN_AVAILABLE: bool = False
 _PROBE_INTERVAL_SEC: float = 60.0
 _LAST_PROBE_TS: float = 0.0
 
+# ── --ignore-rules: no unprotected codex exec (docs/bugs/BIND-8.md) ───────────────────────────────────────────────
+#: Every ``codex exec`` this repo starts carries this flag. ``--ignore-user-config`` does NOT stop Codex loading execpolicy
+#: ``.rules`` files, and a rule such as ``prefix_rule(pattern=["curl"], decision="allow")`` makes Codex run a matching
+#: command OUTSIDE its sandbox, with network, whatever the sandbox mode (docs/bugs/BIND-6.md). The owner's own rules allow
+#: ``curl``, ``git push`` and ``gh pr merge``. A CLI that does not list the flag is not started at all.
+IGNORE_RULES_FLAG = "--ignore-rules"
+_IGNORE_RULES_RX = re.compile(r"(?<![\w-])--ignore-rules(?![\w-])")
+_RULES_PROBE_TIMEOUT_S = 15.0
+_RULES_REPROBE_S = 60.0
+#: binary path -> whether ``<binary> exec --help`` lists the flag. A definitive answer is kept for the life of the process.
+_RULES_SUPPORT: dict[str, bool] = {}
+#: binary path -> monotonic time before which a probe that could not run (a hung or broken binary) is not repeated.
+_RULES_UNKNOWN_UNTIL: dict[str, float] = {}
+
+
+def _probe_ignore_rules(binary: str) -> bool | None:
+    """True or False from ``<binary> exec --help``; None when the probe could not run or answer."""
+    import subprocess
+
+    from llm_router.safe_subprocess import get_safe_env
+
+    try:
+        proc = subprocess.run([binary, "exec", "--help"], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                              timeout=_RULES_PROBE_TIMEOUT_S, env=get_safe_env(), check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0 or not text.strip():
+        return None
+    return bool(_IGNORE_RULES_RX.search(text))
+
+
+def codex_supports_ignore_rules(binary: str) -> bool:
+    """Whether ``binary`` lists ``--ignore-rules`` in ``exec --help``. Asked once per binary and remembered. A binary that
+    cannot answer counts as NOT supporting it (fail closed) and is not asked again for a minute, so a hung CLI costs one
+    probe and not one per call. Never raises."""
+    known = _RULES_SUPPORT.get(binary)
+    if known is not None:
+        return known
+    retry_after = _RULES_UNKNOWN_UNTIL.get(binary)
+    if retry_after is not None and time.monotonic() < retry_after:
+        return False
+    answer = _probe_ignore_rules(binary)
+    if answer is None:
+        _RULES_UNKNOWN_UNTIL[binary] = time.monotonic() + _RULES_REPROBE_S
+        return False
+    _RULES_SUPPORT[binary] = answer
+    return answer
+
+
+def unprotected_refusal(binary: str) -> str | None:
+    """None when ``binary`` supports ``--ignore-rules``. Otherwise the reason this call must not run it, after a WARNING log
+    line and a fail-open row (``CHZ-FO-CODEX-NO-IGNORE-RULES``): the caller reports Codex unavailable for this call and
+    routing falls back. Starting the CLI without the flag would let a user execpolicy rule run commands unsandboxed."""
+    if codex_supports_ignore_rules(binary):
+        return None
+    msg = (f"codex: {binary} does not list {IGNORE_RULES_FLAG} in `exec --help` (or its help could not be read), so a user "
+           "execpolicy rule could run a command outside the sandbox; it is not started unprotected. Update the Codex CLI "
+           "(docs/bugs/BIND-8.md).")
+    log.warning("codex_unprotected_refused: %s", msg)
+    try:
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-CODEX-NO-IGNORE-RULES", None, detail=binary)
+    except Exception:  # noqa: BLE001 -- accounting must never turn a refusal into a crash
+        pass
+    return msg
+
+
+def codex_unsupported_binary() -> str | None:
+    """The Codex binary this process uses when it is KNOWN not to list ``--ignore-rules`` (so :func:`is_codex_available` is
+    False for that reason and not because Codex is missing), else None. A dict read: no I/O, safe on the event loop."""
+    path = _CODEX_BINARY_PATH
+    return path if path is not None and _RULES_SUPPORT.get(path) is False else None
+
 
 def _initialize_codex_cache() -> None:
     """Initialize Codex availability cache at module import time.
@@ -223,9 +299,9 @@ def is_codex_available() -> bool:
     """
     global _CODEX_BINARY_PATH, _CODEX_PLUGIN_AVAILABLE, _LAST_PROBE_TS
 
-    # Fast path: positive cache.
+    # Fast path: positive cache. A CLI already found to lack --ignore-rules is not usable (BIND-8): a dict read, no I/O.
     if _CODEX_BINARY_PATH is not None:
-        return True
+        return _RULES_SUPPORT.get(_CODEX_BINARY_PATH) is not False
 
     # Negative cache → rate-limited re-probe.
     now = time.monotonic()
@@ -243,7 +319,7 @@ def is_codex_available() -> bool:
             # Plugin probe failure is non-fatal; the binary alone is enough
             # to route through Codex.
             pass
-    return _CODEX_BINARY_PATH is not None
+    return _CODEX_BINARY_PATH is not None and _RULES_SUPPORT.get(_CODEX_BINARY_PATH) is not False
 
 
 def _reset_codex_cache_for_tests() -> None:
@@ -257,6 +333,8 @@ def _reset_codex_cache_for_tests() -> None:
     _CODEX_BINARY_PATH = None
     _CODEX_PLUGIN_AVAILABLE = False
     _LAST_PROBE_TS = 0.0
+    _RULES_SUPPORT.clear()
+    _RULES_UNKNOWN_UNTIL.clear()
 
 
 def is_codex_plugin_available() -> bool:
@@ -364,25 +442,35 @@ def _render_pack_prompt(pack) -> str:
 #: ask for an unsandboxed run through this function.
 SANDBOX_MODES = ("read-only", "workspace-write")
 
+#: The config override that removes Codex's hosted ``web_search`` tool from a delegated run (docs/bugs/BIND-9.md). That tool
+#: is executed by the model provider, not inside the local sandbox, so ``network_access=false`` does not touch it; it is
+#: offered by default in every sandbox mode (codex-cli 0.161.0: the tools a stub model is sent; ``disabled`` removes it, the
+#: older ``tools.web_search=false`` and ``--disable web_search`` do not).
+WEB_SEARCH_OFF = 'web_search="disabled"'
+
 
 def codex_exec_args(binary: str, *, model: str, cwd: str, prompt: str, sandbox: str | None = None) -> list[str]:
     """The argv of one ``codex exec`` run. All arguments are separate list items -- no shell expansion.
 
-    ``sandbox=None`` adds no sandbox flag, so ``codex exec`` keeps its own default (read-only); that is what every
-    pure-LLM caller gets, and their argv is unchanged. A delegated agent run (owner decision D-357, 2026-11-03)
-    passes ``"workspace-write"`` or ``"read-only"`` and gets three more guarantees, each checked live against
-    codex-cli 0.161.0 with a stub model on loopback (tests/test_bind_codex_sandbox_live.py):
+    EVERY caller gets ``--ignore-rules``: no execpolicy ``.rules`` file, user or project, is loaded. ``--ignore-user-config``
+    does NOT cover rules, and a rule such as ``prefix_rule(pattern=["curl"], decision="allow")`` makes Codex run a matching
+    command OUTSIDE the sandbox, with network, whatever the sandbox mode (docs/BUGS.md BIND-6; the router chain and the MCP
+    tools were exposed the same way, BIND-8). The owner's own rules allow ``curl``, ``git push`` and ``gh pr merge``.
+    ``run_codex`` does not start a CLI that does not list the flag (:func:`unprotected_refusal`).
 
-    * ``--ignore-rules``: no execpolicy ``.rules`` file, user or project, is loaded. ``--ignore-user-config`` does NOT
-      cover rules, and a rule such as ``prefix_rule(pattern=["curl"], decision="allow")`` makes Codex run a matching
-      command OUTSIDE the sandbox, with network, in either mode (docs/BUGS.md BIND-6). The owner's own rules allow
-      ``curl``, ``git push`` and ``gh pr merge``.
+    ``sandbox=None`` adds no sandbox flag, so ``codex exec`` keeps its own default (read-only); that is what every
+    pure-LLM caller gets. A delegated agent run (owner decision D-357, 2026-11-03) passes ``"workspace-write"`` or
+    ``"read-only"`` and gets two more guarantees, each checked live against codex-cli 0.161.0 with a stub model on loopback
+    (tests/test_bind_codex_sandbox_live.py):
+
     * ``workspace-write`` turns the network OFF explicitly (``sandbox_workspace_write.network_access=false``, so the
       run does not depend on the default staying off) and drops ``/tmp`` and ``$TMPDIR`` from the writable roots
       (``exclude_slash_tmp``, ``exclude_tmpdir_env_var``), which leaves the work tree itself as the only writable
       root; ``run_codex`` gives the run a temp dir of its own inside it (:func:`make_run_tmpdir`).
+    * both modes remove Codex's hosted ``web_search`` tool (``-c web_search="disabled"``), which the model provider runs
+      outside the sandbox and which is offered by default (BIND-9).
     * the flags sit before ``-m`` and are not user-configurable, because ``--ignore-user-config`` means no
-      ``config.toml`` can widen them.
+      ``config.toml`` can widen them (and ``--ignore-rules`` no rules file).
 
     ``codex debug prompt-input`` reports what the MODEL is told ("Network access is restricted"); it does not show
     enforcement. Enforcement is the live test.
@@ -417,9 +505,7 @@ def codex_exec_args(binary: str, *, model: str, cwd: str, prompt: str, sandbox: 
     # subprocess llm_router itself spawned. `-c model_provider=openai` below
     # is a direct config override, not a config.toml read, so it still applies
     # with the file ignored.
-    args = [binary, "exec", "--json", "--ignore-user-config"]
-    if sandbox in SANDBOX_MODES:
-        args += ["--ignore-rules"]
+    args = [binary, "exec", "--json", "--ignore-user-config", IGNORE_RULES_FLAG]
     if sandbox == "workspace-write":
         args += ["--sandbox", "workspace-write",
                  "-c", "sandbox_workspace_write.network_access=false",
@@ -427,6 +513,8 @@ def codex_exec_args(binary: str, *, model: str, cwd: str, prompt: str, sandbox: 
                  "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"]
     elif sandbox == "read-only":
         args += ["--sandbox", "read-only"]
+    if sandbox in SANDBOX_MODES:  # a delegated run has no network: the provider-side search tool goes with it (BIND-9)
+        args += ["-c", WEB_SEARCH_OFF]
     args += [
         "-m", model,
         "-c", "model_provider=openai",
@@ -600,6 +688,13 @@ async def run_codex(
             model=model, exit_code=1, duration_sec=0.0,
             reason_code="binary_missing",
         )
+
+    # BIND-8: never start a CLI that cannot ignore execpolicy rules. The probe runs once per binary, off the event loop.
+    if binary not in _RULES_SUPPORT:
+        await asyncio.to_thread(codex_supports_ignore_rules, binary)
+    refusal = unprotected_refusal(binary)
+    if refusal is not None:
+        return CodexResult(content=refusal, model=model, exit_code=1, duration_sec=0.0, reason_code="no_ignore_rules")
 
     cwd = working_dir or os.getcwd()
 

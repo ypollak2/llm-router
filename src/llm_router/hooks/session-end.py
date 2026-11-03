@@ -3226,15 +3226,17 @@ def _render_rich_summary(session_start, paid_rows, cc_rows, free_rows, tools,
 def _init_hook_logging() -> None:
     # LiteLLM keeps its own handler, which writes every record below WARNING to sys.stdout (looked up when the record
     # is emitted) and takes its level, DEBUG by default, from LITELLM_LOG when it is imported. ERROR keeps it off the
-    # decision channel: set before the import, and on its loggers if it is already imported. An explicit LITELLM_LOG
-    # still wins. Only the script entry changes the process: a test that calls main() must not.
+    # decision channel, and the hook FORCES it: an explicit LITELLM_LOG=DEBUG in the user's environment used to win
+    # here, put LiteLLM's records in front of this hook's JSON, and the host dropped the whole output
+    # (docs/bugs/BIND-10.md). The variable is set before the import, and the loggers on their own in case LiteLLM is
+    # already imported. Only the script entry changes the process: a test that calls main() must not.
     if __name__ == "__main__":
         import logging as _ll_logging
         import os as _ll_os
 
-        if _ll_os.environ.setdefault("LITELLM_LOG", "ERROR") == "ERROR":  # unset, or already ERROR: not an explicit DEBUG
-            for _ll_name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
-                _ll_logging.getLogger(_ll_name).setLevel(_ll_logging.ERROR)
+        _ll_os.environ.update(LITELLM_LOG="ERROR")
+        for _ll_name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
+            _ll_logging.getLogger(_ll_name).setLevel(_ll_logging.ERROR)
     try:
         from llm_router.logging import configure_logging_lazily
 

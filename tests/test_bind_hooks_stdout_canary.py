@@ -17,6 +17,10 @@ A second canary does the same through LiteLLM's OWN logger (S4 of the independen
 writes every record below WARNING to ``sys.stdout``, at a level it reads from ``LITELLM_LOG`` (default DEBUG) when it is
 imported, and the structlog canary above never touches it. It runs with LiteLLM imported late (after the hook's guard) and
 early (before it), and a control shows the canary does reach stdout when the level is DEBUG.
+
+N4 (re-review of PR #818): an explicit ``LITELLM_LOG=DEBUG`` in the user's environment used to win over the hooks' guard
+and put LiteLLM's records in front of the JSON of all ten hooks that carry it. The same LiteLLM canary now also runs with
+that value set, in both import orders: the guard forces the level (docs/bugs/BIND-10.md).
 """
 
 from __future__ import annotations
@@ -225,26 +229,31 @@ def test_hook_stdout_is_only_its_json_even_when_libraries_log(name, tmp_path, ca
         f"{proc.stderr[-500:]}")
 
 
-def _canary_env(tmp_path, canary_dir, mode):
+def _canary_env(tmp_path, canary_dir, mode, explicit=None):
     env = hook_env(tmp_path, LLM_ROUTER_AGENT_ROUTE_CODEX="off", CANARY_LITELLM=mode,
                    CANARY_FIRED=str(tmp_path / "litellm-fired.txt"))
-    env.pop("LITELLM_LOG", None)  # an explicit value wins over the hook's default: this test is about the default
+    env.pop("LITELLM_LOG", None)  # nothing the user set ...
+    if explicit:
+        env["LITELLM_LOG"] = explicit  # ... or the user's own value, which must not win over the hook's guard (N4)
     env["PYTHONPATH"] = f"{canary_dir}:{env['PYTHONPATH']}"
     return env
 
 
+@pytest.mark.parametrize("explicit", [None, "DEBUG"], ids=["env-unset", "explicit-DEBUG"])
 @pytest.mark.parametrize("mode", ["late", "early"])
 @pytest.mark.parametrize("name", sorted(set(PAYLOADS) - LITELLM_NOT_HERE))
-def test_hook_stdout_is_only_its_json_even_when_litellm_logs(name, mode, tmp_path, canary_dir):
+def test_hook_stdout_is_only_its_json_even_when_litellm_logs(name, mode, explicit, tmp_path, canary_dir):
     """S4: LiteLLM's own handler writes records below WARNING to stdout. The hook must keep them off, whether LiteLLM is
-    imported after its guard (``late``: the default level is set first) or before it (``early``: its loggers are set)."""
-    env = _canary_env(tmp_path, canary_dir, mode)
+    imported after its guard (``late``: the level is forced first) or before it (``early``: its loggers are set), and
+    whether the user's environment says nothing or says ``LITELLM_LOG=DEBUG`` (N4)."""
+    env = _canary_env(tmp_path, canary_dir, mode, explicit)
     proc = subprocess.run(
         [sys.executable, str(HOOKS / name)], input=json.dumps(PAYLOADS[name]), capture_output=True, text=True,
         env=env, cwd=str(tmp_path), timeout=120)
     assert "CANARY-BROKEN" not in proc.stderr, proc.stderr[-400:]
     decision_of(proc)  # empty or exactly one JSON object
-    assert LITELLM_MARK not in proc.stdout, f"{name} ({mode}): LiteLLM's handler reached stdout:\n{proc.stdout[:300]}"
+    assert LITELLM_MARK not in proc.stdout, (
+        f"{name} ({mode}, LITELLM_LOG={explicit}): LiteLLM's handler reached stdout:\n{proc.stdout[:300]}")
     fired = (tmp_path / "litellm-fired.txt").read_text().split() if (tmp_path / "litellm-fired.txt").exists() else []
     assert "atexit" in fired and ({"stdin", "dumps"} & set(fired)), (  # the canary ran after the work and inside main()
         f"{name} ({mode}): the LiteLLM canary never fired inside main(): {fired}\n{proc.stderr[-300:]}")

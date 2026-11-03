@@ -47,6 +47,7 @@ def write_codex_stub(
     answer: str = "STUB-CODEX-ANSWER",
     argv_log: Path | None = None,
     sleep_s: float = 0.0,
+    help_lists_ignore_rules: bool = True,
 ) -> Path:
     """Write an executable named ``codex`` that behaves like ``codex exec --json`` and return its path.
 
@@ -54,11 +55,24 @@ def write_codex_stub(
     ``fail`` (no events, exit 2). Each call appends ``{"argv": [...], "cwd": ..., "tmpdir": ..., "tmpdir_exists": ...}``
     to ``argv_log`` so a test can assert what the hook really launched. The script embeds its configuration, so it does not depend on
     which environment variables the hook passes to the child.
+
+    ``codex exec --help`` is the capability probe ``run_codex`` makes once per process (BIND-8): the stub answers it with a
+    help text that does, or with ``help_lists_ignore_rules=False`` does not, list ``--ignore-rules``, and appends one line
+    to ``<argv_log>.probes`` instead of ``argv_log``, so a launch count never includes a probe.
     """
     directory.mkdir(parents=True, exist_ok=True)
     body = textwrap.dedent(
         f"""\
         import json, os, sys, time
+        if sys.argv[1:3] == ["exec", "--help"]:
+            HELP = "Usage: codex exec [OPTIONS]\\n      --ignore-user-config\\n          Do not load config.toml\\n" + (
+                "\\n      --ignore-rules\\n          Do not load user or project execpolicy .rules files\\n"
+                if {help_lists_ignore_rules!r} else "")
+            if {str(argv_log) + ".probes" if argv_log else None!r}:
+                with open({str(argv_log) + ".probes" if argv_log else None!r}, "a") as fh:
+                    fh.write("probe\\n")
+            sys.stdout.write(HELP)
+            sys.exit(0)
         MODE = {mode!r}
         ANSWER = {answer!r}
         QUOTA = {quota_text()!r}
