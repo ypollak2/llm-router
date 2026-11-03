@@ -120,8 +120,8 @@ def test_phase2_cli_path_also_uses_the_configured_model(hook, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_CODEX_AGENT_MODEL", "gpt-5.5-mini")
     monkeypatch.setattr("llm_router.hooks.chain_builder.needs_claude_tools", lambda *a, **k: True)
     monkeypatch.setattr(hook, "_get_remaining_budget", lambda: 10.0)
-    monkeypatch.setattr(hook, "_log_cli_savings", lambda *a, **k: None)
-    monkeypatch.setattr(hook, "_govern_run", lambda *a, **k: None)
+    # _log_cli_savings and _govern_run run for real: replacing the first one is what let its stdout line
+    # (voiding every handoff) go unseen. Their state lands in the isolated LLM_ROUTER_HOME.
     codex = _Codex(monkeypatch, [_ok("gpt-5.5-mini")])
     out = hook._try_cli_delegation("fix the failing build", "code", "complex", "s", "general-purpose")
     assert out == "answer"
@@ -403,29 +403,49 @@ def test_delegation_resumes_once_the_bench_has_passed(hook, monkeypatch):
     assert codex.models == ["gpt-6-astra"]
 
 
-def test_quota_on_primary_only_benches_that_model_and_falls_back(hook, monkeypatch):
+def test_quota_on_primary_only_benches_that_model_and_does_not_fall_back(hook, monkeypatch):
+    """BIND F5: gpt-5.5 as the fallback after a usage limit made 47 attempts and none succeeded (36 CLI warnings
+    with no answer, 11 more usage limits; docs/BUGS.md BIND-3). A usage limit on the primary benches that model and
+    ends the dispatch; the same holds for every later spawn until the reset."""
     text = "codex: " + _quota_text()
     codex = _Codex(monkeypatch, [
-        _fail("gpt-6-astra", text), _ok("gpt-5.5", "from 5.5"),
-        _ok("gpt-5.5", "second from 5.5"),
+        _fail("gpt-6-astra", text), _ok("gpt-5.5", "from 5.5"), _ok("gpt-5.5", "second from 5.5"),
     ])
-    assert _ns3(hook) == "from 5.5"
-    assert codex.models == ["gpt-6-astra", "gpt-5.5"]
+    assert _ns3(hook) is None
+    assert codex.models == ["gpt-6-astra"]  # no second call
     assert provider_reset.is_provider_reset_blocked("codex:gpt-6-astra")
-    assert not provider_reset.is_provider_reset_blocked("codex")  # the account still works
+    assert not provider_reset.is_provider_reset_blocked("codex")  # the account itself is not benched
 
-    # The next spawn goes straight to gpt-5.5 instead of re-hitting the dead model.
     hook2 = _load_hook()
-    assert _ns3(hook2) == "second from 5.5"
-    assert codex.models == ["gpt-6-astra", "gpt-5.5", "gpt-5.5"]
+    assert _ns3(hook2) is None  # the next spawn is skipped before any process starts
+    assert codex.models == ["gpt-6-astra"]
+    rows = _ledger(os.environ["LLM_ROUTER_HOME"])
+    assert [r["outcome"] for r in rows] == ["codex_quota", "benched"]
 
 
-def test_quota_on_both_models_benches_the_account(hook, monkeypatch):
+def test_a_usage_limit_on_the_primary_never_starts_the_fallback(hook, monkeypatch):
+    """Replaces the case where quota on BOTH models benched the account: the second model is never tried."""
     text = "codex: " + _quota_text()
     codex = _Codex(monkeypatch, [_fail("gpt-6-astra", text), _fail("gpt-5.5", text)])
     assert _ns3(hook) is None
+    assert codex.models == ["gpt-6-astra"]
+    assert provider_reset.is_provider_reset_blocked("codex:gpt-6-astra")
+
+
+def test_the_fallback_is_still_used_when_the_account_lacks_the_primary_model(hook, monkeypatch):
+    """The one case the fallback still serves: the primary model does not exist for this account."""
+    codex = _Codex(monkeypatch, [_fail("gpt-6-astra", "codex: Unknown model gpt-6-astra"),
+                                 _ok("gpt-5.5", "from 5.5")])
+    assert _ns3(hook) == "from 5.5"
     assert codex.models == ["gpt-6-astra", "gpt-5.5"]
-    assert provider_reset.is_provider_reset_blocked("codex")
+
+
+def test_the_fallback_is_skipped_when_the_account_is_benched_in_between(hook, monkeypatch):
+    provider_reset.record_provider_reset("codex", time.time() + 7200, reason="usage limit")
+    codex = _Codex(monkeypatch, [_ok("gpt-6-astra")])
+    res, status = hook._run_codex_agent("again", 300, None)
+    assert status == "benched" and res is None
+    assert codex.calls == []
 
 
 def test_unparseable_usage_limit_still_benches_for_a_bounded_time(hook, monkeypatch):

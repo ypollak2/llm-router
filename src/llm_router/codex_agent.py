@@ -13,8 +13,11 @@ import asyncio
 import json
 import logging
 import os
+import re
+import shutil
 import signal
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,6 +133,81 @@ _CODEX_PLUGIN_AVAILABLE: bool = False
 _PROBE_INTERVAL_SEC: float = 60.0
 _LAST_PROBE_TS: float = 0.0
 
+# ── --ignore-rules: no unprotected codex exec (docs/bugs/BIND-8.md) ───────────────────────────────────────────────
+#: Every ``codex exec`` this repo starts carries this flag, but the frozen CLS-DEV study script's (BIND-8). ``--ignore-user-config`` does NOT stop Codex loading execpolicy
+#: ``.rules`` files, and a rule such as ``prefix_rule(pattern=["curl"], decision="allow")`` makes Codex run a matching
+#: command OUTSIDE its sandbox, with network, whatever the sandbox mode (docs/bugs/BIND-6.md). The owner's own rules allow
+#: ``curl``, ``git push`` and ``gh pr merge``. A CLI that does not list the flag is not started at all.
+IGNORE_RULES_FLAG = "--ignore-rules"
+_IGNORE_RULES_RX = re.compile(r"(?<![\w-])--ignore-rules(?![\w-])")
+_RULES_PROBE_TIMEOUT_S = 15.0
+_RULES_REPROBE_S = 60.0
+#: binary path -> whether ``<binary> exec --help`` lists the flag. A definitive answer is kept for the life of the process.
+_RULES_SUPPORT: dict[str, bool] = {}
+#: binary path -> monotonic time before which a probe that could not run (a hung or broken binary) is not repeated.
+_RULES_UNKNOWN_UNTIL: dict[str, float] = {}
+
+
+def _probe_ignore_rules(binary: str) -> bool | None:
+    """True or False from ``<binary> exec --help``; None when the probe could not run or answer."""
+    import subprocess
+
+    from llm_router.safe_subprocess import get_safe_env
+
+    try:
+        proc = subprocess.run([binary, "exec", "--help"], capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                              timeout=_RULES_PROBE_TIMEOUT_S, env=get_safe_env(), check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0 or not text.strip():
+        return None
+    return bool(_IGNORE_RULES_RX.search(text))
+
+
+def codex_supports_ignore_rules(binary: str) -> bool:
+    """Whether ``binary`` lists ``--ignore-rules`` in ``exec --help``. Asked once per binary and remembered. A binary that
+    cannot answer counts as NOT supporting it (fail closed) and is not asked again for a minute, so a hung CLI costs one
+    probe and not one per call. Never raises."""
+    known = _RULES_SUPPORT.get(binary)
+    if known is not None:
+        return known
+    retry_after = _RULES_UNKNOWN_UNTIL.get(binary)
+    if retry_after is not None and time.monotonic() < retry_after:
+        return False
+    answer = _probe_ignore_rules(binary)
+    if answer is None:
+        _RULES_UNKNOWN_UNTIL[binary] = time.monotonic() + _RULES_REPROBE_S
+        return False
+    _RULES_SUPPORT[binary] = answer
+    return answer
+
+
+def unprotected_refusal(binary: str) -> str | None:
+    """None when ``binary`` supports ``--ignore-rules``. Otherwise the reason this call must not run it, after a WARNING log
+    line and a fail-open row (``CHZ-FO-CODEX-NO-IGNORE-RULES``): the caller reports Codex unavailable for this call and
+    routing falls back. Starting the CLI without the flag would let a user execpolicy rule run commands unsandboxed."""
+    if codex_supports_ignore_rules(binary):
+        return None
+    msg = (f"codex: {binary} does not list {IGNORE_RULES_FLAG} in `exec --help` (or its help could not be read), so a user "
+           "execpolicy rule could run a command outside the sandbox; it is not started unprotected. Update the Codex CLI "
+           "(docs/bugs/BIND-8.md).")
+    log.warning("codex_unprotected_refused: %s", msg)
+    try:
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-CODEX-NO-IGNORE-RULES", None, detail=binary)
+    except Exception:  # noqa: BLE001 -- accounting must never turn a refusal into a crash
+        pass
+    return msg
+
+
+def codex_unsupported_binary() -> str | None:
+    """The Codex binary this process uses when it is KNOWN not to list ``--ignore-rules`` (so :func:`is_codex_available` is
+    False for that reason and not because Codex is missing), else None. A dict read: no I/O, safe on the event loop."""
+    path = _CODEX_BINARY_PATH
+    return path if path is not None and _RULES_SUPPORT.get(path) is False else None
+
 
 def _initialize_codex_cache() -> None:
     """Initialize Codex availability cache at module import time.
@@ -221,9 +299,9 @@ def is_codex_available() -> bool:
     """
     global _CODEX_BINARY_PATH, _CODEX_PLUGIN_AVAILABLE, _LAST_PROBE_TS
 
-    # Fast path: positive cache.
+    # Fast path: positive cache. A CLI already found to lack --ignore-rules is not usable (BIND-8): a dict read, no I/O.
     if _CODEX_BINARY_PATH is not None:
-        return True
+        return _RULES_SUPPORT.get(_CODEX_BINARY_PATH) is not False
 
     # Negative cache → rate-limited re-probe.
     now = time.monotonic()
@@ -241,7 +319,7 @@ def is_codex_available() -> bool:
             # Plugin probe failure is non-fatal; the binary alone is enough
             # to route through Codex.
             pass
-    return _CODEX_BINARY_PATH is not None
+    return _CODEX_BINARY_PATH is not None and _RULES_SUPPORT.get(_CODEX_BINARY_PATH) is not False
 
 
 def _reset_codex_cache_for_tests() -> None:
@@ -255,6 +333,8 @@ def _reset_codex_cache_for_tests() -> None:
     _CODEX_BINARY_PATH = None
     _CODEX_PLUGIN_AVAILABLE = False
     _LAST_PROBE_TS = 0.0
+    _RULES_SUPPORT.clear()
+    _RULES_UNKNOWN_UNTIL.clear()
 
 
 def is_codex_plugin_available() -> bool:
@@ -358,6 +438,163 @@ def _render_pack_prompt(pack) -> str:
     return "\n\n".join(parts)
 
 
+#: Sandbox modes ``run_codex(sandbox=...)`` accepts. ``danger-full-access`` is deliberately absent: no caller may
+#: ask for an unsandboxed run through this function.
+SANDBOX_MODES = ("read-only", "workspace-write")
+
+#: The config override that removes Codex's hosted ``web_search`` tool from a delegated run (docs/bugs/BIND-9.md). That tool
+#: is executed by the model provider, not inside the local sandbox, so ``network_access=false`` does not touch it; it is
+#: offered by default in every sandbox mode (codex-cli 0.161.0: the tools a stub model is sent; ``disabled`` removes it, the
+#: older ``tools.web_search=false`` and ``--disable web_search`` do not).
+WEB_SEARCH_OFF = 'web_search="disabled"'
+
+
+def codex_exec_args(binary: str, *, model: str, cwd: str, prompt: str, sandbox: str | None = None) -> list[str]:
+    """The argv of one ``codex exec`` run. All arguments are separate list items -- no shell expansion.
+
+    EVERY caller gets ``--ignore-rules``: no execpolicy ``.rules`` file, user or project, is loaded. ``--ignore-user-config``
+    does NOT cover rules, and a rule such as ``prefix_rule(pattern=["curl"], decision="allow")`` makes Codex run a matching
+    command OUTSIDE the sandbox, with network, whatever the sandbox mode (docs/BUGS.md BIND-6; the router chain and the MCP
+    tools were exposed the same way, BIND-8). The owner's own rules allow ``curl``, ``git push`` and ``gh pr merge``.
+    ``run_codex`` does not start a CLI that does not list the flag (:func:`unprotected_refusal`).
+
+    ``sandbox=None`` adds no sandbox flag, so ``codex exec`` keeps its own default (read-only); that is what every
+    pure-LLM caller gets. A delegated agent run (owner decision D-357, 2026-11-03) passes ``"workspace-write"`` or
+    ``"read-only"`` and gets two more guarantees, each checked live against codex-cli 0.161.0 with a stub model on loopback
+    (tests/test_bind_codex_sandbox_live.py):
+
+    * ``workspace-write`` turns the network OFF explicitly (``sandbox_workspace_write.network_access=false``, so the
+      run does not depend on the default staying off) and drops ``/tmp`` and ``$TMPDIR`` from the writable roots
+      (``exclude_slash_tmp``, ``exclude_tmpdir_env_var``), which leaves the work tree itself as the only writable
+      root; ``run_codex`` gives the run a temp dir of its own inside it (:func:`make_run_tmpdir`).
+    * both modes remove Codex's hosted ``web_search`` tool (``-c web_search="disabled"``), which the model provider runs
+      outside the sandbox and which is offered by default (BIND-9).
+    * the flags sit before ``-m`` and are not user-configurable, because ``--ignore-user-config`` means no
+      ``config.toml`` can widen them (and ``--ignore-rules`` no rules file).
+
+    ``codex debug prompt-input`` reports what the MODEL is told ("Network access is restricted"); it does not show
+    enforcement. Enforcement is the live test.
+    """
+    # All arguments passed as separate list items — no shell expansion.
+    # --skip-git-repo-check: llm_router is a pure-LLM consumer, not a code-edit
+    # client; without this flag Codex CLI v0.133+ refuses to run when ``cwd``
+    # is outside a trusted git repo ("Not inside a trusted directory and
+    # --skip-git-repo-check was not specified") and exits non-zero — which
+    # the router then logs as "Codex exited 1" and skips Codex for the
+    # entire chain. Always-on is safe for a pure-LLM call because we never ask
+    # Codex to mutate the working tree; the one exception is a delegated agent
+    # run (``sandbox="workspace-write"`` above), which is writable on purpose
+    # and has the network off.
+    # --json: emit JSONL events line-by-line for streaming progress visibility
+    #
+    # -c model_provider=openai: LLM Router's own installer (commands/install.py,
+    # _install_codex_gateway_config) sets `model_provider = "llm_router"` as the
+    # GLOBAL default in ~/.codex/config.toml, looping Codex's own calls back
+    # through LLM Router's local gateway (127.0.0.1:17900) for its own routing
+    # benefits. That gateway doesn't yet speak the exact OpenAI "responses"
+    # wire shape Codex's client expects, so every call through it fails with
+    # an undecodable-stream error. This dispatch must always reach the real
+    # ChatGPT-authenticated backend regardless of that global default, so the
+    # provider is pinned back to the built-in "openai" provider here — scoped
+    # to this one subprocess call, no edit to the user's global config.
+    # --ignore-user-config: skips loading ~/.codex/config.toml entirely (auth
+    # still comes from CODEX_HOME). This repo's own installer can register
+    # llm_router as an MCP tool server inside that file — separate from the
+    # model_provider loop-back handled above — and an agentic Codex run that
+    # calls its own MCP tools could reach back into llm_router from inside a
+    # subprocess llm_router itself spawned. `-c model_provider=openai` below
+    # is a direct config override, not a config.toml read, so it still applies
+    # with the file ignored.
+    args = [binary, "exec", "--json", "--ignore-user-config", IGNORE_RULES_FLAG]
+    if sandbox == "workspace-write":
+        args += ["--sandbox", "workspace-write",
+                 "-c", "sandbox_workspace_write.network_access=false",
+                 "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+                 "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"]
+    elif sandbox == "read-only":
+        args += ["--sandbox", "read-only"]
+    if sandbox in SANDBOX_MODES:  # a delegated run has no network: the provider-side search tool goes with it (BIND-9)
+        args += ["-c", WEB_SEARCH_OFF]
+    args += [
+        "-m", model,
+        "-c", "model_provider=openai",
+        "--color", "never",
+        "--skip-git-repo-check",
+        "-C", cwd,
+        prompt,
+    ]
+    return args
+
+
+#: The directory, inside a delegated run's writable root, that holds one temp dir per run. ``/tmp`` and ``$TMPDIR`` are not
+#: writable in a delegated run (:func:`codex_exec_args`), so tests and tools that need a temp dir get this one through
+#: ``TMPDIR``. Its own ``.gitignore`` (``*``, which also ignores the file itself) keeps it out of ``git status`` and out
+#: of any commit; it is created before the run, the run's dir is removed after it, and a dir a killed run left behind
+#: is removed by the next run once it is a day old.
+RUN_TMP_PARENT = ".llm-router-codex-tmp"
+_RUN_TMP_STALE_S = 24 * 3600
+_RUN_ID_CHARS = frozenset("0123456789abcdef")
+
+
+def make_run_tmpdir(root: str) -> str | None:
+    """Create ``<root>/.llm-router-codex-tmp/<run-id>`` (0700) and return it, or None when it cannot be made (the run
+    then has no temp dir at all: it still stays inside its sandbox).
+
+    The parent must be a real directory inside ``root``. A repository can ship ``.llm-router-codex-tmp`` as a symlink to
+    somewhere else, and a delegated run can swap it for one while it runs (``root`` is writable): following it would put
+    the run dir, and the stale-dir pruning below, outside the work tree."""
+    parent = os.path.join(root, RUN_TMP_PARENT)
+    try:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        if os.path.islink(parent) or os.path.realpath(parent) != os.path.join(os.path.realpath(root), RUN_TMP_PARENT):
+            return None
+        try:
+            fd = os.open(os.path.join(parent, ".gitignore"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            try:
+                os.write(fd, b"*\n")
+            finally:
+                os.close(fd)
+        _prune_stale_run_tmpdirs(parent)
+        path = os.path.join(parent, uuid.uuid4().hex[:12])
+        os.mkdir(path, 0o700)
+        return path
+    except OSError:
+        return None
+
+
+def _prune_stale_run_tmpdirs(parent: str) -> None:
+    """Remove run dirs (named like the ones :func:`make_run_tmpdir` makes) that are over a day old."""
+    cutoff = time.time() - _RUN_TMP_STALE_S
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(parent, name)
+        try:
+            if (len(name) == 12 and set(name) <= _RUN_ID_CHARS and os.path.isdir(path)
+                    and not os.path.islink(path) and os.stat(path).st_mtime < cutoff):
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def remove_run_tmpdir(path: str | None) -> None:
+    """Remove one run's temp dir (never raises). A symlink is unlinked, not followed."""
+    if not path:
+        return
+    try:
+        if os.path.islink(path):
+            os.unlink(path)
+        else:
+            shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
+
+
 async def run_codex(
     prompt: str,
     model: str = "gpt-5.5",
@@ -368,6 +605,7 @@ async def run_codex(
     messages: list | None = None,
     transcript_path: str | None = None,
     target_window: int = CODEX_TARGET_WINDOW,
+    sandbox: str | None = None,
 ) -> CodexResult:
     """Run a task through the Codex CLI agent as a subprocess.
 
@@ -411,6 +649,14 @@ async def run_codex(
             from. A missing or unreadable file falls back to ``messages``.
         target_window: Token window the pack is sized against (default
             ``CODEX_TARGET_WINDOW``, an unsourced assumption).
+        sandbox: ``None`` (default) passes no sandbox flag, so ``codex exec`` keeps its own
+            default (read-only): every pure-LLM caller (router chain, MCP tools, evaluators).
+            ``"workspace-write"`` is for a delegated AGENT run (agent-route, D-357): the working
+            directory is writable, the network is off, ``/tmp`` and ``$TMPDIR`` are not writable, and the
+            child's ``TMPDIR`` is a per-run directory inside the working directory (created before the run,
+            removed after it). ``"read-only"`` is the same without writes. Both ignore execpolicy rules
+            (:func:`codex_exec_args`). Anything else is refused: no caller may ask for ``danger-full-access``
+            through here.
 
     Returns:
         A ``CodexResult`` with the process output, model name, exit code,
@@ -443,6 +689,13 @@ async def run_codex(
             reason_code="binary_missing",
         )
 
+    # BIND-8: never start a CLI that cannot ignore execpolicy rules. The probe runs once per binary, off the event loop.
+    if binary not in _RULES_SUPPORT:
+        await asyncio.to_thread(codex_supports_ignore_rules, binary)
+    refusal = unprotected_refusal(binary)
+    if refusal is not None:
+        return CodexResult(content=refusal, model=model, exit_code=1, duration_sec=0.0, reason_code="no_ignore_rules")
+
     cwd = working_dir or os.getcwd()
 
     # Use configurable timeout if not explicitly provided
@@ -450,50 +703,24 @@ async def run_codex(
         from llm_router.timeout_config import codex_timeout
         timeout = codex_timeout()
 
-    # All arguments passed as separate list items — no shell expansion.
-    # --skip-git-repo-check: llm_router is a pure-LLM consumer, not a code-edit
-    # client; without this flag Codex CLI v0.133+ refuses to run when ``cwd``
-    # is outside a trusted git repo ("Not inside a trusted directory and
-    # --skip-git-repo-check was not specified") and exits non-zero — which
-    # the router then logs as "Codex exited 1" and skips Codex for the
-    # entire chain. Always-on is safe because we never ask Codex to mutate
-    # the working tree.
-    # --json: emit JSONL events line-by-line for streaming progress visibility
-    #
-    # -c model_provider=openai: LLM Router's own installer (commands/install.py,
-    # _install_codex_gateway_config) sets `model_provider = "llm_router"` as the
-    # GLOBAL default in ~/.codex/config.toml, looping Codex's own calls back
-    # through LLM Router's local gateway (127.0.0.1:17900) for its own routing
-    # benefits. That gateway doesn't yet speak the exact OpenAI "responses"
-    # wire shape Codex's client expects, so every call through it fails with
-    # an undecodable-stream error. This dispatch must always reach the real
-    # ChatGPT-authenticated backend regardless of that global default, so the
-    # provider is pinned back to the built-in "openai" provider here — scoped
-    # to this one subprocess call, no edit to the user's global config.
-    # --ignore-user-config: skips loading ~/.codex/config.toml entirely (auth
-    # still comes from CODEX_HOME). This repo's own installer can register
-    # llm_router as an MCP tool server inside that file — separate from the
-    # model_provider loop-back handled above — and an agentic Codex run that
-    # calls its own MCP tools could reach back into llm_router from inside a
-    # subprocess llm_router itself spawned. `-c model_provider=openai` below
-    # is a direct config override, not a config.toml read, so it still applies
-    # with the file ignored.
-    args = [
-        binary, "exec",
-        "--json",
-        "--ignore-user-config",
-        "-m", model,
-        "-c", "model_provider=openai",
-        "--color", "never",
-        "--skip-git-repo-check",
-        "-C", cwd,
-        prompt,
-    ]
+    # argv: see codex_exec_args (one place for the flags and the reason for each).
+    if sandbox is not None and sandbox not in SANDBOX_MODES:
+        return CodexResult(
+            content=f"codex: unsupported sandbox mode {sandbox!r}; allowed: {', '.join(SANDBOX_MODES)}",
+            model=model, exit_code=1, duration_sec=0.0, reason_code="spawn_error",
+        )
+    args = codex_exec_args(binary, model=model, cwd=cwd, prompt=prompt, sandbox=sandbox)
 
     start = time.monotonic()
+    run_tmp: str | None = None
     try:
         # Use safe environment that excludes API keys and tokens
         safe_env = get_safe_env()
+        if sandbox == "workspace-write":
+            # /tmp and $TMPDIR are not writable in this mode, so the child's temp dir lives inside its root
+            run_tmp = make_run_tmpdir(cwd)
+            if run_tmp:
+                safe_env["TMPDIR"] = run_tmp
 
         # Codex CLI validates every configured model_provider at startup —
         # including ones this call never uses — and hard-fails the whole turn
@@ -716,6 +943,8 @@ async def run_codex(
             model=model, exit_code=1, duration_sec=time.monotonic() - start,
             reason_code="spawn_error",
         )
+    finally:
+        remove_run_tmpdir(run_tmp)
 
 
 # Initialize Codex cache at module import time (before any async routing code runs).

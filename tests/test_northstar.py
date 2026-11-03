@@ -775,6 +775,28 @@ def test_agent_route_codex_failed_is_discarded(tmp_path):
     assert codex[0]["signal"] == "agent_route_codex_failed"
 
 
+def test_agent_route_codex_blocked_is_a_discarded_attempt(tmp_path):
+    """BIND F5: Codex ran, its reply said the work was blocked, so it was not delivered. That is an invocation
+    whose output was discarded -- it must stay in the denominator (a unit), never vanish like a declined decision."""
+    sid = SID_MAIN
+    _write_north_star_units(tmp_path, [
+        {"ts": 1_800_000_050.0, "lever": "agent_route_codex", "model": "gpt-6-astra",
+         "outcome": "codex_blocked", "subagent_type": "general-purpose", "task_type": "code",
+         "complexity": "moderate", "session_id": sid, "reason_code": "blocked_answer",
+         "tool_use_id": "toolu_x"},
+    ])
+    records = [_user(sid, "please delegate this", 1_800_000_000)]
+    records += _bulk_user_prompts(sid, 60, start_ts=1_800_000_100)
+    proj = _project(tmp_path)
+    _write_jsonl(proj / f"{sid}.jsonl", records)
+
+    rows = list(ns.units(days=None, session_id=sid, root=proj.parent))
+    codex = [u for u in rows if u["kind"] == ns.UNIT_AGENT_ROUTE_CODEX]
+    assert len(codex) == 1
+    assert codex[0]["outcome"] == ns.OUTCOME_DISCARDED
+    assert codex[0]["signal"] == "agent_route_codex_blocked"
+
+
 def test_agent_route_codex_unsuitable_decision_is_not_a_unit(tmp_path):
     """A decision NOT to invoke Codex is not an attempt — no unit at all,
     same treatment as a drafting decision the router never made."""

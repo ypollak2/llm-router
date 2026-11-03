@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 4
+# llm_router-hook-version: 5
 """PostToolUse hook — compress Bash command outputs via RTK-style filtering.
 
 After every bash tool call:
@@ -175,8 +175,40 @@ def _extract_bash_output(payload: dict) -> tuple[str, str] | None:
     return command, output
 
 
+# -- stdout is the host's JSON channel: library logging goes to stderr (docs/BUGS.md BIND-1) --------
+# structlog's default sink is STDOUT. A log line in front of (or after) this hook's JSON makes Claude Code read
+# the whole output as plain text and drop the decision or context it carried; agent-route.py lost 317 of 317
+# Codex handoffs that way. configure_logging_lazily() points structlog at stdlib logging (stderr) the moment it
+# is first imported, as auto-route.py does. The fallback covers a host without the llm_router package.
+def _init_hook_logging() -> None:
+    # LiteLLM keeps its own handler, which writes every record below WARNING to sys.stdout (looked up when the record
+    # is emitted) and takes its level, DEBUG by default, from LITELLM_LOG when it is imported. ERROR keeps it off the
+    # decision channel, and the hook FORCES it: an explicit LITELLM_LOG=DEBUG in the user's environment used to win
+    # here, put LiteLLM's records in front of this hook's JSON, and the host dropped the whole output
+    # (docs/bugs/BIND-10.md). The variable is set before the import, and the loggers on their own in case LiteLLM is
+    # already imported. Only the script entry changes the process: a test that calls main() must not.
+    if __name__ == "__main__":
+        import logging as _ll_logging
+        import os as _ll_os
+
+        _ll_os.environ.update(LITELLM_LOG="ERROR")
+        for _ll_name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
+            _ll_logging.getLogger(_ll_name).setLevel(_ll_logging.ERROR)
+    try:
+        from llm_router.logging import configure_logging_lazily
+
+        configure_logging_lazily()
+    except Exception:  # noqa: BLE001 -- logging setup must never abort the hook
+        import logging as _logging
+
+        _root = _logging.getLogger()
+        if not _root.handlers:
+            _root.addHandler(_logging.StreamHandler(sys.stderr))
+
+
 def main() -> None:
     """Main entry point for PostToolUse hook."""
+    _init_hook_logging()
     # Allow opt-out via env var
     if os.environ.get("LLM_ROUTER_BASH_COMPRESS", "").lower() == "off":
         sys.exit(0)

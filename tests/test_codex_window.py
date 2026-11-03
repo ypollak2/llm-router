@@ -435,14 +435,17 @@ def test_phase2_gemini_path_releases_the_codex_reservation(hook, monkeypatch):
 
 def test_a_usage_limit_hit_mid_run_still_counts(hook, monkeypatch):
     _seed(3)
-    _Codex(monkeypatch, [
+    codex = _Codex(monkeypatch, [
         CodexResult(content="You've hit your usage limit. Try again in 3 hours.",
                     model="gpt-6-astra", exit_code=1, duration_sec=0.1),
         CodexResult(content="You've hit your usage limit. Try again in 3 hours.",
                     model="gpt-5.5", exit_code=1, duration_sec=0.1),
     ])
     assert _ns3(hook) is None
-    assert codex_window.snapshot().used == 5  # both dispatches spent a slot
+    # The dispatch that hit the limit spent its slot. The gpt-5.5 fallback is no longer tried after a usage
+    # limit (BIND F5: 0 successes in 47 attempts), so it spends none.
+    assert codex.calls == ["gpt-6-astra"]
+    assert codex_window.snapshot().used == 4
 
 
 def test_a_fallback_is_refused_when_the_window_filled_in_between(hook, monkeypatch):

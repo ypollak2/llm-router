@@ -813,7 +813,9 @@ def run_noop(prompt: str, sandbox: Path, model: str, timeout: int):
 
 def run_codex(prompt: str, sandbox: Path, model: str, timeout: int):
     out, err = _cli([
-        "codex", "exec", "--json", "-m", model,
+        # --ignore-rules: a user execpolicy `allow` rule would run its command outside the sandbox, with network
+        # (docs/bugs/BIND-8.md); a CLI that does not know the flag rejects it and runs nothing.
+        "codex", "exec", "--json", "--ignore-rules", "-m", model,
         "-c", "model_provider=openai",
         "--color", "never", "--skip-git-repo-check",
         "--sandbox", "workspace-write",
