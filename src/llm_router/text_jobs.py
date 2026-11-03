@@ -48,6 +48,28 @@ MAX_INPUT_CHARS = 40_000
 #: Initial attempt plus retries-with-feedback, same ceiling as edit.py.
 MAX_JOB_ATTEMPTS = 3
 
+#: Stable machine codes for a failed acceptance check (``TextJobResult.codes``). Fixed strings chosen by the
+#: checks below, never derived from the model's text, so a caller can branch on them without parsing prose.
+CODE_EMPTY = "empty"
+CODE_SUBJECT_TOO_LONG = "subject_too_long"
+CODE_GENERIC_SUBJECT = "generic_subject"
+CODE_COULD_NOT_IDENTIFY_FILES = "could_not_identify_files"
+CODE_NAMES_NO_CHANGED_FILE = "names_no_changed_file"
+CODE_TOO_SHORT = "too_short"
+CODE_NO_SUMMARY = "no_summary"
+CODE_NO_TEST_PLAN = "no_test_plan"
+CODE_DROPPED_FILE_REFS = "dropped_file_refs"
+CODE_DROPPED_EXIT_CODES = "dropped_exit_codes"
+CODE_DROPPED_ERROR_SIGNAL = "dropped_error_signal"
+#: The caller's default when a check failed but named no code (a stubbed or future checker).
+CODE_FAILED_CHECKS = "failed_checks"
+
+CHECK_CODES = frozenset({
+    CODE_EMPTY, CODE_SUBJECT_TOO_LONG, CODE_GENERIC_SUBJECT, CODE_COULD_NOT_IDENTIFY_FILES,
+    CODE_NAMES_NO_CHANGED_FILE, CODE_TOO_SHORT, CODE_NO_SUMMARY, CODE_NO_TEST_PLAN,
+    CODE_DROPPED_FILE_REFS, CODE_DROPPED_EXIT_CODES, CODE_DROPPED_ERROR_SIGNAL, CODE_FAILED_CHECKS,
+})
+
 _PLACEHOLDER_SUBJECTS = frozenset({
     "wip", "update", "updates", "fix", "fixes", "changes", "misc", "stuff",
     "cleanup", "minor changes", "fix bug", "various fixes", "tweaks", ".",
@@ -83,11 +105,14 @@ class TextJobResult:
         text: The model's raw output for this attempt.
         ok: Whether the acceptance check passed.
         reason: Why the check failed, or ``None`` if it passed.
+        codes: Stable machine codes of every failed sub-check (``CHECK_CODES``), empty when it passed.
+            Fixed strings from the check itself, never text taken from the model's answer.
     """
 
     text: str
     ok: bool
     reason: str | None = None
+    codes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -164,22 +189,28 @@ def check_commit_message(diff_text: str, candidate: str) -> TextJobResult:
     file the diff actually touched."""
     stripped = candidate.strip()
     reasons: list[str] = []
+    codes: list[str] = []
     first_line = stripped.splitlines()[0].strip() if stripped else ""
 
     if not first_line:
         reasons.append("empty commit message")
+        codes.append(CODE_EMPTY)
     if len(first_line) > 100:
         reasons.append(f"subject line too long ({len(first_line)} chars, max 100)")
+        codes.append(CODE_SUBJECT_TOO_LONG)
     if first_line.rstrip(".").lower() in _PLACEHOLDER_SUBJECTS:
         reasons.append(f"generic placeholder subject: {first_line!r}")
+        codes.append(CODE_GENERIC_SUBJECT)
 
     stems = _grounding_tokens(diff_text)
     if not stems:
         reasons.append("could not identify any changed file from the diff; cannot verify groundedness")
+        codes.append(CODE_COULD_NOT_IDENTIFY_FILES)
     elif not _mentions_any_stem(stripped, stems):
         reasons.append("message does not mention any changed file")
+        codes.append(CODE_NAMES_NO_CHANGED_FILE)
 
-    return TextJobResult(text=candidate, ok=not reasons, reason="; ".join(reasons) or None)
+    return TextJobResult(text=candidate, ok=not reasons, reason="; ".join(reasons) or None, codes=codes)
 
 
 def build_pr_description_prompt(context_text: str, *, hint: str | None = None,
@@ -207,19 +238,24 @@ def check_pr_description(context_text: str, candidate: str) -> TextJobResult:
     in length, and references at least one changed file or commit subject."""
     stripped = candidate.strip()
     reasons: list[str] = []
+    codes: list[str] = []
 
     if len(stripped) < 40:
         reasons.append(f"too short ({len(stripped)} chars, need >= 40)")
+        codes.append(CODE_TOO_SHORT)
     if not re.search(r"(?im)^\s*#{0,3}\s*summary\b", stripped):
         reasons.append("missing a Summary section")
+        codes.append(CODE_NO_SUMMARY)
     if not re.search(r"(?im)test\s*plan|testing|how to test", stripped):
         reasons.append("missing a test plan / testing section")
+        codes.append(CODE_NO_TEST_PLAN)
 
     stems = _grounding_tokens(context_text)
     if stems and not _mentions_any_stem(stripped, stems):
         reasons.append("description does not reference any changed file or commit")
+        codes.append(CODE_NAMES_NO_CHANGED_FILE)
 
-    return TextJobResult(text=candidate, ok=not reasons, reason="; ".join(reasons) or None)
+    return TextJobResult(text=candidate, ok=not reasons, reason="; ".join(reasons) or None, codes=codes)
 
 
 def build_summarize_output_prompt(raw_output: str, *, hint: str | None = None,
@@ -257,9 +293,11 @@ def check_summarize_output(raw_output: str, candidate: str) -> TextJobResult:
     error/failure, the summary must say so too."""
     stripped = candidate.strip()
     reasons: list[str] = []
+    codes: list[str] = []
 
     if len(stripped) < 20:
         reasons.append(f"summary too short to be useful ({len(stripped)} chars)")
+        codes.append(CODE_TOO_SHORT)
 
     raw_files, raw_codes, raw_has_error = _critical_signals(raw_output)
     cand_files, cand_codes, cand_has_error = _critical_signals(stripped)
@@ -267,15 +305,18 @@ def check_summarize_output(raw_output: str, candidate: str) -> TextJobResult:
     missing_files = raw_files - cand_files
     if missing_files:
         reasons.append(f"dropped file:line references: {sorted(missing_files)[:5]}")
+        codes.append(CODE_DROPPED_FILE_REFS)
 
     missing_codes = raw_codes - cand_codes
     if missing_codes:
         reasons.append(f"dropped exit-code mentions: {sorted(missing_codes)[:5]}")
+        codes.append(CODE_DROPPED_EXIT_CODES)
 
     if raw_has_error and not cand_has_error:
         reasons.append("raw output mentions error/failure/exception but the summary does not")
+        codes.append(CODE_DROPPED_ERROR_SIGNAL)
 
-    return TextJobResult(text=candidate, ok=not reasons, reason="; ".join(reasons) or None)
+    return TextJobResult(text=candidate, ok=not reasons, reason="; ".join(reasons) or None, codes=codes)
 
 
 #: job name -> (prompt builder, acceptance checker). Both take
