@@ -70,9 +70,10 @@ git commit -m "${LLM_TEXT:?}"
 gh pr create --title "<short title>" --body "${LLM_TEXT:?}"
 ```
 
-- Keep the double quotes. If the hook did not replace the placeholder, the shell aborts the command
-  (`LLM_TEXT: parameter not set`), so the placeholder is never committed or posted. In that case the hook
-  is not active here: write the text yourself.
+- Keep the double quotes. If the hook did not replace the placeholder the command does not run: Claude Code
+  refuses it ("A variable in braces in this command can't be checked before it runs") or the shell aborts it
+  (`LLM_TEXT: parameter not set`), so the placeholder is never committed or posted. Either message means the
+  hook is not active here: write the text yourself.
 - **Stage in its own command first** (`git add <paths>`), then run the commit alone. A `git add` (or any
   command that changes files) before it on the same line is refused: the text is built from the repository
   as it is when the hook runs. For a PR, commit and push first. `cd <dir> && git commit ...` and

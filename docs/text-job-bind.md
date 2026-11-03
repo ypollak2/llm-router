@@ -55,11 +55,13 @@ and run the command again without the placeholder"). There is no allow path for 
 ## Fail-closed by construction
 
 The placeholder is a shell variable with `:?`. If nothing replaced it (the hook is not registered, was
-killed at its timeout, or runs on a host that ignores `updatedInput`) the shell aborts the whole
-command with `LLM_TEXT: parameter not set`, so the placeholder text is never committed or posted. A
-literal `@llm`-style placeholder would be committed in exactly those cases, and in a PR body it would
-mention a GitHub user. The hook also keeps a deadline guard that answers with a deny shortly before the
-host's silent kill.
+killed at its timeout, or runs on a host that ignores `updatedInput`) the command does not run: Claude
+Code 2.1.317 refuses a command with a braced variable it cannot check ("A variable in braces in this
+command can't be checked before it runs") and, where permissions are bypassed, the shell aborts it with
+`LLM_TEXT: parameter not set`. Either way the placeholder text is never committed or posted; a literal
+`@llm`-style placeholder would be committed in the bypassed case, and in a PR body it would mention a
+GitHub user. The hook also keeps a deadline guard that answers with a deny shortly before the host's
+silent kill.
 
 ## Shapes that are refused, and what to do
 
@@ -108,7 +110,6 @@ model phase, so the router-added figure does not count it.
 ## Not covered
 
 - `git commit --amend`, PR edits, `gh pr create --fill`, and any shape in the table above.
-- A live Claude Code run of the rewrite (the canary of BIND W5 is the proof still owed; the unit and
-  subprocess tests prove the hook's output, not the host's reading of it).
+- Subagents and interactive approval prompts were not exercised in the live canary (see the PR).
 - Hosts other than Claude Code: the rules are not taught there, and the hook is in the Codex plugin
   bundle only because the bundle is generated from one table.

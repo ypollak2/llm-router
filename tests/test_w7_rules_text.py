@@ -32,7 +32,8 @@ def test_the_section_teaches_the_exact_placeholder_and_its_rules():
     s = section()
     assert T == '"${LLM_TEXT:?}"' and T in s
     for must in ("Stage in its own command first", "Keep the double quotes", "write the text yourself",
-                 "second `-m", "--amend", "nothing was run", "parameter not set"):
+                 "second `-m", "--amend", "nothing was run", "parameter not set",
+                 "can't be checked before it runs"):
         assert must in s, must
     assert "@llm" not in s  # the placeholder is not a GitHub mention
 
