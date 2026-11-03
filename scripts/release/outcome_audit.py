@@ -534,9 +534,10 @@ _BLOCK_REFUSAL = re.compile(r"\bblocked\b|\bcannot\b|\bcan'?t\b|\bunable to\b|no
 
 def is_blocked_answer(text: str | None) -> bool:
     """A SCREEN, not a label: the text names a read-only/sandbox limit AND says it
-    could not do the work. On the 317 void 16.0.0 replies 287 (90.5%) match; BIND-R1's
-    own keyword screen gave 269 (85%) and its hand read found 8 of 9 blocked. D-358
-    gates the share on a hand check of 20 bound units; this only picks candidates."""
+    could not do the work. On the 317 void 16.0.0 replies 291 (91.8%, measured 2026-11-03)
+    match; BIND-R1's own keyword screen gave 269 (85%) and its hand read found 8 of 9
+    blocked. D-358 gates the share on a hand check of 20 bound units; this only picks
+    candidates."""
     t = text or ""
     return bool(_BLOCK_ENV.search(t)) and bool(_BLOCK_REFUSAL.search(t))
 

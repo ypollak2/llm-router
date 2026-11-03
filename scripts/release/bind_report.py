@@ -61,7 +61,8 @@ MIN_REFERENCE_UNITS = 30   # a live reference for the savings estimate needs thi
 GATE_DAYS = 30
 #: 15.4.0's recorded value, used only when the history file is not there. It was scored
 #: by audit v1: docs/measurements/outcome_audit_history.json, 2/873, recorded 2026-09-29.
-FALLBACK_BASELINE = {"release": "15.4.0", "used": 2, "attempted": 873, "used_rate": 2 / 873, "audit_version": 1}
+BASELINE_RELEASE = "15.4.0"
+FALLBACK_BASELINE = {"release": BASELINE_RELEASE, "used": 2, "attempted": 873, "used_rate": 2 / 873, "audit_version": 1}
 
 #: Output price per million tokens, copied from src/llm_router/pricing.py (the pricing
 #: page, re-checked 2026-09-28). tests/test_bind_report.py compares this table with that
@@ -248,7 +249,7 @@ def report(units, ctx: dict, gate, audit, since: float, until: float, args, proj
     ci = audit.wilson(len(bound), len(d))
     rate = len(bound) / len(d) if d else None
     res = f"{len(bound)}/{len(d)} = {pct(rate)}" + (f" [Wilson 95% {pct(ci[0])}..{pct(ci[1])}]" if ci else "")
-    void, unpaired = (sum(bool(u.extra.get("launched")) for u in d), sum(u.extra.get("pairing") == "none" for u in d))
+    void, unpaired = (sum(bool(u.extra.get("launched")) for u in d), sum(not u.extra.get("call_found") for u in d))
     if len(d) < BIND_MIN_UNITS or days < BIND_MIN_DAYS:
         status = "INSUFFICIENT"
         why = f"needs >= {BIND_MIN_UNITS} delegated units over >= {BIND_MIN_DAYS:g} days; has {len(d)} over {days:.1f}"
@@ -284,9 +285,9 @@ def report(units, ctx: dict, gate, audit, since: float, until: float, args, proj
     sessions = ctx["sessions"]
     prompts_t = sum(1 for s in sessions.values() for i in s.prompt_idx if since <= (audit._ts(s.records[i]) or 0) <= until)
     derived = sum(1 for s in sessions.values() for k, _t in s.hold_idx if since <= (audit._ts(s.records[k]) or 0) <= until)
-    ledger = read_hold_events(args.holds_file or state_dir / HOLD_LEDGER, since, until, set(sessions))
-    if ledger is not None:
-        holds, prompts, how = ledger.get("blocked", 0), ledger["prompt"], \
+    hold_rows = read_hold_events(args.holds_file or state_dir / HOLD_LEDGER, since, until, set(sessions))
+    if hold_rows is not None:
+        holds, prompts, how = hold_rows.get("blocked", 0), hold_rows["prompt"], \
             f"the router's hold ledger {args.holds_file or state_dir / HOLD_LEDGER} (cross-check from the transcripts: {derived} holds in {prompts_t} prompts)"
     else:
         holds, prompts, how = derived, prompts_t, "holds derived from the transcripts (no hold ledger rows in the window)"
@@ -314,7 +315,8 @@ def report(units, ctx: dict, gate, audit, since: float, until: float, args, proj
     leaks = gate.check_leaks(rows, summary)
     h = summary["headline"]
     releases = (history or {}).get("releases") or []
-    base = releases[-1] if releases else FALLBACK_BASELINE
+    # D-358 names 15.4.0's recorded rate, not "the latest": after a rebaseline the latest entry is a v2 one
+    base = next((e for e in releases if e.get("release") == BASELINE_RELEASE), FALLBACK_BASELINE)
     base_v = gate.audit_version(base)
     cur_v = audit.AUDIT_VERSION
     if leaks:

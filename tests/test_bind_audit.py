@@ -620,13 +620,13 @@ def test_fixtures_are_text_free_and_match_the_reports_totals():
         assert set(u) == ALLOWED_KEYS_R1 and len(u["id"]) == 16
     blob = json.dumps(R2_FIX) + json.dumps(R1_FIX)
     for marker in ("llm_router", "/Users/", "ollama", "Reply", "http"):    # no session path, prompt or reply text
-        assert marker not in blob.replace("llm_router_status", "")
+        assert marker not in blob
     # R2 section 2/3 totals, recomputed from the fixture
     cls = {}
     for u in R2_FIX["units"]:
         cls[u["class"]] = cls.get(u["class"], 0) + 1
     assert sum(u["replay_duplicate"] for u in R2_FIX["units"]) == 8
-    assert cls["err"] == 16 and cls["f"] == 2 and cls["unk"] == 1 and cls["c"] == 3 + 0 and cls["a"] == 8 + 0
+    assert (cls["err"], cls["f"], cls["unk"], cls["c"], cls["a"]) == (16, 2, 1, 3, 8)
     assert sum(1 for u in R1_FIX["units"] if not u["old_audit_paired_its_own_call"]) == 9      # R1: 26 of 35 paired
 
 

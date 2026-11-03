@@ -262,6 +262,18 @@ def test_outcome_line_says_when_it_already_passes_before_the_fix(tmp_path, capsy
     assert "Before --since" not in L[GATE]["note"]
 
 
+def test_outcome_line_keeps_comparing_with_15_4_0_after_a_rebaseline(tmp_path, capsys):
+    """D-358 names 15.4.0's rate. A v2 entry recorded by a rebaseline is not "the previous release" here."""
+    projects, state = build(tmp_path, void=40, used_mcp=5, extra_unused=20)
+    hist = tmp_path / "history.json"
+    hist.write_text(json.dumps({"releases": [HISTORY["releases"][0],
+                                             {"release": "16.0.0", "audit_version": 2, "used_rate": 0.5, "used": 50, "attempted": 100}]}))
+    BR.main(["--since", BR.iso(SINCE), "--until", BR.iso(UNTIL), "--projects-dir", str(projects), "--state-dir", str(state),
+             "--history", str(hist), "--reference", "measured", "--json"])
+    g = {x["criterion"]: x for x in json.loads(capsys.readouterr().out)["lines"]}[GATE]
+    assert g["status"] == "PASS" and "vs 15.4.0's 0.229% (2/873)" in g["result"]
+
+
 def test_outcome_line_fails_at_or_below_the_recorded_rate(tmp_path, capsys):
     _, _, L = run(tmp_path, capsys, void=60)           # 0 used of 60
     assert L[GATE]["status"] == "FAIL"
