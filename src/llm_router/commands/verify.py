@@ -234,6 +234,21 @@ def check_hooks() -> tuple[bool, list[str]]:
             messages.append(f"❌ {hook_name} (not found)")
             all_ok = False
 
+    # The installed rules and the text-job-bind registration must agree: rules that teach the
+    # placeholder without the hook make every placeholder commit abort (see install_hooks.text_job_bind_rules_gap).
+    try:
+        from llm_router.install_hooks import text_job_bind_rules_gap
+
+        gap = text_job_bind_rules_gap()
+    except Exception:
+        gap = None
+    if gap is not None:
+        if gap.level == "danger":
+            messages.append(f"❌ {gap.message}. Fix: {gap.fix}")
+            all_ok = False
+        else:
+            messages.append(f"ℹ {gap.message}. Fix: {gap.fix}")
+
     return all_ok, messages
 
 

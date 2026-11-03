@@ -20,6 +20,8 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
+from llm_router.text_job_bind import PLACEHOLDER
 from llm_router.text_job_bind.limits import HOOK_TIMEOUT_SEC as _TEXT_JOB_BIND_HOOK_TIMEOUT_SEC
 from llm_router.tool_surface import localize  # CHZ-SURF-01
 
@@ -622,6 +624,51 @@ def check_and_update_hooks() -> list[str]:
     return updates
 
 
+# The rules section that teaches the text-job placeholder (`git commit -m "${LLM_TEXT:?}"`) is wrapped in
+# these markers in the template and rendered only for an install whose settings.json registers the
+# text-job-bind hook. Why: pip upgrades refresh the rules but never register hooks, and a model taught
+# the placeholder without the hook writes commands the shell aborts (`LLM_TEXT: parameter not set`).
+_TEXT_JOB_BIND_HOOK = "llm_router-text-job-bind.py"
+_BIND_MARK = "<!-- llm_router-text-job-bind:{} -->\n"
+_BIND_REGION_RE = re.compile(
+    re.escape(_BIND_MARK.format("begin")) + r".*?" + re.escape(_BIND_MARK.format("end")) + r"\n?", re.S
+)
+_BIND_MARKER_LINE_RE = re.compile(r"^<!-- llm_router-text-job-bind:(?:begin|end) -->\n", re.M)
+
+
+def text_job_bind_registered() -> bool:
+    """True when the Claude settings file registers the text-job-bind PreToolUse hook. Read-only.
+
+    Looks at the file the installer itself writes (``settings_path()``, so LLM_ROUTER_CLAUDE_DIR /
+    LLM_ROUTER_HOME / HOME are honoured exactly as ``install()`` honours them). Anything unreadable or
+    malformed counts as "not registered": the safe answer for a rules file that must not teach what
+    cannot run.
+    """
+    try:
+        settings = _load_settings()
+        entries = (settings.get("hooks") or {}).get("PreToolUse") or []
+        for entry in entries:
+            for handler in (entry.get("hooks") or []) if isinstance(entry, dict) else []:
+                command = handler.get("command") if isinstance(handler, dict) else None
+                if isinstance(command, str) and command.strip().rstrip("'\"").endswith(_TEXT_JOB_BIND_HOOK):
+                    return True
+    except Exception:  # noqa: BLE001 — a settings file we cannot read is "not registered"
+        pass
+    return False
+
+
+def _render_text_job_bind_section(text: str) -> str:
+    """Keep (markers dropped) or remove every marked placeholder region, by the hook registration.
+
+    A template without markers (every other host's rules) is returned untouched, without reading settings.
+    """
+    if not _BIND_MARKER_LINE_RE.search(text):
+        return text
+    if text_job_bind_registered():
+        return _BIND_MARKER_LINE_RE.sub("", text)
+    return _BIND_REGION_RE.sub("", text)
+
+
 def _localized_rules_text(src: Path) -> str:
     """Bundled rules text with every tool name resolved for the ACTIVE tier.
 
@@ -630,22 +677,77 @@ def _localized_rules_text(src: Path) -> str:
     while the default tier registers only the doors trained the model, in every
     session, to make a call that fails. Localizing at install/refresh time is the
     right boundary: the file is re-synced on upgrade and by the server at startup.
+
+    The text-job placeholder section is rendered only when the text-job-bind hook is
+    registered (``text_job_bind_registered``). The result therefore depends on settings.json, which is
+    why callers compare the rendered text with the installed text rather than a version number. This
+    function only reads; it never writes settings.
     """
-    text = src.read_text(encoding="utf-8")
+    text = _render_text_job_bind_section(src.read_text(encoding="utf-8"))
     try:
         return localize(text)
     except Exception:  # noqa: BLE001 — never fail an install over cosmetics
         return text
 
 
-def _rules_content_differs(src: Path, dst: Path) -> bool:
+class TextJobBindGap(NamedTuple):
+    """A mismatch between the installed rules and the text-job-bind hook registration."""
+
+    level: str  # "danger": the model is taught a placeholder nothing replaces; "info": the reverse
+    message: str
+    fix: str
+
+
+def text_job_bind_rules_gap() -> TextJobBindGap | None:
+    """Compare the installed rules file with the hook registration. Read-only; None when consistent.
+
+    danger: the rules teach the placeholder but the hook is not registered or its file is missing, so
+            every placeholder commit or PR aborts with ``LLM_TEXT: parameter not set``.
+    info:   the hook is registered but the rules do not teach the placeholder, so the model keeps
+            writing commit messages itself (nothing breaks).
+    """
+    rules = rules_dir() / "llm_router.md"
+    try:
+        text = rules.read_text(encoding="utf-8")
+    except OSError:
+        return None  # no rules installed: a different finding, reported elsewhere
+    teaches = PLACEHOLDER in text
+    registered = text_job_bind_registered()
+    hook_file = hooks_dst() / _TEXT_JOB_BIND_HOOK
+    if teaches and not (registered and hook_file.is_file()):
+        why = (
+            f"is not registered in {settings_path()}"
+            if not registered
+            else f"is registered but its file {hook_file} is missing"
+        )
+        return TextJobBindGap(
+            "danger",
+            f"{rules} teaches the commit/PR placeholder {PLACEHOLDER} but the text-job-bind hook {why}: "
+            "every placeholder `git commit` / `gh pr create` aborts with 'LLM_TEXT: parameter not set'",
+            "run `llm-router install` (registers the hook and re-renders the rules); or restart the "
+            "MCP server, which re-renders the rules without the placeholder section",
+        )
+    if registered and not teaches:
+        return TextJobBindGap(
+            "info",
+            f"the text-job-bind hook is registered but {rules} does not teach the placeholder, so the model "
+            "still writes commit messages and PR bodies itself",
+            "restart the MCP server or run `llm-router install` to refresh the rules",
+        )
+    return None
+
+
+def _rules_content_differs(src: Path, dst: Path, rendered: str | None = None) -> bool:
     """Compare the INSTALLED file against what we would install now.
 
     Must compare against the localized text, not the raw bundle — otherwise the
-    two never match and every startup reports a spurious rules refresh.
+    two never match and every startup reports a spurious rules refresh. That text
+    depends on settings.json (the text-job placeholder section), so registering or
+    removing the hook changes the answer. ``rendered`` lets a caller that will also
+    write the text compare and write the same string.
     """
     try:
-        return dst.read_text(encoding="utf-8") != _localized_rules_text(src)
+        return dst.read_text(encoding="utf-8") != (_localized_rules_text(src) if rendered is None else rendered)
     except OSError:
         return True
 
@@ -670,9 +772,14 @@ def check_and_update_rules() -> str | None:
     # bundled version is newer OR the versions match but the installed rules drifted
     # from bundled (a content change that forgot to bump the version stamp). Never
     # downgrade. Without this, a reworded rules file silently never reaches users.
+    # The rendered text depends on settings.json (the text-job placeholder section is
+    # present only while the hook is registered), so this comparison, not the version
+    # number, is what adds the section after the hook is registered and removes it
+    # after the registration is gone.
     if src_version < dst_version:
         return None
-    _drifted = src_version == dst_version and _rules_content_differs(rules_src, rules_dst)
+    rendered = _localized_rules_text(rules_src)
+    _drifted = src_version == dst_version and _rules_content_differs(rules_src, rules_dst, rendered)
     if src_version == dst_version and not _drifted:
         return None
 
@@ -681,7 +788,12 @@ def check_and_update_rules() -> str | None:
     # overwriting; if the backup cannot be written, skip the overwrite so the
     # user's content is never destroyed without a recovery path.
     _where = ""
+    _before = ""
     if rules_dst.exists():
+        try:
+            _before = rules_dst.read_text(encoding="utf-8")
+        except OSError:
+            pass
         backup = _backup_before_overwrite(rules_dst)
         if backup is None:
             return (
@@ -689,8 +801,14 @@ def check_and_update_rules() -> str | None:
                 "— update NOT applied (previous content preserved)"
             )
         _where = f" (previous saved to {backup.name})"
-    rules_dst.write_text(_localized_rules_text(rules_src), encoding="utf-8")
+    rules_dst.write_text(rendered, encoding="utf-8")
     if _drifted:
+        if (PLACEHOLDER in rendered) != (PLACEHOLDER in _before):
+            _what = "added" if PLACEHOLDER in rendered else "removed"
+            return (
+                f"Refreshed routing rules (text-job placeholder section {_what}: hook "
+                f"{'registered' if PLACEHOLDER in rendered else 'not registered'}){_where}"
+            )
         return f"Refreshed routing rules (content drift at v{src_version}){_where}"
     return f"Updated routing rules v{dst_version} → v{src_version}{_where}"
 
@@ -726,10 +844,12 @@ _HOOK_DEFS = [
 # Codex delegation inside agent-route.py can run `codex exec` for up to five
 # minutes (LLM_ROUTER_SUBAGENT_CLI_TIMEOUT, default 300s — measured: median 91s,
 # 7/17 real tasks over 120s, max 223s). Claude Code's own PreToolUse wall-clock
-# kill defaults to 60s (see docs/MEASUREMENT.md, hook_liveness.py) and is silent
-# on expiry: no output, indistinguishable from "declined to route". Without a
-# per-hook override, a 300s codex subprocess is always killed before it can
-# finish. 320s gives the subprocess 20s of margin to exit and report.
+# kill is silent on expiry (no output, indistinguishable from "declined to route"). The host's
+# documented default for a command hook is 600s, 30s on UserPromptSubmit
+# (code.claude.com/docs/en/hooks.md, "Common fields"); this comment used to say 60s, and a
+# hook registered without a timeout is not covered by the 60s that hook_latency.DEFAULT_TIMEOUT_MS
+# still assumes. Without a per-hook override on a hook whose event has the short default, a 300s
+# codex subprocess would be killed before it can finish. 320s gives the subprocess 20s of margin to exit and report.
 #
 # Keyed by installed_name (not source name) rather than added as a 5th _HOOK_DEFS
 # column: _HOOK_DEFS's 4-tuple shape is destructured in ~10 other call sites
@@ -764,6 +884,12 @@ _HOOK_TIMEOUTS: dict[str, int] = {
 _HOOK_IF: dict[str, str] = {
     "llm_router-text-job-bind.py": "Bash(*LLM_TEXT*)",
 }
+
+# Hooks that work on Claude Code only, keyed by installed_name like the two tables above. The plugin
+# bundle for any other host (Codex) leaves them out. ``text-job-bind``: the ``LLM_TEXT`` placeholder
+# convention and the PreToolUse ``updatedInput`` protocol that rewrites the Bash command are Claude Code's;
+# on another host the hook would never rewrite anything and the placeholder would abort the shell.
+_CLAUDE_ONLY_HOOKS: frozenset[str] = frozenset({"llm_router-text-job-bind.py"})
 
 # Sidecar shell scripts session-start.py shells out to (start-ollama.sh,
 # start-pxpipe.sh) — not hook-event scripts themselves (no event/matcher to
@@ -1469,6 +1595,9 @@ def install(force: bool = False, via_plugin: bool = False) -> list[str]:
         actions.extend(_install_claude_code_cli(mcp_entry))
 
     # ── Copy routing rules ───────────────────────────────────────────────
+    # Must stay AFTER the hook registration above has been saved: the rendered text includes the
+    # text-job placeholder section only while settings.json registers the text-job-bind hook, so a fresh
+    # install ends with rules and registration consistent.
     rules_dir().mkdir(parents=True, exist_ok=True)
 
     rules_src = _RULES_SRC / "llm_router.md"

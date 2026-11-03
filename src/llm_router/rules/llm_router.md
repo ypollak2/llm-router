@@ -59,6 +59,7 @@ does not decide for you: if the result comes back unapplied (validation failed a
 3 tries) or the task genuinely needs exploration across many unknown files, do the
 edit yourself — this is guidance, not enforcement.
 
+<!-- llm_router-text-job-bind:begin -->
 ## Commit messages and PR bodies → do not write them: use the placeholder
 
 A PreToolUse hook (`llm_router-text-job-bind.py`, listed by `llm-router verify`) writes the commit
@@ -85,11 +86,14 @@ gh pr create --title "<short title>" --body "${LLM_TEXT:?}"
 - A denied command is not a failure: the reason says why (the local job did not pass its checks, did not
   finish in time, or the shape is unsupported) and nothing was run. Write the text yourself and run the
   command again without the placeholder.
+<!-- llm_router-text-job-bind:end -->
 
 ## Self-contained text jobs → `llm_text_job` (on by default for a passed local model)
 
+<!-- llm_router-text-job-bind:begin -->
 (Commit messages and PR bodies in a git/gh command use the placeholder above, which is this same job,
 bound. This section is for a summary of long output and for hosts where that hook is not installed.)
+<!-- llm_router-text-job-bind:end -->
 Writing a commit message from a diff, a PR description from commits/diff, or a summary
 of long test/log output is a job whose ENTIRE input is already in hand — there is
 nothing for a local model to guess, which is the usual failure mode this file warns

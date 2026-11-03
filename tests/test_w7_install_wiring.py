@@ -101,16 +101,57 @@ def test_the_hook_waits_less_than_the_host_does():
     assert inspect.signature(engine.decide).parameters["budget_s"].default == limits.BUDGET_SEC
 
 
-def test_the_plugin_bundle_registers_the_same_hook_for_bash():
-    for rel, root_var in (("hooks/hooks.json", "${CLAUDE_PLUGIN_ROOT}"), (".codex-plugin/hooks.json", "${CODEX_PLUGIN_ROOT}")):
-        hooks = json.loads((REPO / rel).read_text())["hooks"]["PreToolUse"]
-        found = [(g.get("matcher"), h) for g in hooks for h in g["hooks"] if h["command"].endswith("/text-job-bind.py")]
-        assert len(found) == 1, rel
-        matcher, h = found[0]
-        assert matcher == "Bash" and h["timeout"] == limits.HOOK_TIMEOUT_SEC and h["command"].startswith(root_var)
-        # The `if` field is Claude Code's: the Claude plugin file carries it, the Codex file does not.
-        assert h.get("if") == ("Bash(*LLM_TEXT*)" if root_var == "${CLAUDE_PLUGIN_ROOT}" else None), rel
+def _bundle_handlers(rel: str) -> list[tuple[str, str | None, dict]]:
+    """Every (event, matcher, handler) of a generated hooks.json."""
+    doc = json.loads((REPO / rel).read_text())["hooks"]
+    return [(ev, g.get("matcher"), h) for ev, groups in doc.items() for g in groups for h in g["hooks"]]
+
+
+def test_the_claude_plugin_bundle_registers_the_hook_for_bash_with_the_if_rule():
+    handlers = _bundle_handlers("hooks/hooks.json")
+    assert len(handlers) > 5, "the bundle must list the router's hooks, or the checks below prove nothing"
+    found = [(ev, m, h) for ev, m, h in handlers if h["command"].endswith("/text-job-bind.py")]
+    assert len(found) == 1
+    ((event, matcher, h),) = found
+    assert (event, matcher) == ("PreToolUse", "Bash")
+    assert h["timeout"] == limits.HOOK_TIMEOUT_SEC == 130
+    assert h["if"] == "Bash(*LLM_TEXT*)" and h["command"].startswith("${CLAUDE_PLUGIN_ROOT}")
     assert (REPO / "hooks" / "text-job-bind.py").read_bytes() == (REPO / "src/llm_router/hooks/text-job-bind.py").read_bytes()
+
+
+def test_the_codex_plugin_bundle_does_not_ship_the_claude_only_hook():
+    """The placeholder convention and the PreToolUse `updatedInput` rewrite are Claude Code's: on Codex the
+    hook would never rewrite anything. The Codex file is generated from the same table, so this is the
+    per-hook `_CLAUDE_ONLY_HOOKS` notion at work, not a hand edit."""
+    handlers = _bundle_handlers(".codex-plugin/hooks.json")
+    claude_handlers = _bundle_handlers("hooks/hooks.json")
+    assert len(handlers) > 5, "an empty Codex bundle would pass every absence check"
+    assert not [h for _e, _m, h in handlers if "text-job-bind" in h["command"] or "text-job-bind" in json.dumps(h)]
+    assert not [h for _e, _m, h in handlers if "if" in h], "the `if` field is Claude Code's"
+    assert any(h["command"].endswith("/enforce-route.py") for _e, _m, h in handlers), "other hooks stay"
+    assert ih._CLAUDE_ONLY_HOOKS == {NAME}
+    # the Claude bundle has everything the Codex bundle has, plus the hook (and its own plugin-only ones)
+    codex_cmds = {h["command"].rsplit("/", 1)[-1] for _e, _m, h in handlers}
+    claude_cmds = {h["command"].rsplit("/", 1)[-1] for _e, _m, h in claude_handlers}
+    assert "text-job-bind.py" in claude_cmds - codex_cmds
+
+
+def test_the_bundle_generator_leaves_a_claude_only_hook_out_for_any_other_host():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("w7_build_plugin_bundle", REPO / "scripts" / "build_plugin_bundle.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    def commands(root_var: str) -> list[str]:
+        doc = mod._hooks_json(root_var)["hooks"]
+        return [h["command"] for groups in doc.values() for g in groups for h in g["hooks"]]
+
+    claude, codex = commands("${CLAUDE_PLUGIN_ROOT}"), commands("${CODEX_PLUGIN_ROOT}")
+    assert codex and claude
+    assert any(c.endswith("/text-job-bind.py") for c in claude)
+    assert not any(c.endswith("/text-job-bind.py") for c in codex)
+    assert commands("${SOME_OTHER_ROOT}") and not any(c.endswith("/text-job-bind.py") for c in commands("${SOME_OTHER_ROOT}"))
 
 
 def test_no_other_router_hook_that_sees_bash_rewrites_its_input(tmp_path):
@@ -203,3 +244,127 @@ def test_install_without_force_adds_the_rule_to_an_existing_registration(sandbox
     assert any("text-job-bind" in a and "if none" in a and RULE in a for a in actions), actions
     ih.install()
     assert len(_entries(json.loads(sp.read_text()))) == 1
+
+
+# ---- the installed rules and the registration agree (F13) -------------------------------------------------
+
+PLACEHOLDER = '"${LLM_TEXT:?}"'
+
+
+def _rules(sandbox) -> str:
+    return (sandbox / ".claude" / "rules" / "llm_router.md").read_text(encoding="utf-8")
+
+
+def test_a_fresh_install_ends_with_the_section_and_the_registration_together(sandbox):
+    ih.install(force=True)
+    assert PLACEHOLDER in _rules(sandbox) and ih.text_job_bind_registered()
+    assert ih.text_job_bind_rules_gap() is None
+    ih.install()  # a second, unforced install rewrites nothing that matters and stays consistent
+    assert PLACEHOLDER in _rules(sandbox) and ih.text_job_bind_rules_gap() is None
+    assert ih.check_and_update_rules() is None
+
+
+def test_an_install_that_registers_no_hooks_installs_rules_without_the_section(sandbox):
+    """`via_plugin`: the plugin carries the hooks, settings.json gets none of them, so nothing here
+    would replace the placeholder."""
+    ih.install(force=True, via_plugin=True)
+    assert not ih.text_job_bind_registered()
+    assert PLACEHOLDER not in _rules(sandbox)
+    assert ih.text_job_bind_rules_gap() is None
+
+
+def test_uninstalling_the_hook_then_refreshing_the_rules_removes_the_section(sandbox):
+    ih.install(force=True)
+    sp = sandbox / ".claude" / "settings.json"
+    settings = json.loads(sp.read_text())
+    for entry in settings["hooks"]["PreToolUse"]:
+        entry["hooks"] = [h for h in entry["hooks"] if NAME not in h["command"]]
+    sp.write_text(json.dumps(settings))
+    gap = ih.text_job_bind_rules_gap()
+    assert gap and gap.level == "danger"
+    assert "removed" in ih.check_and_update_rules()
+    assert PLACEHOLDER not in _rules(sandbox) and ih.text_job_bind_rules_gap() is None
+
+
+def test_gap_rules_teach_the_placeholder_but_the_hook_is_not_registered_is_the_dangerous_one(sandbox):
+    ih.install(force=True)
+    sp = sandbox / ".claude" / "settings.json"
+    sp.write_text(json.dumps({"hooks": {}}))
+    gap = ih.text_job_bind_rules_gap()
+    assert gap.level == "danger"
+    assert "is not registered" in gap.message and "LLM_TEXT: parameter not set" in gap.message
+    assert "llm-router install" in gap.fix and "restart the MCP server" in gap.fix
+
+
+def test_gap_rules_teach_the_placeholder_but_the_hook_file_is_missing(sandbox):
+    ih.install(force=True)
+    (sandbox / ".claude" / "hooks" / NAME).unlink()
+    gap = ih.text_job_bind_rules_gap()
+    assert gap.level == "danger" and "registered but its file" in gap.message and NAME in gap.message
+
+
+def test_gap_hook_registered_but_rules_lack_the_section_is_informational(sandbox):
+    ih.install(force=True)
+    (sandbox / ".claude" / "rules" / "llm_router.md").write_text("<!-- llm_router-rules-version: 12 -->\n# rules\n")
+    gap = ih.text_job_bind_rules_gap()
+    assert gap.level == "info" and "still writes commit messages" in gap.message
+    assert "refresh the rules" in gap.fix
+
+
+def test_no_gap_without_a_rules_file(sandbox):
+    assert ih.text_job_bind_rules_gap() is None
+    ih.install(force=True)
+    (sandbox / ".claude" / "rules" / "llm_router.md").unlink()
+    assert ih.text_job_bind_rules_gap() is None
+
+
+def _verify_home(sandbox, monkeypatch):
+    """`llm-router verify` looks for hook files under Path.home()/.claude; put that where the sandbox is."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: sandbox))
+
+
+def test_verify_fails_and_says_what_to_do_when_the_rules_teach_a_hook_that_is_not_registered(sandbox, monkeypatch):
+    from llm_router.commands.verify import check_hooks
+
+    _verify_home(sandbox, monkeypatch)
+    ih.install(force=True)
+    ok, messages = check_hooks()
+    assert ok is True and not [m for m in messages if "placeholder" in m], messages
+    (sandbox / ".claude" / "settings.json").write_text(json.dumps({"hooks": {}}))
+    ok, messages = check_hooks()
+    (line,) = [m for m in messages if "placeholder" in m]
+    assert ok is False and line.startswith("❌")
+    assert "is not registered" in line and "LLM_TEXT: parameter not set" in line and "llm-router install" in line
+
+
+def test_verify_reports_a_registered_hook_with_rules_that_lack_the_section_without_failing(sandbox, monkeypatch):
+    from llm_router.commands.verify import check_hooks
+
+    _verify_home(sandbox, monkeypatch)
+    ih.install(force=True)
+    (sandbox / ".claude" / "rules" / "llm_router.md").write_text("<!-- llm_router-rules-version: 12 -->\n# rules\n")
+    ok, messages = check_hooks()
+    (line,) = [m for m in messages if "does not teach the placeholder" in m]
+    assert ok is True and line.startswith("ℹ")
+
+
+def test_doctor_reports_both_mismatches_and_only_the_dangerous_one_is_an_issue(sandbox):
+    from llm_router.commands.doctor import _text_job_bind_rules_line
+
+    ih.install(force=True)
+    issues: list[str] = []
+    assert _text_job_bind_rules_line(issues) is None and issues == []
+
+    (sandbox / ".claude" / "settings.json").write_text(json.dumps({"hooks": {}}))
+    line = _text_job_bind_rules_line(issues)
+    assert "teaches the commit/PR placeholder" in line and "is not registered" in line and "fix:" in line
+    assert len(issues) == 1 and "text-job-bind" in issues[0]
+
+    ih.check_and_update_rules()  # the refresh heals it (section removed)
+    issues.clear()
+    assert _text_job_bind_rules_line(issues) is None and issues == []
+
+    ih.install(force=True)
+    (sandbox / ".claude" / "rules" / "llm_router.md").write_text("<!-- llm_router-rules-version: 12 -->\n# rules\n")
+    line = _text_job_bind_rules_line(issues)
+    assert "does not teach the placeholder" in line and issues == [], "informational: not an issue"

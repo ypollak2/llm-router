@@ -9,6 +9,7 @@ MCP server does at start-up is exercised.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -20,12 +21,48 @@ from llm_router.text_job_bind.plan import JOB_COMMIT, JOB_PR, Unsupported, analy
 
 RULES = Path(ih.__file__).parent / "rules" / "llm_router.md"
 T = PLACEHOLDER
+NAME = "llm_router-text-job-bind.py"
+BEGIN = "<!-- llm_router-text-job-bind:begin -->"
+END = "<!-- llm_router-text-job-bind:end -->"
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    """A scratch Claude config dir (rules, hooks, settings) with the state dir beside it."""
+    claude = tmp_path / ".claude"
+    (claude / "rules").mkdir(parents=True)
+    (claude / "hooks").mkdir()
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "state"))
+    monkeypatch.delenv("LLM_ROUTER_CLAUDE_DIR", raising=False)
+    monkeypatch.setattr(ih, "_CLAUDE_DIR", claude)
+    monkeypatch.setattr(ih, "_RULES_DST", claude / "rules")
+    monkeypatch.setattr(ih, "_HOOKS_DST", claude / "hooks")
+    monkeypatch.setattr(ih, "_SETTINGS_PATH", claude / "settings.json")
+    return claude
+
+
+def register(claude: Path, command: str | None = None, event: str = "PreToolUse") -> None:
+    command = command or f"/usr/bin/python3 {claude}/hooks/{NAME}"
+    (claude / "settings.json").write_text(json.dumps({
+        "hooks": {
+            "PreToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": "/usr/bin/python3 /x/llm_router-enforce-route.py"}]}],
+            event: [{"matcher": "Bash", "hooks": [{"type": "command", "command": command, "timeout": 130}]}],
+        }
+    }))
+
+
+def unregister(claude: Path) -> None:
+    (claude / "settings.json").write_text(json.dumps({"hooks": {"PreToolUse": []}}))
+
+
+def snapshot(root: Path) -> dict[str, tuple[bytes, int]]:
+    return {str(f.relative_to(root)): (f.read_bytes(), f.stat().st_mtime_ns) for f in sorted(root.rglob("*")) if f.is_file()}
 
 
 def section() -> str:
     text = RULES.read_text(encoding="utf-8")
     start = text.index("## Commit messages and PR bodies")
-    return text[start:text.index("\n## ", start + 5)]
+    return text[start:text.index("\n## ", start + 5)].replace(END, "")
 
 
 def test_the_section_teaches_the_exact_placeholder_and_its_rules():
@@ -70,14 +107,10 @@ def test_the_stage_first_rule_is_the_refusal_the_section_describes():
     assert analyse("gh pr create --title t --body \"${LLM_TEXT:?}\n\nfooter line\"", "/x") is not None
 
 
-def test_the_rules_version_is_bumped_so_installed_rules_refresh(tmp_path, monkeypatch):
+def test_the_rules_version_is_bumped_so_installed_rules_refresh(home):
     assert ih._rules_version(RULES) >= 12
-    claude = tmp_path / ".claude"
-    (claude / "rules").mkdir(parents=True)
-    monkeypatch.setattr(ih, "_CLAUDE_DIR", claude)
-    monkeypatch.setattr(ih, "_RULES_DST", claude / "rules")
-    monkeypatch.setattr(ih, "_HOOKS_DST", claude / "hooks")
-    installed = claude / "rules" / "llm_router.md"
+    register(home)
+    installed = home / "rules" / "llm_router.md"
     installed.write_text("<!-- llm_router-rules-version: 11 -->\n# old rules\n")
     msg = ih.check_and_update_rules()
     assert msg and "11" in msg and "12" in msg
@@ -104,3 +137,162 @@ def test_the_hook_files_arrive_with_an_upgrade_but_registration_does_not(tmp_pat
     assert any("llm_router-text-job-bind.py" in u and "Restored missing" in u for u in updates), updates
     assert (claude / "hooks" / "llm_router-text-job-bind.py").is_file()
     assert json.loads((claude / "settings.json").read_text()) == {"hooks": {}}, "an upgrade must not register hooks"
+
+
+# ---- the placeholder section is installed only while the hook is registered (F13) -----------------------
+
+def rendered() -> str:
+    return ih._localized_rules_text(RULES)
+
+
+def test_the_template_wraps_the_section_and_its_pointer_in_balanced_markers():
+    text = RULES.read_text(encoding="utf-8")
+    assert text.count(BEGIN) == text.count(END) == 2
+    regions = re.findall(re.escape(BEGIN) + r"\n(.*?)" + re.escape(END), text, re.S)
+    assert len(regions) == 2
+    assert regions[0].startswith("## Commit messages and PR bodies") and T in regions[0]
+    assert "the placeholder above" in regions[1], "the pointer to the section goes with the section"
+    outside = re.sub(re.escape(BEGIN) + r".*?" + re.escape(END), "", text, flags=re.S)
+    assert "LLM_TEXT" not in outside and "placeholder above" not in outside
+
+
+def test_the_section_is_absent_while_the_hook_is_not_registered(home):
+    for setup in (lambda: None, lambda: unregister(home), lambda: (home / "settings.json").write_text("{not json")):
+        setup()
+        text = rendered()
+        assert T not in text and "LLM_TEXT" not in text
+        assert "## Commit messages and PR bodies" not in text and "placeholder above" not in text
+        assert BEGIN not in text and END not in text, "markers are never shown to the model"
+        assert "## Self-contained text jobs" in text and "llm_text_job" in text, "the fallback teaching stays"
+        assert "\n\n\n" not in text, "removing the section leaves no extra blank line"
+        assert text.splitlines()[0] == RULES.read_text(encoding="utf-8").splitlines()[0]
+        assert ih._rules_version(RULES) == int(re.match(r"<!-- llm_router-rules-version: (\d+) -->", text).group(1))
+
+
+def test_the_section_is_present_while_the_hook_is_registered(home):
+    register(home)
+    text = rendered()
+    assert T in text and "## Commit messages and PR bodies" in text and "placeholder above" in text
+    assert BEGIN not in text and END not in text, "markers are never shown to the model"
+    assert "\n\n\n" not in text
+    assert text.index("## Commit messages and PR bodies") < text.index("## Self-contained text jobs")
+    # the registered rendering is the template with only its marker lines removed
+    assert text == ih.localize(RULES.read_text(encoding="utf-8").replace(BEGIN + "\n", "").replace(END + "\n", ""))
+
+
+@pytest.mark.parametrize("command,event,registered", [
+    ("/usr/bin/python3 /h/.claude/hooks/llm_router-text-job-bind.py", "PreToolUse", True),
+    ("python3 '/h/my dir/hooks/llm_router-text-job-bind.py'", "PreToolUse", True),
+    ("/h/dist/llm-router run-hook /h/.claude/hooks/llm_router-text-job-bind.py", "PreToolUse", True),
+    ("/usr/bin/python3 /h/.claude/hooks/llm_router-text-job-bind.py", "PostToolUse", False),
+    ("/usr/bin/python3 /h/.claude/hooks/llm_router-text-job-bind.py.bak", "PreToolUse", False),
+    ("/usr/bin/python3 /h/.claude/hooks/llm_router-text-job-bind.py --check", "PreToolUse", False),
+    ("/usr/bin/python3 /h/.claude/hooks/llm_router-enforce-route.py", "PreToolUse", False),
+])
+def test_registration_means_a_pretooluse_handler_whose_command_ends_with_the_hook_name(home, command, event, registered):
+    register(home, command, event)
+    assert ih.text_job_bind_registered() is registered
+    assert (T in rendered()) is registered
+
+
+@pytest.mark.parametrize("settings", [[], {"hooks": []}, {"hooks": {"PreToolUse": "x"}}, {"hooks": {"PreToolUse": [None, 3, {"hooks": None}, {"hooks": [None, {"command": 5}]}]}}])
+def test_a_settings_file_of_the_wrong_shape_is_simply_not_registered(home, settings):
+    (home / "settings.json").write_text(json.dumps(settings))
+    assert ih.text_job_bind_registered() is False
+    assert T not in rendered()
+
+
+def test_registration_is_read_where_the_installer_writes_settings(tmp_path, monkeypatch):
+    """The installer's own resolution: LLM_ROUTER_CLAUDE_DIR wins, a registration in ~/.claude does not count
+    when the installer would write elsewhere."""
+    resolvers = {"_CLAUDE_DIR": ih.claude_dir, "_HOOKS_DST": ih.hooks_dst, "_RULES_DST": ih.rules_dir, "_SETTINGS_PATH": ih.settings_path}
+    for name, resolve in resolvers.items():  # the module's own lazy resolution, not a patched path
+        monkeypatch.setattr(ih, name, ih._LazyHostPath(resolve))
+    real_home, cfg = tmp_path / "home", tmp_path / "cfg"
+    for d in (real_home / ".claude", cfg):
+        d.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.delenv("LLM_ROUTER_HOME", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_DIR", str(cfg))
+    register(real_home / ".claude")
+    assert ih.settings_path() == cfg / "settings.json"
+    assert ih.text_job_bind_registered() is False
+    register(cfg)
+    assert ih.text_job_bind_registered() is True
+
+
+def test_rendering_never_writes_anything(home, tmp_path):
+    for setup in (lambda: None, lambda: register(home), lambda: unregister(home),
+                  lambda: (home / "settings.json").write_text("{not json")):
+        setup()
+        (home / "rules" / "llm_router.md").write_text("<!-- llm_router-rules-version: 12 -->\nold\n")
+        before = snapshot(tmp_path)
+        rendered()
+        ih.text_job_bind_registered()
+        ih.text_job_bind_rules_gap()
+        ih._rules_content_differs(RULES, home / "rules" / "llm_router.md")
+        assert snapshot(tmp_path) == before, "rendering and the checks around it are read-only"
+
+
+def test_a_template_without_markers_is_rendered_without_looking_at_settings(home, monkeypatch):
+    """Every other host's rules: no section to decide, so settings.json is not even read."""
+    def boom():
+        raise AssertionError("settings were read")
+
+    monkeypatch.setattr(ih, "_load_settings", boom)
+    other = ih._RULES_SRC / "codex-rules.md"
+    assert BEGIN not in other.read_text(encoding="utf-8")
+    assert ih._localized_rules_text(other) == ih.localize(other.read_text(encoding="utf-8"))
+
+
+def test_registering_the_hook_adds_the_section_at_the_next_refresh_and_removing_it_takes_it_out(home):
+    installed = home / "rules" / "llm_router.md"
+    first = ih.check_and_update_rules()  # nothing installed yet, hook not registered
+    assert first and T not in installed.read_text(encoding="utf-8")
+    assert ih.check_and_update_rules() is None, "stable while nothing changes"
+
+    register(home)
+    msg = ih.check_and_update_rules()  # same rules version, different rendering
+    assert msg and "added" in msg and "registered" in msg, msg
+    assert T in installed.read_text(encoding="utf-8")
+    assert ih._rules_version(installed) == ih._rules_version(RULES), "the version marker is unchanged"
+    assert ih.check_and_update_rules() is None
+
+    unregister(home)
+    msg = ih.check_and_update_rules()
+    assert msg and "removed" in msg, msg
+    body = installed.read_text(encoding="utf-8")
+    assert T not in body and "## Commit messages and PR bodies" not in body
+    assert ih.check_and_update_rules() is None
+
+    register(home)
+    assert ih.check_and_update_rules() and T in installed.read_text(encoding="utf-8")
+
+
+def test_the_flip_keeps_the_previous_file_and_never_downgrades(home):
+    installed = home / "rules" / "llm_router.md"
+    register(home)
+    ih.check_and_update_rules()
+    full = installed.read_text(encoding="utf-8")
+    unregister(home)
+    msg = ih.check_and_update_rules()
+    assert "previous saved to" in msg
+    saved = [*(home / "rules").glob("llm_router.md.bak"), *ih._state_dir().rglob("llm_router.md.*.bak")]
+    assert any(full == b.read_text(encoding="utf-8") for b in saved), "the removed text is recoverable"
+    # a NEWER installed version is never replaced, whatever the registration says
+    installed.write_text("<!-- llm_router-rules-version: 99 -->\nfuture\n")
+    register(home)
+    assert ih.check_and_update_rules() is None
+    assert installed.read_text(encoding="utf-8").endswith("future\n")
+
+
+def test_an_older_full_text_installed_before_this_change_is_refreshed_when_the_hook_is_missing(home):
+    """What a pip upgrade left behind: the v12 text with the section, no markers, and no registration."""
+    installed = home / "rules" / "llm_router.md"
+    installed.write_text(RULES.read_text(encoding="utf-8").replace(BEGIN + "\n", "").replace(END + "\n", ""))
+    gap = ih.text_job_bind_rules_gap()
+    assert gap and gap.level == "danger"
+    msg = ih.check_and_update_rules()
+    assert msg and "removed" in msg
+    assert T not in installed.read_text(encoding="utf-8")
+    assert ih.text_job_bind_rules_gap() is None

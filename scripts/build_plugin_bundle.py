@@ -27,7 +27,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from llm_router.install_hooks import _HOOK_DEFS, _HOOK_IF, _HOOK_TIMEOUTS  # noqa: E402
+from llm_router.install_hooks import _CLAUDE_ONLY_HOOKS, _HOOK_DEFS, _HOOK_IF, _HOOK_TIMEOUTS  # noqa: E402
 
 # Claude Code and Codex use the same event names for the events we care about.
 # Cursor differs and is handled by its own installer (tasks 23–26).
@@ -40,6 +40,10 @@ _CODEX_EVENT_ALIASES: dict[str, str] = {
     "Stop": "Stop",
 }
 
+
+#: Each host's plugin-root placeholder; ``_hooks_json`` tells the hosts apart by it.
+_CLAUDE_ROOT = "${CLAUDE_PLUGIN_ROOT}"
+_CODEX_ROOT = "${CODEX_PLUGIN_ROOT}"
 
 #: Hooks only the Claude Code plugin ships (never written to settings.json by the CLI installer,
 #: so they are not in ``_HOOK_DEFS``): (script, event, matcher, timeout seconds). P212-3.
@@ -56,7 +60,9 @@ def _hooks_json(root_var: str) -> dict:
     """
     events: dict[str, dict[str, list]] = {}
     for src_name, installed_name, event, matcher in _HOOK_DEFS:
-        if root_var == "${CODEX_PLUGIN_ROOT}" and event == "Stop" and src_name == "session-end.py":
+        if installed_name in _CLAUDE_ONLY_HOOKS and root_var != _CLAUDE_ROOT:
+            continue
+        if root_var == _CODEX_ROOT and event == "Stop" and src_name == "session-end.py":
             src_name = "codex-stop.py"
         handler: dict = {
             "type": "command",
@@ -67,11 +73,11 @@ def _hooks_json(root_var: str) -> dict:
             handler["timeout"] = timeout
         # The "if" field is Claude Code's (permission-rule syntax); Codex's hook schema is not known to take it.
         rule = _HOOK_IF.get(installed_name)
-        if rule is not None and root_var == "${CLAUDE_PLUGIN_ROOT}":
+        if rule is not None and root_var == _CLAUDE_ROOT:
             handler["if"] = rule
         events.setdefault(event, {}).setdefault(matcher, []).append(handler)
 
-    if root_var == "${CLAUDE_PLUGIN_ROOT}":
+    if root_var == _CLAUDE_ROOT:
         for src_name, event, matcher, timeout in _PLUGIN_ONLY_HOOKS:
             events.setdefault(event, {}).setdefault(matcher, []).append(
                 {"type": "command", "command": f"{root_var}/hooks/{src_name}", "timeout": timeout}
@@ -216,10 +222,10 @@ def build() -> dict[Path, str]:
     # shared and only the root placeholder differs. Copying the scripts twice
     # would just be two things to keep in sync.
     files[REPO / "hooks" / "hooks.json"] = (
-        json.dumps(_hooks_json("${CLAUDE_PLUGIN_ROOT}"), indent=2) + "\n"
+        json.dumps(_hooks_json(_CLAUDE_ROOT), indent=2) + "\n"
     )
     files[REPO / ".codex-plugin" / "hooks.json"] = (
-        json.dumps(_hooks_json("${CODEX_PLUGIN_ROOT}"), indent=2) + "\n"
+        json.dumps(_hooks_json(_CODEX_ROOT), indent=2) + "\n"
     )
 
     # Task 05 — slash commands.

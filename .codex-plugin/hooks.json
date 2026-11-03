@@ -42,16 +42,6 @@
           }
         ],
         "matcher": "Agent"
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CODEX_PLUGIN_ROOT}/hooks/text-job-bind.py",
-            "timeout": 130
-          }
-        ],
-        "matcher": "Bash"
       }
     ],
     "SubagentStart": [
