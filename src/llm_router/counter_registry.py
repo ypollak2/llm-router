@@ -441,28 +441,34 @@ def _read_hold_ledger() -> CounterReading:
 
     The BLOCKED text used to invite a throwaway ``llm_*`` call to release the lock; 51 holds
     in 9 sessions, 76 of 141 unused MCP units were such probes. The bar is under 1 BLOCKED per
-    100 prompts and no ack-shaped probe. Alarming on the RATE and only with volume. No prompt
-    row in the window is UNKNOWN, never a clean 0: a hook that stopped recording would
-    otherwise read as a hold that stopped firing.
+    100 prompts and no ack-shaped probe, on ORGANIC sessions (D-358): a harness or research
+    session that holds tools is not the owner's experience. Alarming on the RATE and only with
+    volume. No organic prompt row in the window is UNKNOWN, never a clean 0: a hook that
+    stopped recording, or sessions that were never tagged, would otherwise read as a hold
+    that stopped firing.
     """
     try:
         from llm_router import hold_ledger
 
-        s = hold_ledger.summarize(days=7)
+        s = hold_ledger.summarize(days=7, kinds=("organic",))
         if not s["prompts"]:
             return CounterReading(
-                None, unknown_reason="no prompt recorded in the hold ledger in the last 7 days"
+                None,
+                unknown_reason="no organic prompt recorded in the hold ledger in the last 7 days "
+                               "(a session that was never tagged is not counted as organic)",
             )
         rate = s["blocked_per_100_prompts"]
         return CounterReading(
             float(s["blocked"]),
             alarming=s["prompts"] >= _HOLD_MIN_PROMPTS
-            and (rate >= _HOLD_BLOCKED_PER_100_BAR or s["probes_short"] > 0),
+            and (rate >= _HOLD_BLOCKED_PER_100_BAR or s["ack_probes"] > 0),
             detail=(
-                f"{s['blocked']} BLOCKED in {s['prompts']} prompts = {rate:g} per 100 "
+                f"{s['blocked']} BLOCKED in {s['prompts']} organic prompts = {rate:g} per 100 "
                 f"(bar: under {_HOLD_BLOCKED_PER_100_BAR:g})",
                 f"{s['holds']} holds written, {s['exempt']} prompts exempt, "
-                f"{s['probes']} probe call(s) ({s['probes_short']} ack-shaped: a routing-door call of 12 words or fewer)",
+                f"{s['ack_probes']} ack-shaped probe(s) (a fixed-reply routing-door call that did not "
+                f"carry the owner's prompt, held or not), {s['probes']} call(s) made under a hold "
+                f"that did not release it",
             ),
         )
     except Exception as exc:  # noqa: BLE001

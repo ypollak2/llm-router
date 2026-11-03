@@ -280,9 +280,18 @@ rm ~/.env  # If used
 - ✅ Hooks are subject to deadlock detection before installation
 - ⚠️ Hooks **can** block core tools (Read, Edit, Bash, Write). PreToolUse enforcement
   does this routinely in `smart` and `hard` modes — it is the mechanism those modes are
-  built on, not an edge case. What is guaranteed is **no permanent lockout**: every block
-  carries an escape valve (call any `llm_*` tool), and repeated attempts auto-pivot to
-  release the lock. True deadlock, in the CS sense, is what is prevented — not blocking.
+  built on, not an edge case. What is guaranteed in `smart` and `hard` is **no permanent
+  lockout**: a block is released by routing the user's request through a routing door
+  (`llm`, `llm_route`, `llm_act`, ...; a trivial or unrelated `llm_*` call does not release
+  it), by the user starting the prompt with `claude:`, and, with no model call at all, by
+  repeated attempts, which auto-pivot. `strict` is the documented exception: it turns the
+  auto-pivots off on purpose, so a strict hold ends only when the user's request is routed,
+  when the user starts the prompt with `claude:`, when the user sends the next prompt, or
+  when its one-hour routing window runs out, and a `strict` session can stall. The router's
+  own CLI (`llm-router set-enforce off`) is never held in any mode, so the user can always
+  leave `strict` without editing a file. True deadlock, in the CS sense, is what is
+  prevented in the default modes — not blocking (docs/proxy.md, "When a prompt holds a
+  tool").
 - ✅ Hooks are local (don't phone home)
 
 **Risks:**

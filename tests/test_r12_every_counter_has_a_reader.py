@@ -346,9 +346,11 @@ def _drive_text_job_fail_closed(tmp_home: pathlib.Path) -> None:
 
 
 def _drive_blocked_holds(tmp_home: pathlib.Path) -> None:
-    """BIND W2: a prompt and a BLOCKED tool call, through the real ledger writer."""
-    from llm_router import hold_ledger
+    """BIND W2: a prompt and a BLOCKED tool call, through the real ledger writer. The counter
+    reads organic sessions only (D-358), so the session is tagged by the real tagger first."""
+    from llm_router import hold_ledger, session_kind
 
+    assert session_kind.tag_session("r12-probe-session", "/home/u/proj", env={}) == "organic"
     hold_ledger.record("prompt", "r12-probe-session", words=40)
     hold_ledger.record("blocked", "r12-probe-session", tool="Bash", task="query")
 

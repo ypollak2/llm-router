@@ -143,10 +143,64 @@ def test_a_string_input_is_read_as_the_request():
     assert hp.forwards_owner_prompt(OWNER, "Reply OK") is False
 
 
-@pytest.mark.parametrize("owner", [None, "", "go on", "do it now please", "12345 67890"])
-def test_nothing_to_compare_is_unverifiable_not_false(owner):
-    """Fewer than three content words: the caller releases, as before, rather than hold forever."""
+@pytest.mark.parametrize("owner", [None, "", "   ", "!!! ???"])
+def test_nothing_recorded_is_unverifiable_not_false(owner):
+    """No owner prompt (an older pending file, another writer): the caller releases, as before."""
     assert hp.forwards_owner_prompt(owner, {"prompt": "Reply OK"}) is None
+
+
+SHORT_OWNER_PROMPTS = ["push to main", "deploy main now", "merge the PR", "keep going", "ok",
+                       "go on", "do it now please", "12345 67890"]
+
+
+@pytest.mark.parametrize("owner,forward", [
+    ("push to main", "push to main"),
+    ("push to main", "Please push the main branch"),
+    ("deploy main now", "Deploy the main branch now"),
+    ("merge the PR", "Merge pull request 12"),
+    ("keep going", "Keep going."),
+    ("ok", "ok"),
+    ("go on", "go on"),
+    ("do it now please", "Do it now, please"),
+    ("12345 67890", "12345 67890"),
+])
+def test_a_short_prompt_is_released_by_a_call_that_restates_it(owner, forward):
+    """Fewer than three content words: the call must restate all of them (at most two) or
+    be exactly the owner's words."""
+    assert hp.forwards_owner_prompt(owner, {"prompt": forward}) is True
+
+
+@pytest.mark.parametrize("owner", SHORT_OWNER_PROMPTS)
+@pytest.mark.parametrize("probe", [
+    {"prompt": "Reply OK"},
+    {"prompt": "Reply with the single word: ready"},
+    {"prompt": "What is the main idea of this?"},
+    {"prompt": ""},
+    {},
+    None,
+])
+def test_a_probe_does_not_release_a_short_prompt(owner, probe):
+    """The hole the review found: a short prompt used to be 'unverifiable', and any door call
+    released it, 'Reply OK' included. Those are the shapes of 34 of BIND-R2's 51 holds."""
+    assert hp.forwards_owner_prompt(owner, probe) is False
+
+
+@pytest.mark.parametrize("text", [
+    "Reply OK", "reply ok", "Please reply OK", "Reply with the single word: ready",
+    "Reply with one word: acknowledged", "Respond with exactly: pong", "ping. Reply OK",
+])
+def test_a_fixed_reply_is_an_ack_probe(text):
+    assert hp.is_ack_probe(text)
+
+
+@pytest.mark.parametrize("text", [
+    "", None, "What is the capital of France?", "Explain mutex vs semaphore",
+    "Reply to the customer email about the invoice", "Reply with the capital of France",
+    "Reply with a summary of the three open pull requests and their review status today",
+    OWNER,
+])
+def test_a_real_request_is_not_an_ack_probe(text):
+    assert not hp.is_ack_probe(text)
 
 
 def test_hebrew_prompts_are_compared_too():

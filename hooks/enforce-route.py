@@ -162,6 +162,30 @@ def _hold_policy():
         return None
 
 
+def _record_door_call(session_id, tool_name, tool_input, pending, tool_use_id) -> None:
+    """BIND W2: one text-free ``door_call`` row for every routing-door call this hook sees,
+    whether or not a hold is pending, so a fixed-reply probe that no hold provoked ("Reply
+    OK" after a ROUTE hint) is still counted. Cheap for every other tool: one string test.
+    Fail-open and counted: a metric never changes what the hook decides."""
+    try:
+        bare = tool_name.split("__")[-1] if "__" in tool_name else tool_name
+        if not (bare == "llm" or bare.startswith("llm_")):
+            return
+        hp = _hold_policy()
+        if hp is None or not hp.is_route_door(bare):
+            return
+        text = hp.call_text(tool_input)
+        forwarded = "unknown"
+        if pending is not None:
+            fwd = hp.forwards_owner_prompt(pending.get("original_prompt"), tool_input)
+            forwarded = "route" if fwd else ("unknown" if fwd is None else "unrelated")
+        _hold_event("door_call", session_id, tool_use_id=tool_use_id, tool=bare,
+                    call_words=hp.words_in(text), held=pending is not None, forwarded=forwarded,
+                    ack=hp.is_ack_probe(text))
+    except Exception as exc:  # noqa: BLE001 -- the metric never breaks a tool call
+        _count_failopen("CHZ-FO-HOOK-DOOR-CALL", exc)
+
+
 def _hold_event(event: str, session_id: str, **fields) -> None:
     """One text-free row in the hold ledger (llm_router.hold_ledger). Fail-open and counted."""
     try:
@@ -1526,14 +1550,21 @@ def _try_local_intercept(hook_input: dict) -> None:
     sys.exit(0)
 
 
-def main() -> None:
-    """Run the hook with stdout reserved for its one JSON decision (see ``_emit``)."""
+def main(restore_stdout: bool = True) -> None:
+    """Run the hook with stdout reserved for its one JSON decision (see ``_emit``).
+
+    ``restore_stdout=False`` is how the script entry runs it: ``sys.stdout`` stays pointed at
+    stderr to the end of the process, because handlers that run AFTER main() returns (the
+    hook_latency atexit write, whose failure is logged through structlog to ``sys.stdout``)
+    would otherwise put a log line behind the JSON and void the decision. An in-process
+    caller (a test) keeps the default and gets its stdout back."""
     _REAL_STDOUT[0] = sys.stdout
     sys.stdout = sys.stderr
     try:
         _main()
     finally:
-        sys.stdout = _REAL_STDOUT[0] or sys.stdout
+        if restore_stdout:
+            sys.stdout = _REAL_STDOUT[0] or sys.stdout
         _REAL_STDOUT[0] = None
 
 
@@ -1645,6 +1676,7 @@ def _main() -> None:
         sys.exit(0)
 
     pending = _read_pending(session_id)
+    _record_door_call(session_id, tool_name, hook_input.get("tool_input"), pending, _tuid)
 
     # ── Self-healing: if no pending routing state exists AND the upstream
     # auto-route.py hook is missing, routing has silently stopped working.
@@ -2043,10 +2075,21 @@ def _main() -> None:
     #    that does not, and any other llm_* tool (status, admin, session), runs but leaves
     #    the hold in place and is counted as a probe. The free valves further down (trap,
     #    loop, count) and the user's `claude:` prefix still release without a model call.
-    _hp = _hold_policy()
+    #
+    #    Only where a hold is in force (smart, hard, strict). Under soft and suggest, or for a
+    #    prompt an exemption downgraded to soft, nothing is held, so there is no toll to
+    #    prevent and the release rules stay exactly what they were (any llm_* tool), which
+    #    keeps their telemetry byte for byte: no probe is recorded and no extra VIOLATION
+    #    row appears later because a pending file was left behind.
+    _hp = _hold_policy() if enforce in ("hard", "smart") else None
     _door_call = (_hp.is_route_door(bare_name) if _hp is not None
                   else (bare_name == "llm" or bare_name.startswith("llm_")))
-    if _door_call or bare_name.startswith("llm_"):
+    if enforce not in ("hard", "smart") and bare_name.startswith("llm_"):
+        _record_realization_used(session_id, pending)  # CHZ-EXT-204
+        _clear_pending(session_id)
+        _clear_violation_count(session_id)
+        sys.exit(0)
+    if enforce in ("hard", "smart") and (_door_call or bare_name.startswith("llm_")):
         if _hp is None:
             _releases, _how = True, "unverifiable"  # cannot judge a forward: today's behaviour
         elif not _door_call:
@@ -2354,6 +2397,26 @@ def _main() -> None:
     # every routing door still releases.
     _not_release_note = (" (a trivial or unrelated llm_* call does NOT release it)"
                          if _hp is not None else "")
+    if _strict:
+        # Strict switches the trap, loop and count valves off (SECURITY.md, enforcement modes):
+        # listing them here would promise a release that never comes.
+        _valve_lines = (
+            "  • Strict mode has no free valve: the trap, loop and violation-count releases are "
+            "off, so retrying this tool does not release the hold\n"
+            "  • The user's next prompt replaces the hold, and it expires by itself after "
+            f"{_PENDING_TTL // 60} minutes\n"
+        )
+        escalation = (
+            f"\n⚠️  Violation {violation_count} — strict mode: there is no auto-pivot, "
+            f"only the release below."
+        )
+    else:
+        _valve_lines = (
+            "  • Routing cannot help (it needs local files or the shell): retry the same tool. "
+            "Trap detection: the 2nd block of one tool in one turn → auto-pivot\n"
+            "  • Loop detection: same tool blocked 3+ times in 2 minutes → auto-pivot\n"
+            "  • Or hit violation 4 → auto-pivot\n"
+        )
     block_reason = (
         f"[llm_router] Routing directive BLOCKED.{escalation}{loop_warning}{window_warning}\n\n"
         f"  Directive:     ⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {_expected_disp}\n"
@@ -2366,10 +2429,7 @@ def _main() -> None:
         f"{action}\n\n"
         f"How this hold is released{_not_release_note}:\n"
         f"  • Route the user's actual request: {_expected_call} with the request itself as the prompt\n"
-        f"  • Routing cannot help (it needs local files or the shell): retry the same tool. "
-        f"Trap detection: the 2nd block of one tool in one turn → auto-pivot\n"
-        f"  • Loop detection: same tool blocked 3+ times in 2 minutes → auto-pivot\n"
-        f"  • Or hit violation 4 → auto-pivot\n"
+        f"{_valve_lines}"
         f"  • The user can skip the hold for one prompt by starting it with `claude:` "
         f"(docs/proxy.md, Routing prefixes)\n\n"
         f"Debug options:\n"
@@ -2419,4 +2479,4 @@ def _main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(restore_stdout=False)

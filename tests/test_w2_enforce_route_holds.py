@@ -165,12 +165,207 @@ def test_no_probe_is_recorded_where_nothing_is_held(tmp_path):
 
 
 def test_no_text_reaches_the_ledger_or_the_log(tmp_path):
-    secret = "UNIQUE-CANARY-PROMPT-TEXT-77"
+    secret = "UNIQUECANARYPROMPTTEXT77"     # one word: it must not make the probe look like a quote of the owner
     _seed(tmp_path, original_prompt=OWNER + " " + secret)
     _hook(tmp_path, "mcp__llm_router__llm", {"prompt": "Reply OK " + secret, "task": "query"})
     _hook(tmp_path, "Bash", {"command": "echo " + secret})
     blob = (tmp_path / ".llm-router" / "hold_events.jsonl").read_text() + _log(tmp_path)
     assert secret not in blob
+    # the check had something to check: both the call and the refusal were recorded
+    assert len(_events(tmp_path, "door_call")) == 1 and len(_events(tmp_path, "blocked")) == 1
+
+
+# ── a short owner prompt is no easier to release than a long one ─────────────
+
+TINY = "push to main"      # 3 words, 2 of them content words
+THIN = "yes please do that again now and keep going with the same thing as before"  # 15 words, 1 content
+
+
+@pytest.mark.parametrize("mode", ["hard", "strict"])
+def test_a_reply_ok_probe_does_not_release_a_tiny_prompts_hold(tmp_path, mode):
+    """docs/proxy.md: a probe never releases a hold. A prompt of fewer than three content
+    words used to be 'unverifiable', so any door call released it and the toll was back for
+    the shortest prompts, in exactly the modes that hold them."""
+    pending = _seed(tmp_path, original_prompt=TINY)
+    env = {"LLM_ROUTER_ENFORCE": mode}
+    assert _decision(_hook(tmp_path, "mcp__llm_router__llm", {"prompt": "Reply OK"}, **env)) is None
+    assert pending.exists(), f"a probe released the {mode} hold on a three-word prompt"
+    assert _held(_hook(tmp_path, "Bash", BASH, **env))
+    assert [r["kind"] for r in _events(tmp_path, "probe")] == ["door_unrelated"]
+    assert _events(tmp_path, "released") == []
+
+
+@pytest.mark.parametrize("mode", ["hard", "strict", "smart"])
+@pytest.mark.parametrize("call", [
+    {"prompt": "push to main"},
+    {"prompt": "Push to main!", "task": "query"},
+    {"prompt": "Please push the finished changes to main and report back", "task": "query"},
+])
+def test_restating_a_tiny_prompt_releases_its_hold(tmp_path, mode, call):
+    pending = _seed(tmp_path, original_prompt=TINY)
+    assert _decision(_hook(tmp_path, "mcp__llm_router__llm", call, LLM_ROUTER_ENFORCE=mode)) is None
+    assert not pending.exists()
+    assert [r["how"] for r in _events(tmp_path, "released")] == ["route"]
+
+
+def test_a_long_prompt_with_one_content_word_is_judged_the_same_way(tmp_path):
+    """15 words, so smart holds it; one content word, so the overlap test cannot judge it. A
+    probe still shares none of it, and the prompt's own words still release."""
+    pending = _seed(tmp_path, original_prompt=THIN)
+    assert _decision(_hook(tmp_path, "mcp__llm_router__llm", {"prompt": "Reply OK"})) is None
+    assert pending.exists() and len(_events(tmp_path, "probe")) == 1
+    assert _decision(_hook(tmp_path, "mcp__llm_router__llm", {"prompt": THIN})) is None
+    assert not pending.exists()
+
+
+# ── strict has no free valve ─────────────────────────────────────────────────
+
+STRICT = {"LLM_ROUTER_ENFORCE": "strict"}
+
+
+def test_strict_has_no_free_valve_and_a_probe_leaves_the_hold(tmp_path):
+    """SECURITY.md, enforcement modes: strict turns the trap, loop and count releases off.
+    Retrying does not release, a probe runs and leaves the hold, and the exits are routing the
+    request (the user's `claude:` prefix and the next prompt are in the prompt-hook tests)."""
+    pending = _seed(tmp_path)
+    for n in range(1, 7):          # the 2nd (trap), 3rd (loop) and 4th (count) block would each have released
+        assert _held(_hook(tmp_path, "Bash", BASH, **STRICT)), f"strict released at block {n}"
+    assert pending.exists() and _events(tmp_path, "released") == []
+    assert "AUTO-PIVOT" not in _log(tmp_path) and "BLOCKED(strict)" in _log(tmp_path)
+    assert _decision(_hook(tmp_path, "mcp__llm_router__llm", {"prompt": "Reply OK"}, **STRICT)) is None
+    assert pending.exists(), "a probe must not release a strict hold"
+    assert _held(_hook(tmp_path, "Bash", BASH, **STRICT))
+    assert _decision(_hook(tmp_path, "mcp__llm_router__llm", {"prompt": OWNER}, **STRICT)) is None
+    assert not pending.exists()
+    assert not _held(_hook(tmp_path, "Bash", BASH, **STRICT))
+    assert [r["how"] for r in _events(tmp_path, "released")] == ["route"]
+
+
+def test_the_strict_block_text_does_not_promise_a_release_that_never_comes(tmp_path):
+    _seed(tmp_path)
+    reason = _decision(_hook(tmp_path, "Bash", BASH, **STRICT))["reason"]
+    assert "Strict mode has no free valve" in reason and "60 minutes" in reason
+    for promised in ("Trap detection", "Loop detection", "hit violation 4", "Auto-pivot at violation 4",
+                     "retry the same tool"):
+        assert promised not in reason, f"strict text promises: {promised}"
+    assert "`claude:`" in reason and "does NOT release" in reason
+
+
+def test_strict_still_lets_the_routers_own_cli_run(tmp_path):
+    """The one exit that needs no routing (F-1): SECURITY.md and docs/proxy.md say so."""
+    _seed(tmp_path)
+    assert _decision(_hook(tmp_path, "Bash", {"command": "llm-router set-enforce off"}, **STRICT)) is None
+    assert "ROUTER_CLI_EXEMPT" in _log(tmp_path)
+
+
+def test_control_the_other_modes_still_list_their_free_valves(tmp_path):
+    _seed(tmp_path)
+    reason = _decision(_hook(tmp_path, "Bash", BASH))["reason"]
+    assert "Trap detection" in reason and "Loop detection" in reason and "Strict mode" not in reason
+
+
+# ── soft and suggest keep the release they always had ────────────────────────
+
+def test_control_a_pending_file_under_soft_logs_a_violation_for_a_work_tool(tmp_path):
+    _seed(tmp_path)
+    assert _decision(_hook(tmp_path, "Bash", BASH, LLM_ROUTER_ENFORCE="soft")) is None
+    assert "VIOLATION" in _log(tmp_path) and "ALLOWED(soft)" in _log(tmp_path)
+
+
+@pytest.mark.parametrize("mode", ["soft", "suggest"])
+@pytest.mark.parametrize("tool", ["mcp__llm_router__llm_route", "mcp__llm_router__llm_router_status"])
+def test_soft_and_suggest_still_clear_the_pending_file_on_any_llm_tool(tmp_path, mode, tool):
+    """Nothing is held under soft or suggest, so there is no toll to prevent. A probe that
+    left the pending file behind would log one more VIOLATION on the next tool call; the
+    release those modes always had keeps their telemetry what it was."""
+    pending = _seed(tmp_path)
+    env = {"LLM_ROUTER_ENFORCE": mode}
+    assert _decision(_hook(tmp_path, tool, {"prompt": "Reply OK"}, **env)) is None
+    assert not pending.exists()
+    assert _events(tmp_path, "probe") == [] and "PROBE" not in _log(tmp_path)
+    assert _decision(_hook(tmp_path, "Bash", BASH, **env)) is None
+    assert "VIOLATION" not in _log(tmp_path)
+
+
+# ── every routing-door call is counted, held or not ──────────────────────────
+
+def test_a_door_call_outside_any_hold_is_counted_so_the_probe_bar_is_measurable(tmp_path):
+    """A ROUTE hint can provoke a "Reply OK" with no hold in force. probe rows exist only
+    under a hold, so the door_call row is where 'no Reply OK probes' is measured."""
+    assert _decision(_hook(tmp_path, "mcp__llm_router__llm", {"prompt": "Reply OK", "task": "query"})) is None
+    (row,) = _events(tmp_path, "door_call")
+    assert row["tool"] == "llm" and row["held"] is False and row["forwarded"] == "unknown"
+    assert row["ack"] is True and row["call_words"] == 2
+    assert row["session_id"] == SESSION and row["tool_use_id"] == TUID
+    assert _events(tmp_path, "probe") == [] and _events(tmp_path, "released") == []
+
+
+def test_a_door_call_under_a_hold_records_whether_it_carried_the_request(tmp_path):
+    _seed(tmp_path)
+    _hook(tmp_path, "mcp__llm_router__llm", {"prompt": "Reply OK"})
+    (first,) = _events(tmp_path, "door_call")
+    assert first["held"] is True and first["forwarded"] == "unrelated" and first["ack"] is True
+    assert len(_events(tmp_path, "probe")) == 1            # the same call, seen as a probe
+    _hook(tmp_path, "mcp__llm_router__llm", {"prompt": OWNER})
+    rows = _events(tmp_path, "door_call")
+    assert [r["forwarded"] for r in rows] == ["unrelated", "route"]
+    assert rows[1]["ack"] is False and rows[1]["call_words"] == len(OWNER.split())
+    assert [r["how"] for r in _events(tmp_path, "released")] == ["route"]
+
+
+@pytest.mark.parametrize("text,ack", [
+    ("Reply OK", True),
+    ("Reply with the single word: ready", True),
+    ("Respond with exactly: pong", True),
+    ("Reply to the customer about the invoice", False),
+    ("What is the capital of France?", False),
+])
+def test_the_ack_verdict_is_on_the_row_and_the_text_is_not(tmp_path, text, ack):
+    _hook(tmp_path, "mcp__llm_router__llm", {"prompt": text})
+    (row,) = _events(tmp_path, "door_call")
+    assert row["ack"] is ack and text not in json.dumps(row)
+
+
+@pytest.mark.parametrize("tool", ["Bash", "Read", "mcp__llm_router__llm_router_status", "mcp__other__thing"])
+def test_only_routing_doors_get_a_door_call_row(tmp_path, tool):
+    _seed(tmp_path)
+    _hook(tmp_path, tool, {"command": "ls"} if tool == "Bash" else {"view": "x"})
+    assert _events(tmp_path, "door_call") == []
+
+
+def test_a_crash_while_writing_the_door_call_row_never_changes_the_decision(tmp_path, monkeypatch):
+    """The row is a metric. If building it raises, the hook still decides exactly as before
+    (here: the owner's request releases the hold, nothing on stdout) and the miss is counted."""
+    wrapper = (
+        "import runpy, sys\n"
+        "import llm_router.hold_policy as hp\n"
+        "def boom(*a, **k):\n"
+        "    raise RuntimeError('boom')\n"
+        "hp.is_ack_probe = boom\n"                      # only the door_call row uses it
+        "runpy.run_path(sys.argv[1], run_name='__main__')\n"
+    )
+    pending = _seed(tmp_path)
+    r = subprocess.run(
+        [sys.executable, "-c", wrapper, str(ENFORCE)],
+        input=json.dumps({"session_id": SESSION, "tool_name": "mcp__llm_router__llm",
+                          "tool_input": {"prompt": OWNER}, "tool_use_id": TUID}),
+        capture_output=True, text=True, env=_env(tmp_path), timeout=60,
+    )
+    assert r.returncode == 0 and r.stdout == "", r.stderr[-400:]
+    assert not pending.exists() and [x["how"] for x in _events(tmp_path, "released")] == ["route"]
+    assert _events(tmp_path, "door_call") == []
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+    from llm_router import failopen
+
+    failopen.reset_cache()           # snapshot() caches per process, not per store path
+    assert failopen.snapshot().by_code.get("CHZ-FO-HOOK-DOOR-CALL", 0) >= 1
+
+
+def test_door_calls_are_counted_in_soft_mode_too(tmp_path):
+    _seed(tmp_path)
+    _hook(tmp_path, "mcp__llm_router__llm", {"prompt": "Reply OK"}, LLM_ROUTER_ENFORCE="soft")
+    (row,) = _events(tmp_path, "door_call")
+    assert row["ack"] is True and row["held"] is True
 
 
 # ── a real route releases ────────────────────────────────────────────────────
@@ -301,6 +496,36 @@ def test_a_probe_and_a_release_emit_nothing_on_stdout(tmp_path):
     assert release.returncode == 0 and release.stdout == ""
 
 
+@pytest.mark.parametrize("both", [False, True], ids=["latency-store", "latency-and-failopen-store"])
+@pytest.mark.parametrize("case", ["block", "probe", "release", "interception"])
+def test_a_failing_exit_time_write_puts_no_line_behind_the_decision(tmp_path, case, both):
+    """The hook_latency row (KPI G1) is written by an atexit handler, after main() has returned.
+    When that write fails the library logs through structlog to sys.stdout, and a line behind
+    (or instead of) the JSON voids the decision. The script entry leaves sys.stdout on stderr
+    until the process is gone. Run as the host runs it: the real script, no wrapper."""
+    _seed(tmp_path)
+    root = tmp_path / ".llm-router"
+    (root / "hook_latency.jsonl").mkdir()            # a directory where the file goes: the write cannot open it
+    if both:
+        (root / "fail_open.jsonl").mkdir()           # nor can the fail-open store, so the library warns instead
+    big = tmp_path / "big.txt"
+    big.write_text("".join(f"line {i % 3} of the repeated log output with padding text\n" for i in range(400)))
+    tool, tool_input, extra = {
+        "block": ("Bash", BASH, {}),
+        "probe": ("mcp__llm_router__llm", {"prompt": "Reply OK"}, {}),
+        "release": ("mcp__llm_router__llm", {"prompt": OWNER}, {}),
+        "interception": ("Bash", {"command": f"cat {big}"}, {"LLM_ROUTER_BASH_INTERCEPT": "1"}),
+    }[case]
+    r = _hook(tmp_path, tool, tool_input, **extra)
+    decision = _decision(r)          # json.loads(stdout): a stray line before or after the object raises
+    if case in ("block", "interception"):
+        assert decision is not None and decision["hookSpecificOutput"]["permissionDecision"] == "deny"
+    else:
+        assert decision is None
+    # the check had something to check: the exit-time write failed and the library did log, on stderr
+    assert "CHZ-FO-HOOK-LATENCY-WRITE" in r.stderr
+
+
 def test_hooks_newer_than_the_package_still_decide_and_the_miss_is_counted(tmp_path, monkeypatch):
     """Hook files can be newer than the installed llm_router (hold_policy / hold_ledger
     absent). The hold still blocks, a door call still releases (nothing to judge it with),
@@ -330,6 +555,7 @@ def test_hooks_newer_than_the_package_still_decide_and_the_miss_is_counted(tmp_p
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
     from llm_router import failopen
 
+    failopen.reset_cache()           # snapshot() caches per process, not per store path
     by_code = failopen.snapshot().by_code
     assert by_code.get("CHZ-FO-HOOK-HOLD-LEDGER", 0) >= 1
     assert by_code.get("CHZ-FO-HOOK-HOLD-POLICY", 0) >= 1

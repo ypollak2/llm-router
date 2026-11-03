@@ -94,10 +94,10 @@ def test_a_short_prompt_of_a_held_class_writes_no_hold(tmp_path, prompt):
     assert ex["reason"] == "short_prompt" and ex["words"] == len(prompt.split())
 
 
-@pytest.mark.parametrize("mode", ["hard", "suggest"])
+@pytest.mark.parametrize("mode", ["hard", "strict", "suggest"])
 def test_hard_and_the_modes_that_never_block_are_unchanged_for_a_short_prompt(tmp_path, mode):
-    """The rule is for `smart`: `hard` is the explicit opt-in to hold everything, and `suggest`
-    has no hold to take away, so both keep the pending state and the text they had."""
+    """The rule is for `smart`: `hard` and `strict` are the explicit opt-in to hold everything,
+    and `suggest` has no hold to take away, so each keeps the pending state and the text it had."""
     ctx = _context(_turn(tmp_path, "refactor the auth module", "m", enforce=mode))
     assert _pending(tmp_path, "m").exists()
     assert "nothing held" not in ctx
@@ -150,16 +150,34 @@ def test_a_hook_newer_than_the_package_says_only_what_is_true(tmp_path):
     assert "releases" in ctx and "does NOT release" not in ctx
 
 
-def test_the_claude_prefix_is_the_explicit_user_bypass(tmp_path):
+@pytest.mark.parametrize("mode", ["smart", "hard", "strict"])
+def test_the_claude_prefix_is_the_explicit_user_bypass(tmp_path, mode):
     """docs/proxy.md, Routing prefixes: `claude:` answers natively and holds nothing, and it
-    drops a hold left by the previous turn, so the user can always say 'no hold'."""
+    drops a hold left by the previous turn, so the user can always say 'no hold'. In strict,
+    which turns every automatic release off, it is the only free exit."""
     sid = "pfx"
-    first = _context(_turn(tmp_path, LONG_GENERATE, sid))
+    first = _context(_turn(tmp_path, LONG_GENERATE, sid, enforce=mode))
     assert _pending(tmp_path, sid).exists() and first
-    proc = _turn(tmp_path, "claude: " + LONG_GENERATE, sid)
+    proc = _turn(tmp_path, "claude: " + LONG_GENERATE, sid, enforce=mode)
     assert proc.returncode == 0 and proc.stdout.strip() == ""   # answered natively: no directive
     assert not _pending(tmp_path, sid).exists(), "the bypass must drop the previous hold"
     assert [r["event"] for r in _rows(tmp_path)].count("prompt") == 2   # and it still counts as a prompt
+
+
+@pytest.mark.parametrize("prompt", [LONG_GENERATE, "refactor the auth module", "claude: " + LONG_GENERATE],
+                         ids=["hold", "exempt", "claude-prefix"])
+def test_a_failing_exit_time_write_puts_no_line_behind_the_prompt_hooks_json(tmp_path, prompt):
+    """The hook_latency row is written by an atexit handler. This hook pins its logging to
+    stderr, so a failed write there cannot reach stdout; the test keeps it that way on the
+    paths the hold change touched (the enforce-route twin is in test_w2_enforce_route_holds)."""
+    root = tmp_path / ".llm-router"
+    root.mkdir(parents=True)
+    (root / "hook_latency.jsonl").mkdir()           # a directory where the file goes
+    proc = _turn(tmp_path, prompt, "lat")
+    assert proc.returncode == 0, proc.stderr
+    if proc.stdout.strip():
+        json.loads(proc.stdout)                     # one object, nothing after it
+    assert "CHZ-FO-HOOK-LATENCY-WRITE" in proc.stderr, "the write did not fail: nothing was checked"
 
 
 def test_every_prompt_is_counted_even_when_nothing_else_is_written(tmp_path):

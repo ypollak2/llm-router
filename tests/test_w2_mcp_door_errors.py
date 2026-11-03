@@ -17,6 +17,7 @@ Every test drives a tool over the MCP protocol (``mcp.client.Client``, in memory
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 import time
@@ -153,16 +154,20 @@ async def test_the_real_llm_door_reports_a_stale_server(monkeypatch, temp_db):
 
 
 @pytest.mark.timeout(120)
-def test_the_server_takes_its_snapshot_at_start():
-    """The wiring: importing the server module is what starts the clock."""
+def test_the_server_takes_its_snapshot_at_start(tmp_path):
+    """The wiring: importing the server module is what starts the clock. The child gets a temp
+    HOME on purpose: importing llm_router.server refreshes the hook files under
+    $HOME/.claude/hooks, and a test must never be able to reach the real ones."""
     code = (
         "import llm_router.server\n"
         "from llm_router import mcp_door\n"
         "fp = mcp_door._START['fp']\n"
         "print('SNAP', fp is not None, mcp_door.stale_reason())\n"
     )
+    env = {**os.environ, "HOME": str(tmp_path), "LLM_ROUTER_HOME": str(tmp_path / ".llm-router"),
+           "PYTHONPATH": str(ROOT / "src")}
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                         cwd=str(ROOT), timeout=120)
+                         cwd=str(ROOT), timeout=120, env=env)
     assert out.returncode == 0, out.stderr[-500:]
     assert "SNAP True None" in out.stdout
 
@@ -256,6 +261,7 @@ async def test_outside_the_window_the_full_deadline_applies(monkeypatch):
     assert _text(await _call(_probe(slowish, name="llm"), "llm", {})) == "late"
 
 
+@pytest.mark.timing  # asserts a time.monotonic() window: serial `timing` CI lane (test_timing_lane)
 @pytest.mark.asyncio
 async def test_a_deadline_opens_the_window_for_its_whole_length(monkeypatch):
     monkeypatch.setattr(mcp_door, "BUSY_WINDOW_S", 60.0)

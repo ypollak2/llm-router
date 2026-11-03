@@ -1,22 +1,24 @@
 """A text-free ledger of hold decisions: "BLOCKED per 100 prompts" and the probes (BIND W2).
 
-The success bar of BIND W2 is "BLOCKED per 100 prompts under 1 and no 'Reply OK' probes".
-The audit measured it from transcripts (a ``Routing directive BLOCKED`` tool result per
-counted human prompt); this ledger lets the hooks count both sides themselves, so the
-number is available without reading a transcript and without a model.
+The success bar of BIND W2 is "BLOCKED per 100 prompts under 1 and no 'Reply OK' probes",
+measured on ORGANIC sessions (D-358). The audit measured it from transcripts (a
+``Routing directive BLOCKED`` tool result per counted human prompt); this ledger lets the
+hooks count both sides themselves, so the number is available without reading a transcript
+and without a model.
 
 ONE ROW PER EVENT, appended to ``hold_events.jsonl`` under ``LLM_ROUTER_HOME`` (two
 generations kept, ``capped_log``). Never any prompt, command or tool-argument text:
-ids, counts and codes only. The three ``enforce-route`` events also carry ``tool_use_id``
-(the id of the tool call the host sent, when it sent one), so a row joins to the
-``tool_use`` block of the transcript exactly.
+ids, counts, codes and yes/no verdicts only. The ``enforce-route`` events also carry
+``tool_use_id`` (the id of the tool call the host sent, when it sent one), so a row joins
+to the ``tool_use`` block of the transcript exactly.
 
 ====================  =======  ============================================================
 event                 writer   fields (besides ``ts``, ``event``, ``session_id``)
 ====================  =======  ============================================================
 ``prompt``            auto-    ``words``: the prompt's word count. One row per human
                       route    prompt the hook sees; the denominator. Background-task
-                               notifications and sub-agent reports are not prompts.
+                               notifications and sub-agent reports are not prompts; slash
+                               commands and ``!`` shell entries are counted.
 ``hold``              auto-    ``task``, ``complexity``, ``mode``, ``words``: a hold
                       route    (pending route) was written for the prompt.
 ``exempt``            auto-    ``reason``, ``words``, ``task``: the prompt would have held
@@ -24,24 +26,45 @@ event                 writer   fields (besides ``ts``, ``event``, ``session_id``
 ``blocked``           enforce- ``tool``, ``task``, ``complexity``, ``violation``: a tool
                       route    call was refused (the ``Routing directive BLOCKED`` text).
 ``probe``             enforce- ``tool``, ``kind``, ``call_words``: an ``llm_*`` call made
-                      route    while a hold was pending that did NOT release it. ``kind``
+                      route    while a hold was in force that did NOT release it. ``kind``
                                is ``door_unrelated`` (a routing door whose input does not
                                carry the owner's prompt) or ``non_door`` (a status, admin
                                or session tool). ``call_words`` is the length of the
                                request text, so a one-line ack is told from a real call.
+``door_call``         enforce- ``tool``, ``call_words``, ``held`` (a pending route existed),
+                      route    ``forwarded`` (``route``: the call carries the owner's
+                               prompt; ``unrelated``: it does not; ``unknown``: no hold, so
+                               no prompt to compare), ``ack`` (the call is a fixed-reply
+                               probe, ``hold_policy.is_ack_probe``). One row for EVERY
+                               routing-door call the hook sees, held or not: the probes a
+                               ROUTE hint provokes outside any hold are here, and only here.
+                               Recorded in soft, suggest, smart, hard and strict; the hook
+                               exits earlier in off, shadow and advise.
 ``released``          enforce- ``how``: ``route`` (a door call forwarded the owner's
-                      route    prompt), ``unverifiable`` (the owner's prompt had nothing
-                               to compare, or the policy module was unavailable),
-                               ``expected_tool`` / ``expected_server`` (a non-LLM tool
-                               the directive named), ``trap`` / ``loop`` / ``count``
-                               (the free auto-pivots, no model call).
+                      route    prompt), ``unverifiable`` (no owner prompt was recorded, or
+                               the policy module was unavailable), ``expected_tool`` /
+                               ``expected_server`` (a non-LLM tool the directive named),
+                               ``trap`` / ``loop`` / ``count`` (the free auto-pivots, no
+                               model call).
 ====================  =======  ============================================================
 
-READING IT. :func:`summarize` returns the counts and the rates (``probes_short`` is the
-number of ``door_unrelated`` probes whose request was 12 words or fewer: the "Reply OK"
-shape the success bar wants at zero); ``python -m
-llm_router.hold_ledger --days 30`` prints them as JSON. ``blocked_per_100_prompts`` is
-``None``, never 0, when no prompt row exists in the window: an empty ledger is unknown.
+READING IT. :func:`summarize` returns the counts and the rates; ``python -m
+llm_router.hold_ledger --days 30 --organic`` prints them as JSON.
+
+* ``blocked_per_100_prompts`` is ``None``, never 0, when no prompt row exists in the window:
+  an empty ledger is unknown.
+* ORGANIC. D-358 is measured on organic sessions. A row carries only ``session_id``, so the
+  kind of each session is read at summary time from :mod:`llm_router.session_kind` (the
+  owner's override file first, then the session's tag): ``kinds=("organic",)`` or
+  ``--organic`` keeps those sessions, a session never tagged is its own bucket
+  (``untagged``) and is NOT counted as organic. ``by_kind`` is always present and gives each
+  kind's prompts, BLOCKED and rate, so the organic line is visible even without the filter.
+* THE PROBE BAR. ``ack_probes`` counts ``door_call`` rows that are fixed-reply probes and do
+  not carry the owner's prompt, held or not: that is "0 'Reply OK' probes".
+  ``probes``/``probes_short`` count only calls made while a hold was in force (a diagnostic,
+  not the bar), because the hook cannot see a hold that does not exist. The shape test is a
+  heuristic (``hold_policy.is_ack_probe``): a fixed reply of at most two words in 12 words or
+  fewer; it can miss a probe phrased another way, and the transcript audit stays the check.
 
 The ledger has no off switch, because a metric that can be turned off is a metric that
 can be missing. Writes are fail-open and counted (``CHZ-FO-HOLD-LEDGER-WRITE`` in the
@@ -52,7 +75,7 @@ from __future__ import annotations
 import json
 import sys
 import time
-from typing import Any
+from typing import Any, Iterable
 
 from llm_router import capped_log
 from llm_router.paths import state_path
@@ -60,15 +83,18 @@ from llm_router.paths import state_path
 __all__ = ["EVENTS", "STORE_FILENAME", "read_rows", "record", "store_path", "summarize"]
 
 STORE_FILENAME = "hold_events.jsonl"
-EVENTS = ("prompt", "hold", "exempt", "blocked", "probe", "released")
+EVENTS = ("prompt", "hold", "exempt", "blocked", "probe", "door_call", "released")
 
-#: 100-205 bytes a row (docs/RETENTION.md); 2 MiB a generation holds 10k-20k rows, weeks of a busy machine.
+#: 100-231 bytes a row (docs/RETENTION.md); 2 MiB a generation holds 9k-20k rows, weeks of a busy machine.
 _MAX_BYTES = 2 * 1024 * 1024
 #: Row fields a writer may pass. Anything else is dropped, so a caller cannot put text in by accident.
 _FIELDS = frozenset({
     "session_id", "words", "task", "complexity", "mode", "reason", "tool", "violation",
-    "kind", "call_words", "how", "tool_use_id",
+    "kind", "call_words", "how", "tool_use_id", "held", "forwarded", "ack",
 })
+#: A probe whose request is this many words or fewer is "ack-shaped" for ``probes_short``.
+_SHORT_PROBE_WORDS = 12
+UNTAGGED = "untagged"
 
 
 def store_path():
@@ -111,51 +137,111 @@ def _per_100(num: int, den: int) -> float | None:
     return round(100.0 * num / den, 2) if den else None
 
 
-def summarize(days: float | None = 30, now: float | None = None) -> dict:
-    """Counts and rates over the last *days* days (all rows when None)."""
+def _kind_resolver():
+    """session id -> kind (``organic``, ``research``, ``harness``, ``headless``) or ``untagged``.
+
+    The owner's override file wins over the session's tag (``session_kind.kind_of``). A
+    session that was never tagged, or a reader that cannot be imported, is ``untagged``:
+    unknown is never organic."""
+    try:
+        from llm_router import session_kind
+
+        reader = session_kind.kind_of
+    except Exception:  # noqa: BLE001 -- no reader: every session is untagged
+        reader = None
+    cache: dict[Any, str] = {}
+
+    def kind(session_id: Any) -> str:
+        if session_id not in cache:
+            try:
+                cache[session_id] = (reader(session_id) if reader and isinstance(session_id, str) else None) or UNTAGGED
+            except Exception:  # noqa: BLE001 -- an unreadable tag is untagged
+                cache[session_id] = UNTAGGED
+        return cache[session_id]
+
+    return kind
+
+
+def _blank() -> dict:
+    return {"n": {e: 0 for e in EVENTS}, "exempt_by": {}, "released_by": {}, "probe_by": {},
+            "probe_short": 0, "ack_probes": 0, "sessions": set()}
+
+
+def _add(acc: dict, row: dict) -> None:
+    ev = row["event"]
+    acc["n"][ev] += 1
+    if isinstance(row.get("session_id"), str):
+        acc["sessions"].add(row["session_id"])
+    if ev == "exempt":
+        acc["exempt_by"][str(row.get("reason"))] = acc["exempt_by"].get(str(row.get("reason")), 0) + 1
+    elif ev == "released":
+        acc["released_by"][str(row.get("how"))] = acc["released_by"].get(str(row.get("how")), 0) + 1
+    elif ev == "probe":
+        acc["probe_by"][str(row.get("kind"))] = acc["probe_by"].get(str(row.get("kind")), 0) + 1
+        # ack-shaped: a routing-door call of 12 words or fewer. A status view under a hold is a
+        # probe too, but it is not an ack and has no request text.
+        if (row.get("kind") == "door_unrelated" and isinstance(row.get("call_words"), (int, float))
+                and row["call_words"] <= _SHORT_PROBE_WORDS):
+            acc["probe_short"] += 1
+    elif ev == "door_call" and row.get("ack") is True and row.get("forwarded") != "route":
+        acc["ack_probes"] += 1
+
+
+def _headline(acc: dict) -> dict:
+    prompts = acc["n"]["prompt"]
+    return {
+        "sessions": len(acc["sessions"]),
+        "prompts": prompts,
+        "blocked": acc["n"]["blocked"],
+        "blocked_per_100_prompts": _per_100(acc["n"]["blocked"], prompts),
+        "ack_probes": acc["ack_probes"],
+    }
+
+
+def summarize(days: float | None = 30, now: float | None = None,
+              kinds: Iterable[str] | None = None) -> dict:
+    """Counts and rates over the last *days* days (all rows when None).
+
+    *kinds* keeps only the sessions of those kinds (``("organic",)`` for D-358); the
+    top-level numbers are then over those sessions alone. ``by_kind`` always covers every
+    kind, so the organic rate is visible whether or not the filter is used."""
     rows = read_rows(days, now)
-    n = {e: 0 for e in EVENTS}
-    exempt_by: dict[str, int] = {}
-    released_by: dict[str, int] = {}
-    probe_by: dict[str, int] = {}
-    probe_short = 0
-    sessions = set()
+    kind_of = _kind_resolver()
+    want = None if kinds is None else frozenset(kinds)
+    total = _blank()
+    per_kind: dict[str, dict] = {}
+    n_rows = 0
     for r in rows:
-        ev = r.get("event")
-        if ev not in n:
+        if r.get("event") not in EVENTS:
             continue
-        n[ev] += 1
-        if isinstance(r.get("session_id"), str):
-            sessions.add(r["session_id"])
-        if ev == "exempt":
-            exempt_by[str(r.get("reason"))] = exempt_by.get(str(r.get("reason")), 0) + 1
-        elif ev == "released":
-            released_by[str(r.get("how"))] = released_by.get(str(r.get("how")), 0) + 1
-        elif ev == "probe":
-            probe_by[str(r.get("kind"))] = probe_by.get(str(r.get("kind")), 0) + 1
-            # ack-shaped: a routing-door call of 12 words or fewer ("Reply OK"). A status view
-            # under a hold is a probe too, but it is not an ack and has no request text.
-            if (r.get("kind") == "door_unrelated" and isinstance(r.get("call_words"), (int, float))
-                    and r["call_words"] <= 12):
-                probe_short += 1
+        k = kind_of(r.get("session_id"))
+        _add(per_kind.setdefault(k, _blank()), r)
+        if want is None or k in want:
+            _add(total, r)
+            n_rows += 1
+    n = total["n"]
     prompts = n["prompt"]
     return {
         "days": days,
-        "rows": len(rows),
-        "sessions": len(sessions),
+        "kinds": sorted(want) if want is not None else None,
+        "rows": n_rows,
+        "sessions": len(total["sessions"]),
         "prompts": prompts,
         "holds": n["hold"],
         "exempt": n["exempt"],
-        "exempt_by_reason": exempt_by,
+        "exempt_by_reason": total["exempt_by"],
         "blocked": n["blocked"],
         "probes": n["probe"],
-        "probes_by_kind": probe_by,
-        "probes_short": probe_short,
+        "probes_by_kind": total["probe_by"],
+        "probes_short": total["probe_short"],
+        "door_calls": n["door_call"],
+        "ack_probes": total["ack_probes"],
         "released": n["released"],
-        "released_by_how": released_by,
+        "released_by_how": total["released_by"],
         "holds_per_100_prompts": _per_100(n["hold"], prompts),
         "blocked_per_100_prompts": _per_100(n["blocked"], prompts),
         "probes_per_100_prompts": _per_100(n["probe"], prompts),
+        "by_kind": {k: _headline(v) for k, v in sorted(per_kind.items())},
     }
 
 
@@ -167,8 +253,15 @@ def main(argv: list[str] | None = None) -> int:
         description="Hold counters: BLOCKED and probes per 100 prompts (text-free).",
     )
     parser.add_argument("--days", type=float, default=30.0, help="window in days (0 = all rows)")
+    parser.add_argument("--organic", action="store_true",
+                        help="count organic sessions only (the D-358 population)")
+    parser.add_argument("--kinds", default="",
+                        help="comma-separated session kinds to count (organic, research, harness, headless, untagged)")
     args = parser.parse_args(argv)
-    summary = summarize(None if args.days <= 0 else args.days)
+    kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
+    if args.organic:
+        kinds.append("organic")
+    summary = summarize(None if args.days <= 0 else args.days, kinds=kinds or None)
     json.dump(summary, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0

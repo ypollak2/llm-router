@@ -3544,9 +3544,9 @@ def _hold_policy():
     try:
         from llm_router import hold_policy
         return hold_policy
-    except Exception as exc:  # noqa: BLE001 -- a partial install must not cost a prompt its routing
+    except Exception as _exc:  # noqa: BLE001 -- a partial install must not cost a prompt its routing
         from llm_router import failopen as _fo
-        _fo.record("CHZ-FO-HOOK-HOLD-POLICY", exc)
+        _fo.record("CHZ-FO-HOOK-HOLD-POLICY", _exc)
         return None
 
 
@@ -3556,9 +3556,9 @@ def _hold_event(event: str, session_id: str, **fields) -> None:
     try:
         from llm_router import hold_ledger
         hold_ledger.record(event, session_id, **fields)
-    except Exception as exc:  # noqa: BLE001 -- the metric never costs a prompt its routing
+    except Exception as _exc:  # noqa: BLE001 -- the metric never costs a prompt its routing
         from llm_router import failopen as _fo
-        _fo.record("CHZ-FO-HOOK-HOLD-LEDGER", exc)
+        _fo.record("CHZ-FO-HOOK-HOLD-LEDGER", _exc)
 
 
 def _last_route_path(session_id: str) -> Path:

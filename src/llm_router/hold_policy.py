@@ -49,13 +49,16 @@ import re
 from typing import Any
 
 __all__ = [
+    "ACK_PROBE_MAX_WORDS",
     "REASON_SESSION_CONTINUATION",
     "REASON_SHORT_PROMPT",
     "SHORT_PROMPT_MAX_WORDS",
     "ROUTE_DOORS",
+    "call_text",
     "content_words",
     "forwards_owner_prompt",
     "hold_exempt_reason",
+    "is_ack_probe",
     "is_route_door",
     "words_in",
 ]
@@ -143,8 +146,9 @@ _STOP = frozenset((
     "really maybe perhaps"
 ).split())
 
-#: A forward is judged on shared content words. Below this many in the owner's prompt
-#: there is nothing to compare, and the call is given the benefit of the doubt.
+#: A forward is judged on shared content words. An owner prompt with at least this many gets
+#: the overlap test below; a shorter one ("push to main", "keep going", "ok") is judged by
+#: the stricter short-prompt test in :func:`forwards_owner_prompt`.
 MIN_OWNER_CONTENT_WORDS = 3
 #: The call restates at least this share of the owner's content words ...
 RECALL_MIN = 0.5
@@ -153,6 +157,8 @@ RECALL_MIN = 0.5
 PRECISION_MIN = 0.6
 MIN_SHARED_FOR_PRECISION = 4
 MIN_SHARED_FOR_RECALL = 3
+#: A fixed-reply probe ("Reply OK") is at most this many words.
+ACK_PROBE_MAX_WORDS = 12
 
 
 def content_words(text: str | None) -> frozenset[str]:
@@ -194,27 +200,73 @@ def call_text(tool_input: Any) -> str:
     return "\n".join(parts)[:_MAX_CALL_CHARS]
 
 
+def _norm(text: str | None) -> str:
+    """Lower-cased words of *text* joined by single spaces (punctuation and case ignored)."""
+    return " ".join(_WORD_RE.findall((text or "").lower()))
+
+
 def forwards_owner_prompt(owner_prompt: str | None, tool_input: Any) -> bool | None:
     """Does a routing-door call carry the owner's prompt?
 
-    True: the call restates at least half of the owner's content words (and three of
-    them), or is made mostly (60%, at least four shared) of the owner's words, as a
-    quoted excerpt of a long prompt is. False: it does not, so it is a probe. None: the
-    owner's prompt has fewer than three content words, so there is nothing to compare;
-    the caller treats that as a release (the old behaviour) rather than hold forever.
+    * An owner prompt with three or more content words: True when the call restates at
+      least half of them (and three), or is made mostly (60%, at least four shared) of the
+      owner's words, as a quoted excerpt of a long prompt is. Otherwise False, a probe.
+    * A shorter one ("push to main", "keep going", "ok"): True only when the call restates
+      ALL of its content words (at most two) or is exactly the owner's words. A "Reply OK"
+      probe shares none of them, so a short prompt is no easier to release than a long one.
+    * None: no owner prompt was recorded (an older pending file, another writer) or it has
+      no word in it, so there is nothing to compare. The caller releases, as before, rather
+      than hold forever.
 
     BIND-R2 measured the other side: the 4-gram overlap of all 133 router calls with the
     owner's preceding message was under 20%.
     """
-    owner = content_words(owner_prompt)
-    if len(owner) < MIN_OWNER_CONTENT_WORDS:
+    if not isinstance(owner_prompt, str):
         return None
-    call = content_words(call_text(tool_input))
-    if not call:
+    norm_owner = _norm(owner_prompt)
+    if not norm_owner:
+        return None
+    text = call_text(tool_input)
+    owner = content_words(owner_prompt)
+    call = content_words(text)
+    if len(owner) >= MIN_OWNER_CONTENT_WORDS:
+        if not call:
+            return False
+        shared = len(owner & call)
+        if shared >= MIN_SHARED_FOR_RECALL and shared / len(owner) >= RECALL_MIN:
+            return True
+        if shared >= MIN_SHARED_FOR_PRECISION and shared / len(call) >= PRECISION_MIN:
+            return True
         return False
-    shared = len(owner & call)
-    if shared >= MIN_SHARED_FOR_RECALL and shared / len(owner) >= RECALL_MIN:
+    if norm_owner == _norm(text):
         return True
-    if shared >= MIN_SHARED_FOR_PRECISION and shared / len(call) >= PRECISION_MIN:
-        return True
-    return False
+    return bool(owner) and len(owner & call) == len(owner)
+
+
+#: Words that may sit between "reply" and the fixed answer of an ack probe.
+_ACK_FILLER = frozenset("with only just exactly the a an one single word string token text".split())
+_ACK_LEAD = frozenset("please just kindly".split())
+
+
+def is_ack_probe(text: str | None) -> bool:
+    """True for a fixed-reply probe: "Reply OK", "Reply with the single word: ready".
+
+    BIND-R2: all 76 probes asked for a fixed reply (72 start with "Reply"; the rest end with
+    "Reply OK" or ask for an exact string). The shape is a reply verb followed by at most two
+    words of answer, in 12 words or fewer, with at most four words of lead-in ("ping."). A
+    real question that starts with "reply" ("Reply to the customer about the invoice")
+    carries more than two words of content and is not one. Text-free: only the verdict is
+    kept, never the text.
+    """
+    if not isinstance(text, str):
+        return False
+    toks = _WORD_RE.findall(text.lower())
+    if not 0 < len(toks) <= ACK_PROBE_MAX_WORDS:
+        return False
+    verbs = [i for i, t in enumerate(toks) if t in ("reply", "respond")]
+    if not verbs:
+        return False
+    i = verbs[-1]
+    lead = [t for t in toks[:i] if t not in _ACK_LEAD]
+    answer = [t for t in toks[i + 1:] if t not in _ACK_FILLER]
+    return len(lead) <= 4 and 1 <= len(answer) <= 2

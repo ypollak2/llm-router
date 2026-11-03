@@ -26,8 +26,12 @@ status: fixed in `bind/mcp-holds` (deploy: `llm-router install --force` for hook
   with "This session is being continued from a previous conversation" writes no hold. The route hint stays, worded as
   advice ("nothing held"), and the hook records an `exempt` row. A user-forced `local:` or `codex:` prefix is an explicit
   request to route and keeps its hold, and so do `hard` and `strict` (the explicit opt-in to hold everything, where the
-  `llm_act` redirect of short executable asks such as "push to main" is a deliberate design; a trivial call no longer
-  releases it, so it costs a retry, not a toll). The rule is applied in `smart` mode only: the modes that never block
+  `llm_act` redirect of short executable asks such as "push to main" is a deliberate design; a trivial call does not
+  release it, so in `hard` it costs a retry, not a toll (`strict` has no retry valve, see BIND-TOLL-1). That sentence
+  was false for a prompt with fewer than three content words
+  in the first version of this fix, which released it on any routing door; the review of PR #817 at 549d02a9 found it and
+  `hold_policy.forwards_owner_prompt` now judges such a prompt by whether the call restates all of its content words,
+  `tests/test_w2_enforce_route_holds.py::test_a_reply_ok_probe_does_not_release_a_tiny_prompts_hold`). The rule is applied in `smart` mode only: the modes that never block
   (`suggest`, `soft`, `advise`, `shadow`, `off`) have no hold to take away and keep their text byte for byte. A stale hold from the previous turn is consumed as before. Every prompt writes a
   `prompt` row first, so the denominator is complete (`hold_events.jsonl`, `docs/RETENTION.md`).
 - **Known limits.** (1) A reader-side exemption in `enforce-route.py` (drop a pending file whose `original_prompt` is short)
@@ -63,5 +67,5 @@ status: fixed in `bind/mcp-holds` (deploy: `llm-router install --force` for hook
   `::test_the_boundary_is_ten_words`, `::test_a_compaction_summary_is_not_a_request`,
   `::test_no_prompt_is_no_evidence_so_not_exempt`. Mutation check on unmodified origin/main 5c056309: 13 of the 15
   tests in `test_w2_auto_route_holds.py` fail; the `local:` preservation test and the degraded-install text test pass.
-  Also `test_hard_and_the_modes_that_never_block_are_unchanged_for_a_short_prompt` (hard and suggest keep the pending
-  state and the text they had).
+  Also `test_hard_and_the_modes_that_never_block_are_unchanged_for_a_short_prompt` (hard, strict and suggest keep the
+  pending state and the text they had) and `test_the_claude_prefix_is_the_explicit_user_bypass` (smart, hard, strict).
