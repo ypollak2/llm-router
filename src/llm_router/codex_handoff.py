@@ -159,7 +159,7 @@ def note_agent_launched(session_id: str, tool_use_id: str, *, now: float | None 
     return _update(session_id, _m, "CHZ-FO-CODEX-HANDOFF-VOID")
 
 
-def void_count(session_id: str) -> int:
+def voids_in_session(session_id: str) -> int:
     try:
         raw = _section(_read(_depth_file(session_id))).get("void")
     except Exception as exc:  # noqa: BLE001
@@ -170,7 +170,7 @@ def void_count(session_id: str) -> int:
 
 def breaker_open(session_id: str) -> bool:
     """True once ``VOID_LIMIT`` delegations in this session were discarded by the host."""
-    return void_count(session_id) >= VOID_LIMIT
+    return voids_in_session(session_id) >= VOID_LIMIT
 
 
 def was_delivered(session_id: str, prompt_hash: str, *, now: float | None = None) -> bool:

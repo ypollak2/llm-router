@@ -33,15 +33,15 @@ def home(tmp_path, monkeypatch):
 def test_launch_of_a_delivered_call_is_void_and_counted(home):
     h = ch.prompt_fingerprint("analyze the pager")
     ch.note_delivered(SID, "toolu_1", h)
-    assert ch.void_count(SID) == 0
+    assert ch.voids_in_session(SID) == 0
     assert ch.note_agent_launched(SID, "toolu_1") == 1
-    assert ch.void_count(SID) == 1
+    assert ch.voids_in_session(SID) == 1
 
 
 def test_a_call_that_was_never_delivered_is_not_void(home):
     ch.note_delivered(SID, "toolu_1", ch.prompt_fingerprint("a"))
     assert ch.note_agent_launched(SID, "toolu_other") is None  # an ordinary Agent call
-    assert ch.void_count(SID) == 0
+    assert ch.voids_in_session(SID) == 0
 
 
 def test_a_void_is_counted_once(home):
@@ -95,7 +95,7 @@ def test_unreadable_state_fails_open_and_is_recorded(home, monkeypatch):
     depth.write_text("{not json")
     recorded = []
     monkeypatch.setattr("llm_router.failopen.record", lambda code, exc=None, *, detail="": recorded.append(code))
-    assert ch.void_count(SID) == 0 and not ch.breaker_open(SID)
+    assert ch.voids_in_session(SID) == 0 and not ch.breaker_open(SID)
     ch.note_delivered(SID, "toolu_1", ch.prompt_fingerprint("p"))  # must not raise
     assert ch.note_agent_launched(SID, "toolu_1") in (1, None)
 
@@ -128,7 +128,7 @@ def test_post_tool_use_hook_marks_the_delegated_call_void(home):
     proc = _post_agent(home, "toolu_void")
     assert proc.returncode == 0
     assert proc.stdout == "", proc.stdout  # this hook never speaks on stdout
-    assert ch.void_count(SID) == 1
+    assert ch.voids_in_session(SID) == 1
     rows = [r for r in ledger_rows(home) if r["outcome"] == "delegation_void"]
     assert len(rows) == 1 and rows[0]["tool_use_id"] == "toolu_void"
     assert "void" in proc.stderr.lower()
@@ -138,7 +138,7 @@ def test_post_tool_use_hook_ignores_an_ordinary_agent_call(home):
     ch.note_delivered(SID, "toolu_void", ch.prompt_fingerprint("p"))
     proc = _post_agent(home, "toolu_ordinary")
     assert proc.returncode == 0 and proc.stdout == ""
-    assert ch.void_count(SID) == 0
+    assert ch.voids_in_session(SID) == 0
     assert [r for r in ledger_rows(home) if r["outcome"] == "delegation_void"] == []
 
 
