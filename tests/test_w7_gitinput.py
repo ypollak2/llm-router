@@ -456,7 +456,7 @@ def test_more_files_than_the_list_holds_are_counted_in_a_tail(repo):
     _many_files(repo, gitinput.LIST_MAX_FILES + 7, lines=1)
     inp = build_commit_input(str(repo))
     assert inp.files == gitinput.LIST_MAX_FILES + 7
-    assert f"... and 7 more" in inp.text and len(inp.stats) == gitinput.LIST_MAX_FILES + 7
+    assert "... and 7 more" in inp.text and len(inp.stats) == gitinput.LIST_MAX_FILES + 7
 
 
 def test_files_whose_diff_does_not_fit_the_budget_are_counted_not_dropped():

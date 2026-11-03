@@ -154,7 +154,7 @@ def test_pr_options_are_read_for_the_job_input():
     ("bash -c 'git commit -m \"${LLM_TEXT:?}\"'", "placeholder_spelling"),
     (f"git commit -m {T} # ${{LLM_TEXT:?}}", "placeholder_spelling"),
     (f"git commit -m {T} && echo '$LLM_TEXT'", "placeholder_spelling"),
-    (f"gh pr create --body '${{LLM_TEXT:?}}'", "placeholder_spelling"),
+    ("gh pr create --body '${LLM_TEXT:?}'", "placeholder_spelling"),
     ("git commit -m \"$(echo ${LLM_TEXT:?})\"", "token_in_expansion"),
     ("git commit -m $'${LLM_TEXT:?}'", "token_in_expansion"),
 ])
