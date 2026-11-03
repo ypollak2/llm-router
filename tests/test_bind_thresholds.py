@@ -114,7 +114,7 @@ def test_the_hold_bar_is_one_per_hundred_prompts_exactly(tmp_path, capsys, block
     assert L[TOLL]["status"] == status, L[TOLL]["result"]
 
 
-def test_the_toll_floor_follows_the_option_and_defaults_to_fifty():
+def test_the_bar_constants_are_the_owners_numbers():
     assert BR.MIN_PROMPTS == 50 and BR.HOLDS_PER_100_MAX == 1.0 and BR.HAND_CHECK_N == 20
     assert (BR.BIND_RATE_MIN, BR.BIND_MIN_UNITS, BR.BIND_MIN_DAYS, BR.BLOCKED_SHARE_MAX) == (0.90, 30, 3.0, 0.10)
     assert (BR.MIN_REFERENCE_UNITS, BR.GATE_DAYS) == (30, 30)
@@ -285,7 +285,8 @@ def _reissue(tmp_path, second_prompt: str, gap: float = 60.0, first: str | None 
 
 def test_a_reissue_is_the_same_prompt_once_stripped_and_nothing_looser(tmp_path):
     """The router's escape hatch (BIND W1) matches sha256 of the stripped prompt. The same words with another word added,
-    or a task asked in other words, are not a re-issue: the old 4-word-shingle rule read sibling tasks as each other's."""
+    or a task asked in other words, are not a re-issue. (A 4-word-shingle similarity rule, tried first, read template
+    siblings an hour apart as each other's re-issues.)"""
     assert _reissue(tmp_path / "same", W(13)) is True
     assert _reissue(tmp_path / "spaces", "  " + W(13) + "\n") is True
     assert _reissue(tmp_path / "extra", W(13) + " plus") is False
@@ -318,8 +319,9 @@ def test_the_same_prompt_asked_inside_a_sub_agent_is_not_the_parents_reissue(tmp
 
 
 def test_sibling_tasks_from_one_template_are_not_each_others_reissues(tmp_path, capsys):
-    """100 delegations an hour apart whose prompts differ by one number: all 100 are bound. (The old similarity rule
-    read 99 of them as a re-issue of their neighbour.)"""
+    """100 delegations about 57 minutes apart whose prompts differ by one number: none is a re-issue, so the 90 that
+    were delivered are all bound (the other 10 launched a Claude sub-agent). A 4-word-shingle similarity rule, tried
+    first, read such siblings as each other's re-issues."""
     L = lines_of(report(tmp_path, capsys, bound=90, void=10))
     assert "0 re-issued" in L[BIND]["n"] and L[BIND]["result"].startswith("90/100 = 90.0%")
 
