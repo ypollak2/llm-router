@@ -175,9 +175,11 @@ def _expected_line_six(window: str) -> str:
     # (gemini_cli, $4.00) is verified too and sits only in the 24h/7d windows.
     ver_usd, ver_n = (0.5 + EXTRA_SAVED_USD, 2) if window in ("24h", "7d") else (0.5, 1)
     by = " ".join(f"{p} {c}" for p, c in sorted(ex.items(), key=lambda kv: (-kv[1], kv[0])))
+    # W8: the subscription bucket shows its seat split; by the table above every subscription row of this home is
+    # a Claude-seat row (anthropic, auth oauth) and the home has no other subscription seat.
     return (f"ledger {window}: {sum(ex.values())} executed ({by}) · mix local {loc} / "
-            f"subscription {sub} / paid {paid} / unclassified {unc} · est. saved ${usd - ver_usd:,.2f} (n={n - ver_n:,}) "
-            f"· verified saved ${ver_usd:,.2f} (n={ver_n:,})")
+            f"subscription {sub} (Claude seat {sub} + other seats 0) / paid {paid} / unclassified {unc} · "
+            f"est. saved ${usd - ver_usd:,.2f} (n={n - ver_n:,} calls) · verified saved ${ver_usd:,.2f} (n={ver_n:,} calls)")
 
 
 def _ungrounded(text: str, sep: str) -> list[str]:
@@ -255,8 +257,8 @@ def test_status_bar_day_is_the_today_oracle(six):
     # F119 / D-247: the bar prints the estimate and the verified saving apart, each with its n.
     usd, n = _saved_six("today")
     bar = _status_bar(six)
-    assert (f"D:~${usd - VERIFIED_TODAY_USD:.2f} est n={n - VERIFIED_TODAY_N} "
-            f"\u00b7 ${VERIFIED_TODAY_USD:.2f} ver n={VERIFIED_TODAY_N} \u00b7today") in bar, bar
+    assert (f"D:~${usd - VERIFIED_TODAY_USD:.2f} est n={n - VERIFIED_TODAY_N} calls "
+            f"\u00b7 ${VERIFIED_TODAY_USD:.2f} ver n={VERIFIED_TODAY_N} calls \u00b7today") in bar, bar
     assert f"${usd:.2f}" not in bar, bar                    # the merged sum appears nowhere
 
 
@@ -264,21 +266,23 @@ def test_status_bar_week_is_the_7d_oracle(six):
     usd, n = _saved_six("7d")
     ver_usd, ver_n = 0.5 + EXTRA_SAVED_USD, 2
     bar = _status_bar(six)
-    assert (f"W:~${usd - ver_usd:.2f} est n={n - ver_n} \u00b7 ${ver_usd:.2f} ver n={ver_n} \u00b77d") in bar, bar
+    assert (f"W:~${usd - ver_usd:.2f} est n={n - ver_n} calls \u00b7 ${ver_usd:.2f} ver n={ver_n} calls \u00b77d") in bar, bar
     assert f"${usd:.2f}" not in bar, bar
 
 
 def test_status_bar_session_calls_are_the_session_mix_oracle(six):
     loc, sub, paid = SESSION_MIX
-    assert f"sub:{sub} free:{loc} paid:{paid}" in _status_bar(six)
+    # W8: the subscription bucket is split by seat. By the table above all four subscription rows (P2, P_edge_in,
+    # P_edge_out, P_old) are anthropic with oauth auth, the Claude seat; this home has no other subscription seat.
+    assert f"claude:{sub} other:0 free:{loc} paid:{paid}" in _status_bar(six)
 
 
 def test_status_bar_figures_carry_n_and_window(six):
     line = _status_bar(six)
     assert _ungrounded(line, "\u2502") == [], line
-    assert "D:~$" in line and "sub:" in line, line        # something to check: money and calls present
+    assert "D:~$" in line and "claude:" in line, line     # something to check: money and calls present
     for label, window in (("D", "today"), ("W", "7d"), ("M", "month")):
-        assert re.search(rf"{label}:~\$[\d.]+ est n=\d+ \u00b7 \$[\d.]+ ver n=\d+ \u00b7{window}", line), line
+        assert re.search(rf"{label}:~\$[\d.]+ est n=\d+ calls \u00b7 \$[\d.]+ ver n=\d+ calls \u00b7{window}", line), line
 
 
 def test_status_bar_baseline_label_is_the_priced_model_not_zero(six):

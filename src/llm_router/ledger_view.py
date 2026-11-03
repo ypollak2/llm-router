@@ -1595,15 +1595,15 @@ def _saved_segments(lw: LedgerWindow) -> str:
         known = [(k, v) for k, v in (("est.", est), ("verified", ver)) if None not in v]
         if not known:
             return "est. saved n/a"
-        segs = [f"{k} saved ${u:,.2f} (n={n:,})" for k, (u, n) in known if n or u]
+        segs = [f"{k} saved ${u:,.2f} (n={n:,} calls)" for k, (u, n) in known if n or u]
         missing = "est." if None in est else "verified"
         return " · ".join(segs + [f"{missing} saved n/a"])
     segs = []
     if est[1] or est[0]:
-        segs.append(f"est. saved ${est[0]:,.2f} (n={est[1]:,})")
+        segs.append(f"est. saved ${est[0]:,.2f} (n={est[1]:,} calls)")
     if ver[1] or ver[0]:
-        segs.append(f"verified saved ${ver[0]:,.2f} (n={ver[1]:,})")
-    return " · ".join(segs) or "est. saved $0.00 (n=0)"
+        segs.append(f"verified saved ${ver[0]:,.2f} (n={ver[1]:,} calls)")
+    return " · ".join(segs) or "est. saved $0.00 (n=0 calls)"
 
 
 def format_line(lw: LedgerWindow) -> str:
@@ -1613,7 +1613,14 @@ def format_line(lw: LedgerWindow) -> str:
         return f"ledger {lw.window}: no execution data (usage.db and proxy ledger missing)"
     na = lambda v: "n/a" if v is None else f"{v}"                      # noqa: E731
     by = " ".join(f"{p} {n}" for p, n in lw.executed) or "none"
-    mix = (f"local {na(lw.local_n)} / subscription {na(lw.subscription_n)} / paid {na(lw.paid_n)}"
+    if None not in (lw.subscription_n, lw.subscription_claude_n, lw.subscription_other_n):
+        # W8: the Claude seat (what the router wants to spend less of) and every other seat (Codex, Gemini CLI)
+        # never share one number; an older cache without the split prints the one bucket
+        subscription = (f"subscription {lw.subscription_n} (Claude seat {lw.subscription_claude_n}"
+                        f" + other seats {lw.subscription_other_n})")
+    else:
+        subscription = f"subscription {na(lw.subscription_n)}"
+    mix = (f"local {na(lw.local_n)} / {subscription} / paid {na(lw.paid_n)}"
            + (f" / unclassified {lw.unclassified_n}" if lw.unclassified_n else ""))
     saved = _saved_segments(lw)
     return f"ledger {lw.window}: {na(lw.n)} executed ({by}) · mix {mix} · {saved}"

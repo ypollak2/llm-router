@@ -58,3 +58,76 @@ def test_without_a_repeated_call_the_daily_series_is_what_it_was(tmp_path):
     daily = dd.query_daily(7, db_path=path)
     assert window.unverified_calls == 2
     assert sum(d.unverified_saved_usd for d in daily) == pytest.approx(window.unverified_saved_usd)
+
+
+# ── the seat split and the unit on the other two status surfaces (coordinator S2) ─────────────────
+
+def _window(**kw):
+    from llm_router import ledger_view as lv
+
+    base = dict(as_of="x", window="7d", source="s", estimated=True, n=100, executed=(("anthropic", 90), ("codex", 5), ("ollama", 5)),
+                local_n=5, subscription_n=95, paid_n=0, unclassified_n=0, verified_usd=0.0, unverified_usd=4.92,
+                verified_n=0, unverified_n=634, scope="session_id")
+    base.update(kw)
+    return lv.LedgerWindow(**base)
+
+
+def test_the_kpi_ledger_line_splits_the_subscription_bucket_by_seat_and_labels_its_n():
+    line = _window(subscription_claude_n=90, subscription_other_n=5).line()
+    assert "subscription 95 (Claude seat 90 + other seats 5)" in line, line
+    assert "est. saved $4.92 (n=634 calls)" in line, line
+
+
+def test_a_ledger_window_without_the_split_keeps_the_one_bucket():
+    """An older cache (or package) has no per-seat figure: the line says the bucket, never a made-up split."""
+    line = _window().line()
+    assert "subscription 95 /" in line and "Claude seat" not in line, line
+    half = _window(subscription_claude_n=90).line()                  # one half unknown: no split either
+    assert "subscription 95 /" in half and "Claude seat" not in half, half
+
+
+def _status_bar():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "hooks" / "status-bar.py"
+    spec = importlib.util.spec_from_file_location("sb_w8_money", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_status_bar_mix_splits_the_seats_and_says_what_its_n_counts(monkeypatch):
+    from llm_router import ledger_view as lv
+
+    hook = _status_bar()
+    monkeypatch.setattr(hook, "_ledger_window", lambda _lv, _w: _window(subscription_claude_n=90, subscription_other_n=5))
+    assert hook._calls_str(lv) == "claude:90 other:5 free:5 paid:0 n=100 ledger rows, session"
+    monkeypatch.setattr(hook, "_ledger_window", lambda _lv, _w: _window(subscription_claude_n=90, subscription_other_n=5, unclassified_n=3))
+    assert hook._calls_str(lv).startswith("claude:90 other:5 free:5 paid:0 unc:3 n=100")
+
+
+def test_the_status_bar_mix_falls_back_to_the_one_bucket_for_a_package_without_the_split(monkeypatch):
+    """The installed hook can run against an older package: its figures() has no per-seat entry."""
+    from llm_router import ledger_view as lv
+
+    hook = _status_bar()
+    old = _window()
+    real = type(old).figures
+
+    def old_figures(self):
+        figs = real(self)
+        figs.pop("mix_subscription_claude"), figs.pop("mix_subscription_other")
+        return figs
+
+    monkeypatch.setattr(type(old), "figures", old_figures)
+    monkeypatch.setattr(hook, "_ledger_window", lambda _lv, _w: old)
+    assert hook._calls_str(lv) == "sub:95 free:5 paid:0 n=100 ledger rows, session"
+
+
+def test_the_status_bar_money_says_calls(monkeypatch):
+    from llm_router import ledger_view as lv
+
+    hook = _status_bar()
+    assert hook._usd_seg(lv, lv.Figure(0.26, 44, "today", "x", "s", "estimated", None), "est") == "~$0.26 est n=44 calls"
+

@@ -3,14 +3,16 @@
 """UserPromptSubmit hook — enhanced savings + routing status bar.
 
 Displays a two-mode status line:
-  compact: 📊 CC 45%s·28%w | 🦙✔ ⚙️✔ ☁️✔ | 💰 D:$1.42·today n=4 W:$9.88·7d n=31 | 🛡️
-  full:    📊 CC 45%s·28%w·61%♪ | Ollama✔ Codex✔ APIs✔ | 💰 D:$1.42·today n=4 W:$9.88·7d n=31
-           M:$41.15·month n=120 (vs <baseline model>) | enforce🛡️ | sub:4 free:3 paid:1 n=8 session
+  compact: 📊 CC 45%s·28%w | 🦙✔ ⚙️✔ ☁️✔ | 💰 D:~$1.42 est n=4 calls ·today W:~$9.88 est n=31 calls ·7d | 🛡️
+  full:    📊 CC 45%s·28%w·61%♪ | Ollama✔ Codex✔ APIs✔ | 💰 D:~$1.42 est n=4 calls ·today W:~$9.88 est n=31 calls ·7d
+           M:~$41.15 est n=120 calls ·month (vs <baseline model>) | enforce🛡️
+           | claude:4 other:0 free:3 paid:1 n=8 ledger rows, session
 
 Every money figure is the ledger's (P3.4-B3, D-218): ``ledger_view.window_summary`` for the LOCAL
 day, the rolling 7 days and the local month, printed with its n and window. Session call counts
 are the session's mix (local/subscription/paid by evidence, proxy rows included; ``free`` = local,
-``unc`` = unclassified). An unknown figure prints ``n/a``, never 0; a copy without ``llm_router``
+``unc`` = unclassified; the subscription bucket is split by seat: ``claude`` is the Claude Code seat,
+``other`` every other seat such as Codex). An unknown figure prints ``n/a``, never 0; a copy without ``llm_router``
 (standalone) prints ``💰 n/a`` and scans nothing.
 Provider health: read from ~/.llm-router/health.json (written by background checks).
 Enforcement mode: read from LLM_ROUTER_ENFORCE env var.
@@ -298,7 +300,7 @@ def _usd_seg(lv, fig, tag: str) -> str | None:
     if text is None:
         return f"{tag} n/a"
     sign, text = ("-", text[1:]) if text.startswith("-") else ("", text)
-    return f"{'~' if tag == 'est' else ''}{sign}${text} {tag} n={fig.n}"
+    return f"{'~' if tag == 'est' else ''}{sign}${text} {tag} n={fig.n} calls"
 
 
 def _money_part(lv, label: str, lw) -> str:
@@ -338,8 +340,11 @@ def _savings_str(lv, compact: bool) -> str:
 
 
 def _calls_str(lv) -> str:
-    """The session's mix: ``sub:4 free:3 paid:1 [unc:8] n=16 session`` (free = local). Empty
-    when the session's figures are unknown or it executed nothing."""
+    """The session's mix: ``claude:4 other:0 free:3 paid:1 [unc:8] n=16 ledger rows, session`` (free =
+    local; claude = the Claude Code seat, other = every other subscription seat such as Codex).
+    W8: the two seats never share one number. A package that predates the split has no such figure,
+    and the one bucket (``sub:4``) is printed instead. Empty when the session's figures are unknown or
+    it executed nothing."""
     if lv is None:
         return ""
     lw = _ledger_window(lv, "session")
@@ -350,9 +355,12 @@ def _calls_str(lv) -> str:
                               ("mix_subscription", "mix_local", "mix_paid", "executed"))
     if None in (sub, free, paid, total) or int(total) == 0:
         return ""
+    seats = [lv.show(figs[k], "{:.0f}") if k in figs else None
+             for k in ("mix_subscription_claude", "mix_subscription_other")]
+    subscription = f"claude:{seats[0]} other:{seats[1]}" if None not in seats else f"sub:{sub}"
     unc = f" unc:{lw.unclassified_n}" if lw.unclassified_n else ""
     window = "session" if lw.scope == "session_id" else "session~"   # ~ = by timestamp
-    return f"sub:{sub} free:{free} paid:{paid}{unc} n={total} {window}"
+    return f"{subscription} free:{free} paid:{paid}{unc} n={total} ledger rows, {window}"
 
 
 def _provider_health_compact(health: dict[str, str]) -> str:
