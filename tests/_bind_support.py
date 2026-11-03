@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -139,7 +140,8 @@ def agent_payload(prompt: str, *, subagent_type: str = "general-purpose", tool_u
         "tool_name": "Agent",
         "tool_use_id": tool_use_id,
         "session_id": session_id,
-        "cwd": cwd or str(REPO),
+        # not the repo checkout: a delegated stub run there would put its per-run temp dir (and the dir's .gitignore) in it
+        "cwd": cwd or tempfile.gettempdir(),
         "tool_input": {"prompt": prompt, "subagent_type": subagent_type, **tool_input},
     }
 
