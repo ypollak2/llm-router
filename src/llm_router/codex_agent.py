@@ -358,6 +358,68 @@ def _render_pack_prompt(pack) -> str:
     return "\n\n".join(parts)
 
 
+#: Sandbox modes ``run_codex(sandbox=...)`` accepts. ``danger-full-access`` is deliberately absent: no caller may
+#: ask for an unsandboxed run through this function.
+SANDBOX_MODES = ("read-only", "workspace-write")
+
+
+def codex_exec_args(binary: str, *, model: str, cwd: str, prompt: str, sandbox: str | None = None) -> list[str]:
+    """The argv of one ``codex exec`` run. All arguments are separate list items -- no shell expansion.
+
+    ``sandbox=None`` adds no sandbox flag, so ``codex exec`` keeps its own default (read-only); that is what every
+    pure-LLM caller gets. ``"workspace-write"`` (a delegated agent run, owner decision D-357, 2026-11-03) makes
+    ``cwd`` writable and turns the network OFF explicitly: ``sandbox_workspace_write.network_access`` is the
+    documented key (verified with ``codex debug prompt-input -c sandbox_workspace_write.network_access=false``,
+    which reports "Network access is restricted", and ``=true``, which reports "enabled"), so the run does not
+    depend on the default staying off. The flags sit before ``-m`` and are not user-configurable:
+    ``--ignore-user-config`` below means no ``config.toml`` can widen them.
+    """
+    # All arguments passed as separate list items — no shell expansion.
+    # --skip-git-repo-check: llm_router is a pure-LLM consumer, not a code-edit
+    # client; without this flag Codex CLI v0.133+ refuses to run when ``cwd``
+    # is outside a trusted git repo ("Not inside a trusted directory and
+    # --skip-git-repo-check was not specified") and exits non-zero — which
+    # the router then logs as "Codex exited 1" and skips Codex for the
+    # entire chain. Always-on is safe for a pure-LLM call because we never ask
+    # Codex to mutate the working tree; the one exception is a delegated agent
+    # run (``sandbox="workspace-write"`` above), which is writable on purpose
+    # and has the network off.
+    # --json: emit JSONL events line-by-line for streaming progress visibility
+    #
+    # -c model_provider=openai: LLM Router's own installer (commands/install.py,
+    # _install_codex_gateway_config) sets `model_provider = "llm_router"` as the
+    # GLOBAL default in ~/.codex/config.toml, looping Codex's own calls back
+    # through LLM Router's local gateway (127.0.0.1:17900) for its own routing
+    # benefits. That gateway doesn't yet speak the exact OpenAI "responses"
+    # wire shape Codex's client expects, so every call through it fails with
+    # an undecodable-stream error. This dispatch must always reach the real
+    # ChatGPT-authenticated backend regardless of that global default, so the
+    # provider is pinned back to the built-in "openai" provider here — scoped
+    # to this one subprocess call, no edit to the user's global config.
+    # --ignore-user-config: skips loading ~/.codex/config.toml entirely (auth
+    # still comes from CODEX_HOME). This repo's own installer can register
+    # llm_router as an MCP tool server inside that file — separate from the
+    # model_provider loop-back handled above — and an agentic Codex run that
+    # calls its own MCP tools could reach back into llm_router from inside a
+    # subprocess llm_router itself spawned. `-c model_provider=openai` below
+    # is a direct config override, not a config.toml read, so it still applies
+    # with the file ignored.
+    args = [binary, "exec", "--json", "--ignore-user-config"]
+    if sandbox == "workspace-write":
+        args += ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=false"]
+    elif sandbox == "read-only":
+        args += ["--sandbox", "read-only"]
+    args += [
+        "-m", model,
+        "-c", "model_provider=openai",
+        "--color", "never",
+        "--skip-git-repo-check",
+        "-C", cwd,
+        prompt,
+    ]
+    return args
+
+
 async def run_codex(
     prompt: str,
     model: str = "gpt-5.5",
@@ -368,6 +430,7 @@ async def run_codex(
     messages: list | None = None,
     transcript_path: str | None = None,
     target_window: int = CODEX_TARGET_WINDOW,
+    sandbox: str | None = None,
 ) -> CodexResult:
     """Run a task through the Codex CLI agent as a subprocess.
 
@@ -411,6 +474,12 @@ async def run_codex(
             from. A missing or unreadable file falls back to ``messages``.
         target_window: Token window the pack is sized against (default
             ``CODEX_TARGET_WINDOW``, an unsourced assumption).
+        sandbox: ``None`` (default) passes no sandbox flag, so ``codex exec`` keeps its own
+            default (read-only): every pure-LLM caller (router chain, MCP tools, evaluators).
+            ``"workspace-write"`` is for a delegated AGENT run (agent-route, D-357): the working
+            directory is writable and the network is off (:func:`codex_exec_args`).
+            ``"read-only"`` names the default explicitly. Anything else is refused: no caller
+            may ask for ``danger-full-access`` through here.
 
     Returns:
         A ``CodexResult`` with the process output, model name, exit code,
@@ -450,45 +519,13 @@ async def run_codex(
         from llm_router.timeout_config import codex_timeout
         timeout = codex_timeout()
 
-    # All arguments passed as separate list items — no shell expansion.
-    # --skip-git-repo-check: llm_router is a pure-LLM consumer, not a code-edit
-    # client; without this flag Codex CLI v0.133+ refuses to run when ``cwd``
-    # is outside a trusted git repo ("Not inside a trusted directory and
-    # --skip-git-repo-check was not specified") and exits non-zero — which
-    # the router then logs as "Codex exited 1" and skips Codex for the
-    # entire chain. Always-on is safe because we never ask Codex to mutate
-    # the working tree.
-    # --json: emit JSONL events line-by-line for streaming progress visibility
-    #
-    # -c model_provider=openai: LLM Router's own installer (commands/install.py,
-    # _install_codex_gateway_config) sets `model_provider = "llm_router"` as the
-    # GLOBAL default in ~/.codex/config.toml, looping Codex's own calls back
-    # through LLM Router's local gateway (127.0.0.1:17900) for its own routing
-    # benefits. That gateway doesn't yet speak the exact OpenAI "responses"
-    # wire shape Codex's client expects, so every call through it fails with
-    # an undecodable-stream error. This dispatch must always reach the real
-    # ChatGPT-authenticated backend regardless of that global default, so the
-    # provider is pinned back to the built-in "openai" provider here — scoped
-    # to this one subprocess call, no edit to the user's global config.
-    # --ignore-user-config: skips loading ~/.codex/config.toml entirely (auth
-    # still comes from CODEX_HOME). This repo's own installer can register
-    # llm_router as an MCP tool server inside that file — separate from the
-    # model_provider loop-back handled above — and an agentic Codex run that
-    # calls its own MCP tools could reach back into llm_router from inside a
-    # subprocess llm_router itself spawned. `-c model_provider=openai` below
-    # is a direct config override, not a config.toml read, so it still applies
-    # with the file ignored.
-    args = [
-        binary, "exec",
-        "--json",
-        "--ignore-user-config",
-        "-m", model,
-        "-c", "model_provider=openai",
-        "--color", "never",
-        "--skip-git-repo-check",
-        "-C", cwd,
-        prompt,
-    ]
+    # argv: see codex_exec_args (one place for the flags and the reason for each).
+    if sandbox is not None and sandbox not in SANDBOX_MODES:
+        return CodexResult(
+            content=f"codex: unsupported sandbox mode {sandbox!r}; allowed: {', '.join(SANDBOX_MODES)}",
+            model=model, exit_code=1, duration_sec=0.0, reason_code="spawn_error",
+        )
+    args = codex_exec_args(binary, model=model, cwd=cwd, prompt=prompt, sandbox=sandbox)
 
     start = time.monotonic()
     try:

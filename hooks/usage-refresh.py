@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 6
+# llm_router-hook-version: 7
 """PostToolUse hook — usage refresh + periodic savings awareness.
 
 After any llm_* MCP tool call:
@@ -429,7 +429,26 @@ def _oauth_refresh_and_write() -> None:
         pass
 
 
+# -- stdout is the host's JSON channel: library logging goes to stderr (docs/BUGS.md BIND-1) --------
+# structlog's default sink is STDOUT. A log line in front of (or after) this hook's JSON makes Claude Code read
+# the whole output as plain text and drop the decision or context it carried; agent-route.py lost 317 of 317
+# Codex handoffs that way. configure_logging_lazily() points structlog at stdlib logging (stderr) the moment it
+# is first imported, as auto-route.py does. The fallback covers a host without the llm_router package.
+def _init_hook_logging() -> None:
+    try:
+        from llm_router.logging import configure_logging_lazily
+
+        configure_logging_lazily()
+    except Exception:  # noqa: BLE001 -- logging setup must never abort the hook
+        import logging as _logging
+
+        _root = _logging.getLogger()
+        if not _root.handlers:
+            _root.addHandler(_logging.StreamHandler(sys.stderr))
+
+
 def main() -> None:
+    _init_hook_logging()
     raw = sys.stdin.read().strip()
     if not raw:
         # No hook payload → statusline background refresh. Fetch & write usage.json.

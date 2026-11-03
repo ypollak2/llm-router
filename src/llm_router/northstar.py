@@ -1044,6 +1044,10 @@ def load_verify_records(rows: list[dict] | None = None) -> dict[str, dict]:
 _CODEX_ATTEMPT_OUTCOMES = {
     "delegated": (OUTCOME_UNKNOWN, "agent_route_codex_delegated"),
     "codex_failed": (OUTCOME_DISCARDED, "agent_route_codex_failed"),
+    # Codex ran and its reply reported blocked or read-only work, so agent-route did not deliver it and let the
+    # Agent call through (BIND F5). An invocation whose output was thrown away: counting it as attempted and
+    # discarded keeps those runs in the denominator instead of letting them vanish.
+    "codex_blocked": (OUTCOME_DISCARDED, "agent_route_codex_blocked"),
 }
 
 

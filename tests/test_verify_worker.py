@@ -101,7 +101,7 @@ def _by_code() -> dict:
 def _fake_codex(monkeypatch, mod, repo: Path, *, truncated=False, content="done: fixed add()",
                 writes=True, keep_class=True):
     """Codex writes into the user's tree (as the real one does) and returns a result."""
-    def _run(prompt, timeout, context_root):
+    def _run(prompt, timeout, context_root, working_dir=None):
         if writes:
             (repo / "src" / "pkg.py").write_text(FIXED)
             (repo / "src" / "helpers.py").write_text("def noop():\n    return None\n")

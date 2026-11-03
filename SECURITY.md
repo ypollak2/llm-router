@@ -782,7 +782,11 @@ model has just written (`write_file s.py`, then `python3 s.py`; pinned in
 **Out of scope.** Work delegated to an external agent CLI (`codex exec`, from
 `src/llm_router/agentic/adapters.py` and `src/llm_router/codex_agent.py`) runs
 under that CLI's own sandbox (`--sandbox workspace-write`, or Codex's exec default),
-not under `write_policy`.
+not under `write_policy`. The Claude Code `agent-route.py` hook's delegated runs (owner decision D-357) use
+`--sandbox workspace-write` with the network off (`sandbox_workspace_write.network_access=false`) and the
+session's own directory (the hook payload's `cwd`) as the writable root, so they can edit and run tests there,
+including under the home directory when the session is rooted there; only the filesystem root is refused.
+They cannot reach the network, and `danger-full-access` cannot be requested through `run_codex`.
 
 `tests/test_security_docs_match_the_code.py` reads the tables in this section and
 runs every row through the real lane executors. `tests/test_write_policy_one_policy.py`

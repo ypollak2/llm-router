@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 7
+# llm_router-hook-version: 8
 """PostToolUse[Agent] hook — release the agent nesting-depth slot.
 
 The circuit breaker in agent-route.py (PreToolUse[Agent]) increments a
@@ -184,7 +184,62 @@ def _atomic_write(path: Path, data: dict) -> None:
         raise
 
 
+# -- stdout is the host's JSON channel: library logging goes to stderr (docs/BUGS.md BIND-1) --------
+# structlog's default sink is STDOUT. A log line in front of (or after) this hook's JSON makes Claude Code read
+# the whole output as plain text and drop the decision or context it carried; agent-route.py lost 317 of 317
+# Codex handoffs that way. configure_logging_lazily() points structlog at stdlib logging (stderr) the moment it
+# is first imported, as auto-route.py does. The fallback covers a host without the llm_router package.
+def _init_hook_logging() -> None:
+    try:
+        from llm_router.logging import configure_logging_lazily
+
+        configure_logging_lazily()
+    except Exception:  # noqa: BLE001 -- logging setup must never abort the hook
+        import logging as _logging
+
+        _root = _logging.getLogger()
+        if not _root.handlers:
+            _root.addHandler(_logging.StreamHandler(sys.stderr))
+
+
+def _note_void_delegation(hook_input: dict) -> None:
+    """BIND F3: PostToolUse[Agent] fires only for an Agent call that RAN.
+
+    agent-route.py answers a delegated task by DENYING the Agent call with the Codex result. If this hook sees the
+    same ``tool_use_id`` the deny was not applied: the host launched the sub-agent anyway (317 of 317 in the window
+    2026-10-04..2026-11-03, docs/BUGS.md BIND-4), so the Codex run was wasted and Claude paid for the task as well.
+    The call is recorded as ``delegation_void`` in the north-star ledger and counted toward the per-session breaker
+    in ``llm_router.codex_handoff``. Runs before the depth-file early exit below: a delegated call never took a
+    slot, so there may be no depth state to release. Prints only to stderr; never raises.
+    """
+    token = str(hook_input.get("tool_use_id") or "").strip()
+    if not token:
+        return
+    try:
+        from llm_router import codex_handoff
+    except ImportError:
+        return  # llm_router is not importable on this host: nothing was delegated from it either
+    try:
+        session_id = _get_session_id()
+        voided = codex_handoff.note_agent_launched(session_id, token)
+        if voided is None:
+            return  # an ordinary Agent call
+        codex_handoff.record_void(session_id, token, voided)
+        left = max(0, codex_handoff.VOID_LIMIT - voided)
+        print(
+            f"llm-router: the Codex handoff for Agent call {token} was void: the host ran the sub-agent anyway "
+            f"({voided} void this session; Codex delegation stops after {codex_handoff.VOID_LIMIT}, "
+            f"{left} left).",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001 -- detection must never break the hook
+        _msg = f"void-delegation check skipped ({type(exc).__name__})"
+        print(f"llm-router: {_msg}", file=sys.stderr)
+        _log_hook_error(_msg)
+
+
 def main() -> None:
+    _init_hook_logging()
     try:
         hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
@@ -202,6 +257,8 @@ def main() -> None:
 
     if hook_input.get("tool_name", "") != "Agent":
         sys.exit(0)
+
+    _note_void_delegation(hook_input)
 
     session_id = _get_session_id()
     depth_file = _depth_file(session_id)

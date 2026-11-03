@@ -645,9 +645,12 @@ def test_main_passes_the_hook_payload_cwd_to_delegation(tmp_path, monkeypatch, c
 
     mod.main()  # the delegated path emits a block decision and returns
     out = capsys.readouterr().out
-    assert "delegated to Codex CLI" in out
+    assert "run by Codex CLI" in out
 
     assert captured.get("context_root") == str(repo_a.resolve()), out
+    # D-357: the same payload cwd is the delegated run's writable sandbox root (not the process cwd, repo_b).
+    assert captured.get("working_dir") == str(repo_a), out
+    assert captured.get("sandbox") == "workspace-write", out
 
 
 def test_hooks_mirror_is_byte_identical():
