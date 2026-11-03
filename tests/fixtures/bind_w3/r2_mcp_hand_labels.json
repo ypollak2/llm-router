@@ -1,0 +1,2242 @@
+{
+ "source": "BIND-R2-mcp-unused-20261103.md Appendix A (158 routed_mcp rows of outcome_audit_16.0.0, window 2026-10-04T09:50:20Z..2026-11-03T09:50:20Z), single unblinded reader",
+ "ids": "sha256(unit_id)[:16] of the audit unit_id \"routed_mcp:<session>:<utc ts>\"; no prompt or reply text is stored",
+ "mapping": "class a->redone, b->unused, c->corrected, d(local_task/verbatim)->used, d(status)->not_applicable, e(probe/ping/hold-release/ack)->not_applicable, e(throwaway question)->unused|unknown, f(stub)->not_applicable, err->unused|not_applicable, replay duplicate->absent",
+ "columns": {
+  "class": "R2 class letter a-f, err, unk",
+  "quality": "A accepted as given, P after trimming, W wrong, N n/a",
+  "hold": "B block in the same turn, D hold notice, - none, . not a router-llm call"
+ },
+ "units": [
+  {
+   "id": "4c1cc54865b4db7a",
+   "r2_row": 1,
+   "tool": "llm/query",
+   "class": "a",
+   "subclass": "host_ran_same_command_in_parallel",
+   "quality": "P",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "redone"
+   ],
+   "basis": "host did the same job itself"
+  },
+  {
+   "id": "0ba73008792057c2",
+   "r2_row": 2,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "315572fcd80d9953",
+   "r2_row": 3,
+   "tool": "llm/code",
+   "class": "e",
+   "subclass": "ping_liveness",
+   "quality": "W",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "8bb059926b0b94ea",
+   "r2_row": 4,
+   "tool": "status",
+   "class": "d",
+   "subclass": "status_view_used_for_diagnosis",
+   "quality": "N",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "status view"
+  },
+  {
+   "id": "2bab81fc2b7c8624",
+   "r2_row": 5,
+   "tool": "llm/code",
+   "class": "f",
+   "subclass": "background_stub_result_not_in_transcript",
+   "quality": "N",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "background stub, ack-type prompt (R2 section 9: stubs leave)"
+  },
+  {
+   "id": "05e0c459f8694b3b",
+   "r2_row": 6,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "01e30927fc918859",
+   "r2_row": 7,
+   "tool": "llm/query",
+   "class": "err",
+   "subclass": "E1a bare error, MCP server stale/dead until owner reconnected",
+   "quality": "-",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "9e1c3be0b5231a0d",
+   "r2_row": 8,
+   "tool": "llm/generate",
+   "class": "err",
+   "subclass": "E1a bare error, MCP server stale/dead until owner reconnected",
+   "quality": "-",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "2c59f939e785f7e8",
+   "r2_row": 9,
+   "tool": "route",
+   "class": "err",
+   "subclass": "E1a bare error, MCP server stale/dead until owner reconnected",
+   "quality": "-",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "d284b34bdba656c5",
+   "r2_row": 10,
+   "tool": "status",
+   "class": "d",
+   "subclass": "status_view_used_for_diagnosis",
+   "quality": "N",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "status view"
+  },
+  {
+   "id": "09f69ee83bc78145",
+   "r2_row": 11,
+   "tool": "llm/query",
+   "class": "err",
+   "subclass": "E1a bare error, MCP server stale/dead until owner reconnected",
+   "quality": "-",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "72cae0e6cb63ebcf",
+   "r2_row": 12,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "8e221f43f0a47a2d",
+   "r2_row": 13,
+   "tool": "route",
+   "class": "e",
+   "subclass": "ping_liveness",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "f95e9ba0c8f30c8e",
+   "r2_row": 14,
+   "tool": "llm/query",
+   "class": "err",
+   "subclass": "E1a bare error, MCP server stale/dead until owner reconnected",
+   "quality": "-",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "45d37675f823fdd8",
+   "r2_row": 15,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "ping_liveness",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "2f96a0a30f1edc26",
+   "r2_row": 16,
+   "tool": "route",
+   "class": "e",
+   "subclass": "ping_liveness",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "08342526bb33ca19",
+   "r2_row": 17,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "ping_liveness",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "785258bcd769b645",
+   "r2_row": 18,
+   "tool": "llm/query",
+   "class": "a",
+   "subclass": "host_wrote_own_log_entry",
+   "quality": "P",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "redone"
+   ],
+   "basis": "host did the same job itself"
+  },
+  {
+   "id": "9fdfd59bb905eb10",
+   "r2_row": 19,
+   "tool": "llm/generate",
+   "class": "a",
+   "subclass": "host_wrote_own_log_entry",
+   "quality": "P",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "redone"
+   ],
+   "basis": "host did the same job itself"
+  },
+  {
+   "id": "3c36e647e45c9a27",
+   "r2_row": 20,
+   "tool": "llm/query",
+   "class": "b",
+   "subclass": "contaminated_answer",
+   "quality": "W",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused"
+   ],
+   "basis": "weak / wrong / failed"
+  },
+  {
+   "id": "44f43d1546705515",
+   "r2_row": 21,
+   "tool": "llm/research",
+   "class": "err",
+   "subclass": "E1b bare error on task=research",
+   "quality": "-",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "5fd63faba166f0e4",
+   "r2_row": 22,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "202224f2b38dfcfe",
+   "r2_row": 23,
+   "tool": "llm/research",
+   "class": "err",
+   "subclass": "E1b bare error on task=research",
+   "quality": "-",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "e4daccc422851583",
+   "r2_row": 24,
+   "tool": "llm/research",
+   "class": "err",
+   "subclass": "E1b bare error on task=research",
+   "quality": "-",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "4712ed845623c223",
+   "r2_row": 25,
+   "tool": "llm",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "9ece481a91c25cc7",
+   "r2_row": 26,
+   "tool": "llm",
+   "class": "e",
+   "subclass": "ping_liveness",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "3b37d17e9d594157",
+   "r2_row": 27,
+   "tool": "llm",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "0c0c0c80036aeb25",
+   "r2_row": 28,
+   "tool": "llm",
+   "class": "c",
+   "subclass": "adopted_as_confirmation",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "corrected"
+   ],
+   "basis": "adopted, reworded"
+  },
+  {
+   "id": "c11764242e10dc21",
+   "r2_row": 29,
+   "tool": "llm",
+   "class": "f",
+   "subclass": "background_stub_result_not_in_transcript",
+   "quality": "N",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "background stub, ack-type prompt (R2 section 9: stubs leave)"
+  },
+  {
+   "id": "91f2fcdae8ec9be3",
+   "r2_row": 30,
+   "tool": "llm/research",
+   "class": "err",
+   "subclass": "E1b bare error on task=research",
+   "quality": "-",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "7e82ed2bcc29f098",
+   "r2_row": 31,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "b3516b2676030682",
+   "r2_row": 32,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "f11e4126ca0984b0",
+   "r2_row": 33,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "65133c6cab5d8a61",
+   "r2_row": 34,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "ping_liveness",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "8b41e73af6b6ff0f",
+   "r2_row": 35,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "2882909cc0c1eae9",
+   "r2_row": 36,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "09c061fa98de21d6",
+   "r2_row": 37,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "3d6264ec3f3540e9",
+   "r2_row": 38,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "005e6254e8e1a5b0",
+   "r2_row": 39,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "97042edae7689dcb",
+   "r2_row": 40,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "72775a883ebdb284",
+   "r2_row": 41,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "2ce79aa885048542",
+   "r2_row": 42,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ack",
+   "quality": "W",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "93af02e8c7bd2181",
+   "r2_row": 43,
+   "tool": "llm/analyze",
+   "class": "b",
+   "subclass": "off_topic_hallucinated",
+   "quality": "W",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused"
+   ],
+   "basis": "weak / wrong / failed"
+  },
+  {
+   "id": "01674abca564596a",
+   "r2_row": 44,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "used"
+   ],
+   "basis": "used (file effect / verbatim in a tool input)"
+  },
+  {
+   "id": "65b45b454073ec07",
+   "r2_row": 45,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "used"
+   ],
+   "basis": "used (file effect / verbatim in a tool input)"
+  },
+  {
+   "id": "ad78a3c8109597ba",
+   "r2_row": 46,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "used"
+   ],
+   "basis": "used (file effect / verbatim in a tool input)"
+  },
+  {
+   "id": "8a56fd1f897540ca",
+   "r2_row": 47,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "used"
+   ],
+   "basis": "used (file effect / verbatim in a tool input)"
+  },
+  {
+   "id": "04122847d1ea3835",
+   "r2_row": 48,
+   "tool": "llm/query",
+   "class": "b",
+   "subclass": "wrong_answer",
+   "quality": "W",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused"
+   ],
+   "basis": "weak / wrong / failed"
+  },
+  {
+   "id": "b6f6e7d2be29a25d",
+   "r2_row": 49,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "206c5b99f6780a3b",
+   "r2_row": 50,
+   "tool": "llm/query",
+   "class": "b",
+   "subclass": "partly_wrong_answer",
+   "quality": "P",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused"
+   ],
+   "basis": "weak / wrong / failed"
+  },
+  {
+   "id": "82a9206e20138a99",
+   "r2_row": 51,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "94bda130e7ea284b",
+   "r2_row": 52,
+   "tool": "llm/code",
+   "class": "d",
+   "subclass": "used_verbatim_in_bash",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "used"
+   ],
+   "basis": "used (file effect / verbatim in a tool input)"
+  },
+  {
+   "id": "a61852287c99d861",
+   "r2_row": 53,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "84b57d1c9548a10c",
+   "r2_row": 54,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "W",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "26478ea69e255d84",
+   "r2_row": 55,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "143ac2a34d774d79",
+   "r2_row": 56,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "W",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "d8752178264507a6",
+   "r2_row": 57,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "8c3b73010833b904",
+   "r2_row": 58,
+   "tool": "llm/query",
+   "class": "unk",
+   "subclass": "no host reply (ack, turn ended)",
+   "quality": "-",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "ack, no host reply (R2 section 2: ack/ping rows)"
+  },
+  {
+   "id": "63d50ea8895361fe",
+   "r2_row": 59,
+   "tool": "llm/generate",
+   "class": "c",
+   "subclass": "adopted_with_edits",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "corrected"
+   ],
+   "basis": "adopted, reworded"
+  },
+  {
+   "id": "1fd06bed7e78583c",
+   "r2_row": 60,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "P",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "562768c2cce7d908",
+   "r2_row": 61,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "9e275aefb1c32a93",
+   "r2_row": 62,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "62b5838b571ec53a",
+   "r2_row": 63,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "used"
+   ],
+   "basis": "used (file effect / verbatim in a tool input)"
+  },
+  {
+   "id": "28b3d11ac3906548",
+   "r2_row": 64,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "used"
+   ],
+   "basis": "used (file effect / verbatim in a tool input)"
+  },
+  {
+   "id": "78113b35c94af4fc",
+   "r2_row": 65,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "used"
+   ],
+   "basis": "used (file effect / verbatim in a tool input)"
+  },
+  {
+   "id": "f442bb7b0dab72af",
+   "r2_row": 66,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "used"
+   ],
+   "basis": "used (file effect / verbatim in a tool input)"
+  },
+  {
+   "id": "1eae8300eb9d96f4",
+   "r2_row": 67,
+   "tool": "local_task",
+   "class": "b",
+   "subclass": "local_task_failed_then_host_redid",
+   "quality": "W",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused"
+   ],
+   "basis": "weak / wrong / failed"
+  },
+  {
+   "id": "e53dfb0f494f8b38",
+   "r2_row": 68,
+   "tool": "llm/code",
+   "class": "e",
+   "subclass": "ping_liveness",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "0814787b90889374",
+   "r2_row": 69,
+   "tool": "llm/query",
+   "class": "err",
+   "subclass": "E1c bare error (short test session)",
+   "quality": "-",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "dff964cc870bc65b",
+   "r2_row": 70,
+   "tool": "llm/generate",
+   "class": "a",
+   "subclass": "host_wrote_own_log_entry",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "redone"
+   ],
+   "basis": "host did the same job itself"
+  },
+  {
+   "id": "99f8c5799bb64b74",
+   "r2_row": 71,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "fe87fee7f7dc20bc",
+   "r2_row": 72,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "1be17ab002a9b435",
+   "r2_row": 73,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "7e9eaea9d7c713d0",
+   "r2_row": 74,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "706abfaca0e2b95c",
+   "r2_row": 75,
+   "tool": "llm/query",
+   "class": "b",
+   "subclass": "non_answer",
+   "quality": "W",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused"
+   ],
+   "basis": "weak / wrong / failed"
+  },
+  {
+   "id": "4c3dcf52df8d3072",
+   "r2_row": 76,
+   "tool": "llm/query",
+   "class": "a",
+   "subclass": "host_refetched_fresh_data",
+   "quality": "A",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "redone"
+   ],
+   "basis": "host did the same job itself"
+  },
+  {
+   "id": "8f9fce85dc79fd3c",
+   "r2_row": 77,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "P",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "ef452d4c0ece5cfb",
+   "r2_row": 78,
+   "tool": "llm/query",
+   "class": "b",
+   "subclass": "adds_nothing_beyond_prompt",
+   "quality": "P",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused"
+   ],
+   "basis": "weak / wrong / failed"
+  },
+  {
+   "id": "954991e8143c5183",
+   "r2_row": 79,
+   "tool": "text_job",
+   "class": "d",
+   "subclass": "used_verbatim_in_bash",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "used"
+   ],
+   "basis": "used (file effect / verbatim in a tool input)"
+  },
+  {
+   "id": "a3df90d8ea243bdb",
+   "r2_row": 80,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "02707993a5a0eeef",
+   "r2_row": 81,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "ccbed4cede6385ef",
+   "r2_row": 82,
+   "tool": "llm/query",
+   "class": "a",
+   "subclass": "host_verified_itself",
+   "quality": "A",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "redone"
+   ],
+   "basis": "host did the same job itself"
+  },
+  {
+   "id": "b40918a8f71e5c81",
+   "r2_row": 83,
+   "tool": "llm/query",
+   "class": "a",
+   "subclass": "host_checked_state_itself",
+   "quality": "A",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "redone"
+   ],
+   "basis": "host did the same job itself"
+  },
+  {
+   "id": "552545a1f24252d9",
+   "r2_row": 84,
+   "tool": "llm/query",
+   "class": "a",
+   "subclass": "host_wrote_own_document",
+   "quality": "P",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "redone"
+   ],
+   "basis": "host did the same job itself"
+  },
+  {
+   "id": "e12f5e1ebed59e91",
+   "r2_row": 85,
+   "tool": "llm/query",
+   "class": "b",
+   "subclass": "wrong_not_graceful",
+   "quality": "W",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused"
+   ],
+   "basis": "weak / wrong / failed"
+  },
+  {
+   "id": "ab5664bdeee4687e",
+   "r2_row": 86,
+   "tool": "status",
+   "class": "d",
+   "subclass": "status_view_used_for_diagnosis",
+   "quality": "N",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "status view"
+  },
+  {
+   "id": "860eed47e22971d2",
+   "r2_row": 87,
+   "tool": "llm/analyze",
+   "class": "b",
+   "subclass": "off_topic_hallucinated",
+   "quality": "W",
+   "hold": "-",
+   "replay_duplicate": true,
+   "hand_label_any_of": null,
+   "basis": "deduped"
+  },
+  {
+   "id": "ba641d3c7b69d762",
+   "r2_row": 88,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": true,
+   "hand_label_any_of": null,
+   "basis": "deduped"
+  },
+  {
+   "id": "37b99160ea314f3a",
+   "r2_row": 89,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": true,
+   "hand_label_any_of": null,
+   "basis": "deduped"
+  },
+  {
+   "id": "e5a2c18468a1520b",
+   "r2_row": 90,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": true,
+   "hand_label_any_of": null,
+   "basis": "deduped"
+  },
+  {
+   "id": "d5e462d21766740a",
+   "r2_row": 91,
+   "tool": "local_task",
+   "class": "d",
+   "subclass": "local_task_edit_applied",
+   "quality": "A",
+   "hold": ".",
+   "replay_duplicate": true,
+   "hand_label_any_of": null,
+   "basis": "deduped"
+  },
+  {
+   "id": "f03ec2ba69503f7b",
+   "r2_row": 92,
+   "tool": "llm/query",
+   "class": "b",
+   "subclass": "wrong_answer",
+   "quality": "W",
+   "hold": "-",
+   "replay_duplicate": true,
+   "hand_label_any_of": null,
+   "basis": "deduped"
+  },
+  {
+   "id": "713eda0665506a28",
+   "r2_row": 93,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": true,
+   "hand_label_any_of": null,
+   "basis": "deduped"
+  },
+  {
+   "id": "f68c6ca792822521",
+   "r2_row": 94,
+   "tool": "llm/query",
+   "class": "b",
+   "subclass": "partly_wrong_answer",
+   "quality": "P",
+   "hold": "-",
+   "replay_duplicate": true,
+   "hand_label_any_of": null,
+   "basis": "deduped"
+  },
+  {
+   "id": "3ab4a3007dbcf8bc",
+   "r2_row": 95,
+   "tool": "llm/query",
+   "class": "err",
+   "subclass": "E2 deadline 90s, Ollama busy",
+   "quality": "-",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "0374fde872dff42d",
+   "r2_row": 96,
+   "tool": "llm/query",
+   "class": "err",
+   "subclass": "E2 deadline 90s, Ollama busy",
+   "quality": "-",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "ab2c7a7e9f98b469",
+   "r2_row": 97,
+   "tool": "llm/research",
+   "class": "err",
+   "subclass": "E2 deadline 90s, Ollama busy",
+   "quality": "-",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "323e8c9f36a4a69e",
+   "r2_row": 98,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "P",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "4ae2c55b821662c0",
+   "r2_row": 99,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "377ba9b0b9a5faaa",
+   "r2_row": 100,
+   "tool": "llm/query",
+   "class": "err",
+   "subclass": "E2 deadline 90s, Ollama busy",
+   "quality": "-",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "5de3bc376fe0a5fb",
+   "r2_row": 101,
+   "tool": "llm/query",
+   "class": "err",
+   "subclass": "E3 connection closed",
+   "quality": "-",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "088319219176a272",
+   "r2_row": 102,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "c172fcc4e5507385",
+   "r2_row": 103,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "ee237aa06a87c4f9",
+   "r2_row": 104,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "4ec0fe594f57fd92",
+   "r2_row": 105,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "baa9af30bed72611",
+   "r2_row": 106,
+   "tool": "status",
+   "class": "d",
+   "subclass": "status_view_used_for_diagnosis",
+   "quality": "N",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "status view"
+  },
+  {
+   "id": "788bbb6fe5c691a3",
+   "r2_row": 107,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "ping_liveness",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "4776cd3e06e9237e",
+   "r2_row": 108,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "062f54d382b58b5b",
+   "r2_row": 109,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "36e634af54217004",
+   "r2_row": 110,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "074922e93138960f",
+   "r2_row": 111,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "f778678728003d59",
+   "r2_row": 112,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "1a140bea487de172",
+   "r2_row": 113,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "6b420e73589602f0",
+   "r2_row": 114,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "35d43edc33f8960e",
+   "r2_row": 115,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "8666692e56710d49",
+   "r2_row": 116,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "73165f2c44c48df6",
+   "r2_row": 117,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "faf4229111b9f999",
+   "r2_row": 118,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "0a4872c869bdd189",
+   "r2_row": 119,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "b3651ecbd7da963e",
+   "r2_row": 120,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "ping_liveness",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "3587eebbaa1bc9fe",
+   "r2_row": 121,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "393a49563b135670",
+   "r2_row": 122,
+   "tool": "llm/query",
+   "class": "err",
+   "subclass": "E2 deadline 90s, Ollama busy",
+   "quality": "-",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "not_applicable"
+   ],
+   "basis": "tool error: unused, or not_applicable when the prompt was a fixed-reply probe"
+  },
+  {
+   "id": "702e4a440cf94bcd",
+   "r2_row": 123,
+   "tool": "status",
+   "class": "e",
+   "subclass": "status_view_not_used",
+   "quality": "N",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "status view"
+  },
+  {
+   "id": "be4dc46a9fdc5df2",
+   "r2_row": 124,
+   "tool": "status",
+   "class": "d",
+   "subclass": "status_view_used_for_diagnosis",
+   "quality": "N",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "status view"
+  },
+  {
+   "id": "23460356d24e97de",
+   "r2_row": 125,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "P",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "2669f160400faff7",
+   "r2_row": 126,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "d6f1560abeaee046",
+   "r2_row": 127,
+   "tool": "llm/query",
+   "class": "b",
+   "subclass": "invented_term",
+   "quality": "W",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused"
+   ],
+   "basis": "weak / wrong / failed"
+  },
+  {
+   "id": "26761c2ff0312ee6",
+   "r2_row": 128,
+   "tool": "llm/query",
+   "class": "c",
+   "subclass": "adopted_as_confirmation",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "corrected"
+   ],
+   "basis": "adopted, reworded"
+  },
+  {
+   "id": "5c10c54532ebb04a",
+   "r2_row": 129,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "4435ce92f6b8a10e",
+   "r2_row": 130,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "396b3e8a97050148",
+   "r2_row": 131,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "ddbf15e724deff75",
+   "r2_row": 132,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "24e01b6d4a5521c9",
+   "r2_row": 133,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "5c13d60dc1185142",
+   "r2_row": 134,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "5ec4e6de37fd5c2e",
+   "r2_row": 135,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "b11646b8e9239309",
+   "r2_row": 136,
+   "tool": "route",
+   "class": "e",
+   "subclass": "toll_ack",
+   "quality": "W",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "522e96707b2df9ed",
+   "r2_row": 137,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "80f1b13109e74756",
+   "r2_row": 138,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "2cff519d716fc16e",
+   "r2_row": 139,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "cb6502e8aa04ee2d",
+   "r2_row": 140,
+   "tool": "llm/code",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "W",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "981bf1b101dccfc6",
+   "r2_row": 141,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "8e730fc403b96563",
+   "r2_row": 142,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "879c1bb43ab3d250",
+   "r2_row": 143,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "7dff583c763c085f",
+   "r2_row": 144,
+   "tool": "status",
+   "class": "e",
+   "subclass": "status_view_not_used",
+   "quality": "N",
+   "hold": ".",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "status view"
+  },
+  {
+   "id": "dd276eeb2b939db1",
+   "r2_row": 145,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "b1d906820b95f4fd",
+   "r2_row": 146,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "ping_liveness",
+   "quality": "W",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "172d2d77db466aa4",
+   "r2_row": 147,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "7aafb524b861098c",
+   "r2_row": 148,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "W",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "c6e4fb742223492c",
+   "r2_row": 149,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_hold_release",
+   "quality": "A",
+   "hold": "D",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "842c7a74da0ea863",
+   "r2_row": 150,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "W",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "19bb5ed14cd84191",
+   "r2_row": 151,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "W",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "bf9f14b750ef0ee5",
+   "r2_row": 152,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "56b38f78717f1c8d",
+   "r2_row": 153,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_ritual_no_hold_seen",
+   "quality": "W",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "not_applicable"
+   ],
+   "basis": "probe / ping / hold-release / ack"
+  },
+  {
+   "id": "1f5ef951b04bddc6",
+   "r2_row": 154,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "a7835d95333a8ed9",
+   "r2_row": 155,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "5b348bbb16e96dc8",
+   "r2_row": 156,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "B",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "313f80988f197fe2",
+   "r2_row": 157,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  },
+  {
+   "id": "c8b065a8d7863807",
+   "r2_row": 158,
+   "tool": "llm/query",
+   "class": "e",
+   "subclass": "toll_task",
+   "quality": "A",
+   "hold": "-",
+   "replay_duplicate": false,
+   "hand_label_any_of": [
+    "unused",
+    "unknown"
+   ],
+   "basis": "throwaway question, answer not needed"
+  }
+ ]
+}

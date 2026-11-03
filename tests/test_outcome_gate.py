@@ -215,3 +215,126 @@ def test_stale_headline_rate_fails(tmp_path, capsys):
     rc, _ = _run(tmp_path, rows, s, "1.0.0")
     assert rc == 1
     assert "headline rate" in capsys.readouterr().out
+
+
+# ── BIND W3: not_applicable rows and the audit version ───────────────────────
+
+def _rows_with_na(n_used: int, n_total: int, n_na: int, na_signal: str = "probe_fixed_reply"):
+    rows = _rows(n_used, n_total)
+    for i in range(n_na):
+        rows.append({"unit_id": f"routed_mcp:s:na{i}", "kind": "routed_mcp", "label": "not_applicable",
+                     "signal": na_signal, "confidence": "high", "human_reviewed": False})
+    return rows
+
+
+def _summary_v(rows, release="1.0.0", version=2):
+    attempted = [r for r in rows if r["label"] != "not_applicable"]
+    used = sum(r["label"] == "used" for r in rows)
+    s = _summary(attempted, release)
+    s["audit_version"] = version
+    s["headline"].update(used=used, attempted=len(attempted), rate=used / len(attempted) if attempted else None,
+                         not_applicable=len(rows) - len(attempted))
+    s["not_applicable"] = {"n": len(rows) - len(attempted), "by_signal": {"probe_fixed_reply": len(rows) - len(attempted)},
+                           "used_rate_if_included": used / len(rows) if rows else None}
+    return s
+
+
+def test_not_applicable_rows_are_outside_the_denominator(tmp_path, capsys):
+    rows = _rows_with_na(3, 100, 40)
+    rc, hist = _run(tmp_path, rows, _summary_v(rows), "1.0.0")
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "40 unit(s) are not_applicable" in out
+    assert "counted as attempted: 2.143%" in out and "used rate 3/100 = 3.000%" in out    # both rates are shown
+    entry = json.loads(hist.read_text())["releases"][-1]
+    assert (entry["used"], entry["attempted"], entry["not_applicable"], entry["audit_version"]) == (3, 100, 40, 2)
+
+
+def test_a_headline_that_counts_not_applicable_as_attempted_fails_the_recount(tmp_path, capsys):
+    rows = _rows_with_na(3, 100, 40)
+    s = _summary_v(rows)
+    s["headline"]["attempted"] = 140
+    s["headline"]["rate"] = 3 / 140
+    rc, _ = _run(tmp_path, rows, s, "1.0.0")
+    assert rc == 1 and "recount" in capsys.readouterr().out
+
+
+def test_not_applicable_needs_an_allowed_reason(tmp_path, capsys):
+    rows = _rows_with_na(3, 100, 5, na_signal="tool_result_not_reused")      # hiding an unused unit
+    rc, _ = _run(tmp_path, rows, _summary_v(rows), "1.0.0")
+    out = capsys.readouterr().out
+    assert rc == 1 and "not an allowed not_applicable reason" in out
+
+
+def test_skip_does_not_excuse_an_unallowed_not_applicable(tmp_path):
+    rows = _rows_with_na(0, 3, 5, na_signal="made_up")
+    rc, _ = _run(tmp_path, rows, _summary_v(rows), "1.0.0", extra=("--skip-outcome", "x"))
+    assert rc == 1
+
+
+V1_ENTRY = {"release": "15.4.0", "used_rate": 2 / 873, "used": 2, "attempted": 873}     # no audit_version: v1
+
+
+def test_a_cross_version_comparison_is_refused_by_default(tmp_path, capsys):
+    rows = _rows(10, 100)
+    rc, hist = _run(tmp_path, rows, _summary_v(rows, "16.0.1"), "16.0.1", {"releases": [V1_ENTRY]})
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "AUDIT VERSION MISMATCH" in out and "audit v2" in out and "audit v1" in out
+    assert "--cross-version rebaseline" in out and "--cross-version compare" in out
+    assert [e["release"] for e in json.loads(hist.read_text())["releases"]] == ["15.4.0"]     # nothing written
+
+
+def test_rebaseline_passes_without_comparing_and_records_why(tmp_path, capsys):
+    rows = _rows(0, 100)           # 0% is far below 15.4.0's 0.229%: a rebaseline must not compare
+    rc, hist = _run(tmp_path, rows, _summary_v(rows, "16.0.1"), "16.0.1", {"releases": [V1_ENTRY]},
+                    extra=("--cross-version", "rebaseline"))
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "REBASELINED" in out and "NOT compared" in out
+    entry = json.loads(hist.read_text())["releases"][-1]
+    assert entry["audit_version"] == 2
+    assert entry["cross_version"]["policy"] == "rebaseline" and entry["cross_version"]["against"]["release"] == "15.4.0"
+    assert entry["cross_version"]["against"]["audit_version"] == 1
+
+
+def test_compare_across_versions_is_labelled_and_can_fail(tmp_path, capsys):
+    low, high = _rows(0, 100), _rows(5, 100)
+    rc, hist = _run(tmp_path, low, _summary_v(low, "16.0.1"), "16.0.1", {"releases": [V1_ENTRY]},
+                    extra=("--cross-version", "compare"))
+    out = capsys.readouterr().out
+    assert rc == 1 and "CROSS-VERSION" in out and "not like for like" in out
+    rc, hist = _run(tmp_path, high, _summary_v(high, "16.0.1"), "16.0.1", {"releases": [V1_ENTRY]},
+                    extra=("--cross-version", "compare"))
+    out = capsys.readouterr().out
+    assert rc == 0 and "PASS (CROSS-VERSION" in out
+    assert json.loads(hist.read_text())["releases"][-1]["cross_version"]["policy"] == "compare"
+
+
+def test_after_a_rebaseline_the_next_release_compares_like_for_like(tmp_path, capsys):
+    history = {"releases": [V1_ENTRY, {"release": "16.0.1", "audit_version": 2, "used_rate": 0.05, "used": 5, "attempted": 100}]}
+    rows = _rows(3, 100)           # below the v2 entry, above nothing else
+    rc, _ = _run(tmp_path, rows, _summary_v(rows, "16.0.2"), "16.0.2", history)
+    out = capsys.readouterr().out
+    assert rc == 1 and "dropped below 16.0.1" in out and "MISMATCH" not in out
+    rows = _rows(6, 100)
+    rc, hist = _run(tmp_path, rows, _summary_v(rows, "16.0.2"), "16.0.2", history)
+    assert rc == 0 and "MISMATCH" not in capsys.readouterr().out
+
+
+def test_entries_and_summaries_without_a_version_are_version_1(tmp_path, capsys):
+    assert G.audit_version({}) == 1 and G.audit_version({"audit_version": 2}) == 2 and G.audit_version({"audit_version": "x"}) == 1
+    history = {"releases": [{"release": "1.0.0", "used_rate": 0.02, "used": 2, "attempted": 100}]}
+    rows = _rows(3, 100)
+    rc, _ = _run(tmp_path, rows, _summary(rows, "1.1.0"), "1.1.0", history)     # neither has a version: v1 vs v1
+    assert rc == 0 and "MISMATCH" not in capsys.readouterr().out
+
+
+def test_a_person_may_label_a_unit_not_applicable(tmp_path, capsys):
+    rows = _rows_with_na(3, 100, 1)
+    rows[-1].update(signal="human_review", human_reviewed=True)
+    rc, _ = _run(tmp_path, rows, _summary_v(rows), "1.0.0")
+    assert rc == 0, capsys.readouterr().out
+    rows[-1].update(human_reviewed=False)                       # a machine claiming a person's reading
+    rc, _ = _run(tmp_path, rows, _summary_v(rows), "1.0.0")
+    assert rc == 1 and "not an allowed not_applicable reason" in capsys.readouterr().out

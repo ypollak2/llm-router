@@ -30,6 +30,9 @@ SRC = REPO / "src" / "llm_router"
 AUDIT_FILES = [
     REPO / "scripts" / "release" / "outcome_audit.py",
     REPO / "scripts" / "release" / "outcome_gate.py",
+    # BIND W3: they only slice the audit's units, so they keep the audit's boundary
+    REPO / "scripts" / "release" / "bind_report.py",
+    REPO / "scripts" / "release" / "audit_agreement.py",
 ]
 FORBIDDEN_NAMES = ("outcome_audit", "outcome_gate")
 #: src/ files the audit may path-load. Adding one needs the same argument as
