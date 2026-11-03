@@ -90,7 +90,8 @@ missing hook file but never registers it). Run `llm-router install --force` once
 PreToolUse entry with matcher `Bash` and its own timeout (`130`) into `~/.claude/settings.json`; the
 plugin bundle (`hooks/hooks.json`, `.codex-plugin/hooks.json`) carries the same entry. The rules text
 refreshes by itself at the next MCP server start. Until the hook is registered a model that follows the
-new rules gets the shell's abort and writes the text itself.
+new rules gets Claude Code's refusal or the shell's abort (see "Fail-closed by construction") and writes
+the text itself.
 
 Only one router hook may rewrite Bash input: Claude Code does not merge `updatedInput` from several hooks.
 
@@ -110,6 +111,7 @@ model phase, so the router-added figure does not count it.
 ## Not covered
 
 - `git commit --amend`, PR edits, `gh pr create --fill`, and any shape in the table above.
-- Subagents and interactive approval prompts were not exercised in the live canary (see the PR).
+- Interactive approval prompts, Claude Code versions other than 2.1.317 and a real local model were not
+  exercised in the live canary (see PR #820, which lists what was).
 - Hosts other than Claude Code: the rules are not taught there, and the hook is in the Codex plugin
   bundle only because the bundle is generated from one table.
