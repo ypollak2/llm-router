@@ -789,7 +789,7 @@ execpolicy `.rules` file, user or project, is loaded. Without `--ignore-rules` a
 `prefix_rule(pattern=["curl"], decision="allow")` makes Codex run a matching command outside the sandbox, with network,
 in either mode (the owner's rules allow `curl`, `git push`, `gh pr merge` and `gh run`); `tests/test_bind_codex_sandbox_live.py`
 reproduces it on the real binary, with a stub model and a canary listener on loopback, and fails if it comes back
-(docs/bugs/BIND-6.md). The sandbox is chosen from the session's directory, the hook payload's `cwd`. Inside a git work
+(docs/bugs/BIND-6.md; it is marked `requires_codex`, so CI runs the argv pins instead). The sandbox is chosen from the session's directory, the hook payload's `cwd`. Inside a git work
 tree (`git -C <cwd> rev-parse --show-toplevel` succeeds) the run gets `--sandbox workspace-write` with the network off
 (`sandbox_workspace_write.network_access=false`) and that work tree's top level as its only writable root: `/tmp` and
 `$TMPDIR` are excluded (`exclude_slash_tmp`, `exclude_tmpdir_env_var`) and the child's `TMPDIR` is a per-run directory in

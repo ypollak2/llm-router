@@ -143,6 +143,7 @@ def test_an_environment_fact_alone_and_an_unexplained_not_run_are_not_flagged(ma
     assert mark("I implemented the change in `pager.py` and added a test, but I did not run the tests.") is None
 
 
+@pytest.mark.timing  # asserts on a perf_counter reading: runs in the serial timing lane (tests/test_timing_lane.py)
 def test_the_gate_is_fast_on_hostile_input(mark):
     """Windows are the head 1500 and tail 1000 characters, but a sentence can be all of one: no pattern may backtrack."""
     hostile = ["I " * 1500, "`" * 1500, "no " * 600, "a" * 5000, "I could not " * 300, "sandbox " * 400,

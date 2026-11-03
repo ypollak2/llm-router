@@ -14,7 +14,9 @@ file where the sandbox forbids one.
 
 Every claim is paired with a control: the same scenario with the flag removed must show the escape, or the test is
 skipped (this machine's Codex or sandbox cannot show it) rather than passed. A test that cannot fail proves nothing.
-Skipped without a ``codex`` binary; run without an outer ``sandbox-exec`` (a nested sandbox cannot be applied).
+Marked ``requires_codex``, so CI and the default run deselect it: run ``pytest -m requires_codex
+tests/test_bind_codex_sandbox_live.py`` where ``codex`` is installed, without an outer ``sandbox-exec`` (a nested sandbox
+cannot be applied: every test then skips). Also skipped without ``codex`` or ``curl``.
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ pytestmark = [
     pytest.mark.skipif(not CODEX or not shutil.which("curl"), reason="needs the real codex binary and curl"),
     pytest.mark.skipif(not _has_flag("--ignore-rules"), reason="this codex has no --ignore-rules"),
     pytest.mark.timeout(300),
+    pytest.mark.requires_codex,  # the repo's marker for tests that need the real binary (CI: -m "not requires_codex")
     pytest.mark.xdist_group("codex-live"),  # the scenarios are shared: run them in one worker
 ]
 
