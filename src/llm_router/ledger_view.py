@@ -699,6 +699,12 @@ def _estimate_call_rows(con, bounds: Bounds) -> "list[CallRow]":
     return rows
 
 
+def repeated_calls(con, bounds: Bounds) -> "list[CallRow]":
+    """The rows of ``bounds`` that repeat a call an earlier-priority table holds: what ``money_window`` takes
+    out of its estimate, for a reader (``dashboard_data.query_daily``) that sums the same rows by day."""
+    return duplicate_calls(_estimate_call_rows(con, bounds))
+
+
 def money_window(bounds: Bounds, *, db_path=None, timeout_s: float = 1.0) -> MoneyWindow:
     """Calls / tokens / saved dollars across ``usage``, the platform tables and ``savings_stats``
     (the body ``dashboard_data.query_window`` had), over ``bounds``. A missing database or table
@@ -793,7 +799,7 @@ def money_window(bounds: Bounds, *, db_path=None, timeout_s: float = 1.0) -> Mon
             out.calls += int(row[0])
             out.tokens += tokens
         try:                                       # one call, once: a failure here leaves the raw sums
-            gone = duplicate_calls(_estimate_call_rows(con, bounds))
+            gone = repeated_calls(con, bounds)
         except sqlite3.Error:
             gone = []
         out.duplicate_calls = len(gone)
