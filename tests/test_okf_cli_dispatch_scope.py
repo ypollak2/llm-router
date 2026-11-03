@@ -42,6 +42,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._bind_support import init_repo
+
 AGENT_ROUTE_HOOK_PATH = Path(__file__).parent.parent / "src" / "llm_router" / "hooks" / "agent-route.py"
 
 
@@ -620,7 +622,7 @@ def test_main_passes_the_hook_payload_cwd_to_delegation(tmp_path, monkeypatch, c
     monkeypatch.setenv("LLM_ROUTER_SESSIONS_PATH", str(tmp_path / "s.db"))
     monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
     monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
-    repo_a = _make_repo(tmp_path, "repo-a")
+    repo_a = init_repo(_make_repo(tmp_path, "repo-a"))  # D-357: only a real work tree may be the writable root
     repo_b = _make_repo(tmp_path, "repo-b")
     monkeypatch.chdir(repo_b)
     monkeypatch.delenv("LLM_ROUTER_PROJECT_ROOT", raising=False)
@@ -648,8 +650,8 @@ def test_main_passes_the_hook_payload_cwd_to_delegation(tmp_path, monkeypatch, c
     assert "run by Codex CLI" in out
 
     assert captured.get("context_root") == str(repo_a.resolve()), out
-    # D-357: the same payload cwd is the delegated run's writable sandbox root (not the process cwd, repo_b).
-    assert captured.get("working_dir") == str(repo_a), out
+    # D-357: the payload cwd's repository is the delegated run's writable sandbox root (not the process cwd, repo_b).
+    assert os.path.realpath(captured.get("working_dir")) == str(repo_a.resolve()), out
     assert captured.get("sandbox") == "workspace-write", out
 
 

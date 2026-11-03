@@ -2,7 +2,8 @@
 
 ``agent-route.py`` lost 317 of 317 Codex handoffs because a library log line (structlog's default sink is
 STDOUT) came out in front of its decision. ``auto-route.py`` already guarded against that; the other hooks
-did not. This test runs EVERY hook script in ``hooks/`` as a subprocess under a canary: a ``sitecustomize``
+did not. This test runs every hook script in ``hooks/`` as a subprocess (``enforce-route.py`` is audited by
+another pull request: see ``OWNED_ELSEWHERE``) under a canary: a ``sitecustomize``
 that makes library code log one ``error`` line through ``llm_router.logging`` at three moments --
 
 * ``stdin``    the first read of the payload inside ``main()`` (a log line before the hook has done anything),
@@ -127,8 +128,6 @@ PAYLOADS: dict[str, dict] = {
     "context-capture.py": {"hook_event_name": "PostToolUse", "tool_name": "Read",
                            "tool_input": {"file_path": "/tmp/x"}, "tool_response": {"content": "abc"},
                            "session_id": "s1"},
-    "enforce-route.py": {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "ls"},
-                         "session_id": "s1", "cwd": "/tmp"},
     "playwright-compress.py": {"hook_event_name": "PostToolUse", "tool_name": "mcp__playwright__browser_snapshot",
                                "tool_input": {}, "session_id": "s1",
                                "tool_response": {"content": [{"type": "text", "text": "- generic: x\n" * 400}]}},
@@ -143,6 +142,13 @@ PAYLOADS: dict[str, dict] = {
 #: Stdlib only: import nothing from llm_router, so no library can log through structlog from them
 #: (codex-stop.py by design: tests/test_codex_stop.py pins "no llm_router import on the hot path").
 STDLIB_ONLY = {"plugin-install.py", "codex-stop.py"}
+#: Hooks whose stdout guard and subprocess tests live in ANOTHER pull request. BIND W2 (PR #817) owns
+#: ``enforce-route.py`` (and its ``src/llm_router/hooks/`` mirror): it carries its own stdout guard and tests the
+#: three emit paths as subprocesses in ``tests/test_w2_enforce_route_holds.py`` (the block, the local-interception
+#: deny, a probe and a release that print nothing, and the in-process call that must hand stdout back). This PR
+#: does not touch that hook, so two PRs cannot edit one file, and the canary does not run it here. After both
+#: merge, the same canary can take it back by moving the name to ``PAYLOADS``.
+OWNED_ELSEWHERE = {"enforce-route.py"}
 
 
 def _hook_scripts() -> list[str]:
@@ -157,8 +163,11 @@ def _hook_scripts() -> list[str]:
 def test_the_audit_covers_every_shipped_hook_script():
     found = _hook_scripts()
     assert len(found) >= 15, found  # an empty or shrunken set would pass everything
-    missing = [n for n in found if n not in PAYLOADS and n not in STDLIB_ONLY]
+    missing = [n for n in found if n not in PAYLOADS and n not in STDLIB_ONLY and n not in OWNED_ELSEWHERE]
     assert not missing, f"hooks with no canary payload (add one to PAYLOADS): {missing}"
+    # An exclusion must name a script that exists and must not also be audited here, or it hides nothing real.
+    assert set(OWNED_ELSEWHERE) <= set(found), f"OWNED_ELSEWHERE names a script that is not shipped: {OWNED_ELSEWHERE}"
+    assert not set(OWNED_ELSEWHERE) & (set(PAYLOADS) | STDLIB_ONLY), "a hook is both audited here and excluded"
 
 
 def test_the_stdlib_only_hooks_really_import_nothing_from_llm_router():

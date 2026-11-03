@@ -92,6 +92,16 @@ def write_codex_stub(
     return launcher
 
 
+def init_repo(path: Path) -> Path:
+    """Create ``path`` as a real git work tree and return it. ``git -C <dir> rev-parse --show-toplevel`` is how the
+    hook decides a session may write, and an empty ``.git`` directory does not satisfy it. Inherited ``GIT_*``
+    variables are dropped so a test run inside a git hook cannot re-initialise some other repository."""
+    path.mkdir(parents=True, exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True, env=env)
+    return path
+
+
 def hook_env(home: Path, **extra: str) -> dict[str, str]:
     """A clean environment for running a hook: no inherited router or session settings, state under ``home``."""
     env = {

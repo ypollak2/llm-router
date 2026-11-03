@@ -782,11 +782,18 @@ model has just written (`write_file s.py`, then `python3 s.py`; pinned in
 **Out of scope.** Work delegated to an external agent CLI (`codex exec`, from
 `src/llm_router/agentic/adapters.py` and `src/llm_router/codex_agent.py`) runs
 under that CLI's own sandbox (`--sandbox workspace-write`, or Codex's exec default),
-not under `write_policy`. The Claude Code `agent-route.py` hook's delegated runs (owner decision D-357) use
-`--sandbox workspace-write` with the network off (`sandbox_workspace_write.network_access=false`) and the
-session's own directory (the hook payload's `cwd`) as the writable root, so they can edit and run tests there,
-including under the home directory when the session is rooted there; only the filesystem root is refused.
-They cannot reach the network, and `danger-full-access` cannot be requested through `run_codex`.
+not under `write_policy`. The Claude Code `agent-route.py` hook's delegated Codex runs (owner decision D-357,
+"write in repo") pick the sandbox from the session's directory, the hook payload's `cwd`. Inside a git work tree
+(`git -C <cwd> rev-parse --show-toplevel` succeeds) the run gets `--sandbox workspace-write` with the network
+off (`sandbox_workspace_write.network_access=false`) and that work tree's top level as its writable root, so it
+can edit and run tests in the repository. Anywhere else it gets `--sandbox read-only`, also with no network,
+and a reply that reports blocked work is not delivered. The top level is never `$HOME`, the account's own home
+directory, a directory above either, or `/`: a session rooted at the home directory, outside any repository, or
+in a repository that contains the home directory runs read-only, and a session rooted at `/` is not delegated
+to Codex at all (`codex_unsafe_cwd`). git is asked without `GIT_DIR`, `GIT_WORK_TREE` and `GIT_COMMON_DIR` (set,
+`GIT_DIR` makes any directory a work tree), and a top level that does not contain the session directory (a
+repository's own `core.worktree` can point elsewhere) counts as no repository. `danger-full-access` cannot be
+requested through `run_codex`. Tests: `tests/test_bind_agent_route_handoff.py` (docs/bugs/BIND-2.md).
 
 `tests/test_security_docs_match_the_code.py` reads the tables in this section and
 runs every row through the real lane executors. `tests/test_write_policy_one_policy.py`

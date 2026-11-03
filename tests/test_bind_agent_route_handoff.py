@@ -30,6 +30,7 @@ from tests._bind_support import (
     agent_payload,
     decision_of,
     hook_env,
+    init_repo,
     ledger_rows,
     run_hook,
     stub_calls,
@@ -52,8 +53,7 @@ BLOCKED_ANSWER = ("I'll read the builder rules first.\n\nBlocked by this session
 @pytest.fixture
 def ctx(tmp_path):
     argv_log = tmp_path / "codex_argv.jsonl"
-    project = tmp_path / "project"
-    project.mkdir()
+    project = init_repo(tmp_path / "project")  # a real work tree: a repo session is the case that may write
 
     class Ctx:
         home = tmp_path
@@ -461,20 +461,144 @@ def test_no_caller_can_ask_for_an_unsandboxed_run(monkeypatch):
     assert launched == []
 
 
+def _launch(ctx):
+    """``(argv, cwd)`` of the one launch the stub recorded."""
+    calls = stub_calls(ctx.log)
+    assert len(calls) == 1, calls
+    return calls[0]["argv"], calls[0]["cwd"]
+
+
+def _sandbox_of(argv):
+    return argv[argv.index("--sandbox") + 1]
+
+
+def _root_of(argv):
+    return os.path.realpath(argv[argv.index("-C") + 1])
+
+
+def _git(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True,
+                          env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")})
+
+
 def test_built_command_line_of_a_delegated_run(ctx):
-    """What the hook REALLY launches: the flags, and the session's directory as both ``-C`` and the process cwd."""
+    """What the hook REALLY launches for a session in a git repository: the writable sandbox with the network
+    off, and the repository as both ``-C`` and the process cwd."""
     stub = ctx.stub()
     decision_of(ctx.run(_payload(ctx), codex=stub))
-    call = stub_calls(ctx.log)[0]
-    argv = call["argv"]
+    argv, cwd = _launch(ctx)
     assert argv[0] == "exec" and "--json" in argv and "--ignore-user-config" in argv
-    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert _sandbox_of(argv) == "workspace-write"
     assert "sandbox_workspace_write.network_access=false" in argv
     assert argv[argv.index("-m") + 1] == "gpt-6-astra"
-    assert argv[argv.index("-C") + 1] == str(ctx.proj.resolve()) or argv[argv.index("-C") + 1] == str(ctx.proj)
+    assert _root_of(argv) == os.path.realpath(ctx.proj)
     # the payload's cwd, not the (different) directory the hook process was started in
-    assert os.path.realpath(call["cwd"]) == os.path.realpath(ctx.proj)
-    assert os.path.realpath(call["cwd"]) != os.path.realpath(ctx.home / "hookproc")
+    assert os.path.realpath(cwd) == os.path.realpath(ctx.proj)
+    assert os.path.realpath(cwd) != os.path.realpath(ctx.home / "hookproc")
+
+
+def test_a_session_in_a_repo_subdirectory_writes_at_the_repo_toplevel(ctx):
+    """"Write in repo": the root is the repository's top level, not the directory the session started in."""
+    sub = ctx.proj / "pkg" / "deep"
+    sub.mkdir(parents=True)
+    decision_of(ctx.run(_payload(ctx, cwd=str(sub)), codex=ctx.stub()))
+    argv, cwd = _launch(ctx)
+    assert _sandbox_of(argv) == "workspace-write"
+    assert _root_of(argv) == os.path.realpath(ctx.proj) and os.path.realpath(cwd) == os.path.realpath(ctx.proj)
+
+
+@pytest.mark.parametrize("where", ["", "plain"])
+def test_a_session_at_home_or_outside_any_repository_runs_read_only(ctx, where):
+    """``$HOME`` itself and a plain directory (no work tree) are never writable. Codex still answers, with the
+    network off, in the session's own directory, and the answer is bound like any other."""
+    target = ctx.home / where
+    target.mkdir(exist_ok=True)
+    assert _git("-C", str(target), "rev-parse", "--show-toplevel").returncode != 0  # premise: no work tree here
+    decision = decision_of(ctx.run(_payload(ctx, cwd=str(target)), codex=ctx.stub()))
+    assert decision["decision"] == "block" and ANSWER in decision["reason"]
+    argv, cwd = _launch(ctx)
+    assert _sandbox_of(argv) == "read-only"
+    assert "workspace-write" not in argv and not any("sandbox_workspace_write" in a for a in argv)
+    assert _root_of(argv) == os.path.realpath(target) and os.path.realpath(cwd) == os.path.realpath(target)
+    assert [r["sandbox"] for r in ledger_rows(ctx.home) if r["outcome"] == "delegated"] == ["read-only"]
+
+
+@pytest.mark.parametrize("where, expected", [
+    ("", "read-only"),                  # the home directory is the repository's top level
+    ("notes", "read-only"),             # inside the home repository: its top level is still the home directory
+    ("project", "workspace-write"),     # a repository of its own under the home directory keeps its own root
+])
+def test_a_home_that_is_itself_a_repository_is_still_not_a_writable_root(ctx, where, expected):
+    """A dotfiles repository at ``$HOME`` passes ``rev-parse --show-toplevel``. The home-directory rule is what
+    stops it, and it must not stop the repositories that live under the home directory."""
+    init_repo(ctx.home)
+    target = ctx.home / where
+    target.mkdir(exist_ok=True)
+    top = _git("-C", str(target), "rev-parse", "--show-toplevel")
+    assert top.returncode == 0  # premise: git does call this a work tree
+    decision_of(ctx.run(_payload(ctx, cwd=str(target)), codex=ctx.stub()))
+    argv, _ = _launch(ctx)
+    assert _sandbox_of(argv) == expected
+    assert _root_of(argv) == os.path.realpath(top.stdout.strip() if expected == "workspace-write" else target)
+
+
+def test_a_repository_above_the_home_directory_is_not_a_writable_root(ctx):
+    """The work tree's top level contains ``$HOME`` (a home inside a repository): never the root."""
+    init_repo(ctx.home)
+    home = ctx.home / "acct"
+    work = home / "work"
+    work.mkdir(parents=True)
+    top = _git("-C", str(work), "rev-parse", "--show-toplevel")
+    assert top.returncode == 0 and os.path.realpath(top.stdout.strip()) == os.path.realpath(ctx.home)  # premise
+    decision_of(ctx.run(_payload(ctx, cwd=str(work)), codex=ctx.stub(), HOME=str(home)))
+    argv, _ = _launch(ctx)
+    assert _sandbox_of(argv) == "read-only"
+
+
+def test_an_inherited_git_dir_cannot_make_a_plain_directory_a_work_tree(ctx):
+    """With GIT_DIR set, git calls ANY directory a work tree. A hook started from inside a git hook inherits it."""
+    plain = ctx.home / "plain"
+    plain.mkdir()
+    trap = subprocess.run(["git", "-C", str(plain), "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+                          env={**os.environ, "GIT_DIR": str(ctx.proj / ".git")})
+    if trap.returncode != 0:  # premise: the trap is real on this machine's git
+        pytest.skip("this git does not call a plain directory a work tree when GIT_DIR is set")
+    decision_of(ctx.run(_payload(ctx, cwd=str(plain)), codex=ctx.stub(), GIT_DIR=str(ctx.proj / ".git")))
+    argv, _ = _launch(ctx)
+    assert _sandbox_of(argv) == "read-only"
+
+
+def test_a_repository_cannot_move_the_writable_root_with_core_worktree(ctx):
+    """``core.worktree`` in a repository's own config redirects ``--show-toplevel`` to a directory the session is
+    not in. That directory must not become the writable root."""
+    hostile = init_repo(ctx.home / "hostile")
+    elsewhere = ctx.home / "elsewhere"
+    elsewhere.mkdir()
+    assert _git("-C", str(hostile), "config", "core.worktree", str(elsewhere)).returncode == 0
+    top = _git("-C", str(hostile), "rev-parse", "--show-toplevel")
+    if os.path.realpath(top.stdout.strip()) != os.path.realpath(elsewhere):  # premise: git is redirected
+        pytest.skip("this git does not follow core.worktree to a directory the session is not in")
+    decision_of(ctx.run(_payload(ctx, cwd=str(hostile)), codex=ctx.stub()))
+    argv, _ = _launch(ctx)
+    assert _sandbox_of(argv) == "read-only"
+    assert _root_of(argv) == os.path.realpath(hostile) != os.path.realpath(elsewhere)
+
+
+def test_both_the_env_home_and_the_account_home_are_protected(hook_mod, monkeypatch, tmp_path):
+    """A run started with ``HOME`` redirected must not make the account's real home directory writable."""
+    import pwd
+    import types
+
+    env_home, account_home = tmp_path / "env-home", tmp_path / "account-home"
+    for d in (env_home, account_home, tmp_path / "other"):
+        d.mkdir()
+    monkeypatch.setenv("HOME", str(env_home))
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: types.SimpleNamespace(pw_dir=str(account_home)))
+    protected = hook_mod._is_home_or_above
+    assert protected(str(env_home)) and protected(str(account_home))            # either home itself
+    assert protected(str(tmp_path)) and protected("/")                           # a directory above them
+    assert not protected(str(env_home / "repo")) and not protected(str(account_home / "repo"))  # under a home
+    assert not protected(str(tmp_path / "other"))                                # a sibling of the homes
 
 
 def test_a_missing_payload_cwd_falls_back_to_the_hook_process_directory(ctx):
@@ -482,8 +606,9 @@ def test_a_missing_payload_cwd_falls_back_to_the_hook_process_directory(ctx):
     payload = _payload(ctx)
     payload["cwd"] = str(ctx.home / "does-not-exist")
     decision_of(ctx.run(payload, codex=stub))
-    call = stub_calls(ctx.log)[0]
-    assert os.path.realpath(call["cwd"]) == os.path.realpath(ctx.home / "hookproc")
+    argv, cwd = _launch(ctx)
+    assert os.path.realpath(cwd) == os.path.realpath(ctx.home / "hookproc")
+    assert _sandbox_of(argv) == "read-only"  # that directory is not a work tree
 
 
 def test_a_filesystem_root_is_never_the_writable_root(ctx):
@@ -500,6 +625,46 @@ def test_delegated_row_records_the_sandbox(ctx):
     ctx.run(_payload(ctx), codex=ctx.stub())
     row = [r for r in ledger_rows(ctx.home) if r["outcome"] == "delegated"][0]
     assert row["sandbox"] == "workspace-write"
+
+
+def test_a_blocked_reply_from_a_read_only_session_is_not_bound(ctx):
+    """A read-only run cannot do the work the delegated prompts ask for: its report of that never reaches Claude as
+    a finished sub-agent, and Claude's own sub-agent runs the task."""
+    plain = ctx.home / "plain"
+    plain.mkdir()
+    decision = decision_of(ctx.run(_payload(ctx, cwd=str(plain)), codex=ctx.stub(answer=BLOCKED_ANSWER)))
+    assert "decision" not in decision and decision["hookSpecificOutput"]["permissionDecision"] == "allow"
+    rows = ledger_rows(ctx.home)
+    blocked = [r for r in rows if r["outcome"] == "codex_blocked"]
+    assert len(blocked) == 1 and blocked[0]["sandbox"] == "read-only"
+    assert not [r for r in rows if r["outcome"] == "delegated"]
+
+
+_PHASE2_ENV = {k: v for k, v in _LEGACY_ROUTING_OFF.items() if k != "LLM_ROUTER_SUBAGENT_CLI_DELEGATION"}
+_LONG_PROMPT = SUITABLE_PROMPT + " " + ("Check every call site and report the exact lines. " * 14)
+
+
+@pytest.mark.parametrize("where, expected", [("project", "workspace-write"), ("plain", "read-only")])
+def test_cli_delegation_is_sandboxed_by_the_same_plan(ctx, where, expected):
+    (ctx.home / "plain").mkdir(exist_ok=True)
+    target = ctx.home / where
+    decision = decision_of(ctx.run(_payload(ctx, _LONG_PROMPT, cwd=str(target)), codex=ctx.stub(), **_PHASE2_ENV))
+    assert decision["decision"] == "block" and ANSWER in decision["reason"]  # delivered by Phase 2, not NS3
+    argv, _ = _launch(ctx)
+    assert _sandbox_of(argv) == expected and _root_of(argv) == os.path.realpath(target)
+
+
+def test_cli_delegation_does_not_bind_a_blocked_reply(ctx):
+    """With the legacy routing off the hook then falls through to its own old block (use the llm_* tools); what
+    matters here is that Codex's report is not what Claude is handed as a sub-agent's result."""
+    plain = ctx.home / "plain"
+    plain.mkdir()
+    decision = decision_of(ctx.run(_payload(ctx, _LONG_PROMPT, cwd=str(plain)), codex=ctx.stub(answer=BLOCKED_ANSWER),
+                                   **_PHASE2_ENV))
+    reason = decision.get("reason", "")
+    assert "BEGIN UNTRUSTED SUB-AGENT RESULT" not in reason and "write-enabled session" not in reason
+    blocked = [r for r in ledger_rows(ctx.home) if r["outcome"] == "codex_blocked"]
+    assert len(blocked) == 1 and blocked[0]["path"] == "cli_delegation" and blocked[0]["sandbox"] == "read-only"
 
 
 def test_pure_llm_callers_pass_no_sandbox(monkeypatch):

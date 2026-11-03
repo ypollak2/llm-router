@@ -1834,41 +1834,97 @@ def _note_codex_success(model: str) -> None:
             pass
 
 
-#: D-357 (owner decision, 2026-11-03): a delegated Codex run gets a WRITABLE workspace sandbox and NO network.
-#: Before this the run had no --sandbox flag, so ``codex exec`` ran read-only; the delegated prompts ask for
-#: worktrees, tests and report files, and 269 of 317 answers said blocked or cannot (docs/BUGS.md BIND-2).
-_CODEX_SANDBOX = "workspace-write"
+#: D-357 (owner decision, 2026-11-03): a delegated Codex run may WRITE, and never has a network. Before this the run
+#: had no --sandbox flag, so ``codex exec`` ran read-only; the delegated prompts ask for worktrees, tests and report
+#: files, and 269 of 317 answers said blocked or cannot (docs/BUGS.md BIND-2). The coordinator's ruling of the same
+#: day ("write in repo") bounds it: writable only inside the session's git repository, read-only everywhere else.
+_CODEX_SANDBOX_WRITE = "workspace-write"
+_CODEX_SANDBOX_READ = "read-only"
 
 
 def _codex_working_dir(cwd) -> str | None:
     """The session's project directory (the hook payload's ``cwd``) when it names an existing directory, else None
-    (Codex then starts in the hook process's own directory, as before). The sandbox's writable root IS this
-    directory, so it has to be the session's, not wherever the hook process happened to be started."""
+    (Codex then starts in the hook process's own directory, as before). The sandbox's writable root is derived
+    from this directory, so it has to be the session's, not wherever the hook process happened to be started."""
     if not isinstance(cwd, str) or not cwd.strip():
         return None
     path = os.path.abspath(os.path.expanduser(cwd.strip()))
     return path if os.path.isdir(path) else None
 
 
-def _sandbox_root_refusal(path: str) -> str | None:
-    """Why ``path`` may not be the writable root of a delegated run, or None. Only the filesystem root is refused:
-    a writable ``/`` is not a workspace. A session rooted at the home directory IS allowed, because D-357 names the
-    session's own directory whatever it is; that exposure is the owner's call and is stated in the PR."""
-    real = os.path.realpath(path)
-    return "the session directory is the filesystem root" if real == os.path.dirname(real) else None
+def _git_toplevel(path: str) -> str | None:
+    """The top of the git work tree that contains ``path`` (resolved), or None when ``path`` is not inside one or
+    git cannot say: ``git -C <path> rev-parse --show-toplevel``, as ``zero_claude_edit._repo_root`` asks it, with
+    two differences that matter here.
+
+    GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR are dropped from the environment. With GIT_DIR set git calls ANY
+    directory a work tree (a plain directory answers itself; ``tests/test_bind_agent_route_handoff.py`` reproduces
+    it), so a hook started from inside a git hook would have made every session writable.
+
+    The answer must contain ``path``. A repository's own ``core.worktree`` can point ``--show-toplevel`` at an
+    unrelated directory, which would otherwise become the writable root."""
+    import subprocess
+
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")}
+    try:
+        res = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=3, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = res.stdout.rstrip("\n") if res.returncode == 0 else ""
+    if not out or not os.path.isabs(out):
+        return None
+    top, here = os.path.realpath(out), os.path.realpath(path)
+    return top if os.path.commonpath([top, here]) == top else None
 
 
-def _run_codex_agent(prompt: str, timeout: int, context_root: str | None, working_dir: str | None = None):
+def _is_home_or_above(path: str) -> bool:
+    """True when ``path`` (resolved) is a home directory or a directory that contains one (``/Users``, ``/``). The
+    homes are ``$HOME`` and the account's own: a run started with HOME redirected must not make the real one writable."""
+    homes = {os.path.realpath(os.path.expanduser("~"))}
+    try:
+        import pwd
+
+        homes.add(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))
+    except (ImportError, KeyError, OSError):
+        pass  # no passwd entry: $HOME alone
+    return any(os.path.commonpath([path, home]) == path for home in homes)
+
+
+def _codex_sandbox_plan(cwd) -> tuple[str | None, str, str | None]:
+    """How a delegated Codex run is sandboxed: ``(working_dir, sandbox, refusal)``.
+
+    D-357 as the coordinator ruled it, "write in repo". The run may write only when the session's directory is inside
+    a git work tree (``_git_toplevel`` answers); the work tree's top level is then the writable root AND Codex's
+    working directory, and it must not be a home directory, a directory above one, or ``/``. Every other session runs
+    READ-ONLY, still in its own directory: one rooted at the home directory, one outside any repository, one inside a
+    repository that sits at or above the home directory. Codex can still answer there, a reply that reports blocked
+    work is never bound (``_blocked_marker``), and Claude's sub-agent does the task. A session rooted at ``/`` gets a
+    ``refusal`` and no run at all. The network is off in both modes (``codex_exec_args``)."""
+    session_dir = _codex_working_dir(cwd) or os.getcwd()
+    real = os.path.realpath(session_dir)
+    if real == os.path.dirname(real):
+        return None, _CODEX_SANDBOX_READ, "the session directory is the filesystem root"
+    top = _git_toplevel(session_dir)
+    if top is not None and not _is_home_or_above(top):
+        return top, _CODEX_SANDBOX_WRITE, None
+    return _codex_working_dir(cwd), _CODEX_SANDBOX_READ, None
+
+
+def _run_codex_agent(prompt: str, timeout: int, context_root: str | None, working_dir: str | None = None,
+                     sandbox: str = _CODEX_SANDBOX_READ):
     """Run one delegated task on Codex (see ``_run_codex_agent_inner``); any window
     slot still held when it returns -- no Codex call was made -- is handed back."""
     try:
-        return _run_codex_agent_inner(prompt, timeout, context_root, working_dir)
+        return _run_codex_agent_inner(prompt, timeout, context_root, working_dir, sandbox)
     finally:
         _release_reservation()
 
 
-def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None, working_dir: str | None = None):
-    """Run one delegated task on Codex with the configured model.
+def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None, working_dir: str | None = None,
+                           sandbox: str = _CODEX_SANDBOX_READ):
+    """Run one delegated task on Codex with the configured model, in the ``sandbox`` mode ``_codex_sandbox_plan``
+    chose (read-only unless the caller says otherwise).
 
     Returns ``(res, status)``. ``status`` is ``"ok"``, ``"failed"``,
     ``"benched"`` (the delegation model is benched, or this call hit the usage limit, so Codex is not usable
@@ -1903,7 +1959,7 @@ def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None, 
         if not _spend_window_slot():  # every dispatch spends window quota
             return last, "failed"  # window exhausted for the fallback dispatch
         res = asyncio.run(run_codex(prompt, model=model, timeout=left, context_root=context_root,
-                                    working_dir=working_dir, sandbox=_CODEX_SANDBOX))
+                                    working_dir=working_dir, sandbox=sandbox))
         last = res
         if res and getattr(res, "success", False) and (res.content or "").strip():
             _note_codex_success(model)
@@ -2093,14 +2149,14 @@ def _try_cli_delegation(
             reason=f"Codex usage limit; benched until {_fmt_clock(_benched_until)}",
             path="cli_delegation",
         )
-    _work_dir = _codex_working_dir(cwd)  # D-357: the session's directory is the writable sandbox root
-    _codex_ok = (_benched_until is None and _sandbox_root_refusal(_work_dir or os.getcwd()) is None
+    _work_dir, _sandbox, _refusal = _codex_sandbox_plan(cwd)  # D-357: writable only inside the session's git repo
+    _codex_ok = (_benched_until is None and _refusal is None
                  and not _codex_window_declines(
                      "cli_delegation", prompt, subagent_type, task_type, complexity, session_id))
     try:
         if _codex_ok and is_codex_available():
             provider = "codex"
-            res, status = _run_codex_agent(prompt, timeout, _scope_root, _work_dir)
+            res, status = _run_codex_agent(prompt, timeout, _scope_root, _work_dir, _sandbox)
             if status != "ok":
                 _note_codex_failure("cli_delegation", status, res, subagent_type,
                                     task_type, complexity, session_id)
@@ -2119,6 +2175,14 @@ def _try_cli_delegation(
 
     if not res or not getattr(res, "success", False) or not (res.content or "").strip():
         return None
+
+    if provider == "codex":  # F5 holds on this path too, and read-only sessions make it matter more
+        marker = _blocked_marker(res.content)
+        if marker is not None:
+            _discard_blocked_codex(res, marker, subagent_type=subagent_type, task_type=task_type,
+                                   complexity=complexity, session_id=session_id, path="cli_delegation",
+                                   sandbox=_sandbox)
+            return None
 
     if os.environ.get("LLM_ROUTER_ROUTE_BANNER", "on").strip().lower() not in ("0", "off", "false", "no"):
         try:
@@ -2416,6 +2480,30 @@ def _blocked_marker(text: str) -> str | None:
     return None
 
 
+def _discard_blocked_codex(res, marker: str, *, subagent_type, task_type, complexity, session_id, path: str,
+                           sandbox: str) -> None:
+    """Codex ran, but its reply says the environment stopped the work. Binding it would tell Claude a sub-agent
+    finished when none did, so the caller returns None and the hook carries on as if Codex had not answered (by
+    default the Agent call is allowed and Claude's own sub-agent runs it). This logs the unit ``codex_blocked`` (no
+    saving is booked) with the sandbox the run had, and says so on stderr. Both Codex paths use it: NS3 and the
+    Phase-2 CLI delegation."""
+    _record_north_star_unit(
+        "agent_route_codex", model=res.model, outcome="codex_blocked",
+        subagent_type=subagent_type, task_type=task_type,
+        complexity=complexity, session_id=session_id, path=path,
+        duration_sec=res.duration_sec, sandbox=sandbox,
+        reason=f"Codex reported blocked work (marker: {marker}); not delivered, a Claude sub-agent runs it",
+        reason_code="blocked_answer",
+    )
+    if os.environ.get("LLM_ROUTER_ROUTE_BANNER", "on").strip().lower() not in ("0", "off", "false", "no"):
+        try:
+            sys.stderr.write(
+                f"⚠ Codex reported blocked work ({marker}) — the sub-agent stays on Claude · "
+                f"{res.model} · {res.duration_sec:.1f}s\n")
+        except Exception:
+            pass
+
+
 # ── F3: the delivered / void bookkeeping lives in llm_router.codex_handoff ───
 #: Model that produced the answer ``_try_codex_subagent_delegation`` last returned (for the delivered text).
 _last_codex_model = ""
@@ -2566,9 +2654,8 @@ def _try_codex_subagent_delegation(
         )
         return None
 
-    # D-357: the writable root is the SESSION's directory (the payload's cwd). Only the filesystem root is refused.
-    working_dir = _codex_working_dir(cwd)
-    refusal = _sandbox_root_refusal(working_dir or os.getcwd())
+    # D-357 ("write in repo"): writable only inside the session's git repository, read-only elsewhere, "/" refused.
+    working_dir, sandbox, refusal = _codex_sandbox_plan(cwd)
     if refusal:
         _record_north_star_unit(
             "agent_route_codex", model="", outcome="codex_unsafe_cwd",
@@ -2585,7 +2672,7 @@ def _try_codex_subagent_delegation(
     _codex_subagent_budget_increment()
 
     try:
-        res, status = _run_codex_agent(prompt, timeout, _delegation_scope_root(cwd), working_dir)
+        res, status = _run_codex_agent(prompt, timeout, _delegation_scope_root(cwd), working_dir, sandbox)
     except Exception as e:
         _record_north_star_unit(
             "agent_route_codex", model="", outcome="codex_failed",
@@ -2605,21 +2692,8 @@ def _try_codex_subagent_delegation(
     # sub-agent finished when none did; log it and let the Agent call through. No saving is booked either.
     marker = _blocked_marker(res.content)
     if marker is not None:
-        _record_north_star_unit(
-            "agent_route_codex", model=res.model, outcome="codex_blocked",
-            subagent_type=subagent_type, task_type=task_type,
-            complexity=complexity, session_id=session_id, path="ns3",
-            duration_sec=res.duration_sec, sandbox=_CODEX_SANDBOX,
-            reason=f"Codex reported blocked work (marker: {marker}); not delivered, a Claude sub-agent runs it",
-            reason_code="blocked_answer",
-        )
-        if os.environ.get("LLM_ROUTER_ROUTE_BANNER", "on").strip().lower() not in ("0", "off", "false", "no"):
-            try:
-                sys.stderr.write(
-                    f"⚠ Codex reported blocked work ({marker}) — the sub-agent stays on Claude · "
-                    f"{res.model} · {res.duration_sec:.1f}s\n")
-            except Exception:
-                pass
+        _discard_blocked_codex(res, marker, subagent_type=subagent_type, task_type=task_type,
+                               complexity=complexity, session_id=session_id, path="ns3", sandbox=sandbox)
         return None
 
     if os.environ.get("LLM_ROUTER_ROUTE_BANNER", "on").strip().lower() not in ("0", "off", "false", "no"):
@@ -2639,7 +2713,7 @@ def _try_codex_subagent_delegation(
         "agent_route_codex", model=res.model, outcome="delegated",
         subagent_type=subagent_type, task_type=task_type,
         complexity=complexity, session_id=session_id,
-        duration_sec=res.duration_sec, sandbox=_CODEX_SANDBOX,
+        duration_sec=res.duration_sec, sandbox=sandbox,
         **({"truncated": True} if getattr(res, "truncated", False) else {}),
         **({"reason_code": res.reason_code} if getattr(res, "reason_code", "") else {}),
     )
