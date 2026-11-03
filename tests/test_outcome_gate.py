@@ -317,6 +317,19 @@ def test_compare_across_versions_is_labelled_and_can_fail(tmp_path, capsys):
     assert json.loads(hist.read_text())["releases"][-1]["cross_version"]["policy"] == "compare"
 
 
+def test_a_rate_exactly_equal_to_the_recorded_one_passes_like_for_like_and_across_versions(tmp_path, capsys):
+    """Only a LOWER rate fails, in both comparisons: the same version (a later release) and --cross-version compare."""
+    same_version = {"releases": [{"release": "1.0.0", "audit_version": 2, "used_rate": 0.03, "used": 3, "attempted": 100}]}
+    rows = _rows(3, 100)
+    rc, _ = _run(tmp_path, rows, _summary_v(rows, "1.0.1"), "1.0.1", same_version)
+    assert rc == 0, capsys.readouterr().out
+    rows = _rows(2, 873)                                                   # exactly 15.4.0's recorded 2 of 873
+    (tmp_path / "x").mkdir()
+    rc, _ = _run(tmp_path / "x", rows, _summary_v(rows, "16.0.1"), "16.0.1", {"releases": [V1_ENTRY]},
+                 extra=("--cross-version", "compare"))
+    assert rc == 0 and "PASS (CROSS-VERSION" in capsys.readouterr().out
+
+
 def test_after_a_rebaseline_the_next_release_compares_like_for_like(tmp_path, capsys):
     history = {"releases": [V1_ENTRY, {"release": "16.0.1", "audit_version": 2, "used_rate": 0.05, "used": 5, "attempted": 100}]}
     rows = _rows(3, 100)           # below the v2 entry, above nothing else
@@ -351,7 +364,7 @@ def test_a_person_may_label_a_unit_not_applicable(tmp_path, capsys):
 PRV = REPO / "scripts" / "release" / "pre-release-verify.sh"
 
 
-def _prv_harness(tmp_path, history):
+def _prv_harness(tmp_path, history, rows=None):
     """The script's own colour set, argument parser and step 13 (cut out of the real file by
     its markers), run against a stub `uv`: the audit step is a no-op and the gate step runs the
     REAL outcome_gate.py on a temp artifact and history, after echoing the arguments the script
@@ -361,10 +374,11 @@ def _prv_harness(tmp_path, history):
     parse = sh[sh.index('SKIP_QUALITY_REASON=""'):sh.index("# P3.2:")]
     step13 = sh[sh.index("# 13. Outcome audit"):sh.index('echo -e "${GREEN}========================================${NC}"')]
     assert "--outcome-cross-version" in parse and "outcome_gate.py" in step13       # the cut found the real code
-    rows = _rows(5, 100)
+    rows = rows if rows is not None else _rows(5, 100)
     art = _write(tmp_path, rows, _summary_v(rows, "9.9.9"), "9.9.9")
     hist = tmp_path / "history.json"
-    hist.write_text(json.dumps(history))
+    if history is not None:                                  # None: keep the history a previous run left
+        hist.write_text(json.dumps(history))
     stub = textwrap.dedent('''
         uv() {
             shift 2                                  # "run python"
@@ -384,8 +398,8 @@ def _prv_harness(tmp_path, history):
     return script, env, hist
 
 
-def _run_prv(tmp_path, history, *args):
-    script, env, hist = _prv_harness(tmp_path, history)
+def _run_prv(tmp_path, history, *args, rows=None):
+    script, env, hist = _prv_harness(tmp_path, history, rows)
     p = subprocess.run(["bash", str(script), *args], capture_output=True, text=True, env=env, timeout=120)
     return p.returncode, p.stdout + p.stderr, hist
 
@@ -444,3 +458,117 @@ def test_the_script_header_documents_the_flag():
     assert "[--outcome-cross-version rebaseline|compare]" in head                             # the usage line
     assert "# --outcome-cross-version rebaseline|compare is forwarded to step 13" in head    # and its paragraph
     assert "D-359" in head and "FAILS" in head and "nothing passes silently" in head
+
+
+# ── a recorded baseline is sticky (the PR #816 review, S1) ───────────────────
+
+def _first_baseline(tmp_path, rows=None):
+    """Rebaseline release 1.0.0 once (history: 15.4.0 scored by audit v1) and return its rows, history and artifact."""
+    rows = rows if rows is not None else _rows(9, 291)
+    rc, hist = _run(tmp_path, rows, _summary_v(rows, "1.0.0"), "1.0.0", {"releases": [V1_ENTRY]},
+                    extra=("--cross-version", "rebaseline"))
+    assert rc == 0
+    return rows, hist, tmp_path / "art" / "outcome_audit_1.0.0.jsonl"
+
+
+def test_the_entry_records_release_version_rate_n_and_the_artifact_hash(tmp_path):
+    import hashlib
+    rows, hist, jsonl = _first_baseline(tmp_path)
+    e = json.loads(hist.read_text())["releases"][-1]
+    assert (e["release"], e["audit_version"], e["used"], e["attempted"]) == ("1.0.0", 2, 9, 291)
+    assert e["used_rate"] == pytest.approx(9 / 291)
+    assert e["artifact_sha256"] == hashlib.sha256(jsonl.read_bytes()).hexdigest()
+
+
+def test_a_rerun_of_the_baseline_release_needs_no_flag_and_changes_nothing(tmp_path, capsys):
+    rows, hist, _ = _first_baseline(tmp_path)
+    capsys.readouterr()
+    before = hist.read_bytes()
+    rc, _ = _run(tmp_path, rows, _summary_v(rows, "1.0.0"), "1.0.0")          # same artifact, default policy, no flag
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "MISMATCH" not in out and "is the recorded v2 baseline" in out
+    assert hist.read_bytes() == before
+
+
+def test_a_worse_rerun_fails_under_every_policy_and_never_replaces_the_baseline(tmp_path, capsys):
+    """The review's reproduction: a 0/291 artifact with --cross-version rebaseline overwrote 3.093% and passed."""
+    _, hist, _ = _first_baseline(tmp_path)
+    before = hist.read_bytes()
+    worse = _rows(0, 291)
+    for extra in ((), ("--cross-version", "rebaseline"), ("--cross-version", "compare")):
+        capsys.readouterr()
+        rc, _ = _run(tmp_path, worse, _summary_v(worse, "1.0.0"), "1.0.0", extra=extra)
+        out = capsys.readouterr().out
+        assert rc == 1 and "dropped below" in out and "NOT replaced" in out, (extra, out)
+        assert hist.read_bytes() == before
+
+
+def test_a_better_rerun_passes_but_the_baseline_is_kept(tmp_path, capsys):
+    _, hist, _ = _first_baseline(tmp_path)
+    before = hist.read_bytes()
+    better = _rows(12, 291)
+    capsys.readouterr()
+    rc, _ = _run(tmp_path, better, _summary_v(better, "1.0.0"), "1.0.0")
+    out = capsys.readouterr().out
+    assert rc == 0 and "kept, not replaced" in out, out
+    assert hist.read_bytes() == before
+
+
+def test_a_different_artifact_with_exactly_the_same_rate_passes_and_the_baseline_is_kept(tmp_path, capsys):
+    """Only a LOWER rate fails: 9 of 291 again, from other rows, is not a drop."""
+    _, hist, jsonl = _first_baseline(tmp_path)
+    before = hist.read_bytes()
+    same_rate = _rows(9, 291, signal="local_task_effect_kept")
+    capsys.readouterr()
+    rc, _ = _run(tmp_path, same_rate, _summary_v(same_rate, "1.0.0"), "1.0.0")
+    out = capsys.readouterr().out
+    assert rc == 0 and "kept, not replaced" in out and "dropped below" not in out, out
+    assert jsonl.read_bytes() != b"" and hist.read_bytes() == before
+
+
+def test_force_baseline_replaces_it_and_records_what_it_replaced(tmp_path, capsys):
+    rows, hist, jsonl = _first_baseline(tmp_path)
+    old = json.loads(hist.read_text())["releases"][-1]
+    worse = _rows(0, 291)
+    capsys.readouterr()
+    rc, _ = _run(tmp_path, worse, _summary_v(worse, "1.0.0"), "1.0.0", extra=("--force-baseline", "window moved"))
+    out = capsys.readouterr().out
+    assert rc == 0 and "WARNING" in out and "window moved" in out, out
+    e = json.loads(hist.read_text())["releases"][-1]
+    assert (e["used"], e["attempted"]) == (0, 291)
+    assert e["replaced"]["used"] == 9 and e["replaced"]["artifact_sha256"] == old["artifact_sha256"]
+    assert e["replaced"]["reason"] == "window moved" and e["artifact_sha256"] != old["artifact_sha256"]
+
+
+def test_a_baseline_recorded_before_hashes_existed_is_never_replaced_either(tmp_path, capsys):
+    history = {"releases": [V1_ENTRY, {"release": "1.0.0", "audit_version": 2, "used_rate": 0.5, "used": 50, "attempted": 100}]}
+    rows = _rows(5, 100)
+    rc, hist = _run(tmp_path, rows, _summary_v(rows, "1.0.0"), "1.0.0", history)
+    assert rc == 1 and "dropped below" in capsys.readouterr().out
+    assert json.loads(hist.read_text())["releases"][-1]["used"] == 50
+
+
+def test_a_later_release_keeps_the_older_rerun_rule_and_force_is_not_for_it(tmp_path, capsys):
+    """Only the baseline is sticky: 1.0.1 is compared with 1.0.0 and a re-run replaces its own entry."""
+    history = {"releases": [V1_ENTRY,
+                            {"release": "1.0.0", "audit_version": 2, "used_rate": 0.03, "used": 3, "attempted": 100},
+                            {"release": "1.0.1", "audit_version": 2, "used_rate": 0.05, "used": 5, "attempted": 100}]}
+    rows = _rows(4, 100)                                        # below its own earlier 5%, above 1.0.0's 3%
+    rc, hist = _run(tmp_path, rows, _summary_v(rows, "1.0.1"), "1.0.1", history, extra=("--force-baseline", "x"))
+    out = capsys.readouterr().out
+    assert rc == 0 and "is not the v2 baseline release; ignored" in out, out
+    assert [e["used"] for e in json.loads(hist.read_text())["releases"]][-2:] == [3, 4]
+
+
+@needs_bash
+def test_through_the_release_script_a_rerun_needs_no_flag_and_a_worse_one_cannot_overwrite(tmp_path):
+    rc, out, hist = _run_prv(tmp_path, {"releases": [V1_ENTRY]}, "--outcome-cross-version", "rebaseline")
+    assert rc == 0, out
+    recorded = hist.read_bytes()
+    rc, out, _ = _run_prv(tmp_path, None)                         # an RC re-run: no flag, the same release
+    assert rc == 0 and "MISMATCH" not in out and "is the recorded v2 baseline" in out, out
+    rc, out, _ = _run_prv(tmp_path, None, "--outcome-cross-version", "rebaseline", rows=_rows(0, 100))
+    assert rc == 1 and "dropped below" in out and "NOT replaced" in out, out
+    assert hist.read_bytes() == recorded
+

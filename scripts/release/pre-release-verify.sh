@@ -19,7 +19,9 @@
 # compares the numbers anyway and records the run as CROSS-VERSION. Once a
 # baseline of the new version is in docs/measurements/outcome_audit_history.json
 # later releases are compared like for like and need no flag. Commit the updated
-# history with the release.
+# history with the release. The baseline is sticky: a re-run for the release that
+# holds it needs no flag, is compared with the recorded baseline and never replaces
+# it; replacing it is a deliberate, manual `outcome_gate.py --force-baseline "<reason>"`.
 #
 # --skip-quality is forwarded to step 12 (the answer-quality bench). It is
 # NOT a way to skip step 11 (the classifier regression gate) -- that one runs

@@ -42,6 +42,17 @@ release when either holds:
 
    The decision is recorded in the history entry (``cross_version``).
 
+   **A recorded baseline is sticky.** The baseline of an audit version is its earliest
+   history entry (the first run, or the rebaseline that began it). Every entry records the
+   sha256 of the audit artifact it was scored from (``artifact_sha256``), with the rate and n.
+   A re-run for the baseline release needs no ``--cross-version`` flag and is compared with
+   THAT entry: the same artifact passes unchanged; a different one fails if its rate is lower
+   and otherwise passes; in neither case is the baseline replaced. Replacing it takes
+   ``--force-baseline "<reason>"``, which records what it replaced and why. (An earlier gate
+   let a re-run with ``--cross-version rebaseline`` overwrite 3.093% with 0.000%.) A later
+   release is unchanged: a re-run is compared with the release before it and replaces its
+   own entry.
+
    A ``not_applicable`` row (a probe, a status view) is outside ``attempted``; the
    gate accepts it only with a signal from the audit's ``NOT_APPLICABLE_SIGNALS``
    and prints how many there are, because shrinking the denominator raises the rate.
@@ -58,6 +69,7 @@ The gate imports nothing from ``src/`` and nothing under ``src/`` imports it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import sys
@@ -153,6 +165,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="what to do when the only earlier history entries were scored by another audit "
                          "version: refuse (default, FAIL), rebaseline (PASS, this run becomes the baseline), "
                          "compare (compare the numbers anyway, labelled CROSS-VERSION)")
+    ap.add_argument("--force-baseline", default=None, metavar="REASON",
+                    help="replace the baseline already recorded for this release and audit version with this run's "
+                         "artifact (default: a re-run never replaces it); the old values and the reason are recorded")
     args = ap.parse_args(argv)
 
     release = args.release or _A.current_release()
@@ -198,12 +213,47 @@ def main(argv: list[str] | None = None) -> int:
     # (never a later release that happens to be recorded after it).
     earlier = releases[:idx] if idx is not None else releases
     same = [e for e in earlier if audit_version(e) == cur_v]
+    sha = hashlib.sha256(jsonl.read_bytes()).hexdigest()
     entry = {"release": release, "audit_version": cur_v, "used_rate": rate, "used": used, "attempted": n,
              "ci95": head.get("ci95"), "window_days": summary.get("window_days"),
-             "recorded_at": datetime.now(timezone.utc).isoformat()}
+             "recorded_at": datetime.now(timezone.utc).isoformat(), "artifact_sha256": sha}
     if na:
         entry["not_applicable"] = na
-    if same:
+    # The BASELINE of an audit version is its earliest entry (the first run, or the rebaseline that began it).
+    # A re-run of that release is compared with it and never replaces it; a later release keeps the older rule:
+    # a re-run is compared with the release before it and replaces its own entry.
+    own = releases[idx] if idx is not None and audit_version(releases[idx]) == cur_v and not same else None
+    if own is not None and not args.force_baseline:
+        # An RC re-run of the baseline release: compare with the baseline, like for like; never replace it
+        # (and never ask for --cross-version again).
+        if args.cross_version != "refuse":
+            print(f"outcome gate: note — --cross-version {args.cross_version} is not needed: {release} already has a "
+                  f"v{cur_v} baseline, and a re-run is compared with it")
+        recorded = f"{release}'s recorded {100 * own['used_rate']:.3f}% ({own['used']}/{own['attempted']})"
+        if own.get("artifact_sha256") == sha:
+            print(f"outcome gate: PASS — this artifact (sha256 {sha[:12]}) is the recorded v{cur_v} baseline of {release}: "
+                  f"{used}/{n} = {100 * rate:.3f}%; nothing to record")
+            return 0
+        if rate < own["used_rate"]:
+            print(f"outcome gate: FAIL — used rate {used}/{n} = {100 * rate:.3f}% dropped below {recorded}; "
+                  f"a different artifact (sha256 {sha[:12]}, recorded {str(own.get('artifact_sha256'))[:12]}). "
+                  f"The recorded baseline was NOT replaced; --force-baseline \"<reason>\" replaces it deliberately.")
+            return 1
+        print(f"outcome gate: PASS — used rate {used}/{n} = {100 * rate:.3f}% >= {recorded}; a different artifact "
+              f"(sha256 {sha[:12]}, recorded {str(own.get('artifact_sha256'))[:12]}), so the recorded baseline was "
+              f"kept, not replaced (--force-baseline \"<reason>\" replaces it)")
+        return 0
+    if own is not None:
+        entry["replaced"] = {**{k: own.get(k) for k in ("used_rate", "used", "attempted", "artifact_sha256", "recorded_at")},
+                             "reason": args.force_baseline}
+        print(f"outcome gate: WARNING — --force-baseline replaces {release}'s recorded v{cur_v} baseline "
+              f"{100 * own['used_rate']:.3f}% ({own['used']}/{own['attempted']}) with {used}/{n} = {100 * rate:.3f}%; "
+              f"reason: {args.force_baseline}")
+    elif args.force_baseline:
+        print(f"outcome gate: note — --force-baseline given but {release} is not the v{cur_v} baseline release; ignored")
+    if own is not None:
+        pass
+    elif same:
         prev = same[-1]
         if rate < prev["used_rate"]:
             print(f"outcome gate: FAIL — used rate {used}/{n} = {100 * rate:.3f}% dropped below "
