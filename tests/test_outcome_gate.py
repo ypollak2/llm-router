@@ -14,8 +14,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
+import shutil
+import subprocess
 import sys
+import textwrap
+
+import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -338,3 +344,103 @@ def test_a_person_may_label_a_unit_not_applicable(tmp_path, capsys):
     rows[-1].update(human_reviewed=False)                       # a machine claiming a person's reading
     rc, _ = _run(tmp_path, rows, _summary_v(rows), "1.0.0")
     assert rc == 1 and "not an allowed not_applicable reason" in capsys.readouterr().out
+
+
+# ── pre-release-verify.sh forwards a one-time rebaseline (owner decision D-359) ─
+
+PRV = REPO / "scripts" / "release" / "pre-release-verify.sh"
+
+
+def _prv_harness(tmp_path, history):
+    """The script's own colour set, argument parser and step 13 (cut out of the real file by
+    its markers), run against a stub `uv`: the audit step is a no-op and the gate step runs the
+    REAL outcome_gate.py on a temp artifact and history, after echoing the arguments the script
+    passed. The rest of the script (git, version sync, the test suites) is not run."""
+    sh = PRV.read_text(encoding="utf-8")
+    colours = sh[sh.index("RED="):sh.index('SKIP_QUALITY_REASON=""')]
+    parse = sh[sh.index('SKIP_QUALITY_REASON=""'):sh.index("# P3.2:")]
+    step13 = sh[sh.index("# 13. Outcome audit"):sh.index('echo -e "${GREEN}========================================${NC}"')]
+    assert "--outcome-cross-version" in parse and "outcome_gate.py" in step13       # the cut found the real code
+    rows = _rows(5, 100)
+    art = _write(tmp_path, rows, _summary_v(rows, "9.9.9"), "9.9.9")
+    hist = tmp_path / "history.json"
+    hist.write_text(json.dumps(history))
+    stub = textwrap.dedent('''
+        uv() {
+            shift 2                                  # "run python"
+            local script="$1"; shift
+            case "$script" in
+                scripts/release/outcome_audit.py) echo "STUB audit: $*" ;;
+                scripts/release/outcome_gate.py)
+                    echo "GATE ARGS: $*"
+                    "$PYBIN" "$REPO/$script" --artifact-dir "$ART" --release 9.9.9 --history "$HIST" "$@" ;;
+                *) echo "unexpected uv call: $script" >&2; return 99 ;;
+            esac
+        }
+    ''')
+    script = tmp_path / "step13.sh"
+    script.write_text("set -e\n" + colours + stub + parse + step13)
+    env = {**os.environ, "PYBIN": sys.executable, "REPO": str(REPO), "ART": str(art), "HIST": str(hist)}
+    return script, env, hist
+
+
+def _run_prv(tmp_path, history, *args):
+    script, env, hist = _prv_harness(tmp_path, history)
+    p = subprocess.run(["bash", str(script), *args], capture_output=True, text=True, env=env, timeout=120)
+    return p.returncode, p.stdout + p.stderr, hist
+
+
+needs_bash = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+
+
+@needs_bash
+def test_a_version_mismatch_fails_the_release_script_without_the_flag(tmp_path):
+    rc, out, hist = _run_prv(tmp_path, {"releases": [V1_ENTRY]})
+    assert rc == 1, out
+    assert "AUDIT VERSION MISMATCH" in out and "Outcome gate failed" in out
+    assert "--outcome-cross-version rebaseline|compare" in out          # the refusal names the flag the script takes
+    assert "--cross-version" not in out.split("GATE ARGS:")[1].splitlines()[0]         # no flag given, none forwarded
+    assert [e["release"] for e in json.loads(hist.read_text())["releases"]] == ["15.4.0"]       # nothing written
+
+
+@needs_bash
+def test_the_rebaseline_flag_is_forwarded_and_records_the_new_baseline(tmp_path):
+    rc, out, hist = _run_prv(tmp_path, {"releases": [V1_ENTRY]}, "--outcome-cross-version", "rebaseline")
+    assert rc == 0, out
+    assert "GATE ARGS: --cross-version rebaseline" in out and "REBASELINED" in out
+    entry = json.loads(hist.read_text())["releases"][-1]
+    assert entry["release"] == "9.9.9" and entry["audit_version"] == 2
+    assert entry["cross_version"]["policy"] == "rebaseline" and entry["cross_version"]["against"]["release"] == "15.4.0"
+
+
+@needs_bash
+def test_the_compare_flag_is_forwarded_beside_skip_outcome(tmp_path):
+    rc, out, _ = _run_prv(tmp_path, {"releases": [V1_ENTRY]}, "--skip-outcome", "fresh machine",
+                          "--outcome-cross-version", "compare")
+    assert rc == 0, out
+    assert "GATE ARGS: --skip-outcome fresh machine --cross-version compare" in out
+    assert "PASS (CROSS-VERSION" in out
+
+
+@needs_bash
+@pytest.mark.parametrize("args", [("--outcome-cross-version",), ("--outcome-cross-version", "refuse"),
+                                  ("--outcome-cross-version", "yes")])
+def test_the_flag_takes_rebaseline_or_compare_and_nothing_else(tmp_path, args):
+    rc, out, hist = _run_prv(tmp_path, {"releases": [V1_ENTRY]}, *args)
+    assert rc == 1 and "takes rebaseline or compare" in out and "GATE ARGS" not in out
+    assert [e["release"] for e in json.loads(hist.read_text())["releases"]] == ["15.4.0"]
+
+
+@needs_bash
+def test_a_same_version_history_needs_no_flag_and_none_is_forwarded(tmp_path):
+    history = {"releases": [{"release": "16.0.0", "audit_version": 2, "used_rate": 0.02, "used": 2, "attempted": 100}]}
+    rc, out, _ = _run_prv(tmp_path, history)               # 5 of 100 against a recorded 2 of 100, both version 2
+    assert rc == 0, out
+    assert "--cross-version" not in out.split("GATE ARGS:")[1].splitlines()[0] and "MISMATCH" not in out
+
+
+def test_the_script_header_documents_the_flag():
+    head = PRV.read_text(encoding="utf-8").split("set -e")[0]
+    assert "[--outcome-cross-version rebaseline|compare]" in head                             # the usage line
+    assert "# --outcome-cross-version rebaseline|compare is forwarded to step 13" in head    # and its paragraph
+    assert "D-359" in head and "FAILS" in head and "nothing passes silently" in head

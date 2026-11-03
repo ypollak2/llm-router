@@ -227,7 +227,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.cross_version == "refuse":
             print(f"outcome gate: FAIL — not comparable. Decide how to treat the change of method, then re-run "
                   f"with --cross-version rebaseline (this run becomes the v{cur_v} baseline, not compared) or "
-                  f"--cross-version compare (compare the numbers anyway, recorded as CROSS-VERSION). "
+                  f"--cross-version compare (compare the numbers anyway, recorded as CROSS-VERSION); "
+                  f"through pre-release-verify.sh that is --outcome-cross-version rebaseline|compare. "
                   f"Nothing was written to {args.history}.")
             return 1
         if args.cross_version == "compare":
