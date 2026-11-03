@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 11
+# llm_router-hook-version: 12
 """UserPromptSubmit hook — enhanced savings + routing status bar.
 
 Displays a two-mode status line:
