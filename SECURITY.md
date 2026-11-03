@@ -799,8 +799,9 @@ the work tree (`.llm-router-codex-tmp/<run-id>`, ignored by git, removed after t
 never `$HOME`, the account's own home directory, a directory above either, or `/`: a session rooted at the home
 directory, outside any repository, or in a repository that contains the home directory runs read-only, and a session
 rooted at `/` is not delegated to Codex at all (`codex_unsafe_cwd`). git is asked without `GIT_DIR`, `GIT_WORK_TREE` and
-`GIT_COMMON_DIR` (set, `GIT_DIR` makes any directory a work tree), and a top level that does not contain the session
-directory (a repository's own `core.worktree` can point elsewhere) counts as no repository. `danger-full-access` cannot
+`GIT_COMMON_DIR` (set, `GIT_DIR` makes any directory a work tree), and a top level that is not the nearest directory at
+or above the session directory with a `.git` entry (a repository's own `core.worktree` can point elsewhere, or at an
+ancestor) counts as no repository (docs/bugs/BIND-7.md). `danger-full-access` cannot
 be requested through `run_codex`. **Not covered:** the router chain and the MCP tools call `codex exec` with no sandbox
 flag and no `--ignore-rules`, and the same scenario shows a rule-allowed `curl` leaving their read-only sandbox (open,
 docs/bugs/BIND-6.md). Verified on the macOS seatbelt with codex-cli 0.161.0; other Codex versions and the Linux sandboxes

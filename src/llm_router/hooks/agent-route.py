@@ -1861,8 +1861,11 @@ def _git_toplevel(path: str) -> str | None:
     directory a work tree (a plain directory answers itself; ``tests/test_bind_agent_route_handoff.py`` reproduces
     it), so a hook started from inside a git hook would have made every session writable.
 
-    The answer must contain ``path``. A repository's own ``core.worktree`` can point ``--show-toplevel`` at an
-    unrelated directory, which would otherwise become the writable root."""
+    The answer must contain ``path``, and must be the NEAREST directory at or above it that carries a ``.git`` entry (a
+    directory, or the file of a linked worktree or a submodule). A repository's own ``core.worktree`` can point
+    ``--show-toplevel`` at an unrelated directory, which would otherwise become the writable root, or at an ANCESTOR of
+    the session directory, which would widen the root to everything under it: ``proj/a`` with ``core.worktree=proj`` and
+    a session in ``proj/a/sub`` answers ``proj``, and the sibling repository ``proj/b`` is then writable."""
     import subprocess
 
     env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")}
@@ -1875,7 +1878,15 @@ def _git_toplevel(path: str) -> str | None:
     if not out or not os.path.isabs(out):
         return None
     top, here = os.path.realpath(out), os.path.realpath(path)
-    return top if os.path.commonpath([top, here]) == top else None
+    if os.path.commonpath([top, here]) != top:
+        return None
+    nearest = here
+    while not os.path.lexists(os.path.join(nearest, ".git")):
+        parent = os.path.dirname(nearest)
+        if parent == nearest:
+            return None
+        nearest = parent
+    return top if nearest == top else None
 
 
 def _is_home_or_above(path: str) -> bool:

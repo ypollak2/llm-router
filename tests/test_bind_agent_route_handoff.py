@@ -634,6 +634,42 @@ def test_both_the_env_home_and_the_account_home_are_protected(hook_mod, monkeypa
     assert not protected(str(tmp_path / "other"))                                # a sibling of the homes
 
 
+@pytest.mark.parametrize("ancestor_is_a_repo", [False, True])
+def test_a_repository_cannot_widen_the_writable_root_to_an_ancestor_with_core_worktree(ctx, ancestor_is_a_repo):
+    """S2: ``proj/a`` with ``core.worktree=proj`` and a session in ``proj/a/sub``: git answers ``proj``, which contains
+    the session, so containment alone passes it, and the sibling repository ``proj/b`` would be writable. The top level
+    has to be the nearest directory with a ``.git`` entry, whether or not the ancestor is itself a repository."""
+    proj = ctx.home / "proj"
+    a = init_repo(proj / "a")
+    sibling = init_repo(proj / "b")
+    if ancestor_is_a_repo:
+        init_repo(proj)
+    sub = a / "sub"
+    sub.mkdir()
+    assert _git("-C", str(a), "config", "core.worktree", str(proj)).returncode == 0
+    top = _git("-C", str(sub), "rev-parse", "--show-toplevel")
+    assert os.path.realpath(top.stdout.strip()) == os.path.realpath(proj)  # premise: git names the ancestor
+    decision_of(ctx.run(_payload(ctx, cwd=str(sub)), codex=ctx.stub()))
+    argv, _ = _launch(ctx)
+    assert _sandbox_of(argv) == "read-only"
+    assert _root_of(argv) != os.path.realpath(proj) and os.path.realpath(sibling) not in (_root_of(argv),)
+
+
+def test_a_linked_worktree_and_a_submodule_style_gitfile_still_count_as_a_repository(ctx):
+    """The ``.git`` entry may be a file (a linked worktree, a submodule): that must not be read as 'no repository'."""
+    main = init_repo(ctx.home / "main")
+    assert _git("-C", str(main), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q",
+                "-m", "x").returncode == 0
+    linked = ctx.home / "linked"
+    assert _git("-C", str(main), "worktree", "add", "-q", "--detach", str(linked)).returncode == 0
+    assert (linked / ".git").is_file()  # premise: a gitfile
+    sub = linked / "pkg"
+    sub.mkdir()
+    decision_of(ctx.run(_payload(ctx, cwd=str(sub)), codex=ctx.stub()))
+    argv, _ = _launch(ctx)
+    assert _sandbox_of(argv) == "workspace-write" and _root_of(argv) == os.path.realpath(linked)
+
+
 def test_a_missing_payload_cwd_falls_back_to_the_hook_process_directory(ctx):
     stub = ctx.stub()
     payload = _payload(ctx)
