@@ -12,6 +12,11 @@ that makes library code log one ``error`` line through ``llm_router.logging`` at
 
 The hook passes when its stdout is empty or exactly one JSON object, the canary line is NOT on it, and the
 canary line IS on stderr (a canary that never fired proves nothing: an empty set passes everything).
+
+A second canary does the same through LiteLLM's OWN logger (S4 of the independent review): LiteLLM keeps a handler that
+writes every record below WARNING to ``sys.stdout``, at a level it reads from ``LITELLM_LOG`` (default DEBUG) when it is
+imported, and the structlog canary above never touches it. It runs with LiteLLM imported late (after the hook's guard) and
+early (before it), and a control shows the canary does reach stdout when the level is DEBUG.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ pytestmark = [
 
 HOOKS = REPO / "hooks"
 MARK = "CANARY-LOG-LINE"
+LITELLM_MARK = "CANARY-LITELLM-LINE"
 
 _SITECUSTOMIZE = r'''
 import atexit, json, sys
@@ -51,6 +57,12 @@ def _in_hook_main():
     return False
 
 
+import os as _os
+
+if _os.environ.get("CANARY_LITELLM") == "early":
+    import litellm  # noqa: F401  imported BEFORE the hook's own guard runs
+
+
 def _log(trigger):
     global _busy
     if _busy:
@@ -61,8 +73,16 @@ def _log(trigger):
         get_logger("canary").error("@MARK@:" + trigger)
     except Exception as exc:  # the canary must not break the hook
         sys.stderr.write("CANARY-BROKEN %s: %s\n" % (type(exc).__name__, exc))
-    finally:
-        _busy = False
+    if _os.environ.get("CANARY_LITELLM"):
+        try:
+            import logging
+            import litellm  # noqa: F401  (late mode: first imported here, after the hook's guard)
+            logging.getLogger("LiteLLM").info("@LMARK@:" + trigger)  # below WARNING: its handler writes it to stdout
+            with open(_os.environ["CANARY_FIRED"], "a") as fh:
+                fh.write(trigger + "\n")
+        except Exception as exc:
+            sys.stderr.write("CANARY-BROKEN-LITELLM %s: %s\n" % (type(exc).__name__, exc))
+    _busy = False
 
 
 def dumps(*a, **k):
@@ -108,7 +128,7 @@ class _Stdin:
 
 sys.stdin = _Stdin(sys.stdin)
 atexit.register(lambda: _log("atexit"))
-'''.replace("@MARK@", MARK)
+'''.replace("@MARK@", MARK).replace("@LMARK@", "CANARY-LITELLM-LINE")
 
 # One payload per hook, chosen so main() runs past its early exits. A hook with no entry here fails the test:
 # a new hook cannot skip the audit by being absent from it.
@@ -149,6 +169,9 @@ STDLIB_ONLY = {"plugin-install.py", "codex-stop.py"}
 #: does not touch that hook, so two PRs cannot edit one file, and the canary does not run it here. After both
 #: merge, the same canary can take it back by moving the name to ``PAYLOADS``.
 OWNED_ELSEWHERE = {"enforce-route.py"}
+#: ``auto-route.py`` is audited by the structlog canary here but is PR #817's file too (BIND W2 edits it), so its LiteLLM
+#: guard, if it needs one, goes with that PR; this branch does not touch it.
+LITELLM_NOT_HERE = {"auto-route.py"}
 
 
 def _hook_scripts() -> list[str]:
@@ -200,3 +223,41 @@ def test_hook_stdout_is_only_its_json_even_when_libraries_log(name, tmp_path, ca
     assert (f"{MARK}:stdin" in proc.stderr or f"{MARK}:dumps" in proc.stderr), (
         f"{name}: no in-main canary fired (the payload exits before main() reads or writes anything):\n"
         f"{proc.stderr[-500:]}")
+
+
+def _canary_env(tmp_path, canary_dir, mode):
+    env = hook_env(tmp_path, LLM_ROUTER_AGENT_ROUTE_CODEX="off", CANARY_LITELLM=mode,
+                   CANARY_FIRED=str(tmp_path / "litellm-fired.txt"))
+    env.pop("LITELLM_LOG", None)  # an explicit value wins over the hook's default: this test is about the default
+    env["PYTHONPATH"] = f"{canary_dir}:{env['PYTHONPATH']}"
+    return env
+
+
+@pytest.mark.parametrize("mode", ["late", "early"])
+@pytest.mark.parametrize("name", sorted(set(PAYLOADS) - LITELLM_NOT_HERE))
+def test_hook_stdout_is_only_its_json_even_when_litellm_logs(name, mode, tmp_path, canary_dir):
+    """S4: LiteLLM's own handler writes records below WARNING to stdout. The hook must keep them off, whether LiteLLM is
+    imported after its guard (``late``: the default level is set first) or before it (``early``: its loggers are set)."""
+    env = _canary_env(tmp_path, canary_dir, mode)
+    proc = subprocess.run(
+        [sys.executable, str(HOOKS / name)], input=json.dumps(PAYLOADS[name]), capture_output=True, text=True,
+        env=env, cwd=str(tmp_path), timeout=120)
+    assert "CANARY-BROKEN" not in proc.stderr, proc.stderr[-400:]
+    decision_of(proc)  # empty or exactly one JSON object
+    assert LITELLM_MARK not in proc.stdout, f"{name} ({mode}): LiteLLM's handler reached stdout:\n{proc.stdout[:300]}"
+    fired = (tmp_path / "litellm-fired.txt").read_text().split() if (tmp_path / "litellm-fired.txt").exists() else []
+    assert "atexit" in fired and ({"stdin", "dumps"} & set(fired)), (  # the canary ran after the work and inside main()
+        f"{name} ({mode}): the LiteLLM canary never fired inside main(): {fired}\n{proc.stderr[-300:]}")
+
+
+@pytest.mark.parametrize("level, leaks", [("DEBUG", True), ("ERROR", False)])
+def test_the_litellm_canary_reaches_stdout_exactly_when_the_level_lets_it(level, leaks, tmp_path, canary_dir):
+    """The control: with no hook, but the root logger at DEBUG as a hook leaves it (``configure_logging``), LiteLLM's handler
+    does print the canary line to stdout at ``LITELLM_LOG=DEBUG`` and not at ERROR, so the canary can fail and the hooks'
+    pass above means something."""
+    env = _canary_env(tmp_path, canary_dir, "early")  # LiteLLM cannot be first imported at interpreter shutdown
+    env["LITELLM_LOG"] = level
+    proc = subprocess.run([sys.executable, "-c", "import logging; logging.getLogger().setLevel(logging.DEBUG)"],
+                          capture_output=True, text=True, env=env, cwd=str(tmp_path), timeout=120)
+    assert "CANARY-BROKEN" not in proc.stderr, proc.stderr[-400:]
+    assert (LITELLM_MARK in proc.stdout) is leaks, (level, proc.stdout[:300], proc.stderr[-300:])

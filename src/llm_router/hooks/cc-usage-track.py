@@ -315,6 +315,18 @@ def _log_to_db(
 # Codex handoffs that way. configure_logging_lazily() points structlog at stdlib logging (stderr) the moment it
 # is first imported, as auto-route.py does. The fallback covers a host without the llm_router package.
 def _init_hook_logging() -> None:
+    # LiteLLM keeps its own handler, which writes every record below WARNING to sys.stdout (looked up when the record
+    # is emitted) and takes its level, DEBUG by default, from LITELLM_LOG when it is imported. ERROR keeps it off the
+    # decision channel: set before the import, and on its loggers if it is already imported. An explicit LITELLM_LOG
+    # still wins. Only the script entry changes the process: a test that calls main() must not.
+    if __name__ == "__main__":
+        import logging as _ll_logging
+        import os as _ll_os
+
+        if "LITELLM_LOG" not in _ll_os.environ:
+            _ll_os.environ["LITELLM_LOG"] = "ERROR"
+            for _ll_name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
+                _ll_logging.getLogger(_ll_name).setLevel(_ll_logging.ERROR)
     try:
         from llm_router.logging import configure_logging_lazily
 
