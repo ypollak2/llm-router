@@ -736,6 +736,39 @@ def test_cli_delegation_does_not_bind_a_blocked_reply(ctx):
     assert len(blocked) == 1 and blocked[0]["path"] == "cli_delegation" and blocked[0]["sandbox"] == "read-only"
 
 
+def test_the_delegated_row_records_the_answer_length(ctx):
+    """S7: the delivered reason carries the answer twice, and whether the host takes that above 10,000 characters is not
+    documented: the live window reads the size of each delegated answer from its row."""
+    ctx.run(_payload(ctx), codex=ctx.stub())
+    (row,) = [r for r in ledger_rows(ctx.home) if r["outcome"] == "delegated"]
+    assert row["answer_chars"] == len(ANSWER)
+
+
+def test_the_shadow_verifier_only_sees_runs_that_could_write(hook_mod, monkeypatch, tmp_path):
+    """S7: after a read-only run ``git diff HEAD`` is the user's own uncommitted work; it must not be queued as Codex's."""
+    import asyncio  # noqa: F401  (the fake below is a coroutine function)
+
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
+    monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
+    monkeypatch.setattr("llm_router.codex_agent.is_codex_available", lambda: True)
+
+    async def _fake(prompt, timeout=None, **kwargs):
+        return CodexResult(content="Reviewed the diff: the loop stops one early. No findings beyond that.",
+                           model="gpt-6-astra", exit_code=0, duration_sec=0.1)
+
+    monkeypatch.setattr("llm_router.codex_agent.run_codex", _fake)
+    queued = []
+    monkeypatch.setattr(hook_mod, "_verify_enqueue_marker", lambda res, sid, ts, working_dir=None: queued.append(working_dir))
+    repo = init_repo(tmp_path / "repo")
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    for cwd in (repo, plain):
+        out = hook_mod._try_codex_subagent_delegation(
+            "implement a fix for the pager", "code", "moderate", "general-purpose", f"s-{cwd.name}", cwd=str(cwd))
+        assert out is not None, cwd  # the run was delivered either way
+    assert queued == [os.path.realpath(repo)], queued  # only the writable run, in the repo's own top level
+
+
 def test_pure_llm_callers_pass_no_sandbox(monkeypatch):
     """router.py / the MCP tools call ``run_codex`` without ``sandbox``: what they launch must not change."""
     import asyncio

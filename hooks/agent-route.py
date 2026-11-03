@@ -2840,10 +2840,16 @@ def _try_codex_subagent_delegation(
         subagent_type=subagent_type, task_type=task_type,
         complexity=complexity, session_id=session_id,
         duration_sec=res.duration_sec, sandbox=sandbox,
+        # the delivered reason carries the answer twice (decision/reason and permissionDecisionReason); whether the host
+        # accepts that above 10,000 characters is not documented, so the live window reads it from here (BIND-5)
+        answer_chars=len(res.content),
         **({"truncated": True} if getattr(res, "truncated", False) else {}),
         **({"reason_code": res.reason_code} if getattr(res, "reason_code", "") else {}),
     )
-    _verify_enqueue_marker(res, session_id, _delegated_ts, working_dir)
+    if sandbox == _CODEX_SANDBOX_WRITE:
+        # Only a run that could write has a diff of its own to verify. After a read-only run ``git diff HEAD`` would be
+        # the user's OWN uncommitted work, filed under this Codex unit in the shadow verifier's statistics (BIND-4).
+        _verify_enqueue_marker(res, session_id, _delegated_ts, working_dir)
     _last_codex_model = res.model
     return res.content
 
