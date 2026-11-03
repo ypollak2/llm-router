@@ -60,6 +60,53 @@ def test_the_staged_diff_is_the_input_and_names_every_changed_file(repo):
     assert "a.py" in text_jobs.changed_files(inp.text)
 
 
+def test_the_hint_shows_recent_subjects_without_their_pull_request_numbers(repo):
+    """A model told to match the style copies a ``(#123)`` suffix and makes up a number (seen on real commits)."""
+    (repo / "a.py").write_text("print('a')\nprint('b')\n")
+    git(repo, "commit", "-qam", "fix: second thing (#123)")
+    (repo / "a.py").write_text("print('c')\n")
+    git(repo, "add", "a.py")
+    hint = build_commit_input(str(repo)).hint or ""
+    assert [ln for ln in hint.splitlines() if ln.startswith("- ")] == ["- fix: second thing", "- feat: first"]
+    assert "never make one up" in hint
+
+
+def test_the_hint_offers_the_names_of_the_largest_changes_first_and_only_plain_names(repo):
+    (repo / "small_one.py").write_text("x = 1\n")
+    (repo / "big-module.py").write_text("".join(f"line {i}\n" for i in range(30)))
+    (repo / "notes.v2.md").write_text("a name with a dot in it\n")
+    git(repo, "add", ".")
+    hint = build_commit_input(str(repo)).hint or ""
+    offer = [ln for ln in hint.splitlines() if ln.startswith("Name at least one changed file")]
+    assert len(offer) == 1 and "for example: big-module, small_one." in offer[0]
+    assert "notes" not in offer[0]
+
+
+def test_at_most_three_names_are_offered(repo):
+    for i in range(5):
+        (repo / f"module_{i}.py").write_text("x = 1\n" * (i + 1))
+    git(repo, "add", ".")
+    offer = [ln for ln in (build_commit_input(str(repo)).hint or "").splitlines() if ln.startswith("Name at least one")][0]
+    assert "for example: module_4, module_3, module_2." in offer
+
+
+def test_a_message_that_uses_an_offered_name_passes_the_routers_own_check(repo):
+    """The offer is only worth making if it satisfies the check that judges the answer."""
+    (repo / "ledger_view.py").write_text("x = 1\n")
+    git(repo, "add", "ledger_view.py")
+    inp = build_commit_input(str(repo))
+    assert "for example: ledger_view." in (inp.hint or "")
+    assert text_jobs.check_commit_message(inp.text, "fix: ledger_view keeps one row per id").ok
+    assert not text_jobs.check_commit_message(inp.text, "fix: keep one row per id").ok
+
+
+def test_no_plain_file_name_means_no_offer_and_the_subjects_stay(repo):
+    (repo / "v1.2.3.md").write_text("x\n")
+    git(repo, "add", ".")
+    hint = build_commit_input(str(repo)).hint or ""
+    assert "Name at least one" not in hint and "- feat: first" in hint
+
+
 def test_nothing_staged_is_refused_with_the_next_step(repo):
     (repo / "a.py").write_text("changed\n")  # unstaged only
     with pytest.raises(InputRefused) as e:

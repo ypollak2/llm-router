@@ -180,6 +180,36 @@ def condense(patch: str, *, budget: int = INPUT_BUDGET_CHARS, block_lines: int =
     return "\n".join(out).rstrip("\n") + "\n", len(blocks), omitted
 
 
+_PR_REF_RE = re.compile(r"\s*\(#\d+\)")
+_PLAIN_STEM_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{2,}")
+NAME_EXAMPLES = 3
+
+
+def _subject_for_hint(subject: str) -> str:
+    """A recent subject without its pull-request number. A model told to match the style copies the
+    ``(#123)`` suffix and makes up a number, so the numbers are not shown."""
+    return _PR_REF_RE.sub("", subject).strip()[:120]
+
+
+def _name_examples(patch: str) -> list[str]:
+    """Up to ``NAME_EXAMPLES`` changed files' names without the extension, the largest change first.
+
+    The router's check of a commit message wants it to name a changed file (``text_jobs.check_commit_message``:
+    the file's name without the extension, as a whole word). Without being told, the model fails that at its
+    first attempt more often than not and the retry loop has to ask again; the names come from the same
+    ``diff --git`` headers the check reads, so a message that uses one of them always passes it.
+    """
+    ranked = sorted(((sum(_counts(b)), _block_path(b)) for b in _blocks(patch)), key=lambda t: -t[0])
+    out: list[str] = []
+    for _, path in ranked:
+        stem = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if _PLAIN_STEM_RE.fullmatch(stem) and stem.lower() not in {x.lower() for x in out}:
+            out.append(stem)
+        if len(out) == NAME_EXAMPLES:
+            break
+    return out
+
+
 def build_commit_input(repo: str, *, all_tracked: bool = False) -> JobInput:
     """The input for a commit message: the staged diff (``-a``: tracked changes against HEAD)."""
     _require_repo(repo)
@@ -199,13 +229,18 @@ def build_commit_input(repo: str, *, all_tracked: bool = False) -> JobInput:
         raise InputRefused("nothing_staged", empty)
     text, files, omitted = condense(patch, label="Changed files")
     rc, log = _git(repo, "log", "-5", "--format=%s")
-    subjects = [s.strip() for s in log.splitlines() if s.strip()] if rc == 0 else []
-    hint = None
+    subjects = [t for t in (_subject_for_hint(s) for s in log.splitlines() if s.strip()) if t] if rc == 0 else []
+    parts: list[str] = []
     if subjects:
-        hint = "Recent commit subjects in this repository (match their style and tense):\n" + "\n".join(
-            f"- {s[:120]}" for s in subjects
+        parts.append(
+            "Recent commit subjects in this repository (match their style and tense; leave out pull-request "
+            "numbers such as (#123) and never make one up):\n" + "\n".join(f"- {s}" for s in subjects)
         )
-    return JobInput(text, hint, files, omitted)
+    names = _name_examples(patch)
+    if names:
+        parts.append("Name at least one changed file in the message, by its file name without the extension, "
+                     "for example: " + ", ".join(names) + ".")
+    return JobInput(text, "\n\n".join(parts) or None, files, omitted)
 
 
 def _resolve_ref(repo: str, candidates: list[str]) -> str | None:

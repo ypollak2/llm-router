@@ -41,7 +41,12 @@ matcher `Bash`):
    placeholder is left alone.
 2. Builds the job input from the repository as it is now: `git diff --cached` (`git diff HEAD` with
    `-a`), or for a PR the commits, the changed files and the diff against the base. A diff far larger
-   than the model can read is cut per file; every changed file is still named.
+   than the model can read is cut per file; every changed file is still named. For a commit message
+   the model is also shown the last five commit subjects (without their `(#123)` numbers: a model told
+   to match the style copies the suffix and makes up a number) and is asked to name one of the changed
+   files, by its name without the extension, with up to three offered (the router's acceptance check
+   wants exactly that; without the offer the retry loop has to ask for it, and every rejected attempt
+   counts toward the lane monitor described under "Measuring it").
 3. Runs the router's own `llm_text_job` (same prompts, same acceptance checks, same ledgers), local
    model only: a passed `llm-router local-check` lane is required, and `LLM_ROUTER_LOCAL_TEXT_JOBS=1`
    (the full routing chain, cloud models included) is treated as unset for this hook.
@@ -114,13 +119,23 @@ n/a rather than a figure that only reflects the filter. Take the denominator (al
 the outcome audit's transcript count, or register the hook without the `if` field to have the ledger count
 them (at the price of one process start per Bash call).
 
+The router watches the lane behind the hook. `local_check.routing.demotion_check` turns a (model, job)
+lane off (`demoted: fallbacks` in `local_routing.json`) when too large a share of its latest local attempts
+were rejected or failed (`DEMOTE_RATE` over `DEMOTE_WINDOW` in `src/llm_router/local_check/routing.py`), and
+an attempt that a retry rescued still counts as rejected. A demoted lane
+answers every placeholder command with a denial (`no_lane`, about a second): Claude writes the text itself
+and nothing is bound until `llm-router local-check enable commit_message` is run, which also restarts the
+window. The window is shared with every other use of the lane, so read `text_job_local_attempts.jsonl`
+before the hook is registered, and check `llm-router doctor` for demotion notices afterwards.
+
 The hook is instrumented for the G1 hook-latency KPI: the wait on the local model is the `text_job`
 model phase, so the router-added figure does not count it.
 
 ## Not covered
 
 - `git commit --amend`, PR edits, `gh pr create --fill`, and any shape in the table above.
-- Interactive approval prompts, Claude Code versions other than 2.1.317 and a real local model were not
-  exercised in the live canary (see PR #820, which lists what was).
+- Interactive approval prompts and Claude Code versions other than 2.1.317 were not exercised in the live
+  canary, and the live canary stubs the local model (a real model was run separately; see PR #820, which
+  lists what was).
 - Hosts other than Claude Code: the rules are not taught there, and the hook is in the Codex plugin
   bundle only because the bundle is generated from one table.
