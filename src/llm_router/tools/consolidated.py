@@ -3,9 +3,11 @@
 These are the front-door tool names from the 73→11 proposal, registered ALONGSIDE
 the existing tools (nothing is removed — this is a NON-BREAKING alias layer that
 sets up the 1.0 cutover). `llm_act` is the agentic *execution* door: the tool
-enforcement steers operational work to, and — like every ``llm_*`` tool — calling
-it clears an enforcement lock, so a task that needs to *do* things always has an
-unblocked path (no wrong-tool dead-end).
+enforcement steers operational work to, and — like every routing door — calling it
+with the user's task clears an enforcement lock, so a task that needs to *do* things
+always has an unblocked path (no wrong-tool dead-end). A call that does not carry the
+user's request (a "Reply OK" probe, a status view) runs but does not clear the lock
+(BIND W2, ``llm_router.hold_policy``).
 """
 from __future__ import annotations
 

@@ -16,11 +16,11 @@
 #
 #   router.py::_dispatch_model_loop  -> 0.8 is a budget-pressure threshold
 #                                       (line 2359); every 4 is an int
-#   enforce-route.py::main           -> 0.8 is a pressure threshold
+#   enforce-route.py::_main          -> 0.8 is a pressure threshold
 #                                       (line 1161); every 4 and 15 is an int
 #
 # Neither function contains a price. FOLLOW-UP, needs owner sign-off since it
 # edits an immutable asset: require both halves of a retired pair to be genuine
 # float literals in _check_file(). Real tables always write 4.00, not 4.
-llm_router/hooks/enforce-route.py	retired-rate	function `main` contains 0.8/4.0
+llm_router/hooks/enforce-route.py	retired-rate	function `_main` contains 0.8/4.0
 llm_router/router.py	retired-rate	function `_dispatch_model_loop` contains 0.8/4.0

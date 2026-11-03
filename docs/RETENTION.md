@@ -122,6 +122,18 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | File mode | Files are created 0600, including the new live file after rotation. |
 | Concurrency | Append takes no lock: one `O_APPEND` write. Rotation uses a non-blocking lock on the sidecar `text_job_fail_closed.jsonl.lock` (empty, created on the first rotation and kept); a writer that cannot take it skips rotation. |
 
+## `hold_events.jsonl` (BIND W2)
+
+| Item | Value |
+|---|---|
+| Rows | `ts`, `event` (`prompt`, `hold`, `exempt`, `blocked`, `probe`, `door_call`, `released`), `session_id`, and per event: `words`, `task`, `complexity`, `mode`, `reason`, `tool`, `violation`, `kind`, `call_words`, `how`, `held`, `forwarded`, `ack`, and, on the `enforce-route` events, `tool_use_id` (the host's id of the tool call, which joins a row to the transcript). Counts, ids, codes and yes/no verdicts only: never a prompt, command or tool argument. The writer drops any other key, and a dict or list value. |
+| Writers | `auto-route.py` (`prompt`, `hold`, `exempt`) and `enforce-route.py` (`blocked`, `probe`, `door_call`, `released`), through `hold_ledger.record`. `door_call` is one row per routing-door call the hook sees, held or not (it is how a fixed-reply probe outside any hold is counted); the hook exits before it in `off`, `shadow` and `advise`. A failed write is recorded with `failopen` code `CHZ-FO-HOLD-LEDGER-WRITE` and never changes the hook's answer. There is no off switch. |
+| Kept | Two generations of 2 MiB via `capped_log` (`hold_ledger._MAX_BYTES`): `<name>` and `<name>.1` (older). The oldest generation is dropped on rotation; a generation can exceed the cap by one row. |
+| Why 2 MiB | A row is 100 to 231 bytes (n=7, one synthetic row of each event with the longest realistic values: a 36-character session id, a 30-character `tool_use_id`, the tool names `NotebookEdit` and `llm_local_task`; the length of `json.dumps(row, separators=(",", ":")) + "\n"`, computed 2026-11-03: 101, 154, 157, 206, 217, 221, 231), so 9,000 to 20,000 rows per generation. One `prompt` row per prompt, one row per hold decision and one per routing-door call: weeks of a busy machine. |
+| Reads | `hold_ledger.summarize` (the `blocked_holds` counter in `llm-router doctor`, and `python -m llm_router.hold_ledger --days 30 [--organic]`): `blocked_per_100_prompts`, `holds_per_100_prompts`, `probes_per_100_prompts`, `ack_probes`, and the breakdowns. The session kind of each row is read at summary time from `llm_router.session_kind.kind_of` (the owner's override file, then the session's tag), so the rows themselves carry no kind; `--organic` counts organic sessions only, a session that was never tagged is the `untagged` bucket and is not organic, and `by_kind` is always printed. No `prompt` row in the window reads as unknown (`null`), never 0. |
+| File mode | Files are created 0600, including the new live file after rotation. |
+| Concurrency | Append takes no lock: one `O_APPEND` write. Rotation uses a non-blocking lock on the sidecar `hold_events.jsonl.lock`; a writer that cannot take it skips rotation. |
+
 ## File modes of every state file (W0-4, PRD S7)
 
 | Item | Value |
