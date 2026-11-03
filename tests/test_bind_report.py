@@ -133,6 +133,18 @@ def test_binding_is_insufficient_under_thirty_units_or_three_days(tmp_path, caps
     assert out == 1
 
 
+def test_a_ledger_id_with_no_call_in_the_transcript_counts_as_unpaired_not_bound(tmp_path, capsys):
+    projects, state = build(tmp_path, bound=3)
+    rows = [json.loads(ln) for ln in (state / "north_star_units.jsonl").read_text().splitlines()]
+    rows.append(codex_row(SINCE + 7000, tool_use_id="not-in-any-transcript"))
+    (state / "north_star_units.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    BR.main(["--since", BR.iso(SINCE), "--until", BR.iso(UNTIL), "--projects-dir", str(projects), "--state-dir", str(state),
+             "--history", str(tmp_path / "h.json"), "--reference", "measured", "--json"])
+    L = {x["criterion"]: x for x in json.loads(capsys.readouterr().out)["lines"]}
+    assert L[BIND]["result"].startswith("3/4 = 75.0%")                       # an unpaired unit is not bound
+    assert "1 with no Agent call found" in L[BIND]["n"] and "0 void" in L[BIND]["n"]
+
+
 def test_blocked_share_needs_the_hand_check(tmp_path, capsys):
     _, _, L = run(tmp_path, capsys, bound=28, blocked=2)
     assert L[BLOCKED]["status"] == "PENDING" and "hand check of 20 not entered" in L[BLOCKED]["result"]
