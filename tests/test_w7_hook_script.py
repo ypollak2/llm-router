@@ -16,7 +16,6 @@ import os
 import subprocess
 import sys
 import textwrap
-import time
 from pathlib import Path
 
 import pytest
@@ -232,18 +231,18 @@ def test_the_canary_does_reach_stdout_without_the_file_descriptor_guard(repo, en
 def test_a_lingering_library_thread_cannot_keep_the_host_waiting(repo, env, tmp_path):
     """After the decision is out the process exits normally, and a watchdog ends it hard if a non-daemon
     thread (the kind aiosqlite leaves behind) stops the interpreter from finishing."""
-    t0 = time.monotonic()
+    # The thread sleeps 60 s; the subprocess timeout (20 s) is the clock: without the watchdog it raises.
     r = run_wrapped(tmp_path, stdin_for(f"git commit -m {T}", repo), env, body="pass",
-                    prelude=textwrap.dedent(LINGERING_THREAD))
-    assert r.returncode == 0 and time.monotonic() - t0 < 20  # the thread sleeps 60 s
+                    prelude=textwrap.dedent(LINGERING_THREAD), timeout=20)
+    assert r.returncode == 0
     assert one_object(r.stdout)["hookSpecificOutput"]["updatedInput"]["command"].startswith("git commit -F ")
 
 
 def test_the_deadline_guard_answers_with_a_deny_before_the_host_would_kill_the_hook(repo, env, tmp_path):
-    t0 = time.monotonic()
+    # The model call sleeps 60 s; the guard fires at 4 s. Without it the run outlives the 25 s subprocess timeout.
     r = run_wrapped(tmp_path, stdin_for(f"git commit -m {T}", repo), env, body="import time; time.sleep(60)",
-                    prelude="hook._DEADLINE_SEC = 4")
-    assert r.returncode == 0 and time.monotonic() - t0 < 30
+                    prelude="hook._DEADLINE_SEC = 4", timeout=25)
+    assert r.returncode == 0
     obj = one_object(r.stdout)
     assert obj["hookSpecificOutput"]["permissionDecision"] == "deny" and "ran out of time" in obj["reason"]
     assert "updatedInput" not in obj["hookSpecificOutput"]

@@ -261,17 +261,16 @@ def test_output_past_the_byte_cap_is_cut_and_still_a_success(repo, monkeypatch):
 
 
 def test_a_git_that_hangs_is_killed_and_reported_not_mistaken_for_an_empty_diff(repo, monkeypatch, tmp_path):
-    import time
-
     fake = tmp_path / "bin"
     fake.mkdir()
     slow = fake / "git"
     slow.write_text("#!/bin/sh\nsleep 30\n")  # the sleep is a CHILD that inherits the pipe
     slow.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
-    t0 = time.monotonic()
+    # The fake git's `sleep 30` child holds the pipe: if the process group were not killed this call would
+    # block for the 30 s (pytest's per-test timeout would fail it), so returning is the proof.
     rc, out = gitinput._git(str(repo), "status", timeout=0.4)
-    assert rc == gitinput.RC_TIMEOUT and out == "" and time.monotonic() - t0 < 10
+    assert rc == gitinput.RC_TIMEOUT and out == ""
     monkeypatch.setattr(gitinput, "_GIT_TIMEOUT_S", 0.4)
     monkeypatch.setattr(gitinput, "_git", lambda repo, *a, **k: (gitinput.RC_TIMEOUT, ""))
     with pytest.raises(InputRefused) as e:
