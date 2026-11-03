@@ -4,12 +4,13 @@ status: fixed in this change (BIND W3, branch `bind/audit-metrics`; audit v2)
 ---
 ## BINDAUDIT-9. The outcome gate compared a used rate with the previous release's whatever method produced it
 
-- **Symptom.** `docs/measurements/outcome_audit_history.json` holds 15.4.0's 0.229% (2/873), scored by the first
-  audit; its transcripts are purged (30-day retention), so it cannot be re-scored. On the 16.0.0 window the old audit
-  reads 0 of 564 and the fixed one reads 10 of 467 (2.141%; overrides lifted, the same population) and 9 of 291
-  (3.093%; overrides applied), so a change of method moves the rate by 9 to 13 times that baseline. A gate that compares
-  across the two passes or fails for a reason that is not the product's.
-- **Cause.** History entries carried no method version, and `outcome_gate.py` compared with `previous[-1]`.
+- **Symptom.** `docs/measurements/outcome_audit_history.json` holds 15.4.0's 0.229% (2 of 873 units), scored by the
+  first audit; its transcripts are purged (30-day retention), so it cannot be re-scored. On the 16.0.0 window
+  (n=564 units, `~/.rsi/research/primary-plan/v16/rel16-main/release-artifacts/outcome-audit/outcome_audit_16.0.0.jsonl`) the old audit reads 0 and the fixed one reads 10 of 467 (2.141%; overrides lifted, the same
+  sessions) and 9 of 291 (3.093%; overrides applied), so a change of method moves the rate by 9 to 13 times that
+  baseline. A gate that compares across the two passes or fails for a reason that is not the product's.
+- **Cause.** History entries carried no method version, and `scripts/release/outcome_gate.py` compared with
+  `previous[-1]`.
 - **Fix.** The audit stamps `audit_version` (2) and its change list in the summary; the gate records it in every
   history entry (an entry without one is version 1) and compares only with the latest entry of its own version.
   When the only earlier entries are of another version it prints `AUDIT VERSION MISMATCH` and does what
