@@ -194,9 +194,11 @@ def test_a_single_reply_ok_probe_fails_the_toll_line(tmp_path, capsys):
     assert L[TOLL]["status"] == "FAIL" and "1 fixed-reply probes" in L[TOLL]["result"]
 
 
-def test_toll_line_is_insufficient_under_a_hundred_prompts(tmp_path, capsys):
+def test_toll_line_is_insufficient_under_the_prompt_floor(tmp_path, capsys):
     _, _, L = run(tmp_path, capsys, prompts=40)
-    assert L[TOLL]["status"] == "INSUFFICIENT" and "needs >= 100" in L[TOLL]["note"]
+    assert L[TOLL]["status"] == "INSUFFICIENT" and "needs >= 50" in L[TOLL]["note"]
+    _, _, L = run(tmp_path / "ok", capsys, "--min-prompts", "30", prompts=40)         # the floor is this script's, so it moves
+    assert L[TOLL]["status"] == "PASS" and "0 holds in 40 prompts = 0.00 per 100 [Wilson 95% 0.00..8.76]" in L[TOLL]["result"]
 
 
 def _ledger(path, rows):

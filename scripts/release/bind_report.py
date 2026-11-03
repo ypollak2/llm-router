@@ -53,7 +53,10 @@ BIND_MIN_DAYS = 3.0
 BLOCKED_SHARE_MAX = 0.10
 HAND_CHECK_N = 20
 HOLDS_PER_100_MAX = 1.0
-MIN_PROMPTS = 100          # fewer prompts cannot show a rate of under 1 per 100
+#: This script's floor, not the pre-registration's (which has none): "0 holds in 5 prompts" is not a pass.
+#: Organic traffic is about 14 prompts a day (418 in the 16.0.0 window with the overrides applied), so a
+#: 3 to 5 day window holds 40 to 70; ``--min-prompts`` moves it.
+MIN_PROMPTS = 50
 MIN_REFERENCE_UNITS = 30   # a live reference for the savings estimate needs this many void units
 GATE_DAYS = 30
 #: 15.4.0's recorded value, used only when the history file is not there. It was scored
@@ -289,18 +292,22 @@ def report(units, ctx: dict, gate, audit, since: float, until: float, args, proj
         holds, prompts, how = derived, prompts_t, "holds derived from the transcripts (no hold ledger rows in the window)"
     probes = [u for u in units if u.kind == "routed_mcp" and u.extra.get("probe") and since <= u.ts <= until]
     per100 = 100 * holds / prompts if prompts else None
-    if prompts < MIN_PROMPTS:
+    hci = audit.wilson(holds, prompts)
+    if prompts < args.min_prompts:
         status = "INSUFFICIENT"
     else:
         status = "PASS" if (per100 < HOLDS_PER_100_MAX and not probes) else "FAIL"
     lines.append(line(status, "Toll probes", f"{holds} holds in {prompts} prompts = "
-                      f"{'n/a' if per100 is None else f'{per100:.2f}'} per 100; {len(probes)} fixed-reply probes",
+                      f"{'n/a' if per100 is None else f'{per100:.2f}'} per 100"
+                      + (f" [Wilson 95% {100 * hci[0]:.2f}..{100 * hci[1]:.2f}]" if hci else "")
+                      + f"; {len(probes)} fixed-reply probes",
                       f"holds < {HOLDS_PER_100_MAX:g} per 100 prompts and 0 'Reply OK' probes",
-                      f"{prompts} organic prompts (floor {MIN_PROMPTS}), {len(probes)} probes", window,
+                      f"{prompts} organic prompts (floor {args.min_prompts}), {len(probes)} probes", window,
                       f"{how}; probes from the transcripts' MCP calls in {src_tr}"
                       + (f"; probe units (first 5, to check for a false positive): "
                          f"{', '.join(u.unit_id for u in probes[:5])}" if probes else ""),
-                      "" if prompts >= MIN_PROMPTS else f"needs >= {MIN_PROMPTS} organic prompts to show a rate under 1 per 100"))
+                      "" if prompts >= args.min_prompts else
+                      f"needs >= {args.min_prompts} organic prompts before a rate under 1 per 100 means anything"))
 
     # 4. outcome gate (fixed audit)
     rows, summary = audit._finish(list(units), ctx, "bind-report")
@@ -386,6 +393,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--holds-file", type=Path, default=None,
                     help=f"the router's hold ledger (default: <state dir>/{HOLD_LEDGER}); transcripts are used when it has no rows")
     ap.add_argument("--hand-checked", type=Path, default=None, help="jsonl of {unit_id, blocked} for the printed sample")
+    ap.add_argument("--min-prompts", type=int, default=MIN_PROMPTS,
+                    help="organic prompts the toll line needs before it can pass (this script's floor, not D-358's)")
     ap.add_argument("--reference", choices=("measured", "live"), default="live",
                     help="what a void Claude sub-agent cost: live (recompute while transcripts exist) or measured")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")
