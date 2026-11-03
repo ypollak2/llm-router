@@ -53,6 +53,8 @@ QA_TYPES = ("query", "research", "generate", "analyze")
 SID = "sess-noconv-9k1"
 
 _ROUTE_WORDS = ("llm(", "ROUTE", "SUGGESTED", "DIRECTIVE", "CONTEXT PROMPT", "route WITH")
+# Appended where a test needs a prompt of more than ten words (hold_policy.SHORT_PROMPT_MAX_WORDS).
+_LONG_TAIL = " and then tell me what you found, one point at a time, in plain words please"
 
 
 def _load(name: str, filename: str):
@@ -181,6 +183,10 @@ def test_a_code_prompt_still_holds_edits_under_smart_and_hard(monkeypatch, tmp_p
 @pytest.mark.parametrize("prompt", [COORDINATE_PROMPT, INTROSPECT_PROMPT],
                          ids=["coordinate", "introspect"])
 def test_qa_routing_env_restores_the_previous_behaviour(monkeypatch, tmp_path, mode, prompt):
+    if mode == "smart":
+        # BIND W2 (docs/bugs/BIND-HOLD-1.md): in smart mode a prompt of ten words or fewer
+        # writes no hold, so the env switch is shown on a longer prompt. `hard` keeps the short one.
+        prompt = prompt + _LONG_TAIL
     out, decisions, _, _ = _run_prompt(monkeypatch, tmp_path, prompt, mode,
                                        LLM_ROUTER_QA_ROUTING="on")
     assert decisions[0]["task_type"] in CONVERSATIONAL_TYPES
@@ -249,6 +255,32 @@ def test_executable_coordination_prompt_keeps_its_directive_and_pending_route(
     out, decisions, _, _ = _run_prompt(monkeypatch, tmp_path, prompt, mode)
     assert decisions[0]["task_type"] == "coordination", decisions
     assert any(w in _context(out) for w in ("ROUTE", "SUGGESTED")), _context(out)
+    if mode == "smart":
+        # BIND W2 (docs/bugs/BIND-HOLD-1.md): all of these are ten words or fewer, so in smart
+        # mode the hint stays as advice and no hold is written. `hard` is the explicit opt-in to
+        # hold everything and keeps the pending route (and with it the llm_act redirect).
+        assert "nothing held" in _context(out)
+        assert _pending(tmp_path) == []
+    else:
+        assert len(_pending(tmp_path)) == 1
+
+
+LONG_EXECUTABLE_COORDINATION_PROMPTS = [
+    "push to main and then deploy it to production once the whole test suite is green again",
+    "merge the PR into main, then run the release script and tell me when the tag is pushed",
+]
+
+
+@pytest.mark.parametrize("mode", ["smart", "hard"])
+@pytest.mark.parametrize("prompt", LONG_EXECUTABLE_COORDINATION_PROMPTS)
+def test_a_longer_executable_coordination_prompt_keeps_its_pending_route_in_both_modes(
+        monkeypatch, tmp_path, mode, prompt):
+    """The control for the test above: past ten words the smart-mode hold is unchanged."""
+    assert len(prompt.split()) > 10
+    out, decisions, _, _ = _run_prompt(monkeypatch, tmp_path, prompt, mode)
+    assert decisions[0]["task_type"] == "coordination", decisions
+    assert any(w in _context(out) for w in ("ROUTE", "SUGGESTED")), _context(out)
+    assert "nothing held" not in _context(out)
     assert len(_pending(tmp_path)) == 1
 
 

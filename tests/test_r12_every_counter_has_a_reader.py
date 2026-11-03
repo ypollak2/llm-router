@@ -345,7 +345,16 @@ def _drive_text_job_fail_closed(tmp_home: pathlib.Path) -> None:
     eligibility_routing.record_fail_closed(eligibility_routing.FC_ELIGIBILITY_STEP, RuntimeError("probe"))
 
 
+def _drive_blocked_holds(tmp_home: pathlib.Path) -> None:
+    """BIND W2: a prompt and a BLOCKED tool call, through the real ledger writer."""
+    from llm_router import hold_ledger
+
+    hold_ledger.record("prompt", "r12-probe-session", words=40)
+    hold_ledger.record("blocked", "r12-probe-session", tool="Bash", task="query")
+
+
 DRIVERS = {
+    "blocked_holds": _drive_blocked_holds,
     "fail_open_events": _drive_fail_open,
     "ledger_events_dropped": _drive_dropped_events,
     "session_lock_timeouts": _drive_lock_timeouts,

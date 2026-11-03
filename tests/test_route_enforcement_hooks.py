@@ -662,8 +662,10 @@ def test_block_message_shows_correct_threshold(tmp_path):
     assert "2/2+" not in reason
 
 
-def test_block_message_documents_escape_valve(tmp_path):
-    """Block message must mention the llm_* clear-lock escape."""
+def test_block_message_documents_how_a_hold_is_released(tmp_path):
+    """BIND W2: the block message says what releases a hold, and no longer says that ANY
+    llm_* call does (76 of 141 unused MCP units in the audit window were probes sent to
+    clear the lock on exactly that advice)."""
     session_id = "sess-escape"
     _write_pending(tmp_path, session_id)
 
@@ -678,9 +680,16 @@ def test_block_message_documents_escape_valve(tmp_path):
     )
 
     out = json.loads(result.stdout)
-    assert "Escape valves" in out["reason"]
-    assert "llm_" in out["reason"]
-    assert "loop" in out["reason"].lower() or "retry the same tool" in out["reason"].lower()
+    reason = out["reason"]
+    assert "Routing directive BLOCKED" in reason  # the audit counts this string
+    assert "How this hold is released" in reason
+    assert "does NOT release" in reason
+    assert "Call ANY" not in reason and "even a trivial" not in reason
+    assert "Escape valves" not in reason
+    assert "request itself as the prompt" in reason          # the real route
+    assert "retry the same tool" in reason.lower()           # the free valve
+    assert "loop" in reason.lower()
+    assert "`claude:`" in reason                              # the user's bypass
 
 
 def test_hard_mode_exempts_filesystem_task(tmp_path):

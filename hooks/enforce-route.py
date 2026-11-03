@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 24
+# llm_router-hook-version: 25
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -7,8 +7,13 @@ pending state file to ~/.llm-router/pending_route_{session_id}.json.
 
 This hook fires before every tool call and:
   1. If no pending state → allow (no routing was requested for this prompt).
-  2. If the tool is an llm_* MCP tool → routing honored, clear state, allow.
-  3. If the tool exactly matches the expected_tool in pending state → allow + clear.
+     (auto-route.py writes none for a prompt that is not a request:
+     llm_router.hold_policy, ten words or fewer or a compaction summary.)
+  2. If the tool is a routing door (llm, llm_route, llm_act, ...) AND its input carries
+     the owner's prompt → routing honored, clear state, allow. A door call that does not
+     (a "Reply OK" probe) and any other llm_* tool (status, admin) leave the hold in
+     place: the call itself runs, the hold does not clear (BIND W2).
+  3. If the tool exactly matches a NON-LLM expected_tool in pending state → allow + clear.
      (Supports MCP server routing, e.g. mcp__obsidian__create_note)
   4. If the tool is NOT in the task-specific blocklist → allow unconditionally.
      This covers: ToolSearch, all mcp__* tools, Agent (schema load), etc.
@@ -116,6 +121,56 @@ def _router_dir():
     return _router_home()
 def _log_path():
     return _router_dir() / "enforcement.log"
+
+
+# ── BIND W2: stdout is for ONE JSON decision, nothing else ───────────────────
+# The host parses this hook's stdout as a single JSON object. A line printed before it
+# (a library log record, a stray print) makes the host ignore the whole decision, so a
+# hold or a local interception silently does not happen. (The same defect voided
+# agent-route's decisions on 2026-11-03: a log line came first.) main() therefore points
+# sys.stdout at stderr for the whole run, where anything stray is harmless, and the
+# decision is written to the stdout captured at entry, through _emit, by nobody else.
+_REAL_STDOUT: list = [None]
+
+
+def _emit(decision: dict) -> None:
+    """Write the one JSON decision to the real stdout."""
+    out = _REAL_STDOUT[0] or sys.stdout
+    out.write(json.dumps(decision))
+    out.flush()
+
+
+def _count_failopen(code: str, exc: BaseException) -> None:
+    """Count a swallowed failure in the fail-open store when llm_router can be imported.
+    This hook may run under an interpreter that cannot import it, and must not die then."""
+    try:
+        from llm_router import failopen
+        failopen.record(code, exc)
+    except Exception:  # noqa: BLE001 -- no package, no counter: nothing else to try
+        return
+
+
+def _hold_policy():
+    """``llm_router.hold_policy`` (the rules shared with auto-route.py), or None when the
+    package cannot be imported. None leaves today's behaviour: any routing door releases
+    a hold (nothing to judge a forward with). A miss is counted, not silent."""
+    try:
+        from llm_router import hold_policy
+        return hold_policy
+    except Exception as exc:  # noqa: BLE001 -- a partial install must not break a tool call
+        _count_failopen("CHZ-FO-HOOK-HOLD-POLICY", exc)
+        return None
+
+
+def _hold_event(event: str, session_id: str, **fields) -> None:
+    """One text-free row in the hold ledger (llm_router.hold_ledger). Fail-open and counted."""
+    try:
+        from llm_router import hold_ledger
+        hold_ledger.record(event, session_id, **fields)
+    except Exception as exc:  # noqa: BLE001 -- the metric never breaks a tool call
+        _count_failopen("CHZ-FO-HOOK-HOLD-LEDGER", exc)
+
+
 _PENDING_TTL = 3600  # seconds — 1h TTL; survives context compaction; auto-route resets on each new prompt
 
 # Base blocklist: blocked in explicit opt-in blocking modes (smart/hard/strict)
@@ -1146,13 +1201,15 @@ def _record_realization_used(session_id: str, pending: dict | None) -> None:
     execution_events row stayed realization_status=NULL, so the product could
     not measure its own bypass rate.
 
-    Phase 0.2b: this fires the moment ANY llm_* tool is called while a hold is
-    pending — including throwaway calls made only to release the hold. The
+    Phase 0.2b: this used to fire the moment ANY llm_* tool was called while a
+    hold was pending — including throwaway calls made only to release the hold. The
     2026-09-29 audit (~/.rsi/research/audit-2026-09-29/verification.md, C8)
     traced 176 of 176 organic `verified_used` rows in 30 days to this path, with
     no check that the tool's output was used. So it now writes
     `route_acknowledged`, never `verified_used`, and `used_by_host` stays
     unknown (None). Only content evidence may promote a route to used.
+    BIND W2: it is now reached only by a routing door whose input carries the
+    owner's prompt (or when there was nothing to compare), never by a probe.
     Fully fail-open.
     """
     try:
@@ -1465,11 +1522,22 @@ def _try_local_intercept(hook_input: dict) -> None:
         return
     if not reason:
         return
-    json.dump(deny_payload(reason), sys.stdout)
+    _emit(deny_payload(reason))
     sys.exit(0)
 
 
 def main() -> None:
+    """Run the hook with stdout reserved for its one JSON decision (see ``_emit``)."""
+    _REAL_STDOUT[0] = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        _main()
+    finally:
+        sys.stdout = _REAL_STDOUT[0] or sys.stdout
+        _REAL_STDOUT[0] = None
+
+
+def _main() -> None:
     try:
         hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
@@ -1484,6 +1552,9 @@ def main() -> None:
 
     if not isinstance(hook_input, dict):  # HOOKS-FAILOPEN-1: `[]`, `"x"`, `123` -> fail open like an empty payload
         sys.exit(0)
+
+    # BIND W2: the host's id for this tool call, so a ledger row joins to the transcript.
+    _tuid = hook_input.get("tool_use_id")
 
     _try_local_intercept(hook_input)
 
@@ -1755,8 +1826,8 @@ def main() -> None:
     # blocking it to "force routing" is pure drift (the git-branch-delete class).
     #
     # Scoped deliberately: QA tasks route by passing file content to llm_analyze,
-    # and CODE tasks use the route-first gate (one llm_code call clears the lock)
-    # — both are intended, so the exemption skips them. The drift lives in
+    # and CODE tasks use the route-first gate (one llm_code call that carries the
+    # request clears the lock) — both are intended, so the exemption skips them. The drift lives in
     # OPERATIONAL task types (e.g. "coordination": "yes, delete the merged
     # branch") where a local command has nothing to route. Prompt-wording-
     # independent, so terse contextual follow-ups are covered. Network fetches
@@ -1876,9 +1947,9 @@ def main() -> None:
     # B2: operational prompts hard-route to AGENTIC DELEGATION. A stateless
     # completion model cannot DO an operational task (edit files, run tests); the
     # classifier picks a completion tool, so we redirect the enforced tool to
-    # llm_delegate, which runs a real tool loop with objective acceptance. Any
-    # llm_* call still clears the lock (never a trap), and LLM_ROUTER_ENFORCE=soft/off
-    # or LLM_ROUTER_DELEGATE=off disables the redirect.
+    # llm_delegate, which runs a real tool loop with objective acceptance. A routing
+    # door call that carries the request still clears the lock (never a trap), and
+    # LLM_ROUTER_ENFORCE=soft/off or LLM_ROUTER_DELEGATE=off disables the redirect.
     # 🥷 Backslash-Security: using vibe-coding rules for Logging & Error Handling
     # P2-core (audit R2 cost/latency floor): only route to the heavy multi-step
     # agentic loop when the task is substantial. A SIMPLE operational task (a
@@ -1963,18 +2034,61 @@ def main() -> None:
     # ("mcp__llm_router__llm_query") — accept both forms.
     bare_name = tool_name.split("__")[-1] if "__" in tool_name else tool_name
 
-    # 1. Any llm_* tool honors routing (llm_code, llm_query, llm_route, etc.)
-    if bare_name.startswith("llm_"):
-        _record_realization_used(session_id, pending)  # CHZ-EXT-204
-        _clear_pending(session_id)
-        _clear_violation_count(session_id)  # Reset violations on successful routing
+    # 1. A routing door (llm, llm_route, llm_act, llm_edit, ...) releases the hold, but
+    #    only a REAL route does (BIND W2). This rule used to clear on ANY llm_* tool, and
+    #    the block text said so ("even a trivial llm(task="query")"), so the model released
+    #    holds with "Reply OK" probes: 76 of the 141 unused MCP units in the audit window,
+    #    none of 133 router calls forwarding the owner's prompt. Now the call must carry
+    #    the owner's request (llm_router.hold_policy.forwards_owner_prompt). A door call
+    #    that does not, and any other llm_* tool (status, admin, session), runs but leaves
+    #    the hold in place and is counted as a probe. The free valves further down (trap,
+    #    loop, count) and the user's `claude:` prefix still release without a model call.
+    _hp = _hold_policy()
+    _door_call = (_hp.is_route_door(bare_name) if _hp is not None
+                  else (bare_name == "llm" or bare_name.startswith("llm_")))
+    if _door_call or bare_name.startswith("llm_"):
+        if _hp is None:
+            _releases, _how = True, "unverifiable"  # cannot judge a forward: today's behaviour
+        elif not _door_call:
+            _releases, _how = False, "non_door"
+        else:
+            _fwd = _hp.forwards_owner_prompt(pending.get("original_prompt"),
+                                             hook_input.get("tool_input"))
+            _releases = _fwd is not False
+            _how = "route" if _fwd else ("unverifiable" if _fwd is None else "door_unrelated")
+        if _releases:
+            _record_realization_used(session_id, pending)  # CHZ-EXT-204
+            _clear_pending(session_id)
+            _clear_violation_count(session_id)  # Reset violations on successful routing
+            _hold_event("released", session_id, tool_use_id=_tuid, how=_how, tool=bare_name, task=task_type)
+            sys.exit(0)
+        # A probe. Let the call itself run (it is not a work tool) and keep the hold. It is
+        # recorded only while a hold is in force: soft and suggest never hold a tool, so a
+        # call made under them releases nothing and is no toll.
+        if enforce in ("hard", "smart"):
+            _call_words = (_hp.words_in(_hp.call_text(hook_input.get("tool_input")))
+                           if _hp is not None and _door_call else 0)
+            try:
+                _router_dir().mkdir(parents=True, exist_ok=True)
+                ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                with _priv_open(_log_path(), "a", encoding="utf-8") as f:
+                    f.write(
+                        f"[{ts}] PROBE session={session_id[:12]} tool={bare_name} kind={_how} "
+                        f"call_words={_call_words} outcome=HOLD_KEPT\n"
+                    )
+            except OSError:
+                pass
+            _hold_event("probe", session_id, tool_use_id=_tuid, tool=bare_name, kind=_how, call_words=_call_words,
+                        task=task_type)
         sys.exit(0)
 
-    # 2. Exact match on the expected tool (e.g. mcp__obsidian__create_note)
+    # 2. Exact match on a NON-LLM expected tool (e.g. mcp__obsidian__create_note); the
+    #    llm doors were judged above.
     if tool_name == expected_tool or bare_name == expected_tool.split("__")[-1]:
         _record_realization_used(session_id, pending)  # CHZ-EXT-204
         _clear_pending(session_id)
         _clear_violation_count(session_id)  # Reset violations on successful routing
+        _hold_event("released", session_id, tool_use_id=_tuid, how="expected_tool", task=task_type)
         sys.exit(0)
 
     # 3. MCP server routing: any tool from the expected server satisfies the directive
@@ -1983,6 +2097,7 @@ def main() -> None:
         _record_realization_used(session_id, pending)  # CHZ-EXT-204
         _clear_pending(session_id)
         _clear_violation_count(session_id)  # Reset violations on successful routing
+        _hold_event("released", session_id, tool_use_id=_tuid, how="expected_server", task=task_type)
         sys.exit(0)
 
     # ── v13: Strict routing-first enforcement ────────────────────────────────
@@ -2103,6 +2218,7 @@ def main() -> None:
                            task_type, expected_tool, reason="loop")
         _clear_pending(session_id)  # Clear pending so subsequent tools also pass
         _clear_violation_count(session_id)
+        _hold_event("released", session_id, tool_use_id=_tuid, how="loop", tool=tool_name, task=task_type)
         sys.exit(0)
 
     # ── Trap-detection: 2 same-tool blocks in the same turn → auto-pivot ────
@@ -2128,6 +2244,7 @@ def main() -> None:
         _clear_pending(session_id)
         _clear_turn_blocks(session_id)
         _clear_violation_count(session_id)
+        _hold_event("released", session_id, tool_use_id=_tuid, how="trap", tool=tool_name, task=task_type)
         sys.exit(0)
 
     # ── Stuck-pattern detection: auto-pivot after 4 violations per turn ──────────
@@ -2148,6 +2265,7 @@ def main() -> None:
             pass
         _record_escalation(session_id, _turn_id, task_type, expected_tool, reason="count")
         _clear_pending(session_id)  # Persist the pivot for the rest of the turn
+        _hold_event("released", session_id, tool_use_id=_tuid, how="count", tool=tool_name, task=task_type)
         sys.exit(0)  # Allow this tool call to prevent deadlock
 
     if enforce == "smart":
@@ -2232,6 +2350,10 @@ def main() -> None:
     elif remaining < 30:
         window_warning = f"\n⏰ Routing window: {remaining}s remaining"
 
+    # Said only when it is true: without llm_router.hold_policy (hooks newer than the package)
+    # every routing door still releases.
+    _not_release_note = (" (a trivial or unrelated llm_* call does NOT release it)"
+                         if _hp is not None else "")
     block_reason = (
         f"[llm_router] Routing directive BLOCKED.{escalation}{loop_warning}{window_warning}\n\n"
         f"  Directive:     ⚡ MANDATORY ROUTE: {task_type}/{complexity} → call {_expected_disp}\n"
@@ -2242,11 +2364,14 @@ def main() -> None:
         f"  burns full model cost with no savings. For {complexity} tasks, that's expensive.\n\n"
         f"NEXT STEP (required):\n"
         f"{action}\n\n"
-        f"Escape valves (if the routed model truly can't help):\n"
-        f"  • Call ANY llm_* tool (even a trivial {route_tool('llm_query')}) — clears the lock for this turn\n"
-        f"  • Trap detection: 2 same-tool blocks in one turn → auto-pivot\n"
+        f"How this hold is released{_not_release_note}:\n"
+        f"  • Route the user's actual request: {_expected_call} with the request itself as the prompt\n"
+        f"  • Routing cannot help (it needs local files or the shell): retry the same tool. "
+        f"Trap detection: the 2nd block of one tool in one turn → auto-pivot\n"
         f"  • Loop detection: same tool blocked 3+ times in 2 minutes → auto-pivot\n"
-        f"  • Or hit violation 4 → auto-pivot\n\n"
+        f"  • Or hit violation 4 → auto-pivot\n"
+        f"  • The user can skip the hold for one prompt by starting it with `claude:` "
+        f"(docs/proxy.md, Routing prefixes)\n\n"
         f"Debug options:\n"
         f"  • View compliance log: {_log_path()}\n"
         f"  • Soft-fail for testing: export LLM_ROUTER_ENFORCE=soft\n"
@@ -2266,7 +2391,9 @@ def main() -> None:
     # field so an older Claude Code still blocks. Without the current field, if
     # the shim is ever dropped every block would silently no-op while this hook's
     # log still records "BLOCKED" — a real enforcement + honesty failure.
-    json.dump(
+    _hold_event("blocked", session_id, tool_use_id=_tuid, tool=tool_name, task=task_type, complexity=complexity,
+                violation=violation_count)
+    _emit(
         {
             "decision": "block",
             "reason": block_reason,
@@ -2275,8 +2402,7 @@ def main() -> None:
                 "permissionDecision": "deny",
                 "permissionDecisionReason": block_reason,
             },
-        },
-        sys.stdout,
+        }
     )
 
     # ── Per-session violation nudge ───────────────────────────────────────────

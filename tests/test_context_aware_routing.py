@@ -182,7 +182,9 @@ def test_context_dependent_prompt_writes_no_pending_state(tmp_path):
 def test_self_contained_routable_prompt_still_writes_pending_state(tmp_path):
     # Control: a routable, context-FREE prompt still writes pending state, so
     # routing enforcement stays intact for prompts that genuinely can route.
-    _run_hook("write a haiku about autumn", tmp_path, direct=False)
+    # Past ten words: BIND W2 (docs/bugs/BIND-HOLD-1.md) writes no hold for a shorter prompt.
+    _run_hook("write a haiku about autumn leaves falling over a quiet river at dawn", tmp_path,
+              direct=False)
     assert _pending_path(tmp_path).exists(), (
         "context-free routable prompt should still write pending state"
     )

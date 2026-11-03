@@ -122,6 +122,18 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | File mode | Files are created 0600, including the new live file after rotation. |
 | Concurrency | Append takes no lock: one `O_APPEND` write. Rotation uses a non-blocking lock on the sidecar `text_job_fail_closed.jsonl.lock` (empty, created on the first rotation and kept); a writer that cannot take it skips rotation. |
 
+## `hold_events.jsonl` (BIND W2)
+
+| Item | Value |
+|---|---|
+| Rows | `ts`, `event` (`prompt`, `hold`, `exempt`, `blocked`, `probe`, `released`), `session_id`, and per event: `words`, `task`, `complexity`, `mode`, `reason`, `tool`, `violation`, `kind`, `call_words`, `how`, and, on the three `enforce-route` events, `tool_use_id` (the host's id of the tool call, which joins a row to the transcript). Counts, ids and codes only: never a prompt, command or tool argument. The writer drops any other key, and a dict or list value. |
+| Writers | `auto-route.py` (`prompt`, `hold`, `exempt`) and `enforce-route.py` (`blocked`, `probe`, `released`), through `hold_ledger.record`. A failed write is recorded with `failopen` code `CHZ-FO-HOLD-LEDGER-WRITE` and never changes the hook's answer. There is no off switch. |
+| Kept | Two generations of 2 MiB via `capped_log` (`hold_ledger._MAX_BYTES`): `<name>` and `<name>.1` (older). The oldest generation is dropped on rotation; a generation can exceed the cap by one row. |
+| Why 2 MiB | A row is 100 to 205 bytes (n=6, one row of each event with a 36-character session id and a 30-character `tool_use_id`, measured 2026-11-03: 101, 150, 155, 182, 204, 204), so 10,000 to 20,000 rows per generation. One `prompt` row per prompt plus one row per hold decision: weeks of a busy machine. |
+| Reads | `hold_ledger.summarize` (the `blocked_holds` counter in `llm-router doctor`, and `python -m llm_router.hold_ledger --days 30`): `blocked_per_100_prompts`, `holds_per_100_prompts`, `probes_per_100_prompts`, and the breakdowns. No `prompt` row in the window reads as unknown (`null`), never 0. |
+| File mode | Files are created 0600, including the new live file after rotation. |
+| Concurrency | Append takes no lock: one `O_APPEND` write. Rotation uses a non-blocking lock on the sidecar `hold_events.jsonl.lock`; a writer that cannot take it skips rotation. |
+
 ## File modes of every state file (W0-4, PRD S7)
 
 | Item | Value |
