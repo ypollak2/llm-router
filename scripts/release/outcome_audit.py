@@ -227,7 +227,10 @@ AGENT_MATCH_WINDOW_S = 330.0  # last-resort pairing only; the PreToolUse hook's 
 HOOK_JOIN_BEFORE_S = 2.0      # the hook writes its ledger row BEFORE it emits, so the run's
 HOOK_JOIN_AFTER_S = 20.0      # attachment follows the row (16.0.0 window: median 0.39 s, max 5.5 s)
 LOCAL_TASK_KEEP_WINDOW_S = 6 * 3600.0
-RESPAWN_WINDOW_S = 1800.0
+#: How long after a delivered Codex result (the ledger row's time) the same prompt asked again counts as a re-issue
+#: (the escape hatch in the wrapper text). The router remembers a delivered prompt for 3600 s
+#: (``llm_router.codex_handoff.DELIVERED_TTL_S`` in BIND W1, PR #818).
+RESPAWN_WINDOW_S = 3600.0
 EDIT_JOIN_WINDOW_S = 300.0
 DRAFT_ATTACH_WINDOW_S = 600.0
 JUDGE_ACTIVE_AGREEMENT = 0.80
@@ -236,13 +239,14 @@ JUDGE_MIN_N = 40
 RELAY_MARKERS = ("🎯 LLM Router routed", "🎯 llm_router →")
 _REASK_RE = re.compile(r"^\s*(?:claude|native|opus)\s*:\s*", re.IGNORECASE)
 _CODEX_MARKER = "delegated to Codex"
-#: Phrases that mark a delivered Codex result (case-insensitive). The 16.0.0 hook says
-#: "Subagent task was delegated to Codex CLI"; the BIND W1 wrapper says "This sub-agent task
-#: was run by Codex CLI (...) instead of a Claude sub-agent". A wrapper that keeps none of
-#: these cannot be called bound (the hook's own reason text is also compared when the
-#: transcript recorded it, which it does not for a deny the harness honoured).
-CODEX_RESULT_MARKERS = ("delegated to codex", "run by codex", "result from codex", "codex cli", "codex output",
-                        "codex result")
+#: A delivered Codex result is the BIND W1 wrapper (src/llm_router/hooks/agent-route.py ``_result_message``), which
+#: names its source twice: "This sub-agent task was run by Codex CLI (...) instead of a Claude sub-agent" and the
+#: fence label "BEGIN UNTRUSTED SUB-AGENT RESULT from Codex CLI (...)". A result carries Codex text only if BOTH
+#: phrases are in it (lower-cased match). ``tests/test_bind_audit.py`` checks every phrase against the real wrapper
+#: whenever the hook has it, so a change of wording there fails a test here.
+CODEX_RESULT_MARKERS = ("was run by codex cli", "untrusted sub-agent result from codex cli")
+#: The 16.0.0 hook's header ("Subagent task was delegated to Codex CLI ..."), found only in void rows.
+LEGACY_CODEX_MARKERS = ("subagent task was delegated to codex",)
 ROUTER_TOOL_PREFIX = "mcp__llm_router__"
 #: router tools that return a view of the router, not an answer to relay
 NON_CONTENT_TOOLS = frozenset({"llm_router_status", "llm_router_admin", "llm_router_session",
@@ -251,7 +255,9 @@ NON_CONTENT_TOOLS = frozenset({"llm_router_status", "llm_router_admin", "llm_rou
 _PASSIVE_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "ToolSearch", "TaskOutput", "TaskStop",
                             "WebSearch", "WebFetch"})
 HOLD_MARKER = "Routing directive BLOCKED"
-MIN_ATTRIBUTABLE_WORDS = 3
+#: A routed answer shorter than this cannot be attributed to a later reply by wording: 3 to 7 word bodies matched a
+#: different unit's host text by chance in 13 of 157 draws (8.3%, BIND-R PR #816 review; 0 of 177 for 8 to 19 words).
+MIN_ATTRIBUTABLE_WORDS = 8
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 _AGENT_TOOLS = ("Agent", "Task")
 _SANDBOX_CWD = re.compile(r"^/(private/)?(tmp|var/folders)/")
@@ -298,6 +304,15 @@ def wilson(k: int, n: int, z: float = 1.959964) -> tuple[float, float] | None:
     centre = (p + z * z / (2 * n)) / den
     half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
     return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def parse_utc(text: str) -> float:
+    """Epoch seconds of an ISO time that names its zone ("...Z" or "+00:00"). A time with no zone
+    would be read as the machine's local time, so it is refused, not guessed."""
+    dt = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        raise ValueError(f"{text!r} has no time zone; give UTC, for example 2026-11-03T09:50:20Z")
+    return dt.timestamp()
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -403,13 +418,13 @@ def is_probe_prompt(prompt: str | None) -> bool:
 
 
 def shingle_size(n_words: int) -> int:
-    """8 words from 20 words up, 4 from 8, and the whole body below that."""
-    return n_words if n_words < 8 else (4 if n_words < 20 else 8)
+    """8 words from 20 words up, 4 from 8. (Below 8 words nothing is attributed: MIN_ATTRIBUTABLE_WORDS.)"""
+    return n_words if n_words < MIN_ATTRIBUTABLE_WORDS else (4 if n_words < 20 else 8)
 
 
 def body_reuse(body: str, host: str | None) -> tuple[float | None, int]:
     """(share of the body's shingles found in `host`, words in the body). None when
-    the body is too short to attribute to anything (under 3 words)."""
+    the body is too short to attribute to anything (under MIN_ATTRIBUTABLE_WORDS words)."""
     words = len(_WORD_RE.findall((body or "").lower()))
     if words < MIN_ATTRIBUTABLE_WORDS:
         return None, words
@@ -462,26 +477,64 @@ def parse_local_task(result_text: str | None) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
-_GIT_KEEP = re.compile(r"\bgit\b[^\n;&|]*\b(?:commit|add)\b")
+_GIT_SEG = re.compile(r"\bgit\b((?:\s+(?:-[cC]\s+\S+|--[\w-]+(?:=\S+)?|-\w+))*)\s+(add|commit|checkout|restore)\b([^\n;&|]*)")
+_ARG_END = re.compile(r"[\"'`$<(]")  # a message, a heredoc or a substitution ends the part of a command that matters
+
+
+def _git_segments(cmd: str) -> list[tuple[str, list[str]]]:
+    """(subcommand, argument words) of each git add/commit/checkout/restore in a shell command, in order."""
+    out = []
+    for m in _GIT_SEG.finditer(cmd):
+        raw = m.group(3)
+        cut = _ARG_END.search(raw)
+        out.append((m.group(2), (raw[:cut.start()] if cut else raw).split()))
+    return out
+
+
+def _names_dir(cmd: str, wd: str) -> bool:
+    """The command names this directory as a path, not as the prefix of a sibling (/w/wt-a in /w/wt-ab)."""
+    return bool(re.search(r"(?<![\w.~/-])" + re.escape(wd) + r"(?![\w.-])", cmd))
+
+
+def _covers(pathspec: str, wanted: set[str]) -> bool:
+    p = pathspec.strip("'\"").lstrip("./")
+    if not p:
+        return True  # "." : everything under the directory
+    return p in wanted or any(f.startswith(p.rstrip("/") + "/") for f in wanted)
 
 
 def local_task_follow_up(actions: list[tuple[str, str]], workdir: str, changed: list[str]) -> str | None:
     """What the host did with the workdir an ``llm_local_task`` wrote into. `actions` are the
     host's later Bash commands ("bash", cmd) and file edits ("edit", path), in order.
-    "kept": a ``git commit|add`` naming the workdir came first. "amended": the host edited one
-    of the files the tool changed before that commit. None: no commit seen. (An undo is not
-    looked for: ``git stash`` / ``git checkout`` also appear in ordinary baseline checks, and
-    the diff itself is not in the transcript.)"""
+    "kept": a ``git commit`` that stages what the tool changed (``-a``, ``add -A`` with no
+    pathspec or one covering a changed file, or an ``add`` of a changed file) in a command that
+    names the workdir as a path. "amended": the host edited a changed file before that commit.
+    "undone": a ``git checkout|restore`` of a changed file (or ``.``) came first. None: neither.
+    A commit that stages something else in the same directory, or names a sibling directory, is
+    not kept. (``git stash`` is not an undo: ordinary baseline checks use it.)"""
     wd = (workdir or "").rstrip("/")
     if not wd:
         return None
     wanted = {c.lstrip("./") for c in changed}
-    amended = False
+    amended = covered = False
     for kind, val in actions:
         if kind == "edit":
             amended = amended or (val.startswith(wd + "/") and val[len(wd) + 1:] in wanted)
-        elif wd in val and _GIT_KEEP.search(val):
-            return "amended" if amended else "kept"
+            continue
+        if not _names_dir(val, wd):
+            continue
+        for sub, args in _git_segments(val):
+            flags = [a for a in args if a.startswith("-") and a != "--"]
+            paths = [a for a in args if not a.startswith("-")]
+            short = "".join(f[1:] for f in flags if not f.startswith("--"))
+            if sub in ("checkout", "restore"):
+                if wanted and any(_covers(p, wanted) for p in paths):
+                    return "undone"
+            elif sub == "add":
+                everything = not paths and ("A" in short or "u" in short or "--all" in flags or "--update" in flags)
+                covered = covered or everything or (bool(wanted) and any(_covers(p, wanted) for p in paths))
+            elif sub == "commit" and (covered or "a" in short or "--all" in flags):
+                return "amended" if amended else "kept"
     return None
 
 
@@ -499,17 +552,25 @@ def codex_body(result_text: str | None) -> str:
         t = t.split(":", 2)[2].strip() if t.count(":") >= 2 else t
     if t.lower().startswith("[llm_router]") and "\n\n" in t:
         head, rest = t.split("\n\n", 1)
-        if any(m in head.lower() for m in CODEX_RESULT_MARKERS):
+        if any(m in head.lower() for m in LEGACY_CODEX_MARKERS):
             t = rest
     return t
 
 
+def same_prompt(a: object, b: object) -> bool:
+    """The router's own re-issue rule (BIND W1, ``llm_router.codex_handoff.prompt_fingerprint``: sha256 of the
+    stripped prompt): the two prompts are equal once stripped. A task asked again in other words is a different
+    prompt, so it is not a re-issue; the router answers it as a new task. Empty prompts never match."""
+    return isinstance(a, str) and isinstance(b, str) and bool(a.strip()) and a.strip() == b.strip()
+
+
 def carries_codex_text(result_text: str | None, hook_reason: str | None = None) -> bool:
-    """The Agent tool_result holds the Codex answer: a delivered-result marker, or the
-    hook's own reason text (when the transcript recorded it) found in the result."""
+    """The Agent tool_result holds the Codex answer: BOTH phrases of the BIND W1 wrapper, or the
+    16.0.0 hook's header, or the hook's own reason text (when the transcript recorded it) found
+    in the result. A phrase alone (a sub-agent report that mentions "Codex CLI") is not enough."""
     t = result_text or ""
     low = t.lower()
-    if any(m in low for m in CODEX_RESULT_MARKERS):
+    if all(m in low for m in CODEX_RESULT_MARKERS) or any(m in low for m in LEGACY_CODEX_MARKERS):
         return True
     return bool(hook_reason) and reuse_fraction(hook_reason, t) >= USED_THRESHOLD
 
@@ -598,10 +659,10 @@ def label_routed_mcp(result_text: str | None, is_error: bool, host_text: str | N
     if words == 0:
         return "unused", "tool_result_empty", "medium"
     if frac is None:
-        # Under 3 words ("Hash."): any host text would "contain" it. Not attributable.
+        # Under 8 words ("Hash.", "No, it does not"): any host text would "contain" it. Not attributable.
         return "unknown", "body_too_short_to_attribute", "low"
     if frac >= USED_THRESHOLD:
-        return "used", "tool_result_reused", "medium" if words >= 8 else "low"
+        return "used", "tool_result_reused", "medium"
     if frac >= AMBIGUOUS_FLOOR:
         # Hand check 2026-09-29: a 25% overlap was the host QUOTING the result
         # to critique it; a 5% one was the host adopting two of five review
@@ -624,6 +685,8 @@ def label_local_task(result: dict | None, follow_up: str | None) -> Label:
         return "unused", "local_task_not_applied", "high"
     if status == "incomplete" and not changed:
         return "unused", "local_task_no_effect", "high"
+    if follow_up == "undone":
+        return "unused", "local_task_effect_undone", "medium"
     if follow_up == "kept":
         return "used", "local_task_effect_kept", "medium"
     if follow_up == "amended":
@@ -1328,20 +1391,32 @@ def _index_agents(s: Session) -> _SessionAgents:
     return agents
 
 
-def hook_reason(stdout: str | None) -> str | None:
-    """The reason text a PreToolUse hook emitted (the legacy ``reason`` or the
-    ``permissionDecisionReason``); stdout may open with a stray log line."""
+def hook_json(stdout: str | None) -> dict | None:
+    """The JSON object a PreToolUse hook printed (its stdout may open with a stray log line)."""
     out = stdout or ""
     k = out.find("{")
     while k != -1:
         try:
             obj = json.loads(out[k:])
-            break
         except ValueError:
             k = out.find("{", k + 1)
-    else:
-        return None
-    if not isinstance(obj, dict):
+            continue
+        return obj if isinstance(obj, dict) else None
+    return None
+
+
+def is_deny_shape(obj: dict | None) -> bool:
+    """The current deny contract: ``hookSpecificOutput.permissionDecision == "deny"``. The top-level
+    ``decision``/``reason`` pair alone is the deprecated shape and was ignored on 317 of 317 handoffs."""
+    spec = obj.get("hookSpecificOutput") if isinstance(obj, dict) else None
+    return isinstance(spec, dict) and spec.get("permissionDecision") == "deny"
+
+
+def hook_reason(stdout: str | None) -> str | None:
+    """The reason text a PreToolUse hook emitted (the legacy ``reason`` or the
+    ``permissionDecisionReason``); stdout may open with a stray log line."""
+    obj = hook_json(stdout)
+    if obj is None:
         return None
     r = obj.get("reason")
     if not isinstance(r, str):
@@ -1428,30 +1503,41 @@ def _codex_units(sessions, ns_rows, lo, hi) -> list[Unit]:
             agents = cache[s.sid] = _index_agents(s)
         call, how = _pair_codex_row(r, agents, claimed)
         extra.update(pairing=how, call_found=call is not None, tool_use_id=call.tid if call else extra["tool_use_id"],
-                     nested=bool(call and call.src_path), launched=False, bound=False, respawned=False)
+                     nested=bool(call and call.src_path), launched=False, marker=False, deny_shape=False,
+                     delivered=False, bound=False, respawned=False)
         if call is None:
             units.append(Unit("agent_route_codex", s.sid, float(ts), *label_codex("delegated", None, None, False),
                               extra=extra))
             continue
         launched = claude_subagent_launched(call, agents)
-        reason = next((hook_reason(out) for _t, tid, out in agents.hooks if tid == call.tid), None)
-        carries = call.result_text is not None and carries_codex_text(call.result_text, reason)
-        respawned = (not launched) and any(
-            o.src_path == call.src_path and call.ts < o.ts <= call.ts + RESPAWN_WINDOW_S
-            and reuse_fraction(call.inp.get("prompt"), o.inp.get("prompt"), n=4) >= 0.5
+        stdout = next((out for _t, tid, out in agents.hooks if tid == call.tid), None)
+        marker = call.result_text is not None and carries_codex_text(call.result_text, hook_reason(stdout))
+        # The deny SHAPE. When the transcript kept the hook's own stdout it must hold the current contract
+        # (hookSpecificOutput.permissionDecision == "deny"); an honoured deny leaves no hook attachment, and
+        # then the harness's rendering of it is the evidence: an error result that opens "PreToolUse:Agent hook error".
+        hj = hook_json(stdout) if stdout else None
+        rendered = bool(call.result_is_error) and (call.result_text or "").lstrip().startswith("PreToolUse:Agent hook error")
+        shape = is_deny_shape(hj) if hj is not None else rendered
+        delivered = marker and shape and not launched
+        # The same prompt asked again after a delivered result is the escape hatch (codex_reissue): the work was
+        # redone by Claude, so the handoff did not bind. Only an identical prompt counts: it is the router's own rule.
+        respawned = delivered and any(
+            o.src_path == call.src_path and call.ts < o.ts <= float(ts) + RESPAWN_WINDOW_S
+            and same_prompt(call.inp.get("prompt"), o.inp.get("prompt"))
             for o in agents.calls.values())
-        parent = _agent_reply_text(call, s) if (carries and not launched and not respawned) else ""
+        bound = delivered and not respawned
+        parent = _agent_reply_text(call, s) if bound else ""
         if call.result_text is None:
             label = (("redone", "claude_subagent_ran", "high") if launched
                      else ("unknown", "agent_result_missing", "low"))
         else:
-            label = label_codex("delegated", call.result_text, parent, respawned, launched, carries)
+            label = label_codex("delegated", call.result_text, parent, respawned, launched, marker and shape)
         tur = call.tur if isinstance(call.tur, dict) else {}
-        extra.update(launched=launched, bound=bool(carries and not launched), respawned=respawned,
-                     call_subagent_type=call.inp.get("subagent_type") or "general-purpose",
+        extra.update(launched=launched, marker=marker, deny_shape=shape, delivered=delivered, respawned=respawned,
+                     bound=bound, call_subagent_type=call.inp.get("subagent_type") or "general-purpose",
                      agent_id=agents.launched.get(call.tid) or tur.get("agentId") or agent_id_in_text(call.result_text),
                      resolved_model=tur.get("resolvedModel"),
-                     blocked_screen=is_blocked_answer(codex_body(call.result_text)) if carries and not launched else None)
+                     blocked_screen=is_blocked_answer(codex_body(call.result_text)) if bound else None)
         units.append(Unit("agent_route_codex", s.sid, float(ts), *label, extra=extra,
                           evidence={"routed": call.result_text or "", "host": parent}))
     return units
@@ -1502,29 +1588,43 @@ def default_artifact_dir() -> Path:
     return ROOT / "release-artifacts" / "outcome-audit"
 
 
-def binding_stats(units: list[Unit]) -> dict:
-    """The Codex binding facts (D-358), from the units' in-memory ``extra``: of the units
-    the hook DELEGATED, how many reached Claude as the sub-agent's result (bound) and
-    how many were void (a Claude sub-agent ran anyway)."""
+def binding_stats(units: list[Unit], reissue_rows: int = 0) -> dict:
+    """The Codex binding facts (D-358), from the units' in-memory ``extra``. The denominator is every
+    unit the router DELEGATED (it emitted a deny carrying a Codex result). Of those: ``delivered`` = the
+    deny reached Claude as the sub-agent's result (a deny shape, the Codex wrapper, no Claude sub-agent
+    launched); ``bound`` = delivered and not followed by a re-issue of the same task (the escape hatch,
+    ``codex_reissue``), which means Claude redid the work. Everything else is counted in its own bucket, and the
+    runs that never delivered (``codex_blocked``, ``codex_failed``) are counted beside them, so nothing is hidden."""
     d = [u for u in units if u.kind == "agent_route_codex" and u.extra.get("outcome") == "delegated"]
     bound = [u for u in d if u.extra.get("bound")]
+    codex = [u for u in units if u.kind == "agent_route_codex"]
+    blocked = sum(u.extra.get("outcome") == "codex_blocked" for u in codex)
+    failed = sum(u.extra.get("outcome") == "codex_failed" for u in codex)
     by_pairing: dict[str, int] = {}
     for u in d:
         by_pairing[u.extra.get("pairing", "none")] = by_pairing.get(u.extra.get("pairing", "none"), 0) + 1
+
+    def found_not_launched(u: Unit) -> bool:
+        return bool(u.extra.get("call_found")) and not u.extra.get("launched")
+
     return {
-        "metric": "delegated units whose Agent tool_result carries the Codex text AND for which "
-                  "no Claude sub-agent was launched (per tool_use_id)",
+        "metric": "delegated units whose deny reached Claude as the sub-agent's result (deny shape, Codex wrapper) "
+                  "with no Claude sub-agent launched for that tool_use_id and no re-issue of the task afterwards",
         "delegated": len(d),
+        "delivered": sum(bool(u.extra.get("delivered")) for u in d),
         "bound": len(bound),
         "void_claude_subagent_ran": sum(bool(u.extra.get("launched")) for u in d),
+        "respawned_after_delivery": sum(bool(u.extra.get("respawned")) for u in d),
         "no_agent_call_found": sum(not u.extra.get("call_found") for u in d),
         "paired_in_sub_agent_transcript": sum(bool(u.extra.get("nested")) for u in d),
-        "result_without_codex_text": sum(bool(u.extra.get("call_found")) and not u.extra.get("bound")
-                                         and not u.extra.get("launched") for u in d),
-        "respawned_after_bound": sum(bool(u.extra.get("respawned")) for u in d),
+        "delivered_without_deny_shape": sum(found_not_launched(u) and bool(u.extra.get("marker"))
+                                            and not u.extra.get("deny_shape") for u in d),
+        "result_without_codex_marker": sum(found_not_launched(u) and not u.extra.get("marker") for u in d),
         "blocked_screen_among_bound": sum(bool(u.extra.get("blocked_screen")) for u in bound),
-        "codex_blocked_not_bound": sum(u.kind == "agent_route_codex" and u.extra.get("outcome") == "codex_blocked"
-                                       for u in units),
+        "codex_runs": len(d) + blocked + failed,
+        "codex_blocked": blocked,
+        "codex_failed": failed,
+        "codex_reissue_rows": reissue_rows,
         "pairing": dict(sorted(by_pairing.items())),
     }
 
@@ -1581,6 +1681,9 @@ def _collect(days: int, projects_dir: Path, state_dir: Path, now: float | None, 
     active_sessions = {u.session_id for u in units} | {
         s.sid for s in sessions.values() for i in s.prompt_idx if lo <= (_ts(s.records[i]) or 0) <= hi}
     n_holds = sum(1 for s in sessions.values() for i, _tid in s.hold_idx if lo <= (_ts(s.records[i]) or 0) <= hi)
+    reissue_ts = sorted(float(r["ts"]) for r in ns_rows
+                        if r.get("lever") == "agent_route_codex" and r.get("outcome") == "codex_reissue"
+                        and r.get("session_id") in sessions and isinstance(r.get("ts"), (int, float)) and lo <= r["ts"] <= hi)
     ctx = {"lo": lo, "hi": hi, "days": days, "n_files_read": n_files, "n_prompts": n_prompts,
            "n_sessions": len(active_sessions), "unscoped": unscoped, "excluded": excluded,
            "sessions": sessions, "overrides": {"file": OVERRIDES_FILENAME,
@@ -1588,7 +1691,7 @@ def _collect(days: int, projects_dir: Path, state_dir: Path, now: float | None, 
            "dedup": {"replayed_tool_uses": stats.get("replayed_tool_uses", 0)},
            "holds": {"n": n_holds, "n_prompts": n_prompts,
                      "per_100_prompts": round(100 * n_holds / n_prompts, 3) if n_prompts else None},
-           "binding": binding_stats(units)}
+           "codex_reissue_ts": reissue_ts, "binding": binding_stats(units, len(reissue_ts))}
     return units, ctx
 
 
@@ -1877,7 +1980,11 @@ def print_summary(summary: dict) -> None:
             print(f"  {kind:<20} n={k['n']:<5} used {_fmt(k['used'])}  labels={k['labels']}")
     b = summary["binding"]
     print(f"  codex binding: {b['bound']}/{b['delegated']} delegated units bound "
-          f"(void {b['void_claude_subagent_ran']}, unpaired {b['no_agent_call_found']}, pairing {b['pairing']})")
+          f"(void {b['void_claude_subagent_ran']}, re-issued {b['respawned_after_delivery']}, "
+          f"unpaired {b['no_agent_call_found']}, no Codex wrapper {b['result_without_codex_marker']}, "
+          f"no deny shape {b['delivered_without_deny_shape']}, pairing {b['pairing']})")
+    print(f"  codex runs that delivered nothing: blocked {b['codex_blocked']}, failed {b['codex_failed']} "
+          f"(of {b['codex_runs']} runs); codex_reissue ledger rows {b['codex_reissue_rows']}")
     print(f"  holds: {summary['holds']['n']} in {summary['holds']['n_prompts']} prompts; "
           f"replayed tool_uses deduped: {summary['dedup']['replayed_tool_uses']}; "
           f"sessions excluded by override: {len(summary['scope']['session_kind_overrides']['excluded_sessions'])}")
@@ -1909,7 +2016,11 @@ def main(argv: list[str] | None = None) -> int:
     if out_dir.resolve().is_relative_to(state.resolve()):
         print(f"refusing to write into the state dir {state}", file=sys.stderr)
         return 2
-    until = datetime.fromisoformat(args.until.replace("Z", "+00:00")).timestamp() if args.until else None
+    try:
+        until = parse_utc(args.until) if args.until else None
+    except ValueError as exc:
+        print(f"--until: {exc}", file=sys.stderr)
+        return 2
     calibration = None
     if args.judge and args.calibrate_judge:
         units, _ctx = _collect(args.days, args.projects_dir or default_projects_dir(), state, until)

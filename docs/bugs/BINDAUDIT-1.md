@@ -23,9 +23,13 @@ status: fixed in this change (BIND W3, branch `bind/audit-metrics`; audit v2)
   `subagent_type` first. The old rule remains only as a last resort, with its window cut to the hook's own 320 s
   timeout. On the 16.0.0 window 317 of 317 delegated rows pair that way (offset median 0.39 s, max 5.5 s), 317 of 317
   agree with the ledger's `subagent_type` and with the sub-agent's `agent-*.meta.json` (`toolUseId`, `agentType`),
-  and 35 of 35 of the BIND-R1 sample pair to the call the hand table names (`scripts/release/audit_agreement.py`).
+  and 35 of 35 of the BIND-R1 sample pair to the call the hand table names (`scripts/release/audit_agreement.py`, n=35,
+  one model's unblinded hand table; the pairing rule was written from those rows, so this is an in-sample check).
 - **Test.** `tests/test_bind_audit.py::test_old_rows_are_paired_by_their_hook_run_not_by_the_latest_call` (two
   Agent calls 1 s apart; the 900 s rule picks the later one for both rows) and
   `::test_new_rows_are_paired_by_tool_use_id` (the row names an older call than the nearest). Against the real
   window, by hand (the suite may not read the owner's home): `python3 scripts/release/audit_agreement.py --until
-  2026-11-03T09:50:20Z` reports 35 of 35 (`::test_agreement_cli_on_a_synthetic_corpus` covers its wiring).
+  2026-11-03T09:50:20Z` reports 35 of 35 (`::test_agreement_cli_on_a_synthetic_corpus` covers its wiring), and
+  `tests/test_bind_thresholds.py::test_a_hook_run_joins_a_row_from_two_seconds_before_to_twenty_seconds_after`,
+  `::test_the_last_resort_pairing_reaches_330_seconds_back_and_two_seconds_ahead` and
+  `::test_two_hook_runs_pair_by_subagent_type_before_distance` pin the three windows and the type tie-break.

@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Does the audit label the hand-labelled units the way the hand labels say?
+"""Does the audit reproduce the labels the BIND-R1 and BIND-R2 readers gave?
 
-The 16.0.0 outcome audit was checked by hand twice (BIND-R1: 35 Codex units followed
-through the transcripts; BIND-R2: all 158 routed_mcp rows read). The labels survive
-here as text-free fixtures (``tests/fixtures/bind_w3/``: ids are sha256 hashes of the
-unit id, there is no prompt or reply text). This script re-runs the audit read-only on
-the live transcripts and reports agreement, per unit and per class:
+Two reports labelled units of the 16.0.0 outcome audit: BIND-R1 followed 35 Codex units
+through the transcripts and BIND-R2 read all 158 routed_mcp rows (193 units of the 564 the
+audit scored). Each was one model, unblinded, with no second rater, so the labels are a
+single reader's judgement, not ground truth. The audit's rules were written against these
+same rows, so agreement here is IN-SAMPLE: it shows the rules reproduce the labels they were
+fitted to and says nothing about units they were not fitted to. All 35 Codex units are void,
+so they cannot test the ``bound`` path at all. The labels survive here as text-free fixtures
+(``tests/fixtures/bind_w3/``: ids are sha256 hashes of the unit id, there is no prompt or
+reply text). This script re-runs the audit read-only on the live transcripts and reports
+agreement, per unit and per class:
 
     python3 scripts/release/audit_agreement.py --until 2026-11-03T09:50:20Z
     python3 scripts/release/audit_agreement.py --until 2026-11-03T09:50:20Z \\
@@ -30,7 +35,6 @@ import importlib.util
 import json
 import sys
 from collections import Counter
-from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -169,7 +173,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     audit = _audit()
-    until = datetime.fromisoformat(args.until.replace("Z", "+00:00")).timestamp() if args.until else None
+    try:
+        until = audit.parse_utc(args.until) if args.until else None
+    except ValueError as exc:
+        print(f"audit_agreement: {exc}", file=sys.stderr)
+        return 2
     units, _ctx = audit._collect(args.days, args.projects_dir or audit.default_projects_dir(),
                                  args.state_dir or audit.default_state_dir(), until,
                                  overrides=None if args.keep_overrides else {})
