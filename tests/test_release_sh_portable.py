@@ -81,31 +81,64 @@ def _leaks(paths) -> list[str]:
     return r.stdout.splitlines()
 
 
+# The five internal-document names block in ANY path that carries one, whatever the file
+# type: the check fails closed. The one exemption is Python source under the package tree.
 @pytest.mark.parametrize("path", [
-    "src/llm_router/pricing.py",        # the module that blocked the 2026-11-03 dry run
+    "src/llm_router/pricing.py",           # the module that blocked the 2026-11-03 dry run
     "src/llm_router/pricing.pyi",
     "src/llm_router/strategy.py",
     "src/llm_router/roadmap.py",
     "src/llm_router/monetization.py",
     "src/llm_router/phase_completion.py",
-    "src/llm_router/data/pricing.json",  # package data is not a document
-    "docs/pricing.md5",                  # `.md` must end the extension: this is a checksum
+    "src/llm_router/PRICING.PY",           # case-insensitive, as the names are
+    "src/llm_router/pricing/__init__.py",  # a package folder named for one of them
+    "src/llm_router/strategy/routing.py",
 ])
 def test_a_source_file_named_like_an_internal_doc_is_not_a_leak(path):
     assert _leaks([path]) == []
 
 
 @pytest.mark.parametrize("path", [
+    # each document extension release.sh used to list, and the case-insensitive spelling
     "PRICING.md", "ROADMAP.md", "MONETIZATION.md", "STRATEGY.md", "PHASE_COMPLETION_REVIEW.md",
-    "docs/PRICING.md",
-    "docs/Roadmap-2027.md",              # case-insensitive, as before
-    "docs/MONETIZATION_STRATEGY.pdf",
-    "ROADMAP.txt",
+    "ROADMAP.rst", "STRATEGY.markdown", "PRICING.doc", "MONETIZATION.docx",
+    "ROADMAP.txt", "docs/MONETIZATION_STRATEGY.pdf", "docs/Roadmap-2027.md", "docs/PRICING.md",
     "PRICING.md.bak", "docs/roadmap.md~", "STRATEGY.txt.orig",  # a backup of a document is one
-    "src/llm_router/PRICING.md",         # a document under src/ is still a document
-    "docs/strategy/overview.md",         # a folder named for one of them
+    "src/llm_router/PRICING.md",           # a document under src/ is still a document
+    "docs/strategy/overview.md",           # a folder named for one of them
 ])
 def test_internal_documents_still_block(path):
+    assert _leaks([path]) == [f"{ROOT}/{path}"]
+
+
+@pytest.mark.parametrize("path", [
+    # no extension
+    "ROADMAP", "STRATEGY", "PRICING", "docs/MONETIZATION", "PHASE_COMPLETION_REVIEW",
+    # other document formats
+    "PRICING.mdx", "PRICING.rtf", "PRICING.odt", "PRICING.html", "PRICING.org", "PRICING.tex",
+    "PRICING.xlsx", "PRICING.pptx", "PRICING.key", "PRICING.csv",
+    # data
+    "PRICING.json", "PRICING.yaml", "PRICING.toml", "PRICING.ipynb",
+    "src/llm_router/data/pricing.json",    # package data is not source code: a decision, not a pass
+    # archives and odd backups
+    "PRICING.zip", "PRICING.tar.gz", "PRICING.md1", "PRICING.mdbak",
+    "docs/pricing.md5",                    # a checksum named for one of them
+    # a file of any type inside a folder named for one of them
+    "strategy/plan.xlsx", "roadmap/q4.png", "roadmap/q4.json",
+])
+def test_the_names_block_in_any_file_type_or_none(path):
+    assert _leaks([path]) == [f"{ROOT}/{path}"]
+
+
+@pytest.mark.parametrize("path", [
+    "pricing.py",                          # top level of the sdist, not under src/
+    "docs/pricing.py", "hooks/strategy.py", "integrations/pi/roadmap.pyi",
+    "docs/src/pricing.py", "integrations/pi/src/strategy.py",  # a nested src/ is not the package tree
+    "src/llm_router/pricing.py.bak",       # not Python source
+    "src/llm_router/pricing.pyx", "src/llm_router/pricing.pyc",
+    "src/llm_router/pricing.js",
+])
+def test_the_exemption_is_python_source_under_src_and_nothing_else(path):
     assert _leaks([path]) == [f"{ROOT}/{path}"]
 
 
@@ -117,15 +150,20 @@ def test_internal_documents_still_block(path):
     "deprecation/old.py",
     "scripts/build.sh", "src/llm_router/scripts/x.py",
     "skills/a/SKILL.md", "src/llm_router/skills/x.py",
+    # the exemption is from the names only: a module in one of these folders still blocks
+    "src/llm_router/skills/pricing.py", "src/llm_router/scripts/roadmap.py",
+    "src/llm_router/.internal/strategy.py",
 ])
 def test_the_other_internal_patterns_still_block_wherever_they_appear(path):
     assert _leaks([path]) == [f"{ROOT}/{path}"]
 
 
-def test_only_the_offending_lines_are_reported():
+def test_only_the_offending_lines_are_reported_and_each_once():
     clean = ["PKG-INFO", "README.md", "pyproject.toml", "src/llm_router/pricing.py", "docs/guide.md"]
-    bad = ["PRICING.md", ".env", "scripts/x.sh"]
-    assert _leaks(clean[:2] + bad[:1] + clean[2:] + bad[1:]) == [f"{ROOT}/{p}" for p in bad]
+    bad = ["PRICING.md", ".env", "scripts/x.sh", "scripts/PRICING.md"]  # the last one trips two rules
+    got = _leaks(clean[:2] + bad[:1] + clean[2:] + bad[1:])
+    assert sorted(got) == sorted(f"{ROOT}/{p}" for p in bad)
+    assert len(got) == len(set(got))
 
 
 def test_no_tracked_package_file_trips_the_leak_check():
@@ -178,6 +216,26 @@ def test_verify_sdist_clean_refuses_an_unreadable_archive(tmp_path):
     r = _run(f'verify_sdist_clean "{bad}"')
     assert r.returncode == 1
     assert "Cannot read" in r.stdout and "sdist is clean" not in r.stdout
+
+
+@pytest.mark.parametrize("var", ["SDIST_BLOCK_RE", "SDIST_NAMES_RE", "SDIST_CODE_RE"])
+def test_a_leak_check_that_fails_is_not_a_clean_sdist(tmp_path, var):
+    """grep exits 2 on a bad pattern. The old `|| true` hid that and printed "sdist is clean"
+    for an archive that held .env and PRICING.md."""
+    sdist = _make_sdist(tmp_path, [".env", "PRICING.md", "src/llm_router/pricing.py"])
+    healthy = _run(f'verify_sdist_clean "{sdist}"')
+    assert healthy.returncode == 1 and "BLOCKED" in healthy.stdout  # control: the leaks are real
+    r = _run(f"{var}='('; verify_sdist_clean \"{sdist}\"")
+    assert r.returncode == 1
+    assert "NOT checked" in r.stdout and "sdist is clean" not in r.stdout
+    assert "BLOCKED" not in r.stdout          # it did not pretend to have found the leaks either
+
+
+@pytest.mark.parametrize("var", ["SDIST_BLOCK_RE", "SDIST_NAMES_RE", "SDIST_CODE_RE"])
+def test_sdist_leaks_fails_when_a_pattern_is_broken(var):
+    r = _run(f"{var}='('; sdist_leaks", stdin=f"{ROOT}/PRICING.md\n{ROOT}/.env\n")
+    assert r.returncode != 0
+    assert r.stdout == ""
 
 
 @pytest.mark.slow
@@ -247,7 +305,11 @@ def test_fallback_reports_a_command_it_cannot_run_as_126(perl_only, tmp_path):
     assert r.returncode == 126, r.stderr
 
 
-@pytest.mark.parametrize("sig,expected", [("TERM", 143), ("KILL", 137), ("INT", 130)])
+# Not INT: a background job of a non-interactive shell starts with SIGINT ignored, and the CI
+# "Run tests" step runs pytest as one (`uv run pytest ... &`), so `kill -INT $$` killed nothing
+# there and the command exited 0 (`assert 0 == 130` on test (3.11) and (3.13), PR #815).
+# HUP (129) takes the same 128 + N path and is not ignored in that setup.
+@pytest.mark.parametrize("sig,expected", [("TERM", 143), ("KILL", 137), ("HUP", 129)])
 def test_fallback_reports_128_plus_n_when_a_signal_killed_the_command(perl_only, sig, expected):
     r = _run(f"run_with_timeout 60 sh -c 'kill -{sig} $$'", path=perl_only)
     assert r.returncode == expected, r.stderr
@@ -437,3 +499,16 @@ def test_the_default_test_limit_covers_a_local_run_of_the_suite():
     assert match, "RELEASE_TEST_TIMEOUT default not found"
     # A local run takes over an hour single-threaded; the old default was 300 s.
     assert int(match.group(1)) >= 7200
+
+
+def test_step_four_runs_verify_sdist_clean_and_stops_the_release_when_it_fails():
+    """The wiring is the fix of the actual blocker. Reverting Step 4 to an inline grep, or
+    dropping the `|| exit 1`, would leave every function test green and ship a release the
+    check had refused."""
+    text = SH.read_text()
+    step4 = text[text.index("Step 4/5"):text.index("Step 5/5")]
+    assert 'verify_sdist_clean "$SDIST_FILE" || exit 1' in step4
+    assert "grep" not in step4, "an inline leak check is back in Step 4"
+    assert "LEAKED_FILES" not in text
+    # and it runs before the tag is created
+    assert text.index('verify_sdist_clean "$SDIST_FILE"') < text.index('git tag "v${current_version}"')

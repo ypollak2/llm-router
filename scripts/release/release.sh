@@ -129,29 +129,50 @@ run_with_timeout() {
     fi
 }
 
-# Paths that must never be published, as a grep -E pattern matched case-insensitively
-# against each line of `tar tzf <sdist>`.
-#  * .env, CLAUDE.md and the .internal/ /research/ /deprecation/ /scripts/ /skills/
-#    directories are blocked wherever they appear.
-#  * The internal-document names (MONETIZATION ROADMAP STRATEGY PRICING
-#    PHASE_COMPLETION) are blocked only on DOCUMENT files (.md .markdown .rst .txt
-#    .pdf .doc .docx, also with a backup suffix such as .bak, .orig or ~).
-#    Unanchored they also matched the source module src/llm_router/pricing.py
-#    (case-insensitive), which blocked the 16.0.0 release dry run on 2026-11-03.
-#    A document named for one of them still blocks, in a folder of that name too,
-#    and under src/ as well: only non-document files (modules, stubs, data) are out
-#    of its reach.
-SDIST_LEAK_RE='\.env$|CLAUDE\.md|\.internal/|/research/|/deprecation/|/scripts/|/skills/|(MONETIZATION|ROADMAP|STRATEGY|PRICING|PHASE_COMPLETION).*\.(md|markdown|rst|txt|pdf|docx?)([^A-Za-z0-9/][^/]*)?$'
+# Paths that must never be published: three grep -E patterns, each matched
+# case-insensitively against a line of `tar tzf <sdist>` (see sdist_leaks).
+#  * SDIST_BLOCK_RE: .env, CLAUDE.md and the .internal/ /research/ /deprecation/
+#    /scripts/ /skills/ directories. Blocked wherever they appear.
+#  * SDIST_NAMES_RE: the internal-document names. Blocked in ANY path that carries
+#    one: a file of any type or of none (ROADMAP, PRICING.xlsx, STRATEGY.md.bak) or
+#    a folder (strategy/plan.png). This fails closed: a document type nobody
+#    listed still blocks.
+#  * SDIST_CODE_RE: the one exemption, and only from SDIST_NAMES_RE: Python source
+#    under the package tree (<root>/src/**/*.py and *.pyi). Without it the names
+#    also matched the module src/llm_router/pricing.py (case-insensitive), which
+#    blocked the 16.0.0 release dry run on 2026-11-03. A module is still caught by
+#    SDIST_BLOCK_RE (src/llm_router/skills/x.py), and a non-code file named for one
+#    of the names stays blocked under src/ too (src/llm_router/data/pricing.json):
+#    that wants a decision, not a pass.
+SDIST_BLOCK_RE='\.env$|CLAUDE\.md|\.internal/|/research/|/deprecation/|/scripts/|/skills/'
+SDIST_NAMES_RE='MONETIZATION|ROADMAP|STRATEGY|PRICING|PHASE_COMPLETION'
+SDIST_CODE_RE='^[^/]+/src/.+\.pyi?$'
+
+# grep that reports "no match" (status 1) as success and fails on any other status:
+# a bad pattern or an I/O error must never read as "nothing found".
+_grep_hits() {
+    local rc=0
+    grep "$@" || rc=$?
+    [ "$rc" -le 1 ] || return "$rc"
+}
 
 # Reads an sdist listing on stdin (one path per line, as `tar tzf` prints it) and
-# prints the lines that must not be published. Prints nothing for a clean listing.
+# prints the paths that must not be published, each once. Prints nothing for a clean
+# listing. Returns non-zero when the check itself failed (grep or awk error): that is
+# not a clean listing and the caller must not treat it as one.
 sdist_leaks() {
-    grep -i -E "$SDIST_LEAK_RE" || true
+    local listing blocked named
+    listing=$(cat)
+    blocked=$(_grep_hits -i -E "$SDIST_BLOCK_RE" <<< "$listing") || return 1
+    named=$(_grep_hits -i -E "$SDIST_NAMES_RE" <<< "$listing") || return 1
+    named=$(_grep_hits -v -i -E "$SDIST_CODE_RE" <<< "$named") || return 1
+    printf '%s\n%s\n' "$blocked" "$named" | awk 'NF && !seen[$0]++'
 }
 
 # 0 = the sdist at $1 is clean; 1 = it holds a private file, or could not be
-# inspected. An unreadable archive or an empty listing is a refusal, never a pass:
-# a leak check that found nothing to check has not checked anything.
+# inspected. An unreadable archive, an empty listing and a failure of the check
+# itself are refusals, never a pass: a leak check that checked nothing has not
+# checked anything.
 verify_sdist_clean() {
     local sdist=$1 listing leaked
     if ! listing=$(tar tzf "$sdist"); then
@@ -162,7 +183,10 @@ verify_sdist_clean() {
         log_error "$sdist lists no files, so the sdist was NOT checked."
         return 1
     fi
-    leaked=$(printf '%s\n' "$listing" | sdist_leaks)
+    if ! leaked=$(printf '%s\n' "$listing" | sdist_leaks); then
+        log_error "The leak check itself failed (error above), so the sdist was NOT checked."
+        return 1
+    fi
     if [ -n "$leaked" ]; then
         log_error "BLOCKED: sdist contains private/internal files:"
         echo "$leaked"
