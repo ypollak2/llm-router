@@ -1,4 +1,4 @@
-<!-- llm_router-rules-version: 11 -->
+<!-- llm_router-rules-version: 12 -->
 # LLM Router — Global Routing Rules
 
 > Installed by llm_router. These rules help you route each task to the cheapest capable
@@ -59,8 +59,36 @@ does not decide for you: if the result comes back unapplied (validation failed a
 3 tries) or the task genuinely needs exploration across many unknown files, do the
 edit yourself — this is guidance, not enforcement.
 
+## Commit messages and PR bodies → do not write them: use the placeholder
+
+A PreToolUse hook (`llm_router-text-job-bind.py`, listed by `llm-router verify`) writes the commit
+message or PR body from the real diff with the local model, checks it, and puts it in your command.
+You do not write that text and you do not copy it. Write exactly:
+
+```
+git commit -m "${LLM_TEXT:?}"
+gh pr create --title "<short title>" --body "${LLM_TEXT:?}"
+```
+
+- Keep the double quotes. If the hook did not replace the placeholder, the shell aborts the command
+  (`LLM_TEXT: parameter not set`), so the placeholder is never committed or posted. In that case the hook
+  is not active here: write the text yourself.
+- **Stage in its own command first** (`git add <paths>`), then run the commit alone. A `git add` (or any
+  command that changes files) before it on the same line is refused: the text is built from the repository
+  as it is when the hook runs. For a PR, commit and push first. `cd <dir> && git commit ...` and
+  `git -C <dir> commit ...` are fine.
+- Anything else you write in the same command stays. Put attribution lines in a second `-m "Co-Authored-By: ..."`,
+  or on new lines after the placeholder inside the PR body quotes (a real line break, not a typed `\n`).
+- Not supported with the placeholder: `--amend`, paths after the message, `-F`, `--fill`, `--web`, heredocs
+  and `$(...)` in the message.
+- A denied command is not a failure: the reason says why (the local job did not pass its checks, did not
+  finish in time, or the shape is unsupported) and nothing was run. Write the text yourself and run the
+  command again without the placeholder.
+
 ## Self-contained text jobs → `llm_text_job` (on by default for a passed local model)
 
+(Commit messages and PR bodies in a git/gh command use the placeholder above, which is this same job,
+bound. This section is for a summary of long output and for hosts where that hook is not installed.)
 Writing a commit message from a diff, a PR description from commits/diff, or a summary
 of long test/log output is a job whose ENTIRE input is already in hand — there is
 nothing for a local model to guess, which is the usual failure mode this file warns

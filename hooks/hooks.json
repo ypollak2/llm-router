@@ -47,6 +47,16 @@
           }
         ],
         "matcher": "Agent"
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/text-job-bind.py",
+            "timeout": 130
+          }
+        ],
+        "matcher": "Bash"
       }
     ],
     "SubagentStart": [

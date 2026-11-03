@@ -44,7 +44,7 @@ timeout, 60 s by default): the invocation used all the time the host gives it.
 The PRD latency bar a hook is judged against is ``HOOK_BUDGETS_MS``.
 
 ROUTER-ADDED TIME (PLAN v16 P0.9). A row whose run named a model phase
-(``MODEL_PHASES``: ``draft_chain``, ``zce_model``, ``codex_delegation``, ``cold_wait``) also carries
+(``MODEL_PHASES``: ``draft_chain``, ``zce_model``, ``codex_delegation``, ``text_job``, ``cold_wait``) also carries
 ``router_added_ms`` = ``elapsed_ms`` minus the model time, with a ``cold_wait``
 reported inside another model phase subtracted once. ``set_session(id)`` adds
 ``session_id`` so a reader can count sessions. ``host`` names the CLI that ran the
@@ -154,6 +154,7 @@ HOOK_BUDGETS_MS: dict[str, int] = {
     "bash-compress": 300,
     "session-start": 2_000,
     "session-end": 300,
+    "text-job-bind": 300,  # W7 (D-360): router-added; the local model's wait is the ``text_job`` model phase
     "codex-stop": 300,  # P35-3 (D-228): the house Stop-hook budget; stat + one JSON read, no llm_router import
     "statusline": 100,
 }
@@ -173,6 +174,7 @@ DEFAULT_BUDGET_MS = 300
 #:   MEASUREMENT.md).
 HOOK_TIMEOUTS_MS: dict[str, int] = {
     "agent-route": 320_000,
+    "text-job-bind": 130_000,  # install_hooks._HOOK_TIMEOUTS; a test pins the two together
 }
 
 #: The host's default hook timeout (MEASUREMENT.md).
@@ -180,10 +182,10 @@ DEFAULT_TIMEOUT_MS = 60_000
 
 #: Phases that are time spent waiting on a model, not time the router added:
 #: ``draft_chain`` (the whole DIRECT draft chain), ``zce_model`` (the
-#: zero-Claude edit's model call) and ``cold_wait`` (Ollama's own model-load
-#: time). ``cold_wait`` is usually reported from INSIDE one of the other two;
+#: zero-Claude edit's model call), ``text_job`` (the text-job-bind hook's wait on the local
+#: model) and ``cold_wait`` (Ollama's own model-load time). ``cold_wait`` is usually reported from INSIDE one of the other two;
 #: the recorder knows when it is (``_model_depth``) and subtracts it once.
-MODEL_PHASES: tuple[str, ...] = ("draft_chain", "zce_model", "codex_delegation", "cold_wait")
+MODEL_PHASES: tuple[str, ...] = ("draft_chain", "zce_model", "codex_delegation", "text_job", "cold_wait")
 
 #: Hooks whose row ALWAYS carries ``router_added_ms`` (elapsed minus ``MODEL_PHASES``,
 #: the same definition ``agent-route`` writes), also when no model phase ran. Their

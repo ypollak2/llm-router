@@ -20,6 +20,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from llm_router.text_job_bind.limits import HOOK_TIMEOUT_SEC as _TEXT_JOB_BIND_HOOK_TIMEOUT_SEC
 from llm_router.tool_surface import localize  # CHZ-SURF-01
 
 from llm_router import paths
@@ -701,6 +702,10 @@ _HOOK_DEFS = [
     ("status-bar.py", "llm_router-status-bar.py", "UserPromptSubmit", ""),
     ("enforce-route.py", "llm_router-enforce-route.py", "PreToolUse", ""),
     ("agent-route.py", "llm_router-agent-route.py", "PreToolUse", "Agent"),
+    # D-360 / W7: binds `git commit -m "${LLM_TEXT:?}"` and `gh pr create --body "${LLM_TEXT:?}"` to the
+    # local text job: it writes the checked text to a file and rewrites the command to read it. It waits
+    # on a local model, so it registers its own timeout (_HOOK_TIMEOUTS below). Claude Code only.
+    ("text-job-bind.py", "llm_router-text-job-bind.py", "PreToolUse", "Bash"),
     ("subagent-start.py", "llm_router-subagent-start.py", "SubagentStart", ""),
     ("usage-refresh.py", "llm_router-usage-refresh.py", "PostToolUse", "llm_|mcp__llm_router__llm"),
     ("cc-usage-track.py", "llm_router-cc-usage-track.py", "PostToolUse", "Agent"),
@@ -743,6 +748,10 @@ _AGENT_ROUTE_HOOK_TIMEOUT_SEC = 320
 _DELEGATION_MARGIN_SEC = 20
 _HOOK_TIMEOUTS: dict[str, int] = {
     "llm_router-agent-route.py": _AGENT_ROUTE_HOOK_TIMEOUT_SEC,
+    # The text-job-bind hook waits on a local model for up to BUDGET_SEC and must answer (even
+    # with a deny) before the host's SILENT kill, which would let the placeholder command run.
+    # The two numbers live in text_job_bind.limits; a test pins them together.
+    "llm_router-text-job-bind.py": _TEXT_JOB_BIND_HOOK_TIMEOUT_SEC,
 }
 
 # Sidecar shell scripts session-start.py shells out to (start-ollama.sh,

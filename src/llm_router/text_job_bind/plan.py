@@ -1,0 +1,464 @@
+"""Read a Bash command line and decide whether, and how, its placeholder can be bound.
+
+``analyse`` answers: does this command put ``"${LLM_TEXT:?}"`` where a commit message or a PR
+body goes, which repository does it act on, and is that repository, at the moment the hook
+runs, in the state the command will find it in? The last part is why predecessors are checked:
+the checked text is built from the repository as it is BEFORE the command runs, so a
+``git add`` earlier on the same line would make it stale. Every other shape that cannot be
+proven safe is refused with a message that says what to do instead. Nothing is guessed.
+
+The rewrite never puts model text in the command. The text goes to a private file and the
+command gets ``-F <file>`` (``git commit``) or ``--body-file <file>`` (``gh pr create``), so there
+is nothing to quote, nothing to escape and no way for the text to be read as shell.
+"""
+
+from __future__ import annotations
+
+import os
+import shlex
+from dataclasses import dataclass, field
+
+from llm_router.text_job_bind.shellscan import Command, Piece, Word, scan_commands
+
+JOB_COMMIT = "commit_message"
+JOB_PR = "pr_description"
+
+#: Env assignments that cannot change which repository ``git`` acts on or which index it reads.
+_GIT_ENV_OK = frozenset({
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+})
+
+#: Commands that read or print and change nothing a diff or a commit list depends on.
+_NEUTRAL_COMMANDS = frozenset({
+    "pwd", "echo", "printf", "true", "false", ":", "test", "[", "ls", "cat", "head", "tail", "wc",
+    "grep", "which", "sleep", "date", "whoami",
+})
+_NEUTRAL_GIT = frozenset({
+    "status", "log", "diff", "show", "rev-parse", "rev-list", "branch", "remote", "config", "fetch",
+    "push", "ls-files", "ls-tree", "cat-file", "show-ref", "for-each-ref", "merge-base", "var",
+    "shortlog", "blame", "grep", "check-ignore", "diff-index", "diff-tree", "name-rev", "describe",
+})
+_NEUTRAL_GH = frozenset({
+    ("pr", "view"), ("pr", "list"), ("pr", "status"), ("pr", "checks"), ("pr", "diff"),
+    ("auth", "status"), ("repo", "view"),
+})
+
+#: ``git`` global options that take no value and do not move the repository.
+_GIT_GLOBAL_FLAGS = frozenset({
+    "--no-pager", "-P", "--paginate", "-p", "--no-optional-locks", "--no-replace-objects",
+    "--literal-pathspecs", "--no-literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+    "--icase-pathspecs",
+})
+_GIT_GLOBAL_MOVES = ("--git-dir", "--work-tree", "--namespace", "--super-prefix", "--exec-path", "--bare")
+
+_COMMIT_SPEC = {
+    "long_flags": frozenset({
+        "all", "no-verify", "signoff", "quiet", "verbose", "no-gpg-sign", "gpg-sign", "no-status",
+        "status", "reset-author", "no-edit",
+    }),
+    "long_values": frozenset({
+        "message", "file", "trailer", "author", "date", "cleanup", "reuse-message",
+        "reedit-message", "template", "fixup", "squash",
+    }),
+    "short_flags": frozenset("asnqvS"),
+    "short_values": frozenset("mFCct"),
+    "where": "git commit",
+}
+#: Message sources that cannot be combined with a generated message.
+_COMMIT_CONFLICTS = frozenset({"file", "F", "reuse-message", "C", "reedit-message", "c", "template", "t",
+                               "fixup", "squash"})
+
+_PR_SPEC = {
+    "long_flags": frozenset({
+        "draft", "fill", "fill-first", "fill-verbose", "web", "no-maintainer-edit", "dry-run", "editor",
+    }),
+    "long_values": frozenset({
+        "title", "body", "body-file", "base", "head", "repo", "assignee", "label", "milestone",
+        "project", "reviewer", "template", "recover",
+    }),
+    "short_flags": frozenset("dfwe"),
+    "short_values": frozenset("tbFBHRalmprT"),
+    "where": "gh pr create",
+}
+_PR_REFUSED = frozenset({"fill", "fill-first", "fill-verbose", "web", "editor", "template", "repo",
+                         "recover", "f", "w", "e", "T", "R"})
+
+
+class Unsupported(Exception):
+    """The command cannot be bound. ``code`` is a short stable reason for the ledger; ``message``
+    is what the model is told (plain text, says what to do instead)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+@dataclass
+class Opt:
+    """One option read from an argument list."""
+
+    word: Word  # the option word (for ``--name=value`` it also carries the value)
+    name: str  # long name without dashes, or the short letter
+    value: Word | None  # None for a flag
+    eq: bool = False  # ``--name=value`` in a single word
+    prefix: str = ""  # short cluster: the letters before this one (``a`` for ``-am``)
+    long: bool = False
+
+
+@dataclass
+class Edit:
+    start: int
+    end: int
+    text: str
+
+
+@dataclass
+class Plan:
+    job: str
+    repo_dir: str
+    command: str
+    messages: list[Opt] = field(default_factory=list)  # message options (commit) / the body option (PR)
+    all_tracked: bool = False
+    base: str | None = None
+    head: str | None = None
+    title: str | None = None
+
+    def final_text(self, generated: str) -> str:
+        """The text the file holds: the generated text where the placeholder was and every other
+        paragraph (trailers, a footer) exactly as the model wrote it."""
+        parts = []
+        for o in self.messages:
+            assert o.value is not None
+            v = o.value.value_with(generated)
+            assert v is not None
+            parts.append(v.strip("\n").rstrip())
+        return "\n\n".join(p for p in parts if p) + "\n"
+
+    def rewrite(self, path: str) -> str:
+        """The command with the message source replaced by the file at ``path``."""
+        q = shlex.quote(path)
+        first, rest = self.messages[0], self.messages[1:]
+        edits: list[Edit] = []
+        if self.job == JOB_COMMIT:
+            if first.eq:
+                edits.append(Edit(first.word.start, first.word.end, f"--file={q}"))
+            else:
+                assert first.value is not None
+                if first.long:
+                    flag = "--file"
+                else:
+                    flag = f"-{first.prefix} -F" if first.prefix else "-F"
+                edits.append(Edit(first.word.start, first.word.end, flag))
+                edits.append(Edit(first.value.start, first.value.end, q))
+            for extra in rest:
+                last = extra.word if extra.eq else extra.value
+                assert last is not None
+                edits.append(Edit(_gap_start(self.command, extra.word.start), last.end, ""))
+        else:
+            if first.eq:
+                edits.append(Edit(first.word.start, first.word.end, f"--body-file={q}"))
+            else:
+                assert first.value is not None
+                edits.append(Edit(first.word.start, first.word.end, "--body-file"))
+                edits.append(Edit(first.value.start, first.value.end, q))
+        out = self.command
+        for e in sorted(edits, key=lambda e: e.start, reverse=True):
+            out = out[:e.start] + e.text + out[e.end:]
+        return out
+
+
+def _gap_start(src: str, pos: int) -> int:
+    while pos > 0 and src[pos - 1] in " \t":
+        pos -= 1
+    return pos
+
+
+def _short(c: Command, n: int = 40) -> str:
+    return " ".join(w.raw for w in c.argv[:2])[:n] or "that command"
+
+
+def _lit(w: Word, what: str) -> str:
+    v = w.literal()
+    if v is None:
+        raise Unsupported("expansion", f"{what} uses a shell expansion; write it as plain text.")
+    return v
+
+
+def _resolve(cwd: str, w: Word, what: str) -> str:
+    target = _lit(w, what)
+    if w.raw[:1] == "~":  # an unquoted leading tilde
+        target = os.path.expanduser(target)
+    return os.path.normpath(target if os.path.isabs(target) else os.path.join(cwd, target))
+
+
+def _check_redirs(c: Command) -> None:
+    for op, target in c.redirs:
+        r, t = op.redir, target.literal()
+        if r in (">&", "<&") and t is not None and t.isdigit():
+            continue
+        if t == "/dev/null" and r in (">", ">>", "<", "&>", "&>>"):
+            continue
+        raise Unsupported(
+            "redirect", f"`{_short(c)}` redirects output or input; run it as its own command first."
+        )
+
+
+def _check_assigns(c: Command) -> None:
+    for a in c.assigns:
+        name = a.raw.split("=", 1)[0]
+        if name.startswith("GIT_") and name not in _GIT_ENV_OK:
+            raise Unsupported(
+                "git_env", f"{name} changes which repository git reads; run the command without it."
+            )
+
+
+def _git_subcommand(args: list[Word]) -> str | None:
+    """The git subcommand after its global options, ``None`` if it cannot be read plainly."""
+    i = 0
+    while i < len(args):
+        a = args[i].literal()
+        if a is None:
+            return None
+        if a in ("-C", "-c"):
+            i += 2
+        elif a in _GIT_GLOBAL_FLAGS:
+            i += 1
+        elif a.startswith("-"):
+            return None
+        else:
+            return a
+    return None
+
+
+def _neutral(c: Command, cwd: str, job: str) -> str:
+    """The working directory after ``c``; raises if ``c`` could change what the job reads."""
+    if c.structural:
+        raise Unsupported(
+            "structure",
+            "The line uses grouping or a shell keyword before the placeholder command; "
+            "run the placeholder command on its own.",
+        )
+    _check_redirs(c)
+    _check_assigns(c)
+    if not c.argv:
+        return cwd
+    name0 = c.argv[0].literal()
+    if name0 is None:
+        raise Unsupported(
+            "unknown_predecessor",
+            "A command before the placeholder command is not plain text; run the placeholder command alone.",
+        )
+    name = os.path.basename(name0)
+    if name == "cd":
+        args = [w for w in c.argv[1:] if w.literal() not in ("--", "-P", "-L", "-e", "-@")]
+        if len(args) != 1 or args[0].literal() == "-":
+            raise Unsupported("cd", "`cd` before the placeholder command needs exactly one plain directory.")
+        return _resolve(cwd, args[0], "`cd` target")
+    if name in _NEUTRAL_COMMANDS:
+        return cwd
+    if name == "git" and _git_subcommand(c.argv[1:]) in _NEUTRAL_GIT:
+        return cwd
+    if name == "gh" and len(c.argv) >= 3 and (c.argv[1].literal(), c.argv[2].literal()) in _NEUTRAL_GH:
+        return cwd
+    raise Unsupported(
+        "mutating_predecessor",
+        f"`{_short(c)}` runs before the placeholder command on the same line, so the checked text "
+        "would be built from a repository that has not changed yet. Run it as its own command "
+        f"first, then run the {'commit' if job == JOB_COMMIT else 'pull request'} command alone.",
+    )
+
+
+def _option_parts(w: Word) -> tuple[str, Word | None] | None:
+    """``(name text, attached value)`` for an option word, ``None`` for a positional word."""
+    first = w.pieces[0] if w.pieces else None
+    if first is None or first.kind != "lit" or not first.text.startswith("-") or first.text == "-":
+        return None
+    t = first.text
+    if t.startswith("--"):
+        if "=" in t:
+            name, _, rest = t.partition("=")
+            pieces = ((Piece("lit", rest),) if rest else ()) + w.pieces[1:]
+            n = len(name) + 1
+            return name, Word(w.start + n, w.end, w.raw[n:], pieces)
+        if len(w.pieces) == 1:
+            return t, None
+        raise Unsupported("option", f"Write {t} and its value as separate words.")
+    if len(w.pieces) == 1:
+        return t, None
+    raise Unsupported("option", f"Write {t} and its value as separate words, not attached.")
+
+
+def _read_options(argv: list[Word], i: int, spec: dict) -> list[Opt]:
+    where = spec["where"]
+    out: list[Opt] = []
+    while i < len(argv):
+        w = argv[i]
+        parts = _option_parts(w)
+        if parts is None:
+            if w.has_token:
+                raise Unsupported("misplaced", "Pass the placeholder as the value of -m (git commit) or --body (gh pr create).")
+            raise Unsupported("positional", f"`{where}` with a path or other positional argument is not supported with the placeholder.")
+        text, attached = parts
+        if text == "--":
+            raise Unsupported("positional", f"`{where} -- <paths>` is not supported with the placeholder.")
+        if text.startswith("--"):
+            name = text[2:]
+            if name in spec["long_values"]:
+                if attached is not None:
+                    out.append(Opt(w, name, attached, eq=True, long=True))
+                    i += 1
+                else:
+                    if i + 1 >= len(argv):
+                        raise Unsupported("option_value", f"{text} needs a value.")
+                    out.append(Opt(w, name, argv[i + 1], long=True))
+                    i += 2
+            elif name in spec["long_flags"] and attached is None:
+                out.append(Opt(w, name, None, long=True))
+                i += 1
+            else:
+                raise Unsupported("option", f"`{where} --{name}` is not supported with the placeholder.")
+            continue
+        letters = text[1:]
+        took_value = False
+        for k, ch in enumerate(letters):
+            if ch in spec["short_flags"]:
+                out.append(Opt(w, ch, None, prefix=letters[:k]))
+            elif ch in spec["short_values"]:
+                if k != len(letters) - 1:
+                    raise Unsupported("option", f"Write -{ch} with its value as the next word, not attached.")
+                if i + 1 >= len(argv):
+                    raise Unsupported("option_value", f"-{ch} needs a value.")
+                out.append(Opt(w, ch, argv[i + 1], prefix=letters[:k]))
+                took_value = True
+            else:
+                raise Unsupported("option", f"`{where} -{ch}` is not supported with the placeholder.")
+        i += 2 if took_value else 1
+    return out
+
+
+def _git_dirs(argv: list[Word], cwd: str) -> tuple[str, int]:
+    """Apply ``git -C <dir>`` globals to ``cwd``; return it and the index of the subcommand."""
+    i = 1
+    while i < len(argv):
+        a = _lit(argv[i], "a git option")
+        if a == "-C":
+            if i + 1 >= len(argv):
+                raise Unsupported("git_dir", "`git -C` needs a directory.")
+            cwd = _resolve(cwd, argv[i + 1], "`git -C` directory")
+            i += 2
+        elif a == "-c":
+            i += 2
+        elif a in _GIT_GLOBAL_FLAGS:
+            i += 1
+        elif a.startswith(_GIT_GLOBAL_MOVES):
+            raise Unsupported("git_dir", f"{a.split('=')[0]} moves the repository; run the commit without it.")
+        elif a.startswith("-"):
+            raise Unsupported("option", f"git option {a.split('=')[0]} is not supported with the placeholder.")
+        else:
+            return cwd, i
+    raise Unsupported("not_commit", "No git subcommand found.")
+
+
+def _plan_commit(command: str, argv: list[Word], cwd: str) -> Plan:
+    repo, sub = _git_dirs(argv, cwd)
+    if _lit(argv[sub], "the git subcommand") != "commit":
+        raise Unsupported("not_commit", "The placeholder is only supported as the message of `git commit`.")
+    messages: list[Opt] = []
+    all_tracked = False
+    for o in _read_options(argv, sub + 1, _COMMIT_SPEC):
+        if o.name in ("m", "message"):
+            messages.append(o)
+        elif o.name in _COMMIT_CONFLICTS:
+            raise Unsupported("message_source", f"`git commit -{'-' if o.long else ''}{o.name}` conflicts with the placeholder message.")
+        elif o.name in ("a", "all"):
+            all_tracked = True
+    return Plan(JOB_COMMIT, repo, command, messages=messages, all_tracked=all_tracked)
+
+
+def _plan_pr(command: str, argv: list[Word], cwd: str) -> Plan:
+    if len(argv) < 3 or argv[1].literal() != "pr" or argv[2].literal() != "create":
+        raise Unsupported("not_pr", "The placeholder is only supported as the body of `gh pr create`.")
+    plan = Plan(JOB_PR, cwd, command)
+    for o in _read_options(argv, 3, _PR_SPEC):
+        if o.name in _PR_REFUSED:
+            raise Unsupported("pr_option", f"`gh pr create {'--' if o.long else '-'}{o.name}` is not supported with the placeholder.")
+        if o.name in ("b", "body", "F", "body-file"):
+            plan.messages.append(o)
+        elif o.name in ("B", "base"):
+            plan.base = o.value.literal() if o.value is not None else None
+        elif o.name in ("H", "head"):
+            plan.head = o.value.literal() if o.value is not None else None
+        elif o.name in ("t", "title"):
+            plan.title = o.value.literal() if o.value is not None else None
+    return plan
+
+
+def _validate(plan: Plan, job_cmd: Command) -> None:
+    where = "-m (git commit) or --body (gh pr create)"
+    held = {id(o.value) for o in plan.messages if o.value is not None}
+    for w in job_cmd.argv:
+        if w.has_token and id(w) not in held and not any(o.word is w and o.eq for o in plan.messages):
+            raise Unsupported("misplaced", f"Pass the placeholder as the value of {where}.")
+    if not plan.messages:
+        raise Unsupported("misplaced", f"Pass the placeholder as the value of {where}.")
+    if sum(1 for o in plan.messages if o.value is not None and o.value.has_token) != 1:
+        raise Unsupported("misplaced", "Use the placeholder in exactly one message or body option.")
+    for o in plan.messages:
+        assert o.value is not None
+        if o.value.has_expansion:
+            raise Unsupported("expansion", "The message or body uses a shell expansion; write it as plain text.")
+    if plan.job == JOB_PR:
+        if len(plan.messages) != 1:
+            raise Unsupported("pr_body", "Give gh pr create one body option, not several.")
+        o = plan.messages[0]
+        if o.name in ("F", "body-file"):
+            v = o.value
+            if v is None or not (len(v.pieces) == 1 and v.pieces[0].kind == "tok"):
+                raise Unsupported("pr_body", "With --body-file the value must be exactly the placeholder.")
+
+
+def analyse(command: str, cwd: str) -> Plan | None:
+    """The plan for ``command``; ``None`` if it does not use the placeholder in a git or gh command.
+
+    Raises :class:`Unsupported` when it does but the shape cannot be bound safely, and
+    :class:`~llm_router.text_job_bind.shellscan.ScanError` when the line cannot be read.
+    """
+    cmds = scan_commands(command)
+    for c in cmds:
+        for w in (*c.assigns, *c.argv, *(t for _o, t in c.redirs)):
+            if w.token_in_expansion:
+                raise Unsupported(
+                    "token_in_expansion",
+                    "The placeholder is inside $(...) or backticks; use it as a plain \"${LLM_TEXT:?}\" argument.",
+                )
+    holders = [k for k, c in enumerate(cmds) if any(w.has_token for w in c.argv)]
+    elsewhere = any(w.has_token for c in cmds for w in (*c.assigns, *(t for _o, t in c.redirs)))
+    if not holders and not elsewhere:
+        return None
+    if elsewhere or len(holders) > 1:
+        raise Unsupported(
+            "misplaced",
+            "Use one placeholder, as the value of -m (git commit) or --body (gh pr create), in one command.",
+        )
+    idx = holders[0]
+    job_cmd = cmds[idx]
+    tool = os.path.basename(job_cmd.argv[0].literal() or "")
+    if tool not in ("git", "gh"):
+        if any(os.path.basename(w.literal() or "") in ("git", "gh") for w in job_cmd.argv[1:4]):
+            if job_cmd.structural:
+                raise Unsupported("structure", "Run the placeholder command on its own, not inside a group, loop or keyword.")
+            raise Unsupported("wrapper", "Run git or gh directly (no env, sudo, time or command in front) with the placeholder.")
+        return None  # the placeholder sits in some other command (an echo, a doc): not ours
+    if job_cmd.structural:
+        raise Unsupported("structure", "Run the placeholder command on its own, not inside a group or keyword.")
+    _check_redirs(job_cmd)
+    _check_assigns(job_cmd)
+    job = JOB_COMMIT if tool == "git" else JOB_PR
+    cwd_now = cwd
+    for pc in cmds[:idx]:
+        cwd_now = _neutral(pc, cwd_now, job)
+    plan = (_plan_commit if tool == "git" else _plan_pr)(command, job_cmd.argv, cwd_now)
+    _validate(plan, job_cmd)
+    return plan

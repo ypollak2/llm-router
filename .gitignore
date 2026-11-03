@@ -123,6 +123,7 @@ tests/hook_rendering/
 # is the same failure that left the Codex plugin pointing at a .mcp.json
 # no clone ever contained.
 !/docs/ROUTERARENA.md
+!/docs/text-job-bind.md
 # F107: retention of quota_history.jsonl (referenced by changelog.d/F107.fixed.md).
 !/docs/RETENTION.md
 # P2.4 ext-a: the empty-chain table tests/test_p24_empty_chain_table.py parses.

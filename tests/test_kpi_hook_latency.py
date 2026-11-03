@@ -295,6 +295,16 @@ def test_agent_route_timeout_is_the_registered_timeout():
     assert hl.timeout_ms("agent-route") == _AGENT_ROUTE_HOOK_TIMEOUT_SEC * 1000 == 320_000
 
 
+def test_text_job_bind_timeout_is_the_registered_timeout_and_its_model_wait_is_a_model_phase():
+    from llm_router.install_hooks import _HOOK_TIMEOUTS
+    from llm_router.text_job_bind import limits
+
+    assert hl.timeout_ms("text-job-bind") == _HOOK_TIMEOUTS["llm_router-text-job-bind.py"] * 1000 == limits.HOOK_TIMEOUT_SEC * 1000
+    assert "text_job" in hl.MODEL_PHASES
+    row = {"hook": "text-job-bind", "elapsed_ms": 40_300.0, "phases_ms": {"text_job": 40_000.0}}
+    assert hl.router_added_ms(row) == pytest.approx(300.0)
+
+
 def test_an_unlisted_hook_is_held_to_the_default_not_to_no_budget():
     assert hl.budget_ms("some-new-hook") == hl.DEFAULT_BUDGET_MS > 0
 
@@ -419,6 +429,7 @@ _EVENTS = {
     "usage-refresh": "PostToolUse", "cc-usage-track": "PostToolUse",
     "agent-depth-release": "PostToolUse", "playwright-compress": "PostToolUse",
     "bash-compress": "PostToolUse", "session-end": "Stop",
+    "text-job-bind": "PreToolUse",
 }
 
 #: A benign payload per hook for a REAL subprocess run. session-start is absent
@@ -452,6 +463,9 @@ _PAYLOADS = {
                       "cwd": "/tmp"},
     "session-end": {"session_id": "t-s1", "hook_event_name": "Stop",
                     "transcript_path": "/nonexistent", "cwd": "/tmp"},
+    # W7 (D-360): a Bash command that is not git commit / gh pr create: the fast path, no model, no git.
+    "text-job-bind": {"session_id": "t-s1", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                      "tool_input": {"command": "ls"}, "cwd": "/tmp"},
 }
 
 
