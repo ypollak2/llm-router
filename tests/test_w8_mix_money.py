@@ -126,6 +126,29 @@ def test_the_segments_write_the_split_and_keep_mix_sub_as_every_seat(tmp_path, m
     assert int(mix["mix_claude"]) + int(mix["mix_other"]) == int(mix["mix_sub"])
 
 
+def test_new_segments_with_an_old_package_keep_the_old_mix_line_instead_of_dropping_it(tmp_path, monkeypatch):
+    """Review S3: the seat split sat in the same try as the mandatory figures, so a package without
+    ``mix_subscription_claude`` (a rollback, or the wrong deploy order) made the whole segment vanish."""
+    path, con = _db(tmp_path)
+    for i, prov in enumerate(["anthropic"] * 3 + ["codex"] * 2 + ["ollama"]):
+        con.execute("INSERT INTO routing_decisions (timestamp, session_id, final_provider, reason_code, provenance) "
+                    "VALUES (?,?,?,?,'runtime')", (_stamp(i)[0], "s1", prov, "router_unhinted"))
+    con.commit()
+    con.close()
+    monkeypatch.setattr(lv, "_load_seats", lambda: _seats(codex=True))
+    real = lv.LedgerWindow.figures
+
+    def old_figures(self):
+        figs = real(self)
+        figs.pop("mix_subscription_claude"), figs.pop("mix_subscription_other")      # what an older package returns
+        return figs
+
+    monkeypatch.setattr(lv.LedgerWindow, "figures", old_figures)
+    mix = ss.mix_segment(str(tmp_path), NOW, "s1")
+    assert (mix["mix_local"], mix["mix_sub"], mix["mix_paid"], mix["mix_n"]) == ("1", "5", "0", "6")   # the old line, whole
+    assert "mix_claude" not in mix and "mix_other" not in mix and mix["mix_win"] == "session"
+
+
 # ── the money: one call, once ────────────────────────────────────────────────────────────────────
 
 def _call(con, i, *, model=LOCAL, tin=1000, tout=50, usage=True, claude=True, savings=True, skew=0, cid=None, host="router"):

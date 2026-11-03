@@ -339,7 +339,9 @@ def mix_segment(state: str, now: float | None = None, session: str = "") -> dict
         shown = {k: lv.show(figs[f], "{:.0f}") for k, f in (
             ("mix_local", "mix_local"), ("mix_sub", "mix_subscription"), ("mix_paid", "mix_paid"),
             ("mix_unc", "mix_unclassified"), ("mix_n", "executed"))}
-        seats = {k: lv.show(figs[f], "{:.0f}") for k, f in (
+        # the split is optional: a package older than this script has no such figure, and the segment then
+        # degrades to the old L/S/P line (mix_sub) instead of disappearing with the KeyError
+        seats = {k: (lv.show(figs[f], "{:.0f}") if f in figs else None) for k, f in (
             ("mix_claude", "mix_subscription_claude"), ("mix_other", "mix_subscription_other"))}
     except Exception:  # noqa: BLE001
         return {}
