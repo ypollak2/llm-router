@@ -1,7 +1,8 @@
 """BIND W3: ``scripts/release/bind_report.py`` prints the D-358 success bar.
 
 Each criterion gets a status: PASS, FAIL, INSUFFICIENT (the window has not produced the
-n the bar needs) or PENDING (the hand check has not been entered). The corpora below are
+n the bar needs), PENDING (the hand check has not been entered) or REPORTED (the outcome
+rate, which owner decision D-359 turned from a gate into a figure). The corpora below are
 synthetic; the arithmetic of the bar is what is pinned.
 """
 from __future__ import annotations
@@ -39,7 +40,7 @@ HISTORY = {"releases": [{"release": "15.4.0", "used_rate": 2 / 873, "used": 2, "
 
 
 def build(tmp_path, bound=0, void=0, blocked=0, prompts=0, holds=0, probes=0, used_mcp=0, extra_unused=0,
-          before_since_void=0, start=SINCE, pre_used_mcp=0):
+          before_since_void=0, start=SINCE):
     """Delegations spread from `start` to the end of the window, plus prompts, holds, probes and MCP units."""
     t = Transcript(tmp_path, SID)
     rows = []
@@ -67,11 +68,6 @@ def build(tmp_path, bound=0, void=0, blocked=0, prompts=0, holds=0, probes=0, us
         t.call(at, tid, "Agent", {"prompt": agent_prompt(f"old{i}")})
         t.result(at + 10, tid, "Async agent launched successfully.\nagentId: o" + str(i))
         rows.append(codex_row(at + 9.5, tool_use_id=tid))
-    for i in range(pre_used_mcp):                               # used units before the fix went live
-        at = SINCE - (i + 1) * 600
-        t.call(at, f"pre{i}", "mcp__llm_router__llm", {"prompt": f"what is the old policy number {i}", "task": "query"})
-        t.result(at + 1, f"pre{i}", json.dumps({"result": f"> 🤖 **x** · 9 tokens · $0 · 1ms\n\n{ANSWER}\n\n─────\n→ x"}))
-        t.say(at + 2, "The router says " + ANSWER)
     for i in range(holds):
         t.call(SINCE + 100 + i, f"h{i}", "Bash", {"command": "x"})
         t.result(SINCE + 101 + i, f"h{i}", "PreToolUse:Bash hook error: [llm_router] Routing directive BLOCKED.\nViolation 1/4", is_error=True)
@@ -103,7 +99,7 @@ def run(tmp_path, capsys, *extra, **corpus):
 
 
 BIND, BLOCKED, TOLL, GATE = ("Codex binding rate", "Blocked-answer share among bound units", "Toll probes",
-                             "Outcome gate under the fixed audit")
+                             "Outcome rate under the fixed audit (reported, not gated; D-359)")
 
 
 def test_binding_passes_at_ninety_percent_of_thirty_units(tmp_path, capsys):
@@ -248,34 +244,24 @@ def test_the_hold_ledger_is_found_in_the_state_dir_by_default(tmp_path, capsys):
     assert "0 holds in 150 prompts" in L[TOLL]["result"] and L[TOLL]["status"] == "PASS"
 
 
-def test_outcome_line_is_insufficient_without_fifty_attempted_units(tmp_path, capsys):
-    _, _, L = run(tmp_path, capsys, bound=10)
-    assert L[GATE]["status"] == "INSUFFICIENT" and "too few to tell" in L[GATE]["result"]
-
-
-def test_outcome_line_passes_above_the_recorded_rate_and_says_it_is_not_like_for_like(tmp_path, capsys):
+def test_outcome_line_is_reported_not_gated_and_cites_d359(tmp_path, capsys):
     _, _, L = run(tmp_path, capsys, void=40, used_mcp=5, extra_unused=20)
     g = L[GATE]
-    assert g["status"] == "PASS", g
-    assert g["result"].startswith("5/65 = 7.7% vs 15.4.0's 0.229% (2/873)")
-    assert "NOT LIKE FOR LIKE" in g["note"] and "audit v1" in g["note"] and "v2" in g["note"]
-    assert "--cross-version" in g["note"]
+    assert g["status"] == "REPORTED"                                   # a figure, never PASS or FAIL
+    assert g["result"].startswith("5/65 = 7.7% [Wilson 95%")
+    assert all("D-359" in g[k] for k in ("criterion", "target", "note"))
+    assert "0.229" not in json.dumps(g) and " vs " not in g["result"]  # no comparison with 15.4.0 (a different method)
+    assert "not compared with 15.4.0" in g["note"]
 
 
-def test_outcome_line_says_when_it_already_passes_before_the_fix(tmp_path, capsys):
-    """The pre-registered line (used rate above 0.229%) is met by the fixed audit on data in which no
-    handoff was bound, so a PASS there proves nothing about binding. The report says so."""
-    _, _, L = run(tmp_path, capsys, void=45, before_since_void=45, pre_used_mcp=10)
-    g = L[GATE]
-    assert g["status"] == "PASS" and L[BIND]["status"] == "FAIL"        # 0 of 45 bound, and the line still passes
-    assert "Before --since the same audit already reads 10/55 = 18.2%" in g["note"]
-    assert "passes without a single bound handoff" in g["note"]
-    _, _, L = run(tmp_path / "few", capsys, void=45, before_since_void=5, pre_used_mcp=2)     # 7 units: too few to say
-    assert "Before --since" not in L[GATE]["note"]
+def test_outcome_line_is_reported_at_a_rate_of_zero_and_on_a_small_sample(tmp_path, capsys):
+    _, _, L = run(tmp_path, capsys, void=60)                           # 0 used of 60: the old line failed here
+    assert L[GATE]["status"] == "REPORTED" and L[GATE]["result"].startswith("0/60 = 0.000%")
+    _, _, L = run(tmp_path / "small", capsys, bound=10)
+    assert L[GATE]["status"] == "REPORTED" and "too few to tell" in L[GATE]["result"]
 
 
-def test_outcome_line_keeps_comparing_with_15_4_0_after_a_rebaseline(tmp_path, capsys):
-    """D-358 names 15.4.0's rate. A v2 entry recorded by a rebaseline is not "the previous release" here."""
+def test_outcome_line_quotes_the_recorded_baseline_of_its_own_audit_version(tmp_path, capsys):
     projects, state = build(tmp_path, void=40, used_mcp=5, extra_unused=20)
     hist = tmp_path / "history.json"
     hist.write_text(json.dumps({"releases": [HISTORY["releases"][0],
@@ -283,17 +269,30 @@ def test_outcome_line_keeps_comparing_with_15_4_0_after_a_rebaseline(tmp_path, c
     BR.main(["--since", BR.iso(SINCE), "--until", BR.iso(UNTIL), "--projects-dir", str(projects), "--state-dir", str(state),
              "--history", str(hist), "--reference", "measured", "--json"])
     g = {x["criterion"]: x for x in json.loads(capsys.readouterr().out)["lines"]}[GATE]
-    assert g["status"] == "PASS" and "vs 15.4.0's 0.229% (2/873)" in g["result"]
+    assert "Recorded v2 baseline: 16.0.0 50/100 = 50.0% (same audit version, like for like)" in g["note"]
+    assert "No v2 baseline" not in g["note"]
+    _, _, L = run(tmp_path / "v1only", capsys, void=40, used_mcp=5, extra_unused=20)          # history holds only 15.4.0 (v1)
+    assert "No v2 baseline is recorded yet" in L[GATE]["note"]
+    assert "pre-release-verify.sh --outcome-cross-version rebaseline" in L[GATE]["note"]
 
 
-def test_outcome_line_fails_at_or_below_the_recorded_rate(tmp_path, capsys):
-    _, _, L = run(tmp_path, capsys, void=60)           # 0 used of 60
-    assert L[GATE]["status"] == "FAIL"
+def test_the_verdict_counts_the_gated_lines_only(tmp_path, capsys):
+    """Lines 1 to 3 pass and the outcome line reads 0 used of 40: the bar is met, because that line is reported."""
+    projects, state = build(tmp_path, bound=40, prompts=150)
+    sample = BR.hand_check_sample(_bound_ids(projects, state))
+    hand = tmp_path / "hand.jsonl"
+    hand.write_text("".join(json.dumps({"unit_id": i, "blocked": False}) + "\n" for i in sample))
+    rc = BR.main(["--since", BR.iso(SINCE), "--until", BR.iso(UNTIL), "--projects-dir", str(projects), "--state-dir", str(state),
+                  "--history", str(tmp_path / "h.json"), "--reference", "measured", "--hand-checked", str(hand), "--json"])
+    rep = json.loads(capsys.readouterr().out)
+    L = {x["criterion"]: x for x in rep["lines"]}
+    assert [L[k]["status"] for k in (BIND, BLOCKED, TOLL, GATE)] == ["PASS", "PASS", "PASS", "REPORTED"]
+    assert rep["verdict"] == "MET" and rc == 0
 
 
-def test_the_bar_is_met_only_when_every_line_passes(tmp_path, capsys):
+def test_the_bar_is_met_only_when_every_gated_line_passes(tmp_path, capsys):
     rc, rep, L = run(tmp_path, capsys, bound=40, void=0, prompts=150, used_mcp=3, extra_unused=10)
-    assert L[BIND]["status"] == "PASS" and L[TOLL]["status"] == "PASS" and L[GATE]["status"] == "PASS"
+    assert L[BIND]["status"] == "PASS" and L[TOLL]["status"] == "PASS" and L[GATE]["status"] == "REPORTED"
     assert L[BLOCKED]["status"] == "PENDING"            # no hand check entered: not yet met
     assert rep["verdict"] == "NOT MET" and rc == 1
 
@@ -338,7 +337,7 @@ def test_render_has_a_status_n_window_and_source_on_every_line(tmp_path, capsys)
     out = capsys.readouterr().out
     assert rc == 1
     for status_line in [ln for ln in out.splitlines() if ln[:2] in ("1.", "2.", "3.", "4.")]:
-        assert any(f"[{s}]" in status_line for s in ("PASS", "FAIL", "INSUFFICIENT", "PENDING"))
+        assert any(f"[{s}]" in status_line for s in ("PASS", "FAIL", "INSUFFICIENT", "PENDING", "REPORTED"))
     assert out.count("     n: ") == 4 and out.count("     window: ") == 4 and out.count("     source: ") == 4
     assert "ESTIMATE (not measured)" in out and "D-358 bar: NOT MET" in out
     assert audit.AUDIT_VERSION == 2

@@ -6,9 +6,9 @@
 
 One block per criterion, each with its n, the UTC window, the source and a
 status. Statuses are PASS, FAIL, INSUFFICIENT (the window has not yet produced the
-n the bar needs; a pass on 4 units is not a pass) and PENDING (the bar asks for a
-hand check that has not been entered). The exit code is 0 only when every gated
-line is PASS.
+n the bar needs; a pass on 4 units is not a pass), PENDING (the bar asks for a
+hand check that has not been entered) and REPORTED (shown, never a verdict). The
+exit code is 0 only when every gated line is PASS.
 
     1  Codex binding rate >= 90% on >= 30 delegated units, over >= 3 days: the Agent
        tool_result carries the Codex text AND no Claude sub-agent was launched for
@@ -21,10 +21,12 @@ line is PASS.
        < 1, and 0 fixed-reply probes ("Reply OK"). Holds and prompts come from BIND
        W2's hold ledger (``<state dir>/hold_events.jsonl``) when it has rows in the
        window, otherwise from the transcripts; probes are counted from the transcripts.
-    4  Outcome gate under the FIXED audit: the used rate over the 30 days ending at
-       --until is above 15.4.0's recorded 0.229%. 15.4.0 was scored by audit v1 and
-       this is audit v2; the line says so, because the two are not like for like
-       (see ``outcome_gate.py --cross-version``).
+    4  The outcome rate under the FIXED audit over the 30 days ending at --until:
+       REPORTED, not gated (owner decision D-359). The outcome gate was rebaselined at
+       the audit v2 number of 16.0.0 and is not compared with 15.4.0's 0.229% (audit
+       v1, a different method, transcripts purged); the binding rate carries the bar.
+       The line prints the v2 rate and, when the gate's history holds one, the
+       recorded v2 baseline.
     -  Reported, not gated: Claude output tokens and dollars avoided, as an ESTIMATE.
 
 The audit's rules are in ``outcome_audit.py``; this script only slices its units.
@@ -59,10 +61,6 @@ HOLDS_PER_100_MAX = 1.0
 MIN_PROMPTS = 50
 MIN_REFERENCE_UNITS = 30   # a live reference for the savings estimate needs this many void units
 GATE_DAYS = 30
-#: 15.4.0's recorded value, used only when the history file is not there. It was scored
-#: by audit v1: docs/measurements/outcome_audit_history.json, 2/873, recorded 2026-09-29.
-BASELINE_RELEASE = "15.4.0"
-FALLBACK_BASELINE = {"release": BASELINE_RELEASE, "used": 2, "attempted": 873, "used_rate": 2 / 873, "audit_version": 1}
 
 #: Output price per million tokens, copied from src/llm_router/pricing.py (the pricing
 #: page, re-checked 2026-09-28). tests/test_bind_report.py compares this table with that
@@ -108,7 +106,7 @@ def iso(ts: float) -> str:
 
 
 def pct(x: float | None) -> str:
-    # 3 decimals under 1%: 15.4.0's recorded rate is 0.229%, which "0.2%" would blur
+    # 3 decimals under 1% so a small rate is not blurred ("0.2%" for 0.229%)
     return "n/a" if x is None else (f"{100 * x:.3f}%" if x < 0.01 else f"{100 * x:.1f}%")
 
 
@@ -310,39 +308,30 @@ def report(units, ctx: dict, gate, audit, since: float, until: float, args, proj
                       "" if prompts >= args.min_prompts else
                       f"needs >= {args.min_prompts} organic prompts before a rate under 1 per 100 means anything"))
 
-    # 4. outcome gate (fixed audit)
+    # 4. the outcome rate under the fixed audit: REPORTED, not gated (owner decision D-359)
     rows, summary = audit._finish(list(units), ctx, "bind-report")
     leaks = gate.check_leaks(rows, summary)
     h = summary["headline"]
-    releases = (history or {}).get("releases") or []
-    # D-358 names 15.4.0's recorded rate, not "the latest": after a rebaseline the latest entry is a v2 one
-    base = next((e for e in releases if e.get("release") == BASELINE_RELEASE), FALLBACK_BASELINE)
-    base_v = gate.audit_version(base)
     cur_v = audit.AUDIT_VERSION
+    releases = (history or {}).get("releases") or []
+    base = next((e for e in reversed(releases) if gate.audit_version(e) == cur_v), None)
+    oci = h["ci95"]
+    res = f"{h['used']}/{h['attempted']} = {pct(h['rate'])}" + (f" [Wilson 95% {pct(oci[0])}..{pct(oci[1])}]" if oci else "")
+    if h["attempted"] < audit.MIN_N:
+        res += f" (too few to tell, n < {audit.MIN_N})"
+    note = ("D-359: the outcome gate was rebaselined at the audit v2 number, so this line is reported and the binding "
+            "rate (line 1) carries the bar. It is not compared with 15.4.0 (audit v1, transcripts purged). ")
+    note += (f"Recorded v{cur_v} baseline: {base['release']} {base['used']}/{base['attempted']} = {pct(base['used_rate'])} "
+             f"(same audit version, like for like). " if base else
+             f"No v{cur_v} baseline is recorded yet: the gate's first run records it "
+             f"(pre-release-verify.sh --outcome-cross-version rebaseline). ")
+    note += f"With the not_applicable units counted as attempted the rate is {pct(summary['not_applicable']['used_rate_if_included'])}."
     if leaks:
-        status, res = "FAIL", f"{len(leaks)} inflated or unverifiable figure(s), first: {leaks[0]}"
-    elif h["attempted"] < audit.MIN_N:
-        status, res = "INSUFFICIENT", f"{h['used']}/{h['attempted']}: too few to tell (n < {audit.MIN_N})"
-    else:
-        res = f"{h['used']}/{h['attempted']} = {pct(h['rate'])} vs {base['release']}'s {pct(base['used_rate'])} " \
-              f"({base['used']}/{base['attempted']})"
-        status = "PASS" if h["rate"] > base["used_rate"] else "FAIL"
-    pre = [u for u in units if u.ts < since and u.label != audit.NOT_APPLICABLE]
-    pre_used = sum(u.label == "used" for u in pre)
-    pre_note = ""
-    if len(pre) >= audit.MIN_N and pre_used / len(pre) > base["used_rate"]:
-        pre_note = (f" Before --since the same audit already reads {pre_used}/{len(pre)} = {pct(pre_used / len(pre))}, "
-                    f"above the same baseline: this line passes without a single bound handoff, so it cannot detect "
-                    f"a failure of the binding fix.")
-    lines.append(line(status, "Outcome gate under the fixed audit", res, f"used rate above {base['release']}'s recorded {pct(base['used_rate'])}",
+        note += f" WARNING: the gate's integrity checks flag {len(leaks)} problem(s), first: {leaks[0]}"
+    lines.append(line("REPORTED", "Outcome rate under the fixed audit (reported, not gated; D-359)", res,
+                      "none: reported only (D-359)",
                       f"{h['attempted']} attempted units ({h['not_applicable']} not_applicable outside the denominator)",
-                      f"{iso(ctx['lo'])}..{iso(ctx['hi'])} (30-day audit ending at --until)",
-                      f"{src_tr}; audit v{cur_v}",
-                      (f"NOT LIKE FOR LIKE: {base['release']} was scored by audit v{base_v}, this is v{cur_v}; "
-                       f"its transcripts are purged so it cannot be re-scored. Decide the gate's treatment with "
-                       f"outcome_gate.py --cross-version. " if base_v != cur_v else "")
-                      + f"With the not_applicable units counted as attempted the rate is {pct(summary['not_applicable']['used_rate_if_included'])}."
-                      + pre_note))
+                      f"{iso(ctx['lo'])}..{iso(ctx['hi'])} (30-day audit ending at --until)", f"{src_tr}; audit v{cur_v}", note))
 
     # reported, not gated: savings
     ref_kind, ref = "measured 2026-11-03, all sessions", MEASURED_REFERENCE
@@ -354,7 +343,7 @@ def report(units, ctx: dict, gate, audit, since: float, until: float, args, proj
     if ref is not MEASURED_REFERENCE:  # the two populations differ by a factor of several: show both
         sav["alternative"] = savings_block(len(bound), days, MEASURED_REFERENCE, "measured 2026-11-03, all sessions")
 
-    verdict = "MET" if all(x["status"] == "PASS" for x in lines) else "NOT MET"
+    verdict = "MET" if all(x["status"] == "PASS" for x in lines if x["status"] != "REPORTED") else "NOT MET"
     return {"decision": "D-358", "audit_version": cur_v, "window": window, "window_days": round(days, 2),
             "generated_at": iso(time.time()), "verdict": verdict, "lines": lines, "savings_estimate": sav,
             "bound_unit_ids": [u.unit_id for u in bound]}
@@ -391,7 +380,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--until", default=None, metavar="ISO_UTC", help="end of the window (default: now)")
     ap.add_argument("--projects-dir", type=Path, default=None)
     ap.add_argument("--state-dir", type=Path, default=None)
-    ap.add_argument("--history", type=Path, default=DEFAULT_HISTORY)
+    ap.add_argument("--history", type=Path, default=DEFAULT_HISTORY,
+                    help="the outcome gate's history; line 4 quotes the recorded baseline of this audit version")
     ap.add_argument("--holds-file", type=Path, default=None,
                     help=f"the router's hold ledger (default: <state dir>/{HOLD_LEDGER}); transcripts are used when it has no rows")
     ap.add_argument("--hand-checked", type=Path, default=None, help="jsonl of {unit_id, blocked} for the printed sample")
