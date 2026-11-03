@@ -375,7 +375,7 @@ def codex_exec_args(binary: str, *, model: str, cwd: str, prompt: str, sandbox: 
 
     * ``--ignore-rules``: no execpolicy ``.rules`` file, user or project, is loaded. ``--ignore-user-config`` does NOT
       cover rules, and a rule such as ``prefix_rule(pattern=["curl"], decision="allow")`` makes Codex run a matching
-      command OUTSIDE the sandbox, with network, in either mode (docs/BUGS.md BIND-2). The owner's own rules allow
+      command OUTSIDE the sandbox, with network, in either mode (docs/BUGS.md BIND-6). The owner's own rules allow
       ``curl``, ``git push`` and ``gh pr merge``.
     * ``workspace-write`` turns the network OFF explicitly (``sandbox_workspace_write.network_access=false``, so the
       run does not depend on the default staying off) and drops ``/tmp`` and ``$TMPDIR`` from the writable roots

@@ -3,7 +3,7 @@
 The independent review of PR #818 reproduced this: ``--ignore-user-config`` does not stop Codex loading execpolicy
 ``.rules`` files, and a rule ``prefix_rule(pattern=["curl"], decision="allow")`` makes Codex run a matching command
 OUTSIDE its sandbox, with network, in ``workspace-write`` and in ``read-only`` alike. The owner's own rules allow
-``curl``, ``git push``, ``gh pr merge`` and ``gh run`` (docs/bugs/BIND-2.md). A delegated run also had ``/tmp`` and
+``curl``, ``git push``, ``gh pr merge`` and ``gh run`` (docs/bugs/BIND-6.md). A delegated run also had ``/tmp`` and
 ``$TMPDIR`` as writable roots.
 
 How it works. A thread serves the OpenAI Responses API on 127.0.0.1 and plays a scripted model: each turn it asks for
@@ -157,11 +157,30 @@ class _Run:
     def wrote_git_dir(self) -> bool:
         return (self.repo / ".git" / "probe.txt").exists()
 
+    @property
+    def curl_exit_code(self) -> int | None:
+        """The exit code Codex's own event stream reports for the scripted ``curl`` (None when no such command ran):
+        the proof that a run without a canary hit is one where the command really ran and was stopped, not one where it
+        never started (a sandbox that cannot be applied, a failed stub)."""
+        for line in self.out.splitlines():
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            item = ev.get("item") if isinstance(ev, dict) else None
+            if (ev.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "command_execution"
+                    and "curl" in str(item.get("command", ""))):
+                code = item.get("exit_code")
+                return code if isinstance(code, int) else None
+        return None
+
 
 def _without(args: list[str], *flags: str) -> list[str]:
     """``args`` minus each of ``flags``; a flag that is a ``-c`` value is removed together with its ``-c``."""
     out = list(args)
     for flag in flags:
+        if flag not in out:  # already absent: a mutation of the argv builder must fail the test, not this helper
+            continue
         i = out.index(flag)
         if i > 0 and out[i - 1] == "-c":
             del out[i - 1:i + 1]
@@ -259,6 +278,7 @@ def test_a_rules_allowed_command_does_not_leave_the_workspace_write_sandbox(scen
         pytest.skip("without --ignore-rules this Codex no longer runs a rule-allowed curl outside its sandbox")
     fixed = scenarios("write-fixed", "workspace-write")
     assert fixed.wrote_repo, "the scripted commands did not run in the fixed run"
+    assert fixed.curl_exit_code not in (None, 0), f"the sandboxed curl did not run and fail: {fixed.curl_exit_code}"
     assert not fixed.curl_escaped, f"a curl allowed by a user rule reached the network: {fixed.hits}"
 
 
@@ -268,6 +288,9 @@ def test_a_rules_allowed_command_does_not_leave_the_read_only_sandbox(scenarios)
         pytest.skip("without --ignore-rules this Codex no longer runs a rule-allowed curl outside its sandbox "
                     f"(or the scripted commands did not run here: rc={control.rc})")
     fixed = scenarios("ro-fixed", "read-only")
+    if fixed.curl_exit_code is None:
+        pytest.skip(f"the sandboxed curl did not run here (a sandbox cannot be applied?): rc={fixed.rc}")
+    assert fixed.curl_exit_code != 0, "the curl succeeded inside the read-only sandbox"
     assert not fixed.curl_escaped, f"a curl allowed by a user rule reached the network: {fixed.hits}"
     assert not fixed.wrote_repo  # read-only really is read-only
 
@@ -294,9 +317,10 @@ def test_the_runs_own_temp_dir_inside_the_work_tree_is_writable(scenarios):
 def test_the_git_dir_inside_the_root_is_read_only_on_this_codex(scenarios):
     """Not a guarantee, a record that keeps a doc claim honest: on codex-cli 0.161.0's macOS seatbelt ``.git`` is
     read-only inside the writable root, so the commit, worktree and PR steps of a delegated builder prompt end in
-    blocked reports even in a repository session (docs/bugs/BIND-2.md). Skipped when this Codex lets a run write it."""
+    blocked reports even in a repository session (docs/bugs/BIND-6.md). Skipped when this Codex lets a run write it."""
+    _premise(scenarios("write-open", "workspace-write", drop=_OPEN))  # skips when the scripted commands cannot run here
     fixed = scenarios("write-fixed", "workspace-write")
-    assert fixed.wrote_repo, "the scripted commands did not run"
+    assert fixed.wrote_repo, "the scripted commands did not run in the fixed run"
     if fixed.wrote_git_dir:
-        pytest.skip("this Codex lets a delegated run write .git: the BIND-2 note that commits end blocked no longer holds")
+        pytest.skip("this Codex lets a delegated run write .git: the BIND-6 note that commits end blocked no longer holds")
     assert not fixed.wrote_git_dir
