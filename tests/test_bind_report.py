@@ -3,7 +3,9 @@
 Each criterion gets a status: PASS, FAIL, INSUFFICIENT (the window has not produced the
 n the bar needs), PENDING (the hand check has not been entered) or REPORTED (the outcome
 rate, which owner decision D-359 turned from a gate into a figure). The corpora below are
-synthetic; the arithmetic of the bar is what is pinned.
+synthetic; the arithmetic of the bar is what is pinned. The independent review of PR #816
+(rv-PR816-20261103.md) added: the binding denominator and its disclosures (S2), the fail-closed
+toll line (S6), the seeded hand-check sample (S7) and zone-required times (S9).
 """
 from __future__ import annotations
 
@@ -40,8 +42,11 @@ HISTORY = {"releases": [{"release": "15.4.0", "used_rate": 2 / 873, "used": 2, "
 
 
 def build(tmp_path, bound=0, void=0, blocked=0, prompts=0, holds=0, probes=0, used_mcp=0, extra_unused=0,
-          before_since_void=0, start=SINCE):
-    """Delegations spread from `start` to the end of the window, plus prompts, holds, probes and MCP units."""
+          before_since_void=0, start=SINCE, reissued=0, codex_blocked=0, codex_failed=0, reissue_rows=0):
+    """Delegations spread from `start` to the end of the window, plus prompts, holds, probes and MCP units.
+    `reissued` bound units are followed by the same task again (the escape hatch: a Claude sub-agent runs it);
+    `codex_blocked`/`codex_failed` add ledger rows of runs that delivered nothing; `reissue_rows` adds the
+    router's own codex_reissue rows."""
     t = Transcript(tmp_path, SID)
     rows = []
     step = (UNTIL - start - 3600) / max(bound + void + blocked, 1)
@@ -49,6 +54,7 @@ def build(tmp_path, bound=0, void=0, blocked=0, prompts=0, holds=0, probes=0, us
     for i in range(prompts):
         t.human(SINCE + 60 + i * 30, f"please carry on with step number {i} of the plan now")
     n = 0
+    reissue_left = reissued
     for kind, count in (("bound", bound), ("void", void), ("blocked", blocked)):
         for _ in range(count):
             tid = f"t{n}"
@@ -62,6 +68,16 @@ def build(tmp_path, bound=0, void=0, blocked=0, prompts=0, holds=0, probes=0, us
                 t.result(at + 10, tid, "PreToolUse:Agent hook error: " + reason, is_error=True)
             t.say(at + 20, "ok")
             rows.append(codex_row(at + 9.5, tool_use_id=tid))
+            if kind == "bound" and reissue_left > 0:
+                reissue_left -= 1
+                t.call(at + 400, f"{tid}r", "Agent", {"prompt": agent_prompt(str(n)), "subagent_type": "task-reviewer"})
+                t.result(at + 410, f"{tid}r", "Async agent launched successfully.\nagentId: r" + str(n))
+    for i in range(codex_blocked):
+        rows.append(codex_row(SINCE + 7000 + i, outcome="codex_blocked", tool_use_id=f"cb{i}"))
+    for i in range(codex_failed):
+        rows.append(codex_row(SINCE + 8000 + i, outcome="codex_failed", tool_use_id=f"cf{i}"))
+    for i in range(reissue_rows):
+        rows.append(codex_row(SINCE + 9000 + i, outcome="codex_reissue", tool_use_id=f"cr{i}"))
     for i in range(before_since_void):                       # the pre-fix reference population
         tid = f"old{i}"
         at = SINCE - (i + 1) * 3600
@@ -106,7 +122,7 @@ def test_binding_passes_at_ninety_percent_of_thirty_units(tmp_path, capsys):
     rc, rep, L = run(tmp_path, capsys, bound=27, void=3)
     assert L[BIND]["status"] == "PASS"
     assert L[BIND]["result"].startswith("27/30 = 90.0%")
-    assert "30 delegated units (3 void" in L[BIND]["n"]
+    assert "30 delegated units: 27 bound, 3 void (a Claude sub-agent ran)" in L[BIND]["n"]
     assert BR.iso(SINCE) in L[BIND]["window"] and "north_star_units.jsonl" in L[BIND]["source"]
     assert rc == 1 and rep["verdict"] == "NOT MET"                  # the other lines are not yet satisfied
 
@@ -143,10 +159,11 @@ def test_a_ledger_id_with_no_call_in_the_transcript_counts_as_unpaired_not_bound
 
 def test_blocked_share_needs_the_hand_check(tmp_path, capsys):
     _, _, L = run(tmp_path, capsys, bound=28, blocked=2)
-    assert L[BLOCKED]["status"] == "PENDING" and "hand check of 20 not entered" in L[BLOCKED]["result"]
+    assert L[BLOCKED]["status"] == "PENDING" and "hand check of the sample of 20 not complete (0 entered)" in L[BLOCKED]["result"]
     assert "automated screen" in L[BLOCKED]["note"] and "2/30" in L[BLOCKED]["note"]
-    sample = L[BLOCKED]["note"].split("stable order): ")[1].split(", ")
+    sample = L[BLOCKED]["note"].split("Sample (unit ids): ")[1].split(", ")
     assert len(sample) == 20 and len(set(sample)) == 20
+    assert f"sha256('{BR.HAND_CHECK_SEED}:<unit_id>')" in L[BLOCKED]["note"]          # the rule is printed with the sample
 
 
 def test_blocked_share_passes_or_fails_on_the_hand_check(tmp_path, capsys):
@@ -204,7 +221,7 @@ def test_a_single_reply_ok_probe_fails_the_toll_line(tmp_path, capsys):
 
 def test_toll_line_is_insufficient_under_the_prompt_floor(tmp_path, capsys):
     _, _, L = run(tmp_path, capsys, prompts=40)
-    assert L[TOLL]["status"] == "INSUFFICIENT" and "needs >= 50" in L[TOLL]["note"]
+    assert L[TOLL]["status"] == "INSUFFICIENT" and "needs a source with >= 50 organic prompts" in L[TOLL]["note"]
     _, _, L = run(tmp_path / "ok", capsys, "--min-prompts", "30", prompts=40)         # the floor is this script's, so it moves
     assert L[TOLL]["status"] == "PASS" and "0 holds in 40 prompts = 0.00 per 100 [Wilson 95% 0.00..8.76]" in L[TOLL]["result"]
 
@@ -213,25 +230,89 @@ def _ledger(path, rows):
     path.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
-def test_the_routers_hold_ledger_wins_over_the_derived_count(tmp_path, capsys):
+def test_the_worse_of_the_ledger_and_the_transcripts_decides_and_both_are_shown(tmp_path, capsys):
     ledger = tmp_path / "hold_events.jsonl"
     rows = [{"ts": SINCE + 10 * i, "event": "prompt", "session_id": SID} for i in range(200)]
     rows += [{"ts": SINCE + 5000 + i, "event": "blocked", "session_id": SID, "tool": "Bash"} for i in range(3)]
     rows += [{"ts": SINCE - 5, "event": "blocked", "session_id": SID},                    # before the window
              {"ts": SINCE + 99, "event": "blocked", "session_id": "ffffffff-0000-4000-8000-000000000000"}]   # not an organic session here
     _ledger(ledger, rows)
-    _, _, L = run(tmp_path, capsys, "--holds-file", str(ledger), prompts=120)
-    assert "3 holds in 200 prompts = 1.50 per 100" in L[TOLL]["result"] and L[TOLL]["status"] == "FAIL"
-    assert "hold ledger" in L[TOLL]["source"] and "cross-check from the transcripts: 0 holds in 120 prompts" in L[TOLL]["source"]
+    _, _, L = run(tmp_path, capsys, "--holds-file", str(ledger), prompts=120)             # the transcripts show 0 holds
+    assert L[TOLL]["status"] == "FAIL"                                                    # the ledger's 3 in 200 decides
+    assert "hold ledger: 3 holds in 200 prompts = 1.50 per 100" in L[TOLL]["result"]
+    assert "transcripts: 0 holds in 120 prompts = 0.00 per 100" in L[TOLL]["result"]       # and the other source is not hidden
+    assert "hold ledger" in L[TOLL]["source"]
+
+
+def test_a_transcript_hold_fails_the_line_even_when_the_ledger_is_clean(tmp_path, capsys):
+    """Fail closed: the old rule let the ledger win, so a ledger that missed a hold hid it."""
+    ledger = tmp_path / "hold_events.jsonl"
+    _ledger(ledger, [{"ts": SINCE + 10 * i, "event": "prompt", "session_id": SID} for i in range(200)])   # 0 blocked in 200
+    _, _, L = run(tmp_path, capsys, "--holds-file", str(ledger), prompts=120, holds=2)                    # 2 in 120 = 1.67 per 100
+    assert L[TOLL]["status"] == "FAIL"
+    assert "hold ledger: 0 holds in 200 prompts" in L[TOLL]["result"] and "transcripts: 2 holds in 120 prompts" in L[TOLL]["result"]
 
 
 def test_an_empty_hold_ledger_is_unknown_and_the_transcripts_are_used(tmp_path, capsys):
     ledger = tmp_path / "hold_events.jsonl"
     _ledger(ledger, [{"ts": SINCE + 1, "event": "blocked", "session_id": SID}])           # a block but no prompt row
     _, _, L = run(tmp_path, capsys, "--holds-file", str(ledger), prompts=120, holds=2)
-    assert "2 holds in 120 prompts" in L[TOLL]["result"] and "derived from the transcripts" in L[TOLL]["source"]
+    assert "transcripts: 2 holds in 120 prompts" in L[TOLL]["result"] and "hold ledger:" not in L[TOLL]["result"]
+    assert "no prompt rows in the window, so it gives no rate" in L[TOLL]["source"]
     assert BR.read_hold_events(tmp_path / "missing.jsonl", SINCE, UNTIL, {SID}) is None
     assert BR.read_hold_events(None, SINCE, UNTIL, {SID}) is None
+    _ledger(ledger, [{"ts": SINCE - 99, "event": "prompt", "session_id": SID}])           # no row inside the window
+    assert BR.read_hold_events(ledger, SINCE, UNTIL, {SID}) is None
+
+
+def test_a_probe_still_fails_the_line_below_the_prompt_floor(tmp_path, capsys):
+    """The old order tested the floor first, so one 'Reply OK' probe in 10 prompts read INSUFFICIENT."""
+    _, _, L = run(tmp_path, capsys, prompts=10, probes=1)
+    assert L[TOLL]["status"] == "FAIL" and "1 fixed-reply probes" in L[TOLL]["result"] and L[TOLL]["note"] == ""
+
+
+def test_a_rate_demonstrably_over_the_bar_fails_below_the_floor(tmp_path, capsys):
+    """5 holds in 10 prompts: the Wilson lower bound is 23.7 per 100, so no floor is needed to see the bar is broken."""
+    _, _, L = run(tmp_path, capsys, prompts=10, holds=5)
+    assert L[TOLL]["status"] == "FAIL" and "5 holds in 10 prompts = 50.00 per 100" in L[TOLL]["result"]
+
+
+def test_one_hold_in_forty_prompts_is_insufficient_and_never_a_pass(tmp_path, capsys):
+    """2.5 per 100 on 40 prompts: the Wilson lower bound (0.44) is under the bar, so it is not proven broken, and not clear."""
+    _, _, L = run(tmp_path, capsys, prompts=40, holds=1)
+    assert L[TOLL]["status"] == "INSUFFICIENT"
+    assert "needs a source with >= 50 organic prompts" in L[TOLL]["note"]
+
+
+def test_a_small_source_over_the_bar_blocks_a_pass(tmp_path, capsys):
+    ledger = tmp_path / "hold_events.jsonl"
+    rows = [{"ts": SINCE + 10 * i, "event": "prompt", "session_id": SID} for i in range(40)]
+    rows.append({"ts": SINCE + 5000, "event": "blocked", "session_id": SID, "tool": "Bash"})      # 1 in 40 on the ledger
+    _ledger(ledger, rows)
+    _, _, L = run(tmp_path, capsys, "--holds-file", str(ledger), prompts=120)                    # the transcripts: 0 in 120 (enough)
+    assert L[TOLL]["status"] == "INSUFFICIENT"
+    assert "hold ledger reads at or above 1 per 100 on fewer than 50 prompts" in L[TOLL]["note"]
+    assert L[TOLL]["status"] != "PASS"
+
+
+def test_ledger_probe_events_fail_the_line_when_no_transcript_shows_a_probe(tmp_path, capsys):
+    ledger = tmp_path / "hold_events.jsonl"
+    rows = [{"ts": SINCE + 10 * i, "event": "prompt", "session_id": SID} for i in range(150)]
+    rows += [{"ts": SINCE + 7000, "event": "probe", "session_id": SID, "tool": "mcp__llm_router__llm"}]
+    _ledger(ledger, rows)
+    _, _, L = run(tmp_path, capsys, "--holds-file", str(ledger), prompts=120)
+    assert L[TOLL]["status"] == "FAIL" and "1 fixed-reply probes" in L[TOLL]["result"]
+    assert "(transcripts 0, hold ledger probe events 1)" in L[TOLL]["n"]
+    _ledger(ledger, [{"ts": SINCE + 7000, "event": "probe", "session_id": SID, "tool": "x"}])    # a ledger with no prompt row
+    _, _, L = run(tmp_path / "noprompt", capsys, "--holds-file", str(ledger), prompts=120)
+    assert L[TOLL]["status"] == "FAIL" and "1 fixed-reply probes" in L[TOLL]["result"]           # its probe row still counts
+
+
+def test_no_prompts_at_all_is_insufficient_and_does_not_crash_with_a_zero_floor(tmp_path, capsys):
+    _, _, L = run(tmp_path, capsys, "--min-prompts", "0", bound=3)                                # 0 prompts, floor 0
+    assert L[TOLL]["status"] == "INSUFFICIENT" and "0 holds in 0 prompts = n/a per 100" in L[TOLL]["result"]
+    _, _, L = run(tmp_path / "default", capsys, bound=3)
+    assert L[TOLL]["status"] == "INSUFFICIENT"
 
 
 def test_the_hold_ledger_is_found_in_the_state_dir_by_default(tmp_path, capsys):
@@ -353,3 +434,117 @@ def test_report_reads_and_writes_nothing_outside_stdout(tmp_path, capsys):
 
 def test_until_must_follow_since(tmp_path, capsys):
     assert BR.main(["--since", BR.iso(UNTIL), "--until", BR.iso(SINCE), "--projects-dir", str(tmp_path), "--state-dir", str(tmp_path)]) == 2
+
+
+# ── S2: the binding denominator and what is printed beside it ────────────────
+
+def test_the_denominator_is_every_deny_that_carried_a_codex_result_and_the_runs_that_did_not_are_printed(tmp_path, capsys):
+    """codex_blocked and codex_failed delivered nothing, so they are not in the 27/30; they are printed beside it."""
+    rc, rep, L = run(tmp_path, capsys, bound=27, void=3, codex_blocked=4, codex_failed=1)
+    b = L[BIND]
+    assert b["result"].startswith("27/30 = 90.0%") and b["status"] == "PASS"
+    assert "codex_blocked: 4 of 35 Codex runs (11.4%) answered 'blocked' and were not delivered" in b["disclosed"][0]
+    assert "codex_failed: 1 of 35 Codex runs (2.9%) failed" in b["disclosed"][1]
+    assert "re-issued after delivery: 0 of 27 delivered results (0.000%)" in b["disclosed"][2]
+    out = BR.render(rep)
+    assert out.count("     disclosed: ") == 3 and "disclosed: codex_blocked: 4 of 35" in out
+
+
+def test_a_reissue_after_a_delivered_result_counts_as_not_bound_and_is_printed(tmp_path, capsys):
+    """The escape hatch: Claude calls Agent again with the same prompt and a Claude sub-agent redoes the work."""
+    _, _, L = run(tmp_path, capsys, bound=30, reissued=4, reissue_rows=4)
+    b = L[BIND]
+    assert b["status"] == "FAIL" and b["result"].startswith("26/30 = 86.7%")                  # 4 of 30 do not bind
+    assert "4 re-issued" in b["n"] and "26 bound" in b["n"]
+    assert "re-issued after delivery: 4 of 30 delivered results (13.3%)" in b["disclosed"][2]
+    assert "codex_reissue ledger rows in the window: 4" in b["disclosed"][2]
+
+
+def test_a_reissue_outside_the_window_is_not_counted_in_the_ledger_line(tmp_path, capsys):
+    projects, state = build(tmp_path, bound=3)
+    rows = [json.loads(ln) for ln in (state / "north_star_units.jsonl").read_text().splitlines()]
+    rows += [codex_row(SINCE - 10, outcome="codex_reissue", tool_use_id="before"),
+             codex_row(UNTIL + 10, outcome="codex_reissue", tool_use_id="after")]
+    (state / "north_star_units.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    BR.main(["--since", BR.iso(SINCE), "--until", BR.iso(UNTIL), "--projects-dir", str(projects), "--state-dir", str(state),
+             "--history", str(tmp_path / "h.json"), "--reference", "measured", "--json"])
+    L = {x["criterion"]: x for x in json.loads(capsys.readouterr().out)["lines"]}
+    assert "codex_reissue ledger rows in the window: 0" in L[BIND]["disclosed"][2]
+
+
+def test_a_deny_without_the_codex_wrapper_is_named_as_wording_drift_not_hidden(tmp_path, capsys):
+    """A deny whose text matches no known Codex wrapper is not bound, and the line says why."""
+    projects, state = build(tmp_path, bound=2)
+    for f in projects.rglob("*.jsonl"):
+        f.write_text(f.read_text().replace("Subagent task was delegated to Codex CLI", "Some future wording of the handoff"))
+    BR.main(["--since", BR.iso(SINCE), "--until", BR.iso(UNTIL), "--projects-dir", str(projects), "--state-dir", str(state),
+             "--history", str(tmp_path / "h.json"), "--reference", "measured", "--json"])
+    L = {x["criterion"]: x for x in json.loads(capsys.readouterr().out)["lines"]}
+    assert L[BIND]["result"].startswith("0/2 = 0.000%")
+    assert "2 deny without the Codex wrapper (wording drift or a different deny)" in L[BIND]["n"]
+
+
+# ── S7: the hand-check sample is pre-registered ──────────────────────────────
+
+def test_the_sample_is_fixed_by_a_pinned_seed_and_changes_with_it():
+    ids = [f"agent_route_codex:s:{i}" for i in range(50)]
+    assert BR.HAND_CHECK_SEED == "D-358/hand-check/v1" and BR.HAND_CHECK_N == 20
+    assert BR.hand_check_sample(ids)[:5] == ["agent_route_codex:s:20", "agent_route_codex:s:4", "agent_route_codex:s:23",
+                                             "agent_route_codex:s:38", "agent_route_codex:s:7"]
+    assert BR.hand_check_sample(ids, seed="another seed")[:3] != BR.hand_check_sample(ids)[:3]
+
+
+def test_a_hand_check_of_units_outside_the_sample_does_not_count(tmp_path, capsys):
+    """Cherry-picking: twenty favourable entries for units the seed did not pick leave the line PENDING."""
+    projects, state = build(tmp_path, bound=30)
+    ids = _bound_ids(projects, state)
+    sample = BR.hand_check_sample(ids)
+    others = [i for i in ids if i not in sample]
+    pick = tmp_path / "picked.jsonl"
+    pick.write_text("".join(json.dumps({"unit_id": i, "blocked": False}) + "\n" for i in others))   # 10 hand-picked, all clean
+    BR.main(["--since", BR.iso(SINCE), "--until", BR.iso(UNTIL), "--projects-dir", str(projects), "--state-dir", str(state),
+             "--history", str(tmp_path / "h.json"), "--reference", "measured", "--hand-checked", str(pick), "--json"])
+    L = {x["criterion"]: x for x in json.loads(capsys.readouterr().out)["lines"]}
+    assert L[BLOCKED]["status"] == "PENDING" and "(0 entered)" in L[BLOCKED]["result"]
+    assert "(10 ignored)" in L[BLOCKED]["note"]
+
+
+def test_a_partial_sample_is_pending_and_extra_entries_cannot_change_a_complete_one(tmp_path, capsys):
+    projects, state = build(tmp_path, bound=30)
+    ids = _bound_ids(projects, state)
+    sample = BR.hand_check_sample(ids)
+    args = ["--since", BR.iso(SINCE), "--until", BR.iso(UNTIL), "--projects-dir", str(projects), "--state-dir", str(state),
+            "--history", str(tmp_path / "h.json"), "--reference", "measured", "--json"]
+    part = tmp_path / "part.jsonl"
+    part.write_text("".join(json.dumps({"unit_id": i, "blocked": False}) + "\n" for i in sample[:19]))
+    BR.main([*args, "--hand-checked", str(part)])
+    L = {x["criterion"]: x for x in json.loads(capsys.readouterr().out)["lines"]}
+    assert L[BLOCKED]["status"] == "PENDING" and "(19 entered)" in L[BLOCKED]["result"]
+    full = tmp_path / "full.jsonl"                                       # the whole sample is clean; 10 other units say blocked
+    full.write_text("".join(json.dumps({"unit_id": i, "blocked": False}) + "\n" for i in sample)
+                    + "".join(json.dumps({"unit_id": i, "blocked": True}) + "\n" for i in ids if i not in sample))
+    BR.main([*args, "--hand-checked", str(full)])
+    L = {x["criterion"]: x for x in json.loads(capsys.readouterr().out)["lines"]}
+    assert L[BLOCKED]["status"] == "PASS" and "0/20 = 0.000% by hand check" in L[BLOCKED]["result"]
+    assert "(10 ignored)" in L[BLOCKED]["note"]
+
+
+def test_the_blocked_share_is_insufficient_with_fewer_than_twenty_bound_units(tmp_path, capsys):
+    _, _, L = run(tmp_path, capsys, bound=19)
+    assert L[BLOCKED]["status"] == "INSUFFICIENT" and "19 bound units" in L[BLOCKED]["result"]
+    _, _, L = run(tmp_path / "twenty", capsys, bound=20)
+    assert L[BLOCKED]["status"] == "PENDING" and "sample of 20" in L[BLOCKED]["result"]
+
+
+# ── S9: a time with no zone is refused ───────────────────────────────────────
+
+def test_a_time_without_a_zone_is_refused_rather_than_read_as_local_time(tmp_path, capsys):
+    with pytest.raises(ValueError, match="no time zone"):
+        BR.parse_utc("2026-09-25T12:00:00")
+    assert BR.parse_utc("2026-09-25T12:00:00Z") == BR.parse_utc("2026-09-25T14:00:00+02:00")
+    for flag in ("--since", "--until"):
+        argv = ["--since", "2026-09-25T12:00:00Z", "--until", "2026-09-29T12:00:00Z", "--projects-dir", str(tmp_path),
+                "--state-dir", str(tmp_path)]
+        argv[argv.index(flag) + 1] = "2026-09-26T12:00:00"
+        assert BR.main(argv) == 2
+        assert "no time zone" in capsys.readouterr().err
