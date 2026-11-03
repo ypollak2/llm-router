@@ -86,11 +86,21 @@ def test_the_rules_version_is_bumped_so_installed_rules_refresh(tmp_path, monkey
     assert ih._rules_version(installed) == ih._rules_version(RULES)
 
 
-def test_the_hook_files_arrive_with_an_upgrade_but_registration_does_not():
-    """The honest limit of the auto-refresh: check_and_update_hooks copies a missing hook file, it never
-    registers one. Registration is `llm-router install`, which is why the rules and the hook can
-    arrive out of step, and why the placeholder is a variable that aborts the shell when nothing replaced it."""
-    import inspect
+def test_the_hook_files_arrive_with_an_upgrade_but_registration_does_not(tmp_path, monkeypatch):
+    """The honest limit of the auto-refresh, shown by running it: `check_and_update_hooks` copies a missing
+    hook file next to the others, it never writes a registration. Registration is `llm-router install`, which
+    is why the rules and the hook can arrive out of step, and why the placeholder is a variable that aborts
+    the shell when nothing replaced it."""
+    import json
 
-    src = inspect.getsource(ih.check_and_update_hooks)
-    assert "_register_hook" not in src and "Restored missing" in src
+    claude = tmp_path / ".claude"
+    (claude / "hooks").mkdir(parents=True)
+    monkeypatch.setattr(ih, "_CLAUDE_DIR", claude)
+    monkeypatch.setattr(ih, "_HOOKS_DST", claude / "hooks")
+    monkeypatch.setattr(ih, "_RULES_DST", claude / "rules")
+    monkeypatch.setattr(ih, "_SETTINGS_PATH", claude / "settings.json")
+    (claude / "settings.json").write_text(json.dumps({"hooks": {}}))
+    updates = ih.check_and_update_hooks()
+    assert any("llm_router-text-job-bind.py" in u and "Restored missing" in u for u in updates), updates
+    assert (claude / "hooks" / "llm_router-text-job-bind.py").is_file()
+    assert json.loads((claude / "settings.json").read_text()) == {"hooks": {}}, "an upgrade must not register hooks"
