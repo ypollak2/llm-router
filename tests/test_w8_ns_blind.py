@@ -192,3 +192,25 @@ def test_the_cache_never_carries_a_share_for_a_blind_ns():
     assert cached["pct"] is None and cached["k"] == 0 and cached["blind"] is True
     older = {"v": 1, "written_at": 1_791_234_000.0 - 5, "mode": "smart", "ns": {"pct": cached["pct"], "n": cached["n"]}}
     assert " · NS n/a n=2097 · " in tick.render(older, now=1_791_234_000.0) + " · "
+
+
+# ── a small share is not a zero (review S5) ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("k,n,text", [
+    (0, 8083, "0.0% (n=8083)"),               # a numerator of 0 is a real zero
+    (4, 8083, "0.05% (n=8083)"),              # the same 4 calls the call-mix line gives as 0.05%
+    (1, 8083, "0.01% (n=8083)"),
+    (1, 30000, "<0.01% (n=30000)"),           # two places would round to 0.00%: say so instead
+    (17, 8083, "0.2% (n=8083)"),              # one place survives: unchanged
+    (40, 50, "80.0% (n=50)"),
+])
+def test_a_rate_that_one_decimal_would_round_to_zero_keeps_its_places(k, n, text):
+    assert kpi._rate_result(k, n)["value"] == text
+
+
+def test_d1_prints_a_small_share_with_enough_places_not_as_a_zero(monkeypatch, organic):
+    """D1 printed `0.0%` for 4 of 8,083 calls, one line above the call-mix line that gave the same 4 as `0.05%`."""
+    claude = [_unit(kind=ns.UNIT_CLAUDE_MAIN, model="claude-opus-5-5", outcome="not_routed") for _ in range(2399)]
+    _stream(monkeypatch, claude + [_unit()])
+    d1 = _card()["kpis"]["D1"]
+    assert d1["value"] == "0.04% (n=2400)" and (d1["numerator"], d1["denominator"]) == (1, 2400)

@@ -228,6 +228,16 @@ def _pct(x: float, digits: int = 1) -> str:
     return f"{x * 100:.{digits}f}%"
 
 
+def _share_pct(k: int, n: int) -> str:
+    """``12.3%``. A share that one decimal would round to ``0.0%`` keeps two (``0.05%``) and below that says
+    ``<0.01%``: only a numerator of 0 prints ``0.0%`` (review S5: D1 printed ``0.0%`` for 4 of 8,083 calls,
+    beside a line that gave the same 4 calls as ``0.05%``)."""
+    p = 100.0 * k / n
+    if k == 0 or round(p, 1) != 0.0:
+        return f"{p:.1f}%"
+    return f"{p:.2f}%" if round(p, 2) != 0.0 else "<0.01%"
+
+
 def _rate_result(numerator: int, denominator: int, *, label: str = "n",
                  newest_ts: float | None = None, seen: int | None = None,
                  backfilled: int = 0) -> dict[str, Any]:
@@ -242,7 +252,7 @@ def _rate_result(numerator: int, denominator: int, *, label: str = "n",
         out["seen"] = seen_n
         return out
     note = f", {backfilled:,} backfilled" if backfilled else ""
-    return _measured(f"{_pct(numerator / denominator)} (n={denominator}{note})", denominator,
+    return _measured(f"{_share_pct(numerator, denominator)} (n={denominator}{note})", denominator,
                       newest_ts=newest_ts, seen=seen_n, backfilled=backfilled,
                       numerator=numerator, denominator=denominator)
 

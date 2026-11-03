@@ -22,3 +22,10 @@ status: fixed in `bind/honest-statusline` (deploy: refresh the installed status 
   seam off and on through the real ledger, health, the cache and the tick for every cache shape);
   `tests/test_kpi_strict_used.py`, `tests/test_kpi_command.py` and the other KPI tests now assert the blind value where they asserted
   `0.0%`. Reverting `kpi._ns_d1_d2` to the old rate fails the blind cases.
+- **D1 and D2 move too (review S5).** Counting sub-agent calls and one unit per API message changes the unit stream D1 and D2 read, so their
+  denominators grew about 3.5x and the series breaks: `llm-router kpi --json --days 7` read D1 `0.1% (n=2294)` over 5,138 window units
+  before and `0.0% (n=8083)` over 15,219 after (one copy of this machine's data, 7 d to 2026-11-03T20:54Z, n=1 copy,
+  `~/.rsi/research/primary-plan/v16/coord/rv-PR821-20261103.md`). Compare D1 and D2 across this change only with that break in mind. D1 also
+  printed `0.0%` for 4 of 8,083 calls beside the call-mix line that gave the same 4 as `0.05%`: `kpi._share_pct` keeps two places for a
+  share that one decimal rounds to zero and says `<0.01%` below that, so only a numerator of 0 prints `0.0%`
+  (`tests/test_w8_ns_blind.py`: the rounding cases and D1 through the scorecard).
