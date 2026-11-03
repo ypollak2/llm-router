@@ -2408,11 +2408,16 @@ def _codex_quota_spread_declines(task_type, subagent_type, complexity, session_i
 # sub-agent finished when none did. It is never delivered: the case is logged ``codex_blocked`` and the Agent call
 # is allowed, so Claude's own sub-agent does the work.
 #
-# The reply must say the ENVIRONMENT stopped the work, in one sentence that also says the work was not done. Bare
-# "read-only" and bare "session" are not enough on their own: the code under review is often read-only by design and
-# this repo is full of sessions. A few phrases are conclusive alone ("Resume in a write-enabled session").
-# Calibrated on the 317 delegated answers of the window above (those were produced read-only): 300 flagged; of the
-# 211 whose end was captured, 207 flagged and the 4 not flagged were finished reviews with a verdict.
+# The reply must say the ENVIRONMENT stopped the work, in one sentence that also says the work was not done, and the
+# word that says "not done" must not be a word of the environment phrase itself ("connection refused" is both an
+# environment phrase and a "refused"). Bare "read-only" and bare "session" are not enough on their own: the code under
+# review is often read-only by design and this repo is full of sessions. A few phrases are conclusive alone
+# ("Resume in a write-enabled session"). Three kinds of reply that mention these words are NOT blocked: a finding
+# about the code under review ("the client cannot connect to the gateway"), a reply that could not SAVE its report
+# file but carries the report in its text, and a reply that never names an environment cause ("I did not run the tests").
+#
+# The measured precision and recall, before and after the tuning of the independent review (S3), are in
+# docs/bugs/BIND-2.md; tests/test_bind_blocked_gate.py holds the invented answers they were measured on.
 _APOS = "['’]"
 #: Environment-level restriction wording, one labelled pattern per kind. ``_blocked_marker`` returns the LABEL of the
 #: kind that matched, never a piece of the answer: the ledger row and the stderr banner must not carry model text.
@@ -2424,36 +2429,82 @@ _BLOCKED_ENV = (
         r"\b(?:session|sandbox|file ?system|workspace|checkout|clone)\b[^.\n]{0,40}\b(?:is|was|are|has|enforces|"
         r"runs|configured|mounted)\b[^.\n]{0,30}\bread[- ]only", re.IGNORECASE)),
     ("this_session_or_sandbox", re.compile(r"\bthis (?:session|sandbox)\b|\bfrom this sandbox\b", re.IGNORECASE)),
+    ("read_only_state", re.compile(r"\b(?:is|are|was|were) read[- ]only\b", re.IGNORECASE)),
     ("sandbox_refused", re.compile(
-        r"\bsandbox(?:ed)? (?:denied|blocks?|blocked|prevents?|prohibits?|refus\w+|policy|restrictions?)",
+        r"\b(?:sandbox(?:ed)?|workspace) (?:denied|denies|blocks?|blocked|prevents?|prohibits?|forbids?|rejects?|"
+        r"refus\w+)\b", re.IGNORECASE)),
+    ("sandbox_policy", re.compile(
+        r"\bsandbox(?:ed)? (?:policy|restrictions?|does not (?:allow|permit)|doesn" + _APOS + r"t (?:allow|permit))",
         re.IGNORECASE)),
+    ("not_permitted_here", re.compile(
+        r"\bnot permitted (?:here|in this (?:run|environment|session|sandbox))\b", re.IGNORECASE)),
     ("write_access_missing", re.compile(
         r"write[- ](?:enabled|access|capable)|writable (?:session|file ?system|sandbox|workspace|directory|paths?|"
-        r"scratch)|file ?system[- ]writable|file ?system writes", re.IGNORECASE)),
+        r"scratch)|outside (?:of )?the writable (?:area|roots?|paths?)|file ?system[- ]writable|file ?system writes|"
+        r"\brequires? (?:a )?writable\b|"
+        r"\b(?:is not|isn" + _APOS + r"t|are not|aren" + _APOS + r"t|not) writable\b|"
+        r"\bread[- ]only (?:here|in this (?:run|environment|session|sandbox))\b", re.IGNORECASE)),
     ("approval_or_escalation", re.compile(
         r"(?:permission|approval)s? (?:denied|escalation|(?:are|is) disabled|disabled)|escalation (?:is )?"
-        r"(?:disabled|unavailable|prohibited)|approvals? (?:are |is )?(?:disabled|unavailable)", re.IGNORECASE)),
+        r"(?:disabled|unavailable|prohibited)|approvals? (?:are |is )?(?:disabled|unavailable)|"
+        r"\brequires? (?:user |explicit |manual )?approval|\bapproval (?:is |was )?required\b", re.IGNORECASE)),
     ("os_permission_denied", re.compile(
         r"operation not permitted|permission denied|\bEROFS\b|\bEACCES\b|read-only file system|denied writing",
         re.IGNORECASE)),
     # D-357 removes the network: the blocked reports that remain say so.
     ("no_network", re.compile(
-        r"no network|network(?: access)? (?:is |was |are )?(?:disabled|blocked|unavailable|restricted|off|"
-        r"not available)|(?:no|without) (?:internet|network) access|\boffline\b", re.IGNORECASE)),
-    ("cannot_reach", re.compile(
-        r"(?:cannot|can" + _APOS + r"t|could not|couldn" + _APOS + r"t|unable to|failed to) (?:reach|connect to|"
-        r"resolve|contact)", re.IGNORECASE)),
+        r"no (?:outbound |external )?network|network(?: access| egress)? (?:is |was |are )?(?:disabled|blocked|unavailable|"
+        r"restricted|off|not available)|network restrictions?|(?:no|without) (?:internet|network) access|\boffline\b|"
+        r"\bno [\w ]{1,25}access (?:from|in) this (?:environment|run|sandbox|session)\b|"
+        r"\b(?:needs?|requires?) (?:network|internet) access|\b(?:no|without) [\w ,]{0,40}?(?:or|and) (?:internet|"
+        r"network)(?: access)?\b", re.IGNORECASE)),
+    ("network_error", re.compile(
+        r"\bno such host\b|\bENOTFOUND\b|\bEAI_AGAIN\b|\bECONNREFUSED\b|\bETIMEDOUT\b|\bECONNRESET\b|"
+        r"(?:network|host) is unreachable|error connecting to|no matching distribution|\bconnection error\b",
+        re.IGNORECASE)),
     ("connection_failed", re.compile(
-        r"could not resolve host|name resolution|connection (?:refused|timed out|failed)", re.IGNORECASE)),
+        r"could not resolve host|(?:temporary failure in )?name resolution|connection (?:refused|timed out|failed)",
+        re.IGNORECASE)),
     ("github_unreachable", re.compile(r"github (?:network )?access|api\.github\.com", re.IGNORECASE)),
 )
+#: Labels whose own wording contains a "not done" word ("permission DENIED", "connection REFUSED", "NOT PERMITTED"): in prose
+#: about code ("raises a clear error on 'permission denied' and retries once") that word is a mention, not a report, so
+#: another "not done" word has to come from outside the phrase. The other labels are conclusive on their own wording
+#: ("the sandbox denied worktree creation") and keep the self-overlap.
+_BLOCKED_SEPARATE_INABILITY = frozenset({"os_permission_denied", "connection_failed", "approval_or_escalation"})
+#: Labels whose wording is itself the report, a refusal by name ("the sandbox denied worktree creation"): no other
+#: "not done" word is needed.
+_BLOCKED_REFUSAL = frozenset({"sandbox_refused"})
+#: Labels too common in prose about code to count without the reply's own voice: the sentence must have an agent
+#: subject (I, we, or a sentence that opens on the inability itself). "This session id cannot be reused" and "the
+#: classifier cannot distinguish ..." are findings; "I could not push from this sandbox" is a blocked run.
+_BLOCKED_AGENT_ONLY = frozenset({"this_session_or_sandbox", "github_unreachable", "read_only_state"})
+_AGENT_SUBJECT = re.compile(
+    r"\b(?:I|We|we)(?:[’']\w+)?\b|`(?:gh|git|curl|wget|npm|pip|uv|docker|brew|pytest|make)\b[^`\n]{0,80}`|"
+    r"(?i:^[\s*\->•#`]*(?:could not|couldn" + _APOS + r"t|cannot|can" + _APOS + r"t|unable to|failed to|did not|"
+    r"didn" + _APOS + r"t|not able to)\b)", re.MULTILINE)
+#: "`npm ci` fails with ENOTFOUND": present tense, so it is a report only when the sentence has the reply's own voice; in
+#: prose about code ("mkdir fails with Operation not permitted when the parent is read-only") it describes behaviour.
+_AGENT_ONLY_INABILITY = re.compile(r"\bfails(?=\s*(?::|with\b|before\b|\())", re.IGNORECASE)
 _BLOCKED_INABILITY = re.compile("|".join([
     r"\bblocked\b", r"\bcannot\b", r"\bcan" + _APOS + r"t\b", r"\bcan not\b", r"\bunable to\b", r"\bcould not\b",
     r"\bcouldn" + _APOS + r"t\b", r"\bprevent(?:s|ed|ing)?\b", r"\bprohibit(?:s|ed)?\b",
-    r"\bnot (?:allowed|permitted|performed|written)\b", r"\bdenied\b", r"\brefus(?:ed|es)\b",
-    r"\bremain(?:s|ed)? (?:unverified|outstanding|unrun|not run)\b",
-    r"\bdid not (?:run|create|write|apply|perform|complete)\b", r"\bno files (?:were )?changed\b",
-    r"\bfailed to\b", r"\bdisabled\b",
+    r"\bnot (?:allowed|permitted|performed|written)\b", r"\bdenied\b", r"(?<!connection )\brefus(?:ed|es)\b",
+    r"\bremain(?:s|ed)? (?:unverified|outstanding|unrun|not run|open|undone|incomplete|pending)\b",
+    r"\bdid not (?:run|create|write|apply|perform|complete|start|finish|proceed|fetch|push|merge|open|commit)\b",
+    r"\bno files (?:were )?changed\b", r"\bfailed to\b", r"\bdisabled\b",
+    r"\bfailed(?=\s*(?::|with\b|before\b|\())",                 # "`gh pr create` failed: error connecting ..."
+    r"\b(?:I|we) (?:did not|didn" + _APOS + r"t|have not|haven" + _APOS + r"t|was not able to|am not able to|stopped)\b",
+    r"\bstopped before\b", r"\bleft (?:it|this|that|them|the \w+) (?:undone|unfinished|open|untouched)\b",
+    r"\b(?:was|were|is|are) not (?:run|executed|created|completed|performed|committed|merged|opened|pushed|fetched|"
+    r"applied|made)\b",
+    r"\bno (?:tests?|checks?|commands?|changes?) (?:were |was )?(?:run|executed|made|created|committed|written)\b",
+    r"\b(?:tests?|checks?|steps?|suite) not (?:run|started|executed)\b",             # "Tests not run: pytest exits with ..."
+    r"\b(?:run|work|task|checks?|verification) (?:is |was |remains? )?incomplete\b",
+    r"\bstill (?:open|pending|undone|outstanding|unverified|unrun)\b", r"\b(?:I|we) (?:skipped|omitted)\b",
+    r"\b(?:I|we) (?:tried|attempted)\b", r"\bno (?:tests?|checks?) (?:ran|were run)\b",
+    r"\bnot (?:attempted|possible|accessible)\b|\binaccessible\b", r"\bunavailable here\b",
+    r"\b(?:wasn|weren)" + _APOS + r"t able to\b|\bnot able to\b",
 ]), re.IGNORECASE)
 #: Conclusive on their own, in the head or the tail of the reply.
 _BLOCKED_STRONG = (
@@ -2467,25 +2518,89 @@ _BLOCKED_STRONG = (
         r"\bblocked by (?:this|the|my|your|read[- ]only|an? )\s?(?:session|sandbox|environment|file ?system|"
         r"workspace|permissions?|policy|read[- ]only)", re.IGNORECASE)),
     ("write_enabled_session", re.compile(r"\bwrite[- ]enabled session\b", re.IGNORECASE)),
+    ("outside_writable_roots", re.compile(
+        r"\boutside (?:of )?the writable (?:area|roots?|paths?|directories) (?:of|in) this (?:run|sandbox|session|"
+        r"environment)\b", re.IGNORECASE)),
+    # a partial review says what it could not do: "required runtime verification blocked", "execution-based review
+    # remains incomplete", "validation was not run"
+    ("verification_incomplete", re.compile(
+        r"\b(?:runtime|execution(?:-based)?|live|required|test|dynamic)[- ](?:verification|review|checks?|validation)"
+        r"\b (?:was |is |remains |remained |still )?(?:blocked|incomplete|not (?:run|executed|performed)|unverified|"
+        r"unavailable)", re.IGNORECASE)),
+    ("failed_because_environment", re.compile(
+        r"\bfailed because (?:the|this) (?:sandbox|session|environment|file ?system) (?:is |was |has )?(?:read[- ]only|"
+        r"cannot|can" + _APOS + r"t|could not|denied|blocks?|prevents?|does not allow|doesn" + _APOS + r"t allow|"
+        r"has no network|disallows)", re.IGNORECASE)),
+    # a tool's own error line, "mkdir: /tmp/work: Operation not permitted": the program, the path, the strerror.
+    ("tool_error_line", re.compile(
+        r"(?m)^[ \t>*`-]*(?:curl: \(\d+\)|[\w./+-]{1,24}:[^\n]{0,120}:\s*(?:operation not permitted|permission denied|"
+        r"read-only file system)\b)", re.IGNORECASE)),
 )
+#: Conclusive within ONE sentence that has an agent subject: the run itself says it could not reach something.
+_BLOCKED_SELF = (
+    ("not_permitted_to", re.compile(
+        r"\b(?:I|We|we)\b[^.\n]{0,20}\b(?:was|were|am|are) not permitted to\b", re.IGNORECASE)),
+    ("run_cannot", re.compile(
+        r"\b(?:this|the current) (?:run|environment) (?:cannot|can" + _APOS + r"t|could not|is unable to|"
+        r"does not allow|doesn" + _APOS + r"t allow|has no)\b", re.IGNORECASE)),
+    ("cannot_reach", re.compile(
+        r"(?:\b(?:I|We|we)\b[^.\n]{0,30}?|`(?:gh|git|curl|wget|npm|pip|uv|docker|brew)\b[^`\n]{0,80}`\s+(?:also\s+)?|"
+        r"\b(?:gh|git|curl|wget|npm|pip|docker)\s+(?:also\s+)?)"
+        r"(?i:cannot|can" + _APOS + r"t|could not|couldn" + _APOS + r"t|unable to|failed to) "
+        r"(?i:reach|connect to|resolve|contact)\b|"
+        r"(?im:^[\s*\->•#`]*(?:cannot|can" + _APOS + r"t|could not|couldn" + _APOS + r"t|unable to|failed to) "
+        r"(?:reach|connect to|resolve|contact)\b)")),
+)
+#: "I could not save report.md" and "the session is read-only, so I can return the report but cannot write the
+#: requested Markdown file": the report is in the reply, only its file was not written.
+_DELIVERABLE_WRITE = re.compile(
+    r"\b(?:cannot|can" + _APOS + r"t|could not|couldn" + _APOS + r"t|unable to|was unable to|did not)\s+"
+    r"(?:write|save|create|persist|store|place)\s+(?:to |into |out )?(?:the )?(?:requested )?(?:output )?"
+    r"(?:`[^`\n]{1,200}\.(?:md|markdown|txt|json|csv|log|html)`|[\w./~-]{1,200}\.(?:md|markdown|txt|json|csv|log|html)\b|"
+    r"(?:markdown|report|summary|notes?|findings)(?: file)?\b)", re.IGNORECASE)
+_AGENT_INABILITY = re.compile(
+    r"\b(?:cannot|can" + _APOS + r"t|could not|couldn" + _APOS + r"t|unable to|was unable to|did not|failed to|"
+    r"was not able to)\b", re.IGNORECASE)
 _BLOCKED_SENTENCE = re.compile(r"(?<=[.!?])\s+|\n+")
 #: Where the verdict of a long reply sits: the opening (what the run found it could do) and the closing lines.
 _BLOCKED_HEAD, _BLOCKED_TAIL = 1500, 1000
+#: A reply at least this long carries a body; only then may "could not save the report file" pass as delivered.
+_BLOCKED_BODY_MIN = 800
+
+
+def _delivers_inline(sentence: str) -> bool:
+    """True when the one thing this sentence says was not done is writing a report file."""
+    m = _DELIVERABLE_WRITE.search(sentence)
+    return bool(m) and not _AGENT_INABILITY.search(sentence[:m.start()] + " " + sentence[m.end():])
 
 
 def _blocked_marker(text: str) -> str | None:
     """The label of the kind of wording that marks ``text`` as a report of work the environment stopped, or None
     for a real answer. A label, not a quotation: nothing of the model's text goes to the ledger."""
     t = text or ""
+    substantive = len(t) >= _BLOCKED_BODY_MIN
     windows = [t[:_BLOCKED_HEAD]] + ([t[-_BLOCKED_TAIL:]] if len(t) > _BLOCKED_HEAD else [])
     for window in windows:
         for label, rx in _BLOCKED_STRONG:
             if rx.search(window):
                 return label
         for sentence in _BLOCKED_SENTENCE.split(window):
-            if not _BLOCKED_INABILITY.search(sentence):
-                continue
             for label, rx in _BLOCKED_ENV:
+                for m in rx.finditer(sentence):
+                    # a label that is itself a "not done" word needs another one from outside its own phrase
+                    own = sentence
+                    if label in _BLOCKED_SEPARATE_INABILITY:
+                        own = sentence[:m.start()] + " " + sentence[m.end():]
+                    if label not in _BLOCKED_REFUSAL and not (
+                            _BLOCKED_INABILITY.search(own)
+                            or (_AGENT_ONLY_INABILITY.search(own) and _AGENT_SUBJECT.search(sentence))):
+                        continue
+                    if label in _BLOCKED_AGENT_ONLY and not _AGENT_SUBJECT.search(sentence):
+                        continue
+                    if substantive and _delivers_inline(sentence):
+                        continue
+                    return label
+            for label, rx in _BLOCKED_SELF:
                 if rx.search(sentence):
                     return label
     return None
