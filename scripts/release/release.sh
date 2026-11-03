@@ -32,7 +32,7 @@ log_error() {
 # Run Python with the PROJECT interpreter. The project needs Python >= 3.11
 # (requires-python in pyproject.toml; tomllib is stdlib only from 3.11), and the
 # system python3 on macOS is 3.9: a bare `python3 -c "import tomllib"` died with
-# ModuleNotFoundError on the first line of main(), before anything was printed
+# ModuleNotFoundError at the first Python call in main(), right after the banner
 # (release dry run, 2026-11-03). `uv run --frozen python` is the same interpreter
 # the test, lint and build steps use. Without uv, python3 is accepted only if it
 # is new enough; otherwise stop here with a message that says what to do.
