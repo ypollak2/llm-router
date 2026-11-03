@@ -33,12 +33,19 @@ MAX_COMMAND_CHARS = 32_000
 
 _MAX_DEPTH = 24
 
-#: ``${LLM_TEXT}``, ``${LLM_TEXT:?}`` and ``${LLM_TEXT:?message}`` (also ``?`` without the colon).
-_TOKEN_INNER = re.compile(rf"{TOKEN_NAME}(?::?\?[^}}]*)?")
-#: The same forms, and the bare ``$LLM_TEXT``, found inside a single-quoted run or an expansion.
+#: What the placeholder may look like between the braces: ``${LLM_TEXT:?}`` or ``${LLM_TEXT:?message}`` (also
+#: ``?`` without the colon). The ``?`` is the abort guard: bash stops the whole command when the variable is
+#: unset, which is what makes a hook that never ran (not registered, killed) fail closed. ``${LLM_TEXT}`` and
+#: ``$LLM_TEXT`` expand too, but to nothing, and an empty ``--body`` would be posted; they are not the placeholder.
+_TOKEN_INNER = re.compile(rf"{TOKEN_NAME}:?\?[^}}]*")
+#: The guarded and unguarded forms and the bare ``$LLM_TEXT``, found inside an expansion.
 TOKEN_ANYWHERE = re.compile(
     rf"\$\{{{TOKEN_NAME}(?::?\?[^}}]*)?\}}|\${TOKEN_NAME}(?![A-Za-z0-9_])"
 )
+#: Any place the variable is written with its ``$``: expanding or not (single quotes, a backslash, a quoted
+#: here-document, a comment, ``${LLM_TEXT:-x}``). A command that mentions it more often than the scanner found
+#: the real placeholder has a mention that bash would NOT replace with the checked text.
+MENTION = re.compile(rf"\$\{{?{TOKEN_NAME}(?![A-Za-z0-9_])")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -89,7 +96,11 @@ class Word:
     @property
     def token_in_expansion(self) -> bool:
         """The placeholder written where nothing can replace it: inside ``$(...)`` or backticks."""
-        return any(p.kind == "exp" and TOKEN_ANYWHERE.search(p.text) for p in self.pieces)
+        return any(
+            p.kind == "exp" and p.text[:2] in ("$(", "$'") or p.kind == "exp" and p.text[:1] == "`"
+            for p in self.pieces
+            if TOKEN_ANYWHERE.search(p.text)
+        )
 
     def literal(self) -> str | None:
         """The word's value when it is plain text, else ``None``."""
@@ -135,16 +146,6 @@ def _flush(buf: list[str], pieces: list[Piece]) -> None:
     if buf:
         pieces.append(Piece("lit", "".join(buf)))
         buf.clear()
-
-
-def _split_single_quoted(text: str, buf: list[str], pieces: list[Piece]) -> None:
-    pos = 0
-    for m in TOKEN_ANYWHERE.finditer(text):
-        buf.append(text[pos:m.start()])
-        _flush(buf, pieces)
-        pieces.append(Piece("tok", m.group(0)))
-        pos = m.end()
-    buf.append(text[pos:])
 
 
 def _skip_backtick(src: str, i: int) -> int:
@@ -309,7 +310,7 @@ def _read_dollar(src: str, i: int, buf: list[str], pieces: list[Piece], in_dq: b
     m = _NAME.match(src, i + 1)
     if m:
         _flush(buf, pieces)
-        pieces.append(Piece("tok" if m.group(0) == TOKEN_NAME else "exp", src[i:m.end()]))
+        pieces.append(Piece("exp", src[i:m.end()]))  # $LLM_TEXT has no abort guard: not the placeholder
         return m.end()
     if nxt and nxt in "@*#?$!-0123456789":
         _flush(buf, pieces)
@@ -350,7 +351,7 @@ def _read_word(src: str, i: int) -> tuple[Word, int]:
             j = src.find("'", i + 1)
             if j < 0:
                 raise ScanError("unterminated single quote")
-            _split_single_quoted(src[i + 1:j], buf, pieces)
+            buf.append(src[i + 1:j])  # nothing expands inside single quotes: the text is literal, a ``$`` too
             i = j + 1
             continue
         if c == '"':

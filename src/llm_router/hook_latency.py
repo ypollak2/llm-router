@@ -170,14 +170,16 @@ DEFAULT_BUDGET_MS = 300
 #: * ``auto-route`` -- 60 s, the ``timeout`` registered in settings.json. The
 #:   hook budgets itself to 55 s so it exits with an answer rather than being
 #:   killed holding one.
-#: * the rest register no timeout, so the host default applies (60 s,
-#:   MEASUREMENT.md).
+#: * the rest register no timeout, so the host default applies. The host documents 600 s for a command
+#:   hook (30 s on UserPromptSubmit); ``DEFAULT_TIMEOUT_MS`` below is still the older 60 s that
+#:   MEASUREMENT.md measured under; the value was not changed with this comment (see ``timeout_ms``).
 HOOK_TIMEOUTS_MS: dict[str, int] = {
     "agent-route": 320_000,
     "text-job-bind": 130_000,  # install_hooks._HOOK_TIMEOUTS; a test pins the two together
 }
 
-#: The host's default hook timeout (MEASUREMENT.md).
+#: The default the KPI assumes for a hook with no registered timeout (MEASUREMENT.md measured under 60 s; the
+#: host's documented default for a command hook is 600 s). Left at 60 s: changing it changes the KPI.
 DEFAULT_TIMEOUT_MS = 60_000
 
 #: Phases that are time spent waiting on a model, not time the router added:
@@ -449,6 +451,24 @@ def router_added_ms(row: dict) -> float | None:
     if not outer and "cold_wait" in phases:
         outer = {"cold_wait": phases["cold_wait"]}
     return max(0.0, float(elapsed) - model_ms(outer))
+
+
+def finish_now(open_phases: dict[str, float] | None = None) -> None:
+    """Write this invocation's row now. For a hook that is about to leave through ``os._exit`` (which skips the
+    ``atexit`` handler that normally writes it). Writes at most once; the caller decides what a failure means.
+
+    ``open_phases`` books time for phases whose ``with`` block is still open in a thread that will never leave it
+    (the model call the deadline guard gave up on). They are added as plain phase time: going through
+    :func:`add_phase` would count them as nested inside the open block and subtract them twice."""
+    global _pending, _model_depth
+    try:
+        if _pending is not None:
+            for name, ms in (open_phases or {}).items():
+                _phases[name] = _phases.get(name, 0.0) + float(ms)
+        _model_depth = 0
+        _finish()
+    finally:
+        _pending = None
 
 
 def _finish() -> None:

@@ -15,13 +15,27 @@ is nothing to quote, nothing to escape and no way for the text to be read as she
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from dataclasses import dataclass, field
 
-from llm_router.text_job_bind.shellscan import Command, Piece, Word, scan_commands
+from llm_router.text_job_bind.shellscan import MENTION, Command, Piece, Word, scan_commands
 
 JOB_COMMIT = "commit_message"
 JOB_PR = "pr_description"
+
+#: A ``git commit`` / ``gh pr create`` anywhere in the text. A regex, not the scanner: it must work on any
+#: command the model writes, including ones the scanner cannot read.
+COMMIT_CMD = re.compile(r"(?<![\w-])git\s+(?:(?:-C|-c)\s+\S+\s+|--[\w-]+(?:=\S+)?\s+)*commit(?![\w-])")
+PR_CMD = re.compile(r"(?<![\w-])gh\s+pr\s+create(?![\w-])")
+
+STRAY_MESSAGE = (
+    "LLM_TEXT is written where bash would not replace it with the checked text (single quotes, after a "
+    "backslash, in a here-document or a comment, as ${LLM_TEXT:-...}, or without the :? guard), so it would "
+    'be committed or posted as literal text. Write the placeholder exactly as "${LLM_TEXT:?}" as the value of '
+    "-m (git commit) or --body (gh pr create). To commit text that itself mentions it, write the message to a "
+    "file and run git commit -F <file>."
+)
 
 #: Env assignments that cannot change which repository ``git`` acts on or which index it reads.
 _GIT_ENV_OK = frozenset({
@@ -124,6 +138,8 @@ class Plan:
     base: str | None = None
     head: str | None = None
     title: str | None = None
+    index: int = 0  # which command of the line holds the placeholder
+    flags: frozenset[str] = frozenset()  # the valueless options of that command (-a, --no-verify, ...)
 
     def final_text(self, generated: str) -> str:
         """The text the file holds: the generated text where the placeholder was and every other
@@ -153,6 +169,13 @@ class Plan:
                 edits.append(Edit(first.word.start, first.word.end, flag))
                 edits.append(Edit(first.value.start, first.value.end, q))
             for extra in rest:
+                # An extra message option is folded into the file, but the flags that share its short
+                # cluster (-a in -am, -s in -sm) are not messages and must stay: -am "x" becomes -a.
+                if not extra.eq and not extra.long and extra.prefix:
+                    assert extra.value is not None
+                    edits.append(Edit(extra.word.start, extra.word.end, f"-{extra.prefix}"))
+                    edits.append(Edit(_gap_start(self.command, extra.value.start), extra.value.end, ""))
+                    continue
                 last = extra.word if extra.eq else extra.value
                 assert last is not None
                 edits.append(Edit(_gap_start(self.command, extra.word.start), last.end, ""))
@@ -161,7 +184,9 @@ class Plan:
                 edits.append(Edit(first.word.start, first.word.end, f"--body-file={q}"))
             else:
                 assert first.value is not None
-                edits.append(Edit(first.word.start, first.word.end, "--body-file"))
+                # -db "${LLM_TEXT:?}": the -d (--draft) shares the cluster and must survive the rewrite
+                flag = f"-{first.prefix} --body-file" if first.prefix and not first.long else "--body-file"
+                edits.append(Edit(first.word.start, first.word.end, flag))
                 edits.append(Edit(first.value.start, first.value.end, q))
         out = self.command
         for e in sorted(edits, key=lambda e: e.start, reverse=True):
@@ -419,6 +444,20 @@ def _validate(plan: Plan, job_cmd: Command) -> None:
                 raise Unsupported("pr_body", "With --body-file the value must be exactly the placeholder.")
 
 
+def option_flags(job: str, command: str, index: int) -> frozenset[str]:
+    """The valueless options (``a``, ``s``, ``no-verify``, ``draft``, ...) of command ``index`` of the line.
+
+    Used twice: on the original command, and on the rewritten one to prove that the rewrite kept every
+    flag that shared a short cluster with a message option (``-am`` must become ``-a -F``)."""
+    argv = scan_commands(command)[index].argv
+    if job == JOB_COMMIT:
+        _repo, sub = _git_dirs(argv, "/")
+        opts = _read_options(argv, sub + 1, _COMMIT_SPEC)
+    else:
+        opts = _read_options(argv, 3, _PR_SPEC)
+    return frozenset(o.name for o in opts if o.value is None)
+
+
 def analyse(command: str, cwd: str) -> Plan | None:
     """The plan for ``command``; ``None`` if it does not use the placeholder in a git or gh command.
 
@@ -431,8 +470,11 @@ def analyse(command: str, cwd: str) -> Plan | None:
             if w.token_in_expansion:
                 raise Unsupported(
                     "token_in_expansion",
-                    "The placeholder is inside $(...) or backticks; use it as a plain \"${LLM_TEXT:?}\" argument.",
+                    "The placeholder is inside $(...), backticks or $'...'; use it as a plain \"${LLM_TEXT:?}\" argument.",
                 )
+    valid = sum(1 for c in cmds for w in (*c.assigns, *c.argv, *(t for _o, t in c.redirs)) for p in w.pieces if p.kind == "tok")
+    if len(MENTION.findall(command)) > valid and (COMMIT_CMD.search(command) or PR_CMD.search(command)):
+        raise Unsupported("placeholder_spelling", STRAY_MESSAGE)
     holders = [k for k, c in enumerate(cmds) if any(w.has_token for w in c.argv)]
     elsewhere = any(w.has_token for c in cmds for w in (*c.assigns, *(t for _o, t in c.redirs)))
     if not holders and not elsewhere:
@@ -461,4 +503,6 @@ def analyse(command: str, cwd: str) -> Plan | None:
         cwd_now = _neutral(pc, cwd_now, job)
     plan = (_plan_commit if tool == "git" else _plan_pr)(command, job_cmd.argv, cwd_now)
     _validate(plan, job_cmd)
+    plan.index = idx
+    plan.flags = option_flags(plan.job, command, idx)
     return plan

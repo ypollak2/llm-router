@@ -323,3 +323,155 @@ def test_a_git_that_hangs_is_killed_and_reported_not_mistaken_for_an_empty_diff(
     with pytest.raises(InputRefused) as e:
         build_commit_input(str(repo))
     assert e.value.code == "git_timeout" and "did not answer" in e.value.message
+
+
+# ---- F4: the hook's own git reads run nothing the repository's configuration names --------------------------
+
+def _hostile(repo: Path, tmp_path: Path, names: tuple[str, ...]) -> Path:
+    """Configure ``repo`` so that git runs a script (which touches a marker file) for each named mechanism."""
+    marks = tmp_path / "marks"
+    marks.mkdir()
+
+    def script(name: str) -> str:
+        s = tmp_path / f"{name}.sh"
+        s.write_text(f"#!/bin/sh\ntouch {marks}/{name}\ncat\n")
+        s.chmod(0o755)
+        return str(s)
+
+    (repo / ".gitattributes").write_text("* filter=evil\n*.txt diff=evil\n")
+    git(repo, "add", ".gitattributes")
+    git(repo, "commit", "-qm", "attrs")
+    cfg = {"core.fsmonitor": "fsmonitor", "filter.evil.clean": "clean", "filter.evil.smudge": "smudge",
+           "diff.external": "external", "diff.evil.command": "drvcommand", "diff.evil.textconv": "textconv",
+           "core.pager": "pager", "pager.diff": "pagerdiff", "filter.a.b.clean": "dotted"}
+    for key, name in cfg.items():
+        if name in names:
+            git(repo, "config", key, script(name))
+    return marks
+
+
+def _seen(marks: Path) -> list[str]:
+    got = sorted(p.name for p in marks.iterdir())
+    for p in marks.iterdir():
+        p.unlink()
+    return got
+
+
+ALL_VECTORS = ("fsmonitor", "clean", "smudge", "external", "drvcommand", "textconv", "pager", "pagerdiff", "dotted")
+
+
+def test_a_hostile_repository_config_runs_nothing_when_the_hook_reads_the_repository(repo, tmp_path):
+    marks = _hostile(repo, tmp_path, ALL_VECTORS)
+    (repo / "a.py").write_text("changed\n")
+    (repo / "n.txt").write_text("text file\n")
+    git(repo, "add", "-N", "n.txt")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    # control: plain git, same repository, same command, DOES run the programs (so the test can fail)
+    subprocess.run(["git", "diff", "HEAD"], cwd=repo, capture_output=True, env=env)
+    control = set(_seen(marks))
+    assert {"clean", "external", "fsmonitor"} <= control, control
+    git(repo, "add", "a.py")
+    subprocess.run(["git", "diff", "--cached"], cwd=repo, capture_output=True, env=env)
+    _seen(marks)
+    # the hook: the staged diff and the tracked-changes diff, and the PR path's reads
+    inp = build_commit_input(str(repo))
+    assert "a.py" in inp.text and _seen(marks) == []
+    (repo / "a.py").write_text("changed again\n")
+    inp = build_commit_input(str(repo), all_tracked=True)
+    assert "a.py" in inp.text and _seen(marks) == []
+    git(repo, "checkout", "-q", "-b", "feat")
+    git(repo, "commit", "-qam", "feat")  # this commit is git's own, run by the test: it runs the programs
+    _seen(marks)
+    build_pr_input(str(repo), base="main")
+    assert _seen(marks) == []
+
+
+def test_a_filter_with_a_dot_in_its_name_is_neutralised_too(repo, tmp_path):
+    (repo / ".gitattributes").write_text("* filter=a.b\n")
+    git(repo, "add", ".gitattributes")
+    git(repo, "commit", "-qm", "attrs")
+    marks = tmp_path / "marks"
+    marks.mkdir()
+    s = tmp_path / "dotted.sh"
+    s.write_text(f"#!/bin/sh\ntouch {marks}/dotted\ncat\n")
+    s.chmod(0o755)
+    git(repo, "config", "filter.a.b.clean", str(s))
+    (repo / "a.py").write_text("changed\n")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "diff", "HEAD"], cwd=repo, capture_output=True, env=env)
+    assert _seen(marks) == ["dotted"]
+    inp = build_commit_input(str(repo), all_tracked=True)
+    assert "a.py" in inp.text and "+changed" in inp.text and _seen(marks) == []
+
+
+def test_every_call_carries_the_neutral_configuration(repo, monkeypatch):
+    seen: list[list[str]] = []
+    real = subprocess.Popen
+
+    def spy(cmd, *a, **k):
+        seen.append(list(cmd))
+        return real(cmd, *a, **k)
+
+    (repo / "a.py").write_text("changed\n")
+    git(repo, "add", "a.py")
+    monkeypatch.setattr(gitinput.subprocess, "Popen", spy)
+    build_commit_input(str(repo))
+    assert len(seen) >= 4
+    for cmd in seen:
+        for kv in ("core.fsmonitor=false", "core.pager=cat"):
+            assert kv in cmd, cmd
+        assert cmd[:2] == ["git", "--no-pager"]
+    diffs = [c for c in seen if "diff" in c]
+    assert diffs and all("--no-ext-diff" in c and "--no-textconv" in c for c in diffs if "--numstat" not in c)
+
+
+# ---- F9: a diff past the byte cap, or past the file list, is counted, never silently shortened ---------------
+
+def _many_files(repo: Path, n: int, lines: int = 12) -> None:
+    for i in range(n):
+        (repo / f"mod_{i:03d}.py").write_text("".join(f"value_{i}_{j} = {j}\n" for j in range(lines)))
+    git(repo, "add", ".")
+
+
+def test_a_patch_cut_at_the_byte_cap_still_reports_the_true_file_count(repo, monkeypatch):
+    _many_files(repo, 30)
+    monkeypatch.setattr(gitinput, "_GIT_BYTES_CAP", 3_000)
+    inp = build_commit_input(str(repo))
+    assert inp.files == 30 and len(inp.stats) == 30
+    assert "## Changed files (30)" in inp.text
+    assert "git stopped printing the diff after 3000 bytes" in inp.text
+    # the names of the files git never printed are still in the list, and headers keep them grounded
+    assert "mod_029.py (+12/-0)" in inp.text and "diff --git a/mod_029.py b/mod_029.py" in inp.text
+    assert inp.omitted_files > 0
+
+
+def test_a_list_cut_at_the_cap_says_it_may_be_longer(repo, monkeypatch):
+    _many_files(repo, 30)
+    monkeypatch.setattr(gitinput, "_GIT_BYTES_CAP", 400)
+    inp = build_commit_input(str(repo))
+    assert "## Changed files (" in inp.text and "+)" in inp.text.split("\n", 1)[0]
+
+
+def test_more_files_than_the_list_holds_are_counted_in_a_tail(repo):
+    _many_files(repo, gitinput.LIST_MAX_FILES + 7, lines=1)
+    inp = build_commit_input(str(repo))
+    assert inp.files == gitinput.LIST_MAX_FILES + 7
+    assert f"... and 7 more" in inp.text and len(inp.stats) == gitinput.LIST_MAX_FILES + 7
+
+
+def test_files_whose_diff_does_not_fit_the_budget_are_counted_not_dropped():
+    patch = "".join(f"diff --git a/f{i}.py b/f{i}.py\n--- a/f{i}.py\n+++ b/f{i}.py\n@@ -1 +1 @@\n-a\n+b\n" for i in range(40))
+    text, n, omitted = condense(patch, budget=1_000)  # the list of 40 names alone takes about 600 of them
+    assert n == 40 and omitted > 0
+    assert "more changed files have no diff text here" in text
+    shown = text.count("diff --git")
+    assert 0 < shown < 40
+    stats = [(f"f{i}.py", 1, 1) for i in range(40)]
+    text2, n2, _ = condense("", stats=stats, budget=2_000)
+    assert n2 == 40 and text2.count("diff --git") > 0 and "(+1/-1)" in text2
+
+
+def test_the_files_body_lists_what_git_counted_and_nothing_else():
+    stats = [("a.py", 3, 1), ("b.bin", None, None), ("docs/c.md", 0, 2)]
+    assert gitinput.files_body(stats) == "Changed files:\n- a.py (+3/-1)\n- b.bin (binary)\n- docs/c.md (+0/-2)"
+    assert gitinput.files_body(stats, limit=2).endswith("- ... and 1 more files")

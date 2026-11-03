@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
@@ -182,16 +183,20 @@ def test_the_rewrite_is_one_object_with_updated_input_and_no_permission_decision
     hso = obj["hookSpecificOutput"]
     assert set(hso) == {"hookEventName", "updatedInput"} and hso["hookEventName"] == "PreToolUse"
     ui = hso["updatedInput"]
-    assert ui["description"] == "d" and ui["timeout"] == 1000
+    assert ui["timeout"] == 1000 and set(ui) == {"command", "description", "timeout"}  # every field kept
+    assert ui["description"] == "git commit (local text): app: change a.py"  # what the approver sees besides a path
     path = Path(ui["command"].split("-F ", 1)[1])
-    assert ui["command"] == f"git commit -F {path}" and path.read_text() == MODEL_TEXT + "\n"
+    # the default body is the deterministic list of changed files: the model's body line never reaches the commit
+    published = "app: change a.py\n\nChanged files:\n- a.py (+1/-0)\n"
+    assert ui["command"] == f"git commit -F {path}" and path.read_text() == published
     assert "ollama/stub" in obj["systemMessage"]
     out = subprocess.run(["bash", "-c", ui["command"]], cwd=repo, env=env, capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     log = subprocess.run(["git", "log", "-1", "--format=%B"], cwd=repo, env=env, capture_output=True, text=True).stdout
-    assert log.strip() == MODEL_TEXT
+    assert log.strip() == published.strip() and "A body line" not in log
     (row,) = ledger_rows(env)
-    assert (row["kind"], row["outcome"], row["out_chars"]) == ("bound", "accepted", len(MODEL_TEXT))
+    assert (row["kind"], row["outcome"], row["out_chars"]) == ("bound", "accepted", len(published.rstrip("\n")))
+    assert row["body_mode"] == "files"
 
 
 CANARY = '''
@@ -248,6 +253,26 @@ def test_the_deadline_guard_answers_with_a_deny_before_the_host_would_kill_the_h
     assert "updatedInput" not in obj["hookSpecificOutput"]
 
 
+def test_the_deadline_guard_leaves_a_ledger_row_the_cooldown_and_a_latency_row(repo, env, tmp_path):
+    """F10: os._exit skips the exit handlers, so the guard writes what an engine timeout writes before it leaves."""
+    home = Path(env["LLM_ROUTER_HOME"])
+    r = run_wrapped(tmp_path, stdin_for(f"git commit -m {T}", repo), env, body="import time; time.sleep(60)",
+                    prelude="hook._DEADLINE_SEC = 4\nfrom llm_router import hook_latency\n"
+                            "hook_latency.begin('text-job-bind', 'PreToolUse', hook._HOOK_T0)", timeout=25)
+    assert r.returncode == 0 and one_object(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    (row,) = ledger_rows(env)
+    assert (row["kind"], row["outcome"], row["reason"]) == ("denied", "timeout", "deadline_guard")
+    until = json.loads((home / "text_job_bind" / "cooldown.json").read_text())["until"]
+    assert until > time.time() + 200  # the cooldown, as after a timeout inside the engine
+    lat = [json.loads(ln) for ln in (home / "hook_latency.jsonl").read_text().splitlines()]
+    assert len(lat) == 1 and lat[0]["hook"] == "text-job-bind"
+    assert lat[0]["phases_ms"]["text_job"] > 2000  # the wait on the model is booked as the model's, not the router's
+    assert lat[0]["router_added_ms"] < 2500
+    # the next placeholder command is refused at once, as after any timeout
+    r2 = run_wrapped(tmp_path, stdin_for(f"git commit -m {T}", repo), env, body="pass")
+    assert "paused" in one_object(r2.stdout)["reason"]
+
+
 def test_the_deadline_guard_is_armed_only_for_a_placeholder_command(repo, env, tmp_path):
     r = run_wrapped(tmp_path, stdin_for("git commit -m 'by hand'", repo), env, prelude="hook._DEADLINE_SEC = 0.01")
     assert r.returncode == 0 and r.stdout == ""
@@ -300,3 +325,18 @@ def test_in_process_main_hands_stdout_back_and_writes_one_object(repo, env, monk
 def test_the_bundled_copy_is_byte_identical_and_stamped():
     assert HOOK.read_bytes() == BUNDLED.read_bytes()
     assert b"llm_router-hook-version:" in HOOK.read_bytes()[:200]
+
+
+def test_loading_the_router_is_booked_as_router_added_time_not_as_the_models_wait(repo, env, tmp_path):
+    """F11: the router import takes seconds and is not the model's wait. A stand-in `prepare` that takes a second
+    must show up in router_added_ms; the model phase must stay small."""
+    home = Path(env["LLM_ROUTER_HOME"])
+    prelude = ("from llm_router import hook_latency\n"
+               "hook_latency.begin('text-job-bind', 'PreToolUse', hook._HOOK_T0)\n"
+               "_o2 = engine.decide\n"
+               "engine.decide = lambda payload, **kw: _o2(payload, prepare=lambda: __import__('time').sleep(1.0), **kw)\n")
+    r = run_wrapped(tmp_path, stdin_for(f"git commit -m {T}", repo), env, prelude=prelude)
+    assert r.returncode == 0 and '"updatedInput"' in r.stdout
+    (lat,) = [json.loads(ln) for ln in (home / "hook_latency.jsonl").read_text().splitlines()]
+    assert lat["router_added_ms"] >= 950, lat
+    assert lat["phases_ms"]["text_job"] < 500, lat

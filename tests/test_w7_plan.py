@@ -36,7 +36,6 @@ def plan(cmd: str, cwd: str = "/base"):
     (f"git commit -sm {T}", "git commit -s -F P", "/base", "G\n"),
     (f"git commit --message={T}", "git commit --file=P", "/base", "G\n"),
     (f"git commit --message {T}", "git commit --file P", "/base", "G\n"),
-    ("git commit -m '${LLM_TEXT:?}'", "git commit -F P", "/base", "G\n"),
     ("git commit -m ${LLM_TEXT:?}", "git commit -F P", "/base", "G\n"),
     (f"git commit --no-verify -m {T} --trailer 'A: b'", "git commit --no-verify -F P --trailer 'A: b'", "/base", "G\n"),
     (f"git commit -m {T} -m 'Co-Authored-By: X <x@y>'", "git commit -F P", "/base", "G\n\nCo-Authored-By: X <x@y>\n"),
@@ -109,7 +108,7 @@ def test_pr_options_are_read_for_the_job_input():
     ("git commit -m \"$(echo ${LLM_TEXT:?})\"", "token_in_expansion"),
     (f"git commit -m {T} -m {T}", "misplaced"),
     (f"git commit --author {T} -m x", "misplaced"),
-    ("git commit -m'${LLM_TEXT:?}'", "option"),
+    ("git commit -m'${LLM_TEXT:?}'", "placeholder_spelling"),
     (f"git commit -m{T}", "option"),
     (f"git commit -amx {T}", "option"),
     (f"for f in a b; do git commit -m {T}; done", "structure"),
@@ -142,6 +141,22 @@ def test_pr_options_are_read_for_the_job_input():
     (f"gh pr view 1 --json title && gh pr create --body {T}", None),
     (f"gh issue create --body {T}", "not_pr"),
     (f"git log -m {T}", "not_commit"),
+    # F3: the text is written where the shell does not replace it, or without the abort guard
+    ("git commit -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("git commit -m \\${LLM_TEXT:?}", "placeholder_spelling"),
+    ('git commit -m "\\${LLM_TEXT:?}"', "placeholder_spelling"),
+    ("git commit -m $LLM_TEXT", "placeholder_spelling"),
+    ('git commit -m "${LLM_TEXT}"', "placeholder_spelling"),
+    ('git commit -m "${LLM_TEXT:-fallback}"', "placeholder_spelling"),
+    ("git commit -F - <<'EOF'\n${LLM_TEXT:?}\nEOF", "placeholder_spelling"),
+    ("git commit -F - <<EOF\n${LLM_TEXT:?}\nEOF", "placeholder_spelling"),
+    ("cat <<'EOF' > doc.md\ngit commit -m \"${LLM_TEXT:?}\"\nEOF", "placeholder_spelling"),
+    ("bash -c 'git commit -m \"${LLM_TEXT:?}\"'", "placeholder_spelling"),
+    (f"git commit -m {T} # ${{LLM_TEXT:?}}", "placeholder_spelling"),
+    (f"git commit -m {T} && echo '$LLM_TEXT'", "placeholder_spelling"),
+    (f"gh pr create --body '${{LLM_TEXT:?}}'", "placeholder_spelling"),
+    ("git commit -m \"$(echo ${LLM_TEXT:?})\"", "token_in_expansion"),
+    ("git commit -m $'${LLM_TEXT:?}'", "token_in_expansion"),
 ])
 def test_refusals_carry_a_code(cmd, code):
     if code is None:
@@ -158,8 +173,6 @@ def test_refusals_carry_a_code(cmd, code):
     "git status",
     f"echo {T}",
     f"printf '%s' {T} > notes.txt",
-    "cat <<'EOF' > doc.md\ngit commit -m \"${LLM_TEXT:?}\"\nEOF",
-    "bash -c 'git commit -m \"${LLM_TEXT:?}\"'",
     f"grep -r {T} src/",
     "git commit -m \"$(cat <<'EOF'\nfix: a\nEOF\n)\"",
 ])
@@ -285,3 +298,51 @@ def test_scan_of_the_rewritten_command_has_no_placeholder_and_the_same_shape():
         out = p.rewrite("/p/m")
         assert len(scan_commands(out)) == len(scan_commands(cmd))
         assert not any(w.has_token for c in scan_commands(out) for w in c.argv)
+
+
+# ---- F1 / F19: no flag is lost when a message option is folded into the file ---------------------------------
+
+@pytest.mark.parametrize("cmd,rewritten,flags", [
+    (f"git commit -m {T} -am 'trailer'", "git commit -F P -a", {"a"}),
+    (f"git commit -m {T} -sm 'Signed'", "git commit -F P -s", {"s"}),
+    (f"git commit -m 'x' -sm {T}", "git commit -F P -s", {"s"}),
+    (f"git commit -m 'x' -asm {T}", "git commit -F P -as", {"a", "s"}),
+    (f"git commit -vm {T}", "git commit -v -F P", {"v"}),
+    (f"git commit -qam {T} --no-verify", "git commit -qa -F P --no-verify", {"q", "a", "no-verify"}),
+    (f"git commit -m {T} -m 'x' --signoff -m 'y'", "git commit -F P --signoff", {"signoff"}),
+    (f"git -C /r commit -am {T}", "git -C /r commit -a -F P", {"a"}),
+    (f"git -C /r commit -m {T} -am 'trailer'", "git -C /r commit -F P -a", {"a"}),
+    (f"git commit --message={T} -sm 'x'", "git commit --file=P -s", {"s"}),
+    (f"gh pr create -db {T} --title t", "gh pr create -d --body-file P --title t", {"d"}),
+    (f"gh pr create --title t -db {T}", "gh pr create --title t -d --body-file P", {"d"}),
+    (f"gh pr create --draft --title t --body {T}", "gh pr create --draft --title t --body-file P", {"draft"}),
+    (f"gh pr create -d -t t -b {T} --no-maintainer-edit", "gh pr create -d -t t --body-file P --no-maintainer-edit",
+     {"d", "no-maintainer-edit"}),
+    (f"gh pr create --title t --body-file {T} --draft --dry-run", "gh pr create --title t --body-file P --draft --dry-run",
+     {"draft", "dry-run"}),
+])
+def test_flags_in_a_cluster_or_on_the_line_survive_the_rewrite(cmd, rewritten, flags):
+    from llm_router.text_job_bind.plan import option_flags
+
+    p = plan(cmd)
+    assert p is not None and p.flags == frozenset(flags)
+    out = p.rewrite("P")
+    assert out == rewritten
+    assert option_flags(p.job, out, p.index) == frozenset(flags)
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_flag_dropped_with_an_extra_message_would_have_changed_what_git_did(repo, shell):
+    """-a (stage tracked changes) and -s (sign off) shared a cluster with an extra -m. The rewritten command must
+    still do both: the commit holds the modified file and the sign-off line."""
+    r, env = repo
+    cmd = f"git -C {shlex.quote(str(r))} commit -m {T} -asm 'Extra paragraph'"
+    p = plan(cmd, cwd=str(r))
+    msg = r / "msg.txt"
+    msg.write_text(p.final_text(GEN))
+    out = _run(shell, p.rewrite(str(msg)), r, env)
+    assert out.returncode == 0, out.stderr
+    shown = subprocess.run(["git", "show", "--stat", "--format=%B", "HEAD"], cwd=r, env=env, capture_output=True, text=True).stdout
+    assert "f.txt" in shown, shown  # -a staged the tracked change
+    assert "Signed-off-by: t <t@t>" in shown, shown  # -s signed it off
+    assert "Extra paragraph" in shown

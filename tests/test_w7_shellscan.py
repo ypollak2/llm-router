@@ -52,20 +52,60 @@ def test_words_match_shell_rules(src, expected):
     assert lits(src) == expected
 
 
-@pytest.mark.parametrize("token", ["${LLM_TEXT:?}", "${LLM_TEXT}", "${LLM_TEXT:?run the hook}", "$LLM_TEXT", "${LLM_TEXT?}"])
-@pytest.mark.parametrize("wrap", ['"{t}"', "{t}", "'{t}'", '"a {t} b"', "x{t}-y", "--message={t}", '--message="{t}"'])
-def test_the_placeholder_is_a_token_in_every_quoting(token, wrap):
+GUARDED = ["${LLM_TEXT:?}", "${LLM_TEXT:?run the hook}", "${LLM_TEXT?}", "${LLM_TEXT?not set}"]
+#: Spellings bash EXPANDS but that carry no abort guard: they are not the placeholder (an empty --body would be posted).
+UNGUARDED = ["$LLM_TEXT", "${LLM_TEXT}", "${LLM_TEXT:-x}", "${LLM_TEXT-x}", "${LLM_TEXT:+x}", "${LLM_TEXT#a}"]
+
+
+@pytest.mark.parametrize("token", GUARDED)
+@pytest.mark.parametrize("wrap", ['"{t}"', "{t}", '"a {t} b"', "x{t}-y", "--message={t}", '--message="{t}"'])
+def test_the_guarded_placeholder_is_a_token_in_every_expanding_quoting(token, wrap):
     (w,) = words(wrap.format(t=token))
     assert w.has_token and not w.has_expansion
     assert w.value_with("<T>").count("<T>") == 1
 
 
-@pytest.mark.parametrize("not_token", [
-    "$LLM_TEXTS", "${LLM_TEXT_2}", "${LLM_TEXT:-x}", "$LLM", "\\${LLM_TEXT:?}", '"\\${LLM_TEXT:?}"', "$(echo)", "`x`", "$((1+2))", "$1", "$@",
-])
-def test_lookalikes_are_not_the_placeholder(not_token):
-    (w,) = words(not_token)
+@pytest.mark.parametrize("token", GUARDED + UNGUARDED)
+@pytest.mark.parametrize("wrap", ["'{t}'", "'a {t} b'", "\\{t}", '"\\{t}"'])
+def test_no_spelling_that_the_shell_does_not_expand_is_a_token(token, wrap):
+    """Single quotes and a backslash stop the expansion: the text stays literal and must never be read as the
+    placeholder (it would be committed as it is, or silently replace text the model wrote by hand)."""
+    ws = words(wrap.format(t=token))  # an unquoted space in the message part makes more than one word
+    assert ws and not any(w.has_token or w.has_expansion for w in ws)
+
+
+@pytest.mark.parametrize("token", UNGUARDED)
+@pytest.mark.parametrize("wrap", ['"{t}"', "{t}"])
+def test_an_expanding_spelling_without_the_abort_guard_is_not_a_token_either(token, wrap):
+    (w,) = words(wrap.format(t=token))
     assert not w.has_token
+
+
+def _shell_result(shell: str, snippet: str, *, set_var: bool) -> tuple[int, str, str]:
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+    if set_var:
+        env["LLM_TEXT"] = "VALUE"
+    cmd = [shell, "-c", snippet] if shell == "bash" else [shell, "-f", "-c", snippet]
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=20)
+    return r.returncode, r.stdout, r.stderr
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("spelling", GUARDED + UNGUARDED + ["'${LLM_TEXT:?}'", "\\${LLM_TEXT:?}", '"\\${LLM_TEXT:?}"', "$'${LLM_TEXT:?}'"])
+def test_the_scanner_accepts_exactly_the_spellings_that_make_the_shell_abort_when_unset(shell, spelling):
+    """Proved against the real shells. A spelling is the placeholder if and only if (a) the shell replaces it with
+    the variable's value when the variable is set and (b) the shell stops the whole command when it is unset."""
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} is not installed")
+    snippet = f"printf 'ran<%s>' {spelling}"
+    rc_unset, out_unset, _err = _shell_result(shell, snippet, set_var=False)
+    _rc, out_set, _ = _shell_result(shell, snippet, set_var=True)
+    expands = "VALUE" in out_set
+    aborts = rc_unset != 0 and "ran<" not in out_unset
+    (w,) = words(spelling)
+    assert w.has_token == (expands and aborts), (spelling, expands, aborts)
+    if not (expands and aborts):
+        assert not w.has_token
 
 
 def test_a_placeholder_inside_a_substitution_is_flagged_not_replaced():

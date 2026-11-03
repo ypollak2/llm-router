@@ -92,17 +92,19 @@ class _Channel:
         self._lock = threading.Lock()
         self.sent = False
 
-    def send(self, obj: dict) -> None:
+    def send(self, obj: dict) -> bool:
+        """Write the decision; ``False`` when one was already written (a second object would make the host drop both)."""
         with self._lock:
-            if self.sent:  # a second object would make the host drop both
-                return
+            if self.sent:
+                return False
             self.sent = True
             self._stream.write(json.dumps(obj))
             self._stream.flush()
+            return True
 
-    def deny(self, reason: str) -> None:
+    def deny(self, reason: str) -> bool:
         # Both shapes, as every hook in this repo: the current field and the legacy one.
-        self.send({
+        return self.send({
             "decision": "block",
             "reason": reason,
             "hookSpecificOutput": {
@@ -136,11 +138,22 @@ def _daemon_timer(seconds: float, fn) -> threading.Timer:
     return t
 
 
-def _arm_deadline(chan: _Channel) -> None:
-    """Answer with a deny, then end the process, shortly before the host's own silent kill."""
+def _arm_deadline(chan: _Channel, payload: dict) -> None:
+    """Answer with a deny, then end the process, shortly before the host's own silent kill.
+
+    ``os._exit`` skips the exit handlers, so what a timeout inside the engine leaves behind (a ledger row, the
+    cooldown, the model wait as its latency phase, the latency row itself) is written here first, and only
+    when this deny is the one that went out."""
     def expire() -> None:
-        chan.deny(_TOO_SLOW)
         try:
+            if chan.deny(_TOO_SLOW):
+                try:
+                    from llm_router.hook_latency import finish_now
+                    from llm_router.text_job_bind import engine
+
+                    finish_now(engine.record_deadline(payload))
+                except Exception as exc:  # noqa: BLE001 -- the deny is out; bookkeeping must not stop the exit
+                    print(f"llm-router: deadline bookkeeping failed ({type(exc).__name__})", file=sys.stderr)
             sys.stderr.flush()
         finally:
             os._exit(0)
@@ -178,7 +191,7 @@ def _run(raw: str, chan: _Channel, *, script: bool) -> int:
             chan.deny(_NOT_IMPORTABLE)
         return 0
     if token_present and script:
-        _arm_deadline(chan)
+        _arm_deadline(chan, payload)
     decision = engine.decide(payload, started=_HOOK_T0)
     if decision.kind == "rewrite" and decision.tool_input is not None:
         chan.rewrite(decision.tool_input, decision.note)
