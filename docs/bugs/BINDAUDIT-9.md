@@ -16,8 +16,15 @@ status: fixed in this change (BIND W3, branch `bind/audit-metrics`; audit v2)
   When the only earlier entries are of another version it prints `AUDIT VERSION MISMATCH` and does what
   `--cross-version` says: `refuse` (the default: FAIL, nothing written), `rebaseline` (PASS without comparing; this
   run becomes the version's baseline) or `compare` (compare anyway, labelled CROSS-VERSION and recorded as such).
-  Which policy the release uses is an owner decision, still open; the default fails closed until it is made.
+  The owner decided D-359 (REBASELINE): the 16.0.0 audit v2 number becomes the baseline, with no comparison to
+  15.4.0, run once through `scripts/release/pre-release-verify.sh --outcome-cross-version rebaseline`, which forwards
+  the flag to step 13. Without the flag a version mismatch still FAILS, so nothing passes silently. The D-358 report's
+  outcome line is now reported, not gated (`scripts/release/bind_report.py`).
 - **Test.** `tests/test_outcome_gate.py::test_a_cross_version_comparison_is_refused_by_default`,
   `::test_rebaseline_passes_without_comparing_and_records_why`, `::test_compare_across_versions_is_labelled_and_can_fail`,
-  `::test_after_a_rebaseline_the_next_release_compares_like_for_like` and
-  `::test_entries_and_summaries_without_a_version_are_version_1`.
+  `::test_after_a_rebaseline_the_next_release_compares_like_for_like`,
+  `::test_entries_and_summaries_without_a_version_are_version_1`, and for the release script
+  `::test_a_version_mismatch_fails_the_release_script_without_the_flag`,
+  `::test_the_rebaseline_flag_is_forwarded_and_records_the_new_baseline` and
+  `::test_the_compare_flag_is_forwarded_beside_skip_outcome`; for the report
+  `tests/test_bind_report.py::test_outcome_line_is_reported_not_gated_and_cites_d359`.

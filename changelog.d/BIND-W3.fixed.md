@@ -11,7 +11,7 @@ call (the old audit: 26) and all `redone / claude_subagent_ran`; 144 of the 158 
 label (the old audit: 43, 27.2%), and the 10 it found used are the 10 the audit now calls used (the old audit: 0). The
 fixed audit reads 10 used of 467 attempted (2.141%) on that window where the old one read 0 of 564, so it is not
 comparable with any earlier number: `outcome_gate.py` records `audit_version`, compares only within a version, and on a
-mismatch prints it and FAILS unless `--cross-version rebaseline|compare` is given. 15.4.0's recorded 0.229% (2/873)
+mismatch prints it and FAILS unless `--cross-version rebaseline|compare` is given. Owner decision D-359 is REBASELINE: the 16.0.0 audit v2 number becomes the baseline, compared with nothing, and `scripts/release/pre-release-verify.sh --outcome-cross-version rebaseline` forwards the flag to step 13 once. 15.4.0's recorded 0.229% (2/873)
 is an audit v1 number and cannot be re-scored (transcripts purged). Not fixed: BIND-R2 class (a) "the host did the same
 job itself" (8 rows) and class (c) "adopted, reworded" (3) have no lexical signal and stay `unused`/`unknown`; 67 router calls
 made inside sub-agent transcripts (30 days, all sessions) are not scored.
