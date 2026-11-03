@@ -62,7 +62,7 @@ status: fixed in `bind/mcp-holds` (deploy: `llm-router install --force` for hook
   `test_research_with_no_provider_is_an_answer_that_says_what_to_do`).
   Existing tests: the 39 enforcement-hook test files, the W2 files, D-141, F25, F26, R12, doctor and the fail-open,
   silent-write, hook-pair and docs-lint ratchets (65 files, with the hook-pair guard's git base required, 2026-11-03, the tree of this
-  PR) give 2,794 passed and 1 deselected. Five existing tests changed (the block-message test above and the four listed in
+  PR) give 2,797 passed and 1 deselected (4 min 14 s). Five existing tests changed (the block-message test above and the four listed in
   BIND-HOLD-1); every other existing test is untouched and passes.
 - **To measure after deploy (not a result of this PR).** `python -m llm_router.hold_ledger --days 30`:
   `blocked_per_100_prompts` (bar: under 1) and `probes_short` (bar: 0), on organic sessions after the fix is live.
