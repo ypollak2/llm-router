@@ -1,4 +1,5 @@
-"""BIND-8: every ``codex exec`` this repo starts carries ``--ignore-rules``, and none starts on a CLI that cannot honour it.
+"""BIND-8: every ``codex exec`` this repo starts carries ``--ignore-rules`` (one frozen study script excepted), and no
+routing path starts one on a CLI that cannot honour it.
 
 The hole (docs/bugs/BIND-6.md, reproduced live on codex-cli 0.161.0): ``--ignore-user-config`` does not stop Codex loading
 execpolicy ``.rules`` files, and a rule such as ``prefix_rule(pattern=["curl"], decision="allow")`` makes Codex run a matching
@@ -10,7 +11,8 @@ model they started was not sandboxed either (BIND-8).
 Four layers; docs/bugs/BIND-8.md lists the mutation that turns each one red.
 
 1. CENSUS   an AST walk of src/, scripts/ and hooks/ finds every ``codex exec`` argv list and command string. The set must
-            equal the known one, so a new call site cannot appear without the flag and a pin in this file.
+            equal the known one, so a new call site cannot appear without the flag and a pin in this file. One site is
+            exempt by name: the frozen CLS-DEV study script (D-345, sha-pinned), which is not a routing path.
 2. ARGV     the exact argv of each call site; a delegated run also carries ``-c web_search="disabled"`` (BIND-9).
 3. CALLERS  the real callers (MCP tool, router chain, session broker, evaluator, calibration, agent-route hook, agentic
             adapter) start a stand-in ``codex`` and the launch carries the flag.
@@ -64,10 +66,17 @@ pytestmark = [pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX s
 KNOWN_ARGV_SITES = {
     ("src/llm_router/codex_agent.py", "codex_exec_args"): "run",       # run_codex: router chain, MCP tool, broker, evaluator, calibrate, agent-route
     ("src/llm_router/agentic/adapters.py", "CodexAdapter._codex_argv"): "run",
-    ("scripts/cls_send_lib.py", "codex_argv"): "run",
+    ("scripts/cls_send_lib.py", "codex_argv"): "run",                  # frozen CLS-DEV study script: UNPROTECTED_ON_PURPOSE
     ("scripts/bench_backend_quality.py", "run_codex"): "run",
     ("src/llm_router/codex_agent.py", "_probe_ignore_rules"): "help",  # the capability check itself
     ("scripts/cls_pins.py", "compute_static.codex"): "help",          # pins the help text; starts no run
+}
+#: Run sites that do NOT carry the flag, on purpose: (file, function) -> why. Exactly one. The census still finds it (it is in
+#: KNOWN_ARGV_SITES) and its argv is pinned as it is (``test_argv_of_the_cls_sender``), so a change to the frozen script is
+#: noticed, and any other ``codex exec`` without the flag fails.
+UNPROTECTED_ON_PURPOSE = {
+    ("scripts/cls_send_lib.py", "codex_argv"):
+        "frozen CLS-DEV study script (D-345, sha-pinned); not a routing path; do not run CLS-DEV scripts",
 }
 #: Command LINES (strings that begin ``codex exec``) in code, outside docstrings: a recommendation shown to the model is a
 #: call site too, because the model runs it.
@@ -164,8 +173,13 @@ def test_every_run_site_and_command_line_carries_the_flag():
     runs = [(rel, where, line) for rel, where, line, elts in argv if not _is_help_query(elts)]
     assert len(runs) == 4, f"expected the four run sites, found {runs}"  # an empty list would pass everything
     unprotected = [(rel, where, line) for rel, where, line, elts in argv
-                   if not _is_help_query(elts) and not _carries_flag(elts)]
+                   if not _is_help_query(elts) and not _carries_flag(elts) and (rel, where) not in UNPROTECTED_ON_PURPOSE]
     assert not unprotected, f"`codex exec` without {IGNORE_RULES_FLAG}: {unprotected}"
+    # an exemption must name a site that exists and still lacks the flag, or it is dead weight and goes
+    exempt = {(rel, where): elts for rel, where, _line, elts in argv if (rel, where) in UNPROTECTED_ON_PURPOSE}
+    assert set(exempt) == set(UNPROTECTED_ON_PURPOSE), f"an exemption names a site that is gone: {UNPROTECTED_ON_PURPOSE}"
+    carrying = [site for site, elts in exempt.items() if _carries_flag(elts)]
+    assert not carrying, f"{carrying} carries the flag now: drop it from UNPROTECTED_ON_PURPOSE"
     assert strings, "no command line found: the recommendation in tools/routing.py is not being checked"
     bare = [(rel, where, line) for rel, where, line, text in strings if IGNORE_RULES_FLAG not in text]
     assert not bare, f"a `codex exec ...` command line without {IGNORE_RULES_FLAG}: {bare}"
@@ -218,12 +232,14 @@ def test_argv_of_the_agentic_adapter():
 
 
 def test_argv_of_the_cls_sender():
+    """The one exception, pinned as it is: the frozen CLS-DEV study script (D-345, sha-pinned) keeps its original argv, with
+    no ``--ignore-rules``. It is not a routing path and its scripts are not to be run; changing it changes its pinned hash."""
     sys.path.insert(0, str(REPO / "scripts"))
     try:
         import cls_send_lib as S
     finally:
         sys.path.remove(str(REPO / "scripts"))
-    head = ["/bin/codex", "exec", "-s", "read-only", IGNORE_RULES_FLAG, "--skip-git-repo-check", "--ephemeral", "-C", "/cwd"]
+    head = ["/bin/codex", "exec", "-s", "read-only", "--skip-git-repo-check", "--ephemeral", "-C", "/cwd"]
     assert S.codex_argv("/cwd", "gpt-5.5", "/bin/codex") == head + ["--json", "-m", "gpt-5.5"]
     assert S.codex_argv("/cwd", "gpt-5.5", "/bin/codex", json_events=False) == head + ["-m", "gpt-5.5"]
 

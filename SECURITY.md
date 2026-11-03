@@ -807,16 +807,17 @@ or above the session directory with a `.git` entry (a repository's own `core.wor
 ancestor) counts as no repository (docs/bugs/BIND-7.md). `danger-full-access` cannot
 be requested through `run_codex`. **Every other `codex exec` passes `--ignore-rules` as well** (docs/bugs/BIND-8.md): the
 router chain, the MCP tool `llm_codex`, the session broker, the model evaluator, calibration, the agentic adapter (which
-also passes `--ignore-user-config`) and the two scripts that call Codex. The argv of each is pinned, and a test walks the
-source for any new `codex exec` (`tests/test_bind_codex_ignore_rules_everywhere.py`). The router paths do not start a Codex
+also passes `--ignore-user-config`) and `scripts/bench_backend_quality.py`. The argv of each is pinned, and a test walks the
+source for any new `codex exec` (`tests/test_bind_codex_ignore_rules_everywhere.py`). **One exception:** `scripts/cls_send_lib.py`,
+the frozen CLS-DEV study script (D-345, sha-pinned), keeps its original argv; it is not a routing path and its scripts are not to be run. The router paths do not start a Codex
 CLI whose `exec --help` does not list the flag, asked once per binary: the call fails with `reason_code` `no_ignore_rules`,
 one WARNING and one `CHZ-FO-CODEX-NO-IGNORE-RULES` fail-open row, and routing falls back; a probe that cannot answer counts
-as "no". The two scripts rely on the CLI rejecting an unknown flag. Without the flag, a user rule makes the router chain's
+as "no". The benchmark script relies on the CLI rejecting an unknown flag. Without the flag, a user rule makes the router chain's
 and the MCP tool's `curl` leave Codex's default (read-only) sandbox with network; with it, it does not
 (`tests/test_bind_codex_sandbox_live.py`, `requires_codex`). **Not covered:** those pure-LLM callers run in Codex's own
 default sandbox and keep its hosted `web_search` tool; the agentic adapter's `workspace-write` run keeps Codex's defaults
-for `/tmp` and passes no `sandbox_workspace_write.*` flags (the D-357 hardening above is agent-route's); the two scripts do
-not pass `--ignore-user-config`. Verified on the macOS seatbelt with codex-cli 0.161.0; other Codex versions and the Linux
+for `/tmp` and passes no `sandbox_workspace_write.*` flags (the D-357 hardening above is agent-route's); the benchmark
+script does not pass `--ignore-user-config`. Verified on the macOS seatbelt with codex-cli 0.161.0; other Codex versions and the Linux
 sandboxes are untested. Tests: `tests/test_bind_agent_route_handoff.py`, `tests/test_bind_codex_run_tmpdir.py`.
 
 `tests/test_security_docs_match_the_code.py` reads the tables in this section and

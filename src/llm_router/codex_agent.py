@@ -134,7 +134,7 @@ _PROBE_INTERVAL_SEC: float = 60.0
 _LAST_PROBE_TS: float = 0.0
 
 # ── --ignore-rules: no unprotected codex exec (docs/bugs/BIND-8.md) ───────────────────────────────────────────────
-#: Every ``codex exec`` this repo starts carries this flag. ``--ignore-user-config`` does NOT stop Codex loading execpolicy
+#: Every ``codex exec`` this repo starts carries this flag, but the frozen CLS-DEV study script's (BIND-8). ``--ignore-user-config`` does NOT stop Codex loading execpolicy
 #: ``.rules`` files, and a rule such as ``prefix_rule(pattern=["curl"], decision="allow")`` makes Codex run a matching
 #: command OUTSIDE its sandbox, with network, whatever the sandbox mode (docs/bugs/BIND-6.md). The owner's own rules allow
 #: ``curl``, ``git push`` and ``gh pr merge``. A CLI that does not list the flag is not started at all.

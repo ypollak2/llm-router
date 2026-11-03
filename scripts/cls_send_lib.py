@@ -511,9 +511,7 @@ def codex_argv(cwd, model: str | None = None, codex_bin: str = "codex", *, json_
     (used by the canary)."""
     if not model:
         raise CLSExit(EXIT_MODEL_ID, "codex call refused: no pinned model id for -m")
-    # --ignore-rules: no execpolicy rule may run a command outside the read-only sandbox (docs/bugs/BIND-8.md); a CLI that
-    # does not know the flag rejects it and the call exits non-zero (parked, never a void)
-    argv = [codex_bin, "exec", "-s", "read-only", "--ignore-rules", "--skip-git-repo-check", "--ephemeral", "-C", str(cwd)]
+    argv = [codex_bin, "exec", "-s", "read-only", "--skip-git-repo-check", "--ephemeral", "-C", str(cwd)]
     if json_events:
         argv.append("--json")
     return argv + ["-m", model]
