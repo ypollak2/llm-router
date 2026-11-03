@@ -444,6 +444,10 @@ BLIND_REASON = (
     "served it AND a verifier passed it), so it cannot be observed; a number here would be a structural "
     "zero, not a measurement (D-364)"
 )
+#: The Stop-line item while a session's strict NS is blind (D-364). No n: the Stop path reads main-file units
+#: only (sub-agent transcripts are never scanned on a hot path), so an n here would not be the n the status
+#: line prints for the same NS. The pooled figure, with its unit and window, is on the status line.
+STOP_LINE_BLIND = "north star (strict): blind (no verifier connected)"
 STRICT_RULE_TEXT = (
     "strict-used: served by a non-Claude model AND verify_status in {pass_f2p, pass_f2p_model} "
     "AND task_type not Q&A AND outcome not redo (a unit with no verify record never counts; "
@@ -1517,6 +1521,8 @@ def build_sessions(days: int | None, root: Path | None = None,
             if cutoff is not None and mtime is not None and mtime < cutoff:
                 continue  # the same cheap pre-filter as the top-level files above
             target_sid = _root_of(parent)
+            if session_id and target_sid != session_id:
+                continue  # one session asked for: another session's sub-agents are never read
             su = per_session.setdefault(target_sid, SessionUnits(session_id=target_sid))
             records = list(_iter_jsonl(path))
             edit_call_units: list[Unit] = []
@@ -1768,34 +1774,51 @@ def _percentile(values: list[float], p: float) -> float | None:
     return vals[lo] + (vals[hi] - vals[lo]) * (k - lo)
 
 
-def report(days: int | None = 30, session_id: str | None = None, root: Path | None = None) -> dict:
+def report(days: int | None = 30, session_id: str | None = None, root: Path | None = None, *,
+           subagents: bool = False) -> dict:
     """The northstar report, computed from ``units()`` so the two cannot disagree.
 
     {"window_days": N, "generated_at": iso8601,
      "aggregate": {"n_sessions": int, "median": float|null, "p25": float|null,
                    "max": float|null, "too_few": bool,
                    "strict_median": float|null, "strict_p25": float|null,
-                   "strict_max": float|null},
+                   "strict_max": float|null, "strict_blind": bool},
      "sessions": [{"session_id", "units", "used", "attempted", "unknown",
-                   "redo", "share", "strict_used", "strict_share"}, ...],
+                   "redo", "share", "strict_used", "strict_share",
+                   "strict_blind"}, ...],
      "by_kind": {"<kind>": {"units", "attempted", "used", "redo", "unknown"}}}
 
     ``redo`` here folds both ``redo`` and ``discarded`` unit outcomes
     together (this schema carries no separate "discarded" field; ``units()``
     exposes the finer distinction for consumers that want it).
+
+    BLIND (owner decision D-364). A session whose units carry no verifier VERDICT
+    (``has_verdict``) has an unobservable strict numerator: its row says
+    ``strict_blind: true`` and ``strict_share: null`` (not ``0.0``), and the
+    ``strict_*`` aggregate leaves it out. ``aggregate.strict_blind`` is true when
+    sessions with enough units exist and every one of them is blind. ``strict_used``
+    stays the COUNT of units that passed the strict rule (0 is a true count; it is
+    the share that cannot be stated). ``units()`` is called with the seam
+    ``NS_ATTACH_VERIFY_RECORDS``. ``subagents`` is False by default because
+    ``report()`` serves the Stop line, a hot path, which counts main-file units only;
+    ``llm-router northstar`` (not a hot path) passes True so its n is the n of
+    ``llm-router kpi`` and the status line: sub-agent calls included.
     """
     per_session_counts: dict[str, dict[str, int]] = {}
     by_kind: dict[str, dict[str, int]] = {
         k: {"units": 0, "attempted": 0, "used": 0, "redo": 0, "unknown": 0} for k in ALL_KINDS
     }
 
-    for u in units(days=days, session_id=session_id, root=root):
+    for u in units(days=days, session_id=session_id, root=root, verify_records=NS_ATTACH_VERIFY_RECORDS,
+                   subagents=subagents):
         sid = u["session_id"]
         c = per_session_counts.setdefault(
             sid, {"units": 0, "used": 0, "attempted": 0, "unknown": 0, "redo": 0,
-                  "strict_used": 0},
+                  "strict_used": 0, "verdicts": 0},
         )
         c["units"] += 1
+        if has_verdict(u):
+            c["verdicts"] += 1
         kind = u["kind"]
         bk = by_kind[kind]
         bk["units"] += 1
@@ -1820,6 +1843,8 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
     strict_shares = []
     for sid, c in sorted(per_session_counts.items()):
         share = (c["used"] / c["units"]) if c["units"] >= MIN_UNITS and c["units"] else None
+        blind = c["verdicts"] == 0          # D-364: no verdict, so the strict numerator cannot be observed
+        strict_share = (c["strict_used"] / c["units"]) if share is not None and not blind else None
         session_rows.append({
             "session_id": sid,
             "units": c["units"],
@@ -1829,11 +1854,13 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
             "redo": c["redo"],
             "share": share,
             "strict_used": c["strict_used"],
-            "strict_share": (c["strict_used"] / c["units"]) if share is not None else None,
+            "strict_share": strict_share,
+            "strict_blind": blind,
         })
         if share is not None:
             shares.append(share)
-            strict_shares.append(c["strict_used"] / c["units"])
+            if strict_share is not None:
+                strict_shares.append(strict_share)
 
     # median/p25/max are the heuristic ``outcome == used`` share, kept for the JSON
     # report and kpi diagnostics. The strict_* keys are the NS that user surfaces
@@ -1847,6 +1874,8 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
         "strict_median": statistics.median(strict_shares) if strict_shares else None,
         "strict_p25": _percentile(strict_shares, 25) if strict_shares else None,
         "strict_max": max(strict_shares) if strict_shares else None,
+        # sessions with enough units exist, and none of them has a verdict behind its strict share
+        "strict_blind": bool(shares) and not strict_shares,
     }
     return {
         "window_days": days,
@@ -1858,7 +1887,7 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
 
 
 def current_session_line(session_id: str, root: Path | None = None) -> str:
-    """The Stop-line's compact item: 'north star (strict) 12% (n=87)' or 'too few to tell'.
+    """The Stop-line's compact item: 'north star (strict) 12% (n=87)', 'too few to tell', or the blind item.
 
     P0.8 (NFR-NUM): the share is the strict rule (``is_strict_used``), the same
     numerator ``llm-router kpi`` reports as NS. It was the heuristic ``outcome ==
@@ -1876,6 +1905,10 @@ def current_session_line(session_id: str, root: Path | None = None) -> str:
     Never reads the session-kind backfill sidecar: this line shows a share, not a
     kind, and ``report()`` -> ``units()`` leaves ``backfill`` off (its default).
     ``tests/test_session_kind_backfill.py`` pins zero ``load_sidecar`` calls here.
+
+    BLIND (owner decision D-364): with no verifier verdict among the session's units the strict
+    share cannot be observed, so the item is ``STOP_LINE_BLIND`` (no n), never ``0%``. It keeps
+    reading main-file units only: no sub-agent transcript is scanned on this path.
     """
     try:
         data = report(days=2, session_id=session_id, root=root)
@@ -1886,6 +1919,8 @@ def current_session_line(session_id: str, root: Path | None = None) -> str:
         n = row["units"]
         if n < MIN_UNITS:
             return f"north star: too few to tell (n={n})"
+        if row["strict_blind"]:
+            return STOP_LINE_BLIND
         pct = row["strict_share"] * 100
         return f"north star (strict) {pct:.0f}% (n={n})"
     except Exception:  # noqa: BLE001 — never break a caller that renders a line
