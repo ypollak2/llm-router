@@ -27,7 +27,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from llm_router.install_hooks import _HOOK_DEFS, _HOOK_TIMEOUTS  # noqa: E402
+from llm_router.install_hooks import _HOOK_DEFS, _HOOK_IF, _HOOK_TIMEOUTS  # noqa: E402
 
 # Claude Code and Codex use the same event names for the events we care about.
 # Cursor differs and is handled by its own installer (tasks 23–26).
@@ -65,6 +65,10 @@ def _hooks_json(root_var: str) -> dict:
         timeout = _HOOK_TIMEOUTS.get(installed_name)
         if timeout is not None:
             handler["timeout"] = timeout
+        # The "if" field is Claude Code's (permission-rule syntax); Codex's hook schema is not known to take it.
+        rule = _HOOK_IF.get(installed_name)
+        if rule is not None and root_var == "${CLAUDE_PLUGIN_ROOT}":
+            handler["if"] = rule
         events.setdefault(event, {}).setdefault(matcher, []).append(handler)
 
     if root_var == "${CLAUDE_PLUGIN_ROOT}":

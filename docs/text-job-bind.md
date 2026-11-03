@@ -33,8 +33,12 @@ The rules text that teaches this is the section "Commit messages and PR bodies" 
 `src/llm_router/hooks/text-job-bind.py` (installed as `llm_router-text-job-bind.py`, PreToolUse,
 matcher `Bash`):
 
+0. Is not even started for an ordinary Bash call: it is registered with `"if": "Bash(*LLM_TEXT*)"`
+   (Claude Code permission-rule syntax), so the host spawns it only when some subcommand contains the
+   placeholder, or when it cannot read the command statically (`$(...)`); the hook's own fast path then
+   exits at once. A hang or a crash in it cannot slow any other Bash call.
 1. Reads the command with a strict shell scanner (`text_job_bind/shellscan.py`). A command without the
-   placeholder is left alone (a hand-written commit or PR command only leaves a ledger row).
+   placeholder is left alone.
 2. Builds the job input from the repository as it is now: `git diff --cached` (`git diff HEAD` with
    `-a`), or for a PR the commits, the changed files and the diff against the base. A diff far larger
    than the model can read is cut per file; every changed file is still named.
@@ -87,7 +91,7 @@ that shows the canary does reach stdout.
 
 A new hook has to be registered; copying the file is not enough (`check_and_update_hooks` copies a
 missing hook file but never registers it). Run `llm-router install --force` once. It writes the
-PreToolUse entry with matcher `Bash` and its own timeout (`130`) into `~/.claude/settings.json`; the
+PreToolUse entry with matcher `Bash`, its own timeout (`130`) and the `if` rule into `~/.claude/settings.json`; the
 plugin bundle (`hooks/hooks.json`, `.codex-plugin/hooks.json`) carries the same entry. The rules text
 refreshes by itself at the next MCP server start. Until the hook is registered a model that follows the
 new rules gets Claude Code's refusal or the shell's abort (see "Fail-closed by construction") and writes
@@ -98,12 +102,17 @@ Only one router hook may rewrite Bash input: Claude Code does not merge `updated
 ## Measuring it
 
 `python -m llm_router.text_job_bind report [--days N] [--json]` reads `text_job_binds.jsonl`
-(text-free: sizes, a reason code, latency; two generations of 2 MiB, 0600). One row per `git commit` or
-`gh pr create` command the hook sees: `bound` (the checked local text was put in the command), `denied`
-(with an outcome and a reason) or `handwritten` (the denominator). The report prints adoption
-(placeholder commands of all such commands), the bound rate, bound latency p50 and p95, and the
-estimated Claude output tokens avoided (characters bound divided by 4, an estimate; the hand-written
-characters are printed the same way as the upper bound of what is left). Read every figure with its N.
+(text-free: sizes, a reason code, latency; two generations of 2 MiB, 0600). One row per command the hook
+sees: `bound` (the checked local text was put in the command), `denied` (with an outcome and a reason) or
+`handwritten` (a `git commit` / `gh pr create` without the placeholder). The report prints the bound
+rate, bound latency p50 and p95, and the estimated Claude output tokens avoided (characters bound divided
+by 4, an estimate). Read every figure with its N.
+
+Adoption needs a denominator, and the registered `if` filter takes it away: the hook never sees a
+hand-written commit or PR command, so no `handwritten` rows are written and the report prints adoption as
+n/a rather than a figure that only reflects the filter. Take the denominator (all `git commit` and `gh pr create` commands) from
+the outcome audit's transcript count, or register the hook without the `if` field to have the ledger count
+them (at the price of one process start per Bash call).
 
 The hook is instrumented for the G1 hook-latency KPI: the wait on the local model is the `text_job`
 model phase, so the router-added figure does not count it.

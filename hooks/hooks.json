@@ -53,7 +53,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/text-job-bind.py",
-            "timeout": 130
+            "timeout": 130,
+            "if": "Bash(*LLM_TEXT*)"
           }
         ],
         "matcher": "Bash"

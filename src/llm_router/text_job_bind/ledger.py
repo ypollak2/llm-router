@@ -95,7 +95,10 @@ def summarize(rows: list[dict]) -> dict:
         "n_bound": len(bound),
         "n_denied": len(denied),
         "n_handwritten": len(hand),
-        "adoption": (used / total) if total else None,
+        # Without hand-written rows there is no denominator: a hook registered with an `if` filter (the installer's
+        # default) never sees a command that lacks the placeholder, so 100% would be an artefact, not a measurement.
+        "adoption": (used / total) if (total and hand) else None,
+        "denominator_known": bool(hand),
         "bound_rate": (len(bound) / used) if used else None,
         "by_job": by_job,
         "denied_by_reason": dict(sorted(reasons.items(), key=lambda kv: -kv[1])),
@@ -123,15 +126,23 @@ def render(summary: dict) -> str:
         f"text-job-bind ledger: {s['n_rows']} rows, {s['n_commit_pr_commands']} git commit / gh pr create commands",
         f"  placeholder used : {s['n_placeholder']} of {s['n_commit_pr_commands']} ({pct(s['adoption'])}); "
         f"hand-written: {s['n_handwritten']}",
+    ]
+    if not s["denominator_known"] and s["n_placeholder"]:
+        lines.append("  adoption is n/a: no hand-written rows, because the hook is registered with an `if` filter and never "
+                     "sees a command without the placeholder; take the denominator from the outcome audit (transcripts)")
+    lines += [
         f"  bound (local text in the command): {s['n_bound']} of {s['n_placeholder']} placeholder uses "
         f"({pct(s['bound_rate'])}); denied: {s['n_denied']}",
         f"  bound latency ms : p50 {num(s['bound_latency_ms_p50'])}, p95 {num(s['bound_latency_ms_p95'])} "
         f"(n={s['n_bound']})",
         f"  est. Claude output tokens avoided: {num(s['est_output_tokens_avoided'])} "
         f"({num(s['bound_out_chars'])} chars / {CHARS_PER_TOKEN}, estimate)",
-        f"  est. tokens still spent on hand-written commands: {num(s['est_output_tokens_still_handwritten'])} "
-        f"({num(s['handwritten_cmd_chars'])} command chars / {CHARS_PER_TOKEN}, estimate, upper bound)",
     ]
+    if s["denominator_known"]:
+        lines.append(
+            f"  est. tokens still spent on hand-written commands: {num(s['est_output_tokens_still_handwritten'])} "
+            f"({num(s['handwritten_cmd_chars'])} command chars / {CHARS_PER_TOKEN}, estimate, upper bound)"
+        )
     for job, c in sorted(s["by_job"].items()):
         lines.append(
             f"  {job}: bound {c[KIND_BOUND]}, denied {c[KIND_DENIED]}, hand-written {c[KIND_HANDWRITTEN]}"

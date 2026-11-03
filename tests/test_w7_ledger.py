@@ -85,6 +85,19 @@ def test_summary_arithmetic_with_exact_numbers():
     assert (s["since"], s["until"]) == (1000.0, 2000.0)
 
 
+def test_without_handwritten_rows_adoption_is_n_a_not_a_hundred_percent():
+    """A hook registered with an `if` filter never sees a command without the placeholder, so there are no
+    hand-written rows. 3 of 3 would be an artefact of the filter, not an adoption rate."""
+    rows = [row("bound", latency_ms=10, out_chars=400), row("denied", outcome="rejected", reason="generic_subject"),
+            row("bound", job="pr_description", latency_ms=20, out_chars=800)]
+    s = ledger.summarize(rows)
+    assert s["adoption"] is None and s["denominator_known"] is False and s["n_placeholder"] == 3
+    text = ledger.render(s)
+    assert "adoption is n/a" in text and "`if` filter" in text and "100%" not in text
+    assert "still spent on hand-written" not in text
+    assert ledger.summarize(rows + [row("handwritten", cmd_chars=100)])["adoption"] == pytest.approx(0.75)
+
+
 def test_an_empty_ledger_reports_n_a_not_zero_percent():
     s = ledger.summarize([])
     assert s["adoption"] is None and s["bound_rate"] is None and s["bound_latency_ms_p50"] is None

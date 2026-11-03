@@ -754,6 +754,17 @@ _HOOK_TIMEOUTS: dict[str, int] = {
     "llm_router-text-job-bind.py": _TEXT_JOB_BIND_HOOK_TIMEOUT_SEC,
 }
 
+# Handlers that run only for matching tool calls. Claude Code (2.1.x) takes an optional ``"if"`` on a hook
+# handler, written in permission-rule syntax: the hook process is not spawned unless the call matches, so a
+# hang or a crash in it cannot touch any other Bash call. Keyed by installed_name like _HOOK_TIMEOUTS, for
+# the same reason (the _HOOK_DEFS 4-tuple is destructured in ~10 other places). ``Bash(*LLM_TEXT*)``: a
+# command containing the text-job placeholder anywhere, in any subcommand of a compound command; Claude Code
+# also spawns the hook, whatever the pattern, for a command it cannot read statically ($VAR, $(...)), and the
+# hook's own fast path then exits at once. A host that predates the field runs the hook for every Bash call.
+_HOOK_IF: dict[str, str] = {
+    "llm_router-text-job-bind.py": "Bash(*LLM_TEXT*)",
+}
+
 # Sidecar shell scripts session-start.py shells out to (start-ollama.sh,
 # start-pxpipe.sh) — not hook-event scripts themselves (no event/matcher to
 # register), just plain files that must land next to it. These were never
@@ -932,8 +943,24 @@ def _existing_hook_timeout(
     return None
 
 
+def _existing_hook_if(settings: dict, event: str, matcher: str, command: str) -> str | None:
+    """The ``"if"`` rule already registered for ``command``, or ``None`` (the twin of
+    :func:`_existing_hook_timeout`, for the report of what an upgrade changed)."""
+    normalized_cmd = _normalize_command(command)
+    hooks = settings.get("hooks", {})
+    event_hooks = hooks.get(event, []) if isinstance(hooks, dict) else []
+    for entry in event_hooks:
+        if not isinstance(entry, dict) or entry.get("matcher", "") != matcher:
+            continue
+        for hook in entry.get("hooks", []):
+            if isinstance(hook, dict) and _normalize_command(hook.get("command", "")) == normalized_cmd:
+                return hook.get("if")
+    return None
+
+
 def _hook_is_registered(
-    settings: dict, event: str, matcher: str, command: str, timeout: int | None = None
+    settings: dict, event: str, matcher: str, command: str, timeout: int | None = None,
+    if_rule: str | None = None,
 ) -> bool:
     """Return True when the nested Claude Code hook settings contain a command.
 
@@ -953,18 +980,25 @@ def _hook_is_registered(
             if isinstance(hook, dict) and _normalize_command(hook.get("command", "")) == normalized_cmd:
                 if timeout is not None and hook.get("timeout") != timeout:
                     return False
+                if if_rule is not None and hook.get("if") != if_rule:
+                    return False
                 return True
     return False
 
 
 def _register_hook(
-    settings: dict, event: str, matcher: str, command: str, timeout: int | None = None
+    settings: dict, event: str, matcher: str, command: str, timeout: int | None = None,
+    if_rule: str | None = None,
 ) -> str:
     """Add or normalize a hook registration.
 
     ``timeout`` (seconds), when given, is written as the hook's ``"timeout"``
     field, overriding the host's default wall-clock kill for this hook alone.
     When ``None``, any existing ``"timeout"`` field on the entry is left as-is.
+
+    ``if_rule``, when given, is written as the handler's ``"if"`` field (a permission
+    rule: the host spawns the hook only for a matching call); an entry that has none,
+    or another one, is updated. When ``None`` an existing ``"if"`` is left as-is.
 
     Returns ``"added"``, ``"updated"``, or ``"existing"``.
     """
@@ -989,6 +1023,8 @@ def _register_hook(
         new_hook: dict = {"type": "command", "command": command}
         if timeout is not None:
             new_hook["timeout"] = timeout
+        if if_rule is not None:
+            new_hook["if"] = if_rule
         event_hooks.append({
             "matcher": matcher,
             "hooks": [new_hook],
@@ -999,16 +1035,20 @@ def _register_hook(
     first_entry = event_hooks[first_entry_idx]
     first_hook = first_entry["hooks"][first_hook_idx]
     timeout_changed = timeout is not None and first_hook.get("timeout") != timeout
+    if_changed = if_rule is not None and first_hook.get("if") != if_rule
     changed = (
         first_hook.get("type") != "command"
         or first_hook.get("command", "") != command
         or len(matches) > 1
         or timeout_changed
+        or if_changed
     )
     first_hook["type"] = "command"
     first_hook["command"] = command
     if timeout is not None:
         first_hook["timeout"] = timeout
+    if if_rule is not None:
+        first_hook["if"] = if_rule
 
     for entry_idx, hook_idx in reversed(matches[1:]):
         entry = event_hooks[entry_idx]
@@ -1325,6 +1365,7 @@ def install(force: bool = False, via_plugin: bool = False) -> list[str]:
         src = _HOOKS_SRC / src_name
         dst = hooks_dst() / dst_name
         timeout = _HOOK_TIMEOUTS.get(dst_name)
+        if_rule = _HOOK_IF.get(dst_name)
 
         if not src.exists():
             actions.append(f"SKIP {src_name}: source not found at {src}")
@@ -1336,7 +1377,7 @@ def install(force: bool = False, via_plugin: bool = False) -> list[str]:
                 if src.read_bytes() == dst.read_bytes():
                     # Check if registration is also correct
                     command = f"{_python_exe()} {dst}"
-                    already_registered = _hook_is_registered(settings, event, matcher, command, timeout)
+                    already_registered = _hook_is_registered(settings, event, matcher, command, timeout, if_rule)
                     if already_registered:
                         continue
             except OSError:
@@ -1361,7 +1402,8 @@ def install(force: bool = False, via_plugin: bool = False) -> list[str]:
 
         command = f"{_python_exe()} {dst}"
         old_timeout = _existing_hook_timeout(settings, event, matcher, command)
-        status = _register_hook(settings, event, matcher, command, timeout)
+        old_if = _existing_hook_if(settings, event, matcher, command)
+        status = _register_hook(settings, event, matcher, command, timeout, if_rule)
         if status == "added":
             actions.append(f"Registered {event} hook: {dst_name}")
         elif status == "updated":
@@ -1369,6 +1411,10 @@ def install(force: bool = False, via_plugin: bool = False) -> list[str]:
                 actions.append(
                     f"Normalized {event} hook: {dst_name} "
                     f"(timeout {old_timeout if old_timeout is not None else 'none'} → {timeout})"
+                )
+            elif if_rule is not None and old_if != if_rule:
+                actions.append(
+                    f"Normalized {event} hook: {dst_name} (if {old_if if old_if is not None else 'none'} → {if_rule})"
                 )
             else:
                 actions.append(f"Normalized {event} hook: {dst_name}")
