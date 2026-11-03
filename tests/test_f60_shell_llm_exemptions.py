@@ -99,11 +99,21 @@ def test_non_empty_sets():
     assert len(REFUSED_CLI) >= 15 and len(ALLOWED_CLI) >= 10
 
 
+# `llm-router share` was removed from the CLI, but enforce-route.py still lists it among the admin
+# subcommands. The entry is dead and harmless (the command now answers "unknown command"), so it is
+# exempt below -- and pinned as NOT dispatchable, so the exemption cannot outlive the removal.
+# Drop the word from the hook's list and from this set together.
+_REMOVED_BUT_STILL_LISTED = {"share"}
+
+
 def test_admin_allowlist_names_exist_in_the_real_cli(hook):
     """Anti-drift: every allowlisted word (bar flags/aliases) is a real dispatch branch."""
     src = (ROOT / "src" / "llm_router" / "cli.py").read_text(encoding="utf-8")
-    for name in sorted(hook._ROUTER_ADMIN_SUBCOMMANDS - {"discover", "version", "help"}):
+    listed = hook._ROUTER_ADMIN_SUBCOMMANDS - {"discover", "version", "help"}
+    for name in sorted(listed - _REMOVED_BUT_STILL_LISTED):
         assert f'args[0] == "{name}"' in src, name
+    for name in sorted(_REMOVED_BUT_STILL_LISTED):
+        assert f'args[0] == "{name}"' not in src, f"{name} is dispatchable again: un-exempt it"
     # and no model-calling branch leaked into the allowlist
     for name in ("run", "judge", "benchmark", "probe", "soak", "calibrate", "demo",
                  "replay", "quickstart", "test", "tui", "serve", "gateway", "proxy", "broker"):

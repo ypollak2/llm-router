@@ -179,8 +179,8 @@ def analyze_facts(
         # other three same-named writers leaves it empty.
         #
         # `measured` distinguishes "I could not see your activity" from "you had
-        # no activity". The zero counts stay for existing readers (snapshot.py,
-        # share.py index them directly), but classification_accuracy is now None
+        # no activity". The zero counts stay for existing readers (snapshot.py
+        # indexes them directly), but classification_accuracy is now None
         # rather than 1.0 — a perfect score derived from zero samples is the
         # number that made these files look real.
         return {

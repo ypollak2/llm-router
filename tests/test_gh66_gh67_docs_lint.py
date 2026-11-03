@@ -432,7 +432,6 @@ _CLI_LINT_FILES = tuple(
         "commands/serve.py",
         "commands/set_enforce.py",
         "commands/setup.py",
-        "commands/share.py",
         "commands/soak.py",
         "commands/team.py",
         "commands/team_sync.py",

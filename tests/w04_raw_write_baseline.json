@@ -15,7 +15,6 @@
  "commands/proxy_default.py": 1,
  "commands/set_enforce.py": 4,
  "commands/setup.py": 1,
- "commands/share.py": 1,
  "commands/team.py": 2,
  "commands/team_sync.py": 1,
  "community.py": 1,
