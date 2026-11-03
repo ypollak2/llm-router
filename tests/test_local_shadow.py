@@ -41,7 +41,7 @@ def _fixture_units(monkeypatch):
     rows = ([{"session_id": "s-org", "kind": attempted, "outcome": ns.OUTCOME_USED, "lever": None, "ts": now}] * 20
             + [{"session_id": "s-org", "kind": "claude_only", "outcome": ns.OUTCOME_NOT_ROUTED, "lever": None,
                 "ts": now}] * 60)
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False, **_: iter(rows))
 
 
 def _make_db(path, rows):
@@ -101,7 +101,7 @@ def test_kpi_byte_identical_with_and_without_local_shadow_rows(monkeypatch, tmp_
     without = kpi.compute_scorecard(days=7, now=1_800_000_000.0)
     text_without = kpi.render_scorecard(without)
     assert without["local_shadow"]["n"] == 0
-    assert without["kpis"]["NS"]["value"] == "0.0% (n=80)"   # fixture is measurable (strict-used, M0.2)
+    assert without["kpis"]["NS"]["value"] == "blind: strict 0/80 (no verifier verdict reaches NS)"   # n=80 counted; D-364: no verdict
     assert without["kpis_diag"]["NS_heuristic"]["value"] == "25.0% (n=80)"
 
     _make_db(home / "usage.db", ROWS)

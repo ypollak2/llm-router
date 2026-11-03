@@ -25,7 +25,8 @@ values stripped of control characters (a value is data to print, never to run)::
     v=1  written=<epoch s>
     usage=none|fallback|ok  session_pct  weekly_pct  usage_stale=0|1  reset
     ctx_human  ctx_pct
-    money  money_n  money_win              (today's ESTIMATED saving "~$X est", its n and window)
+    money  money_n  money_win              (today's ESTIMATED saving "~$X est", its n and window; n is CALLS,
+                                           a call recorded in several tables counted once, W8)
     money_m  money_m_n                     (today's VERIFIED saving "$X verified saved" and its n; never summed
                                            with the estimate, P35-2)
     snap_line  snap_at                     (the five-field snapshot line and its data time; the script
@@ -33,6 +34,10 @@ values stripped of control characters (a value is data to print, never to run)::
     mix_local  mix_sub  mix_paid  mix_unc  mix_n  mix_win  ledger_as_of
                                            (this session's executed calls, from ONE
                                            ``ledger_view.window_summary``; D-218)
+    mix_claude  mix_other  mix_cover       (W8: ``mix_sub`` split by seat, the Claude Code seat vs Codex and
+                                           the other seats, so Opus and Codex never share a bucket; and the
+                                           calls the session made, for "ledger rows N of ~M". Each is
+                                           absent when unknown, and the script then prints the old line)
     proxy_down
     health=ok|degraded|idle|down
     last  last_stale=0|1  last_tok
@@ -316,7 +321,13 @@ def mix_segment(state: str, now: float | None = None, session: str = "") -> dict
 
     Keys ``mix_local mix_sub mix_paid mix_unc mix_n mix_win ledger_as_of``. Proxy rows included,
     classes by evidence (``ledger_view.provider_class``), the window by session id. An unknown
-    figure is absent, never 0; an empty session is a real ``0`` with ``mix_n=0``."""
+    figure is absent, never 0; an empty session is a real ``0`` with ``mix_n=0``.
+
+    ``mix_sub`` stays EVERY subscription seat (an older script reads only it). W8 adds the split the
+    new script prints so Opus and Codex never share a bucket: ``mix_claude`` (the Claude Code seat) and
+    ``mix_other`` (Codex, Gemini CLI), written only when both are known. ``mix_cover`` is how many calls
+    the session made (unique API messages in its transcripts, 7 days), when the NS refresher has counted
+    them: the ledger sees only the calls that went through the router, so ``n`` is printed against it."""
     now = time.time() if now is None else now
     try:
         from llm_router import ledger_view as lv
@@ -328,14 +339,42 @@ def mix_segment(state: str, now: float | None = None, session: str = "") -> dict
         shown = {k: lv.show(figs[f], "{:.0f}") for k, f in (
             ("mix_local", "mix_local"), ("mix_sub", "mix_subscription"), ("mix_paid", "mix_paid"),
             ("mix_unc", "mix_unclassified"), ("mix_n", "executed"))}
+        seats = {k: lv.show(figs[f], "{:.0f}") for k, f in (
+            ("mix_claude", "mix_subscription_claude"), ("mix_other", "mix_subscription_other"))}
     except Exception:  # noqa: BLE001
         return {}
     if any(v is None for v in shown.values()):
         return {}
     out: dict[str, str] = {k: str(v) for k, v in shown.items()}
+    if all(v is not None for v in seats.values()):
+        out.update({k: str(v) for k, v in seats.items()})
     out["mix_win"] = "session" if lw.scope == "session_id" else "session~"   # ~ = by timestamp
     out["ledger_as_of"] = lw.as_of
+    if lw.scope == "session_id":
+        cover = _session_calls(state, session, now)
+        if cover:
+            out["mix_cover"] = str(cover)
     return out
+
+
+def _session_calls(state: str, session: str, now: float) -> int | None:
+    """Calls this session made, from ``statusline_cache.json``'s ``call_mix.sessions`` (the NS
+    refresher counts them in the same pass as NS: unique API messages in the session's main and
+    sub-agent transcripts, 7 days, organic). None when there is no fresh cache (it is only written
+    by the fast tick's refresher), the session is not in it, or the figure is not a whole number."""
+    sid = session if session not in ("", "default") else ""
+    if not sid:
+        return None
+    try:
+        with open(os.path.join(state, "statusline_cache.json"), encoding="utf-8") as fh:
+            cache = json.load(fh)
+        written = float(cache["written_at"])
+        n = cache["call_mix"]["sessions"][sid]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not 0 <= now - written <= 15 * 60.0:           # the tick's STALE_AFTER_S: an old count is not a count
+        return None
+    return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else None
 
 
 SNAP_HOST = "claude_code"

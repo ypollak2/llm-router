@@ -232,8 +232,8 @@ def saved_field(actions: list[dict] | None, now: float):
 
 # ── the line ───────────────────────────────────────────────────────────────────
 
-def _pct(label: str, value: float | None, n, window: str) -> str:
-    ns = "n/a" if n is None else f"n={n}"
+def _pct(label: str, value: float | None, n, window: str, unit: str = "") -> str:
+    ns = "n/a" if n is None else f"n={n}{' ' + unit if unit else ''}"      # W8: the unit of every n is printed
     return f"{label} {value:.0f}% ({ns}, {window})" if value is not None else f"{label} n/a ({ns}, {window})"
 
 
@@ -245,10 +245,10 @@ def render_line(f: dict) -> str:
     router = f"router: {r['model']} ({r['reason']})" if r["model"] else "router: n/a"
     o = f["offload"]
     if o["value"] is not None:
-        offload = f"offload {100 * o['value']:.0f}% (n={o['n']}, {o['window']})"
+        offload = f"offload {100 * o['value']:.0f}% (n={o['n']} actions, {o['window']})"
     else:
         why = f", {o['why']}" if o.get("why") else ""
-        offload = f"offload n/a (n={o['n']}, {o['window']}{why})"
+        offload = f"offload n/a (n={o['n']} actions, {o['window']}{why})"
     q = f["quota"]
     c = q["claude"]
     if c["pct"] is not None and c.get("n") == 1 and c.get("age_s") is not None:
@@ -262,7 +262,7 @@ def render_line(f: dict) -> str:
         codex = f"Codex n/a (n/a, {cx['window']})"
     quota = claude + " / " + codex
     ql = f["quality"]
-    quality = (_pct("quality", None if ql["rate"] is None else 100 * ql["rate"], ql["n"], ql["window"]))
+    quality = (_pct("quality", None if ql["rate"] is None else 100 * ql["rate"], ql["n"], ql["window"], "verdicts"))
     fig = lv.Figure.from_dict(f["saved"]) if f["saved"] else None
     text = lv.show(fig, unit="subscription", quantity="work_hours", with_n=True)
     why = fig.na_reason if fig and fig.na_reason else "n/a"
@@ -271,7 +271,7 @@ def render_line(f: dict) -> str:
     parts = [router, offload, quota, quality, saved]
     j = f.get("judge")
     if j:
-        parts.append(f"judge {j['mean']:.2f} (n={j['n']}, {j['window']})")
+        parts.append(f"judge {j['mean']:.2f} (n={j['n']} judged, {j['window']})")
     return " | ".join(parts)
 
 

@@ -81,7 +81,7 @@ MIX_SIX = {  # window -> (local, subscription, paid, unclassified), by the table
     "today": (2, 1, 1, 3), "24h": (3, 1, 1, 4),
 }
 FIGURE = re.compile(r"\$-?\s?\d|\d+L/\d+|\d+ executed|\d+ ms")
-HAS_N = re.compile(r"\bn=\d|\bn \d|\d+ executed")
+HAS_N = re.compile(r"\bn=\d|\bn \d|\d+ executed|\bledger rows \d")   # W8: the statusline mix says "session ledger rows N"
 HAS_WINDOW = re.compile(r"\b(session|today|24h|7d|month|lifetime)\b")
 
 
@@ -222,7 +222,9 @@ def test_statusline_money_is_the_today_oracle(six):
 def test_statusline_mix_is_the_session_oracle(six):
     loc, sub, paid = SESSION_MIX
     seg = next((f for f in _statusline(six).split(" · ") if f.startswith("\u2696")), "")
-    assert f"{loc}L/{sub}S/{paid}P" in seg and "session" in seg, seg
+    # W8: S is the Claude seat and C every other seat. This fixture has one Claude seat and no Codex or
+    # Gemini seat (R2, R13 are unclassified, not subscription), so C is 0 and S carries all 4 subscription rows.
+    assert f"{loc}L/{sub}S/0C/{paid}P" in seg and "session ledger rows" in seg, seg
 
 
 def test_statusline_figures_carry_n_and_window(six):
@@ -597,7 +599,7 @@ def test_kpi_statusline_and_stop_judge_figures_equal_the_ledger_window(six_judge
     jv.refresh_cache(now=NOW)                                # what the Stop's child writes
     field = snap._judge_field()                              # the statusline snapshot reads that cache
     assert field == {"mean": mean, "n": n, "window": "14d"}
-    assert f"judge {mean:.2f} (n={n}, 14d)" in snap.render_line({**UNKNOWN_FIELDS, "judge": field})
+    assert f"judge {mean:.2f} (n={n} judged, 14d)" in snap.render_line({**UNKNOWN_FIELDS, "judge": field})   # W8: n has its unit
     assert _session_end()._cached_judge_line(NOW) == lw.judge_line()
     assert f"n={n}" in lw.judge_line() and "14d" in lw.judge_line()   # something to check: n and window shown
 

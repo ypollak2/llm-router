@@ -16,6 +16,15 @@ otherwise look comparable when they counted different things.
 
 SCOPE, stated rather than implied:
 
+* **NS and D2 read BLIND while no verifier is connected (owner decision D-364, 2026-11-03).** Their
+  strict numerator (a non-Claude model served it AND a verifier passed it) reads a unit's ``verify`` record,
+  and with none among the counted units it cannot be observed: the result is ``blind: strict 0/n``
+  (``measurable`` false, ``blind`` true, the 0/n kept), never ``0.0%``, and ``--health`` calls it blind
+  (``northstar.NS_ATTACH_VERIFY_RECORDS`` is the seam a verifier connects through). The units come from
+  ``northstar.units(subagents=True)``: sub-agent transcripts included, one unit per unique API message.
+  Two descriptive lines print beside it (``call_mix``, outside ``kpis``): calls answered outside Claude /
+  all calls, and Claude calls on Sonnet or Haiku / Claude calls, over the same unit list, window and
+  population (``_call_mix``).
 * **Organic sessions only by default.** ``session_kind`` (research / harness /
   headless / organic / untagged) was added by the instrumentation PR; most
   history on this machine predates it, so most records read back ``None``
@@ -343,7 +352,7 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
     ``northstar.units(backfill=True)`` list when the caller already holds it."""
     from llm_router import northstar as ns
 
-    window = joined = untagged = conflicting = total = attempted = used = used_heuristic = 0
+    window = joined = untagged = conflicting = total = attempted = used = used_heuristic = verdicts = 0
     backfilled_total = backfilled_attempted = 0
     by_source: dict[str, int] = {}
     by_kind: dict[str, int] = {}
@@ -353,7 +362,7 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
     newest: float | None = None
     # backfill=True: this KPI is the one reader that resolves a unit's kind from the
     # backfill sidecar. northstar.units() leaves it off for every hot-path caller.
-    for u in (ns.units(days=_wall_days(days, win), backfill=True) if units is None else units):
+    for u in (_ns_units(days, win) if units is None else units):
         if win is not None and not win.covers(u.get("ts")):
             continue
         window += 1
@@ -382,6 +391,8 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
             backfilled_total += 1
         by_session[str(sid)] = by_session.get(str(sid), 0) + 1
         newest = _newer(newest, _parse_ts(u.get("ts")))
+        if ns.has_verdict(u):
+            verdicts += 1
         is_attempted = u["kind"] in ns.ATTEMPTED_KINDS or u.get("lever") == "proxy"
         if is_attempted:
             attempted += 1
@@ -419,13 +430,45 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
             used_heuristic, attempted, label="attempt", newest_ts=newest, seen=window,
             backfilled=backfilled_attempted)),
     }
-    return (_strict_note(_rate_result(used, total, label="unit", newest_ts=newest, seen=window,
-                                      backfilled=backfilled_total)),
+    joins["verdicts"] = verdicts
+    # D-364: the strict numerator reads a verifier's verdict. With none among the counted units it
+    # cannot be observed, so NS and D2 are BLIND (their 0/n kept beside the label), not 0.0%.
+    seal = _blind if verdicts == 0 else _strict_note
+    return (seal(_rate_result(used, total, label="unit", newest_ts=newest, seen=window,
+                              backfilled=backfilled_total)),
             _rate_result(attempted, total, label="unit", newest_ts=newest, seen=window,
                          backfilled=backfilled_total),
-            _strict_note(_rate_result(used, attempted, label="attempt", newest_ts=newest, seen=window,
-                                      backfilled=backfilled_attempted)),
+            seal(_rate_result(used, attempted, label="attempt", newest_ts=newest, seen=window,
+                              backfilled=backfilled_attempted)),
             joins)
+
+
+def _ns_units(days: int, win: "_Window | None") -> list[dict]:
+    """The unit stream NS, D1, D2 and the call mix read: sub-agent transcripts included (the NS
+    definition counts them), and verify records attached only through the seam
+    (``northstar.NS_ATTACH_VERIFY_RECORDS``, False until a verifier is connected: D-364)."""
+    from llm_router import northstar as ns
+
+    return list(ns.units(days=_wall_days(days, win), backfill=True, subagents=True,
+                         verify_records=ns.NS_ATTACH_VERIFY_RECORDS))
+
+
+def _blind(result: dict) -> dict:
+    """A strict rate with no verifier verdict behind it (D-364): not a measurement, whatever 0/n it
+    computed. Keeps n, numerator, denominator and backfilled so every surface can print ``0/n``
+    beside the word; a too-few or not-measurable result is left as it was (it already says n/a)."""
+    from llm_router import northstar as ns
+
+    if not result.get("measurable"):
+        return result
+    k, n = result["numerator"], result["denominator"]
+    backfilled = result.get("backfilled") or 0
+    note = f", {backfilled:,} backfilled" if backfilled else ""     # stated on the line, as for a measured rate
+    out = dict(result)
+    out.pop("lines", None)
+    out.update(value=f"blind: strict {k}/{n} (no verifier verdict reaches NS{note})", measurable=False,
+               blind=True, reason=ns.BLIND_REASON)
+    return out
 
 
 VERIFY_SHADOW_KEYS = ("fail", "unavailable", "verified", "weak")
@@ -481,6 +524,98 @@ def _heuristic_diag(result: dict) -> dict:
         result["reason"] = f"{result.get('reason')} ({note})"
     result["lines"] = [note]
     return result
+
+
+# ── the two progress lines beside a blind NS (D-364) ─────────────────────────
+
+#: Sessions kept in ``call_mix["sessions"]`` (largest first): the status line needs only the live one.
+CALL_MIX_SESSIONS = 50
+
+
+def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window | None" = None, *,
+              sessions: bool = False) -> dict:
+    """Two descriptive figures over the SAME unit list, window and population ``_ns_d1_d2`` reads:
+
+    * ``outside_claude``: calls answered by a non-Claude model / all calls;
+    * ``below_opus``: Claude calls on Sonnet or Haiku / Claude calls.
+
+    A call is ONE API message (``northstar``: unique ``message.id``, sub-agents included), plus the
+    non-Claude calls the router made (an MCP call joined to its routing row, a proxy-served message, a
+    draft, a Codex handoff, an edit). A user prompt is no call. The answering model is the unit's own
+    ``model``: ``message.model`` for a Claude call, the SERVED model for a proxy-served one, the router
+    row's model for an MCP call. A call whose model is unknown (an MCP admin tool, a draft with no
+    model line) is in NEITHER figure and is counted in ``unclassified``: unknown never joins a side.
+    Neither figure is NS (D-364 keeps NS strict) and neither says a call was good: they say who answered.
+
+    ``sessions=True`` adds ``sessions`` (calls per session id, the largest ``CALL_MIX_SESSIONS``): only the
+    status line refresher asks, because it prints a session's ledger rows against its calls. ``kpi --json``
+    carries no session id."""
+    from llm_router import northstar as ns
+
+    claude = dict.fromkeys(("opus", "sonnet", "haiku", "claude-other"), 0)
+    outside = unclassified = 0
+    by_session: dict[str, int] = {}                     # calls per session: the status line prints a session's n against it
+    for u in units:
+        if u.get("kind") == ns.UNIT_USER_PROMPT:
+            continue
+        if win is not None and not win.covers(u.get("ts")):
+            continue
+        kind = u["session_kind"] if "session_kind" in u else index.resolve(u.get("session_id")).kind
+        if kind not in allowed:
+            continue
+        model = u.get("model")
+        family = ns.claude_family(model)
+        if family is not None:
+            claude[family] += 1
+        elif isinstance(model, str) and model.strip():
+            outside += 1
+        else:
+            unclassified += 1
+            continue
+        sid = u.get("session_id")
+        if isinstance(sid, str) and sid:
+            by_session[sid] = by_session.get(sid, 0) + 1
+    n_claude = sum(claude.values())
+    n_calls = n_claude + outside
+    out = {
+        "unit": "calls", "population": "organic" if allowed == _allowed_kinds(False) else "organic+research",
+        "outside_claude": {"k": outside, "n": n_calls},
+        "below_opus": {"k": claude["sonnet"] + claude["haiku"], "n": n_claude},
+        "claude_by_family": claude, "unclassified": unclassified,
+    }
+    if sessions:
+        out["sessions"] = dict(sorted(by_session.items(), key=lambda kv: -kv[1])[:CALL_MIX_SESSIONS])
+    return out
+
+
+def _mix_pct(k: int, n: int) -> str:
+    """``0.06%`` below one percent (two places keep a small share from rounding to zero), else ``86.9%``."""
+    p = 100.0 * k / n
+    return f"{p:.2f}%" if 0 < p < 1 else f"{p:.1f}%"
+
+
+def _call_mix_segment(label: str, fig: dict, noun: str, window: str, population: str) -> str:
+    """``off-Claude 0.06% (4/7116 calls, 7d, organic)``: the share, its k/n, the unit, the window and the
+    population. Below ``MIN_N`` calls it is ``n/a`` with the same k/n (never a share of a handful)."""
+    k, n = fig["k"], fig["n"]
+    body = f"({k}/{n} {noun}, {window}, {population})"
+    if n < MIN_N:
+        return f"{label} n/a {body}"
+    return f"{label} {_mix_pct(k, n)} {body}"
+
+
+def _call_mix_render_lines(data: dict) -> list[str]:
+    """The two lines of ``render_scorecard``: nothing when no call was counted (an empty window prints
+    no line, so a card with no units is unchanged)."""
+    cm = data.get("call_mix")
+    if not cm or not cm["outside_claude"]["n"]:
+        return []
+    window, pop = _window_label(data), cm["population"]
+    lines = [f"  {_call_mix_segment('off-Claude', cm['outside_claude'], 'calls', window, pop)}",
+             f"  {_call_mix_segment('<Opus', cm['below_opus'], 'Claude calls', window, pop)}"]
+    if cm["unclassified"]:
+        lines.append(f"      {cm['unclassified']} call(s) with no known model are in neither figure")
+    return lines
 
 
 # ── D3: redo rate, from usage_outcome ────────────────────────────────────────
@@ -2675,10 +2810,12 @@ def _judge_quality(days: float, now_ts: float, win: "_Window | None") -> dict | 
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
                       schema_since: float | None = None, now: float | None = None,
                       since_policy: str | None = None,
-                      since: float | None = None, until: float | None = None) -> dict:
+                      since: float | None = None, until: float | None = None,
+                      call_mix_sessions: bool = False) -> dict:
     """The scorecard over the last ``days`` days, or over the absolute window
     ``[since, until]`` (epoch seconds; both or neither). A window replaces ``days`` and
-    ``now``: "now" becomes ``until``, so a historical check does not drift as time passes."""
+    ``now``: "now" becomes ``until``, so a historical check does not drift as time passes.
+    ``call_mix_sessions`` adds calls-per-session to ``call_mix`` (the status line refresher only)."""
     from llm_router import session_kind as sk
     from llm_router.proxy import ledger as pl
 
@@ -2695,10 +2832,10 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     all_rows = pl.read_rows()
     index = sk.KindIndex(all_rows)
     until_ts = None if win is None else win.until
-    from llm_router import northstar as _ns
-    unit_list = list(_ns.units(days=_wall_days(days, win), backfill=True))  # one pass: NS/D1/D2 and verify_shadow
+    unit_list = _ns_units(days, win)  # one pass: NS/D1/D2, the call mix and verify_shadow
     ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index, win, unit_list)
     kpis_diag = joins.pop("diag")
+    call_mix_r = _call_mix(unit_list, allowed, index, win, sessions=call_mix_sessions)
     d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index, win), days, now_ts)
     pop = _proxy_population(all_rows, days, allowed, now_ts, until=until_ts)
     d4_r = _d4_tier_mix(pop)
@@ -2739,6 +2876,9 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         # PLAN v16 W1-2 / UN-08: routes to a model not eligible at decision time. Outside "kpis".
         "ineligible_routes": _ineligible_routes(days, now_ts, win),
         "verify_shadow": _verify_shadow(unit_list, win),
+        # D-364: the two progress lines beside a blind NS, from the same unit list, window and population.
+        # Outside "kpis" (informational): _ORDER, --health and the pinned NS..G4 text are unchanged.
+        "call_mix": call_mix_r,
         # Informational only: not in "kpis", so not in _ORDER, --health or NS/D1/D2.
         "local_shadow": _local_shadow_summary(days, win),
         # O3 is likewise outside "kpis": adding it there would change the key set, _ORDER and
@@ -2891,6 +3031,7 @@ def render_scorecard(data: dict) -> str:
             v = data["verify_shadow"]
             lines.append(f"      verify (shadow): {v['verified']} verified, {v['weak']} weak, "
                          f"{v['fail']} failed, {v['unavailable']} unavailable (informational; not in NS/D1/D2)")
+    lines += _call_mix_render_lines(data)
     if (data.get("ledger") or {}).get("line"):
         lines.append(f"  {data['ledger']['line']}")
     for key, r in (data.get("kpis_diag") or {}).items():
