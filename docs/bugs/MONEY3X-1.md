@@ -11,7 +11,7 @@ status: fixed in `bind/honest-statusline` (deploy: restart the MCP server and ev
   all three: they share the model and token counts, `usage.correlation_id` equals `savings_stats.session_id`, and the timestamps are
   written a moment apart (13 of 800 id-sharing pairs differed by one second, `src/llm_router/ledger_view.py`).
 - **Fix.** `ledger_view.duplicate_calls` names the repeats: the key is the call id where both rows carry one (`usage.correlation_id`
-  and `savings_stats.session_id`; `claude_usage` has none), else the model, the input and output tokens and a timestamp within
+  and `savings_stats.session_id`; `claude_usage` has none) together with the same model and token counts, else the model, the input and output tokens and a timestamp within
   `CALL_MATCH_WINDOW_S` (two seconds; 800 id-sharing pairs measured, `src/llm_router/ledger_view.py`). Matching is one-to-one and only across tables (identical calls of one table stay two), the priority is
   `usage`, `savings_stats`, then the platform tables, and the repeats leave `unverified_calls` and `unverified_usd`
   (`MoneyWindow.duplicate_calls` and `duplicate_usd` report them). Every surface reads that window, so they move together. The status line

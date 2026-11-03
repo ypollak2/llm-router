@@ -175,6 +175,15 @@ def test_the_call_id_wins_over_the_clock(tmp_path):
     assert _window(path).unverified_calls == 1
 
 
+def test_an_id_alone_is_not_enough_the_model_and_tokens_must_agree_too(tmp_path):
+    """A writer that reuses one id for many calls must not merge different calls."""
+    path, con = _db(tmp_path)
+    _call(con, 0, claude=False, skew=600)
+    con.execute("UPDATE savings_stats SET input_tokens = 999")          # same id, another call
+    con.commit()
+    assert _window(path).unverified_calls == 2
+
+
 def test_without_an_id_the_same_model_tokens_and_time_make_one_call(tmp_path):
     path, con = _db(tmp_path)
     _call(con, 0, cid="")                              # an empty id: no id on either row

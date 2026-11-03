@@ -588,8 +588,9 @@ def duplicate_calls(rows: "list[CallRow]") -> "list[CallRow]":
     """The rows that repeat a call an earlier-priority table already holds (the one call is counted once).
 
     KEY, in order: (1) an ID both rows carry (``usage.correlation_id`` = ``savings_stats.session_id``: the
-    router stamps the call's id into both); (2) otherwise model + input tokens + output tokens + a timestamp
-    within :data:`CALL_MATCH_WINDOW_S`. Matching is one-to-one and only ACROSS tables: a call recorded
+    router stamps the call's id into both) together with the same model and token counts, so a writer that
+    reuses one id for many calls cannot merge different calls, and the two clocks may disagree by any amount;
+    (2) otherwise model + input tokens + output tokens + a timestamp within :data:`CALL_MATCH_WINDOW_S`. Matching is one-to-one and only ACROSS tables: a call recorded
     twice in the SAME table is two calls (a retry with identical tokens), and one row of a table can absorb
     at most one row of each other table, so three identical calls in ``usage`` and one in ``claude_usage``
     drop one row, not three. Tables are taken in priority order (``_CALL_PRIORITY``): each table's rows
@@ -606,11 +607,11 @@ def duplicate_calls(rows: "list[CallRow]") -> "list[CallRow]":
     dropped: list[CallRow] = []
     for table in sorted(by_table, key=lambda t: rank.get(t, len(rank))):
         # what this table may still match: the rows higher tables kept, none of them matched by it yet
-        ids: dict[str, list[int]] = {}
+        ids: dict[tuple, list[int]] = {}
         pools: dict[tuple, list[tuple[float, int]]] = {}
         for i, other in enumerate(kept):
             if other.ident:
-                ids.setdefault(other.ident, []).append(i)
+                ids.setdefault((other.ident, other.model, other.tin, other.tout), []).append(i)
             if other.ts is not None:
                 pools.setdefault((other.model, other.tin, other.tout), []).append((other.ts, i))
         for pool in pools.values():
@@ -618,8 +619,8 @@ def duplicate_calls(rows: "list[CallRow]") -> "list[CallRow]":
 
         def take(i: int) -> None:                      # a kept row matched by this table leaves its pools
             other = kept[i]
-            if other.ident and i in ids.get(other.ident, ()):
-                ids[other.ident].remove(i)
+            if other.ident and i in ids.get((other.ident, other.model, other.tin, other.tout), ()):
+                ids[(other.ident, other.model, other.tin, other.tout)].remove(i)
             if other.ts is not None:
                 pool = pools[(other.model, other.tin, other.tout)]
                 del pool[bisect_left(pool, (other.ts, i))]
@@ -628,7 +629,7 @@ def duplicate_calls(rows: "list[CallRow]") -> "list[CallRow]":
         survivors: list[CallRow] = []
         unmatched: list[CallRow] = []
         for row in mine:                                # (1) by id
-            hit = ids.get(row.ident or "")
+            hit = ids.get((row.ident, row.model, row.tin, row.tout)) if row.ident else None
             if hit:
                 take(hit[-1])
                 dropped.append(row)
