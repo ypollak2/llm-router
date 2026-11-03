@@ -436,10 +436,26 @@ def test_exec_args_workspace_write_has_the_network_off_and_precedes_the_model():
                            sandbox="workspace-write")
     assert args[args.index("--sandbox") + 1] == "workspace-write"
     assert "sandbox_workspace_write.network_access=false" in args
+    # /tmp and $TMPDIR are not writable roots: the work tree is the only one (the run's temp dir is inside it)
+    assert "sandbox_workspace_write.exclude_slash_tmp=true" in args
+    assert "sandbox_workspace_write.exclude_tmpdir_env_var=true" in args
     assert args.index("-c") < args.index("-m")  # the sandbox flags come first
     assert args[args.index("-C") + 1] == "/proj" and args[-1] == "do it"
     assert "--ignore-user-config" in args  # no config.toml can widen the sandbox
+    assert "--ignore-rules" in args and args.index("--ignore-rules") < args.index("-m")  # no execpolicy rule either
     assert "danger-full-access" not in args and "--dangerously-bypass-approvals-and-sandbox" not in args
+
+
+@pytest.mark.parametrize("mode", ["workspace-write", "read-only"])
+def test_exec_args_of_every_delegated_mode_ignore_user_and_project_rules(mode):
+    """M1 (security): an execpolicy ``allow`` rule makes Codex run a matching command OUTSIDE its sandbox, with network,
+    in either mode, and ``--ignore-user-config`` does not stop it (tests/test_bind_codex_sandbox_live.py reproduces it
+    on the real binary). The flag has to be in the argv of both modes."""
+    args = codex_exec_args("/bin/codex", model="m", cwd="/proj", prompt="p", sandbox=mode)
+    assert "--ignore-user-config" in args and "--ignore-rules" in args
+    assert args.index("--ignore-rules") < args.index("-m")
+    assert args[args.index("--sandbox") + 1] == mode
+    assert "--ignore-rules" not in codex_exec_args("/bin/codex", model="m", cwd="/proj", prompt="p")  # pure-LLM: unchanged
 
 
 def test_no_caller_can_ask_for_an_unsandboxed_run(monkeypatch):
@@ -487,14 +503,29 @@ def test_built_command_line_of_a_delegated_run(ctx):
     stub = ctx.stub()
     decision_of(ctx.run(_payload(ctx), codex=stub))
     argv, cwd = _launch(ctx)
-    assert argv[0] == "exec" and "--json" in argv and "--ignore-user-config" in argv
+    assert argv[0] == "exec" and "--json" in argv and "--ignore-user-config" in argv and "--ignore-rules" in argv
     assert _sandbox_of(argv) == "workspace-write"
     assert "sandbox_workspace_write.network_access=false" in argv
+    assert "sandbox_workspace_write.exclude_slash_tmp=true" in argv
+    assert "sandbox_workspace_write.exclude_tmpdir_env_var=true" in argv
     assert argv[argv.index("-m") + 1] == "gpt-6-astra"
     assert _root_of(argv) == os.path.realpath(ctx.proj)
     # the payload's cwd, not the (different) directory the hook process was started in
     assert os.path.realpath(cwd) == os.path.realpath(ctx.proj)
     assert os.path.realpath(cwd) != os.path.realpath(ctx.home / "hookproc")
+
+
+def test_a_delegated_write_run_has_a_temp_dir_inside_the_repo_that_never_reaches_a_commit(ctx):
+    """S1: /tmp and $TMPDIR are not writable in the sandbox, so the child's TMPDIR is a per-run directory inside the
+    repository: it exists when the child starts, is gone when the run ends, and git ignores its parent."""
+    decision_of(ctx.run(_payload(ctx), codex=ctx.stub()))
+    call = stub_calls(ctx.log)[0]
+    tmp, parent = call["tmpdir"], ctx.proj / ".llm-router-codex-tmp"
+    assert tmp and call["tmpdir_exists"], call
+    assert os.path.realpath(os.path.dirname(tmp)) == os.path.realpath(parent)
+    assert not os.path.exists(tmp)  # removed after the run
+    assert (parent / ".gitignore").read_text() == "*\n"
+    assert _git("-C", str(ctx.proj), "status", "--porcelain", "--ignored=no").stdout.strip() == ""  # not even untracked
 
 
 def test_a_session_in_a_repo_subdirectory_writes_at_the_repo_toplevel(ctx):
@@ -521,6 +552,8 @@ def test_a_session_at_home_or_outside_any_repository_runs_read_only(ctx, where):
     assert "workspace-write" not in argv and not any("sandbox_workspace_write" in a for a in argv)
     assert _root_of(argv) == os.path.realpath(target) and os.path.realpath(cwd) == os.path.realpath(target)
     assert [r["sandbox"] for r in ledger_rows(ctx.home) if r["outcome"] == "delegated"] == ["read-only"]
+    assert "--ignore-rules" in argv  # M1: read-only is not isolated from execpolicy rules either
+    assert not (target / ".llm-router-codex-tmp").exists()  # a read-only run writes nothing, its temp dir included
 
 
 @pytest.mark.parametrize("where, expected", [

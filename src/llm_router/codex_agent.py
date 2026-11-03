@@ -13,8 +13,10 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -367,12 +369,23 @@ def codex_exec_args(binary: str, *, model: str, cwd: str, prompt: str, sandbox: 
     """The argv of one ``codex exec`` run. All arguments are separate list items -- no shell expansion.
 
     ``sandbox=None`` adds no sandbox flag, so ``codex exec`` keeps its own default (read-only); that is what every
-    pure-LLM caller gets. ``"workspace-write"`` (a delegated agent run, owner decision D-357, 2026-11-03) makes
-    ``cwd`` writable and turns the network OFF explicitly: ``sandbox_workspace_write.network_access`` is the
-    documented key (verified with ``codex debug prompt-input -c sandbox_workspace_write.network_access=false``,
-    which reports "Network access is restricted", and ``=true``, which reports "enabled"), so the run does not
-    depend on the default staying off. The flags sit before ``-m`` and are not user-configurable:
-    ``--ignore-user-config`` below means no ``config.toml`` can widen them.
+    pure-LLM caller gets, and their argv is unchanged. A delegated agent run (owner decision D-357, 2026-11-03)
+    passes ``"workspace-write"`` or ``"read-only"`` and gets three more guarantees, each checked live against
+    codex-cli 0.161.0 with a stub model on loopback (tests/test_bind_codex_sandbox_live.py):
+
+    * ``--ignore-rules``: no execpolicy ``.rules`` file, user or project, is loaded. ``--ignore-user-config`` does NOT
+      cover rules, and a rule such as ``prefix_rule(pattern=["curl"], decision="allow")`` makes Codex run a matching
+      command OUTSIDE the sandbox, with network, in either mode (docs/BUGS.md BIND-2). The owner's own rules allow
+      ``curl``, ``git push`` and ``gh pr merge``.
+    * ``workspace-write`` turns the network OFF explicitly (``sandbox_workspace_write.network_access=false``, so the
+      run does not depend on the default staying off) and drops ``/tmp`` and ``$TMPDIR`` from the writable roots
+      (``exclude_slash_tmp``, ``exclude_tmpdir_env_var``), which leaves the work tree itself as the only writable
+      root; ``run_codex`` gives the run a temp dir of its own inside it (:func:`make_run_tmpdir`).
+    * the flags sit before ``-m`` and are not user-configurable, because ``--ignore-user-config`` means no
+      ``config.toml`` can widen them.
+
+    ``codex debug prompt-input`` reports what the MODEL is told ("Network access is restricted"); it does not show
+    enforcement. Enforcement is the live test.
     """
     # All arguments passed as separate list items — no shell expansion.
     # --skip-git-repo-check: llm_router is a pure-LLM consumer, not a code-edit
@@ -405,8 +418,13 @@ def codex_exec_args(binary: str, *, model: str, cwd: str, prompt: str, sandbox: 
     # is a direct config override, not a config.toml read, so it still applies
     # with the file ignored.
     args = [binary, "exec", "--json", "--ignore-user-config"]
+    if sandbox in SANDBOX_MODES:
+        args += ["--ignore-rules"]
     if sandbox == "workspace-write":
-        args += ["--sandbox", "workspace-write", "-c", "sandbox_workspace_write.network_access=false"]
+        args += ["--sandbox", "workspace-write",
+                 "-c", "sandbox_workspace_write.network_access=false",
+                 "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+                 "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true"]
     elif sandbox == "read-only":
         args += ["--sandbox", "read-only"]
     args += [
@@ -418,6 +436,75 @@ def codex_exec_args(binary: str, *, model: str, cwd: str, prompt: str, sandbox: 
         prompt,
     ]
     return args
+
+
+#: The directory, inside a delegated run's writable root, that holds one temp dir per run. ``/tmp`` and ``$TMPDIR`` are not
+#: writable in a delegated run (:func:`codex_exec_args`), so tests and tools that need a temp dir get this one through
+#: ``TMPDIR``. Its own ``.gitignore`` (``*``, which also ignores the file itself) keeps it out of ``git status`` and out
+#: of any commit; it is created before the run, the run's dir is removed after it, and a dir a killed run left behind
+#: is removed by the next run once it is a day old.
+RUN_TMP_PARENT = ".llm-router-codex-tmp"
+_RUN_TMP_STALE_S = 24 * 3600
+_RUN_ID_CHARS = frozenset("0123456789abcdef")
+
+
+def make_run_tmpdir(root: str) -> str | None:
+    """Create ``<root>/.llm-router-codex-tmp/<run-id>`` (0700) and return it, or None when it cannot be made (the run
+    then has no temp dir at all: it still stays inside its sandbox).
+
+    The parent must be a real directory inside ``root``. A repository can ship ``.llm-router-codex-tmp`` as a symlink to
+    somewhere else, and a delegated run can swap it for one while it runs (``root`` is writable): following it would put
+    the run dir, and the stale-dir pruning below, outside the work tree."""
+    parent = os.path.join(root, RUN_TMP_PARENT)
+    try:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        if os.path.islink(parent) or os.path.realpath(parent) != os.path.join(os.path.realpath(root), RUN_TMP_PARENT):
+            return None
+        try:
+            fd = os.open(os.path.join(parent, ".gitignore"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            try:
+                os.write(fd, b"*\n")
+            finally:
+                os.close(fd)
+        _prune_stale_run_tmpdirs(parent)
+        path = os.path.join(parent, uuid.uuid4().hex[:12])
+        os.mkdir(path, 0o700)
+        return path
+    except OSError:
+        return None
+
+
+def _prune_stale_run_tmpdirs(parent: str) -> None:
+    """Remove run dirs (named like the ones :func:`make_run_tmpdir` makes) that are over a day old."""
+    cutoff = time.time() - _RUN_TMP_STALE_S
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(parent, name)
+        try:
+            if (len(name) == 12 and set(name) <= _RUN_ID_CHARS and os.path.isdir(path)
+                    and not os.path.islink(path) and os.stat(path).st_mtime < cutoff):
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            continue
+
+
+def remove_run_tmpdir(path: str | None) -> None:
+    """Remove one run's temp dir (never raises). A symlink is unlinked, not followed."""
+    if not path:
+        return
+    try:
+        if os.path.islink(path):
+            os.unlink(path)
+        else:
+            shutil.rmtree(path, ignore_errors=True)
+    except OSError:
+        pass
 
 
 async def run_codex(
@@ -477,9 +564,11 @@ async def run_codex(
         sandbox: ``None`` (default) passes no sandbox flag, so ``codex exec`` keeps its own
             default (read-only): every pure-LLM caller (router chain, MCP tools, evaluators).
             ``"workspace-write"`` is for a delegated AGENT run (agent-route, D-357): the working
-            directory is writable and the network is off (:func:`codex_exec_args`).
-            ``"read-only"`` names the default explicitly. Anything else is refused: no caller
-            may ask for ``danger-full-access`` through here.
+            directory is writable, the network is off, ``/tmp`` and ``$TMPDIR`` are not writable, and the
+            child's ``TMPDIR`` is a per-run directory inside the working directory (created before the run,
+            removed after it). ``"read-only"`` is the same without writes. Both ignore execpolicy rules
+            (:func:`codex_exec_args`). Anything else is refused: no caller may ask for ``danger-full-access``
+            through here.
 
     Returns:
         A ``CodexResult`` with the process output, model name, exit code,
@@ -528,9 +617,15 @@ async def run_codex(
     args = codex_exec_args(binary, model=model, cwd=cwd, prompt=prompt, sandbox=sandbox)
 
     start = time.monotonic()
+    run_tmp: str | None = None
     try:
         # Use safe environment that excludes API keys and tokens
         safe_env = get_safe_env()
+        if sandbox == "workspace-write":
+            # /tmp and $TMPDIR are not writable in this mode, so the child's temp dir lives inside its root
+            run_tmp = make_run_tmpdir(cwd)
+            if run_tmp:
+                safe_env["TMPDIR"] = run_tmp
 
         # Codex CLI validates every configured model_provider at startup —
         # including ones this call never uses — and hard-fails the whole turn
@@ -753,6 +848,8 @@ async def run_codex(
             model=model, exit_code=1, duration_sec=time.monotonic() - start,
             reason_code="spawn_error",
         )
+    finally:
+        remove_run_tmpdir(run_tmp)
 
 
 # Initialize Codex cache at module import time (before any async routing code runs).

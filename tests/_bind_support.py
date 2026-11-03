@@ -50,8 +50,8 @@ def write_codex_stub(
     """Write an executable named ``codex`` that behaves like ``codex exec --json`` and return its path.
 
     ``mode``: ``answer`` (one agent message, exit 0), ``quota`` (the usage-limit error events, exit 1) or
-    ``fail`` (no events, exit 2). Each call appends ``{"argv": [...], "cwd": ...}`` to ``argv_log`` so a test
-    can assert what the hook really launched. The script embeds its configuration, so it does not depend on
+    ``fail`` (no events, exit 2). Each call appends ``{"argv": [...], "cwd": ..., "tmpdir": ..., "tmpdir_exists": ...}``
+    to ``argv_log`` so a test can assert what the hook really launched. The script embeds its configuration, so it does not depend on
     which environment variables the hook passes to the child.
     """
     directory.mkdir(parents=True, exist_ok=True)
@@ -64,7 +64,9 @@ def write_codex_stub(
         ARGV_LOG = {str(argv_log) if argv_log else None!r}
         if ARGV_LOG:
             with open(ARGV_LOG, "a") as fh:
+                tmp = os.environ.get("TMPDIR") or ""
                 fh.write(json.dumps({{"argv": sys.argv[1:], "cwd": os.getcwd(),
+                                      "tmpdir": tmp or None, "tmpdir_exists": bool(tmp) and os.path.isdir(tmp),
                                       "env": {{"LITELLM_LOG": os.environ.get("LITELLM_LOG")}}}}) + "\\n")
         time.sleep({sleep_s!r})
         def ev(obj):

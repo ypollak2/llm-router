@@ -783,17 +783,28 @@ model has just written (`write_file s.py`, then `python3 s.py`; pinned in
 `src/llm_router/agentic/adapters.py` and `src/llm_router/codex_agent.py`) runs
 under that CLI's own sandbox (`--sandbox workspace-write`, or Codex's exec default),
 not under `write_policy`. The Claude Code `agent-route.py` hook's delegated Codex runs (owner decision D-357,
-"write in repo") pick the sandbox from the session's directory, the hook payload's `cwd`. Inside a git work tree
-(`git -C <cwd> rev-parse --show-toplevel` succeeds) the run gets `--sandbox workspace-write` with the network
-off (`sandbox_workspace_write.network_access=false`) and that work tree's top level as its writable root, so it
-can edit and run tests in the repository. Anywhere else it gets `--sandbox read-only`, also with no network,
-and a reply that reports blocked work is not delivered. The top level is never `$HOME`, the account's own home
-directory, a directory above either, or `/`: a session rooted at the home directory, outside any repository, or
-in a repository that contains the home directory runs read-only, and a session rooted at `/` is not delegated
-to Codex at all (`codex_unsafe_cwd`). git is asked without `GIT_DIR`, `GIT_WORK_TREE` and `GIT_COMMON_DIR` (set,
-`GIT_DIR` makes any directory a work tree), and a top level that does not contain the session directory (a
-repository's own `core.worktree` can point elsewhere) counts as no repository. `danger-full-access` cannot be
-requested through `run_codex`. Tests: `tests/test_bind_agent_route_handoff.py` (docs/bugs/BIND-2.md).
+"write in repo") are the one case this repo configures. What they guarantee: every command the model runs stays
+inside the sandbox. Codex is started with `--ignore-user-config` and `--ignore-rules`, so no `config.toml` and no
+execpolicy `.rules` file, user or project, is loaded. Without `--ignore-rules` a user rule such as
+`prefix_rule(pattern=["curl"], decision="allow")` makes Codex run a matching command outside the sandbox, with network,
+in either mode (the owner's rules allow `curl`, `git push`, `gh pr merge` and `gh run`); `tests/test_bind_codex_sandbox_live.py`
+reproduces it on the real binary, with a stub model and a canary listener on loopback, and fails if it comes back
+(docs/bugs/BIND-6.md). The sandbox is chosen from the session's directory, the hook payload's `cwd`. Inside a git work
+tree (`git -C <cwd> rev-parse --show-toplevel` succeeds) the run gets `--sandbox workspace-write` with the network off
+(`sandbox_workspace_write.network_access=false`) and that work tree's top level as its only writable root: `/tmp` and
+`$TMPDIR` are excluded (`exclude_slash_tmp`, `exclude_tmpdir_env_var`) and the child's `TMPDIR` is a per-run directory in
+the work tree (`.llm-router-codex-tmp/<run-id>`, ignored by git, removed after the run). Observed on codex-cli 0.161.0,
+`.git` is read-only inside that root, so commit, worktree and PR steps end in blocked reports. Anywhere else it gets
+`--sandbox read-only`, also with no network, and a reply that reports blocked work is not delivered. The top level is
+never `$HOME`, the account's own home directory, a directory above either, or `/`: a session rooted at the home
+directory, outside any repository, or in a repository that contains the home directory runs read-only, and a session
+rooted at `/` is not delegated to Codex at all (`codex_unsafe_cwd`). git is asked without `GIT_DIR`, `GIT_WORK_TREE` and
+`GIT_COMMON_DIR` (set, `GIT_DIR` makes any directory a work tree), and a top level that does not contain the session
+directory (a repository's own `core.worktree` can point elsewhere) counts as no repository. `danger-full-access` cannot
+be requested through `run_codex`. **Not covered:** the router chain and the MCP tools call `codex exec` with no sandbox
+flag and no `--ignore-rules`, and the same scenario shows a rule-allowed `curl` leaving their read-only sandbox (open,
+docs/bugs/BIND-6.md). Verified on the macOS seatbelt with codex-cli 0.161.0; other Codex versions and the Linux sandboxes
+are untested. Tests: `tests/test_bind_agent_route_handoff.py`, `tests/test_bind_codex_run_tmpdir.py`.
 
 `tests/test_security_docs_match_the_code.py` reads the tables in this section and
 runs every row through the real lane executors. `tests/test_write_policy_one_policy.py`
