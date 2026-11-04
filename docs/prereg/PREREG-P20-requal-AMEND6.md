@@ -67,9 +67,8 @@ privacy rules, the quota guard, and the spend cap of 60.00 USD per run dir ledge
 the 2026-10-19 run: `git diff 123e2e44 <REPO_SHA> -- src` is empty, so the context pack, `grade`,
 `record_competence` and the local model options are the run's of 2026-10-19.
 
-Spend across the two runs is held to 60.00 USD by an operator rule, because the script's guard reads one run
-dir's ledger: the second run starts only if the first run's `status` shows `spend_usd` plus 15.00 is <= 60.00,
-and the operator stops at a combined 60.00. The 2026-10-19 run cost 14.84 USD (b2 ledger).
+The 2026-10-19 run cost 14.84 USD (b2 ledger). The script's spend guard reads one run dir's ledger, so
+the 60.00 USD total approved by D-374 is held by operator rules R2 and R3 below, not by the script.
 
 `tech_op` stays out of scope. Its set has n = 1 (NOT INFORMATIVE by design, prereg section 4), the set is
 terminal at `select`, `run` and `judge` on it exit 4 and make no model call, and `score` writes
@@ -79,19 +78,60 @@ terminal at `select`, `run` and `judge` on it exit 4 and make no model call, and
 
 None added to outcomes: no answer or score has been produced under AMEND6. Disclosed before any data:
 
-* **Agent isolation differs from the run of 2026-10-19.** The code at `REPO_SHA` includes the owner-merged
-  hardening F104, F110, F113, F115, F117 and F122 (PRs #642, #643, #647, #651, #653, #659), cherry-picked
-  with `-x`; their added and removed lines equal the merged commits. They were written after agents deleted
-  the live install twice (F86, F86-2). Agents (Pi and `claude -p` with tools) now run with a scratch HOME, an
-  allow-listed PATH without llm-router, and a token scan. This changes the environment a coding agent sees,
-  not the task, the grader or any pack. The qwen3.8 code result (27/74) was measured without it. The
-  Claude children authenticate through `P20_CLAUDE_CREDENTIALS_FILE` (F104-AGENT-SCRATCH-HOME.md, "Auth").
+* **The agent, Claude-call and grader environment differs from the run of 2026-10-19.** The code at
+  `REPO_SHA` includes the owner-merged hardening F104, F110, F113, F115, F117 and F122 (PRs #642, #643, #647,
+  #651, #653, #659), cherry-picked with `-x`; their added and removed lines equal the merged commits. They were
+  written after agents deleted the live install twice (F86, F86-2). The base code (123e2e44) had none of them.
+  They change where and how things run, not the items, the packs or the grade rule, but three of the changes
+  can reach outcomes, and the qwen3.8 results (qa 13/113, code 27/74) were measured without any of them:
+  1. **Code agents.** Pi and `claude -p` with tools run with a scratch HOME, an allow-listed PATH without
+     llm-router, and a token scan, so a coding agent sees a different environment.
+  2. **Every Claude call.** The Sonnet reference, the Haiku report arm, the Opus judge and the Sonnet code arm
+     now run under a scratch HOME with token authentication (`CLAUDE_CODE_OAUTH_TOKEN` read from
+     `P20_CLAUDE_CREDENTIALS_FILE`; the Keychain is not visible there), and `claude` is looked up on the
+     allow-listed PATH, which excludes `~/.local/bin`, where `claude` is installed on this machine (checked
+     2026-11-04: `shutil.which("claude", path=agent_path(<default PATH>))` is `None`; every Claude call would
+     error). Rule R1 puts a byte copy of the Claude Code CLI on a PATH directory the allow-list keeps.
+  3. **The hidden-test grader.** For the `rx_edit` tasks, F113 and F115 replaced the harness's own interpreter
+     (`sys.executable`) by the first python on the allow-listed PATH that has pytest and cannot import
+     llm_router. The harness does not pin or record it, and with the default PATH none exists (only
+     `/usr/bin/python3` 3.9.6 without pytest: the preflight refuses, and the code runner would exit 2). Rule R1
+     pins it, and rule R1 records it in each run's `use.log`. The interpreter and pytest version the
+     2026-10-19 grader used were not recorded; the harness venv on 2026-11-04 reports Python 3.14.6 and
+     pytest 9.0.2, which are the versions R1 pins, but that is today's reading, not a record of the run.
 * **References are re-run per model.** The judge compares all arms in one call, so Sonnet, Haiku and Opus
   calls are made again in each run dir. Each model is graded against its own run's Sonnet, and the two
   Sonnet samples can differ.
 * **Prior outcomes.** `qwen3-coder:30b` scored 12/34 on the Haiku-truth [NC] tasks (prereg section 4). No
   outcome for `qwen3.6:35b-a3b-coding` on these items exists.
 * The prereg's section 16 biases stand.
+
+## Run rules (operator, text only: no code in the harness enforces them)
+
+Paths (durable; the scratchpad is not used): `REQ6=/Users/yaliandrona/.rsi/research/primary-plan/v16/requal-amend6`
+holds `wt/` (a git worktree of branch `feat/p20-amend6`, checked out at the freeze commit), `agentbin/` (a venv,
+below) and one run dir per model, `a6-qwen3-coder-30b` and `a6-qwen3.6-35b-a3b-coding`.
+
+* **R1. One environment for both runs.** Both runs use the same `PATH`, exported before every command:
+  `$REQ6/agentbin/bin:$HOME/.local/node/current/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
+  `agentbin` is a venv of CPython 3.14.6 with `pytest==9.0.2` and no `llm_router`, plus a byte copy of the
+  Claude Code CLI 2.1.317 (`agentbin/bin/claude`, sha256
+  `09f153b46b5df9e8b3454716d682a91901de020cbca630f61dec1a015b32b5e9`, equal to
+  `~/.local/share/claude/versions/2.1.317`); the allow-list keeps that directory because it holds a python.
+  Before each run `python scripts/p20_prefreeze_smoke.py` (no `--claude-call`) must print four PASS lines; the
+  owner runs `--claude-call` once before run 1 (one real call under the scratch HOME). After `select`, the
+  operator appends two lines to the run's `use.log` with the harness's own `append_use` (snippet in the PR
+  body): `grader <UTC> path=<python> python=<version> pytest=<version>` and
+  `claude <UTC> path=<claude> version=<version> sha256=<sha256>`. Run 2 does not start unless its two lines
+  equal run 1's in path, versions and sha256.
+* **R2. Spend across the two runs.** Run 2 starts only if run 1's `status` shows `spend_usd` + 15.00 <= 60.00.
+  The operator checks `status` of the running run dir at least every 30 minutes, in both runs, and stops the
+  harness (SIGINT, which keeps what exists, prereg section 13) when run 1 + run 2 `spend_usd` reaches 59.00:
+  60.00 less 1.00, the most a run spends in 30 minutes at the 2026-10-19 rate (14.84 USD in about 7.9 hours of
+  call time). The script's own guard (60.00 per run dir) stays as it is.
+* **R3. Install.** `install-eligibility --confirm` checks `--confirm` and a finished `score`, not the
+  independent recompute (prereg section 9 and 13). The operator never runs it; the coordinator runs it after
+  the independent recompute of each `result.json`.
 
 ## Pins
 
@@ -115,10 +155,11 @@ None added to outcomes: no answer or score has been produced under AMEND6. Discl
 3. Real-path precondition dry run before committing the sidecar, from a worktree at the freeze commit with the
    sidecar written uncommitted: the real `frozen()` for each model against a fresh run dir (no model call),
    the code gate, and `select --dry-run` (expected qa n 118, code n 75, tech_op n 1). Record counts only. On any
-   failure delete the sidecar and do not freeze.
+   failure delete the sidecar and do not freeze. Also run `scripts/p20_prefreeze_smoke.py` under the R1 PATH
+   (four PASS lines; 2026-11-04 result: PASS import_guard, grader_python, node_on_agent_path, claude_token).
 4. Commit `PREREG-P20-requal-AMEND6.sha256` (`<sha256>  PREREG-P20-requal-AMEND6.md` plus `frozen_utc <date -u>`,
    after 2026-10-17T23:53:15Z) and a byte-identical 0444 copy of every prereg file into each run dir.
-5. Run from a worktree at the freeze commit, one model at a time, with Ollama otherwise idle.
+5. Run from `$REQ6/wt` at the freeze commit, one model at a time, with Ollama otherwise idle, under rules R1 to R3.
 
 ## Constants (model pins as in the prereg; override AMEND5's REPO_SHA and AMEND3's CODE_RUNNER_SHA256)
 
