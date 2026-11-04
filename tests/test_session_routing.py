@@ -1084,9 +1084,9 @@ def test_a_missing_codex_ledger_counts_nothing_and_an_unreadable_one_makes_route
     assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local OK 100% (1/1, session)"
 
 
-def test_an_unreadable_codex_ledger_makes_the_seven_day_extras_unknown_but_a_missing_one_does_not(env):
+def test_unreadable_codex_window_preserves_local(env):
     home, _projects, _codex = env
-    _routing_db(home)
+    _routing_db(home, [("c1", SID, None)], [("c1", NOW - 50, "ollama", LOCAL_MODEL, "ok")])
 
     def anyone(sid, stamp):
         return True
@@ -1094,8 +1094,10 @@ def test_an_unreadable_codex_ledger_makes_the_seven_day_extras_unknown_but_a_mis
     x = sr.window_extras(NOW - 7 * 86400, NOW, NOW, anyone, {})              # missing: nothing recorded
     assert x["codex_extra"] == 0 and x["runs"] == 0
     (home / "north_star_units.jsonl").mkdir()
-    with pytest.raises(sr.LedgerUnreadable):
-        sr.window_extras(NOW - 7 * 86400, NOW, NOW, anyone, {})
+    x = sr.window_extras(NOW - 7 * 86400, NOW, NOW, anyone, {})
+    assert x["codex_unknown"] is True
+    assert x["codex_extra"] == x["runs"] == x["flagged_runs"] == 0
+    assert x["local"] == {"attempts": 1, "ok": 1, "gate_rejected": 0}
 
 
 def test_the_lenient_reader_keeps_its_old_behaviour_for_the_unit_builders(env):
@@ -1110,3 +1112,46 @@ def test_the_lenient_reader_keeps_its_old_behaviour_for_the_unit_builders(env):
     (home / "north_star_units.jsonl").rmdir()
     _write(home / "north_star_units.jsonl", '{"lever": "agent_route_codex", "ts": 1}\nnot json\n[1]\n')
     assert northstar._read_north_star_ledger() == northstar._load_north_star_ledger() == [{"lever": "agent_route_codex", "ts": 1}]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read permission-denied files")
+def test_strict_codex_reader_permission_denied(env):
+    from llm_router import northstar
+
+    home, _, _ = env
+    path = home / "north_star_units.jsonl"
+    path.write_text('{"lever":"agent_route_codex","ts":1}\n')
+    path.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            northstar._read_north_star_ledger()
+        with pytest.raises(sr.LedgerUnreadable):
+            sr._ns_rows(None)
+    finally:
+        path.chmod(0o600)
+
+
+def test_strict_codex_reader_partial_read_error(env, monkeypatch):
+    import io
+
+    from llm_router import northstar
+
+    home, _, _ = env
+    path = home / "north_star_units.jsonl"
+    original = Path.open
+
+    class BrokenRead(io.StringIO):
+        def read(self, *args, **kwargs):
+            assert super().read(10)
+            raise OSError("disk fault after partial read")
+
+    def open_file(self, *args, **kwargs):
+        if self == path:
+            return BrokenRead('{"lever":"agent_route_codex","ts":1}\n')
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    with pytest.raises(OSError, match="disk fault"):
+        northstar._read_north_star_ledger()
+    with pytest.raises(sr.LedgerUnreadable):
+        sr._ns_rows(None)

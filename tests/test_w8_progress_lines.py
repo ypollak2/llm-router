@@ -247,12 +247,9 @@ def test_end_to_end_from_the_unit_stream_to_the_two_rows(monkeypatch, sessions):
 def test_an_unreadable_ledger_makes_the_seven_day_figures_na_not_a_count_without_the_extras(monkeypatch, sessions):
     """W9b: the Codex turns, the bind jobs and the local attempts are asked for and cannot be built (an unreadable bind
     ledger): the routed share and local OK are n/a. The Claude-side `<Opus` figure does not need them and stays."""
-    from llm_router import session_routing
+    from llm_router import paths
 
-    def boom(*a, **k):
-        raise session_routing.LedgerUnreadable("text_job_binds.jsonl")
-
-    monkeypatch.setattr(session_routing, "window_extras", boom)
+    paths.state_path("text_job_binds.jsonl").mkdir()
     rows = [_u() for _ in range(20)] + [_u(kind=ns.UNIT_SIDECHAIN, model=SONNET) for _ in range(75)] \
         + [_u(kind=ns.UNIT_ROUTED_MCP, model=LOCAL) for _ in range(5)]
     _stream(monkeypatch, rows)
@@ -274,3 +271,24 @@ def test_the_widest_realistic_status_row_still_fits_and_keeps_its_hooks_warning(
     row = tick._ANSI.sub("", tick.render(cache, now=NOW, usage=usage))
     assert len(row) <= tick.MAX_CHARS and "NS strict 0/9999999 (blind) 7d units" in row, (len(row), row)
     assert row.endswith("⚠ hooks p95 12.3s agent-depth-release"), row
+
+
+def test_unreadable_codex_preserves_seven_day_local_ok(monkeypatch, sessions):
+    from llm_router import session_routing
+
+    def unreadable(session):
+        raise session_routing.LedgerUnreadable("north_star_units.jsonl")
+
+    monkeypatch.setattr(session_routing, "_ns_rows", unreadable)
+    monkeypatch.setattr(session_routing, "window_attempts", lambda *a: [
+        {"session": "s-org", "kind": "local", "used": True, "gate_rejected": False}
+    ])
+    rows = [_u() for _ in range(20)] + [_u(kind=ns.UNIT_SIDECHAIN, model=SONNET) for _ in range(75)]
+    _stream(monkeypatch, rows)
+    data = sr.build(time.time())
+    assert data["call_mix"]["detail_unavailable"] is True
+    assert data["call_mix"]["local_ok"] == {"k": 1, "n": 1}
+    out = tick.render_progress(json.loads(json.dumps(data)), now=time.time())
+    assert "routed (incl. Codex turns and binds) n/a (7d, organic)" in out
+    assert "local OK 100% (1/1, 7d, organic)" in out
+    assert "<Opus 78.9% (75/95 Claude calls, 7d, organic)" in out

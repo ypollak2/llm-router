@@ -886,8 +886,15 @@ def window_extras(since: float, until: float, now: float, kind_of, tool_sessions
       session could be found for (not in ``local``). ``local`` and ``unattributed_local`` are ``None`` when the attempt
       ledgers cannot be read: unknown, which every renderer prints as n/a. An unreadable bind ledger raises
       :class:`LedgerUnreadable` (the number of calls is then unknown, and the caller keeps the figures without
-      the extras)."""
-    rows = [r for r in _ns_rows(None) if since <= r["ts"] <= until and kind_of(r.get("session_id"), r.get("session_kind"))]
+      the extras). An unreadable Codex ledger sets ``codex_unknown``; bind and local figures remain measured."""
+    codex_unknown = False
+    try:
+        codex_rows = _ns_rows(None)
+    except LedgerUnreadable as exc:
+        failopen.record("CHZ-FO-ROUTING-LEDGER", exc)
+        codex_rows = []
+        codex_unknown = True
+    rows = [r for r in codex_rows if since <= r["ts"] <= until and kind_of(r.get("session_id"), r.get("session_kind"))]
     runs = codex_run_responses(rows, now)
     extra = 0
     by_session: dict[str, int] = {}
@@ -921,6 +928,6 @@ def window_extras(since: float, until: float, now: float, kind_of, tool_sessions
             unattributed = sum(1 for a in folded if a["kind"] == "local" and not a["session"])
         except LedgerUnreadable as exc:
             failopen.record("CHZ-FO-ROUTING-LEDGER", exc)     # whether an attempt was used is unknown: local stays None
-    return {"codex_extra": extra, "bind_extra": bind_extra, "by_session": by_session,
+    return {"codex_extra": extra, "codex_unknown": codex_unknown, "bind_extra": bind_extra, "by_session": by_session,
             "runs": sum(1 for r in runs if r["row"].get("outcome") == "delegated"),
             "flagged_runs": sum(1 for r in runs if r["flagged"]), "local": local, "unattributed_local": unattributed}

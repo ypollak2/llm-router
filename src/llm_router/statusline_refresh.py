@@ -158,7 +158,7 @@ def _call_mix(card: dict) -> dict | None:
                            if isinstance(sid, str) and _SAFE_ID.fullmatch(sid)
                            and isinstance(n, int) and not isinstance(n, bool) and n > 0}
     if cm.get("detail_unavailable") is True:
-        out["detail_unavailable"] = True                          # Codex turns / binds / local OK could not be counted: n/a, not a partial count
+        out["detail_unavailable"] = True                          # routed share is unknown; an independently measured local_ok may still be present
     codex, local = cm.get("codex"), cm.get("local_ok")
     if isinstance(codex, dict) and isinstance(codex.get("flagged_runs"), int) and not isinstance(codex["flagged_runs"], bool):
         out["codex_turns"] = True                                 # Codex runs count as their model responses: the row's label says so
