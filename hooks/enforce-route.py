@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 25
+# llm_router-hook-version: 26
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -26,6 +26,8 @@ This hook fires before every tool call and:
      soft enforcement for the rest of the session (disabled under strict).
      Separately, a per-turn trap fires faster: 2 blocks of the SAME tool within a
      single user turn → immediate auto-pivot (see _record_turn_block).
+     A sub-agent's call (agent_id in the payload) counts towards these valves but is
+     never denied itself (strict keeps its denials).
   7. If the tool IS in the task-specific blocklist → enforce based on LLM_ROUTER_ENFORCE:
        smart (default)  — hard for Q&A tasks (query/research/generate/analyze),
                           soft for code tasks (file editing allowed).
@@ -2310,6 +2312,13 @@ def _main() -> None:
         _clear_pending(session_id)  # Persist the pivot for the rest of the turn
         _hold_event("released", session_id, tool_use_id=_tuid, how="count", tool=tool_name, task=task_type)
         sys.exit(0)  # Allow this tool call to prevent deadlock
+
+    # A hold belongs to the main thread: a Workflow sub-agent (the payload's agent_id) made 0 routing-tool calls in 142
+    # transcripts (2026-11-04), so a denial could only stop its work. It is never denied. Its calls were counted above, so the valves release
+    # the main thread's hold at the same moment as before this rule. Strict has no free valve and keeps its denials.
+    if hook_input.get("agent_id") and not _strict:
+        _log_violation(session_id, tool_name, expected_tool, outcome="ALLOWED(subagent)")
+        sys.exit(0)
 
     if enforce == "smart":
         # v13: Smart mode blocks write tools for ALL task types until routing

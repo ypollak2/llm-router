@@ -39,7 +39,7 @@ harmless reader, because anything else might hand the literal text to git: it wo
 rule is deny-by-default and does not look for the word `git`, since a name held in a variable or built from quotes
 (`G=git; timeout 5 $G commit -m '...'`, `g'i't commit`, `python3 - <<'PY'` with `['git', 'commit']` in its body) has none
 to find. The harmless readers are a short list (`echo`, `printf`, `grep`, `rg`, `cat`, `ls`, `cd`, ...; not `sed` or `awk`
-(whose arguments can run a program), a pager (`LESSOPEN`) or `test` / `[` (`-v 'a[$(cmd)]'`, and in zsh the operands of
+(whose arguments can run a program), a pager (`LESSOPEN`), `cp` / `mv` (they change files) or `test` / `[` (`-v 'a[$(cmd)]'`, and in zsh the operands of
 `-eq`, are evaluated)), each written by its exact name (`./echo` and `/bin/echo` are not `echo`), with no variable set in
 front of it, outside any group, loop or keyword, with no word of the line that runs a command (`$(...)`, backticks) or
 expands anything but a plain `$NAME` / `${NAME}`, and with none of the options that name a program to run (`rg --pre`,
@@ -61,6 +61,35 @@ harmless, not a proof that nothing else can run git: a harmless reader can still
 line has no commit or PR command in it, the refusal names what the hook cannot see through and says to put the text in a
 file with the editor or `printf`, instead of saying that a commit would carry it. To commit text that itself mentions the
 placeholder, write the message to a file and run `git commit -F <file>`.
+
+**Environment assignments.** The text is built from the repository as the hook sees it, in the hook's own environment (its
+git reads get `PATH`, `HOME` and what git needs, `gitinput._ENV_KEEP`). So a line that mentions the placeholder, bound or
+stray, readable or not, is refused when it SETS a variable that changes which program, directory, configuration or startup file
+a later command on the line uses. Every form counts, in any position: `NAME=value;`, `NAME=value git ...`, `NAME+=value`,
+`export` / `declare` / `typeset` / `readonly` / `local` / `env NAME=value`, `${NAME:=value}` and `$((NAME=1))`; on a line the
+scanner cannot read the text is searched for any `NAME=`, quoted or not. The refusal names the variable and says to take it out of
+the line and to use `cd <dir> &&` or `git -C <dir>` to choose the repository. A line that does not mention the placeholder is not
+this hook's business, and reading a variable (`echo $PATH`) or writing its name as data (`grep 'PATH=' f`, a commit message that
+says `PATH=`) is not an assignment on a readable line. Refused (`plan._ENV_EFFECT`, and the two families below):
+
+| Variables | What an assignment changes |
+|---|---|
+| `PATH` | which program `git`, `gh` or a git hook is |
+| `HOME`, `XDG_CONFIG_HOME` | where `~` and the global git configuration (hooks, editor, aliases) are |
+| `CDPATH` | where `cd <dir>` really goes, so the repository the hook read is not the one the command reaches |
+| `IFS` | how the shell splits words: the words the hook read are not the words that run |
+| `BASH_ENV`, `ENV`, `ZDOTDIR` | a startup file that a bash, sh or zsh started later runs first |
+| `SHELLOPTS`, `BASHOPTS`, `PS4` | options of every bash started later (xtrace expands `PS4`, command substitutions included) |
+| `EDITOR`, `VISUAL` | the editor git falls back to when `GIT_EDITOR` and `core.editor` are not set |
+| every `GIT_*` except the six `GIT_AUTHOR_*` / `GIT_COMMITTER_*` name, email and date | the repository, index, configuration, editor or a helper program of git (the allow-list is the one `_check_assigns` already used) |
+| every `DYLD_*` and `LD_*` | the dynamic loader loads other code into every program that starts later |
+
+Not covered, by choice: interpreter variables (`PYTHONPATH`, `NODE_OPTIONS`, ...), which matter only if a git hook or a gh
+extension starts an interpreter; `PAGER` (git starts no pager without a terminal; `GIT_PAGER` is refused as a `GIT_*` name); and
+`git -c key=value commit` (a configuration option, not an assignment). `cp` and `mv` are off the harmless list for the same reason
+as the rest of this rule: they change files, so a stray mention next to one is refused, not left to the shell (`touch`, `mkdir` and
+`tee` stay on it). Both changes only add refusals: `tests/test_w7_deny_only_env.py`.
+
 The rules text that teaches this is the section "Commit messages and PR bodies" of
 `src/llm_router/rules/llm_router.md`, which every session and every sub-agent loads.
 

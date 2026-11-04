@@ -1576,7 +1576,9 @@ def cmd_proxy(argv: list[str]) -> int:
     import uvicorn
 
     from llm_router import state_files
-    state_files.harden_state()  # W0-4b / S7: 0600/0700 repair on every proxy start, never raises
+    # W0-4b / S7: 0600/0700 repair on every proxy start, never raises. On a thread: the walk visits every
+    # inode under the state dir (61k on the 2026-11-04 machine), and the port must not wait for it.
+    state_files.harden_state_in_background()
 
     steps = ",".join(sorted(cfg.steps)) or "off (pass-through only)"
     print(f"llm-router proxy -> http://{a.host}:{a.port}  steps={steps}  "
