@@ -543,7 +543,7 @@ CALL_MIX_SESSIONS = 50
 
 
 def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window | None" = None, *,
-              sessions: bool = False, extras: dict | None = None) -> dict:
+              sessions: bool = False, extras: dict | None = None, detail_failed: bool = False) -> dict:
     """Two descriptive figures over the SAME unit list, window and population ``_ns_d1_d2`` reads:
 
     * ``outside_claude``: calls answered by a non-Claude model / all calls;
@@ -565,7 +565,8 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
     list undercounts: a Codex run agent-route delegated is ONE unit but several model responses, and the
     responses (``codex_extra``) are added to ``outside_claude`` (k and n), with ``codex`` carrying the run counts
     and the flagged runs it could not count; each accepted text-job-bind job (``bind_extra``: the hook's calls are
-    in no unit) is one more call. It also adds ``local_ok`` (``{k, n}``: local routes that succeeded
+    in no unit) is one more call. ``detail_failed`` (the extras were asked for and could not be built, e.g. an unreadable
+    ledger) sets ``detail_unavailable``: the figures that need them are unknown and the status line prints n/a. It also adds ``local_ok`` (``{k, n}``: local routes that succeeded
     over local attempts, same window and population) for the second status line figure."""
     from llm_router import northstar as ns
 
@@ -606,6 +607,8 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
     }
     if sessions:
         out["sessions"] = dict(sorted(by_session.items(), key=lambda kv: -kv[1])[:CALL_MIX_SESSIONS])
+    if detail_failed:
+        out["detail_unavailable"] = True          # the extras were asked for and could not be built: the status line says n/a
     if extras:
         out["codex"] = {"runs": extras["runs"], "extra_responses": extras["codex_extra"],
                         "flagged_runs": extras["flagged_runs"], "bind_jobs": extras.get("bind_extra", 0)}
@@ -2866,6 +2869,7 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index, win, unit_list)
     kpis_diag = joins.pop("diag")
     extras = None
+    detail_failed = False
     if routing_detail:
         from llm_router import failopen, session_routing
 
@@ -2874,9 +2878,11 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
                 win.since if win is not None else now_ts - days * 86400.0, win.until if win is not None else now_ts,
                 now_ts, lambda sid, stamp: isinstance(sid, str) and bool(sid) and index.resolve(sid, stamp).kind in allowed,
                 tool_sessions or {})
-        except Exception as exc:  # noqa: BLE001 -- the extras are a refinement: NS and the rest of the scorecard stand without them
+        except Exception as exc:  # noqa: BLE001 -- NS and the rest of the scorecard stand; the status line's figures that need the extras are n/a
             failopen.record("CHZ-FO-ROUTING-WINDOW", exc)
-    call_mix_r = _call_mix(unit_list, allowed, index, win, sessions=call_mix_sessions, extras=extras)
+            detail_failed = True
+    call_mix_r = _call_mix(unit_list, allowed, index, win, sessions=call_mix_sessions, extras=extras,
+                           detail_failed=detail_failed)
     d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index, win), days, now_ts)
     pop = _proxy_population(all_rows, days, allowed, now_ts, until=until_ts)
     d4_r = _d4_tier_mix(pop)

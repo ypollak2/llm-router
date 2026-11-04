@@ -219,7 +219,8 @@ def _local_name(model: str) -> str | None:
 
 
 def _append_local_attempt(job: str, model: str, outcome: str, *, jid: str | None = None,
-                          attempt: int | None = None, more: bool = False, acc: bool = False) -> None:
+                          attempt: int | None = None, more: bool = False, acc: bool = False,
+                          marker: bool = False) -> None:
     row: dict = {"ts": time.time(), "job": job, "model": model, "outcome": outcome}
     try:    # who asked: lets a reader match this row to the call and session it belongs to (never by model and time)
         from llm_router import call_identity
@@ -239,6 +240,8 @@ def _append_local_attempt(job: str, model: str, outcome: str, *, jid: str | None
             row["more"] = True  # more tries of this job follow: it has no verdict yet
         if acc:
             row["acc"] = True  # this model failed, another one answered, and the job was ACCEPTED: the job is ok
+        if marker:
+            row["unfinished"] = True  # not a model attempt: the job ended with no verdict (``record_job_unfinished``)
     try:
         path = paths.state_path(LOCAL_ATTEMPTS_FILENAME)
         capped_log.append(
@@ -298,4 +301,4 @@ def record_job_unfinished(*, job: str, models: Iterable[str], jid: str, attempt:
     each local model it already wrote rows for, so the demotion monitor never counts a half-finished job as
     failed (D-367). Best-effort: never raises."""
     for m in models:
-        _append_local_attempt(job, m, OUTCOME_INFRA, jid=jid, attempt=attempt)
+        _append_local_attempt(job, m, OUTCOME_INFRA, jid=jid, attempt=attempt, marker=True)

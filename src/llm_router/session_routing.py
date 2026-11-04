@@ -715,7 +715,8 @@ def bind_jobs(since: float = 0.0, until: float | None = None, *, session_id: str
 
 
 def text_job_jid_groups() -> dict[str, list[dict]]:
-    """Every row of ``text_job_local_attempts.jsonl`` that names a job (``jid``), by ``jid``, in time order.
+    """Every ATTEMPT row of ``text_job_local_attempts.jsonl`` that names a job (``jid``), by ``jid``, in time order:
+    the ``unfinished`` markers a job writes when it ends with no verdict are not model attempts and are left out.
     Raises :class:`LedgerUnreadable`."""
     from llm_router import text_job_ledger as tj
 
@@ -727,7 +728,8 @@ def text_job_jid_groups() -> dict[str, list[dict]]:
             continue
         ts = row.get("ts") if isinstance(row, dict) else None
         if isinstance(ts, (int, float)) and not isinstance(ts, bool) and isinstance(row.get("jid"), str) \
-                and isinstance(row.get("model"), str) and isinstance(row.get("outcome"), str):
+                and isinstance(row.get("model"), str) and isinstance(row.get("outcome"), str) \
+                and row.get("unfinished") is not True:           # an unfinished-job marker is no model attempt
             groups.setdefault(row["jid"], []).append({
                 "ts": float(ts), "model": row["model"], "outcome": row["outcome"],
                 "session": _real_session(row.get("session_id"))})

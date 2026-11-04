@@ -1004,3 +1004,63 @@ def test_the_seven_day_population_counts_the_same_jobs(env):
               "session_kind": "organic"} for _ in range(9)]
     cm = kpi._call_mix(units, frozenset({"organic"}), _Index(), sessions=True, extras=x)
     assert cm["outside_claude"] == {"k": 1, "n": 10} and cm["sessions"] == {SID: 10} and cm["codex"]["bind_jobs"] == 1
+
+
+def test_an_unfinished_job_marker_is_not_a_second_attempt(env):
+    """A rejected try followed by a refused retry: the job writes one `rejected` row and one `infra` MARKER (no verdict).
+    The marker says so (`unfinished`) and is no model attempt: one local call, b = 1."""
+    from llm_router import text_job_ledger as tj
+
+    home = _bound_session(env)
+    t = NOW - 100
+    _routing_db(home)
+    _bind(home, t, kind="denied", outcome="fallback", jid="jM")
+    _write(home / "text_job_local_attempts.jsonl",
+           json.dumps({"ts": t - 5, "job": "commit_message", "model": LOCAL_MODEL, "outcome": "rejected", "jid": "jM",
+                       "try": 1, "more": True}) + "\n")
+    tj.record_job_unfinished(job="commit_message", models=[LOCAL_MODEL], jid="jM", attempt=2)        # the writer's own marker
+    marker = [json.loads(line) for line in (home / "text_job_local_attempts.jsonl").read_text().splitlines()][-1]
+    assert marker["outcome"] == "infra" and marker["unfinished"] is True and marker["jid"] == "jM"
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert _local(r) == (1, 0, 1)                                              # one rejected attempt, not two
+    # a genuine infra attempt row (no marker flag) is still an attempt
+    _write(home / "text_job_local_attempts.jsonl",
+           json.dumps({"ts": t - 4, "job": "commit_message", "model": LOCAL_MODEL, "outcome": "infra", "jid": "jM",
+                       "try": 2}) + "\n")
+    shutil.rmtree(home / sr.INDEX_DIR)
+    assert _local(sr.compute(SID, NOW, budget_s=30)) == (2, 0, 1)
+
+
+def test_a_timed_out_or_raised_bind_job_keeps_its_jid_and_its_earlier_attempts_count(env, monkeypatch):
+    """M3: the outer timeout / error result carries the jid the job put in its sink when it started."""
+    import asyncio
+
+    from llm_router.text_job_bind import engine
+    from llm_router.tools import text as text_tools
+
+    jid = "0123456789ab"
+
+    async def slow(job, text, ctx, hint, sink, attempt_timeout_s=None):
+        sink["jid"] = jid                                                     # what `_llm_text_job` does on entry
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(text_tools, "_llm_text_job", slow)
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_TEXT_JOBS", "1")
+    r = engine.generate_with_text_job("commit_message", "diff", None, 0.05)
+    assert (r.status, r.reason, r.jid) == ("timeout", "timeout", jid)
+
+    async def raises(job, text, ctx, hint, sink, attempt_timeout_s=None):
+        sink["jid"] = jid
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(text_tools, "_llm_text_job", raises)
+    r = engine.generate_with_text_job("commit_message", "diff", None, 5)
+    assert (r.status, r.reason, r.jid) == ("error", "job_raised", jid)
+    # the bind row of a timed-out job names the jid, so its earlier attempts reach b
+    home = _bound_session(env)
+    t = NOW - 100
+    _routing_db(home)
+    _bind(home, t, kind="denied", outcome="timeout", jid=jid)
+    _attempt_rows(home, (t - 40, "rejected", jid), (t - 20, "error", jid))
+    r2 = sr.compute(SID, NOW, budget_s=30)
+    assert r2["non_claude"] == 0 and _local(r2) == (2, 0, 1)

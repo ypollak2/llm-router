@@ -244,6 +244,26 @@ def test_end_to_end_from_the_unit_stream_to_the_two_rows(monkeypatch, sessions):
                       " organic) · local OK n/a (7d, organic)")
 
 
+def test_an_unreadable_ledger_makes_the_seven_day_figures_na_not_a_count_without_the_extras(monkeypatch, sessions):
+    """W9b: the Codex turns, the bind jobs and the local attempts are asked for and cannot be built (an unreadable bind
+    ledger): the routed share and local OK are n/a. The Claude-side `<Opus` figure does not need them and stays."""
+    from llm_router import session_routing
+
+    def boom(*a, **k):
+        raise session_routing.LedgerUnreadable("text_job_binds.jsonl")
+
+    monkeypatch.setattr(session_routing, "window_extras", boom)
+    rows = [_u() for _ in range(20)] + [_u(kind=ns.UNIT_SIDECHAIN, model=SONNET) for _ in range(75)] \
+        + [_u(kind=ns.UNIT_ROUTED_MCP, model=LOCAL) for _ in range(5)]
+    _stream(monkeypatch, rows)
+    data = sr.build(time.time())
+    assert data["call_mix"]["detail_unavailable"] is True
+    out = tick.render_rows(data, now=time.time())
+    assert out[1] == ("routed (incl. Codex turns and binds) n/a (7d, organic) · <Opus 78.9% (75/95 Claude calls, 7d,"
+                      " organic) · local OK n/a (7d, organic)")
+    assert "off-Claude" not in out[1] and "5.0%" not in out[1]
+
+
 def test_the_widest_realistic_status_row_still_fits_and_keeps_its_hooks_warning():
     """Row 3 grew by the blind NS's labels (``NS strict 0/n (blind) 7d units``): the slow-hooks warning at its
     tail is what a cut line loses first, so the widest realistic row must fit with it."""

@@ -403,15 +403,17 @@ def render_progress(cache: dict | None, *, now: float) -> str | None:
     # W9: a cache whose refresher counted Codex model responses and text-job-bind jobs says so in the label; `llm-router kpi` keeps one call per
     # run and its row stays "off-Claude" (the two differ by the responses beyond the first, so they must not share a name)
     codex_turns = cm.get("codex_turns") is True
-    segs = [_mix_segment("routed (incl. Codex turns and binds)" if codex_turns else "off-Claude", cm.get("outside_claude"), "calls",
-                         window, population, _runs_est(cm.get("flagged_codex_runs")) if codex_turns else ""),
-            _mix_segment("<Opus", cm.get("below_opus"), "Claude calls", window, population)]
+    unavailable = cm.get("detail_unavailable") is True      # the refresher could not count Codex turns / binds / local attempts
+    first = (f"routed (incl. Codex turns and binds) n/a ({window}, {population})" if unavailable
+             else _mix_segment("routed (incl. Codex turns and binds)" if codex_turns else "off-Claude", cm.get("outside_claude"),
+                               "calls", window, population, _runs_est(cm.get("flagged_codex_runs")) if codex_turns else ""))
+    segs = [first, _mix_segment("<Opus", cm.get("below_opus"), "Claude calls", window, population)]
     if any(s is None for s in segs):
         return None
-    local = _local_ok_segment(cm.get("local_ok"), f"{window}, {population}")
+    local = None if unavailable else _local_ok_segment(cm.get("local_ok"), f"{window}, {population}")
     if local:
         segs.append(local)
-    elif codex_turns:                                 # this refresher measured attempts and could not: unknown, not "0 attempts"
+    elif codex_turns or unavailable:                  # this refresher measured attempts and could not: unknown, not "0 attempts"
         segs.append(f"local OK n/a ({window}, {population})")
     # (a cache an older refresher wrote has neither flag: the row is as before)
     return _fit(" · ".join(segs))  # type: ignore[arg-type]

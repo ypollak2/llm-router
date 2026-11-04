@@ -82,6 +82,12 @@ class _Ctx:
         return None
 
 
+def _sink_jid(sink: dict) -> str:
+    """The job's id from its sink (set when the job starts), or "" when it is not a plain 12-hex id."""
+    jid = sink.get("jid")
+    return jid if isinstance(jid, str) and re.fullmatch(r"[0-9a-f]{12}", jid) else ""
+
+
 def result_from_sink(sink: dict) -> GenResult:
     """Read what ``llm_text_job`` recorded in its structured sink (``tools/text.py``, ``_llm_text_job``).
 
@@ -90,7 +96,7 @@ def result_from_sink(sink: dict) -> GenResult:
     status = sink.get("status")
     attempts = int(sink.get("attempts") or 0)
     model = str(sink.get("model") or "unknown")
-    jid = sink.get("jid") if isinstance(sink.get("jid"), str) and re.fullmatch(r"[0-9a-f]{12}", sink["jid"]) else ""
+    jid = _sink_jid(sink)
     if status == "accepted":
         return GenResult("accepted", str(sink.get("text") or ""), model, attempts, "", jid)
     if status == "rejected":
@@ -217,10 +223,10 @@ def generate_with_text_job(job: str, input_text: str, hint: str | None, timeout_
     try:
         asyncio.run(run())
     except (asyncio.TimeoutError, TimeoutError):
-        return GenResult("timeout", "", "none", 0, "timeout")
+        return GenResult("timeout", "", "none", 0, "timeout", _sink_jid(sink))  # the attempts it made are still its own
     except Exception as exc:  # noqa: BLE001
         _failopen("CHZ-FO-TEXTJOB-BIND-GENERATE", exc)
-        return GenResult("error", "", "none", 0, "job_raised")
+        return GenResult("error", "", "none", 0, "job_raised", _sink_jid(sink))
     return result_from_sink(sink)
 
 
