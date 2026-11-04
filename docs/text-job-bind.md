@@ -38,15 +38,29 @@ backslash, in a here-document, in a comment, as `${LLM_TEXT:-x}`) is denied unle
 harmless reader, because anything else might hand the literal text to git: it would be committed as written. The
 rule is deny-by-default and does not look for the word `git`, since a name held in a variable or built from quotes
 (`G=git; timeout 5 $G commit -m '...'`, `g'i't commit`, `python3 - <<'PY'` with `['git', 'commit']` in its body) has none
-to find. The harmless readers are a short list (`echo`, `printf`, `grep`, `cat`, `ls`, `cd`, ...; not `sed` or `awk`,
-whose arguments can run a program), each written with a plain name, outside any group, loop or keyword, and with no
-`$(...)` or backticks anywhere on the line. A line the scanner cannot read, or reads differently from other shells (a
-single quote inside `"${...}"`), is judged on its text: every command start (after `;`, `&`, `|`, a parenthesis, a
-backtick, `$(` or a newline, quotes or not) must begin with such a reader, the body of a here-document being data for
-its command (`cat <<'EOF'` passes, `sh <<'EOF'` does not). What passes with no decision is a line whose commands are
-all harmless readers (a `grep`, an `echo`, a `cat` with a here-document). It is a deny-list of what is known to be
-harmless, not a proof that nothing else can run git. To commit text that itself mentions the placeholder, write the
-message to a file and run `git commit -F <file>`.
+to find. The harmless readers are a short list (`echo`, `printf`, `grep`, `rg`, `cat`, `ls`, `cd`, ...; not `sed` or `awk`
+(whose arguments can run a program), a pager (`LESSOPEN`) or `test` / `[` (`-v 'a[$(cmd)]'`, and in zsh the operands of
+`-eq`, are evaluated)), each written by its exact name (`./echo` and `/bin/echo` are not `echo`), with no variable set in
+front of it, outside any group, loop or keyword, with no word of the line that runs a command (`$(...)`, backticks) or
+expands anything but a plain `$NAME` / `${NAME}`, and with none of the options that name a program to run (`rg --pre`,
+`ag --pager`, `sort --compress-program`, `grep -O`). `grep`, `rg`, `ag` and `sort` take no expansion in their arguments at
+all (the value of a variable can be such an option, `rg -g -e "$O"` included), and a `printf` that could evaluate an
+argument is refused (`-v`, a format that is not literal, a conversion other than `%s` with an expansion among the
+arguments: zsh evaluates the arguments of `%d`). A line the scanner cannot read, or reads differently from other shells (a
+single quote inside `"${...}"`), is judged on its text and trusts no quote: every command start (after `;`, `&`, `|`, a
+parenthesis, a backtick, `$(` or a newline, quotes or not) must begin with such a reader, by its exact name, a
+here-document body is judged like any other lines (which of two `<<` is real is a quoting question), and a leading
+`NAME=value` is skipped only as a statement of plain assignments (`X=' echo' git commit` ends the assignment where bash
+does not). What passes with no decision is a line whose commands are all harmless readers (a `grep`, an `echo`, a `cat`
+with a quoted here-document). Denied whatever else the line says, on a line that binds a commit too: `$[...]` (arithmetic
+that evaluates its operand), `${(...)}`, `${!...}`, `$~x` and `${~x}`, a `${NAME:?message}` whose message expands
+something, `printf -v`, and an unquoted here-document whose body holds `$(...)` or backticks; and on a line with a stray
+mention, a shell startup file, a git hook or git config, or `.ssh/` named anywhere. This only ever adds denials to the
+rule above: every line it denied is still denied (`tests/test_w7_deny_only.py`). It is a deny-list of what is known to be
+harmless, not a proof that nothing else can run git: a harmless reader can still write a file it is pointed at. When the
+line has no commit or PR command in it, the refusal names what the hook cannot see through and says to put the text in a
+file with the editor or `printf`, instead of saying that a commit would carry it. To commit text that itself mentions the
+placeholder, write the message to a file and run `git commit -F <file>`.
 The rules text that teaches this is the section "Commit messages and PR bodies" of
 `src/llm_router/rules/llm_router.md`, which every session and every sub-agent loads.
 
