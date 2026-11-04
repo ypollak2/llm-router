@@ -65,7 +65,7 @@ class Transcript:
         r["message"] = {"role": "assistant", "content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}
         self.records.append(r)
 
-    def result(self, ts: float, tid: str, text, is_error: bool = False, tur=None) -> None:
+    def result(self, ts: float, tid: str, text, is_error: bool = False, tur=None, toolDenialKind=None) -> None:
         r = self._base(ts, "user")
         block = {"type": "tool_result", "tool_use_id": tid, "content": text}
         if is_error:
@@ -73,6 +73,8 @@ class Transcript:
         r["message"] = {"role": "user", "content": [block]}
         if tur is not None:
             r["toolUseResult"] = tur
+        if toolDenialKind is not None:
+            r["toolDenialKind"] = toolDenialKind
         self.records.append(r)
 
     def raw_user(self, ts: float, text: str) -> None:

@@ -15,8 +15,9 @@ exit code is 0 only when every gated line is PASS.
        denominator is every unit where the router emitted a deny carrying a Codex
        result. A unit is BOUND when the deny reached Claude as the sub-agent's result
        (the hook's ``hookSpecificOutput.permissionDecision == "deny"``, or the
-       harness's "PreToolUse:Agent hook error" result when it honoured it, carrying
-       the BIND W1 wrapper text), no Claude sub-agent was launched for that tool_use_id
+       harness's error result with the "PreToolUse:Agent hook error" prefix or
+       top-level ``toolDenialKind == "permission-rule"``, carrying the BIND W1 wrapper
+       text), no Claude sub-agent was launched for that tool_use_id
        AND the same prompt was not asked again within an hour (the escape hatch,
        ``codex_reissue``: Claude redid the work). Printed beside the line, so nothing
        is hidden: the Codex runs that delivered nothing (``codex_blocked``,

@@ -516,6 +516,32 @@ def test_new_rows_are_paired_by_tool_use_id(tmp_path):
     assert (u.label, u.signal) == ("used", "codex_output_incorporated")       # the host relayed the answer
 
 
+@pytest.mark.parametrize("denial_kind,is_error,prefix,bound", [
+    pytest.param("permission-rule", True, "", True, id="permission-rule"),
+    pytest.param(None, True, "", False, id="missing-kind"),
+    pytest.param("automode-blocked", True, "", False, id="automode-blocked"),
+    pytest.param("automode-unavailable", True, "", False, id="automode-unavailable"),
+    pytest.param("permission-rule", False, "", False, id="non-error"),
+    pytest.param(None, True, "PreToolUse:Agent hook error: ", True, id="legacy-prefix"),
+])
+def test_rendered_hook_denial_shapes(tmp_path, denial_kind, is_error, prefix, bound):
+    t = Transcript(tmp_path, SID)
+    t0 = NOW - 6000
+    t.human(t0, "please have the reviewer look at the change")
+    t.call(t0 + 1, "tB", "Agent", {"prompt": agent_prompt("B")})
+    text = prefix + w1_wrapper(ANSWER)
+    t.result(t0 + 30, "tB", text, is_error=is_error, tur="Error: " + text, toolDenialKind=denial_kind)
+    t.say(t0 + 40, "The reviewer found: " + ANSWER)
+    t.write()
+    units, ctx = audit_units(tmp_path, write_state(tmp_path, [codex_row(t0 + 29.5, tool_use_id="tB")]))
+    (u,) = by_kind(units, "agent_route_codex")
+    assert u.extra["marker"] is True
+    assert u.extra["deny_shape"] is bound
+    assert u.extra["bound"] is bound
+    assert ctx["binding"]["bound"] == int(bound)
+    assert ctx["binding"]["delivered_without_deny_shape"] == int(not bound)
+
+
 def test_bound_unit_the_host_only_summarised_is_bound_but_not_used(tmp_path):
     t = Transcript(tmp_path, SID)
     t0 = NOW - 6000
@@ -915,4 +941,3 @@ def test_the_markers_match_the_real_w1_wrapper_whenever_the_hook_has_it():
     # the call site names Codex CLI as the source, and keeps the escape hatch the re-issue detection relies on
     assert 'source=f"Codex CLI (' in src and "call the Agent tool again with the same prompt" in src
     assert 'outcome="codex_reissue"' in src
-
