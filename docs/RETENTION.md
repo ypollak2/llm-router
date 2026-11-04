@@ -153,3 +153,31 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Kept | Forever, and for as long as `routing_decisions`: that table has no TTL or pruning in `usage.db`, and snapshots are written once per distinct inventory (their count and size are not measured here). A snapshot is never deleted while any `routing_decisions.inventory_sig` may reference it. If a prune of `routing_decisions` is ever added, it must keep every snapshot a surviving row names. |
 | Reader | `decision_stamp.resolve_inventory(sig)`: the inventory at decision time, or None. |
 | Failure | A failed write is recorded with `failopen` code `W01-SNAPSHOT`; the routing row is still written (its signature then does not resolve). |
+
+## `codex_meter.jsonl` (D-373, R2)
+
+| Item | Value |
+|---|---|
+| Rows | `ts`, `kind` and the fields of that kind. `refused`: `caller`, `source` (`meter`, `meter_stale`, `counters`, `unknown`), `reason` (percentages and counts, about 200 characters), `reserve_pct`, `weekly_used_pct`, `meter_age_s`. `bench_cleared`: `provider`, `source` (`meter`, `canary`), the two percentages. `canary_claimed`: `bench_remaining_s`. `canary_released`. No prompt text, no model output, no path. |
+| Writers | `codex_meter.refusal` (every refused Codex call), `codex_bench` (a bench lifted by the meter or by a canary, a canary taken or handed back). |
+| Kept | At most 512 KiB (`codex_meter._EVENT_LOG_MAX_BYTES`) in two generations (`codex_meter.jsonl` and `.1`, `capped_log`); older rows are dropped by the rotation. Files 0600. |
+| Reads | Nothing in the router reads it; it is the audit trail for the reserve (`llm-router` does not summarise it yet). |
+| Failure | A failed append is recorded with `failopen` code `CHZ-FO-CODEX-METER-LOG`. |
+
+## `agent_route_local.jsonl` (D-372)
+
+| Item | Value |
+|---|---|
+| Rows | One per sub-agent task Codex declined for lack of capacity: `ts`, `outcome` (`local_candidate`, `local_ineligible`), `reason_code`, `blockers` (rule names), `prompt_chars`, `files_named`, `declined_by` (the Codex outcome), `subagent_type`, `task_type`, `complexity`, `session_id`, `session_kind`, `tool_use_id`. **Prompt text is never stored**, only its length and the number of file paths it names. |
+| Writer | `agent_route_local.record`, called from `hooks/agent-route.py` (`_note_local_candidate`). Not the North Star ledger. |
+| Kept | At most 512 KiB (`agent_route_local._LOG_MAX_BYTES`) in two generations (`capped_log`). Files 0600. |
+| Reads | Nothing in the router; it measures whether a local runner is worth building (`src/llm_router/agent_route_local.py`). |
+| Failure | A failed append is recorded with `failopen` code `CHZ-FO-AGENT-ROUTE-LOCAL-LOG`. |
+
+## `codex_canary.json` (R2)
+
+| Item | Value |
+|---|---|
+| Content | One object, `{"last": <epoch>}`: when the last canary through a long Codex bench was taken. No other field. |
+| Writer | `codex_bench.claim_canary` / `release_canary`, under `codex_canary.json.lock`, by atomic replace; 0600. |
+| Kept | Always exactly one value; overwritten by the next claim. Deleting the file allows a canary at once. |

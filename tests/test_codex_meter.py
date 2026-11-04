@@ -31,6 +31,7 @@ def codex_home(tmp_path, monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_CODEX_RESERVE_PCT", raising=False)
     monkeypatch.delenv("LLM_ROUTER_AGENT_ROUTE_CODEX_DAILY_BUDGET", raising=False)
     monkeypatch.delenv("LLM_ROUTER_CODEX_WINDOW_BUDGET", raising=False)
+    codex_meter._noted.clear()  # the once-per-process failopen notes: a test must see its own
     return home
 
 
@@ -143,9 +144,14 @@ def test_the_line_is_at_sixty_percent_of_the_weekly_meter(codex_home):
     assert not verdict.allowed and verdict.source == "meter" and verdict.weekly_used_pct == 60.0
 
 
-def test_the_five_hour_meter_does_not_move_the_line(codex_home):
-    now = _meter_at(codex_home, 10.0, five=100.0)
+def test_the_five_hour_window_refuses_at_ninety_percent_whatever_the_week_says(codex_home):
+    """The counter branch refuses when the router's own 5 h window is spent; the meter branch draws the same line."""
+    now = _meter_at(codex_home, 10.0, five=89.9)
     assert codex_meter.check("llm_codex", now).allowed
+    now = _meter_at(codex_home, 10.0, five=90.0)
+    verdict = codex_meter.check("llm_codex", now)
+    assert not verdict.allowed and verdict.source == "meter" and "5 h meter at 90%" in verdict.reason
+    assert codex_meter.check("agent_route", now).allowed  # the reserved caller is never held by it
 
 
 def test_the_line_is_tunable_and_can_be_switched_off(codex_home, monkeypatch):
@@ -355,3 +361,267 @@ async def test_a_refused_chain_entry_fails_over_to_the_next_provider_and_is_not_
         pass
     assert provider_reset.get_provider_reset_until("codex") is None
     assert any(r["caller"] == "router_chain" for r in _events())
+
+
+# ------------------------------------------------------------------------------------------------ a stale reading is a floor
+
+
+def test_a_stale_reading_at_or_above_the_line_still_refuses_until_its_window_resets(codex_home):
+    """Weekly 80% read at 10:00 must not admit llm_codex at 11:00: the weekly percentage only rises until ``resets_at``."""
+    read_at = time.time()
+    resets = read_at + 3 * 24 * HOUR
+    write_rollout(codex_home, [(read_at, rate_limits(weekly=80.0, five=10.0, now=read_at, weekly_resets=resets))])
+    one_hour_on = read_at + HOUR
+    assert codex_meter.read_meter(one_hour_on) is None  # not trusted ...
+    verdict = codex_meter.check("llm_codex", one_hour_on)  # ... but not ignored
+    assert not verdict.allowed and verdict.source == "meter_stale" and verdict.weekly_used_pct == 80.0
+    assert "holds until" in verdict.reason and verdict.meter_age_s == pytest.approx(HOUR, abs=1)
+    assert codex_meter.check("llm_codex", read_at + 3 * HOUR).source == "meter_stale"
+    assert codex_meter.check("agent_route", one_hour_on).allowed
+    after_reset = codex_meter.check("llm_codex", resets + 1)  # a new window: the old reading says nothing
+    assert after_reset.allowed and after_reset.source == "counters"
+
+
+def test_a_stale_reading_under_the_lines_decides_nothing(codex_home):
+    read_at = time.time()
+    write_rollout(codex_home, [(read_at, rate_limits(weekly=59.0, five=89.0, now=read_at))])
+    verdict = codex_meter.check("llm_codex", read_at + HOUR)
+    assert verdict.allowed and verdict.source == "counters"  # the counters, not the old reading, admit it
+    _spend_daily(60, read_at + HOUR)
+    assert not codex_meter.check("llm_codex", read_at + HOUR).allowed  # ... and they can still refuse
+
+
+def test_a_stale_five_hour_reading_refuses_until_that_window_resets(codex_home):
+    read_at = time.time()
+    write_rollout(codex_home, [(read_at, rate_limits(weekly=5.0, five=97.0, now=read_at, five_resets=read_at + 2 * HOUR))])
+    assert codex_meter.check("llm_codex", read_at + HOUR).source == "meter_stale"
+    assert codex_meter.check("llm_codex", read_at + 2 * HOUR + 1).source == "counters"
+
+
+def test_the_stale_search_finds_a_reading_in_an_older_day_directory(codex_home):
+    read_at = time.time() - 4 * 24 * HOUR
+    write_rollout(codex_home, [(read_at, rate_limits(weekly=70.0, five=1.0, now=read_at,
+                                                     weekly_resets=read_at + 7 * 24 * HOUR))])
+    verdict = codex_meter.check("llm_codex")
+    assert not verdict.allowed and verdict.source == "meter_stale"
+
+
+def test_the_newest_stale_reading_wins_over_an_older_higher_one_of_the_same_window(codex_home):
+    """Within a window the newest reading is the largest; a file order that disagrees must not matter."""
+    t = time.time() - 2 * HOUR
+    write_rollout(codex_home, [(t, rate_limits(weekly=80.0, five=1.0, now=t))], mtime=t + 5)
+    write_rollout(codex_home, [(t + 600, rate_limits(weekly=81.0, five=2.0, now=t))], mtime=t + 700)
+    assert codex_meter.check("llm_codex").weekly_used_pct == 81.0
+
+
+# ------------------------------------------------------------------------------------------------ what a reading may be
+
+
+@pytest.mark.parametrize("bad", [101.0, -1.0, 1e9, "60", None, True])
+def test_a_percentage_outside_zero_to_one_hundred_is_not_a_reading(codex_home, bad):
+    now = time.time()
+    limits = rate_limits(weekly=10.0, five=10.0, now=now)
+    limits["secondary"]["used_percent"] = bad
+    limits["primary"]["used_percent"] = bad
+    write_rollout(codex_home, [(now - 60, limits)])
+    assert codex_meter.read_meter(now) is None
+    assert codex_meter.check("llm_codex", now).source == "counters"
+
+
+def test_only_the_codex_bucket_is_the_plus_meter(codex_home):
+    now = time.time()
+    other = rate_limits(weekly=95.0, five=95.0, now=now)
+    other["limit_id"] = "codex_other"
+    write_rollout(codex_home, [(now - 60, other)])
+    assert codex_meter.read_meter(now) is None
+    assert codex_meter.check("llm_codex", now).allowed  # a different bucket's 95% is not the Plus meter
+
+
+# ------------------------------------------------------------------------------------------------ problems are counted
+
+
+def _codes() -> dict[str, int]:
+    from llm_router import failopen
+
+    failopen.reset_cache()
+    return dict(failopen.snapshot().by_code)
+
+
+@pytest.fixture
+def clean_failopen():
+    from llm_router import failopen
+
+    failopen.reset_cache()
+    failopen.clear()
+    yield
+    failopen.reset_cache()
+
+
+def test_a_sessions_directory_that_cannot_be_listed_is_counted_once(codex_home, clean_failopen):
+    import os
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root can list a mode-000 directory")
+    now = _meter_at(codex_home, 10.0)
+    sessions = codex_home / "sessions"
+    sessions.chmod(0)
+    try:
+        assert codex_meter.read_meter(now) is None
+        codex_meter.read_meter(now)
+        codex_meter.check("llm_codex", now)
+    finally:
+        sessions.chmod(0o755)
+    assert _codes() == {"CHZ-FO-CODEX-METER-READ": 1}  # three guarded calls, one row
+
+
+def test_a_directory_that_does_not_exist_is_normal(codex_home, clean_failopen):
+    assert codex_meter.read_meter() is None and codex_meter.read_last_meter() is None
+    assert _codes() == {}
+
+
+def test_a_codex_reading_in_a_format_the_reader_does_not_know_is_counted(codex_home, clean_failopen):
+    now = time.time()
+    limits = rate_limits(weekly=10.0, five=10.0, now=now)
+    del limits["primary"], limits["secondary"]
+    limits["windows"] = [{"used": 12}]  # a future shape
+    write_rollout(codex_home, [(now - 60, limits)])
+    assert codex_meter.read_meter(now) is None
+    assert _codes() == {"CHZ-FO-CODEX-METER-FORMAT": 1}
+    codex_meter.read_meter(now)
+    assert _codes() == {"CHZ-FO-CODEX-METER-FORMAT": 1}  # once per process
+
+
+def test_a_premium_event_is_not_a_format_problem(codex_home, clean_failopen):
+    now = time.time()
+    write_rollout(codex_home, [(now - 60, rate_limits(weekly=None, five=None, now=now, limit_id="premium"))])
+    assert codex_meter.read_meter(now) is None
+    assert _codes() == {}
+
+
+def test_a_broken_line_is_counted_unless_it_is_the_last_one_codex_may_still_be_writing(codex_home, clean_failopen):
+    now = time.time()
+    path = write_rollout(codex_home, [(now - 120, rate_limits(weekly=30.0, five=1.0, now=now))])
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write('{"timestamp": "' + "x" * 20 + '", "payload": {"rate_limits": {"limit_id": "cod\n')  # cut off mid-write
+    assert codex_meter.read_meter(now).weekly_used_pct == 30.0
+    assert _codes() == {}  # the last line may be half written
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write('{"type": "event_msg"}\n')  # now the broken line is in the middle of the file
+    assert codex_meter.read_meter(now).weekly_used_pct == 30.0  # still read: the reader walks back past it
+    assert _codes() == {"CHZ-FO-CODEX-METER-FORMAT": 1}  # but a broken line in the middle of a file is counted
+
+
+# ------------------------------------------------------------------------------------------------ review items 1, 3, 4
+
+
+@pytest.mark.asyncio
+async def test_a_reserved_codex_entry_is_a_policy_skip_not_a_provider_fault(codex_home, temp_db, mock_env, monkeypatch, tmp_path):
+    """Two refusals used to open Codex's breaker for 30 s (tracker.record_failure), write attempt_failed rows, and build the
+    context pack first. The chain now asks BEFORE anything is built and goes on to the next entry."""
+    from llm_router import router
+    from llm_router.health import HealthTracker, get_tracker
+    from llm_router.router import route_and_call
+    from llm_router.types import RoutingProfile, TaskType
+
+    codex_agent._reset_codex_cache_for_tests()
+    _meter_at(codex_home, 91.0)
+    monkeypatch.setenv("LLM_ROUTER_PROVIDER_RESET_PATH", str(tmp_path / "reset.json"))
+    monkeypatch.delenv("LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_BLOCK_PROVIDERS", raising=False)
+    monkeypatch.setattr("llm_router.router.is_codex_available", lambda: True)
+    monkeypatch.setattr("llm_router.router.is_gemini_cli_available", lambda: False)
+    monkeypatch.setattr("llm_router.claude_usage.get_claude_pressure", lambda: 0.97)
+    _no_process(monkeypatch)
+    seen = {"run_codex": 0, "context_pack": 0, "failures": [], "attempt_failed": []}
+
+    async def run_codex_spy(*_a, **_k):
+        seen["run_codex"] += 1
+        raise AssertionError("run_codex was reached")
+
+    async def context_spy(*_a, **_k):
+        seen["context_pack"] += 1
+        raise AssertionError("the context pack was built for a refused entry")
+
+    real_emit = router._emit_ledger_attempt
+
+    def emit_spy(response, model, *a, **k):
+        if k.get("event_type") == "attempt_failed":
+            seen["attempt_failed"].append(model)
+        return real_emit(response, model, *a, **k)
+
+    monkeypatch.setattr("llm_router.router.run_codex", run_codex_spy)
+    monkeypatch.setattr("llm_router.router._cli_prompt_with_context", context_spy)
+    monkeypatch.setattr("llm_router.router._emit_ledger_attempt", emit_spy)
+    monkeypatch.setattr(HealthTracker, "record_failure", lambda self, provider: seen["failures"].append(provider))
+    try:
+        await route_and_call(TaskType.CODE, "refactor this function", profile=RoutingProfile.BALANCED)
+    except Exception:  # noqa: BLE001 -- every other provider is absent in the test environment
+        pass
+    assert seen["run_codex"] == 0 and seen["context_pack"] == 0
+    assert "codex" not in seen["failures"]
+    # the first failed attempt on the ledger is the next provider's: the two refused Codex entries wrote none (the emergency
+    # chain's own attempts at codex/* models, which litellm cannot run, come after the primary chain is exhausted)
+    assert seen["attempt_failed"] and not seen["attempt_failed"][0].startswith("codex/")
+    assert get_tracker().is_healthy("codex")
+    assert {r["caller"] for r in _events()} == {"router_chain"} and len(_events()) >= 1
+
+
+def test_a_chain_guard_that_fails_refuses_rather_than_opens(monkeypatch):
+    from llm_router import router
+
+    monkeypatch.setattr(codex_meter, "refusal", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("bug")))
+    assert "reserve guard failed" in router._codex_reserve_refusal()
+
+
+def test_a_call_that_passes_a_sandbox_and_no_caller_is_agent_routes(codex_home, monkeypatch):
+    """Hook 27 (before D-373) passes the D-357 sandbox and no caller. A package from this change under that hook must not
+    refuse every delegation as 'unspecified' once the weekly meter is at the line."""
+    _meter_at(codex_home, 99.0, five=99.0)
+    monkeypatch.setattr(codex_agent, "find_codex_binary", lambda: None)
+    for sandbox in ("read-only", "workspace-write"):
+        assert _run(model="gpt-6-astra", sandbox=sandbox).reason_code == "binary_missing"
+    assert _events() == []
+    assert _run(model="gpt-6-astra").reason_code == "meter_reserved"  # no sandbox, no caller: a pure-LLM caller
+    assert _run(model="gpt-6-astra", sandbox="read-only", caller="evaluator").reason_code == "meter_reserved"  # a name wins
+
+
+def _milestone():
+    from llm_router.agentic.ledger import AcceptanceResult, Milestone
+
+    return Milestone("M1", "do it", lambda _a: AcceptanceResult(True))
+
+
+def test_the_agentic_codex_tier_is_guarded_like_every_other_caller(codex_home):
+    """tools/agentic.py tier 1 (llm_delegate, llm_act) starts ``codex exec`` itself, not through run_codex."""
+    from llm_router.agentic.adapters import CodexAdapter, ProcResult
+
+    calls = []
+
+    def fake_runner(argv, input_text):
+        calls.append(argv)
+        return ProcResult(0, "ran\n", "")
+
+    _meter_at(codex_home, 81.0)
+    res = CodexAdapter(tier=1, runner=fake_runner, binary="codex-x").run(_milestone(), [], 5.0)
+    assert calls == []  # nothing was started
+    assert res.artifacts["returncode"] == 127 and "reserved for sub-agent delegation" in res.artifacts["stderr"]
+    assert res.confidence == 0.3  # a failed tier: the escalation moves on
+    assert [(r["kind"], r["caller"]) for r in _events()] == [("refused", "agentic_codex")]
+
+
+def test_the_agentic_codex_tier_runs_when_the_meter_has_room(codex_home):
+    from llm_router.agentic.adapters import CodexAdapter, ProcResult
+
+    calls = []
+    _meter_at(codex_home, 12.0)
+    res = CodexAdapter(tier=1, runner=lambda argv, i: calls.append(argv) or ProcResult(0, "ran\n", ""),
+                       binary="codex-x").run(_milestone(), [], 5.0)
+    assert calls and calls[0][:2] == ["codex-x", "exec"] and res.confidence == 1.0
+    assert _events() == []
+
+
+def test_an_agentic_guard_that_fails_refuses_rather_than_opens(monkeypatch):
+    from llm_router.agentic.adapters import CodexAdapter
+
+    monkeypatch.setattr(codex_meter, "refusal", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("bug")))
+    assert "reserve guard failed" in CodexAdapter._reserve_refusal()

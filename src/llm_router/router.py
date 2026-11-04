@@ -267,8 +267,25 @@ def _codex_caller() -> str:
         from llm_router import eligibility_routing
 
         return "text_job" if eligibility_routing._text_job_ctx.get() else "router_chain"
-    except Exception:  # noqa: BLE001 -- the label only; an unnamed caller is guarded all the same
+    except Exception as exc:  # the label only; an unnamed caller is guarded all the same
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-ROUTER-CODEX-CALLER", exc)
         return "router_chain"
+
+
+def _codex_reserve_refusal() -> str | None:
+    """D-373: the refusal text when the chain may not spend the Codex Plus meter now, else None. Logged by ``codex_meter``.
+    A guard that fails refuses (the meter is unknown, and unknown is not open)."""
+    try:
+        from llm_router import codex_meter
+
+        return codex_meter.refusal(_codex_caller())
+    except Exception as exc:
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-ROUTER-CODEX-RESERVE", exc)
+        return "Codex is reserved for sub-agent delegation (D-373); the reserve guard failed"
 
 
 def _format_subprocess_chain_error(
@@ -3515,6 +3532,24 @@ async def _dispatch_model_loop(
             chain_errors.append((model, f"premium_capped@{budget_state.pressure:.2f}"))
             skip_causes.note(model, skip_causes.BUDGET)
             continue
+
+        # D-373: the Plus meter is reserved for agent-route. Asked BEFORE anything is built or reserved for this entry (the
+        # context pack, the token reservation, the heartbeat), and answered as a policy skip, not a provider fault: no
+        # health failure (two would open the breaker on Codex for 30 s), no attempt_failed row, and the walk goes on to the
+        # next entry. ``run_codex`` asks again as the backstop for every other caller.
+        if provider == "codex" and task_type not in MEDIA_TASK_TYPES:
+            _reserved = _codex_reserve_refusal()
+            if _reserved is not None:
+                route_log.info(
+                    "routing_policy_skip",
+                    correlation_id=correlation_id,
+                    model=model,
+                    provider=provider,
+                    fallback_reason="codex_meter_reserved",
+                )
+                chain_errors.append((model, "skipped:codex_meter_reserved"))
+                skip_causes.note(model, skip_causes.POLICY, detail="codex_meter_reserved")
+                continue
 
         # Show provider context for QUOTA_BALANCED
         provider_context = f" [{provider.upper()}]" if profile == RoutingProfile.QUOTA_BALANCED else ""

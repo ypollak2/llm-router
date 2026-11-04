@@ -116,6 +116,11 @@ NOT_KEYS = {
     "huggingface_filler": "HF_TOKEN=hf_" + "x" * 34,
     "npm_filler": "//registry.npmjs.org/:_authToken=npm_" + "0" * 36,
     "age_public_recipient": "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p",
+    "placeholder_wording_camel_case": "-----BEGIN PRIVATE KEY-----\nYourPrivateKeyGoesHere\n-----END PRIVATE KEY-----",
+    "placeholder_wording_camel_case_long": "-----BEGIN RSA PRIVATE KEY-----\nReplaceThisWithYourRealPrivateKeyMaterial",
+    "one_long_plain_word_after_a_header": "-----BEGIN PRIVATE KEY-----\ninternationalization is the problem here",
+    "one_long_upper_case_word_after_a_header": "-----BEGIN PRIVATE KEY-----\nINTERNATIONALIZATIONSETTINGS",
+    "identifier_that_ends_in_sk_live": "export const risk_live_" + "aB3dE5fG7hJ9kL1mN3pQ5rS7tU" + " = 1",
     "ppk_public_half_only": "PuTTY-User-Key-File-3: ssh-ed25519\nEncryption: none\nComment: laptop\nPublic-Lines: 2\n"
                             + "\n".join(_body(4)[:2]),
 }
@@ -251,3 +256,22 @@ def test_a_short_prefix_that_starts_a_run_is_a_key():
     assert _high("export HF_TOKEN=hf_" + _draw(r, B62, 34))
     assert _high("hf_" + _draw(r, B62, 34) + " is the token")
     assert _high("npm_" + _draw(r, B62, 36))
+
+
+def test_a_stripe_key_after_a_separator_is_found_and_one_glued_to_letters_is_not():
+    r = random.Random("w11-stripe-anchor")
+    body = _draw(r, B62, 28)
+    for before in ("=", ": ", '"', "'", "(", " ", "_"):
+        assert _high(f"key{before}sk_live_{body}"), repr(before)
+    for before in ("ri", "di", "ta", "8"):
+        assert not _high(f"{before}sk_live_{body}"), repr(before)
+
+
+def test_key_material_must_look_like_base64_not_like_words():
+    r = random.Random("w11-classes")
+    for n in (16, 17, 24, 64):
+        line = _draw(r, B64, n)
+        while sum(map(bool, (any(c.isupper() for c in line), any(c.islower() for c in line),
+                             any(c.isdigit() for c in line), any(c in "+/" for c in line)))) < 3:
+            line = _draw(r, B64, n)
+        assert _high(f"-----BEGIN PRIVATE KEY-----\n{line}"), n

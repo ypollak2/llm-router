@@ -662,7 +662,9 @@ async def run_codex(
         caller: Who is spending the Plus meter. D-373 reserves the meter for sub-agent delegation: every caller
             except ``"agent_route"`` is refused (``reason_code="meter_reserved"``, no process started) once the
             weekly meter passes the reserve line, and a caller that names nothing is guarded too
-            (:mod:`llm_router.codex_meter`).
+            (:mod:`llm_router.codex_meter`). One exception, for a hook installed before ``caller`` existed: a call that
+            passes a ``sandbox`` and no ``caller`` is a delegated agent run, which only agent-route makes, and is read as
+            agent-route's (every pure-LLM caller passes ``sandbox=None``).
 
     Returns:
         A ``CodexResult`` with the process output, model name, exit code,
@@ -670,6 +672,9 @@ async def run_codex(
         in the result.
     """
     from llm_router.safe_subprocess import get_safe_env
+
+    if not caller and sandbox is not None:
+        caller = "agent_route"  # hook 27 (before D-373) passes the D-357 sandbox and no caller: see the docstring
 
     # D-373: before any work is done for the call (context pack, binary probe), not after it.
     try:

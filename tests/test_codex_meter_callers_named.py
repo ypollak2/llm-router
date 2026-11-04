@@ -16,8 +16,15 @@ from llm_router import codex_meter
 REPO = Path(__file__).resolve().parents[1]
 
 
+def _is_caller_unpack(keyword: ast.keyword) -> bool:
+    """``**_caller_kwargs(run_codex)``: the agent-route hook passes ``caller`` only to a ``run_codex`` that takes it."""
+    value = keyword.value
+    return (keyword.arg is None and isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id == "_caller_kwargs")
+
+
 def _run_codex_calls() -> list[tuple[str, int, bool]]:
-    """Every ``run_codex(...)`` call in src: (file, line, passes caller=)."""
+    """Every ``run_codex(...)`` call in src: (file, line, names its caller)."""
     out = []
     for path in sorted((REPO / "src" / "llm_router").rglob("*.py")):
         if path.name == "codex_agent.py":
@@ -28,7 +35,8 @@ def _run_codex_calls() -> list[tuple[str, int, bool]]:
                 fn = node.func
                 name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
                 if name == "run_codex":
-                    out.append((str(path.relative_to(REPO)), node.lineno, any(k.arg == "caller" for k in node.keywords)))
+                    named = any(k.arg == "caller" or _is_caller_unpack(k) for k in node.keywords)
+                    out.append((str(path.relative_to(REPO)), node.lineno, named))
     return out
 
 
@@ -44,12 +52,33 @@ def test_every_run_codex_call_in_the_package_names_its_caller():
 
 
 def test_only_agent_route_names_itself_as_the_reserved_caller():
-    seen = {}
+    """No ``caller="agent_route"`` keyword anywhere, and the one place the name is built is the hook's ``_caller_kwargs``."""
+    keywords, dicts = {}, {}
     for path in sorted((REPO / "src" / "llm_router").rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        rel = str(path.relative_to(REPO))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) == "run_codex":
-                for k in node.keywords:
-                    if k.arg == "caller" and isinstance(k.value, ast.Constant) and k.value.value in codex_meter.EXEMPT_CALLERS:
-                        seen[str(path.relative_to(REPO))] = k.value.value
-    assert seen == {"src/llm_router/hooks/agent-route.py": "agent_route"}
+            if isinstance(node, ast.keyword) and node.arg == "caller" and isinstance(node.value, ast.Constant) \
+                    and node.value.value in codex_meter.EXEMPT_CALLERS:
+                keywords[rel] = node.value.value
+            if isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if (isinstance(key, ast.Constant) and key.value == "caller" and isinstance(value, ast.Constant)
+                            and value.value in codex_meter.EXEMPT_CALLERS):
+                        dicts[rel] = value.value
+    assert keywords == {}
+    assert dicts == {"src/llm_router/hooks/agent-route.py": "agent_route"}
+
+
+def test_a_module_that_builds_its_own_codex_exec_argv_applies_the_guard():
+    """``agentic/adapters.py`` starts ``codex exec`` without ``run_codex`` (an injected runner). Any file that does that must
+    ask ``codex_meter`` itself, or the reserve has a hole: the one this found was tier 1 of llm_delegate / llm_act."""
+    builders = []
+    for path in sorted((REPO / "src" / "llm_router").rglob("*.py")):
+        if path.name in ("codex_agent.py", "codex_meter.py", "codex_bench.py"):
+            continue
+        source = path.read_text(encoding="utf-8")
+        if '"exec"' in source and '"--ignore-rules"' in source and '"--json"' in source:
+            builders.append((str(path.relative_to(REPO)), "codex_meter" in source))
+    assert builders, "the scan found no direct `codex exec` builder; it would pass anything"
+    assert [b for b in builders if not b[1]] == [], builders

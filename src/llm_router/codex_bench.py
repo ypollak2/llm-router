@@ -22,13 +22,14 @@ from __future__ import annotations
 import json
 import os
 import time
+from dataclasses import dataclass
 from typing import Sequence
 
 from llm_router import codex_meter, failopen, paths, provider_reset, state_files
 from llm_router.file_lock import exclusive_lock
 
 #: A bench is cleared when the fresh meter shows the 5 h window under this many percent ...
-FIVE_HOUR_BELOW = 90.0
+FIVE_HOUR_BELOW = codex_meter.FIVE_HOUR_SPENT_PCT
 #: ... and the weekly window under this many.
 WEEKLY_BELOW = 95.0
 #: A bench with more than this left is "long": it gets a canary.
@@ -68,7 +69,9 @@ def clear_if_meter_shows_headroom(providers: Sequence[str], now: float | None = 
         for name, entry in benched.items():
             if meter.observed_at <= entry["set_at"]:
                 continue  # the reading predates the bench: it cannot contradict it
-            cleared += provider_reset.clear_provider_reset(name, now, source="meter")
+            # ... and the same test again under the bench file's lock: another process may have recorded a NEWER bench for
+            # this provider since the entries above were read, and a reading from before it must not lift it
+            cleared += provider_reset.clear_provider_reset(name, now, source="meter", if_set_before=meter.observed_at)
         for name in cleared:
             codex_meter.log_event("bench_cleared", provider=name, source="meter", weekly_used_pct=meter.weekly_used_pct,
                                   five_hour_used_pct=meter.five_hour_used_pct,
@@ -104,36 +107,67 @@ def canary_due(bench_until: float, now: float | None = None) -> bool:
     return enabled() and bench_until - now > LONG_BENCH_S and now - _last_canary() >= CANARY_INTERVAL_S
 
 
-def claim_canary(bench_until: float, now: float | None = None) -> bool:
-    """Take the canary slot: True for exactly one caller per ``CANARY_INTERVAL_S``, decided and written under one lock.
+@dataclass(frozen=True)
+class CanaryClaim:
+    """The canary slot, held: when it was taken, and the stamp it replaced (so an unused slot can be handed back)."""
 
-    Refuses (False) when it cannot decide: an unlockable or unwritable slot must not turn into a canary per hook run."""
+    claimed_at: float
+    previous: float
+
+
+def _write_stamp(path, value: float) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    with state_files.open_private(tmp, "w") as fh:
+        fh.write(json.dumps({"last": value}))
+    tmp.replace(path)
+
+
+def claim_canary(bench_until: float, now: float | None = None) -> CanaryClaim | None:
+    """Take the canary slot: a claim for exactly one caller per ``CANARY_INTERVAL_S``, decided and written under one lock; None
+    for everyone else.
+
+    Refuses (None) when it cannot decide: an unlockable or unwritable slot must not turn into a canary per hook run."""
     now = time.time() if now is None else now
     try:
         path = _canary_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with exclusive_lock(path.with_suffix(path.suffix + ".lock"), timeout=0.5) as locked:  # a hook must not wait on it
             if not locked:
-                return False
+                return None
             if not canary_due(bench_until, now):
-                return False
-            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-            with state_files.open_private(tmp, "w") as fh:
-                fh.write(json.dumps({"last": now}))
-            tmp.replace(path)
+                return None
+            previous = _last_canary()
+            _write_stamp(path, now)
     except Exception as exc:  # noqa: BLE001
         failopen.record("CHZ-FO-CODEX-CANARY-CLAIM", exc)
-        return False
+        return None
     codex_meter.log_event("canary_claimed", bench_remaining_s=round(bench_until - now))
-    return True
+    return CanaryClaim(now, previous)
 
 
-def clear_after_canary(providers: Sequence[str], now: float | None = None) -> list[str]:
-    """The canary run succeeded: lift the bench of every provider in ``providers``. Returns the names cleared."""
+def release_canary(claim: CanaryClaim | None) -> None:
+    """The run that held ``claim`` ended without making a Codex call (declined by another gate, out of time, out of window):
+    hand the slot back so the next task can be the probe. Only if the stamp is still the claim's own. Never raises."""
+    if claim is None:
+        return
+    try:
+        path = _canary_path()
+        with exclusive_lock(path.with_suffix(path.suffix + ".lock"), timeout=0.5) as locked:
+            if locked and _last_canary() == claim.claimed_at:
+                _write_stamp(path, claim.previous)
+    except Exception as exc:  # noqa: BLE001
+        failopen.record("CHZ-FO-CODEX-CANARY-RELEASE", exc)
+        return
+    codex_meter.log_event("canary_released")
+
+
+def clear_after_canary(providers: Sequence[str], claim: CanaryClaim, now: float | None = None) -> list[str]:
+    """The canary run succeeded: lift the bench of every provider in ``providers`` that was recorded before the run began
+    (a bench another process recorded since is newer than this success and stands). Returns the names cleared."""
     try:
         cleared: list[str] = []
         for name in providers:
-            cleared += provider_reset.clear_provider_reset(name, now, source="canary")
+            cleared += provider_reset.clear_provider_reset(name, now, source="canary", if_set_before=claim.claimed_at)
         for name in cleared:
             codex_meter.log_event("bench_cleared", provider=name, source="canary")
         return cleared

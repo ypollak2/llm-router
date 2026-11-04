@@ -845,7 +845,12 @@ _current_tool_use_id = ""
 _last_codex_outcome = ""
 
 #: True once this run holds the canary slot (``codex_bench.claim_canary``): it is let through a long bench as the probe.
+#: ``_canary_claim`` is the claim itself (the slot is handed back with it if no Codex call is made).
 _canary_claimed = False
+_canary_claim = None
+
+#: True once this run has started a Codex call. A held canary slot that was never used goes back (``_release_canary_unused``).
+_codex_dispatched = False
 
 
 def _failopen(code: str, exc: BaseException | None = None, detail: str = "") -> None:
@@ -1826,7 +1831,7 @@ def _codex_bench_gate(*, claim: bool = False) -> float | None:
     ``claim=False`` only asks whether a canary would be allowed, so a gate in front of other checks does not use the slot up on a task
     that is declined for another reason. ``claim=True`` is the dispatch itself: it takes the slot, once per run, and answers the
     bench if another process took it first."""
-    global _canary_claimed
+    global _canary_claimed, _canary_claim
     until = _codex_bench_until()
     if until is None or _canary_claimed:
         return None
@@ -1835,12 +1840,27 @@ def _codex_bench_gate(*, claim: bool = False) -> float | None:
         if codex_bench.canary_due(until):
             if not claim:
                 return None
-            if codex_bench.claim_canary(until):
-                _canary_claimed = True
+            taken = codex_bench.claim_canary(until)
+            if taken is not None:
+                _canary_claimed, _canary_claim = True, taken
                 return None
     except Exception as exc:
         _failopen("CHZ-FO-AGENT-ROUTE-CODEX-CANARY", exc)
     return until
+
+
+def _release_canary_unused() -> None:
+    """Hand a held canary slot back when this run ended without a Codex call (another gate declined it, no time was left, the
+    window was spent): the next task can be the probe, and the 3 h wait is not spent on a task that never ran."""
+    global _canary_claimed, _canary_claim
+    if _canary_claim is None or _codex_dispatched:
+        return
+    claim, _canary_claim, _canary_claimed = _canary_claim, None, False
+    try:
+        from llm_router import codex_bench
+        codex_bench.release_canary(claim)
+    except Exception as exc:
+        _failopen("CHZ-FO-AGENT-ROUTE-CODEX-CANARY-RELEASE", exc)
 
 
 def _fmt_clock(epoch: float) -> str:
@@ -1879,9 +1899,9 @@ def _note_codex_success(model: str) -> None:
         from llm_router import provider_reset
         provider_reset.note_provider_success(f"codex:{model}")
         provider_reset.note_provider_success("codex")
-        if _canary_claimed:  # the probe worked: the bench was wrong, lift it (R2)
+        if _canary_claim is not None:  # the probe worked: the bench was wrong, lift it (R2)
             from llm_router import codex_bench
-            codex_bench.clear_after_canary(("codex", f"codex:{model}"))
+            codex_bench.clear_after_canary(("codex", f"codex:{model}"), _canary_claim)
     except Exception as exc:
         try:
             from llm_router import failopen
@@ -1978,6 +1998,24 @@ def _codex_sandbox_plan(cwd) -> tuple[str | None, str, str | None]:
     return _codex_working_dir(cwd), _CODEX_SANDBOX_READ, None
 
 
+def _caller_kwargs(run_codex) -> dict:
+    """``{"caller": "agent_route"}`` when this package's ``run_codex`` takes a ``caller`` (D-373), else ``{}``.
+
+    The hook and the package are installed together, but not always at the same moment: a hook from this change running
+    against an older package would raise ``TypeError`` on the unknown keyword and every delegation would fail. A package
+    from this change running under an older hook is covered on its side (``run_codex`` reads a call that passes a sandbox and
+    no caller as agent-route's)."""
+    try:
+        import inspect
+
+        params = inspect.signature(run_codex).parameters
+        if "caller" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return {"caller": "agent_route"}
+    except (TypeError, ValueError) as exc:
+        _failopen("CHZ-FO-AGENT-ROUTE-CODEX-CALLER-SIGNATURE", exc)
+    return {}
+
+
 def _run_codex_agent(prompt: str, timeout: int, context_root: str | None, working_dir: str | None = None,
                      sandbox: str = _CODEX_SANDBOX_READ):
     """Run one delegated task on Codex (see ``_run_codex_agent_inner``); any window
@@ -1986,6 +2024,7 @@ def _run_codex_agent(prompt: str, timeout: int, context_root: str | None, workin
         return _run_codex_agent_inner(prompt, timeout, context_root, working_dir, sandbox)
     finally:
         _release_reservation()
+        _release_canary_unused()
 
 
 def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None, working_dir: str | None = None,
@@ -2006,6 +2045,7 @@ def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None, 
     """
     import asyncio
 
+    global _codex_dispatched
     from llm_router.codex_agent import run_codex
 
     primary = _codex_agent_model()
@@ -2025,9 +2065,10 @@ def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None, 
             return last, "no_time"
         if not _spend_window_slot():  # every dispatch spends window quota
             return last, "failed"  # window exhausted for the fallback dispatch
+        _codex_dispatched = True
         res = asyncio.run(run_codex(prompt, model=model, timeout=left, context_root=context_root,
                                     working_dir=working_dir, sandbox=sandbox,
-                                    caller="agent_route"))  # D-373: the one caller the Plus meter is reserved for
+                                    **_caller_kwargs(run_codex)))  # D-373: the one caller the Plus meter is reserved for
         last = res
         if res and getattr(res, "success", False) and (res.content or "").strip():
             _note_codex_success(model)
@@ -2221,6 +2262,7 @@ def _try_cli_delegation(
         )
     _work_dir, _sandbox, _refusal = _codex_sandbox_plan(cwd)  # D-357: writable only inside the session's git repo
     _codex_ok = (_benched_until is None and _refusal is None
+                 and _codex_bench_gate(claim=True) is None  # R2: a due canary is claimed before a window slot is spent
                  and not _codex_window_declines(
                      "cli_delegation", prompt, subagent_type, task_type, complexity, session_id))
     try:
@@ -2242,6 +2284,7 @@ def _try_cli_delegation(
         return None
     finally:
         _release_reservation()  # admitted for Codex but no Codex call made
+        _release_canary_unused()
 
     if not res or not getattr(res, "success", False) or not (res.content or "").strip():
         return None
@@ -2850,7 +2893,19 @@ def _try_codex_subagent_delegation(
         )
         return None
 
+    # R2: a due canary is CLAIMED here, before a window slot or a daily-budget unit is spent. The gate above only asked; with N
+    # sub-agents spawned together all N passed it, and each of the N-1 that then lost the claim had already spent a budget unit.
+    if _codex_bench_gate(claim=True) is not None:
+        _record_north_star_unit(
+            "agent_route_codex", model="", outcome="benched",
+            subagent_type=subagent_type, task_type=task_type,
+            complexity=complexity, session_id=session_id, path="ns3",
+            reason="Codex usage limit; another run holds this bench's canary slot",
+        )
+        return None
+
     if _codex_window_declines("ns3", prompt, subagent_type, task_type, complexity, session_id):
+        _release_canary_unused()  # no Codex call will be made: give the slot back
         return None
 
     # Reserve budget before dispatch — see _codex_subagent_budget_increment docstring.

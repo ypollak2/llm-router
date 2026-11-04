@@ -462,13 +462,16 @@ def is_provider_reset_blocked(provider: str, now: float | None = None) -> bool:
 
 
 def clear_provider_reset(provider: str | None = None, now: float | None = None, *,
-                         source: str = "owner") -> list[str]:
+                         source: str = "owner", if_set_before: float | None = None) -> list[str]:
     """Lift a bench: one provider, or every provider when ``None``.
 
     Returns the names that were cleared. Never raises (fails open to ``[]``).
     Each cleared bench is logged as an unban (KPI G4); ``now`` is the time
     that is logged. ``source`` is ``owner`` for the CLI, ``meter`` or ``canary``
     when ``codex_bench`` lifts a bench the evidence contradicts.
+
+    ``if_set_before`` clears an entry only if it was recorded before that epoch, decided UNDER the lock against the entry as it is
+    then: a router that lifts a bench on evidence from time T must not lift one that another process recorded after T.
     """
     try:
         path = _state_file()
@@ -482,6 +485,12 @@ def clear_provider_reset(provider: str | None = None, now: float | None = None, 
             names = [str(n) for n in providers] if provider is None else (
                 [provider] if provider in providers else []
             )
+            if if_set_before is not None:
+                def _older(entry: object) -> bool:
+                    set_at = entry.get("set_at") if isinstance(entry, dict) else None
+                    return not isinstance(set_at, (int, float)) or set_at < if_set_before
+
+                names = [n for n in names if _older(providers.get(n))]
             held = {n: providers.get(n) for n in names}
             for n in names:
                 providers.pop(n, None)

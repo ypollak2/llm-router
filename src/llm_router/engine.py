@@ -364,11 +364,12 @@ _SECRET_SHAPES = {
     # PuTTY ``.ppk``: the header line; the key is real only when a ``Private-Lines:`` section follows (``_putty_key_is_real``).
     "putty_key": re.compile(r"PuTTY-User-Key-File-\d{1,2}:[ \t]*[\w-]{1,40}"),
     # Provider credentials with a distinctive prefix. A placeholder (``sk_live_xxxxxxxx``, ``hf_...``) is exempted by the
-    # value itself, as for the shapes above. A prefix of 8 characters or more is not anchored on the left, so a key glued to
-    # preceding text is still found. ``hf_`` and ``npm_`` are 3 and 4 characters: inside a 100 KB random base64url blob one
-    # turns up by chance about once in ten blobs (tests/test_secdet_token_not_surroundings.py), so they must start a run;
-    # a key glued to letters in front of ``hf_`` is the price (``SG.`` needs a ``.``, which a base64url blob never holds).
-    "stripe_key": re.compile(r"[sr]k_live_[0-9A-Za-z]{24,255}"),
+    # value itself, as for the shapes above. Most are not anchored on the left, so a key glued to preceding text is still found
+    # (``glpat-`` and ``dop_v1_``, the shortest of them, turn up in a 100 KB random blob about once in 10^6 blobs; ``SG.`` needs
+    # a ``.``, which a base64url blob never holds). ``hf_`` and ``npm_`` are 3 and 4 characters: one turns up by chance in about
+    # one 100 KB blob in ten (tests/test_secdet_token_not_surroundings.py), so they must start a run; and ``sk_live_`` ends other
+    # words (``risk_live_...``), so it must start one too. A key glued to letters in front of those three is the price.
+    "stripe_key": re.compile(r"(?<![A-Za-z0-9])[sr]k_live_[0-9A-Za-z]{24,255}"),
     "sendgrid_key": re.compile(r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
     "huggingface_token": re.compile(r"(?<![A-Za-z0-9_-])hf_[A-Za-z0-9]{34,255}"),
     "npm_token": re.compile(r"(?<![A-Za-z0-9_-])npm_[A-Za-z0-9]{36,255}"),
@@ -510,9 +511,17 @@ _PEM_LOOKAHEAD = 1024
 _PEM_WORD_STRIP = "\"',+\\#>|"
 
 
+def _char_classes(text: str) -> int:
+    """How many of upper case, lower case, digits and ``+/=`` the text uses: base64 of a key uses at least three."""
+    return sum(1 for pattern in ("[A-Z]", "[a-z]", "[0-9]", "[+/=]") if re.search(pattern, text))
+
+
 def _pem_material_is_real(words: list[str]) -> bool:
+    """Key material, not a word after a header: placeholder wording (``YourPrivateKeyGoesHere`` uses two classes, a long plain
+    word one) and filler fail, and so does anything that is not random-looking base64. A 64-character base64 line misses the
+    three-class test with probability about 2e-5; the 16-character truncated paste, 3.5%."""
     joined = "".join(words)
-    return bool(joined) and not _is_placeholder(joined) \
+    return bool(joined) and _char_classes(joined) >= 3 and not _is_placeholder(joined) \
         and _random_looking(joined, bits=3.0, distinct=min(12, max(8, len(joined) // 3)))
 
 

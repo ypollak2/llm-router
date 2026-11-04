@@ -170,7 +170,8 @@ def test_a_short_bench_gets_no_canary(hook, monkeypatch):
 
 
 def test_the_canary_slot_is_not_used_up_by_a_task_declined_for_another_reason(hook, monkeypatch):
-    """The gate in front of the other checks only asks; the slot is taken at the dispatch."""
+    """The slot is claimed before a window slot or a budget unit is spent, and handed back when the task is then declined."""
+    until = time.time() + 48 * HOUR
     _bench(48 * HOUR)
     for _ in range(codex_window.budget()):
         codex_window.record_delegation(time.time() - 60)  # the 5 h window is spent
@@ -178,8 +179,9 @@ def test_the_canary_slot_is_not_used_up_by_a_task_declined_for_another_reason(ho
     assert _ns3(hook) is None
     assert codex.calls == []
     assert [r["outcome"] for r in _ledger("agent_route_codex")] == ["window_exhausted"]
-    assert not paths.state_path(codex_bench.CANARY_FILE).exists()
-    assert hook._canary_claimed is False
+    assert hook._canary_claimed is False and hook._canary_claim is None
+    assert codex_bench.canary_due(until)  # the next task can be the probe
+    assert [e["kind"] for e in _meter_events()] == ["canary_claimed", "canary_released"]
 
 
 def test_the_probe_can_be_switched_off(env, hook, monkeypatch):
@@ -194,15 +196,16 @@ def test_the_probe_can_be_switched_off(env, hook, monkeypatch):
 def test_two_processes_cannot_both_claim_the_slot(env):
     until = time.time() + 48 * HOUR
     assert codex_bench.canary_due(until)
-    assert codex_bench.claim_canary(until) is True
-    assert codex_bench.claim_canary(until) is False
+    claim = codex_bench.claim_canary(until)
+    assert claim is not None and claim.previous == 0.0
+    assert codex_bench.claim_canary(until) is None
     assert codex_bench.canary_due(until) is False
     assert codex_bench.canary_due(until, time.time() + 3 * HOUR + 1) is True
 
 
 def test_a_canary_that_cannot_be_decided_is_not_taken(env, monkeypatch):
     monkeypatch.setattr(codex_bench, "exclusive_lock", lambda *a, **k: (_ for _ in ()).throw(OSError("no locks")))
-    assert codex_bench.claim_canary(time.time() + 48 * HOUR) is False
+    assert codex_bench.claim_canary(time.time() + 48 * HOUR) is None
     assert failopen.snapshot().by_code.get("CHZ-FO-CODEX-CANARY-CLAIM") == 1
 
 
@@ -303,3 +306,166 @@ def test_a_broken_probe_does_not_hide_the_bench(hook, monkeypatch):
     monkeypatch.setattr(codex_bench, "clear_if_meter_shows_headroom", lambda *a, **k: (_ for _ in ()).throw(ImportError("old package")))
     assert hook._codex_bench_until() is not None
     assert _codes() == {"CHZ-FO-AGENT-ROUTE-CODEX-BENCH-CLEAR": 1}
+
+
+# ------------------------------------------------------------------- canary concurrency (review item 5)
+
+
+def _daily_count() -> int:
+    f = paths.state_path(codex_meter.DAILY_COUNTER_FILE)
+    return json.loads(f.read_text())["count"] if f.exists() else 0
+
+
+def test_a_run_that_loses_the_canary_claim_spends_no_budget_and_no_window_slot(hook, monkeypatch):
+    """N sub-agents spawned together all pass the 'is a canary due' question; only one wins the claim, and the N-1 others must
+    not have spent a daily-budget unit or held a window slot before they lose."""
+    _bench(48 * HOUR)
+    monkeypatch.setattr(codex_bench, "claim_canary", lambda *a, **k: None)  # another run took it between the question and the claim
+    codex = _Codex(monkeypatch, [_ok()])
+    assert _ns3(hook) is None
+    assert codex.calls == []
+    assert _daily_count() == 0
+    assert codex_window.snapshot().used == 0
+    row = _ledger("agent_route_codex")[-1]
+    assert row["outcome"] == "benched" and "canary slot" in row["reason"]
+    assert provider_reset.get_provider_reset_until("codex") is not None
+
+
+def test_n_concurrent_runs_one_probe_n_minus_one_untouched(env, monkeypatch):
+    """Four hook runs on four threads against one long bench, held at a barrier so that ALL of them have passed 'is a canary
+    due' before ANY has claimed it: one takes the slot and makes the only Codex call; the budget moves by one; the three
+    losers spend no daily-budget unit and hold no window slot."""
+    import asyncio
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    _bench(48 * HOUR)
+    runs = [_load_hook() for _ in range(4)]
+    barrier, local, calls = threading.Barrier(4, timeout=20), threading.local(), []
+    real_due = codex_bench.canary_due
+
+    def due(until, now=None):
+        if not getattr(local, "waited", False):  # each thread's first question is the gate's; the claim's own re-check comes later
+            local.waited = True
+            barrier.wait()
+        return real_due(until, now)
+
+    async def slow_codex(prompt, model="gpt-5.5", timeout=None, **kw):
+        calls.append(kw)
+        await asyncio.sleep(0.6)  # the probe is still running while the losers settle
+        return _ok()
+
+    monkeypatch.setattr(codex_bench, "canary_due", due)
+    monkeypatch.setattr("llm_router.codex_agent.run_codex", slow_codex)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(_ns3, runs))
+    assert results.count("answer") == 1 and results.count(None) == 3
+    assert len(calls) == 1 and calls[0]["caller"] == "agent_route"
+    assert _daily_count() == 1
+    assert codex_window.snapshot().used == 1
+    outcomes = sorted(r["outcome"] for r in _ledger("agent_route_codex"))
+    assert outcomes == ["benched", "benched", "benched", "delegated"]
+    assert provider_reset.get_provider_reset_until("codex") is None  # and the winner's success lifted the bench
+
+
+def test_a_canary_slot_is_handed_back_when_no_codex_call_is_made(hook, monkeypatch):
+    """No time left for a run: the probe never ran, so the 3 h wait must not be spent on it."""
+    until = time.time() + 48 * HOUR
+    _bench(48 * HOUR)
+    monkeypatch.setattr(hook, "_delegation_time_left", lambda configured: 0)
+    codex = _Codex(monkeypatch, [_ok()])
+    assert _ns3(hook) is None
+    assert codex.calls == []
+    assert [r["reason_code"] for r in _ledger("agent_route_codex") if r.get("reason_code")] == ["no_time"]
+    assert hook._canary_claimed is False
+    assert codex_bench.canary_due(until)
+    assert provider_reset.get_provider_reset_until("codex") is not None
+
+
+def test_a_canary_slot_that_made_a_call_stays_taken_even_when_the_call_failed(hook, monkeypatch):
+    until = time.time() + 48 * HOUR
+    _bench(48 * HOUR)
+    _Codex(monkeypatch, [CodexResult(content="codex: empty completion (no output)", model="gpt-6-astra", exit_code=1,
+                                     duration_sec=0.1, reason_code="empty_completion")])
+    assert _ns3(hook) is None
+    assert hook._canary_claimed is True
+    assert codex_bench.canary_due(until) is False  # the probe ran (and failed): the next one is 3 h away
+
+
+def test_releasing_a_slot_another_run_has_since_taken_changes_nothing(env):
+    until = time.time() + 48 * HOUR
+    claim = codex_bench.claim_canary(until)
+    later = time.time() + 5
+    paths.state_path(codex_bench.CANARY_FILE).write_text(json.dumps({"last": later}))  # a later claim, by someone else
+    codex_bench.release_canary(claim)
+    assert json.loads(paths.state_path(codex_bench.CANARY_FILE).read_text())["last"] == later
+    codex_bench.release_canary(None)  # nothing held: nothing to do
+
+
+# ------------------------------------------------- the bench comparison is made under the lock (review item 5)
+
+
+def test_a_bench_recorded_after_the_entries_were_read_is_not_lifted_by_an_older_reading(env, monkeypatch):
+    """The check 'the reading is newer than the bench' was made on entries read BEFORE the meter was read; another process can
+    re-bench in between. The same comparison is now made against the bench file under its lock."""
+    now = time.time()
+    _bench(5 * HOUR, set_ago_s=600)
+    stale_entries = provider_reset.provider_reset_entries()  # what the caller read first
+    _fresh_meter(env, weekly=20.0, five=20.0, age_s=300.0)  # reading from 5 minutes ago
+    _bench(5 * HOUR, set_ago_s=60)  # ... and a new bench, recorded one minute ago, after that reading
+    monkeypatch.setattr(provider_reset, "provider_reset_entries", lambda *a, **k: stale_entries)
+    assert codex_bench.clear_if_meter_shows_headroom(("codex",), now) == []
+    assert provider_reset.get_provider_reset_until("codex") is not None
+    assert _unbans() == []
+
+
+def test_a_canary_success_does_not_lift_a_bench_recorded_after_the_probe_began(env):
+    until = time.time() + 48 * HOUR
+    claim = codex_bench.claim_canary(until)
+    _bench(5 * HOUR, set_ago_s=-5)  # recorded 5 s after the claim, by a run that hit the wall
+    assert codex_bench.clear_after_canary(("codex",), claim) == []
+    assert provider_reset.get_provider_reset_until("codex") is not None
+
+
+def test_clear_provider_reset_if_set_before_is_decided_under_the_lock(env):
+    now = time.time()
+    _bench(5 * HOUR, set_ago_s=100)
+    assert provider_reset.clear_provider_reset("codex", now, source="meter", if_set_before=now - 200) == []
+    assert provider_reset.clear_provider_reset("codex", now, source="meter", if_set_before=now - 50) == ["codex"]
+    assert provider_reset.clear_provider_reset("codex") == []  # nothing left; the owner's form is unchanged
+
+
+# ------------------------------------------------------------------- deploy skew between the hook and the package (item 4)
+
+
+def test_the_hook_passes_caller_only_to_a_run_codex_that_takes_it(hook):
+    from llm_router import codex_agent
+
+    async def package_before_d373(prompt, model="gpt-5.5", timeout=None, sandbox=None):
+        return None
+
+    async def takes_caller(prompt, *, caller=""):
+        return None
+
+    async def takes_anything(prompt, **kw):
+        return None
+
+    assert hook._caller_kwargs(package_before_d373) == {}
+    assert hook._caller_kwargs(takes_caller) == {"caller": "agent_route"}
+    assert hook._caller_kwargs(takes_anything) == {"caller": "agent_route"}
+    assert hook._caller_kwargs(codex_agent.run_codex) == {"caller": "agent_route"}  # this package's own
+    assert hook._caller_kwargs(object()) == {}  # not introspectable: leave it out rather than guess
+
+
+def test_a_hook_newer_than_the_package_still_delegates(hook, monkeypatch):
+    """Hook 28 with a package whose run_codex has no ``caller``: the keyword used to raise TypeError and fail every delegation."""
+    seen = []
+
+    async def old_run_codex(prompt, model="gpt-5.5", working_dir=None, timeout=None, on_event=None, context_root=None,
+                            messages=None, transcript_path=None, target_window=0, sandbox=None):
+        seen.append(sandbox)
+        return _ok()
+
+    monkeypatch.setattr("llm_router.codex_agent.run_codex", old_run_codex)
+    assert _ns3(hook) == "answer"
+    assert seen == ["workspace-write"] or seen == ["read-only"]
