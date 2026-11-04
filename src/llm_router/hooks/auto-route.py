@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 79
+# llm_router-hook-version: 80
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -247,7 +247,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 79"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 80"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -5668,6 +5668,22 @@ def main() -> None:
         json.dump(_normalize_output_for_platform(output, hook_input), sys.stdout)
         sys.exit(0)
 
+    # ── W10: the local model's routing verdict for THIS prompt ─────────────────────────────────────────
+    # Started where the prompt enters routing: after zero-Claude edit (which needs its own model resident and
+    # must not be evicted by this call), the sidecar, a user prefix, the strict-ack bypass and the MCP shortcut
+    # (none of those takes a routing decision), and joined at the quiet decision below, so the wait overlaps the
+    # classification in between. LLM_ROUTER_LOCAL_CLASSIFIER=off (default): None, zero Ollama calls. shadow: logged,
+    # nothing changes. on: an opus-confident verdict quiets the hint (docs/bugs/CLS-HOOK-1.md). Fail-open.
+    _door_pending = None
+    if _forced is None:
+        try:
+            from llm_router import door_verdict as _door_verdict
+
+            _door_pending = _door_verdict.start(prompt, "prompt", session_id=session_id or None)
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("LR-FO-HOOK-DOOR-VERDICT-START", _exc)
+
     # W0-1: which layer classified this turn, and how sure it was (None = not measured).
     _cls_layer = _cls_conf = None
 
@@ -5877,7 +5893,21 @@ def main() -> None:
         "LLM_ROUTER_QA_ROUTING", "off").strip().lower() in ("1", "on", "true", "yes")
     _qa_quiet = _qa_task and not _qa_routing_on and not _forced
     _conversational_quiet = _conversational_task and not _qa_routing_on and not _forced
-    if (_qa_quiet or _conversational_quiet or _unservable_quiet
+    # W10: join the local model's verdict. Only an applied "claude" door (mode on, opus-confident) quiets the
+    # hint, the same passive display a quiet Q&A task gets; no verdict changes nothing.
+    _verdict_quiet = False
+    if _door_pending is not None:
+        try:
+            with _hl_phase("verdict_wait"):
+                _door_dec = _door_pending.decide(task_type=task_type)
+            _verdict_quiet = bool(_door_dec.applied)
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] DOOR_VERDICT door={_door_dec.door or '-'} "
+                       f"reason={_door_dec.reason} applied={_door_dec.applied} src={_door_dec.verdict.source} "
+                       f"ms={_door_dec.verdict.ms}")
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("LR-FO-HOOK-DOOR-VERDICT-DECIDE", _exc)
+    if (_qa_quiet or _conversational_quiet or _unservable_quiet or _verdict_quiet
             or _resolved_enforce in ("off", "shadow", "observe")):
         _enforce_mode = "shadow"
     elif _resolved_enforce in ("advise", "advisory"):

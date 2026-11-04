@@ -3152,6 +3152,22 @@ def _main() -> None:
             return
         sys.exit(0)
 
+    # ── W10: the local model's routing verdict for THIS spawn ────────────────────────────────────────────
+    # Started here (Explore, allowlisted and retrieval-only spawns are approved above without a routing
+    # decision, so they get none), joined just before the Codex attempt, so the wait overlaps classify.
+    # LLM_ROUTER_LOCAL_CLASSIFIER=off (default): None, zero Ollama calls. shadow: logged only. on: an
+    # opus-confident verdict keeps the spawn on Claude (no Codex attempt). Fail-open on every path.
+    _door_pending = None
+    try:
+        from llm_router import door_verdict as _door_verdict
+
+        _door_pending = _door_verdict.start(
+            prompt, "agent", session_id=hook_input.get("session_id") or None,
+            context=f"(a sub-agent spawn of type {subagent_type}: the hook sees only the brief the main agent wrote)",
+            tool_use_id=_current_tool_use_id)
+    except Exception as _exc:  # noqa: BLE001
+        _log_hook_error(f"door verdict start failed: {type(_exc).__name__}", session_id)
+
     # ── Classify reasoning task ──────────────────────────────────────────────
     with _hl_phase("classify"):
         task_type, complexity = _classify(prompt)
@@ -3170,11 +3186,28 @@ def _main() -> None:
     # Must run before _allow_routed_spawn() below: that branch defaults to ON and
     # returns unconditionally, which is why Codex delegation was unreachable before
     # this change. See the NS3 docstring above _try_codex_subagent_delegation.
+    _verdict_claude = False
+    if _door_pending is not None:
+        try:
+            with _hl_phase("verdict_wait"):
+                _door_dec = _door_pending.decide(task_type=task_type)
+            _verdict_claude = bool(_door_dec.applied)
+            if _verdict_claude:  # the unit stays countable: same outcome as any spawn the Codex lever declines
+                _record_north_star_unit(
+                    "agent_route_codex", model="", outcome="unsuitable",
+                    subagent_type=subagent_type, task_type=task_type, complexity=complexity,
+                    session_id=session_id, reason_code="verdict_claude",
+                    reason=f"local routing verdict {_door_dec.verdict.tier} "
+                           f"(p_max {_door_dec.verdict.confidence:.2f}): hard work stays on Claude",
+                )
+        except Exception as _exc:  # noqa: BLE001
+            _verdict_claude = False
+            _log_hook_error(f"door verdict decide failed: {type(_exc).__name__}", session_id)
     with _hl_phase("codex_delegation"):  # routed model time when it runs
         _codex_delegated = _try_codex_subagent_delegation(
             prompt, task_type, complexity, subagent_type, session_id,
             cwd=hook_input.get("cwd"), ledger_session_id=hook_input.get("session_id")
-        ) if not _secret_hold else None
+        ) if not _secret_hold and not _verdict_claude else None
     if _codex_delegated is not None:
         _log_agent_call(subagent_type, prompt, "routed_codex_subagent")
         _note_handoff_delivered(session_id, prompt)

@@ -20,7 +20,9 @@ The request and the strings are pinned by PREREG v2 amendment 2 (M1.8 round 3), 
 
 Strict like v6: the answer is discarded (``source=parse_error``) unless it is the one
 ``tier`` choice with exactly the three option probabilities summing to 1 +/- 0.02 and a
-``choice`` equal to the argmax. No function here raises and no prompt text is stored.
+``choice`` that is an argmax. An exact tie at the top (the endpoint quantises) is a valid
+answer and resolves to the highest tied tier. No function here raises and no prompt text
+is stored.
 """
 
 from __future__ import annotations
@@ -108,8 +110,15 @@ def parse_answer(body: object, *, model: str = DEFAULT_MODEL, ms: float = 0.0,
         if abs(sum(probs.values()) - 1.0) > 0.02:
             return bad
         top = max(probs.values())
-        if choice not in OPTIONS or probs[choice] != top or sum(p == top for p in probs.values()) != 1:
+        if choice not in OPTIONS or probs[choice] != top:
             return bad
+        # W10 CLS-TIE-1: the endpoint quantises, so two options can tie EXACTLY at the top (replayed
+        # 2026-11-04: haiku = sonnet = 0.4825230729 and 0.4718243110, p_max below 0.5). A tie is a valid answer
+        # that says "no preference", not a malformed one: it used to read parse_error. Resolve it to the
+        # HIGHEST tied tier, the safer side, and keep p_max as the confidence.
+        tied = [o for o in OPTIONS if probs[o] == top]
+        if len(tied) > 1:
+            choice = tied[-1]
     except (TypeError, KeyError, AttributeError):
         return bad
     conf = float(top)
