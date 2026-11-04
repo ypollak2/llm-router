@@ -629,7 +629,7 @@ def test_every_spawned_git_carries_each_pin_in_both_forms(repo, monkeypatch):
     build_commit_input(str(repo))
     must = {"core.fsmonitor": "false", "log.showSignature": "false", "gpg.program": "/usr/bin/false",
             "gpg.openpgp.program": "/usr/bin/false", "gpg.x509.program": "/usr/bin/false", "gpg.ssh.program": "/usr/bin/false",
-            "core.pager": "cat", "diff.submodule": "short"}
+            "core.pager": "cat", "diff.submodule": "short", "core.hooksPath": "/dev/null", "diff.autoRefreshIndex": "false"}
     assert len(seen) >= 4
     for cmd, env in seen:
         n = int(env["GIT_CONFIG_COUNT"])
@@ -639,3 +639,104 @@ def test_every_spawned_git_carries_each_pin_in_both_forms(repo, monkeypatch):
             assert f"{key}={value}" in cmd, (key, cmd[:8])
     logs = [c for c, _e in seen if "log" in c]
     assert logs and all("--no-show-signature" in c for c in logs)
+
+
+# ---- round 5, S1: a filter list cut at the byte cap is a refusal, not "the rest are fine" -------------------------
+
+def _many_filters_repo(repo: Path, tmp_path: Path, n_junk: int) -> Path:
+    """``n_junk`` configuration lines under ``[filter "junk"]`` (their names show up in ``--get-regexp ^filter\\.``), and an
+    evil clean filter named so that it sorts after them."""
+    marks = tmp_path / "cutmarks"
+    marks.mkdir()
+    s = tmp_path / "cutfilter.sh"
+    s.write_text(f"#!/bin/sh\ntouch {marks}/ran\ncat\n")
+    s.chmod(0o755)
+    (repo / ".gitattributes").write_text("* filter=zevil\n")
+    git(repo, "add", ".gitattributes")
+    git(repo, "commit", "-qm", "attrs")
+    with (repo / ".git" / "config").open("a") as f:
+        f.write('[filter "junk"]\n' + "".join(f"\tv{i} = 1\n" for i in range(n_junk)))
+        f.write(f'[filter "zevil"]\n\tclean = {s}\n')
+    (repo / "a.py").write_text("changed\n")
+    return marks
+
+
+def test_a_filter_list_longer_than_the_byte_cap_refuses_the_diff_instead_of_leaving_later_filters_alone(repo, tmp_path):
+    """The reviewer's PoC at its real size: 120,000 junk lines make the list 2.4 MB, the cap is 2 MB, the answer was cut, the
+    cut counted as success, the evil filter after the cut was never overridden and ran."""
+    marks = _many_filters_repo(repo, tmp_path, 120_000)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "diff", "HEAD"], cwd=repo, capture_output=True, env=env)
+    assert (marks / "ran").exists(), "control: plain git runs the filter, so this test can fail"
+    (marks / "ran").unlink()
+    with pytest.raises(InputRefused) as e:
+        build_commit_input(str(repo), all_tracked=True)
+    assert e.value.code == "git_config_unreadable" and not (marks / "ran").exists()
+
+
+def test_a_filter_list_that_fits_under_the_cap_is_read_in_full_and_overridden(repo, tmp_path, monkeypatch):
+    marks = _many_filters_repo(repo, tmp_path, 30)
+    assert "a.py" in build_commit_input(str(repo), all_tracked=True).text and not (marks / "ran").exists()
+    monkeypatch.setattr(gitinput, "_GIT_BYTES_CAP", 200)  # the same repository with the list past the cap
+    with pytest.raises(InputRefused) as e:
+        build_commit_input(str(repo), all_tracked=True)
+    assert e.value.code == "git_config_unreadable" and not (marks / "ran").exists()
+
+
+# ---- round 5, S2: reading must not write the index, so no git hook has a reason to run ---------------------------
+
+def _stale(repo: Path, bump: int) -> None:
+    """Make the stat data of a tracked file disagree with the index while its content still agrees: a plain ``git diff``
+    refreshes the index (writes it back) because of it."""
+    g = repo / "docs" / "guide.md"
+    st = g.stat()
+    os.utime(g, (st.st_atime, st.st_mtime + bump))
+
+
+def _hook_repo(repo: Path, tmp_path: Path, via_hooks_path: bool) -> Path:
+    marks = tmp_path / "hookmarks"
+    marks.mkdir()
+    hooks = tmp_path / "otherhooks" if via_hooks_path else repo / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    h = hooks / "post-index-change"
+    h.write_text(f"#!/bin/sh\ntouch {marks}/post-index-change\n")
+    h.chmod(0o755)
+    if via_hooks_path:
+        git(repo, "config", "core.hooksPath", str(hooks))
+    _stale(repo, 100)
+    return marks
+
+
+@pytest.mark.parametrize("via_hooks_path", [False, True], ids=["dot-git-hooks", "core.hooksPath"])
+def test_a_stale_index_is_not_refreshed_so_no_repository_hook_runs(repo, tmp_path, via_hooks_path):
+    marks = _hook_repo(repo, tmp_path, via_hooks_path)
+    (repo / "a.py").write_text("changed\n")
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "diff", "HEAD"], cwd=repo, capture_output=True, env=env)
+    assert _seen(marks) == ["post-index-change"], "control: plain `git diff HEAD` writes the index and runs the hook"
+    _stale(repo, 200)
+    before = (repo / ".git" / "index").read_bytes()
+    inp = build_commit_input(str(repo), all_tracked=True)
+    assert "a.py" in inp.text and _seen(marks) == [] and (repo / ".git" / "index").read_bytes() == before
+    git(repo, "add", "a.py")
+    git(repo, "checkout", "-q", "-b", "feat")
+    git(repo, "commit", "-qm", "feat")  # git's own commit, run by the test: it may run hooks
+    _seen(marks)
+    _stale(repo, 300)
+    before = (repo / ".git" / "index").read_bytes()
+    build_pr_input(str(repo), base="main")
+    (repo / "a.py").write_text("again\n")
+    git(repo, "add", "a.py")
+    _seen(marks)
+    _stale(repo, 400)
+    before = (repo / ".git" / "index").read_bytes()
+    build_commit_input(str(repo))
+    assert _seen(marks) == [] and (repo / ".git" / "index").read_bytes() == before
+
+
+def test_a_read_leaves_the_index_file_untouched(repo):
+    _stale(repo, 100)
+    (repo / "a.py").write_text("changed\n")
+    before = (repo / ".git" / "index").read_bytes()
+    build_commit_input(str(repo), all_tracked=True)
+    assert (repo / ".git" / "index").read_bytes() == before

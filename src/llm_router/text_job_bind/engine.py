@@ -12,9 +12,10 @@ exactly one of:
 There is no third answer for a command whose placeholder is written the way the shell replaces it
 (`"${LLM_TEXT:?}"`): it is never allowed through unchanged, and a text that did not pass its checks is never used. A
 failure of any kind, in this module or in the model, ends in a deny. A mention of the variable written anywhere the
-shell would not replace it is denied when the line may run git or gh (see ``plan._runs_job_tool``, a deny-by-default
-rule with a short list of harmless commands); a line that only quotes it next to ``git commit`` in a ``grep``, an
-``echo`` or a here-document gets no decision.
+shell would not replace it is denied unless every command on the line is a harmless reader (see ``plan._runs_job_tool``
+and, for a line the scanner cannot read, ``plan.unreadable_line_is_harmless``: deny-by-default, with a short list of
+harmless commands); a line that only quotes it next to ``git commit`` in a ``grep``, an ``echo`` or a here-document gets
+no decision.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from typing import Callable, NamedTuple
 from llm_router import paths, state_files
 from llm_router.text_job_bind import gitinput, ledger, limits, sanitize
 from llm_router.text_job_bind.plan import (
-    COMMIT_CMD, JOB_COMMIT, JOB_PR, PR_CMD, Plan, Unsupported, analyse, option_flags,
+    COMMIT_CMD, JOB_COMMIT, JOB_PR, PR_CMD, Plan, Unsupported, analyse, option_flags, unreadable_line_is_harmless,
 )
 from llm_router.text_job_bind.shellscan import MENTION, ScanError, scan_commands
 
@@ -43,8 +44,6 @@ COOLDOWN_FILE = "cooldown.json"
 _COMMIT_CMD = COMMIT_CMD
 _PR_CMD = PR_CMD
 _ON = frozenset({"1", "true", "on", "yes"})
-#: A command line the scanner cannot read is let through only if it does not name git or gh at all.
-_NAMES_GIT_OR_GH = re.compile(r"(?<![\w-])(?:git|gh)(?![\w-])")
 
 
 class GenResult(NamedTuple):
@@ -573,8 +572,8 @@ def _decide(payload, generate, t0, budget_s, root, record, now, mono, prepare=No
     except Unsupported as u:
         return deny(guess, "unsupported", u.code, f"{u.message} Nothing was run. Or write the text yourself and run it without the placeholder.")
     except ScanError as e:
-        if handwritten_job(cmd) is None and not _NAMES_GIT_OR_GH.search(cmd):
-            return Decision("pass")  # a doc or script that merely mentions the placeholder
+        if unreadable_line_is_harmless(cmd):
+            return Decision("pass")  # every command in it is a harmless reader (an echo, a grep, a cat): the shell stops the rest
         return deny(guess, "unsupported", "unreadable",
                     f"The command could not be read as a plain git/gh command ({e}). Nothing was run. "
                     "Simplify it, or write the text yourself and run it without the placeholder.")

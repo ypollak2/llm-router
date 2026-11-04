@@ -556,6 +556,58 @@ def test_a_truthy_or_empty_switch_renders_the_section(home, lane, monkeypatch, v
     assert ih.text_job_bind_flag_off() is False
 
 
+def _state_env(home: Path, text: str) -> None:
+    (home.parent / "state").mkdir(exist_ok=True)
+    (home.parent / "state" / ".env").write_text(text)
+
+
+@pytest.mark.parametrize("dotenv,expected", [
+    ("LLM_ROUTER_LOCAL_TEXT_JOBS=0\n", (False, False)), ("LLM_ROUTER_LOCAL_TEXT_JOBS=off\n", (False, False)),
+    ("# comment\nOTHER=1\nLLM_ROUTER_LOCAL_TEXT_JOBS='false'\n", (False, False)),
+    ("LLM_ROUTER_LOCAL_TEXT_JOBS=1\n", (True, True)), ("OTHER=x\n", (True, True)), ("LLM_ROUTER_LOCAL_TEXT_JOBS=\n", (True, True)),
+])
+def test_an_off_switch_kept_only_in_the_users_dotenv_is_seen_before_the_server_has_loaded_it(home, lane, dotenv, expected):
+    """S4 of round 5: server.py renders the rules while it is imported, ahead of load_dotenv_files(), so the process
+    environment does not hold the setting yet. The gate reads ~/.llm-router/.env itself."""
+    register(home)
+    _state_env(home, dotenv)
+    assert FLAG not in __import__("os").environ
+    assert parts_of(rendered()) == expected
+    assert ih.text_job_bind_flag_off() is (expected == (False, False))
+
+
+def test_the_real_environment_wins_over_the_dotenv_in_both_directions(home, lane, monkeypatch):
+    register(home)
+    _state_env(home, "LLM_ROUTER_LOCAL_TEXT_JOBS=0\n")
+    monkeypatch.setenv(FLAG, "1")
+    assert ih.text_job_bind_flag_off() is False and parts_of(rendered()) == (True, True)
+    _state_env(home, "LLM_ROUTER_LOCAL_TEXT_JOBS=1\n")
+    monkeypatch.setenv(FLAG, "0")
+    assert ih.text_job_bind_flag_off() is True and parts_of(rendered()) == (False, False)
+    monkeypatch.setenv(FLAG, "")  # set but empty: the real environment still decides, and an empty value is not off
+    _state_env(home, "LLM_ROUTER_LOCAL_TEXT_JOBS=0\n")
+    assert ih.text_job_bind_flag_off() is False
+
+
+def test_the_rules_refresh_follows_the_dotenv_switch_without_writing_it(home, lane):
+    register(home)
+    assert ih.check_and_update_rules() is not None and ih.check_and_update_rules() is None
+    installed = home / "rules" / "llm_router.md"
+    assert MARK not in installed.read_text() and "## Commit messages" in installed.read_text()
+    _state_env(home, "LLM_ROUTER_LOCAL_TEXT_JOBS=0\n")
+    assert ih.check_and_update_rules() is not None  # the section went away: the switch is off
+    assert "## Commit messages" not in installed.read_text()
+    assert ih.check_and_update_rules() is None
+    assert (home.parent / "state" / ".env").read_text() == "LLM_ROUTER_LOCAL_TEXT_JOBS=0\n"
+
+
+def test_an_unreadable_dotenv_is_no_setting_not_a_failed_render(home, lane):
+    register(home)
+    (home.parent / "state").mkdir(exist_ok=True)
+    (home.parent / "state" / ".env").write_bytes(b"\xff\xfe\x00LLM_ROUTER_LOCAL_TEXT_JOBS=0\n")
+    assert ih.text_job_bind_flag_off() is False and parts_of(rendered()) == (True, True)
+
+
 def test_an_unset_switch_is_not_off(home, monkeypatch):
     monkeypatch.delenv(FLAG, raising=False)
     assert ih.text_job_bind_flag_off() is False

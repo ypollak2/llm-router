@@ -678,9 +678,21 @@ def text_job_bind_registered() -> bool:
 def text_job_bind_flag_off() -> bool:
     """True when LLM_ROUTER_LOCAL_TEXT_JOBS is set to anything but 1/true/on/yes (the hook's own test).
 
-    Read from the process environment only; no .env is read here (the MCP server has loaded its own).
+    The real process environment wins; when it does not set the variable, the user's own ``$LLM_ROUTER_HOME/.env`` is
+    read for it (and nothing else of that file is applied). The MCP server renders the rules while it is being imported,
+    BEFORE it loads that file into its environment, so an off switch kept only there would otherwise be invisible here
+    and the rules would teach a placeholder the hook then refuses (``flag_off``).
     """
-    raw = os.environ.get(_TEXT_JOB_BIND_FLAG, "").strip().lower()
+    if _TEXT_JOB_BIND_FLAG in os.environ:
+        raw = os.environ[_TEXT_JOB_BIND_FLAG]
+    else:
+        try:
+            from llm_router.env_loader import user_dotenv_value
+
+            raw = user_dotenv_value(_TEXT_JOB_BIND_FLAG) or ""
+        except Exception:  # noqa: BLE001 -- an unreadable .env is "no setting here", never a failed render
+            raw = ""
+    raw = raw.strip().lower()
     return bool(raw) and raw not in _TEXT_JOB_BIND_FLAG_ON
 
 

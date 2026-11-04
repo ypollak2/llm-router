@@ -8,9 +8,11 @@ own text-job checks, and puts it in the command. The text never passes through C
 
 - Evidence: in the 30 days to 2026-11-03 Claude ran 1,563 `git commit` and `gh pr create` commands
   (n=1,563 commands: 984 commits, 579 PRs), about 89% of them inside sub-agents, and none of them was
-  routed, because the router's text-job tool was advisory. The research puts the ceiling of what
-  wiring these commands can save at about 4% of Claude's output tokens
-  (`~/.rsi/research/primary-plan/v16/coord/ROUTING-RESEARCH-20261103.md`, same window, same n).
+  routed, because the router's text-job tool was advisory
+  (`~/.rsi/research/primary-plan/v16/coord/ROUTING-RESEARCH-20261103.md`). Most of those lines were not
+  bindable. The measured upper bound of what wiring them can save is 0.36% of output tokens (86 bindable
+  real commands in 7 d, `~/.rsi/research/primary-plan/v16/coord/ROUTING-NEXT-20261104.md`, window
+  2026-10-28..2026-11-04, estimate): a small, safe win, not a large one.
 - The local model passes the commit-message and PR-description checks where it fails open-ended
   questions (same file), so this is the one kind of Claude output the router can take over whole.
 - A tool the model may call and then has to copy is not a handoff: the copy costs the output tokens
@@ -32,18 +34,19 @@ The placeholder must be written exactly as `"${LLM_TEXT:?}"`. Only a spelling th
 aborts the command when the variable is unset is the placeholder (proved against `bash` and `zsh` in
 `tests/test_w7_shellscan.py`): `$LLM_TEXT` and `${LLM_TEXT}` expand to nothing and would post an empty body, so
 they are not accepted. A mention of `$LLM_TEXT` anywhere the shell does not replace it (single quotes, after a
-backslash, in a here-document, in a comment, as `${LLM_TEXT:-x}`) on a line that runs `git` or `gh` is denied,
-never passed through: it would be committed as literal text. "May run git or gh" is decided from the words the
-scanner reads, and the rule is deny-by-default: `git -C "dir with space" commit`, `'git' commit`, `gh 'pr' create`,
-`git "commit"`, a loop around it and an unknown alias (`git ci`) are seen; so is a command whose name is only known
-at run time (`$G commit`, `$(which git) commit`, `${GIT:-git} commit`), and so is any other command that is not on a
-short harmless list (`echo`, `printf`, `grep`, `cat`, `sed`, `awk`, `ls`, ...) and has `git` or `gh` among ANY of its
-words (`env A=1 ... git commit`, `xargs`, `find -exec`, `python3 -c '...'`). A line the scanner cannot read, or reads
-differently from other shells (a single quote inside `"${...}"`), is denied if it names `git` or `gh`. What passes
-with no decision is a line whose mentions sit only in harmless commands (a `grep`, an `echo`, a `cat` with a
-here-document) or in a command that names neither git nor gh. It is a deny-list of what is known to be harmless, not
-a proof that nothing else can run git. To commit text that itself mentions the placeholder, write the message to
-a file and run `git commit -F <file>`.
+backslash, in a here-document, in a comment, as `${LLM_TEXT:-x}`) is denied unless EVERY command on the line is a
+harmless reader, because anything else might hand the literal text to git: it would be committed as written. The
+rule is deny-by-default and does not look for the word `git`, since a name held in a variable or built from quotes
+(`G=git; timeout 5 $G commit -m '...'`, `g'i't commit`, `python3 - <<'PY'` with `['git', 'commit']` in its body) has none
+to find. The harmless readers are a short list (`echo`, `printf`, `grep`, `cat`, `ls`, `cd`, ...; not `sed` or `awk`,
+whose arguments can run a program), each written with a plain name, outside any group, loop or keyword, and with no
+`$(...)` or backticks anywhere on the line. A line the scanner cannot read, or reads differently from other shells (a
+single quote inside `"${...}"`), is judged on its text: every command start (after `;`, `&`, `|`, a parenthesis, a
+backtick, `$(` or a newline, quotes or not) must begin with such a reader, the body of a here-document being data for
+its command (`cat <<'EOF'` passes, `sh <<'EOF'` does not). What passes with no decision is a line whose commands are
+all harmless readers (a `grep`, an `echo`, a `cat` with a here-document). It is a deny-list of what is known to be
+harmless, not a proof that nothing else can run git. To commit text that itself mentions the placeholder, write the
+message to a file and run `git commit -F <file>`.
 The rules text that teaches this is the section "Commit messages and PR bodies" of
 `src/llm_router/rules/llm_router.md`, which every session and every sub-agent loads.
 
@@ -60,14 +63,18 @@ matcher `Bash`):
    placeholder is left alone.
 2. Builds the job input from the repository as it is now: `git diff --cached` (`git diff HEAD` with
    `-a`), or for a PR the commits, the changed files and the diff against the base. Every git read is
-   read-only, bounded and hardened: the repository's own configuration cannot run a program from it
-   (file-system monitor, pager, external diff, textconv, clean/smudge/process filters of every name, submodule log,
-   and the gpg programs that `git log --show-signature` would run for a signed commit; see `gitinput.py`, and
-   `tests/test_w7_gitinput.py` for a hostile configuration with a control that shows plain git runs each of them).
+   bounded and hardened. It does not write the repository (`diff.autoRefreshIndex=false`: a plain `git diff HEAD`
+   refreshes a stale index and writing it runs the `post-index-change` hook), and the repository's own configuration
+   and hooks cannot start a program from it as far as the mechanisms known to do so go (file-system monitor, pager,
+   external diff, textconv, clean/smudge/process filters of every name, submodule log, the gpg programs that
+   `git log --show-signature` would run for a signed commit, and git hooks: `core.hooksPath` is pinned to
+   `/dev/null`; see `gitinput.py`, and `tests/test_w7_gitinput.py` for a hostile configuration with a control that
+   shows plain git runs each of them).
    That is a list of the mechanisms known to start a program, not a proof that git has no other, so there is a second
    layer: every git the hook starts gets a scrubbed environment (`PATH`, `HOME`, `LANG` and what git needs; none of
    the owner's provider keys, none of the `LLM_ROUTER_*` settings), and a test shows that a hostile filter, run
-   with the first layer bypassed, sees no key. A diff is refused when the list of configured filters cannot be read. The true list of changed
+   with the first layer bypassed, sees no key. A diff is refused when the list of configured filters cannot be read in full (a timeout, a failure, or an answer cut at the
+   byte cap: the filters after the cut would not be overridden). The true list of changed
    files comes from `git diff --numstat`, so a patch that git was stopped from printing in full still reports
    the real file count. The list shows the first names and counts the rest; the diff shows as many files as
    the size budget allows, a file that does not fit keeps its header and a note while there is room, and the
@@ -86,8 +93,8 @@ matcher `Bash`):
    persistence for this process. Then it asks the router's own questions about the flag and the lane (the same
    functions with the same arguments as `llm_text_job`, over the input cut at the router's limit; a test runs
    both over the same state files): a job that would be handed back anyway (no passed lane, a lane that cannot
-   be verified, the off switch) is denied here, in about a tenth of a second, before the model libraries are
-   imported. Otherwise it loads the router (seconds; this is router time, not the model's wait), takes the
+   be verified, the off switch) is denied here, before the model libraries are
+   imported (p50 96 ms router-added, p95 109 ms; n=20 runs of the real hook script, stub model, 2026-11-04). Otherwise it loads the router (seconds; this is router time, not the model's wait), takes the
    machine-wide job lock, and runs the router's own `llm_text_job` (same
    prompts, same acceptance checks, same ledgers), local model only: a passed `llm-router local-check` lane
    is required, and `LLM_ROUTER_LOCAL_TEXT_JOBS=1` (the full routing chain, cloud models included) is treated
@@ -105,17 +112,17 @@ matcher `Bash`):
 4. Cleans the text before it is published. `@name` would notify that person, `Fixes #12` or a closing keyword
    with an issue URL would close an issue, a test, testing or verification section is the model's guess
    presented as a result, and a remote image is fetched by whoever opens the PR with whatever its URL carries:
-   mentions lose their `@`, closing keywords become `refs` (the keyword, up to eight separators including line breaks,
-   and the reference), the content under any heading (or bold line) titled test plan, tests, testing, test results, unit
+   mentions lose their `@` (however many lead the name), closing keywords become `refs` (the keyword, up to eight separators
+   including line breaks and non-breaking spaces, and the reference), the content under any heading (or bold line) titled test plan, tests, testing, test results, unit
    or local or manual testing, how I tested, what was tested, checks run, results, verification, validation or QA is
    replaced by a line that says the model does not run tests, and every URL that fetches or runs something (`http(s)`,
-   `ftp`, `ssh`, `git`, `file`, `ws(s)`, `data:`, `javascript:`, `vbscript:`, `mailto:`, `tel:`, protocol-relative ones
+   `ftp`, `ssh`, `git`, `file`, `ws(s)`, `gopher`, `irc(s)`, `smb`, `ldap(s)`, `vscode`, `chrome`, `blob:`, `data:`, `javascript:`, `vbscript:`, `mailto:`, `tel:`, a bare `www.` link, protocol-relative ones (`//host`, `\\host`, with whitespace before them)
    after `(`, `<`, a quote, `=` or `[`) is removed wherever it sits, after the character references and escapes that
    could spell it are undone, together with every markdown image marker and every embedding HTML tag (`a`, `img`,
-   `picture`, `iframe`, `script`, ...), keeping the visible text; relative links and anchors stay, and so do ordinary
+   `picture`, `iframe`, `script`, ...; one too long or broken to match whole loses its opener), keeping the visible text; relative links and anchors stay, and so do ordinary
    angle brackets (`Vec<String>`). This is best effort: markdown and HTML have more ways to name a destination than
    any list, and GitHub's own sanitiser is not consulted. Every pattern is linear (a megabyte of adversarial text is
-   cleaned in tens of milliseconds) and a text longer than a PR body can be is refused before cleaning
+   cleaned in well under a second: `tests/test_w7_sanitize.py` asserts under 1 s per stage) and a text longer than a PR body can be is refused before cleaning
    (`sanitize.py`; the ledger counts what was done, never the text). A
    file NAME is text too: names in the `files` body are quoted when they hold a control character (a newline in
    a name could forge a `Signed-off-by:` trailer) and the list goes through the same cleaning. A commit message holds the model's subject and, by `limits.COMMIT_BODY_MODE` (override
@@ -189,8 +196,10 @@ The rules text that teaches the placeholder is rendered by `check_and_update_rul
 parts, each only when its conditions hold at render time (all read-only: files and the process environment, no network):
 
 - the commit part (`git commit -m "${LLM_TEXT:?}"`): the hook is registered in `settings.json`; the off switch
-  `LLM_ROUTER_LOCAL_TEXT_JOBS` is unset or one of 1/true/on/yes (any other value is off, the same test the hook makes;
-  no `.env` is read for it); and a passed local-check lane for `commit_message` exists;
+  `LLM_ROUTER_LOCAL_TEXT_JOBS` is unset or one of 1/true/on/yes (any other value is off, the same test the hook makes).
+  The process environment is read first; when it does not set the variable, `$LLM_ROUTER_HOME/.env` is read for that
+  one key (the server renders the rules while it is imported, before it loads that file, and the hook loads it, so an
+  off switch kept only there must turn the rules off too); and a passed local-check lane for `commit_message` exists;
 - the pull-request part (`gh pr create --body "${LLM_TEXT:?}"`): the commit part renders AND a passed lane for
   `pr_description` exists. With the commit part only, the rules say that PR bodies have no placeholder and are
   written normally.
@@ -230,8 +239,9 @@ the report never turns them into a percentage. It prints adoption as n/a, with t
 `--transcripts`: it then counts the commands the model ran through the Bash tool in the Claude Code transcripts
 (sub-agent transcripts included) inside the window that really RUN `git commit` or `gh pr create` (the scanner
 reads the words; an `echo`, `grep` or here-document that quotes them is not counted), and how many used the placeholder, with both counts and the range of the transcripts it read.
-Only DIRECT executions count: a command in a loop or a conditional does; one that runs git through `env`, `bash -c`,
-`timeout`, `xargs` or a variable does not, and neither does a line the scanner cannot read. Transcripts the host has
+Only DIRECT, top-level executions count: a command inside a loop, a conditional, a group, a subshell or a function body is
+unknown (`for x in; do git commit -m x; done` never runs it), and so is everything after a construct the scanner cannot
+place; one that runs git through `env`, `bash -c`, `timeout`, `xargs` or a variable does not count either, and neither does a line the scanner cannot read. Transcripts the host has
 already deleted are not in it. "Where the model actually ran" leaves out the denials
 that never reached it (no lane, off switch, lane unverified, router not loadable, no time left).
 
@@ -251,9 +261,9 @@ The hook is instrumented for the G1 hook-latency KPI: the wait on the local mode
 the wait for the job slot is `text_job_queue`, so the router-added figure counts neither. The router import is outside
 those phases and is router time: a successful job costs a second or more of it, because the hook imports the router
 and the model libraries before it calls the model. Because of the `if` filter every invocation is a placeholder
-invocation, so this hook has its own G1 budget, 1,500 ms router-added (`hook_latency.HOOK_BUDGETS_MS`, owner decision
-D-370); every other hook stays at 300 ms. A job the router would hand back anyway is answered before the import, in
-about a tenth of a second.
+invocation, so text-job-bind gets its own 1,500 ms budget (D-370, router-added, `hook_latency.HOOK_BUDGETS_MS`); other
+hooks keep their existing budgets. A job the router would hand back anyway is answered before the import (p50 96 ms,
+p95 109 ms; n=20 runs of the real hook script, stub model, load average 3.3 to 4.0, 2026-11-04).
 
 ## The limits on this path
 

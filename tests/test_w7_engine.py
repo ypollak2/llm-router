@@ -299,11 +299,54 @@ def test_a_quote_the_shells_read_differently_hides_nothing(repo, tmp_path):
     assert d.kind == "deny" and rows[0]["reason"] == "unreadable"
 
 
+DIVERGENT = "echo \"${Y:-'}\""  # a quote that bash reads as opening a string and other shells as text: the line is unreadable
+
+
 def test_a_line_the_scanner_cannot_read_is_denied_when_it_names_git_or_gh_and_passed_when_it_does_not(repo, tmp_path):
     d, rows = run("git -C \"unterminated commit -m '${LLM_TEXT:?}'", repo, tmp_path)
     assert d.kind == "deny" and rows[0]["reason"] == "unreadable"
     d, rows = run("echo \"unterminated '${LLM_TEXT:?}'", repo, tmp_path)
     assert d.kind == "pass" and rows == []
+
+
+@pytest.mark.parametrize("line", [
+    # round 5, S4: no plain `git` word anywhere, and the old rule let every one of these through
+    DIVERGENT + "; g'i't commit -m '${LLM_TEXT:?}'; echo \"'\" \"}\"",
+    DIVERGENT + "; $(echo g)it commit -m '${LLM_TEXT:?}'",
+    DIVERGENT + "; python3 -c 'import subprocess; subprocess.run([\"g\"+\"it\",\"commit\",\"-m\",\"${LLM_TEXT:?}\"])'",
+    DIVERGENT + "; awk 'BEGIN{system(\"g\" \"it commit -m ${LLM_TEXT:?}\")}'",
+    DIVERGENT + "; sed -n 'e g''it commit' f; echo '${LLM_TEXT:?}'",
+    DIVERGENT + " '${LLM_TEXT:?}' | sh",
+    DIVERGENT + " && G=git && $G commit -m '${LLM_TEXT:?}'",
+    DIVERGENT + "; cat <<< hello\ngit commit -m '${LLM_TEXT:?}'",  # a here-STRING has no body: what follows is commands
+    DIVERGENT + "; cat <<EOF\nbody\n  EOF\ngit commit -m '${LLM_TEXT:?}'",  # a terminator the shell does not accept ends it early here
+    DIVERGENT + "; cat <<EOF\n$(git commit -m '${LLM_TEXT:?}')\nEOF",  # an unquoted body is expanded: $(...) runs
+    DIVERGENT + "\npython3 - <<'PY'\nimport subprocess\nsubprocess.run(['git','commit','-m','${LLM_TEXT:?}'])\nPY",
+    "echo \"unterminated\"; xargs $G '${LLM_TEXT:?}'; echo '",
+])
+def test_a_line_the_scanner_cannot_read_and_that_may_run_anything_but_a_reader_is_denied(repo, tmp_path, line):
+    d, rows = run(line, repo, tmp_path)
+    assert d.kind == "deny" and rows[0]["reason"] == "unreadable", line
+
+
+@pytest.mark.parametrize("line", [
+    "echo \"unterminated '${LLM_TEXT:?}'", DIVERGENT + " '${LLM_TEXT:?}'", DIVERGENT + "; grep -n '${LLM_TEXT:?}' notes.md",
+    "cat <<'EOF'\ngit commit -m '${LLM_TEXT:?}'\nEOF\n" + DIVERGENT, "cd /repo && printf '%s' '${LLM_TEXT:?}' | grep -c \"unterminated",
+])
+def test_a_line_the_scanner_cannot_read_but_that_only_reads_and_prints_is_left_to_the_shell(repo, tmp_path, line):
+    d, rows = run(line, repo, tmp_path)
+    assert d.kind == "pass" and rows == [], line
+
+
+@pytest.mark.parametrize("line", [
+    "python3 - <<'PY'\nimport subprocess\nsubprocess.run(['git','commit','-m','${LLM_TEXT:?}'])\nPY",
+    "G=git; timeout 5 $G commit -m '${LLM_TEXT:?}'", "G=git; exec \"$G\" commit -m '${LLM_TEXT:?}'",
+    "awk 'BEGIN{system(\"g\" \"it commit -m ${LLM_TEXT:?}\")}'", "make commit MSG='${LLM_TEXT:?}'",
+])
+def test_a_readable_line_that_may_run_anything_but_a_reader_is_denied_through_the_engine(repo, tmp_path, line):
+    gen = Gen()
+    d, rows = run(line, repo, tmp_path, gen)
+    assert d.kind == "deny" and gen.calls == [] and rows[0]["reason"] == "placeholder_spelling", line
 
 
 @pytest.mark.parametrize("cmd", [
@@ -385,7 +428,7 @@ def test_a_commit_message_is_cleaned_the_same_way_but_keeps_its_prose(repo, tmp_
 
 
 @pytest.mark.parametrize("text,expected", [
-    ("a @x b", "a x b"), ("a@b.com", "a@b.com"), ("(@x)", "(x)"), ("@@x", "@@x"), ("`@x`", "`@x`"),
+    ("a @x b", "a x b"), ("a@b.com", "a@b.com"), ("(@x)", "(x)"), ("@@x", "x"), ("`@x`", "`@x`"),  # round 5: a run of at signs leads a mention too
     ("Fix #1", "refs #1"), ("fix: thing", "fix: thing"), ("fixes the bug", "fixes the bug"), ("Resolved: #4", "refs: #4"),
     ("closed #5, fixed #6", "refs #5, refs #6"), ("fixes#8", "refs #8"),
 ])

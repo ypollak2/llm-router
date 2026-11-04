@@ -16,12 +16,13 @@ attempt in its demotion window, and the rest of the text is fine. The neutral fo
 information (``refs #12``, ``alice``) and lose the effect. Every function is pure and the counts are
 returned so the ledger can say what was done without holding any text.
 
-Best effort, and linear. Markdown has more ways to write a link than any pattern lists, so URLs are removed by what they
+Best effort, and linear in the text. Markdown has more ways to write a link than any pattern lists, so URLs are removed by what they
 ARE (a scheme and what follows it, wherever it sits in the text, after the character references and backslash
 escapes that could spell it are undone), not by the markup around them; the markup that remains cannot name a
-destination. Nothing here backtracks: every pattern is a single bounded or non-overlapping scan, and a text longer
-than ``MAX_CHARS`` (the longest a PR body may be) is cut before any of it runs (the engine refuses such a text
-before it gets here). GitHub's own sanitiser is not consulted.
+destination. Every pattern is bounded at each place it can start (a tag costs at most about 550 steps, a run of spaces
+is scanned once, the rest is a single scan), so the cost is linear in the text; a text longer than ``MAX_CHARS`` (the
+longest a PR body may be) is cut before any of it runs (the engine refuses such a text before it gets here). GitHub's
+own sanitiser is not consulted.
 """
 
 from __future__ import annotations
@@ -33,12 +34,12 @@ from typing import NamedTuple
 #: The longest text this module works on (GitHub's limit for a PR body). Longer input is cut before any pattern runs.
 MAX_CHARS = 65_536
 
-#: A GitHub mention: ``@`` not preceded by a word character (so ``a@b.com`` is left alone), a user name
-#: of up to 39 characters, optionally ``/team``.
-_MENTION = re.compile(r"(?<![\w@`/.])@([A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:/[A-Za-z0-9_.-]+)?)")
+#: A GitHub mention: ``@`` (a run of them: ``@@name`` mentions too) not preceded by a word character (so ``a@b.com`` is left
+#: alone), a user name of up to 39 characters, optionally ``/team``. A match starts only at the first ``@`` of a run.
+_MENTION = re.compile(r"(?<![\w@`/.])@+([A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:/[A-Za-z0-9_.-]+)?)")
 #: The nine closing keywords GitHub recognises, followed by an issue or PR reference or its URL.
 _CLOSING = re.compile(
-    r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b([ \t\r\n]{0,8}:?[ \t\r\n]{0,8})"  # bounded: no backtracking on a long run
+    r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b([ \t\r\n\u00a0]{0,8}:?[ \t\r\n\u00a0]{0,8})"  # bounded: no backtracking on a long run
     r"((?:[\w.-]+/[\w.-]+)?#\d+|https?://github\.com/[\w.-]+/[\w.-]+/(?:issues|pull)/\d+)",
     re.IGNORECASE,
 )
@@ -62,17 +63,28 @@ _URL_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123
 #: ones; ``scheme:`` glued to its body, up to a space, for ``data:``, ``javascript:`` and the like (their bodies hold quotes and
 #: brackets; the word "data:" in prose, with a space after it, stays).
 _URL = re.compile(
-    r"(?<![A-Za-z0-9+.-])(?:(?:https?|ftps?|sftp|ssh|git|file|wss?)://[^\s<>\"'`)\]]*"
-    r"|(?:data|javascript|vbscript|mailto|tel):[^\s<>]+)", re.IGNORECASE)
-#: A protocol-relative target (``//host/x``) only where a target can start: after ``( < " ' = [``.
-_PROTO_RELATIVE = re.compile(r"(?<=[(<\"'=\[])//[^\s<>\"'`)\]]*")
-#: Tags that fetch, run or embed. A tag is matched as ``<name`` + at most 512 characters that contain neither ``<`` nor ``>`` +
-#: ``>``, so a failed match never runs past the next ``<``. Other angle brackets (``Vec<String>``) are not touched.
+    r"(?<![A-Za-z0-9+.-])(?:(?:https?|ftps?|sftp|ssh|git|file|wss?|gopher|ircs?|smb|ldaps?|vscode(?:-insiders)?|chrome|blob)"
+    r"://[^\s<>\"'`)\]]*"
+    r"|www\.[^\s<>\"'`)\]]+"  # GitHub turns a bare ``www.host/x`` into a link too
+    r"|(?:data|javascript|vbscript|mailto|tel|blob):[^\s<>]+)", re.IGNORECASE)
+#: A protocol-relative target (``//host/x``, or ``\\host/x``, which a browser reads the same way) only where a target can start:
+#: after ``( < " ' = [``, with any whitespace between (``src=" //host/x"``). The whitespace run is scanned once: it can only start
+#: right after one of those characters, which a whitespace character is not.
+_PROTO_RELATIVE = re.compile(r"(?<=[(<\"'=\[])[ \t\r\n]*[/\\]{2}[^\s<>\"'`)\]]*")
+#: Tags that fetch, run or embed. A tag is matched as ``<name`` (at most 31 characters) + at most 512 characters that contain neither
+#: ``<`` nor ``>`` + ``>``, so a failed match never runs past the next ``<`` nor tries more than one name length. Other angle
+#: brackets (``Vec<String>``) are not touched.
 _DANGEROUS_TAGS = frozenset({
     "a", "img", "picture", "source", "iframe", "script", "style", "link", "meta", "base", "form", "input", "button", "object",
     "embed", "video", "audio", "svg", "math", "track", "area", "map", "frame", "frameset", "applet", "template",
 })
-_TAG = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)[^<>]{0,512}>")
+_TAG = re.compile(r"</?([A-Za-z][A-Za-z0-9-]{0,30})(?![A-Za-z0-9-])[^<>]{0,512}>")
+#: A tag that FETCHES a resource, matched by its opener alone: a tag too long for ``_TAG`` (over 512 characters of attributes) or one
+#: with a ``<`` inside is not matched as a whole, and without its opener the rest is text that fetches nothing. The attributes stay
+#: as text, and the target scan above has already taken their URLs out.
+_FETCHING_TAGS = ("img", "picture", "source", "iframe", "video", "audio", "embed", "object", "track", "frame", "frameset", "link",
+                  "script", "svg")
+_OPENER = re.compile(r"<(?:" + "|".join(_FETCHING_TAGS) + r")(?![A-Za-z0-9-])", re.IGNORECASE)
 
 TEST_PLAN_PLACEHOLDER = "_Not filled in: the local model does not run tests. The author adds what was actually run._"
 
@@ -146,7 +158,7 @@ def _undo_references(text: str) -> str:
 def strip_remote(text: str) -> tuple[str, int]:
     """Remove every URL that fetches or runs something (``http``, ``https``, ``ftp``, ``data:``, ``javascript:``, ...,
     protocol-relative ones, in any markup or none), every markdown image marker and every embedding HTML tag; keep the visible
-    text of a link. Relative links and anchors stay. Linear: no pattern here can backtrack, and removing a URL can
+    text of a link. Relative links and anchors stay. Linear: every pattern is bounded where it starts (see the module docstring), and removing a URL can
     make the text around it meet, so the scan repeats until nothing is left (at most three times)."""
     n = 0
     for _ in range(3):
@@ -167,6 +179,8 @@ def strip_remote(text: str) -> tuple[str, int]:
             return m.group(0)
 
         text = _TAG.sub(drop_tag, text)
+        text, k = _OPENER.subn("", text)
+        n += k
         if n == before:
             break
     return text, n

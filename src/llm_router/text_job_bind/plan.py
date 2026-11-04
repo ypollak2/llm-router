@@ -19,7 +19,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from llm_router.text_job_bind.shellscan import MENTION, Command, Piece, ScanError, Word, scan_commands
+from llm_router.text_job_bind.shellscan import MAX_COMMAND_CHARS, MENTION, Command, Piece, ScanError, Word, scan_commands
 
 JOB_COMMIT = "commit_message"
 JOB_PR = "pr_description"
@@ -28,12 +28,6 @@ JOB_PR = "pr_description"
 #: command the model writes, including ones the scanner cannot read.
 COMMIT_CMD = re.compile(r"(?<![\w-])git\s+(?:(?:-C|-c)\s+\S+\s+|--[\w-]+(?:=\S+)?\s+)*commit(?![\w-])")
 PR_CMD = re.compile(r"(?<![\w-])gh\s+pr\s+create(?![\w-])")
-
-#: Commands that run another command line: a mention of the placeholder next to a git/gh command inside them is ours.
-_WRAPPERS = frozenset({
-    "bash", "sh", "zsh", "dash", "ksh", "fish", "env", "sudo", "doas", "su", "xargs", "eval", "exec", "command",
-    "builtin", "nohup", "time", "timeout", "nice", "ionice", "watch", "ssh", "script", "parallel", "busybox",
-})
 
 STRAY_MESSAGE = (
     "LLM_TEXT is written where bash would not replace it with the checked text (single quotes, after a "
@@ -451,50 +445,91 @@ def _validate(plan: Plan, job_cmd: Command) -> None:
 
 
 #: Commands that read or print and never start another program with their arguments. A mention of the placeholder
-#: that sits only in these (a `grep`, an `echo`, a `cat` with a here-document) cannot be delivered to git.
+#: that sits only in these (a `grep`, an `echo`, a `cat` with a here-document) cannot be delivered to git. NOT on the list:
+#: ``awk`` (``system()``) and ``sed`` (the ``e`` command), which can run a program built from their own arguments.
 _HARMLESS = frozenset({
-    "echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "awk",
-    "sed", "ls", "tee", "touch", "cp", "mv", "date", "true", "false", "test", "[", "pwd", "which", "whoami", "sleep",
+    "echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr",
+    "ls", "tee", "touch", "cp", "mv", "cd", "mkdir", "date", "true", "false", "test", "[", "pwd", "which", "whoami", "sleep",
     "basename", "dirname", "jq", "diff", "cmp", "less", "more", "file", "stat", "du", "df",
 })
-_GIT_WORD = re.compile(r"(?<![\w-])(?:git|gh)(?![\w-])")
+
+
+def _substitutes(w: Word) -> bool:
+    """Does the word run a command (``$(...)`` or backticks, in a plain word or inside double quotes)?"""
+    return any(p.kind == "exp" and p.text.startswith(("$(", "`")) for p in w.pieces)
 
 
 def _runs_job_tool(cmds: list[Command], command: str) -> bool:
-    """May this line run ``git`` or ``gh``? Decided from the scanned words, with a deny-by-default stance for anything
-    that is not known to be harmless:
+    """May this line run anything but a harmless reader? Deny-by-default: ``False`` only when EVERY command on the line is
+    on the :data:`_HARMLESS` list, written with a plain name, outside any group, loop or keyword, and no word of the line
+    (nor an assignment or a redirection target) runs a command with ``$(...)`` or backticks.
 
-    * a command whose name is only known at run time (``$G commit``, ``$(which git) commit``, ``${GIT:-git} commit``);
-    * ``git`` or ``gh`` themselves, however quoted (``git -C "a b" commit``, ``'git' commit``, ``gh 'pr' create``);
-    * any other command, unless it is on the short harmless list, with ``git`` or ``gh`` among ALL its words (a wrapper
-      such as ``env`` or ``bash -c``, a loop or group, an interpreter, a build tool) or the text naming a commit or PR
-      command (so a wrapper with many words in front cannot hide it).
+    So ``git``, ``gh`` however quoted, a name only known at run time (``$G commit``, ``${GIT:-git} commit``), a wrapper
+    (``env``, ``timeout``, ``xargs``, ``bash -c``, ``exec "$G"``), an interpreter reading a here-document, a build tool, a
+    loop or a group, ``awk`` and ``sed`` are all "may run git". The decision does not look for the word ``git``: a name
+    held in a variable (``G=git; timeout 5 $G commit``) or built from quotes has none to find.
 
     A command that only QUOTES the placeholder next to ``git commit`` (a ``grep``, an ``echo``, a ``cat`` with a
     here-document) is not one."""
-    textual = bool(COMMIT_CMD.search(command) or PR_CMD.search(command))
     for c in cmds:
+        if any(_substitutes(w) for w in (*c.assigns, *c.argv, *(t for _o, t in c.redirs))):
+            return True
+        if c.structural:
+            return True
         if not c.argv:
-            continue
+            continue  # bare assignments
         name = c.argv[0].literal()
-        if name is None:
+        if name is None or os.path.basename(name) not in _HARMLESS:
             return True
-        base = os.path.basename(name)
-        if base in ("git", "gh"):
-            return True
-        if base in _HARMLESS and not c.structural:
-            continue
-        if textual and (c.structural or base in _WRAPPERS):
-            return True
-        for w in c.argv[1:]:
-            lit = w.literal()
-            if (lit is not None and os.path.basename(lit) in ("git", "gh")) or _GIT_WORD.search(w.raw):
-                return True
     return False
 
 
-#: Words that start a command inside a loop, a conditional or a group; a command after one of them is run directly.
-_LEADING_KEYWORDS = frozenset({"do", "then", "else", "elif", "{", "!", "if", "while", "until", "time"})
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(['\"]?)([A-Za-z_]\w*)\1([^\n]*)\n(.*?)(?:\n[ \t]*\2[ \t]*(?=\n|\Z)|\Z)", re.S)
+_COMMAND_START = re.compile(r"\$\(|[;&|()`\n]")
+_LEADING = frozenset({"{", "}", "!", "if", "then", "else", "elif", "do", "while", "until", "time"})
+_ASSIGN_WORD = re.compile(r"[A-Za-z_]\w*=\S*$")
+
+
+def _without_heredoc_bodies(text: str) -> str:
+    """``text`` with the body of every here-document removed (it is data for the command that owns it), unless the body is
+    expanded (an unquoted delimiter) and holds ``$(...)`` or a backtick: that runs, so it stays and is judged."""
+    def drop(m: re.Match) -> str:
+        if not m.group(1) and ("$(" in m.group(4) or "`" in m.group(4)):
+            return m.group(0)
+        return "<<" + m.group(2) + m.group(3)
+
+    return _HEREDOC.sub(drop, text)
+
+
+def unreadable_line_is_harmless(command: str) -> bool:
+    """May a line that mentions the placeholder but that the scanner cannot read be left to the shell?
+
+    Only when EVERY command in it is a harmless reader (the :data:`_HARMLESS` list: ``echo``, ``printf``, ``grep``,
+    ``cat`` ...). There are no scanned words to go by, so this reads the text and over-approximates: every ``;``, ``&``,
+    ``|``, parenthesis, backtick, ``$(`` and newline starts a command, quotes or not, and the first word of each (quotes
+    and backslashes taken out: ``g'i't`` is ``git``) must be exactly a harmless name. A name only known at run time
+    (``$G``), ``awk``, ``sed``, an interpreter, a shell that a pipe feeds, ``git`` and ``gh`` all fail it, with or without
+    the words ``git commit`` in the line. The body of a here-document is data for its command and is not judged (but
+    the command is: ``cat <<EOF`` passes, ``sh <<EOF`` and ``python3 - <<EOF`` do not)."""
+    if len(command) > MAX_COMMAND_CHARS:
+        return False
+    for segment in _COMMAND_START.split(_without_heredoc_bodies(command)):
+        words = segment.split()
+        while words and (words[0] in _LEADING or _ASSIGN_WORD.match(words[0])):
+            words.pop(0)
+        if not words:
+            continue
+        name = words[0].replace("'", "").replace('"', "").replace("\\", "")
+        if os.path.basename(name) not in _HARMLESS:
+            return False
+    return True
+
+
+#: Keywords that open a loop, a conditional or a brace group; their closers; and the two prefixes that still run the
+#: command after them (``time git commit``, ``! git commit``).
+_OPENERS = frozenset({"if", "for", "while", "until", "case", "select", "{"})
+_CLOSERS = frozenset({"fi", "done", "esac", "}"})
+_PREFIXES = frozenset({"!", "time"})
 
 
 def executed_job(command: str) -> tuple[str | None, bool]:
@@ -502,17 +537,33 @@ def executed_job(command: str) -> tuple[str | None, bool]:
     ``(None, False)`` for one that only mentions them (an ``echo``, a ``grep``, a here-document, a doc) or that runs
     them through something else (``env``, ``bash -c``, ``timeout``, a variable holding the name).
 
-    For the adoption count over transcripts. A command in a loop or a conditional (``do git commit ...``) counts: the model
-    ran it. A line the scanner cannot read counts for nothing: a quote that never closes is not a commit. When a line has
-    both a commit and a PR command, the one that holds the placeholder is the one reported."""
+    For the adoption count over transcripts. Only a TOP-LEVEL command counts: the model ran it for certain. One inside a
+    loop, a conditional, a brace group, a subshell or a function body (``for x in; do git commit -m x; done`` never runs
+    it) is unknown, and unknown is not executed. A line the scanner cannot read counts for nothing: a quote that never
+    closes is not a commit. When a line has both a commit and a PR command, the one that holds the placeholder is the
+    one reported."""
     try:
         cmds = scan_commands(command)
     except ScanError:
         return None, False
     found: list[tuple[str, bool]] = []
+    depth = 0
     for c in cmds:
         argv = list(c.argv)
-        while argv and argv[0].literal() in _LEADING_KEYWORDS:
+        first = argv[0].literal() if argv else None
+        if first in _OPENERS:
+            depth += 1
+            continue
+        if first in _CLOSERS:
+            if depth == 0:
+                break  # a closer with no opener: the line is not what it looks like
+            depth -= 1
+            continue
+        if depth:
+            continue
+        if c.structural and first not in _PREFIXES:
+            break  # ``(`` ``)`` grouping, ``f() {``, ``function``, a stray ``then``: from here on nothing is known
+        while argv and argv[0].literal() in _PREFIXES:
             argv.pop(0)
         if not argv:
             continue

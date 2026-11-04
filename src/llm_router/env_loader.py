@@ -167,3 +167,13 @@ def load_user_dotenv(target: "dict[str, str] | None" = None) -> "dict[str, str]"
         dest[key] = value
         applied[key] = value
     return applied
+
+
+def user_dotenv_value(name: str) -> "str | None":
+    """The value ``$LLM_ROUTER_HOME/.env`` gives ``name``, or ``None`` (no file, no such key). Read-only; it does not touch
+    ``os.environ`` and does not consider it: the caller decides what the real environment's own value means.
+
+    For a decision taken BEFORE the process has loaded that file (the MCP server renders the rules text while it is being
+    imported, ahead of ``load_dotenv_files()``)."""
+    env_path = paths.regular_file_or_none(paths.state_path(".env"))
+    return None if env_path is None else _parse_env_file(env_path).get(name)

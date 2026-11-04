@@ -69,7 +69,7 @@ def test_budgets_are_the_prd_bars():
     assert hl.HOOK_BUDGETS_MS["statusline"] == 100
     assert hl.HOOK_BUDGETS_MS["auto-route"] == 750  # D-217: owner-ratified PRD deviation
     # D-370 (owner 2026-11-04): the text-job hook runs once per commit or PR, not per call, and imports the router on a
-    # successful job; every OTHER hook stays at the PRD's 300 ms (asserted above)
+    # successful job; other hooks keep their existing budgets (asserted above)
     assert hl.HOOK_BUDGETS_MS["text-job-bind"] == 1_500
     assert hl.DEFAULT_BUDGET_MS == 300
 

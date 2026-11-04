@@ -281,8 +281,12 @@ def test_only_direct_executions_count_and_a_command_the_scanner_cannot_read_coun
     T = '"${LLM_TEXT:?}"'
     direct = {
         f"git commit -m {T}": ("commit_message", True), "git commit -m x": ("commit_message", False),
-        f"for f in a b; do git commit -m {T}; done": ("commit_message", True),
-        f"if true; then git -C /r commit -am {T}; fi": ("commit_message", True),
+        f"time git commit -m {T}": ("commit_message", True), f"! git commit -m {T}": ("commit_message", True),
+        # a top-level command before, or after a closed loop / conditional / group, still counts
+        f"git commit -m {T}; for x in; do git commit -m x; done": ("commit_message", True),
+        f"for x in a; do echo hi; done; git commit -m {T}": ("commit_message", True),
+        f"if true; then echo hi; fi && git -C /r commit -am {T}": ("commit_message", True),
+        f"{{ echo hi; }}; git commit -m {T}": ("commit_message", True),
         f"cd /r && git status && git commit -m {T}": ("commit_message", True),
         f"gh pr create --title t --body {T}": ("pr_description", True), "gh 'pr' create --body x": ("pr_description", False),
         f"git commit -m x && gh pr create --body {T}": ("pr_description", True),  # the one that holds the placeholder
@@ -299,6 +303,30 @@ def test_only_direct_executions_count_and_a_command_the_scanner_cannot_read_coun
     ]
     for cmd in indirect:
         assert executed_job(cmd) == (None, False), cmd
+
+
+def test_a_command_inside_a_loop_a_conditional_a_group_or_a_function_is_unknown_not_executed():
+    """Round 5: the fallback used to pop the loop keywords, so ``for x in; do git commit -m x; done`` (a loop over an
+    empty list never runs its body) counted as an execution. Only a top-level command counts."""
+    from llm_router.text_job_bind.plan import executed_job
+
+    T = '"${LLM_TEXT:?}"'
+    unknown = [
+        "for x in; do git commit -m x; done", f"for x in; do git commit -m {T}; done",
+        "for x in a; do echo hi; git commit -m x; done", f"for f in a b; do git commit -m {T}; done",
+        f"while false; do gh pr create --body {T}; done", f"until true; do git commit -m {T}; done",
+        f"if false; then git -C /r commit -am {T}; fi", f"if true; then echo ok; else git commit -m {T}; fi",
+        f"if git commit -m {T}; then echo ok; fi", f"{{ git commit -m {T}; }}", f"( git commit -m {T} )",
+        f"(git commit -m {T})", f"f() {{ git commit -m {T}; }}; f", f"function f {{ git commit -m {T}; }}; f",
+        f"case x in y) git commit -m {T};; esac", f"for x in a; do for y in b; do git commit -m {T}; done; done",
+        f"echo hi; (cd /r; git commit -m {T})", f"done; git commit -m {T}", f"fi && git commit -m {T}",
+        f"echo hi; ( cd /r ); git commit -m {T}",  # a subshell closes with ``)``: nothing after it is known
+    ]
+    for cmd in unknown:
+        assert executed_job(cmd) == (None, False), cmd
+    # unknown costs the rest of the line only; the part BEFORE the first construct was a plain execution
+    assert executed_job(f"git commit -m {T}; f() {{ :; }}") == ("commit_message", True)
+    assert executed_job(f"cd /r && git commit -m x; for x in; do gh pr create --body {T}; done") == ("commit_message", False)
 
 
 def test_a_gh_pr_create_with_quoted_words_survives_the_line_prefilter(tmp_path):

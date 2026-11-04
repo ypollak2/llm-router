@@ -5,13 +5,14 @@ The text job is only as good as what it is shown, and the checks that judge its 
 the actual diff, in the shape those checks read (``diff --git`` headers), condensed so that
 every changed file is still named even when the diff is far larger than the model can read.
 
-Every git call is read-only, bounded in time and in bytes, and never takes an optional lock. The hook reads the
-repository BEFORE the permission check for the commit, so a hostile ``.git/config`` must not get a turn. Two
-layers, which do not depend on each other:
+Every git call is bounded in time and in bytes, never takes an optional lock and does not write the repository
+(``diff.autoRefreshIndex=false``: a plain ``git diff HEAD`` refreshes a stale index and writes it, which runs the
+``post-index-change`` hook). The hook reads the repository BEFORE the permission check for the commit, so a hostile
+``.git/config`` or ``.git/hooks`` must not get a turn. Two layers, which do not depend on each other:
 
-* the mechanisms that make git start a program named by the repository's configuration are switched off, each by
-  more than one means: ``_NEUTRAL_CONFIG`` (the file-system monitor, the pager, submodule logs, the gpg programs and
-  ``log.showSignature``), the flags every diff and log read passes (``--no-ext-diff``, ``--no-textconv``,
+* the mechanisms known to make git start a program the repository names are switched off, each by more than one
+  means: ``_NEUTRAL_CONFIG`` (the file-system monitor, the pager, submodule logs, the gpg programs,
+  ``log.showSignature``, ``core.hooksPath`` and the index refresh), the flags every diff and log read passes (``--no-ext-diff``, ``--no-textconv``,
   ``--ignore-submodules=dirty``, ``--no-show-signature``), and ``_filter_overrides``, which replaces every configured
   clean/smudge/process filter (they run when a diff reads the working tree; a name with ``=`` in it only works
   through ``GIT_CONFIG_COUNT``). This is a list of the mechanisms known to run programs, not a proof that git has no
@@ -57,6 +58,9 @@ _NEUTRAL_CONFIG = (
     # a signed commit in the log runs the configured gpg program when log.showSignature is on
     "log.showSignature=false", "gpg.program=/usr/bin/false", "gpg.openpgp.program=/usr/bin/false",
     "gpg.x509.program=/usr/bin/false", "gpg.ssh.program=/usr/bin/false",
+    # git hooks run from a git command that writes the index (post-index-change) or the work tree: the repository's own
+    # ``.git/hooks`` and a ``core.hooksPath`` it sets must not be found, and a stale index must not be refreshed (written)
+    "core.hooksPath=/dev/null", "diff.autoRefreshIndex=false",
 )
 _LOG_FLAGS = ("--no-show-signature",)
 _DIFF_FLAGS = ("--no-color", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty")
@@ -95,9 +99,13 @@ def _filter_overrides(repo: str) -> list[tuple[str, str]]:
     ``GIT_CONFIG_COUNT`` / ``GIT_CONFIG_KEY_n`` / ``GIT_CONFIG_VALUE_n``, not ``-c name=value``: ``-c`` splits at
     the first ``=``, so a filter NAMED ``a=b`` (a legal subsection) was never overridden by it.
 
-    When the list of configured filters cannot be read (a timeout, a git that fails) the diff is refused: it would
+    When the list of configured filters cannot be read in full (a timeout, a git that fails, an answer cut at the byte cap)
+    the diff is refused: it would
     otherwise run with no overrides at all. ``rc 1`` is "no filter is configured"."""
-    rc, out, _cut = _run_git(repo, ["config", "--name-only", "--get-regexp", r"^filter\."], _GIT_BYTES_CAP, 5.0, [])
+    rc, out, cut = _run_git(repo, ["config", "--name-only", "--get-regexp", r"^filter\."], _GIT_BYTES_CAP, 5.0, [])
+    if cut:  # ``_run_git`` reports a cut as rc 0, and a list cut short leaves the later filters un-overridden (they would run)
+        raise InputRefused("git_config_unreadable", "The repository configures more filters than the hook will read, so the diff "
+                           "was not read.")
     if rc == 1:
         return []
     if rc != 0:
