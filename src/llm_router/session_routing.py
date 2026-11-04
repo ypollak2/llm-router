@@ -42,6 +42,12 @@ DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
     matched to its attempt by job identity (:func:`_same_job`: the ``tool_use`` id of the ``llm_text_job`` call, else
     the session), never by model and time alone, and one function does it for the session and the 7-day population.
     A cache hit, a refused or breaker-held call is no attempt;
+  - each ACCEPTED text-job-bind job of the session (``text_job_binds.jsonl``, ``bound`` / ``accepted``): the hook runs
+    outside any MCP server, so its router rows are logged under ``unknown:non_mcp`` with no ``tool_use`` id and the
+    attempt join above cannot reach them. One job is one call, whatever its tries; its model decides the side.
+    The job's own attempts are the ``text_job_local_attempts.jsonl`` rows of the ``jid`` that ended with the job
+    (:func:`link_bind_job`); a router attempt of the session inside the job's own time window and on one of its
+    models is the same work and is taken out, so nothing counts twice;
   - a Claude Code message served by a non-Claude model (proxy).
 
 ``local OK Y% (a/b, session)``
@@ -49,6 +55,9 @@ DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
 * b = LOCAL ATTEMPTS of the session: every ``execution_events`` attempt of a local provider (Ollama, LM Studio,
   vLLM, llama.cpp), whatever its outcome (``attempt_completed``, ``attempt_failed``, ``attempt_rejected``), so a
   local model that errored and was rescued by the next chain entry is a failed attempt in b;
+* b also holds the local attempts of the session's accepted text-job-bind jobs (``text_job_local_attempts.jsonl`` rows:
+  ``ok`` used, ``rejected`` thrown away by the acceptance check, ``error`` / ``infra`` failed); a job whose rows
+  cannot be linked contributes its one accepted attempt;
 * a = those that were used: ``attempt_completed`` and not rejected afterwards by a text job's acceptance check
   (``text_job_local_attempts.jsonl`` ``rejected`` row of the same job or session, same model, that ended at most
   :data:`_GATE_WINDOW_S` seconds after the completion). Rows written before the ledger carried ``session_id`` and
@@ -654,6 +663,116 @@ def apply_text_job_gate(attempts: list[dict], rejections: list[dict]) -> int:
     return marked
 
 
+# ── text-job-bind jobs (the hook runs outside MCP: its router rows name no session) ─────────────────────────
+
+_LINK_BEFORE_S = 3.0        # the job's last attempt row is written right before the bind row (ms apart in practice)
+_LINK_AFTER_S = 1.0
+_CLAIM_SLACK_S = 3.0
+
+
+def bind_jobs(since: float = 0.0, until: float | None = None, *, session_id: str | None = None) -> list[dict]:
+    """The accepted jobs of ``text_job_binds.jsonl`` (``kind: bound``, ``outcome: accepted``) with a real session id:
+    ``{ts, model, session, latency_s}``. ``denied`` and ``handwritten`` rows are no call. One session when asked."""
+    from llm_router import text_job_ledger as tj
+    from llm_router.text_job_bind import ledger as bl
+
+    out: list[dict] = []
+    try:
+        text = bl.ledger_path().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        ts = row.get("ts") if isinstance(row, dict) else None
+        sid = _real_session(row.get("session_id")) if isinstance(row, dict) else None
+        if not (isinstance(ts, (int, float)) and not isinstance(ts, bool) and sid and ts >= since
+                and (until is None or ts <= until) and (session_id is None or sid == session_id)
+                and row.get("kind") == bl.KIND_BOUND and row.get("outcome") == tj.STATUS_ACCEPTED
+                and isinstance(row.get("model"), str) and row["model"]):
+            continue
+        lat = row.get("latency_ms")
+        out.append({"ts": float(ts), "model": row["model"], "session": sid,
+                    "latency_s": float(lat) / 1000.0 if isinstance(lat, (int, float)) and not isinstance(lat, bool) and lat >= 0 else 0.0})
+    return sorted(out, key=lambda j: j["ts"])
+
+
+def text_job_jid_groups() -> dict[str, list[dict]]:
+    """Every row of ``text_job_local_attempts.jsonl`` that names a job (``jid``), by ``jid``, in time order."""
+    from llm_router import text_job_ledger as tj
+
+    groups: dict[str, list[dict]] = {}
+    try:
+        text = paths.state_path(tj.LOCAL_ATTEMPTS_FILENAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return groups
+    for line in text.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        ts = row.get("ts") if isinstance(row, dict) else None
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and isinstance(row.get("jid"), str) \
+                and isinstance(row.get("model"), str) and isinstance(row.get("outcome"), str):
+            groups.setdefault(row["jid"], []).append({
+                "ts": float(ts), "model": row["model"], "outcome": row["outcome"],
+                "session": _real_session(row.get("session_id"))})
+    for rows in groups.values():
+        rows.sort(key=lambda r: r["ts"])
+    return groups
+
+
+def link_bind_job(job: dict, groups: dict[str, list[dict]]) -> list[dict] | None:
+    """The attempt rows of one accepted bind job, or None when they cannot be told apart. The job's ``jid`` group is
+    the one whose LAST row was written within a few seconds of the bind row; for a local model that row must be an
+    ``ok`` of the job's model, and no row of the group may name another session. Two groups that fit is None, not a
+    guess."""
+    found: list[list[dict]] = []
+    for rows in groups.values():
+        last = rows[-1]
+        if not -_LINK_AFTER_S <= job["ts"] - last["ts"] <= _LINK_BEFORE_S:
+            continue
+        if any(r["session"] and r["session"] != job["session"] for r in rows):
+            continue
+        if classify_attempt(*_provider_model(job["model"])) == "local" and not (
+                last["outcome"] == "ok" and _norm_model(last["model"]) == _norm_model(job["model"])):
+            continue
+        found.append(rows)
+    return found[0] if len(found) == 1 else None
+
+
+def _provider_model(model: str) -> tuple[str, str]:
+    head, sep, _rest = model.partition("/")
+    return (head if sep else "other"), model
+
+
+def fold_bind_jobs(attempts: list[dict], jobs: list[dict], groups: dict[str, list[dict]]) -> list[dict]:
+    """``attempts`` with each accepted bind job's own attempts in place of whatever router attempts the job already
+    left in them. A router attempt that ended inside the job's window (its latency plus a few seconds) on one of the
+    job's models is the same work: it is dropped, so a route later attributed to the session never counts twice. The
+    job adds its linked attempt rows (``bind: True``, session set) and, when none of them is the accepted one (a
+    served-by-Codex job, or rows that could not be linked), one used attempt of the served model. Returns a new list."""
+    out = list(attempts)
+    for job in jobs:
+        rows = link_bind_job(job, groups) or []
+        models = {_norm_model(r["model"]) for r in rows} | {_norm_model(job["model"])}
+        lo, hi = job["ts"] - job["latency_s"] - _CLAIM_SLACK_S, job["ts"] + _CLAIM_SLACK_S
+        out = [a for a in out if not (lo <= a["ts"] <= hi and _norm_model(a["model"]) in models)]
+        added = [{"id": ("bind", r["ts"]), "ts": r["ts"], "provider": "ollama", "model": r["model"],
+                  "outcome": "ok" if r["outcome"] == "ok" else "rejected" if r["outcome"] == "rejected" else "error",
+                  "kind": "local", "used": r["outcome"] == "ok", "gate_rejected": r["outcome"] == "rejected",
+                  "session": job["session"], "tool": None, "bind": True} for r in rows]
+        kind = classify_attempt(*_provider_model(job["model"]))
+        if kind is not None and not any(a["used"] for a in added):
+            added.append({"id": ("bind", job["ts"]), "ts": job["ts"], "provider": _provider_model(job["model"])[0],
+                          "model": job["model"], "outcome": "ok", "kind": kind, "used": True, "gate_rejected": False,
+                          "session": job["session"], "tool": None, "bind": True})
+        out += added
+    return sorted(out, key=lambda a: a["ts"])
+
+
 def local_figures(attempts: list[dict]) -> dict:
     """``{attempts, ok, gate_rejected}`` of the local attempts (see the module docstring)."""
     local = [a for a in attempts if a["kind"] == "local"]
@@ -673,9 +792,12 @@ def _part(code: str, fn):
 
 def _router_attempts(session_id: str, mcp_ids: list[str]) -> list[dict] | None:
     attempts = session_attempts(session_id, mcp_ids)
+    if attempts is None:
+        return None
     if attempts:
         apply_text_job_gate(attempts, text_job_rejections(attempts[0]["ts"], dict.fromkeys(mcp_ids, session_id)))
-    return attempts
+    jobs = bind_jobs(session_id=session_id)
+    return fold_bind_jobs(attempts, jobs, text_job_jid_groups()) if jobs else attempts
 
 
 def compute(session_id: str, now: float | None = None, *, budget_s: float = BUDGET_S, root: Path | None = None) -> dict | None:
@@ -735,8 +857,10 @@ def window_extras(since: float, until: float, now: float, kind_of, tool_sessions
       model responses (``responses - 1`` beyond the unit); a ``codex_blocked`` / ``codex_failed`` run is discarded
       work and leaves the count (``-1``: the list counts that unit, Claude re-ran the work). ``by_session`` is its
       per-session split, ``runs`` / ``flagged_runs`` the delegated runs and those counted as one;
-    * ``local``: ``{attempts, ok}`` of the local router attempts of the same sessions, by the same definition as the
-      session figure (an attempt is OK when used). An attempt on a route logged under ``unknown:mcp`` is placed
+    * ``bind_extra``: accepted text-job-bind jobs of the population, one call each (the unit list has none), also in
+      ``by_session``;
+    * ``local``: ``{attempts, ok}`` of the local router attempts of the same sessions, bind jobs folded in, by the same
+      definition as the session figure (an attempt is OK when used). An attempt on a route logged under ``unknown:mcp`` is placed
       through its ``tool_use`` id (``tool_sessions``); ``unattributed_local`` counts the local attempts that no
       session could be found for (not in ``local``). ``local`` and ``unattributed_local`` are ``None`` when the attempt
       ledger cannot be read: unknown, which every renderer prints as n/a."""
@@ -752,13 +876,23 @@ def window_extras(since: float, until: float, now: float, kind_of, tool_sessions
         extra += more
         if more and isinstance(row.get("session_id"), str):
             by_session[row["session_id"]] = by_session.get(row["session_id"], 0) + more
+    # accepted text-job-bind jobs of the population: one call each (the unit list has none), on the model that served
+    jobs = [j for j in bind_jobs(since, until) if kind_of(j["session"], None)]
+    bind_extra = 0
+    for j in jobs:
+        if classify_attempt(*_provider_model(j["model"])) in ("local", "other"):
+            bind_extra += 1
+            by_session[j["session"]] = by_session.get(j["session"], 0) + 1
     attempts = window_attempts(since, until, tool_sessions or {})
     local = None                                            # the ledger could not be read: unknown, never "0 attempts"
     unattributed = None
     if attempts is not None:
         placed = [a for a in attempts if a["session"] and kind_of(a["session"], None)]
         apply_text_job_gate(placed, text_job_rejections(since, tool_sessions))
+        folded = fold_bind_jobs(attempts, jobs, text_job_jid_groups()) if jobs else attempts
+        placed = [a for a in folded if a["session"] and kind_of(a["session"], None)]
         local = local_figures(placed)
-        unattributed = sum(1 for a in attempts if a["kind"] == "local" and not a["session"])
-    return {"codex_extra": extra, "by_session": by_session, "runs": sum(1 for r in runs if r["row"].get("outcome") == "delegated"),
+        unattributed = sum(1 for a in folded if a["kind"] == "local" and not a["session"])
+    return {"codex_extra": extra, "bind_extra": bind_extra, "by_session": by_session,
+            "runs": sum(1 for r in runs if r["row"].get("outcome") == "delegated"),
             "flagged_runs": sum(1 for r in runs if r["flagged"]), "local": local, "unattributed_local": unattributed}

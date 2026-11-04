@@ -19,7 +19,7 @@ the file is older than a minute. The expensive work lives here:
                         their ``window`` and ``population``. With ``routing_detail``
                         (W9) ``outside_claude`` counts a delegated Codex run as its model
                         responses and drops discarded runs (``codex_turns: true``, so the
-                        row is labelled ``routed (incl. Codex turns)``, not ``off-Claude``:
+                        row is labelled ``routed (incl. Codex turns and binds)``, not ``off-Claude``:
                         ``llm-router kpi`` keeps one call per run), ``flagged_codex_runs``
                         counts runs estimated as one response, and ``local_ok`` is the
                         local attempts that were used over all local attempts.

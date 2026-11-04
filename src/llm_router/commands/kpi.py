@@ -564,7 +564,8 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
     ``extras`` (``session_routing.window_extras``, the status line refresher only) corrects the one place the unit
     list undercounts: a Codex run agent-route delegated is ONE unit but several model responses, and the
     responses (``codex_extra``) are added to ``outside_claude`` (k and n), with ``codex`` carrying the run counts
-    and the flagged runs it could not count. It also adds ``local_ok`` (``{k, n}``: local routes that succeeded
+    and the flagged runs it could not count; each accepted text-job-bind job (``bind_extra``: the hook's calls are
+    in no unit) is one more call. It also adds ``local_ok`` (``{k, n}``: local routes that succeeded
     over local attempts, same window and population) for the second status line figure."""
     from llm_router import northstar as ns
 
@@ -592,7 +593,7 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
         if isinstance(sid, str) and sid:
             by_session[sid] = by_session.get(sid, 0) + 1
     if extras:
-        outside += int(extras["codex_extra"])
+        outside += int(extras["codex_extra"]) + int(extras.get("bind_extra", 0))
         for sid, more in extras["by_session"].items():
             by_session[sid] = by_session.get(sid, 0) + int(more)
     n_claude = sum(claude.values())
@@ -607,7 +608,7 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
         out["sessions"] = dict(sorted(by_session.items(), key=lambda kv: -kv[1])[:CALL_MIX_SESSIONS])
     if extras:
         out["codex"] = {"runs": extras["runs"], "extra_responses": extras["codex_extra"],
-                        "flagged_runs": extras["flagged_runs"]}
+                        "flagged_runs": extras["flagged_runs"], "bind_jobs": extras.get("bind_extra", 0)}
         if extras.get("local") is not None:       # None = the attempt ledger could not be read: no figure, not "0 attempts"
             out["local_ok"] = {"k": extras["local"]["ok"], "n": extras["local"]["attempts"],
                                "unattributed_attempts": extras["unattributed_local"]}

@@ -50,7 +50,7 @@ row): the two numbers of the North Star goal for THIS session, read from
 ``local OK n/a (0 attempts, session)`` when the session made no local attempt, never 0%. The tick only reads it
 (one small JSON file) and formats it; nothing is counted here. The 7-day row carries the same two numbers over its
 own window and population (``local OK 88% (95/108, 7d, organic)``). When the refresher counted Codex model responses
-the 7-day figure is labelled ``routed (incl. Codex turns)`` (``llm-router kpi`` keeps ``off-Claude``: one call per run)
+the 7-day figure is labelled ``routed (incl. Codex turns and binds)`` (``llm-router kpi`` keeps ``off-Claude``: one call per run)
 and names delegated runs it had to count as one (``2 Codex runs est.``).
 """
 
@@ -400,10 +400,10 @@ def render_progress(cache: dict | None, *, now: float) -> str | None:
     window, population = _window_of(cm.get("window")), cm.get("population")
     if window is None or population not in _POPULATIONS:
         return None
-    # W9: a cache whose refresher counted Codex model responses says so in the label; `llm-router kpi` keeps one call per
+    # W9: a cache whose refresher counted Codex model responses and text-job-bind jobs says so in the label; `llm-router kpi` keeps one call per
     # run and its row stays "off-Claude" (the two differ by the responses beyond the first, so they must not share a name)
     codex_turns = cm.get("codex_turns") is True
-    segs = [_mix_segment("routed (incl. Codex turns)" if codex_turns else "off-Claude", cm.get("outside_claude"), "calls",
+    segs = [_mix_segment("routed (incl. Codex turns and binds)" if codex_turns else "off-Claude", cm.get("outside_claude"), "calls",
                          window, population, _runs_est(cm.get("flagged_codex_runs")) if codex_turns else ""),
             _mix_segment("<Opus", cm.get("below_opus"), "Claude calls", window, population)]
     if any(s is None for s in segs):
