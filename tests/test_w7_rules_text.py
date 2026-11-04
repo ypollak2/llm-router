@@ -12,10 +12,12 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import llm_router.install_hooks as ih
+from llm_router import eligibility_routing as er
 from llm_router.text_job_bind import PLACEHOLDER
 from llm_router.text_job_bind.plan import JOB_COMMIT, JOB_PR, Unsupported, analyse
 
@@ -24,6 +26,25 @@ T = PLACEHOLDER
 NAME = "llm_router-text-job-bind.py"
 BEGIN = "<!-- llm_router-text-job-bind:begin -->"
 END = "<!-- llm_router-text-job-bind:end -->"
+
+
+REAL_LANE_CHECK = er.passed_lane_available
+
+
+@pytest.fixture(autouse=True)
+def lane(monkeypatch):
+    """The router's lane check, stubbed: a passed commit_message lane exists unless a test says otherwise.
+    ``raises`` makes it blow up, ``calls`` records what it was asked."""
+    state = SimpleNamespace(available=True, raises=False, calls=[])
+
+    def fake(job, input_len, now, **kw):
+        state.calls.append((job, input_len, now))
+        if state.raises:
+            raise RuntimeError("the lane check failed")
+        return state.available
+
+    monkeypatch.setattr(er, "passed_lane_available", fake)
+    return state
 
 
 @pytest.fixture
@@ -296,3 +317,134 @@ def test_an_older_full_text_installed_before_this_change_is_refreshed_when_the_h
     assert msg and "removed" in msg
     assert T not in installed.read_text(encoding="utf-8")
     assert ih.text_job_bind_rules_gap() is None
+
+
+# ---- ... and only while a passed commit_message lane exists (S9) -----------------------------------------
+
+@pytest.mark.parametrize("is_registered,has_lane,section", [
+    (True, True, True), (True, False, False), (False, True, False), (False, False, False),
+])
+def test_the_section_needs_the_hook_registered_and_a_passed_lane(home, lane, is_registered, has_lane, section):
+    if is_registered:
+        register(home)
+    lane.available = has_lane
+    text = rendered()
+    assert (T in text) is section
+    assert ("## Commit messages and PR bodies" in text) is section and ("placeholder above" in text) is section
+    assert "## Self-contained text jobs" in text and "llm_text_job" in text, "the plain guidance is always there"
+    assert BEGIN not in text and END not in text
+
+
+def test_the_lane_is_asked_for_commit_message_with_a_typical_input_and_only_once_the_hook_is_registered(home, lane):
+    rendered()
+    assert lane.calls == [], "an unregistered hook decides it: no lane lookup at all"
+    register(home)
+    rendered()
+    ((job, input_len, now),) = lane.calls
+    assert job == "commit_message" and input_len == 8000 and isinstance(now, float)
+
+
+def test_a_lane_check_that_raises_means_plain_guidance_never_an_exception(home, lane):
+    register(home)
+    lane.raises = True
+    text = rendered()
+    assert T not in text and "## Self-contained text jobs" in text
+    assert ih.text_job_bind_lane_available() is False
+    assert ih.text_job_bind_section_wanted() is False
+    (home / "rules" / "llm_router.md").write_text("<!-- llm_router-rules-version: 12 -->\nold\n")
+    assert ih.check_and_update_rules() is not None  # refresh still works, without the section
+    assert T not in (home / "rules" / "llm_router.md").read_text(encoding="utf-8")
+    assert ih.text_job_bind_rules_gap().level == "info"
+
+
+def test_a_lane_that_appears_or_goes_flips_the_section_at_the_next_refresh_in_both_directions(home, lane):
+    installed = home / "rules" / "llm_router.md"
+    register(home)
+    lane.available = False
+    assert ih.check_and_update_rules() and T not in installed.read_text(encoding="utf-8")  # registered, no lane: plain
+
+    lane.available = True
+    msg = ih.check_and_update_rules()
+    assert msg and "added" in msg and "lane" in msg, msg
+    assert T in installed.read_text(encoding="utf-8")
+
+    lane.available = False
+    msg = ih.check_and_update_rules()
+    assert msg and "removed" in msg and "lane" in msg, msg
+    body = installed.read_text(encoding="utf-8")
+    assert T not in body and "## Commit messages and PR bodies" not in body
+
+    lane.available = True
+    assert ih.check_and_update_rules() and T in installed.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("registered_,lane_", [(True, True), (True, False), (False, True), (False, False)])
+def test_the_same_state_never_flip_flops(home, lane, registered_, lane_):
+    """Several refreshes in a row with nothing changed: the first may write, every later one is None."""
+    if registered_:
+        register(home)
+    lane.available = lane_
+    ih.check_and_update_rules()
+    installed = home / "rules" / "llm_router.md"
+    first = installed.read_text(encoding="utf-8")
+    mtime = installed.stat().st_mtime_ns
+    for _ in range(5):
+        assert ih.check_and_update_rules() is None
+    assert installed.read_text(encoding="utf-8") == first and installed.stat().st_mtime_ns == mtime
+    assert (T in first) is (registered_ and lane_)
+
+
+def test_a_failing_lane_check_does_not_flip_flop_either(home, lane):
+    register(home)
+    lane.raises = True
+    ih.check_and_update_rules()
+    assert all(ih.check_and_update_rules() is None for _ in range(3))
+
+
+def test_rendering_with_every_lane_state_never_writes(home, lane, tmp_path):
+    register(home)
+    (home / "rules" / "llm_router.md").write_text("<!-- llm_router-rules-version: 12 -->\nold\n")
+    for available, raises in ((True, False), (False, False), (True, True)):
+        lane.available, lane.raises = available, raises
+        before = snapshot(tmp_path)
+        rendered()
+        ih.text_job_bind_section_wanted()
+        ih.text_job_bind_rules_gap()
+        assert snapshot(tmp_path) == before
+
+
+def test_the_routers_own_lane_check_end_to_end_on_real_lane_files(home, lane, tmp_path, monkeypatch):
+    """No stub on the lane check: a real passed, enabled, digest-verified lane in a tmp state dir."""
+    from tests.test_lc8_routing import BARE, CTX, DIGEST, JOB, NOW, lane_file
+    from llm_router.local_check import display, routing as lr
+
+    assert JOB == "commit_message"
+    state = tmp_path / "state"
+    state.mkdir(exist_ok=True)
+    monkeypatch.setattr(er, "passed_lane_available", REAL_LANE_CHECK)
+    monkeypatch.setattr(display, "inventory", lambda: ([BARE], {BARE: DIGEST}))
+    monkeypatch.setattr(er, "_route_time_ctx", lambda m: CTX)
+    monkeypatch.setattr(er, "_route_time_think", lambda: False)
+    monkeypatch.setattr(ih, "time", SimpleNamespace(time=lambda: NOW, strftime=ih.time.strftime))
+    er.reset_cache()
+    register(home)
+    installed = home / "rules" / "llm_router.md"
+
+    assert ih.text_job_bind_lane_available() is False, "nothing enabled, nothing passed"
+    assert ih.check_and_update_rules() and T not in installed.read_text(encoding="utf-8")
+
+    lane_file(state)
+    lr.enable(BARE, JOB, "local_check")
+    before = snapshot(tmp_path)
+    assert ih.text_job_bind_lane_available() is True
+    assert T in rendered()
+    assert snapshot(tmp_path) == before, "the real lane check reads files only"
+    msg = ih.check_and_update_rules()
+    assert msg and "added" in msg and T in installed.read_text(encoding="utf-8")
+    assert ih.check_and_update_rules() is None
+
+    lr.disable(BARE, JOB, "manual")
+    msg = ih.check_and_update_rules()
+    assert msg and "removed" in msg and T not in installed.read_text(encoding="utf-8")
+    assert ih.check_and_update_rules() is None
+    er.reset_cache()

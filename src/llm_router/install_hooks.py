@@ -625,10 +625,17 @@ def check_and_update_hooks() -> list[str]:
 
 
 # The rules section that teaches the text-job placeholder (`git commit -m "${LLM_TEXT:?}"`) is wrapped in
-# these markers in the template and rendered only for an install whose settings.json registers the
-# text-job-bind hook. Why: pip upgrades refresh the rules but never register hooks, and a model taught
-# the placeholder without the hook writes commands the shell aborts (`LLM_TEXT: parameter not set`).
+# these markers in the template and rendered only when BOTH hold:
+#   (a) settings.json registers the text-job-bind hook. Why: pip upgrades refresh the rules but never
+#       register hooks, and a model taught the placeholder without the hook writes commands the shell
+#       aborts (`LLM_TEXT: parameter not set`);
+#   (b) a passed local-check lane exists for commit_message. Why: without one the hook denies every
+#       first placeholder commit (`no_lane`) after a few seconds, and nothing tells the model to stop.
+# Otherwise the plain text-job guidance is what the file says.
 _TEXT_JOB_BIND_HOOK = "llm_router-text-job-bind.py"
+_TEXT_JOB_BIND_LANE_JOB = "commit_message"
+#: A typical job input, for the lane's "input fits" guard (a lane measured on small prompts only is not one).
+_TEXT_JOB_BIND_TYPICAL_INPUT_CHARS = 8000
 _BIND_MARK = "<!-- llm_router-text-job-bind:{} -->\n"
 _BIND_REGION_RE = re.compile(
     re.escape(_BIND_MARK.format("begin")) + r".*?" + re.escape(_BIND_MARK.format("end")) + r"\n?", re.S
@@ -657,14 +664,40 @@ def text_job_bind_registered() -> bool:
     return False
 
 
-def _render_text_job_bind_section(text: str) -> str:
-    """Keep (markers dropped) or remove every marked placeholder region, by the hook registration.
+def text_job_bind_lane_available() -> bool:
+    """True when a passed local-check lane for commit_message is usable right now. Read-only.
 
-    A template without markers (every other host's rules) is returned untouched, without reading settings.
+    The router's own check (``eligibility_routing.passed_lane_available``): files only (``local_routing.json``,
+    ``local_eligibility.json``, the discovery cache's digests), no HTTP and no model call. It imports the
+    router's provider module only when an enabled passed lane exists to be checked against the router's
+    context settings. Any failure counts as "no lane": the plain guidance, never an exception.
+    """
+    try:
+        from llm_router import eligibility_routing
+
+        return bool(
+            eligibility_routing.passed_lane_available(
+                _TEXT_JOB_BIND_LANE_JOB, _TEXT_JOB_BIND_TYPICAL_INPUT_CHARS, time.time()
+            )
+        )
+    except Exception:  # noqa: BLE001 — a lane check that fails is "no lane"
+        return False
+
+
+def text_job_bind_section_wanted() -> bool:
+    """The rules teach the placeholder only while the hook is registered AND a passed lane exists."""
+    return text_job_bind_registered() and text_job_bind_lane_available()
+
+
+def _render_text_job_bind_section(text: str) -> str:
+    """Keep (markers dropped) or remove every marked placeholder region, by ``text_job_bind_section_wanted``.
+
+    A template without markers (every other host's rules) is returned untouched, without reading settings
+    or checking a lane.
     """
     if not _BIND_MARKER_LINE_RE.search(text):
         return text
-    if text_job_bind_registered():
+    if text_job_bind_section_wanted():
         return _BIND_MARKER_LINE_RE.sub("", text)
     return _BIND_REGION_RE.sub("", text)
 
@@ -678,10 +711,10 @@ def _localized_rules_text(src: Path) -> str:
     session, to make a call that fails. Localizing at install/refresh time is the
     right boundary: the file is re-synced on upgrade and by the server at startup.
 
-    The text-job placeholder section is rendered only when the text-job-bind hook is
-    registered (``text_job_bind_registered``). The result therefore depends on settings.json, which is
-    why callers compare the rendered text with the installed text rather than a version number. This
-    function only reads; it never writes settings.
+    The text-job placeholder section is rendered only when the text-job-bind hook is registered AND a
+    passed commit_message lane exists (``text_job_bind_section_wanted``). The result therefore depends on
+    settings.json and on the local-check state, which is why callers compare the rendered text with the
+    installed text rather than a version number. This function only reads; it never writes settings.
     """
     text = _render_text_job_bind_section(src.read_text(encoding="utf-8"))
     try:
@@ -699,12 +732,14 @@ class TextJobBindGap(NamedTuple):
 
 
 def text_job_bind_rules_gap() -> TextJobBindGap | None:
-    """Compare the installed rules file with the hook registration. Read-only; None when consistent.
+    """Compare the installed rules file with the hook registration and the lane. Read-only; None when consistent.
 
     danger: the rules teach the placeholder but the hook is not registered or its file is missing, so
             every placeholder commit or PR aborts with ``LLM_TEXT: parameter not set``.
-    info:   the hook is registered but the rules do not teach the placeholder, so the model keeps
-            writing commit messages itself (nothing breaks).
+    info:   the hook is registered but the rules are plain (no passed lane for commit_message yet, or the
+            rules have not been refreshed since one appeared), or the rules teach the placeholder while
+            the lane is gone (each placeholder commit is denied ``no_lane`` until the rules refresh).
+            Nothing aborts in these cases.
     """
     rules = rules_dir() / "llm_router.md"
     try:
@@ -727,11 +762,29 @@ def text_job_bind_rules_gap() -> TextJobBindGap | None:
             "run `llm-router install` (registers the hook and re-renders the rules); or restart the "
             "MCP server, which re-renders the rules without the placeholder section",
         )
-    if registered and not teaches:
+    if not registered:
+        return None
+    lane = text_job_bind_lane_available()
+    if teaches and not lane:
         return TextJobBindGap(
             "info",
-            f"the text-job-bind hook is registered but {rules} does not teach the placeholder, so the model "
+            f"{rules} teaches the placeholder but no passed lane for {_TEXT_JOB_BIND_LANE_JOB} exists now, so "
+            "each placeholder commit is denied (no_lane) after a few seconds",
+            "restart the MCP server or run `llm-router install` to refresh the rules without the section; "
+            "`llm-router local-check` creates the lane",
+        )
+    if not teaches and not lane:
+        return TextJobBindGap(
+            "info",
+            f"hook registered, rules plain: no passed lane for {_TEXT_JOB_BIND_LANE_JOB} yet, so the model "
             "still writes commit messages and PR bodies itself",
+            "run `llm-router local-check`; the rules add the placeholder section at the next MCP server start",
+        )
+    if not teaches:
+        return TextJobBindGap(
+            "info",
+            f"the text-job-bind hook is registered and a passed lane for {_TEXT_JOB_BIND_LANE_JOB} exists, but "
+            f"{rules} does not teach the placeholder yet, so the model still writes commit messages itself",
             "restart the MCP server or run `llm-router install` to refresh the rules",
         )
     return None
@@ -742,8 +795,8 @@ def _rules_content_differs(src: Path, dst: Path, rendered: str | None = None) ->
 
     Must compare against the localized text, not the raw bundle — otherwise the
     two never match and every startup reports a spurious rules refresh. That text
-    depends on settings.json (the text-job placeholder section), so registering or
-    removing the hook changes the answer. ``rendered`` lets a caller that will also
+    depends on settings.json and the lane state (the text-job placeholder section), so
+    registering or removing the hook, or a lane appearing or going, changes the answer. ``rendered`` lets a caller that will also
     write the text compare and write the same string.
     """
     try:
@@ -772,10 +825,11 @@ def check_and_update_rules() -> str | None:
     # bundled version is newer OR the versions match but the installed rules drifted
     # from bundled (a content change that forgot to bump the version stamp). Never
     # downgrade. Without this, a reworded rules file silently never reaches users.
-    # The rendered text depends on settings.json (the text-job placeholder section is
-    # present only while the hook is registered), so this comparison, not the version
-    # number, is what adds the section after the hook is registered and removes it
-    # after the registration is gone.
+    # The rendered text depends on settings.json and the local-check state (the text-job
+    # placeholder section is present only while the hook is registered AND a passed
+    # commit_message lane exists), so this comparison, not the version number, is what adds
+    # the section once both hold and removes it when either stops. Same state, same text:
+    # repeated refreshes return None.
     if src_version < dst_version:
         return None
     rendered = _localized_rules_text(rules_src)
@@ -804,11 +858,12 @@ def check_and_update_rules() -> str | None:
     rules_dst.write_text(rendered, encoding="utf-8")
     if _drifted:
         if (PLACEHOLDER in rendered) != (PLACEHOLDER in _before):
-            _what = "added" if PLACEHOLDER in rendered else "removed"
-            return (
-                f"Refreshed routing rules (text-job placeholder section {_what}: hook "
-                f"{'registered' if PLACEHOLDER in rendered else 'not registered'}){_where}"
+            _why = (
+                "added: hook registered and a passed commit_message lane"
+                if PLACEHOLDER in rendered
+                else "removed: hook not registered or no passed commit_message lane"
             )
+            return f"Refreshed routing rules (text-job placeholder section {_why}){_where}"
         return f"Refreshed routing rules (content drift at v{src_version}){_where}"
     return f"Updated routing rules v{dst_version} → v{src_version}{_where}"
 

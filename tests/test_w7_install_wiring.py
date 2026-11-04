@@ -12,15 +12,25 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import llm_router.install_hooks as ih
+from llm_router import eligibility_routing as er
 import llm_router.install_manifest as im
 from llm_router.text_job_bind import limits
 
 REPO = Path(__file__).resolve().parents[1]
 NAME = "llm_router-text-job-bind.py"
+
+
+@pytest.fixture(autouse=True)
+def lane(monkeypatch):
+    """The router's lane check, stubbed: a passed commit_message lane exists unless a test says otherwise."""
+    state = SimpleNamespace(available=True)
+    monkeypatch.setattr(er, "passed_lane_available", lambda job, input_len, now, **kw: state.available)
+    return state
 
 
 @pytest.fixture
@@ -303,12 +313,47 @@ def test_gap_rules_teach_the_placeholder_but_the_hook_file_is_missing(sandbox):
     assert gap.level == "danger" and "registered but its file" in gap.message and NAME in gap.message
 
 
-def test_gap_hook_registered_but_rules_lack_the_section_is_informational(sandbox):
+PLAIN = "<!-- llm_router-rules-version: 12 -->\n# rules\n"
+
+
+def test_gap_hook_registered_and_a_lane_exists_but_the_rules_are_stale_is_informational(sandbox):
     ih.install(force=True)
-    (sandbox / ".claude" / "rules" / "llm_router.md").write_text("<!-- llm_router-rules-version: 12 -->\n# rules\n")
+    (sandbox / ".claude" / "rules" / "llm_router.md").write_text(PLAIN)
     gap = ih.text_job_bind_rules_gap()
-    assert gap.level == "info" and "still writes commit messages" in gap.message
-    assert "refresh the rules" in gap.fix
+    assert gap.level == "info" and "does not teach the placeholder yet" in gap.message
+    assert "passed lane" in gap.message and "refresh the rules" in gap.fix
+
+
+def test_gap_hook_registered_rules_plain_and_no_lane_says_to_run_local_check(sandbox, lane):
+    lane.available = False
+    ih.install(force=True)
+    assert PLACEHOLDER not in _rules(sandbox), "a plain install with no lane teaches nothing it cannot deliver"
+    assert ih.text_job_bind_registered()
+    gap = ih.text_job_bind_rules_gap()
+    assert gap.level == "info"
+    assert "hook registered, rules plain: no passed lane for commit_message yet" in gap.message
+    assert "llm-router local-check" in gap.fix
+
+
+def test_gap_rules_teach_the_placeholder_but_the_lane_is_gone_is_informational_and_heals_on_refresh(sandbox, lane):
+    ih.install(force=True)
+    assert PLACEHOLDER in _rules(sandbox) and ih.text_job_bind_rules_gap() is None
+    lane.available = False
+    gap = ih.text_job_bind_rules_gap()
+    assert gap.level == "info" and "no_lane" in gap.message and "no passed lane for commit_message" in gap.message
+    assert "removed" in ih.check_and_update_rules()
+    gap = ih.text_job_bind_rules_gap()
+    assert gap.level == "info" and "rules plain" in gap.message
+
+
+def test_gap_is_the_danger_when_unregistered_whatever_the_lane_says(sandbox, lane):
+    ih.install(force=True)
+    (sandbox / ".claude" / "settings.json").write_text(json.dumps({"hooks": {}}))
+    for available in (True, False):
+        lane.available = available
+        assert ih.text_job_bind_rules_gap().level == "danger"
+    (sandbox / ".claude" / "rules" / "llm_router.md").write_text(PLAIN)
+    assert ih.text_job_bind_rules_gap() is None, "unregistered and plain agree: nothing to report"
 
 
 def test_no_gap_without_a_rules_file(sandbox):
@@ -337,24 +382,28 @@ def test_verify_fails_and_says_what_to_do_when_the_rules_teach_a_hook_that_is_no
     assert "is not registered" in line and "LLM_TEXT: parameter not set" in line and "llm-router install" in line
 
 
-def test_verify_reports_a_registered_hook_with_rules_that_lack_the_section_without_failing(sandbox, monkeypatch):
+@pytest.mark.parametrize("has_lane,fragment", [(True, "does not teach the placeholder yet"), (False, "no passed lane for commit_message yet")])
+def test_verify_reports_a_registered_hook_with_plain_rules_without_failing(sandbox, monkeypatch, lane, has_lane, fragment):
     from llm_router.commands.verify import check_hooks
 
     _verify_home(sandbox, monkeypatch)
     ih.install(force=True)
-    (sandbox / ".claude" / "rules" / "llm_router.md").write_text("<!-- llm_router-rules-version: 12 -->\n# rules\n")
+    (sandbox / ".claude" / "rules" / "llm_router.md").write_text(PLAIN)
+    lane.available = has_lane
     ok, messages = check_hooks()
-    (line,) = [m for m in messages if "does not teach the placeholder" in m]
+    (line,) = [m for m in messages if fragment in m]
     assert ok is True and line.startswith("ℹ")
+    assert ("local-check" in line) is (not has_lane)
 
 
-def test_doctor_reports_both_mismatches_and_only_the_dangerous_one_is_an_issue(sandbox):
+def test_doctor_reports_every_mismatch_and_only_the_dangerous_one_is_an_issue(sandbox, lane):
     from llm_router.commands.doctor import _text_job_bind_rules_line
 
     ih.install(force=True)
     issues: list[str] = []
     assert _text_job_bind_rules_line(issues) is None and issues == []
 
+    # danger: the rules teach the placeholder, the hook is not registered
     (sandbox / ".claude" / "settings.json").write_text(json.dumps({"hooks": {}}))
     line = _text_job_bind_rules_line(issues)
     assert "teaches the commit/PR placeholder" in line and "is not registered" in line and "fix:" in line
@@ -364,7 +413,21 @@ def test_doctor_reports_both_mismatches_and_only_the_dangerous_one_is_an_issue(s
     issues.clear()
     assert _text_job_bind_rules_line(issues) is None and issues == []
 
+    # info: registered, a lane exists, the rules are plain (not refreshed yet)
     ih.install(force=True)
-    (sandbox / ".claude" / "rules" / "llm_router.md").write_text("<!-- llm_router-rules-version: 12 -->\n# rules\n")
+    (sandbox / ".claude" / "rules" / "llm_router.md").write_text(PLAIN)
     line = _text_job_bind_rules_line(issues)
-    assert "does not teach the placeholder" in line and issues == [], "informational: not an issue"
+    assert "does not teach the placeholder yet" in line and issues == [], "informational: not an issue"
+
+    # info: registered, no lane, rules plain
+    lane.available = False
+    line = _text_job_bind_rules_line(issues)
+    assert "hook registered, rules plain: no passed lane for commit_message yet" in line
+    assert "llm-router local-check" in line and issues == []
+
+    # info: rules teach the placeholder but the lane is gone
+    lane.available = True
+    ih.check_and_update_rules()
+    lane.available = False
+    line = _text_job_bind_rules_line(issues)
+    assert "no_lane" in line and issues == []
