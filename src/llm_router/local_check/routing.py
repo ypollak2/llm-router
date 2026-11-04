@@ -246,7 +246,9 @@ def _recent_outcomes(model: str, job: str, since: float | None, ledger: Path | N
     ``ok`` when any of its rows is ``ok`` and ``failed`` when every try was rejected or errored. It is not
     counted at all (neither ok nor failed) when it has an ``infra`` row and no ``ok`` row (a queueing timeout,
     a dead connection, a cancelled or unfinished job: it did not fail on quality), or when its latest row says
-    ``more`` (further tries follow: no verdict yet). A row with no ``jid`` (written before D-367) is its own
+    ``more`` (further tries follow: no verdict yet). A failed model's row marked ``acc`` (another model served
+    and the call was accepted) makes the job ``ok``: a rescued failure never fails an accepted job. A row with
+    no ``jid`` (written before D-367) is its own
     one-try job: ``ok`` is ok, ``rejected``/``error`` failed, ``infra`` ignored. Jobs are ordered by their
     latest row. LC-8b: read from the per-attempt local sidecar (``text_job_ledger.record_local_attempts``),
     not the final-row ledger, so a local failure rescued by a later chain entry still counts.
@@ -290,8 +292,8 @@ def _recent_outcomes(model: str, job: str, since: float | None, ledger: Path | N
                 continue
             g = groups.setdefault(jid, {"ok": False, "infra": False, "bad": False, "more": False, "pos": pos})
             g["pos"], g["more"] = pos, r.get("more") is True
-            if outcome == L.OUTCOME_OK:
-                g["ok"] = True
+            if outcome == L.OUTCOME_OK or r.get("acc") is True:
+                g["ok"] = True  # `acc`: a failed model's row of a call that was accepted anyway
             elif outcome == L.OUTCOME_INFRA:
                 g["infra"] = True
             else:

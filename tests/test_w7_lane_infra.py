@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
-import random
 import socket
 import time
 from types import SimpleNamespace
@@ -768,17 +767,31 @@ def test_each_model_is_judged_on_its_own_rows(home):
     assert lr._recent_outcomes("ollama/lc8-other:3b", JOB, None, None) == ["ok"]
 
 
-def _sequence(name: str) -> list[tuple[str, int]]:
-    """The four real runs, as jobs: (kind, tries to the first ok) or ("failed", 3). Order is shuffled by the caller."""
-    spec = {
-        "A": ([("ok", 1)] * 14 + [("ok", 2)] * 17 + [("ok", 3)] * 3 + [("failed", 3)] * 6),
-        "B0": ([("ok", 1)] * 15 + [("ok", 2)] * 20 + [("ok", 3)] * 1 + [("failed", 3)] * 4),
-        "B1": ([("ok", 1)] * 35 + [("ok", 2)] * 4 + [("failed", 3)] * 1),
-        "B2": ([("ok", 1)] * 31 + [("ok", 2)] * 8 + [("failed", 3)] * 1),
-    }[name]
-    order = list(spec)
-    random.Random(0).shuffle(order)
-    return order
+#: The four real 40-commit runs of the bound text job, in the order the commits were generated. One character per
+#: job: a digit is the try the job was ACCEPTED on (1, 2 or 3), `F` is a job rejected on all 3 tries. Source:
+#: evidence/W7-real-20261103/results-sample.json (A), results-B0.json, results-B1.json, results-B2.json (`rows` in
+#: order, `attempts` + `outcome`), recorded 2026-11-03, N=40 jobs each; each file's own summary agrees with the
+#: attempt totals and old-rule demotion points asserted below.
+REAL_RUNS = {
+    "A": "1F1112F12222121232121FFF11322F2211122223",
+    "B0": "FF11312122221122F22111212F21211121222222",
+    "B1": "1111112111111111F11111111211111121112111",
+    "B2": "1111211112211111F21111111111111122122111",
+}
+#: name -> (jobs failed in the whole 40-job run, jobs failed in the WORST window of 20 consecutive jobs,
+#:          attempt number at which the per-attempt rule first demotes, or None)
+REAL_RUN_PINS = {"A": (6, 4, 20), "B0": (4, 3, 20), "B1": (1, 1, None), "B2": (1, 1, 23)}
+
+
+def _real_jobs(name: str) -> list[tuple[str, int]]:
+    return [("failed", 3) if c == "F" else ("ok", int(c)) for c in REAL_RUNS[name]]
+
+
+def _attempt_rows(jobs: list[tuple[str, int]]) -> list[str]:
+    rows: list[str] = []
+    for kind, tries in jobs:
+        rows += ["rejected"] * 3 if kind == "failed" else ["rejected"] * (tries - 1) + ["ok"]
+    return rows
 
 
 def _per_attempt_rule(attempt_outcomes: list[str]) -> int | None:
@@ -791,42 +804,33 @@ def _per_attempt_rule(attempt_outcomes: list[str]) -> int | None:
     return None
 
 
-@pytest.mark.parametrize("name,failed_jobs,old_rule", [
-    ("A", 6, 20), ("B0", 4, 20), ("B1", 1, None), ("B2", 1, "computed"),
-])
-def test_real_sequences_replayed_as_jobs(home, lane_on, name, failed_jobs, old_rule):
-    jobs = _sequence(name)
-    assert len(jobs) == 40 and sum(1 for k, _t in jobs if k == "failed") == failed_jobs
+@pytest.mark.parametrize("name", sorted(REAL_RUNS))
+def test_real_runs_replayed_in_their_real_order_as_jobs(home, lane_on, name):
+    total_failed, worst_window, old_rule = REAL_RUN_PINS[name]
+    jobs = _real_jobs(name)
+    assert len(jobs) == 40 and sum(1 for k, _t in jobs if k == "failed") == total_failed
     c = Clock()
-    attempt_rows: list[str] = []
-    seen_max = 0
+    seen_worst = 0
     for i, (kind, tries) in enumerate(jobs):
-        attempt_rows += put_job(c, f"{name}{i}", kind, tries)
+        put_job(c, f"{name}{i}", kind, tries)
         v = verdicts()
         if len(v) == lr.DEMOTE_WINDOW:
-            seen_max = max(seen_max, v.count("failed"))
-        assert lr.demotion_check(LOCAL, JOB) is False, f"job {i + 1} demoted the lane"
+            seen_worst = max(seen_worst, v.count("failed"))
+        assert lr.demotion_check(LOCAL, JOB) is False, f"run {name}: job {i + 1} demoted the lane"
     assert lr.is_enabled(BARE, JOB)
-    # the maximum failed-jobs count in any 20-job window, from the monitor's own view and from the plain sequence
-    plain = [k for k, _t in jobs]
-    by_hand = max(plain[s:s + 20].count("failed") for s in range(len(plain) - 19))
-    assert seen_max == by_hand and seen_max <= failed_jobs <= 6
-    # the change: the per-attempt rule, computed from the same rows
-    old = _per_attempt_rule(attempt_rows)
-    if old_rule == "computed":
-        assert old is None or old >= lr.DEMOTE_WINDOW
-    else:
-        assert old == old_rule, f"{name}: per-attempt rule gave {old}"
+    # worst number of failed jobs in any window of 20 consecutive jobs: from the monitor's own view, and by hand
+    flags = [k == "failed" for k, _t in jobs]
+    by_hand = max(sum(flags[s:s + 20]) for s in range(len(flags) - 19))
+    assert seen_worst == by_hand == worst_window and worst_window <= 4 < 7   # the threshold: 7 of 20 demotes
+    # the change: the per-attempt rule, computed from the same rows (A and B0 demoted at attempt 20, B2 at 23)
+    attempts_ = _attempt_rows(jobs)
+    assert _per_attempt_rule(attempts_) == old_rule
 
 
-def test_the_per_attempt_rule_would_have_demoted_a_and_b0_and_not_b1():
-    got = {}
-    for name in ("A", "B0", "B1"):
-        rows: list[str] = []
-        for kind, tries in _sequence(name):
-            rows += ["rejected"] * 3 if kind == "failed" else ["rejected"] * (tries - 1) + ["ok"]
-        got[name] = _per_attempt_rule(rows)
-    assert got == {"A": 20, "B0": 20, "B1": None}
+def test_the_real_runs_have_the_totals_their_files_report():
+    got = {n: (len(_attempt_rows(_real_jobs(n))), sum(1 for o in _attempt_rows(_real_jobs(n)) if o != "ok"))
+           for n in REAL_RUNS}
+    assert got == {"A": (75, 41), "B0": (70, 34), "B1": (46, 7), "B2": (50, 11)}
 
 
 async def test_every_row_of_one_call_shares_one_jid_and_a_new_call_gets_a_new_one(monkeypatch):
@@ -949,3 +953,145 @@ async def test_no_cap_means_no_timeout_wrapper(monkeypatch):
         sink: dict = {}
         out = await T._llm_text_job(JOB, DIFF, object(), None, sink, attempt_timeout_s=cap)
         assert "status=accepted, attempts=1" in out
+
+
+# ------------------------------------------------------------------ 10. S7: a failure a later chain entry rescued
+CLOUD = "gemini/fake-cloud"
+RESCUED = [
+    # the router's own "<ErrorType>: <message>" for the earlier entry -> infra?
+    ("Timeout: litellm.Timeout: request timed out", True),
+    ("APIConnectionError: OllamaException - connection refused", True),
+    ("ServiceUnavailableError: server busy, please try again", True),
+    ("InternalServerError: model runner has unexpectedly stopped", True),
+    ("NotFoundError: model 'q:1b' not found, try pulling it first", True),
+    ("WallClockExceeded: Routed turn exceeded max_wall_clock_seconds=5", True),
+    ("TimeoutError: ", True),
+    ("AttemptCapExceeded: deadline_cap: ollama/lc8-fx:9b gave no answer within the 45s per-attempt cap", True),
+    ("ConnectionRefusedError: [Errno 61] Connection refused", True),
+    ("ValueError: the model server returned garbage", False),
+    ("RuntimeError: boom", False),
+    ("BadRequestError: context length exceeded", False),
+    ("AuthenticationError: bad key", False),
+    ("NotFoundError: route not found", False),
+    ("gate_failed: empty answer", False),
+    ("low_quality:0.31", False),
+    ("not an error line at all", False),
+]
+
+
+@pytest.mark.parametrize("text,infra", RESCUED, ids=[r[0][:40] for r in RESCUED])
+def test_a_rescued_failure_is_classified_from_the_served_responses_chain_errors(text, infra):
+    L.record_local_attempts(job=JOB, served_model=CLOUD, chain_attempts=[LOCAL, CLOUD], accepted=True,
+                            chain_errors=[(LOCAL, text)])
+    assert [r["outcome"] for r in attempts()] == ["infra" if infra else "error"]
+
+
+def test_a_rescued_failure_with_no_recorded_error_stays_error():
+    for chain_errors in (None, [], [("ollama/someone-else:1b", "Timeout: x")]):
+        L.record_local_attempts(job=JOB, served_model=CLOUD, chain_attempts=[LOCAL, CLOUD], accepted=True,
+                                chain_errors=chain_errors)
+    assert [r["outcome"] for r in attempts()] == ["error"] * 3
+
+
+def test_the_last_recorded_error_of_the_model_decides():
+    L.record_local_attempts(job=JOB, served_model=CLOUD, chain_attempts=[LOCAL, CLOUD], accepted=True,
+                            chain_errors=[(LOCAL, "ValueError: garbage"), (LOCAL, "Timeout: slow")])
+    assert [r["outcome"] for r in attempts()] == ["infra"]
+
+
+def test_rescued_rows_of_an_accepted_call_say_acc_only_with_a_jid():
+    L.record_local_attempts(job=JOB, served_model=CLOUD, chain_attempts=[LOCAL, CLOUD], accepted=True,
+                            jid="j1", attempt=1, chain_errors=[(LOCAL, "Timeout: x")])
+    L.record_local_attempts(job=JOB, served_model=CLOUD, chain_attempts=[LOCAL, CLOUD], accepted=True)   # old caller
+    L.record_local_attempts(job=JOB, served_model=CLOUD, chain_attempts=[LOCAL, CLOUD], accepted=False,
+                            jid="j2", attempt=1)
+    rows = attempts()
+    assert [r.get("acc", False) for r in rows] == [True, False, False]
+
+
+async def test_the_real_router_hands_back_why_the_earlier_entry_failed(monkeypatch):
+    """No stub of the router: tests/test_lc8d.py's harness runs the real route_and_call with call_llm faked."""
+    from llm_router import router
+    from tests.test_lc8d import CLOUD as D_CLOUD, LOCAL as D_LOCAL, _run, response as d_response
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "fake-a:1b,fake-b:1b")
+    monkeypatch.setattr(router, "_local_timeout_at", {})   # LOCAL-TIMEOUT-1 cooldown must not leak between tests
+    call = AsyncMock(side_effect=[litellm_exc("Timeout", "request timed out"), d_response("fine", D_CLOUD)])
+    result, error, called = await _run(chain=[D_LOCAL, D_CLOUD], call_llm=call)
+    assert error is None and called == [D_LOCAL, D_CLOUD] and result.chain_attempts == called
+    assert [m for m, _e in result.chain_errors] == [D_LOCAL] and result.chain_errors[0][1].startswith("Timeout:")
+    L.record_local_attempts(job=JOB, served_model=result.model, chain_attempts=result.chain_attempts,
+                            accepted=True, chain_errors=result.chain_errors)
+    assert [(r["model"], r["outcome"]) for r in attempts()] == [(D_LOCAL, "infra")]
+
+
+async def test_the_real_router_records_a_non_infra_rescue_as_error(monkeypatch):
+    from llm_router import router
+    from tests.test_lc8d import CLOUD as D_CLOUD, LOCAL as D_LOCAL, _run, response as d_response
+    monkeypatch.setenv("OLLAMA_BUDGET_MODELS", "fake-a:1b,fake-b:1b")
+    monkeypatch.setattr(router, "_local_timeout_at", {})   # LOCAL-TIMEOUT-1 cooldown must not leak between tests
+    call = AsyncMock(side_effect=[ValueError("garbage"), d_response("fine", D_CLOUD)])
+    result, _error, _called = await _run(chain=[D_LOCAL, D_CLOUD], call_llm=call)
+    assert result.chain_errors == [(D_LOCAL, "ValueError: garbage")]
+    L.record_local_attempts(job=JOB, served_model=result.model, chain_attempts=result.chain_attempts,
+                            accepted=True, chain_errors=result.chain_errors)
+    assert [r["outcome"] for r in attempts()] == ["error"]
+
+
+def test_a_response_with_nothing_failed_has_no_chain_errors():
+    assert response(GOOD).chain_errors == []
+
+
+async def _twenty_accepted_jobs(monkeypatch, rescue_error: str | None, rescued: int) -> list[dict]:
+    """20 jobs through the real tool, every one ACCEPTED. `rescued` of them have the local model fail first
+    (`rescue_error` is that entry's error text) and gemini serve; the rest are served by the local model."""
+    monkeypatch.setenv(FLAG, "1")
+    calls = {"n": 0}
+
+    async def route(*a, **k):
+        calls["n"] += 1
+        if calls["n"] <= rescued:
+            return LLMResponse(content=GOOD, model=CLOUD, input_tokens=1, output_tokens=1, cost_usd=0.0,
+                               latency_ms=1.0, provider="gemini", chain_attempts=[LOCAL, CLOUD],
+                               chain_errors=[(LOCAL, rescue_error)])
+        return response(GOOD)
+
+    wire(monkeypatch, route, lane_available=None)
+    for _ in range(20):
+        await run()
+    return attempts()
+
+
+@pytest.mark.parametrize("error,outcome", [
+    ("Timeout: litellm.Timeout: request timed out", "infra"),
+    ("ValueError: the model server returned garbage", "error"),
+], ids=["rescued timeouts", "rescued non-infra errors"])
+async def test_accepted_jobs_never_demote_the_lane_whatever_failed_first(monkeypatch, lane_on, error, outcome):
+    rows = await _twenty_accepted_jobs(monkeypatch, error, 7)
+    assert sorted({r["outcome"] for r in rows}) == sorted({"ok", outcome})
+    assert sum(1 for r in rows if r["outcome"] == outcome) == 7 and all(r.get("acc") for r in rows if r["outcome"] == outcome)
+    assert verdicts() == ["ok"] * 20
+    assert lr.demotion_check(LOCAL, JOB) is False and lr.is_enabled(BARE, JOB)
+
+
+async def test_every_job_rescued_and_accepted_still_does_not_demote(monkeypatch, lane_on):
+    rows = await _twenty_accepted_jobs(monkeypatch, "ValueError: garbage", 20)
+    assert [r["outcome"] for r in rows] == ["error"] * 20 and verdicts() == ["ok"] * 20
+    assert lr.is_enabled(BARE, JOB)
+
+
+async def test_a_rescue_whose_answer_is_then_rejected_does_not_make_the_job_ok(monkeypatch, lane_on):
+    """The same rescue is a failed job when nobody's answer was accepted: that is the lane's failure to count."""
+    monkeypatch.setenv(FLAG, "1")
+
+    async def route(*a, **k):
+        return LLMResponse(content="WIP", model=CLOUD, input_tokens=1, output_tokens=1, cost_usd=0.0,
+                           latency_ms=1.0, provider="gemini", chain_attempts=[LOCAL, CLOUD],
+                           chain_errors=[(LOCAL, "ValueError: garbage")])
+
+    wire(monkeypatch, route, lane_available=None)
+    for _ in range(7):
+        await run()
+    assert verdicts() == ["failed"] * 7 and not any(r.get("acc") for r in attempts())
+    for _ in range(13):
+        await run()
+    assert not lr.is_enabled(BARE, JOB)            # 20 failed jobs

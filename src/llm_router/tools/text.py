@@ -1317,7 +1317,8 @@ async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | Non
             # LC-8b: one row per LOCAL attempt (incl. a local failure the next chain entry rescued).
             _local_touched.update(record_local_attempts(
                 job=job, served_model=resp.model, chain_attempts=getattr(resp, "chain_attempts", None) or [],
-                accepted=check.ok, jid=jid, attempt=attempt, more=not check.ok and attempt < MAX_JOB_ATTEMPTS))
+                accepted=check.ok, jid=jid, attempt=attempt, more=not check.ok and attempt < MAX_JOB_ATTEMPTS,
+                chain_errors=getattr(resp, "chain_errors", None)))
             if check.ok:
                 accepted = True
                 last_codes = []

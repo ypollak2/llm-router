@@ -177,23 +177,33 @@ def is_infra_error(exc: BaseException | None) -> bool:
         return False
 
 
-def _model_is_infra(exc: BaseException | None, model: str) -> bool:
+_ENTRY_RE = re.compile(r"\s*(\w+):\s?(.*)", re.S)
+
+
+def _model_is_infra(exc: BaseException | None, model: str, chain_errors: Iterable[tuple[str, str]] | None = None) -> bool:
     """Whether the failure of ONE local model in a multi-entry chain was infrastructure.
 
-    The router's exhaustion error lists each entry's own error type and message, so a model that failed on
-    its answer is not excused by a different entry's timeout (the exception's cause is only the LAST error).
-    No line for the model (the call was cut off mid-dispatch) falls back to :func:`is_infra_error`.
+    The router lists each entry's own ``<ErrorType>: <message>``: on the response it served (``chain_errors``, a
+    rescued failure) or inside the exhaustion error's text (``exc``), so a model that failed on its answer is not
+    excused by a different entry's timeout (the exception's cause is only the LAST error). A model with no entry
+    falls back to :func:`is_infra_error` of ``exc`` (a call cut off mid-dispatch); with neither, it is NOT infra.
     """
     try:
         want = _norm(model)
-        line = None
-        for e in _cause_chain(exc):
-            for m in _CHAIN_FAILURE_RE.finditer(str(e)):
-                if _norm(m.group(1)) == want:
-                    line = m
-        if line is None:
-            return is_infra_error(exc)
-        return _infra_signal({line.group(2).lower()}, None, line.group(3))
+        found: tuple[str, str] | None = None
+        if chain_errors is not None:
+            for m, text in chain_errors:
+                if _norm(m) == want:
+                    parsed = _ENTRY_RE.match(text)
+                    found = (parsed.group(1), parsed.group(2)) if parsed else ("", text)
+        else:
+            for e in _cause_chain(exc):
+                for m in _CHAIN_FAILURE_RE.finditer(str(e)):
+                    if _norm(m.group(1)) == want:
+                        found = (m.group(2), m.group(3))
+        if found is None:
+            return exc is not None and is_infra_error(exc)
+        return _infra_signal({found[0].lower()}, None, found[1])
     except Exception:  # noqa: BLE001 -- see is_infra_error
         return False
 
@@ -209,7 +219,7 @@ def _local_name(model: str) -> str | None:
 
 
 def _append_local_attempt(job: str, model: str, outcome: str, *, jid: str | None = None,
-                          attempt: int | None = None, more: bool = False) -> None:
+                          attempt: int | None = None, more: bool = False, acc: bool = False) -> None:
     row: dict = {"ts": time.time(), "job": job, "model": model, "outcome": outcome}
     if jid:
         row["jid"] = jid  # D-367: the demotion monitor counts JOBS (every row of one call), not rows
@@ -217,6 +227,8 @@ def _append_local_attempt(job: str, model: str, outcome: str, *, jid: str | None
             row["try"] = int(attempt)
         if more:
             row["more"] = True  # more tries of this job follow: it has no verdict yet
+        if acc:
+            row["acc"] = True  # this model failed, another one answered, and the job was ACCEPTED: the job is ok
     try:
         path = paths.state_path(LOCAL_ATTEMPTS_FILENAME)
         capped_log.append(
@@ -230,6 +242,7 @@ def _append_local_attempt(job: str, model: str, outcome: str, *, jid: str | None
 def record_local_attempts(
     *, job: str, served_model: str, chain_attempts: list[str], accepted: bool, exc: BaseException | None = None,
     jid: str | None = None, attempt: int | None = None, more: bool = False,
+    chain_errors: list[tuple[str, str]] | None = None,
 ) -> list[str]:
     """Record one ``llm_text_job`` attempt's local outcomes; returns the local models touched.
 
@@ -237,10 +250,13 @@ def record_local_attempts(
     (``error``), even though a later entry rescued the call. If the served model is local, the
     acceptance check decides ``ok`` or ``rejected``. ``exc`` is the route error when the whole call failed:
     a local model whose own failure is positively infrastructure (see :func:`is_infra_error`) is recorded
-    as ``infra`` instead of ``error``. Without ``exc`` (a rescued failure: the response carries no error
-    text) a failed local entry stays ``error``. ``jid`` / ``attempt`` tag every row with the job (one
+    as ``infra`` instead of ``error``. For a RESCUED failure (a later entry served the call) the same test reads
+    ``chain_errors``, the served response's per-entry failures; a failed entry with no recorded error stays
+    ``error``. ``jid`` / ``attempt`` tag every row with the job (one
     ``llm_text_job`` call) and try number it belongs to; ``more`` says further tries of that job follow, so
-    the rows are not its verdict yet. Best-effort: never raises.
+    the rows are not its verdict yet. A failed entry's row also says ``acc`` when the call was accepted anyway
+    (``accepted`` with another model serving): the job is ok, so a rescued failure never fails an accepted job.
+    Best-effort: never raises.
     """
     try:
         from llm_router.quality_feedback import is_skip_marker
@@ -253,9 +269,10 @@ def record_local_attempts(
         touched: list[str] = []
         for n, m in local.items():
             if n != served_n:
-                infra = exc is not None and _model_is_infra(exc, m)
+                infra = (exc is not None or isinstance(chain_errors, list)) and _model_is_infra(
+                    exc, m, chain_errors if isinstance(chain_errors, list) else None)
                 _append_local_attempt(job, m, OUTCOME_INFRA if infra else OUTCOME_ERROR,
-                                      jid=jid, attempt=attempt, more=more)
+                                      jid=jid, attempt=attempt, more=more, acc=accepted)
                 touched.append(m)
         if served_n in local or (served_model.startswith(("ollama/", "ollama_chat/")) if isinstance(served_model, str) else False):
             _append_local_attempt(job, served_model, OUTCOME_OK if accepted else OUTCOME_REJECTED,
