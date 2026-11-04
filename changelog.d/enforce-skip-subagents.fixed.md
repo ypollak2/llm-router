@@ -1,0 +1,1 @@
+The enforcement hook no longer applies the main thread's pending route to a sub-agent's tool calls. A sub-agent has no routing tool to satisfy the hold with, so the hold could only block its work (4 `blocked` rows in `hold_events.jsonl`, 2026-11-03T20:22Z..2026-11-04T21:44Z, session 1a45a332). The main thread's hold is unchanged.

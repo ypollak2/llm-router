@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 25
+# llm_router-hook-version: 26
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -1677,6 +1677,11 @@ def _main() -> None:
 
     pending = _read_pending(session_id)
     _record_door_call(session_id, tool_name, hook_input.get("tool_input"), pending, _tuid)
+
+    # A hold belongs to the main thread: a sub-agent (the payload's agent_id) has no routing tool to satisfy it with,
+    # so the hold could only block its work. Its own tool calls pass; the main thread's pending route stays.
+    if hook_input.get("agent_id"):
+        sys.exit(0)
 
     # ── Self-healing: if no pending routing state exists AND the upstream
     # auto-route.py hook is missing, routing has silently stopped working.
