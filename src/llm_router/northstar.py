@@ -37,21 +37,41 @@ A **unit** is one of eight kinds. All eight sum to the denominator.
                   dropped entirely, same as the ground-truth corpus.
 
   claude_main_call
-                  One per ``type == "assistant"`` record in a session's own
-                  top-level transcript file — every turn Claude itself
-                  produced, whether text, a tool call, or both. This is an
-                  "LLM call" even when Claude routed nothing, because the
-                  North Star's denominator is every call, not every routed
-                  call.
+                  One per UNIQUE API message (``message.id``) in a session's
+                  own top-level transcript file — every turn Claude itself
+                  produced, whether text, a tool call, or both. Claude Code
+                  writes one transcript record per content block, all sharing
+                  one ``message.id`` (12,368 records for 6,124 ids in one
+                  session's sub-agent files, 7 days to 2026-11-03T19:01Z,
+                  ``~/.rsi/research/primary-plan/v16/coord/NS-STATUSLINE-
+                  ANALYSIS-20261103.md``), so counting records over-counted
+                  the main thread about 2x: the unit is the message.
+                  A ``<synthetic>`` record (a client-made placeholder, not an
+                  API response) is no call. A record with no id cannot be
+                  deduped and stays one unit. The unit carries the model that
+                  answered (``message.model``), so a reader can split Claude
+                  calls by tier. This is an "LLM call" even when Claude routed
+                  nothing, because the North Star's denominator is every call,
+                  not every routed call.
 
-  sidechain_call  One per assistant turn belonging to a SUB-AGENT that has
-                  been folded into its parent session (see JOIN below). These
-                  are what the North Star calls "sub-agent ... model calls".
+  sidechain_call  One per unique API message belonging to a SUB-AGENT: either
+                  a child folded into its parent session by the heuristic join
+                  (see JOIN below), or, with ``subagents=True``, a message in
+                  ``<project>/<session>/subagents/**/agent-*.jsonl`` (the
+                  layout Claude Code writes today; the parent session is the
+                  directory name). These are what the North Star calls
+                  "sub-agent ... model calls". Same source: 6,180 of 7,112
+                  Claude calls (7 days, organic) were sub-agent calls that a
+                  top-level glob never read.
 
   routed_mcp      One per ``tool_use`` block anywhere in an assistant turn
                   (main or folded sidechain) whose tool name starts with
                   ``mcp__llm_router__``. This is a call Claude explicitly
-                  routed to a non-Claude backend through the MCP surface.
+                  routed to a non-Claude backend through the MCP surface. Its
+                  ``model`` is the router row that answered it: the
+                  ``routing_decisions`` row whose ``tool_use_id`` is this
+                  block's id (None when no row names it, e.g. an admin tool
+                  that never calls a model).
 
   draft           One per ``DIRECT SUCCESS`` invocation in
                   ``~/.llm-router/auto-route-debug.log`` for the session: the
@@ -102,11 +122,11 @@ PROXY-SERVED TURNS (lever ``proxy``). With the opt-in per-call proxy
 (``llm_router.proxy``), Claude Code still writes every assistant turn to its
 transcript, including the ones a non-Claude model served. Those turns stay
 ``claude_main_call`` (or ``sidechain_call``) units, so the denominator does not
-change, but the FIRST transcript record whose ``message.id`` matches a
+change, but the unit whose ``message.id`` matches a
 ``decision == "served"`` row of ``~/.llm-router/proxy_calls.jsonl`` gets
-``lever = "proxy"``, counts as attempted, and is judged (Claude Code writes one
-record per content block; the other records of the same message stay plain
-turns, so one served call is one attempted unit) (confidence HIGH, the ids are exact):
+``lever = "proxy"``, counts as attempted, carries the SERVED model, and is judged
+(a message is one unit however many records Claude Code wrote for its content blocks,
+so one served call is one attempted unit) (confidence HIGH, the ids are exact):
 ``used`` when every tool call it made got a non-error tool_result (or, for a
 text-only turn, the next human prompt is not an explicit ``claude:`` redo);
 ``redo`` when a tool call errored or was rejected/interrupted, or the next
@@ -268,7 +288,12 @@ its share renders as ``None`` / "too few to tell" per CLAUDE.md.
 Public surface
 ────────────────────────────────────────────────────────────────────────────
 
-``units(days=N, session_id=None, root=None, *, backfill=False, verify_records=False) -> Iterator[dict]``
+``units(days=N, session_id=None, root=None, *, backfill=False, verify_records=False, subagents=False) -> Iterator[dict]``
+    ``subagents=True`` also reads ``<project>/<session>/subagents/**/agent-*.jsonl`` (the sub-agent
+    calls of the NS definition). It is OFF by default because the Stop hook and the quality breaker
+    call ``units()`` on hot paths and a busy session holds hundreds of MB of sub-agent transcripts;
+    only ``llm-router kpi`` (and so the status line) passes it.
+
     One dict per unit: ``{"session_id", "ts" (iso8601 or None), "kind", "unit_id",
     "lever", "task_type", "model", "outcome", "signal", "session_kind",
     "session_kind_source"}``. ``session_kind`` is the KPI tag of the unit's
@@ -400,6 +425,29 @@ _REDO_LIKE_OUTCOMES = frozenset({OUTCOME_REDO, OUTCOME_DISCARDED})
 # The set itself lives in ``qa_policy`` (one copy; the hook path imports it without northstar).
 from llm_router.qa_policy import QA_TASK_TYPES  # noqa: E402
 STRICT_VERIFY = frozenset({"pass_f2p", "pass_f2p_model"})
+
+# BLIND (owner decision D-364, 2026-11-03: NS stays STRICT and reads "blind" while no verifier is
+# connected). The strict numerator reads a unit's ``verify`` record. A rate whose numerator cannot be
+# observed is not 0%: it is blind. A VERDICT is a record the verifier actually decided on (a test ran:
+# the V1 statuses ``_clean_verify`` gives ``verify_level == "V1"``); ``unavailable`` and
+# ``not_applicable`` are the verifier saying it could not judge, so they are no verdict.
+VERDICT_STATUSES = frozenset({"pass_f2p", "pass_f2p_model", "pass_p2p", "fail"})
+#: THE SEAM for wiring a verifier into NS. ``commands.kpi._ns_units`` builds the NS, D1 and D2 unit list with
+#: ``units(verify_records=NS_ATTACH_VERIFY_RECORDS)``. False today, so no unit carries a ``verify``
+#: record and NS and D2 read blind. The PR that connects a verifier sets it True (and gives the
+#: verifier a path to write ``record_verify`` rows for every attempted unit it can judge); nothing
+#: else changes: with verdicts present the same rate is measured, with none it is blind again.
+#: ``tests/test_w8_ns_blind.py`` pins both states.
+NS_ATTACH_VERIFY_RECORDS = False
+BLIND_REASON = (
+    "blind: no verifier verdict reaches the strict numerator (a unit counts only when a non-Claude model "
+    "served it AND a verifier passed it), so it cannot be observed; a number here would be a structural "
+    "zero, not a measurement (D-364)"
+)
+#: The Stop-line item while a session's strict NS is blind (D-364). No n: the Stop path reads main-file units
+#: only (sub-agent transcripts are never scanned on a hot path), so an n here would not be the n the status
+#: line prints for the same NS. The pooled figure, with its unit and window, is on the status line.
+STOP_LINE_BLIND = "north star (strict): blind (no verifier connected)"
 STRICT_RULE_TEXT = (
     "strict-used: served by a non-Claude model AND verify_status in {pass_f2p, pass_f2p_model} "
     "AND task_type not Q&A AND outcome not redo (a unit with no verify record never counts; "
@@ -490,6 +538,32 @@ def is_strict_used(unit: Any) -> bool:
             and _verify_status(unit) in STRICT_VERIFY
             and _unit_field(unit, "task_type") not in QA_TASK_TYPES
             and _unit_field(unit, "outcome") != OUTCOME_REDO)
+
+
+def has_verdict(unit: Any) -> bool:
+    """True when the unit carries a verify record the verifier DECIDED (``VERDICT_STATUSES``).
+    The blind rule reads this: no verdict among the counted units means the strict numerator is
+    unobservable (``BLIND_REASON``)."""
+    return _verify_status(unit) in VERDICT_STATUSES
+
+
+def is_claude_model(model: Any) -> bool:
+    """A set model string that names Claude/Anthropic: the rule ``is_non_claude`` applies."""
+    return isinstance(model, str) and model.strip().lower().startswith(("claude", "anthropic"))
+
+
+def claude_family(model: Any) -> str | None:
+    """``opus`` | ``sonnet`` | ``haiku`` | ``claude-other`` for a Claude/Anthropic model string, else
+    None (not Claude's, unknown, or a placeholder such as ``<synthetic>``). By the tier word in the
+    string; a Claude model with no tier word is ``claude-other``, which is neither above nor below
+    Opus as far as the string says."""
+    if not is_claude_model(model):
+        return None
+    m = model.strip().lower()  # type: ignore[union-attr]
+    for family in ("opus", "sonnet", "haiku"):
+        if family in m:
+            return family
+    return "claude-other"
 
 
 def unit_id(session_id: str | None, kind: str, ts: float | None) -> str | None:
@@ -1228,6 +1302,145 @@ def _session_files(root: Path | None = None) -> list[Path]:
     return sorted(Path(p) for p in glob.glob(str(root / "*" / "*.jsonl")))
 
 
+def _subagent_files(root: Path | None = None) -> list[tuple[Path, str, str]]:
+    """``(transcript, parent session id, project dir name)`` for every sub-agent transcript Claude Code
+    writes today: ``<project>/<session>/subagents/**/agent-*.jsonl`` (workflow agents sit one level
+    deeper, under ``subagents/workflows/wf_*``). The parent session is the directory name, so no
+    heuristic join is needed (the legacy layout, a top-level file per sub-agent, still uses one)."""
+    root = root if root is not None else claude_projects_dir()
+    out: list[tuple[Path, str, str]] = []
+    for p in sorted(glob.glob(str(root / "*" / "*" / "subagents" / "**" / "agent-*.jsonl"), recursive=True)):
+        path = Path(p)
+        try:
+            parts = path.relative_to(root).parts
+        except ValueError:
+            continue
+        out.append((path, parts[1], parts[0]))
+    return out
+
+
+# ── the sub-agent index: a steady-state scan re-reads only the files that changed ─────────────────
+#
+# Decoding every record of every sub-agent transcript is what the opt-in scan costs (a week of a busy
+# session holds hundreds of files; ``statusline --refresh`` measured +3 s per run for it). The unit
+# builder needs three facts of a plain message (id, model, time), so they are kept per file, keyed by
+# the file's state ``(size, mtime_ns)``: an unchanged file is never decoded again. A file with an MCP
+# call is always read in full (its units take a model from the routing table, a verdict from the
+# records that follow, and a fold against the edit ledger: all state outside the file), and so is a
+# file that holds a message a proxy served (its verdict is read from the records).
+
+SUBAGENT_INDEX_NAME = "northstar_subagent_index.json"
+_SUBAGENT_INDEX_VERSION = 1
+
+
+def _subagent_extract(records: list[dict]) -> dict:
+    """What the unit builder needs of one sub-agent file, in record order: ``msgs`` is ``[id, model,
+    ts]`` of the FIRST record of each message (later records of a message add no unit), ``mcp`` is
+    whether any record holds an ``mcp__llm_router__`` tool call."""
+    msgs: list[list] = []
+    seen: set[str] = set()
+    mcp = False
+    for obj in records:
+        if obj.get("type") != "assistant":
+            continue
+        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        msg_id = message.get("id") if isinstance(message.get("id"), str) else ""
+        model = message.get("model") if isinstance(message.get("model"), str) else None
+        if not mcp:
+            mcp = any((tu.get("name") or "").startswith("mcp__llm_router__") for tu in _assistant_tool_uses(obj))
+        if msg_id:
+            if msg_id in seen:
+                continue
+            seen.add(msg_id)
+        msgs.append([msg_id, model, _ts_of(obj)])
+    return {"mcp": mcp, "msgs": msgs}
+
+
+def _load_subagent_index() -> dict[str, dict]:
+    """``path -> {"sig", "mcp", "msgs"}`` from the index file; ``{}`` when it is absent, unreadable or
+    written by another version (a derived file: the scan rebuilds it)."""
+    try:
+        data = json.loads(paths.state_path(SUBAGENT_INDEX_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("v") != _SUBAGENT_INDEX_VERSION or not isinstance(data.get("files"), dict):
+        return {}
+    return data["files"]
+
+
+def _indexed_messages(entry: Any, sig: tuple[int, int]) -> list[list] | None:
+    """The indexed messages of a file whose state is ``sig``, or None: no entry, another file state, an
+    MCP-bearing file, or an entry that is not shaped as :func:`_subagent_extract` writes it."""
+    if not isinstance(entry, dict) or entry.get("sig") != list(sig) or entry.get("mcp") is not False:
+        return None
+    msgs = entry.get("msgs")
+    if not isinstance(msgs, list):
+        return None
+    for m in msgs:
+        if not (isinstance(m, list) and len(m) == 3 and isinstance(m[0], str)
+                and (m[1] is None or isinstance(m[1], str))
+                and (m[2] is None or (isinstance(m[2], (int, float)) and not isinstance(m[2], bool)))):
+            return None
+    return msgs
+
+
+def _save_subagent_index(files: dict[str, dict]) -> None:
+    """Replace the index atomically. A failed write costs the next scan its speed, never a number."""
+    path = paths.state_path(SUBAGENT_INDEX_NAME)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8", opener=paths.private_opener) as fh:
+            json.dump({"v": _SUBAGENT_INDEX_VERSION, "files": files}, fh, separators=(",", ":"))
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            return
+
+
+def _load_mcp_models(db_path: Path | None = None, days: int | None = None) -> dict[str, str]:
+    """``tool_use_id -> model`` of the router row that answered that MCP call.
+
+    ``routing_decisions.tool_use_id`` is the ``tool_use`` block id Claude Code sends the MCP server
+    (``_meta["claudecode/toolUseId"]``), so it joins to the transcript block exactly. Several rows can
+    name one id (an ``llm_edit`` retry, an ``llm_act`` planner step): they are one call, and the last
+    SERVED row's model wins (``real_decision_sql``: not an error, cache hit, breaker or refusal).
+    Read-only; ``{}`` when there is no database or no such column (nothing to join against is not a
+    failure of the count). ``days`` bounds the read to rows a window of that many days can name (plus a
+    day of slack), so a hot-path caller never reads the whole table."""
+    import sqlite3
+
+    path = db_path or paths.state_path("usage.db")
+    if not Path(path).is_file():
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return {}
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(routing_decisions)")}
+        if not {"tool_use_id", "final_model"} <= cols:
+            return {}
+        where = "COALESCE(tool_use_id, '') != '' AND COALESCE(final_model, '') != ''"
+        if "provenance" in cols:
+            where += " AND provenance = 'runtime'"
+        where += f" AND {real_decision_sql(conn)}"
+        args: tuple = ()
+        if days:
+            where += " AND datetime(timestamp) >= datetime('now', ?)"
+            args = (f"-{int(days) + 1} days",)
+        rows = conn.execute(
+            f"SELECT tool_use_id, final_model FROM routing_decisions WHERE {where} ORDER BY timestamp, id", args
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        conn.close()
+    return {str(tid): str(model) for tid, model in rows}
+
+
 def _first_user_turn(records: list[dict]) -> tuple[str | None, float | None]:
     for obj in records:
         if obj.get("type") != "user":
@@ -1241,7 +1454,7 @@ def _first_user_turn(records: list[dict]) -> tuple[str | None, float | None]:
 
 def build_sessions(days: int | None, root: Path | None = None,
                     session_id: str | None = None, *,
-                    backfill: bool = False) -> dict[str, SessionUnits]:
+                    backfill: bool = False, subagents: bool = False) -> dict[str, SessionUnits]:
     """Assemble every real, non-synthetic session in the last `days` days.
 
     Sub-agent sessions that join to a parent are folded in (their turns
@@ -1254,6 +1467,15 @@ def build_sessions(days: int | None, root: Path | None = None,
     kind: the Stop hook (``current_session_line`` -> ``report``) and the quality
     breaker (``units()`` from the UserPromptSubmit, Agent and Stop hooks). Only
     ``llm-router kpi`` passes ``backfill=True``.
+
+    ``subagents`` also reads the sub-agent transcripts under
+    ``<project>/<session>/subagents/**/agent-*.jsonl`` into their parent session
+    (parent = the directory name). Off by default for the same hot-path reason as
+    ``backfill``: a busy session holds hundreds of MB of them. ``llm-router kpi`` passes it.
+
+    A unit is one API MESSAGE: records sharing a ``message.id`` are one unit
+    (deduped per session across its main and sub-agent files), a ``<synthetic>``
+    record is none, and a record with no id stays one unit.
     """
     root = root if root is not None else claude_projects_dir()
     cutoff = None
@@ -1266,6 +1488,15 @@ def build_sessions(days: int | None, root: Path | None = None,
     edit_outcome_rows = _load_edit_outcomes()
     codex_ledger_rows = _load_north_star_ledger()
     proxy_served, kind_index = _scan_proxy_ledger(backfill=backfill)
+    mcp_models: dict[str, str] | None = None   # read lazily: most windows hold no MCP call
+
+    def _mcp_model(use_id: Any) -> str | None:
+        nonlocal mcp_models
+        if not use_id:
+            return None
+        if mcp_models is None:
+            mcp_models = _load_mcp_models(days=days)
+        return mcp_models.get(str(use_id))
 
     per_session: dict[str, SessionUnits] = {}
     parent_of: dict[str, str] = {}  # child session_id -> parent session_id
@@ -1311,6 +1542,109 @@ def build_sessions(days: int | None, root: Path | None = None,
     for sid in loaded:
         per_session.setdefault(_root_of(sid), SessionUnits(session_id=_root_of(sid)))
 
+    # One unit per API message, per session: the ids already counted, across the session's main file,
+    # its legacy children and its sub-agent files.
+    seen_msg: dict[str, set[str]] = {}
+
+    def _count_message(su: SessionUnits, target_sid: str, msg_id: str, model: str | None, ts: float | None,
+                       kind: str, records: list[dict] | None) -> None:
+        """The unit of one transcript record's message, once per ``message.id`` per session. ``records``
+        (the file's) is read only for a message a proxy served; the sub-agent index passes None for a
+        file that holds none."""
+        # Claude Code writes one record per content block, all sharing message.id: the FIRST record
+        # is the call, the rest add nothing (their tool_use blocks are still read by the caller).
+        first_of_message = True
+        if msg_id:
+            ids = seen_msg.setdefault(target_sid, set())
+            first_of_message = msg_id not in ids
+            ids.add(msg_id)
+        if first_of_message and not (model or "").startswith("<"):   # "<synthetic>": not an API call
+            turn = Unit(kind=kind, session_id=target_sid, ts=ts, model=model)
+            served = proxy_served.get(msg_id) if msg_id else None
+            if served is not None:
+                # A local backend answered this message: it carries the SERVED model, not the one
+                # Claude Code asked for. One served call is one attempted unit.
+                turn.lever = "proxy"
+                turn.outcome, turn.signal = _judge_proxy_turn(served["msg_id"], records or [])
+                turn.confidence = "high"
+                turn.task_type = served.get("task_type")
+                turn.model = served.get("model") or "proxy-served"
+            su.units.append(turn)
+
+    def _add_assistant(su: SessionUnits, target_sid: str, obj: dict, records: list[dict], kind: str,
+                       edit_call_units: list[Unit], file_mcp_units: list[Unit]) -> None:
+        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        msg_id = message.get("id") if isinstance(message.get("id"), str) else ""
+        model = message.get("model") if isinstance(message.get("model"), str) else None
+        _count_message(su, target_sid, msg_id, model, _ts_of(obj), kind, records)
+        for tu in _assistant_tool_uses(obj):
+            name = tu.get("name") or ""
+            if not name.startswith("mcp__llm_router__"):
+                continue
+            tool_input = tu.get("input") if isinstance(tu.get("input"), dict) else {}
+            mcp_unit = Unit(
+                kind=UNIT_ROUTED_MCP, session_id=target_sid, ts=_ts_of(obj),
+                outcome=OUTCOME_UNKNOWN, model=_mcp_model(tu.get("id")),
+                task_type=tool_input.get("task") if isinstance(tool_input, dict) else None,
+            )
+            su.units.append(mcp_unit)
+            file_mcp_units.append(mcp_unit)
+            if name == _LLM_EDIT_TOOL_NAME:
+                edit_call_units.append(mcp_unit)
+                raw_files = tool_input.get("files") if isinstance(tool_input, dict) else None
+                files_list = [f for f in raw_files if isinstance(f, str)] if isinstance(raw_files, list) else []
+                all_edit_calls.append((target_sid, mcp_unit, files_list))
+
+    # The sub-agent transcripts of the current layout (opt-in, see the docstring), read BEFORE the per-file
+    # ledger folds below so an llm_edit made inside a sub-agent is deduped against its ledger row like the
+    # main thread's. Each belongs to the session whose directory holds it, however that session itself
+    # folded (it may be a legacy child). ONE file is in memory at a time: a busy session holds hundreds of
+    # MB of them, and only the units (and the llm_edit calls the fold needs) outlive a file.
+    sub_edit_calls: dict[str, list[Unit]] = {}
+    if subagents:
+        # An unchanged file is not decoded again (the sub-agent index above): a file whose state matches its
+        # entry, with no MCP call and no message a proxy served, yields its units from the entry alone.
+        index = _load_subagent_index()
+        index_changed = False
+        listing = _subagent_files(root)
+        for path, parent, project in listing:
+            if _sources.is_synthetic_session(parent) or _sources._SANDBOX_PROJECT.match(project):
+                continue
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            if cutoff is not None and st.st_mtime < cutoff:
+                continue  # the same cheap pre-filter as the top-level files above
+            target_sid = _root_of(parent)
+            if session_id and target_sid != session_id:
+                continue  # one session asked for: another session's sub-agents are never read
+            su = per_session.setdefault(target_sid, SessionUnits(session_id=target_sid))
+            sig = (st.st_size, st.st_mtime_ns)
+            indexed = _indexed_messages(index.get(str(path)), sig)
+            if indexed is not None and not (proxy_served and any(m[0] in proxy_served for m in indexed)):
+                for msg_id, model, ts in indexed:
+                    _count_message(su, target_sid, msg_id, model, ts, UNIT_SIDECHAIN, None)
+                continue  # no MCP call in it, so there is nothing for the folds below to add
+            records = list(_iter_jsonl(path))
+            edit_call_units: list[Unit] = []
+            file_mcp_units: list[Unit] = []
+            for obj in records:
+                if obj.get("type") == "assistant":   # a sub-agent's user records are its brief and tool results
+                    _add_assistant(su, target_sid, obj, records, UNIT_SIDECHAIN, edit_call_units, file_mcp_units)
+            sub_edit_calls.setdefault(target_sid, []).extend(edit_call_units)
+            _judge_routed_mcp(su, records, file_mcp_units)
+            index[str(path)] = {"sig": list(sig), **_subagent_extract(records)}
+            index_changed = True
+        # forget the files of this root that are gone; another root's entries (another project dir) stay
+        prefix = str(root) + os.sep
+        live = {str(p) for p, _parent, _project in listing}
+        for key in [k for k in index if k.startswith(prefix) and k not in live]:
+            del index[key]
+            index_changed = True
+        if index_changed:
+            _save_subagent_index(index)
+
     for sid, records in loaded.items():
         target_sid = _root_of(sid)
         is_child = sid != target_sid
@@ -1322,8 +1656,8 @@ def build_sessions(days: int | None, root: Path | None = None,
         skip_first_user = is_child  # dispatch prompt is not a human user_prompt
 
         first_user_seen = False
-        proxy_seen: set[str] = set()
         edit_call_units: list[Unit] = []
+        file_mcp_units: list[Unit] = []
         for obj in records:
             if obj.get("type") == "user":
                 text, _results = _user_text_and_tool_results(obj)
@@ -1338,39 +1672,9 @@ def build_sessions(days: int | None, root: Path | None = None,
                 su.units.append(Unit(kind=UNIT_USER_PROMPT, session_id=target_sid, ts=_ts_of(obj)))
             elif obj.get("type") == "assistant":
                 kind = UNIT_SIDECHAIN if is_child else UNIT_CLAUDE_MAIN
-                turn = Unit(kind=kind, session_id=target_sid, ts=_ts_of(obj))
-                msg_id = (obj.get("message") or {}).get("id") or ""
-                served = proxy_served.get(msg_id)
-                # Claude Code writes one record per content block, all sharing
-                # message.id. Only the FIRST record of a served message is the
-                # routed unit; the rest stay plain turns, so one served call is
-                # one attempted unit, never two or three.
-                if served is not None and msg_id not in proxy_seen:
-                    proxy_seen.add(msg_id)
-                    turn.lever = "proxy"
-                    turn.outcome, turn.signal = _judge_proxy_turn(served["msg_id"], records)
-                    turn.confidence = "high"
-                    turn.task_type = served.get("task_type")
-                    turn.model = served.get("model")
-                su.units.append(turn)
-                for tu in _assistant_tool_uses(obj):
-                    name = tu.get("name") or ""
-                    if not name.startswith("mcp__llm_router__"):
-                        continue
-                    tool_input = tu.get("input") if isinstance(tu.get("input"), dict) else {}
-                    mcp_unit = Unit(
-                        kind=UNIT_ROUTED_MCP, session_id=target_sid, ts=_ts_of(obj),
-                        outcome=OUTCOME_UNKNOWN,
-                        task_type=tool_input.get("task") if isinstance(tool_input, dict) else None,
-                    )
-                    su.units.append(mcp_unit)
-                    if name == _LLM_EDIT_TOOL_NAME:
-                        edit_call_units.append(mcp_unit)
-                        raw_files = tool_input.get("files") if isinstance(tool_input, dict) else None
-                        files_list = [f for f in raw_files if isinstance(f, str)] if isinstance(raw_files, list) else []
-                        all_edit_calls.append((target_sid, mcp_unit, files_list))
+                _add_assistant(su, target_sid, obj, records, kind, edit_call_units, file_mcp_units)
 
-        _judge_routed_mcp(su, records)
+        _judge_routed_mcp(su, records, file_mcp_units)
 
         draft_units = _debug_units_for_session(sid, debug_records)
         _fill_unresolved_drafts_from_transcript(draft_units, assistant_turns)
@@ -1381,7 +1685,9 @@ def build_sessions(days: int | None, root: Path | None = None,
 
         edit_rows_for_sid = [r for r in edit_outcome_rows if r.get("session_id") == sid]
         if edit_rows_for_sid:
-            _fold_edit_ledger(su, edit_call_units, edit_rows_for_sid)
+            # the session's own llm_edit calls, plus its sub-agents' (the ledger row carries the session
+            # id the MCP server saw, which is the parent's): one call is one routed_edit row, not two units
+            _fold_edit_ledger(su, edit_call_units + sub_edit_calls.get(sid, []), edit_rows_for_sid)
 
     # FALLBACK JOIN: rows no session_id-keyed pass above could ever claim,
     # because `r.get("session_id") == sid` is false for every real sid when
@@ -1414,8 +1720,12 @@ def build_sessions(days: int | None, root: Path | None = None,
     return per_session
 
 
-def _judge_routed_mcp(su: SessionUnits, records: list[dict]) -> None:
-    """Signal (c): shingle-overlap reuse for each routed_mcp unit in this session."""
+def _judge_routed_mcp(su: SessionUnits, records: list[dict], units: list[Unit] | None = None) -> None:
+    """Signal (c): shingle-overlap reuse for each routed_mcp unit of ``records``' file.
+
+    ``units`` are that file's routed_mcp units in record order (the pairing below is by position).
+    Without them the session's own routed_mcp units are used, which is right only while one file feeds
+    the session: with sub-agent files folded in, another file's units would shift every pair."""
     tool_use_ids = set()
     for obj in records:
         if obj.get("type") != "assistant":
@@ -1439,7 +1749,7 @@ def _judge_routed_mcp(su: SessionUnits, records: list[dict]) -> None:
         key=lambda t: t[0],
     )
 
-    routed_units = [u for u in su.units if u.kind == UNIT_ROUTED_MCP]
+    routed_units = units if units is not None else [u for u in su.units if u.kind == UNIT_ROUTED_MCP]
     idx = 0
     for obj in records:
         if obj.get("type") != "assistant":
@@ -1478,14 +1788,16 @@ def _judge_routed_mcp(su: SessionUnits, records: list[dict]) -> None:
 
 def units(days: int | None = 30, session_id: str | None = None,
           root: Path | None = None, *, backfill: bool = False,
-          verify_records: bool = False) -> Iterator[dict]:
+          verify_records: bool = False, subagents: bool = False) -> Iterator[dict]:
     """One dict per classified unit. See the module docstring for the shape.
     ``backfill=True`` lets ``session_kind`` resolve from the backfill sidecar as a
     last resort (``session_kind_source == "backfill"``); see ``build_sessions``.
     ``verify_records=True`` attaches the ledger's verify records as ``verify`` (SHADOW,
-    opt-in: the strict-used rule reads ``verify``, so NS and D2, which call this without
-    it, never see a record until the verifier is wired in on purpose)."""
-    sessions = build_sessions(days=days, root=root, session_id=session_id, backfill=backfill)
+    opt-in: the strict-used rule reads ``verify``, so NS and D2 never see a record until the
+    verifier is wired in on purpose: ``llm-router kpi`` passes ``NS_ATTACH_VERIFY_RECORDS``).
+    ``subagents=True`` also reads the sub-agent transcripts (see ``build_sessions``)."""
+    sessions = build_sessions(days=days, root=root, session_id=session_id, backfill=backfill,
+                              subagents=subagents)
     verify = load_verify_records() if verify_records else {}
     for sid in sorted(sessions):
         su = sessions[sid]
@@ -1574,34 +1886,51 @@ def _percentile(values: list[float], p: float) -> float | None:
     return vals[lo] + (vals[hi] - vals[lo]) * (k - lo)
 
 
-def report(days: int | None = 30, session_id: str | None = None, root: Path | None = None) -> dict:
+def report(days: int | None = 30, session_id: str | None = None, root: Path | None = None, *,
+           subagents: bool = False) -> dict:
     """The northstar report, computed from ``units()`` so the two cannot disagree.
 
     {"window_days": N, "generated_at": iso8601,
      "aggregate": {"n_sessions": int, "median": float|null, "p25": float|null,
                    "max": float|null, "too_few": bool,
                    "strict_median": float|null, "strict_p25": float|null,
-                   "strict_max": float|null},
+                   "strict_max": float|null, "strict_blind": bool},
      "sessions": [{"session_id", "units", "used", "attempted", "unknown",
-                   "redo", "share", "strict_used", "strict_share"}, ...],
+                   "redo", "share", "strict_used", "strict_share",
+                   "strict_blind"}, ...],
      "by_kind": {"<kind>": {"units", "attempted", "used", "redo", "unknown"}}}
 
     ``redo`` here folds both ``redo`` and ``discarded`` unit outcomes
     together (this schema carries no separate "discarded" field; ``units()``
     exposes the finer distinction for consumers that want it).
+
+    BLIND (owner decision D-364). A session whose units carry no verifier VERDICT
+    (``has_verdict``) has an unobservable strict numerator: its row says
+    ``strict_blind: true`` and ``strict_share: null`` (not ``0.0``), and the
+    ``strict_*`` aggregate leaves it out. ``aggregate.strict_blind`` is true when
+    sessions with enough units exist and every one of them is blind. ``strict_used``
+    stays the COUNT of units that passed the strict rule (0 is a true count; it is
+    the share that cannot be stated). ``units()`` is called with the seam
+    ``NS_ATTACH_VERIFY_RECORDS``. ``subagents`` is False by default because
+    ``report()`` serves the Stop line, a hot path, which counts main-file units only;
+    ``llm-router northstar`` (not a hot path) passes True so its n is the n of
+    ``llm-router kpi`` and the status line: sub-agent calls included.
     """
     per_session_counts: dict[str, dict[str, int]] = {}
     by_kind: dict[str, dict[str, int]] = {
         k: {"units": 0, "attempted": 0, "used": 0, "redo": 0, "unknown": 0} for k in ALL_KINDS
     }
 
-    for u in units(days=days, session_id=session_id, root=root):
+    for u in units(days=days, session_id=session_id, root=root, verify_records=NS_ATTACH_VERIFY_RECORDS,
+                   subagents=subagents):
         sid = u["session_id"]
         c = per_session_counts.setdefault(
             sid, {"units": 0, "used": 0, "attempted": 0, "unknown": 0, "redo": 0,
-                  "strict_used": 0},
+                  "strict_used": 0, "verdicts": 0},
         )
         c["units"] += 1
+        if has_verdict(u):
+            c["verdicts"] += 1
         kind = u["kind"]
         bk = by_kind[kind]
         bk["units"] += 1
@@ -1626,6 +1955,8 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
     strict_shares = []
     for sid, c in sorted(per_session_counts.items()):
         share = (c["used"] / c["units"]) if c["units"] >= MIN_UNITS and c["units"] else None
+        blind = c["verdicts"] == 0          # D-364: no verdict, so the strict numerator cannot be observed
+        strict_share = (c["strict_used"] / c["units"]) if share is not None and not blind else None
         session_rows.append({
             "session_id": sid,
             "units": c["units"],
@@ -1635,11 +1966,13 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
             "redo": c["redo"],
             "share": share,
             "strict_used": c["strict_used"],
-            "strict_share": (c["strict_used"] / c["units"]) if share is not None else None,
+            "strict_share": strict_share,
+            "strict_blind": blind,
         })
         if share is not None:
             shares.append(share)
-            strict_shares.append(c["strict_used"] / c["units"])
+            if strict_share is not None:
+                strict_shares.append(strict_share)
 
     # median/p25/max are the heuristic ``outcome == used`` share, kept for the JSON
     # report and kpi diagnostics. The strict_* keys are the NS that user surfaces
@@ -1653,6 +1986,8 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
         "strict_median": statistics.median(strict_shares) if strict_shares else None,
         "strict_p25": _percentile(strict_shares, 25) if strict_shares else None,
         "strict_max": max(strict_shares) if strict_shares else None,
+        # sessions with enough units exist, and none of them has a verdict behind its strict share
+        "strict_blind": bool(shares) and not strict_shares,
     }
     return {
         "window_days": days,
@@ -1664,7 +1999,7 @@ def report(days: int | None = 30, session_id: str | None = None, root: Path | No
 
 
 def current_session_line(session_id: str, root: Path | None = None) -> str:
-    """The Stop-line's compact item: 'north star (strict) 12% (n=87)' or 'too few to tell'.
+    """The Stop-line's compact item: 'north star (strict) 12% (n=87)', 'too few to tell', or the blind item.
 
     P0.8 (NFR-NUM): the share is the strict rule (``is_strict_used``), the same
     numerator ``llm-router kpi`` reports as NS. It was the heuristic ``outcome ==
@@ -1682,6 +2017,10 @@ def current_session_line(session_id: str, root: Path | None = None) -> str:
     Never reads the session-kind backfill sidecar: this line shows a share, not a
     kind, and ``report()`` -> ``units()`` leaves ``backfill`` off (its default).
     ``tests/test_session_kind_backfill.py`` pins zero ``load_sidecar`` calls here.
+
+    BLIND (owner decision D-364): with no verifier verdict among the session's units the strict
+    share cannot be observed, so the item is ``STOP_LINE_BLIND`` (no n), never ``0%``. It keeps
+    reading main-file units only: no sub-agent transcript is scanned on this path.
     """
     try:
         data = report(days=2, session_id=session_id, root=root)
@@ -1692,6 +2031,8 @@ def current_session_line(session_id: str, root: Path | None = None) -> str:
         n = row["units"]
         if n < MIN_UNITS:
             return f"north star: too few to tell (n={n})"
+        if row["strict_blind"]:
+            return STOP_LINE_BLIND
         pct = row["strict_share"] * 100
         return f"north star (strict) {pct:.0f}% (n={n})"
     except Exception:  # noqa: BLE001 — never break a caller that renders a line

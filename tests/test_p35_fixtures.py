@@ -291,11 +291,11 @@ async def test_statusline_prints_the_five_fields(p35):
     assert len(fields) == 5, line
     router, offload, quota, quality, saved = fields
     assert router == f"router: {SERVED} (policy_table)", router
-    assert offload.startswith("offload ") and re.search(r"\(n=\d+, session", offload), offload
+    assert offload.startswith("offload ") and re.search(r"\(n=\d+ actions, session", offload), offload   # W8: n has its unit
     # one usage.json poll, 1 min old: its n is that one poll and its age (rv-632 must-fix 3)
     assert quota == f"Claude 5h 37% (n=1 poll, age 1m, 5h) / Codex {CODEX_USED}/15 delegations (5h)", quota
     good, bad = VERDICTS["good"], VERDICTS["bad"]
-    assert quality == f"quality {good / (good + bad):.0%} (n={good + bad}, 7d)", quality
+    assert quality == f"quality {good / (good + bad):.0%} (n={good + bad} verdicts, 7d)", quality
     hours = TURNS_OFF_CLAUDE_TODAY * PP_PER_TURN / MEDIAN_PP          # 1.33: hand-derived above
     assert saved == (f"saved ~{hours:.1f} work-hours (n={TURNS_OFF_CLAUDE_TODAY}, rate n={len(PP_PER_ACTIVE_HOUR)}, "
                      "today)"), saved

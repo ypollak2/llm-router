@@ -31,7 +31,14 @@ one-second loop:
 Output: one line, at most :data:`MAX_CHARS` characters (counted without the
 colour codes), e.g.::
 
-    llm-router · smart · NS 0.0% n=3599 · Claude 5h 12% wk 41% sonnet 3% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route
+    llm-router · smart · NS strict 0/2097 (blind) 7d units · Claude 5h 12% wk 41% sonnet 3% · Codex 7/15 ↻21:14 · ⚠ hooks p95 3.0s auto-route
+
+A North Star the cache marks BLIND (no verifier verdict reaches the strict numerator, owner decision
+D-364) prints ``NS strict k/n (blind) <window> units``, never ``NS 0.0%``: a numerator nobody can observe
+is not a measured zero. One more row (:func:`render_progress`) carries the two progress lines that stand
+beside it, from the same refresher pass::
+
+    off-Claude 0.06% (4/7116 calls, 7d, organic) · <Opus 86.9% (6181/7112 Claude calls, 7d, organic)
 """
 
 from __future__ import annotations
@@ -205,7 +212,12 @@ def render(cache: dict | None, *, now: float, env_mode: str | None = None, color
     ns = (fresh or {}).get("ns") if fresh else None
     ns_pct = _num(ns.get("pct")) if isinstance(ns, dict) else None
     ns_n = _num(ns.get("n")) if isinstance(ns, dict) else None
-    if ns_pct is not None and ns_n is not None and ns_n > 0:
+    ns_k = _num(ns.get("k")) if isinstance(ns, dict) else None
+    if isinstance(ns, dict) and ns.get("blind") is True and ns_n is not None and ns_n > 0 \
+            and ns_k is not None and 0 <= ns_k <= ns_n:
+        # D-364: the strict numerator has no verifier verdict behind it. Say so: the 0 is not a measurement.
+        parts.append(f"NS strict {int(ns_k)}/{int(ns_n)} (blind){_unit_label(ns.get('window'), 'units')}")
+    elif ns_pct is not None and ns_n is not None and ns_n > 0:
         parts.append(f"NS {ns_pct:.1f}% n={int(ns_n)}")
     elif ns_n is not None and ns_n > 0:
         parts.append(f"NS n/a n={int(ns_n)}")  # counted, too few to state a share
@@ -248,6 +260,79 @@ def _fit(line: str) -> str:
         return line
     plain = _ANSI.sub("", line)
     return plain[: MAX_CHARS - 1] + "…"
+
+
+#: Fewer calls than this are no share, as everywhere else (``commands.kpi.MIN_N``; a test pins them equal).
+MIX_MIN_N = 50
+#: The cache's window label is a closed shape, and the population one of these two words: neither is ever
+#: free cache text on a terminal.
+_WINDOW_RE = re.compile(r"^[0-9]{1,4}d$")
+_POPULATIONS = ("organic", "organic+research")
+
+
+def _window_of(value) -> str | None:
+    return value if isinstance(value, str) and _WINDOW_RE.match(value) else None
+
+
+def _unit_label(window, noun: str) -> str:
+    """`` 7d units`` after a count: its window and its unit, so no n stands bare."""
+    w = _window_of(window)
+    return f" {w} {noun}" if w else f" {noun}"
+
+
+def _mix_pct(k: int, n: int) -> str:
+    """``0.06%`` below one percent (two places keep a small share from rounding to zero), else ``86.9%``."""
+    p = 100.0 * k / n
+    return f"{p:.2f}%" if 0 < p < 1 else f"{p:.1f}%"
+
+
+def _mix_segment(label: str, fig, noun: str, window: str, population: str) -> str | None:
+    """``off-Claude 0.06% (4/7116 calls, 7d, organic)``: the share with its k/n, unit, window and
+    population (``commands.kpi._call_mix_segment`` prints the same words). Below :data:`MIX_MIN_N`
+    calls it is ``n/a`` with the same k/n. ``None`` when the figure is not two whole numbers."""
+    k = _num(fig.get("k")) if isinstance(fig, dict) else None
+    n = _num(fig.get("n")) if isinstance(fig, dict) else None
+    if k is None or n is None or n <= 0 or not 0 <= k <= n or k != int(k) or n != int(n):
+        return None
+    k, n = int(k), int(n)
+    body = f"({k}/{n} {noun}, {window}, {population})"
+    return f"{label} n/a {body}" if n < MIX_MIN_N else f"{label} {_mix_pct(k, n)} {body}"
+
+
+def render_progress(cache: dict | None, *, now: float) -> str | None:
+    """The row under the status line: the two progress lines beside a blind NS (D-364), from the same
+    cache pass as NS (same window, same organic population)::
+
+        off-Claude 0.06% (4/7116 calls, 7d, organic) · <Opus 86.9% (6181/7112 Claude calls, 7d, organic)
+
+    ``None`` (no row at all) when the cache is missing, stale, carries no ``call_mix``, or carries one
+    without a window or population: a share without them is not shown. Pure: no I/O."""
+    if not isinstance(cache, dict):
+        return None
+    written = _num(cache.get("written_at"))
+    if written is None or not 0 <= now - written <= STALE_AFTER_S:
+        return None
+    cm = cache.get("call_mix")
+    if not isinstance(cm, dict):
+        return None
+    window, population = _window_of(cm.get("window")), cm.get("population")
+    if window is None or population not in _POPULATIONS:
+        return None
+    segs = [_mix_segment("off-Claude", cm.get("outside_claude"), "calls", window, population),
+            _mix_segment("<Opus", cm.get("below_opus"), "Claude calls", window, population)]
+    if any(s is None for s in segs):
+        return None
+    return _fit(" · ".join(segs))  # type: ignore[arg-type]
+
+
+def render_rows(cache: dict | None, *, now: float, env_mode: str | None = None, color: bool = False,
+                usage: dict | None = None, usage_ttl_s: float = DEFAULT_USAGE_TTL_S) -> list[str]:
+    """Every row the tick prints: the status line, then the progress row when the cache has one."""
+    rows = [render(cache, now=now, env_mode=env_mode, color=color, usage=usage, usage_ttl_s=usage_ttl_s)]
+    progress = render_progress(cache, now=now)
+    if progress:
+        rows.append(progress)
+    return rows
 
 
 def _which(name: str) -> str | None:
@@ -557,8 +642,9 @@ def main() -> int:
     usage = read_usage(home)
     maybe_append_history(home, usage, now)
     color = not os.environ.get("NO_COLOR")
-    sys.stdout.write(render(cache, now=now, env_mode=os.environ.get("LLM_ROUTER_ENFORCE"), color=color,
-                            usage=usage, usage_ttl_s=usage_ttl()) + "\n")
+    rows = render_rows(cache, now=now, env_mode=os.environ.get("LLM_ROUTER_ENFORCE"), color=color,
+                       usage=usage, usage_ttl_s=usage_ttl())
+    sys.stdout.write("\n".join(rows) + "\n")
     return 0
 
 

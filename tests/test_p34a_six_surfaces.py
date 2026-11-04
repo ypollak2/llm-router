@@ -81,7 +81,7 @@ MIX_SIX = {  # window -> (local, subscription, paid, unclassified), by the table
     "today": (2, 1, 1, 3), "24h": (3, 1, 1, 4),
 }
 FIGURE = re.compile(r"\$-?\s?\d|\d+L/\d+|\d+ executed|\d+ ms")
-HAS_N = re.compile(r"\bn=\d|\bn \d|\d+ executed")
+HAS_N = re.compile(r"\bn=\d|\bn \d|\d+ executed|\bledger rows \d")   # W8: the statusline mix says "session ledger rows N"
 HAS_WINDOW = re.compile(r"\b(session|today|24h|7d|month|lifetime)\b")
 
 
@@ -175,9 +175,11 @@ def _expected_line_six(window: str) -> str:
     # (gemini_cli, $4.00) is verified too and sits only in the 24h/7d windows.
     ver_usd, ver_n = (0.5 + EXTRA_SAVED_USD, 2) if window in ("24h", "7d") else (0.5, 1)
     by = " ".join(f"{p} {c}" for p, c in sorted(ex.items(), key=lambda kv: (-kv[1], kv[0])))
+    # W8: the subscription bucket shows its seat split; by the table above every subscription row of this home is
+    # a Claude-seat row (anthropic, auth oauth) and the home has no other subscription seat.
     return (f"ledger {window}: {sum(ex.values())} executed ({by}) · mix local {loc} / "
-            f"subscription {sub} / paid {paid} / unclassified {unc} · est. saved ${usd - ver_usd:,.2f} (n={n - ver_n:,}) "
-            f"· verified saved ${ver_usd:,.2f} (n={ver_n:,})")
+            f"subscription {sub} (Claude seat {sub} + other seats 0) / paid {paid} / unclassified {unc} · "
+            f"est. saved ${usd - ver_usd:,.2f} (n={n - ver_n:,} calls) · verified saved ${ver_usd:,.2f} (n={ver_n:,} calls)")
 
 
 def _ungrounded(text: str, sep: str) -> list[str]:
@@ -222,7 +224,9 @@ def test_statusline_money_is_the_today_oracle(six):
 def test_statusline_mix_is_the_session_oracle(six):
     loc, sub, paid = SESSION_MIX
     seg = next((f for f in _statusline(six).split(" · ") if f.startswith("\u2696")), "")
-    assert f"{loc}L/{sub}S/{paid}P" in seg and "session" in seg, seg
+    # W8: S is the Claude seat and C every other seat. This fixture has one Claude seat and no Codex or
+    # Gemini seat (R2, R13 are unclassified, not subscription), so C is 0 and S carries all 4 subscription rows.
+    assert f"{loc}L/{sub}S/0C/{paid}P" in seg and "session ledger rows" in seg, seg
 
 
 def test_statusline_figures_carry_n_and_window(six):
@@ -253,8 +257,8 @@ def test_status_bar_day_is_the_today_oracle(six):
     # F119 / D-247: the bar prints the estimate and the verified saving apart, each with its n.
     usd, n = _saved_six("today")
     bar = _status_bar(six)
-    assert (f"D:~${usd - VERIFIED_TODAY_USD:.2f} est n={n - VERIFIED_TODAY_N} "
-            f"\u00b7 ${VERIFIED_TODAY_USD:.2f} ver n={VERIFIED_TODAY_N} \u00b7today") in bar, bar
+    assert (f"D:~${usd - VERIFIED_TODAY_USD:.2f} est n={n - VERIFIED_TODAY_N} calls "
+            f"\u00b7 ${VERIFIED_TODAY_USD:.2f} ver n={VERIFIED_TODAY_N} calls \u00b7today") in bar, bar
     assert f"${usd:.2f}" not in bar, bar                    # the merged sum appears nowhere
 
 
@@ -262,21 +266,23 @@ def test_status_bar_week_is_the_7d_oracle(six):
     usd, n = _saved_six("7d")
     ver_usd, ver_n = 0.5 + EXTRA_SAVED_USD, 2
     bar = _status_bar(six)
-    assert (f"W:~${usd - ver_usd:.2f} est n={n - ver_n} \u00b7 ${ver_usd:.2f} ver n={ver_n} \u00b77d") in bar, bar
+    assert (f"W:~${usd - ver_usd:.2f} est n={n - ver_n} calls \u00b7 ${ver_usd:.2f} ver n={ver_n} calls \u00b77d") in bar, bar
     assert f"${usd:.2f}" not in bar, bar
 
 
 def test_status_bar_session_calls_are_the_session_mix_oracle(six):
     loc, sub, paid = SESSION_MIX
-    assert f"sub:{sub} free:{loc} paid:{paid}" in _status_bar(six)
+    # W8: the subscription bucket is split by seat. By the table above all four subscription rows (P2, P_edge_in,
+    # P_edge_out, P_old) are anthropic with oauth auth, the Claude seat; this home has no other subscription seat.
+    assert f"claude:{sub} other:0 free:{loc} paid:{paid}" in _status_bar(six)
 
 
 def test_status_bar_figures_carry_n_and_window(six):
     line = _status_bar(six)
     assert _ungrounded(line, "\u2502") == [], line
-    assert "D:~$" in line and "sub:" in line, line        # something to check: money and calls present
+    assert "D:~$" in line and "claude:" in line, line     # something to check: money and calls present
     for label, window in (("D", "today"), ("W", "7d"), ("M", "month")):
-        assert re.search(rf"{label}:~\$[\d.]+ est n=\d+ \u00b7 \$[\d.]+ ver n=\d+ \u00b7{window}", line), line
+        assert re.search(rf"{label}:~\$[\d.]+ est n=\d+ calls \u00b7 \$[\d.]+ ver n=\d+ calls \u00b7{window}", line), line
 
 
 def test_status_bar_baseline_label_is_the_priced_model_not_zero(six):
@@ -597,7 +603,7 @@ def test_kpi_statusline_and_stop_judge_figures_equal_the_ledger_window(six_judge
     jv.refresh_cache(now=NOW)                                # what the Stop's child writes
     field = snap._judge_field()                              # the statusline snapshot reads that cache
     assert field == {"mean": mean, "n": n, "window": "14d"}
-    assert f"judge {mean:.2f} (n={n}, 14d)" in snap.render_line({**UNKNOWN_FIELDS, "judge": field})
+    assert f"judge {mean:.2f} (n={n} judged, 14d)" in snap.render_line({**UNKNOWN_FIELDS, "judge": field})   # W8: n has its unit
     assert _session_end()._cached_judge_line(NOW) == lw.judge_line()
     assert f"n={n}" in lw.judge_line() and "14d" in lw.judge_line()   # something to check: n and window shown
 

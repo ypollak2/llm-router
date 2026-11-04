@@ -114,7 +114,7 @@ def _stream(monkeypatch, units):
         row = u.to_dict()
         row.pop("session_kind"), row.pop("session_kind_source")
         rows.append(row)
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False, **_: iter(rows))
 
 
 def test_kpi_ns_d2_are_strict_and_heuristic_is_shown_apart(monkeypatch, organic):
@@ -138,12 +138,16 @@ def test_kpi_ns_d2_are_strict_and_heuristic_is_shown_apart(monkeypatch, organic)
     assert "NS_heuristic" not in k and "NS_heuristic" not in kpi.KPI_CODES
 
 
-def test_kpi_without_any_verify_has_ns_zero_and_heuristic_nonzero(monkeypatch, organic):
+def test_kpi_without_any_verify_is_blind_not_zero_and_heuristic_nonzero(monkeypatch, organic):
+    """D-364: with no verifier verdict among the units the strict numerator cannot be observed, so NS and
+    D2 read BLIND (their 0/n kept beside the word), not 0.0%. The heuristic stays a labelled diagnostic."""
     units = [_unit(outcome=ns.OUTCOME_USED) for _ in range(80)]
     _stream(monkeypatch, units)
     card = kpi.compute_scorecard(days=7)
-    assert card["kpis"]["NS"]["value"] == "0.0% (n=80)"
-    assert card["kpis"]["D2"]["value"] == "0.0% (n=80)"
+    for key in ("NS", "D2"):
+        r = card["kpis"][key]
+        assert r["value"] == "blind: strict 0/80 (no verifier verdict reaches NS)", key
+        assert (r["measurable"], r["blind"], r["numerator"], r["denominator"], r["n"]) == (False, True, 0, 80, 80)
     assert card["kpis_diag"]["NS_heuristic"]["value"] == "100.0% (n=80)"
 
 
@@ -155,7 +159,18 @@ def test_kpi_diag_not_measurable_when_no_units(monkeypatch, organic):
 
 
 def test_scorecard_text_prints_the_strict_rule_and_the_diag_lines(monkeypatch, organic):
-    _stream(monkeypatch, [_unit(outcome=ns.OUTCOME_USED) for _ in range(80)])
+    # a verifier verdict is present, so NS is measured and the strict rule is printed under it
+    units = [_unit(outcome=ns.OUTCOME_USED) for _ in range(80)] + [_unit(verify=_verify("pass_f2p"))]
+    _stream(monkeypatch, units)
     text = kpi.render_scorecard(kpi.compute_scorecard(days=7))
     assert "NS_heuristic" in text and "not a target" in text
     assert "strict-used" in text
+
+
+def test_scorecard_text_of_a_blind_ns_says_blind_and_prints_no_percentage_for_it(monkeypatch, organic):
+    _stream(monkeypatch, [_unit(outcome=ns.OUTCOME_USED) for _ in range(80)])
+    text = kpi.render_scorecard(kpi.compute_scorecard(days=7))
+    ns_line = next(ln for ln in text.splitlines() if ln.startswith("  NS "))
+    value = ns_line.split("(target >80%)", 1)[1]            # the label carries the target; the value must carry no rate
+    assert "blind: strict 0/80" in value and "%" not in value
+    assert "strict-used" not in text          # the strict-rule line belongs to a measured NS

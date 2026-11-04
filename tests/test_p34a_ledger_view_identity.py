@@ -63,6 +63,9 @@ EXPECTED_EXEC = {
 EXPECTED_MIX = {  # local / subscription / paid
     "today": (2, 1, 4), "24h": (3, 2, 4), "7d": (3, 2, 7),
 }
+#: W8: the subscription bucket by seat, by hand from the seed: the home has a codex and a gemini login and NO Claude
+#: seat, so its subscription rows (R2 codex; R13 gemini_cli from 24h) are other-seat rows and the Claude seat holds none.
+EXPECTED_SEATS = {"today": (0, 1), "24h": (0, 2), "7d": (0, 2)}   # Claude seat / other seats
 
 
 @pytest.fixture
@@ -188,11 +191,14 @@ _VERIFIED_USD, _VERIFIED_N = 0.5, 1
 def _expected_line(window: str) -> str:
     ex = EXPECTED_EXEC[window]
     loc, sub, paid = EXPECTED_MIX[window]
+    claude, other = EXPECTED_SEATS[window]
+    assert claude + other == sub
     usd, n = _saved(window)
     by = " ".join(f"{p} {c}" for p, c in sorted(ex.items(), key=lambda kv: (-kv[1], kv[0])))
     return (f"ledger {window}: {sum(ex.values())} executed ({by}) · mix local {loc} / "
-            f"subscription {sub} / paid {paid} · est. saved ${usd - _VERIFIED_USD:,.2f} "
-            f"(n={n - _VERIFIED_N:,}) · verified saved ${_VERIFIED_USD:,.2f} (n={_VERIFIED_N:,})")
+            f"subscription {sub} (Claude seat {claude} + other seats {other}) / paid {paid} · "
+            f"est. saved ${usd - _VERIFIED_USD:,.2f} (n={n - _VERIFIED_N:,} calls) · "
+            f"verified saved ${_VERIFIED_USD:,.2f} (n={_VERIFIED_N:,} calls)")
 
 
 def _dashboard_line(window: str, db: Path) -> str:

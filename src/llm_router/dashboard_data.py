@@ -494,7 +494,12 @@ def query_daily(
 
     Daily rollups UNION the same sources as :func:`query_window` so a
     daily chart and a "lifetime" total stay reconcilable when summed.
+    ``unverified_saved_usd`` counts a call once (the repeats of a call that
+    several tables record are taken out, as in ``query_window``); ``calls`` and
+    ``tokens`` are the raw rows per table.
     """
+    from llm_router import ledger_view as _lv
+
     db = Path(db_path) if db_path else _default_db_path()
     if not db.exists():
         return []
@@ -605,6 +610,19 @@ def query_daily(
                 ).fetchall()
                 for day, tok_saved in rows:
                     _bucket(day)["tokens_saved"] += int(tok_saved)
+
+        # W8 (D-364): the estimate counts a CALL once, as ``ledger_view.money_window`` does: the rows that repeat
+        # a call an earlier table holds leave their day's unverified dollars, so the daily series sums to the
+        # window's figure. ``calls`` and ``tokens`` stay the raw rows per table (as ``WindowTotals.calls`` does).
+        try:
+            gone = _lv.repeated_calls(conn, _lv.rolling(24.0 * int(days)))
+        except sqlite3.Error:
+            gone = []
+        for dup in gone:
+            if dup.ts is not None:
+                day = datetime.fromtimestamp(dup.ts).strftime("%Y-%m-%d")      # the SQL's date(..., 'localtime')
+                if day in daily:
+                    daily[day]["unverified"] -= dup.usd
     finally:
         conn.close()
 

@@ -71,7 +71,7 @@ def test_every_unknown_field_prints_na_with_its_n_and_window():
     assert "0%" not in line and "~0" not in line, line   # unknown is never printed as a number
     for f in fields[1:4]:
         assert "(n=" in f or "(n/a" in f, f
-    assert fields[3] == "quality n/a (n=0, 7d)" and "Codex n/a (n/a, 5h)" in fields[2], line
+    assert fields[3] == "quality n/a (n=0 verdicts, 7d)" and "Codex n/a (n/a, 5h)" in fields[2], line   # W8: n has its unit
     assert fields[4] == "saved n/a (3 of 10 active hours)", fields[4]     # one n/a, not "n/a (n/a (...))"
 
 

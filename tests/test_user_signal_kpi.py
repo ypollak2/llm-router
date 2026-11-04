@@ -37,7 +37,7 @@ def _units(monkeypatch, used: int, redo: int, not_routed: int):
             + [{"session_id": "s-org", "kind": attempted, "outcome": ns.OUTCOME_REDO, "lever": None, "ts": now}] * redo
             + [{"session_id": "s-org", "kind": "claude_only", "outcome": ns.OUTCOME_NOT_ROUTED, "lever": None,
                 "ts": now}] * not_routed)
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False, **_: iter(rows))
 
 
 def _d3_rows(monkeypatch, used: int, redone: int):
@@ -59,7 +59,7 @@ def test_keep_never_raises_ns_d1_d2(monkeypatch):
     _units(monkeypatch, used=20, redo=20, not_routed=40)
     _d3_rows(monkeypatch, used=45, redone=15)
     before = _card()["kpis"]
-    assert before["NS"]["value"] == "0.0% (n=80)"           # the fixture is measurable (strict-used, M0.2)
+    assert before["NS"]["value"] == "blind: strict 0/80 (no verifier verdict reaches NS)"   # D-364: n=80, no verdict
     _press(500, "kept", "k")
     after = _card()["kpis"]
     for key in ("NS", "D1", "D2"):

@@ -489,7 +489,7 @@ def test_a_codex_unit_carries_the_stamp_its_ledger_row_was_written_with(tmp_path
 
 
 def _stream(monkeypatch, rows):
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False, **_: iter(rows))
 
 
 def _unit(sid, kind="claude_main_call", outcome=ns.OUTCOME_NOT_ROUTED, lever=None, **kw):
@@ -512,10 +512,10 @@ def test_units_without_a_stamp_are_joined_from_the_proxy_rows(monkeypatch):
     _write([{"ts": NOW, "session_id": "s-ledger", "session_kind": "organic"}] * 3)
     _stream(monkeypatch, _mixed("s-ledger") + _mixed("s-nothing") * 2)
     k = kpi.compute_scorecard(days=7, now=NOW)
-    assert k["kpis"]["NS"]["value"] == "0.0% (n=100)"            # strict-used (M0.2): no verify record
+    assert k["kpis"]["NS"]["value"] == "blind: strict 0/100 (no verifier verdict reaches NS)"   # D-364: no verify record
     assert k["kpis_diag"]["NS_heuristic"]["value"] == "30.0% (n=100)"   # 30 used / 100 organic units
     assert k["kpis"]["D1"]["value"] == "60.0% (n=100)"
-    assert k["kpis"]["D2"]["value"] == "0.0% (n=60)"
+    assert k["kpis"]["D2"]["value"] == "blind: strict 0/60 (no verifier verdict reaches NS)"
     assert k["kpis_diag"]["D2_heuristic"]["value"] == "50.0% (n=60)"
     assert k["joins"]["window_units"] == 300
     assert (k["joins"]["joined"], k["joins"]["untagged"]) == (100, 200)
@@ -545,7 +545,7 @@ def test_no_organic_unit_among_joined_ones_is_not_measurable_and_says_what_joine
         assert "100 joined to a tag (research 100)" in v and "100 untagged" in v
         assert k[key]["measurable"] is False and k[key]["n"] is None
     wide = kpi.compute_scorecard(days=7, include_research=True, now=NOW)["kpis"]
-    assert wide["NS"]["value"] == "0.0% (n=100)"                  # --include research widens, untagged stays out (strict, M0.2)
+    assert wide["NS"]["value"] == "blind: strict 0/100 (no verifier verdict reaches NS)"   # --include research widens, untagged stays out
 
 
 def test_all_untagged_units_keep_the_old_explanation(monkeypatch):

@@ -831,8 +831,9 @@ def test_kpi_is_byte_identical_after_the_worker_has_run(tmp_path):
                  + _bulk_user_prompts(SID_MAIN, 60, start_ts=1_800_000_100))
     sc = lambda: kpi.compute_scorecard(days=100000, now=1_800_100_000.0)  # noqa: E731
     base = sc()
-    for k in ("NS", "D1", "D2"):
-        assert "%" in base["kpis"][k]["value"], base["kpis"][k]
+    assert "%" in base["kpis"]["D1"]["value"], base["kpis"]["D1"]
+    for k in ("NS", "D2"):          # D-364: the seam is off, so no verdict reaches the strict numerator: blind
+        assert base["kpis"][k]["value"].startswith("blind: strict 0/"), base["kpis"][k]
     base_text = kpi.render_scorecard(base)
     ids = [ns.unit_id(SID_MAIN, "agent_route_codex", r["ts"]) for r in rows]
     for uid in ids[:20]:

@@ -273,7 +273,7 @@ def test_status_bar_known_empty_window_is_a_real_zero_not_a_crash():
     empty = _window(verified_usd=0.0, verified_n=0, unverified_usd=0.0, unverified_n=0,
                     saved_usd=0.0, saved_n=0)
     text = _plain(sb._money_part(lv, "D", empty))
-    assert text == "D:~$0.00 est n=0 ·today"
+    assert text == "D:~$0.00 est n=0 calls ·today"
     assert "n/a" not in text
 
 
@@ -294,7 +294,7 @@ def test_status_bar_known_unknown_matrix():
     assert "~$5.00 est n=4" in both_known and "$2.00 ver n=2" in both_known
     _no_merge(both_known)
     both_empty = part(verified_usd=0.0, verified_n=0, unverified_usd=0.0, unverified_n=0)
-    assert both_empty == "D:~$0.00 est n=0 ·today"
+    assert both_empty == "D:~$0.00 est n=0 calls ·today"
 
 
 def test_status_bar_hook_pair_byte_identical():

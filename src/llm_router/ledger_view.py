@@ -50,6 +50,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 from llm_router import paths
 from llm_router.provider_classes import not_error_row_sql, real_decision_sql
@@ -468,6 +469,32 @@ def classify_rows(rows: "list[tuple] | None", seats=None, now: float | None = No
     return mix
 
 
+SEAT_CLAUDE, SEAT_OTHER = "claude", "other"
+
+
+def subscription_seat(provider: str, *, auth: str | None = None, reason: str | None = None) -> str:
+    """Which seat a call classed ``subscription`` ran on: ``claude`` (the Claude Code seat: a proxy row's
+    oauth auth, the usage table's ``subscription`` provider or ``claude_code_subscription`` reason, or a
+    router row for ``anthropic`` / ``claude``) or ``other`` (Codex, Gemini CLI: the seats the router
+    delegates to). The Claude seat is the one the router tries to spend LESS of and the others the ones
+    it wants to spend MORE of, so a surface that prints a mix never lets them share a bucket (W8, D-364)."""
+    if auth == AUTH_SUBSCRIPTION or provider == PROVIDER_SUBSCRIPTION or reason == REASON_SUBSCRIPTION:
+        return SEAT_CLAUDE
+    return SEAT_CLAUDE if SEAT_ALIASES.get(provider) == "claude" else SEAT_OTHER
+
+
+def split_subscription(rows: "list[tuple] | None", seats=None, now: float | None = None) -> dict[str, int] | None:
+    """``{claude, other}``: the ``subscription`` rows of :func:`classify_rows` by seat; None = no data.
+    ``claude + other`` equals the mix's ``subscription`` by construction (the same rows, the same class)."""
+    if rows is None:
+        return None
+    split = {SEAT_CLAUDE: 0, SEAT_OTHER: 0}
+    for provider, auth, why in rows:
+        if provider_class(provider, auth=auth, reason=why, seats=seats, now=now) == "subscription":
+            split[subscription_seat(provider, auth=auth, reason=why)] += 1
+    return split
+
+
 def local_paid_mix(executed: dict[str, int] | None, seats=None, now: float | None = None) -> dict[str, int]:
     """The four-class mix from per-provider counts (no row evidence: use :func:`classify_rows`
     for that). ``unclassified`` is its own bucket."""
@@ -491,10 +518,15 @@ class MoneyWindow:
     cost_usd: float = 0.0
     verified_usd: float = 0.0
     verified_calls: int = 0
-    unverified_usd: float = 0.0
-    unverified_calls: int = 0
+    unverified_usd: float = 0.0       # the ESTIMATE, one call once (see ``duplicate_calls``)
+    unverified_calls: int = 0         # CALLS behind ``unverified_usd``, not rows over three overlapping tables
     by_source: dict = field(default_factory=dict)
     uncosted: list = field(default_factory=list)
+    # W8 / D-364: rows of ``claude_usage``, ``codex_usage``, ``gemini_usage`` and ``savings_stats`` that
+    # repeat a call an earlier table already holds, and the dollars they carried. They are taken OUT of
+    # ``unverified_usd`` and ``unverified_calls`` (``by_source`` still shows every table's raw rows).
+    duplicate_calls: int = 0
+    duplicate_usd: float = 0.0
 
     @property
     def saved_usd(self) -> float:
@@ -531,11 +563,160 @@ def _sum_where(cols: set[str], col: str, pred: str) -> str:
     return f"COALESCE(SUM(CASE WHEN {pred} THEN {col} ELSE 0 END),0)" if col in cols else "0"
 
 
+#: Two rows of different tables are the SAME call when they name the same model and token counts and their
+#: timestamps are within this many seconds (the tables are written at slightly different moments: measured
+#: 2026-11-03, 13 of 800 usage/savings_stats pairs sharing an id differed by exactly 1 s, ``usage.db``).
+CALL_MATCH_WINDOW_S = 2.0
+#: Priority when one call sits in several tables: its row in the first table here is the one that counts.
+#: ``usage`` is the per-call ledger; ``savings_stats`` the savings log; the platform tables come last.
+_CALL_PRIORITY = ("usage", "savings_stats", "claude_usage", "codex_usage", "gemini_usage")
+
+
+class CallRow(NamedTuple):
+    """One production row that counts toward the saved-money ESTIMATE, reduced to what identifies the call."""
+
+    table: str
+    ts: float | None             # epoch seconds (UTC); None = unreadable stamp: cannot be matched by time
+    model: str
+    tin: int
+    tout: int
+    ident: str | None            # the call's own id where the table carries one (usage.correlation_id,
+    usd: float                   # savings_stats.session_id: the router writes the call id there)
+
+
+def duplicate_calls(rows: "list[CallRow]") -> "list[CallRow]":
+    """The rows that repeat a call an earlier-priority table already holds (the one call is counted once).
+
+    KEY, in order: (1) an ID both rows carry (``usage.correlation_id`` = ``savings_stats.session_id``: the
+    router stamps the call's id into both) together with the same model and token counts, so a writer that
+    reuses one id for many calls cannot merge different calls, and the two clocks may disagree by any amount;
+    (2) otherwise model + input tokens + output tokens + a timestamp within :data:`CALL_MATCH_WINDOW_S`. Matching is one-to-one and only ACROSS tables: a call recorded
+    twice in the SAME table is two calls (a retry with identical tokens), and one row of a table can absorb
+    at most one row of each other table, so three identical calls in ``usage`` and one in ``claude_usage``
+    drop one row, not three. Tables are taken in priority order (``_CALL_PRIORITY``): each table's rows
+    are matched against the rows the HIGHER tables kept, and the ones that match nothing are kept in turn.
+    Sorted pools and bisect keep it O(n log n): the 50,000-row tables of a long-lived ledger must not make
+    a status line refresh quadratic."""
+    from bisect import bisect_left
+
+    rank = {t: i for i, t in enumerate(_CALL_PRIORITY)}
+    by_table: dict[str, list[CallRow]] = {}
+    for row in rows:
+        by_table.setdefault(row.table, []).append(row)
+    kept: list[CallRow] = []
+    dropped: list[CallRow] = []
+    for table in sorted(by_table, key=lambda t: rank.get(t, len(rank))):
+        # what this table may still match: the rows higher tables kept, none of them matched by it yet
+        ids: dict[tuple, list[int]] = {}
+        pools: dict[tuple, list[tuple[float, int]]] = {}
+        for i, other in enumerate(kept):
+            if other.ident:
+                ids.setdefault((other.ident, other.model, other.tin, other.tout), []).append(i)
+            if other.ts is not None:
+                pools.setdefault((other.model, other.tin, other.tout), []).append((other.ts, i))
+        for pool in pools.values():
+            pool.sort()
+
+        def take(i: int) -> None:                      # a kept row matched by this table leaves its pools
+            other = kept[i]
+            if other.ident and i in ids.get((other.ident, other.model, other.tin, other.tout), ()):
+                ids[(other.ident, other.model, other.tin, other.tout)].remove(i)
+            if other.ts is not None:
+                pool = pools[(other.model, other.tin, other.tout)]
+                del pool[bisect_left(pool, (other.ts, i))]
+
+        mine = by_table[table]
+        survivors: list[CallRow] = []
+        unmatched: list[CallRow] = []
+        for row in mine:                                # (1) by id
+            hit = ids.get((row.ident, row.model, row.tin, row.tout)) if row.ident else None
+            if hit:
+                take(hit[-1])
+                dropped.append(row)
+            else:
+                unmatched.append(row)
+        for row in sorted(unmatched, key=lambda r: (r.ts is None, r.ts or 0.0)):    # (2) by model, tokens, time
+            pool = pools.get((row.model, row.tin, row.tout)) if row.ts is not None else None
+            best: tuple[float, int] | None = None
+            if pool:
+                pos = bisect_left(pool, (row.ts, -1))
+                for cand in pool[max(0, pos - 1):pos + 1]:      # the pool is sorted: the nearest is a neighbour
+                    gap = abs(cand[0] - row.ts)
+                    if gap <= CALL_MATCH_WINDOW_S and (best is None or gap < abs(best[0] - row.ts)):
+                        best = cand
+            if best is not None:
+                take(best[1])
+                dropped.append(row)
+            else:
+                survivors.append(row)
+        kept.extend(survivors)
+    return dropped
+
+
+def _estimate_call_rows(con, bounds: Bounds) -> "list[CallRow]":
+    """Every production row behind the unverified estimate, per table, as :class:`CallRow` (the same
+    window, provenance and eligibility predicates ``money_window``'s sums use). The epoch is computed in
+    SQL (``strftime('%s')`` reads both spellings of the stamp, with or without a UTC offset), so no row
+    pays a Python date parse."""
+    from llm_router.savings import savings_split_sql
+
+    rows: list[CallRow] = []
+    epoch = "CAST(strftime('%s', timestamp) AS INTEGER)"
+
+    def add(table, sql, params):
+        for r in con.execute(sql, params):  # nosec B608 -- module constants, checked column names, bound params
+            rows.append(CallRow(table, r[0], str(r[1] or ""), int(r[2] or 0), int(r[3] or 0),
+                                str(r[4]) if r[4] else None, float(r[5] or 0.0)))
+
+    def col(cols, name, default="NULL"):
+        return name if name in cols else default
+
+    if _table_exists(con, _LEGACY_TABLE):
+        cols = _columns(con, _LEGACY_TABLE)
+        where, params = bounds.sql(cols)
+        # first in priority: its rows are never the dropped ones, so they carry no dollars here
+        add(_LEGACY_TABLE,
+            f"SELECT {epoch}, {col(cols, 'model')}, {col(cols, 'input_tokens', '0')}, {col(cols, 'output_tokens', '0')}, "
+            f"{col(cols, 'correlation_id')}, 0 FROM {_LEGACY_TABLE} "
+            f"WHERE success=1 AND (provider IS NULL OR provider NOT IN ('subscription', 'cache')) "
+            f"AND {not_error_row_sql(con)} AND {_production_pred(cols)} AND {where}", params)
+    if _table_exists(con, _JSONL_TABLE):
+        cols = _columns(con, _JSONL_TABLE)
+        _verified, unverified_sql, unverified_n_sql = savings_split_sql(cols)
+        where, params = bounds.sql(cols)
+        add(_JSONL_TABLE,
+            f"SELECT {epoch}, {col(cols, 'model_used')}, {col(cols, 'input_tokens', '0')}, {col(cols, 'output_tokens', '0')}, "
+            f"{col(cols, 'session_id')}, ({unverified_sql}) FROM {_JSONL_TABLE} "
+            f"WHERE ({unverified_n_sql}) = 1 AND {_production_pred(cols)} AND {where}", params)
+    for table in _PLATFORM_TABLES:
+        if not _table_exists(con, table):
+            continue
+        cols = _columns(con, table)
+        where, params = bounds.sql(cols)
+        add(table,
+            f"SELECT {epoch}, {col(cols, 'model')}, {col(cols, 'input_tokens', '0')}, {col(cols, 'output_tokens', '0')}, "
+            f"NULL, cost_saved_usd FROM {table} WHERE {_production_pred(cols)} AND {where}", params)
+    return rows
+
+
+def repeated_calls(con, bounds: Bounds) -> "list[CallRow]":
+    """The rows of ``bounds`` that repeat a call an earlier-priority table holds: what ``money_window`` takes
+    out of its estimate, for a reader (``dashboard_data.query_daily``) that sums the same rows by day."""
+    return duplicate_calls(_estimate_call_rows(con, bounds))
+
+
 def money_window(bounds: Bounds, *, db_path=None, timeout_s: float = 1.0) -> MoneyWindow:
     """Calls / tokens / saved dollars across ``usage``, the platform tables and ``savings_stats``
     (the body ``dashboard_data.query_window`` had), over ``bounds``. A missing database or table
     contributes zero. ``usage`` rows leave out failures, ``subscription`` provider, error rows
-    and cache rows (provider ``cache``: 0 tokens, $0, not a call anyone made)."""
+    and cache rows (provider ``cache``: 0 tokens, $0, not a call anyone made).
+
+    The estimate counts a CALL once (W8): the router records one local call in ``usage``,
+    ``claude_usage`` and ``savings_stats`` (one dated copy of ``usage.db``, newest row 2026-11-03 19:16:36Z:
+    the local day's 53 rows were 43 calls, the 10 repeats carrying 38% of the dollars; ``docs/bugs/MONEY3X-1.md``).
+    :func:`duplicate_calls` names the repeats; they leave ``unverified_usd`` and ``unverified_calls`` and are reported in
+    ``duplicate_calls`` / ``duplicate_usd``. ``calls``, ``tokens`` and ``by_source`` stay the raw per-table
+    sums."""
     from llm_router import pricing
     from llm_router.savings import VERIFIED_CALLS_SQL, savings_split_sql
 
@@ -617,6 +798,14 @@ def money_window(bounds: Bounds, *, db_path=None, timeout_s: float = 1.0) -> Mon
                 "verified_calls": int(row[6])}
             out.calls += int(row[0])
             out.tokens += tokens
+        try:                                       # one call, once: a failure here leaves the raw sums
+            gone = repeated_calls(con, bounds)
+        except sqlite3.Error:
+            gone = []
+        out.duplicate_calls = len(gone)
+        out.duplicate_usd = sum(r.usd for r in gone)
+        out.unverified_calls -= out.duplicate_calls
+        out.unverified_usd -= out.duplicate_usd
     except sqlite3.Error:
         return MoneyWindow()
     finally:
@@ -1209,6 +1398,10 @@ class LedgerWindow:
     subscription_n: int | None = None
     paid_n: int | None = None
     unclassified_n: int | None = None
+    # W8: ``subscription_n`` split by seat (``subscription_seat``): the Claude Code seat vs every other seat
+    # (Codex, Gemini CLI). None = unknown, and an older v2 cache has neither: a reader falls back to the one bucket.
+    subscription_claude_n: int | None = None
+    subscription_other_n: int | None = None
     # DEPRECATED (F121 / D-247): the merged verified + estimated sum and its n. Kept in the schema
     # so v2 cache files and external JSON readers keep parsing, and as the "usage db exists"
     # gate of the Stop hook. Never print it; read verified_* and unverified_* instead.
@@ -1254,6 +1447,8 @@ class LedgerWindow:
         for cls in CLASSES:
             out[f"mix_{cls}"] = fig(getattr(self, f"{cls}_n" if cls != "local" else "local_n"),
                                     self.n, self.source)
+        out["mix_subscription_claude"] = fig(self.subscription_claude_n, self.n, self.source)
+        out["mix_subscription_other"] = fig(self.subscription_other_n, self.n, self.source)
         for key in ("latency_p50", "latency_p95", "latency_p99"):
             lat = getattr(self, key)
             if lat is not None:
@@ -1363,6 +1558,7 @@ def window_summary(since: "str | Bounds | float | datetime | None" = "24h",
     lat, n_rec, n_tot = latency_figures(bounds, db_path=db_path)
     money = money_window(bounds, db_path=db_path) if _db_path(db_path).is_file() else None
     classes = classify_rows(rows, seat_obj, now=bounds.until_ts)
+    seat_split = split_subscription(rows, seat_obj, now=bounds.until_ts)
     counts: dict[str, int] = {}
     for provider, _a, _w in rows or ():
         counts[provider] = counts.get(provider, 0) + 1
@@ -1375,6 +1571,8 @@ def window_summary(since: "str | Bounds | float | datetime | None" = "24h",
         subscription_n=None if classes is None else classes["subscription"],
         paid_n=None if classes is None else classes["paid"],
         unclassified_n=None if classes is None else classes["unclassified"],
+        subscription_claude_n=None if seat_split is None else seat_split[SEAT_CLAUDE],
+        subscription_other_n=None if seat_split is None else seat_split[SEAT_OTHER],
         saved_usd=None if money is None else money.saved_usd,
         saved_n=None if money is None else money.saved_n,
         verified_usd=None if money is None else money.verified_usd,
@@ -1397,15 +1595,15 @@ def _saved_segments(lw: LedgerWindow) -> str:
         known = [(k, v) for k, v in (("est.", est), ("verified", ver)) if None not in v]
         if not known:
             return "est. saved n/a"
-        segs = [f"{k} saved ${u:,.2f} (n={n:,})" for k, (u, n) in known if n or u]
+        segs = [f"{k} saved ${u:,.2f} (n={n:,} calls)" for k, (u, n) in known if n or u]
         missing = "est." if None in est else "verified"
         return " · ".join(segs + [f"{missing} saved n/a"])
     segs = []
     if est[1] or est[0]:
-        segs.append(f"est. saved ${est[0]:,.2f} (n={est[1]:,})")
+        segs.append(f"est. saved ${est[0]:,.2f} (n={est[1]:,} calls)")
     if ver[1] or ver[0]:
-        segs.append(f"verified saved ${ver[0]:,.2f} (n={ver[1]:,})")
-    return " · ".join(segs) or "est. saved $0.00 (n=0)"
+        segs.append(f"verified saved ${ver[0]:,.2f} (n={ver[1]:,} calls)")
+    return " · ".join(segs) or "est. saved $0.00 (n=0 calls)"
 
 
 def format_line(lw: LedgerWindow) -> str:
@@ -1415,7 +1613,14 @@ def format_line(lw: LedgerWindow) -> str:
         return f"ledger {lw.window}: no execution data (usage.db and proxy ledger missing)"
     na = lambda v: "n/a" if v is None else f"{v}"                      # noqa: E731
     by = " ".join(f"{p} {n}" for p, n in lw.executed) or "none"
-    mix = (f"local {na(lw.local_n)} / subscription {na(lw.subscription_n)} / paid {na(lw.paid_n)}"
+    if None not in (lw.subscription_n, lw.subscription_claude_n, lw.subscription_other_n):
+        # W8: the Claude seat (what the router wants to spend less of) and every other seat (Codex, Gemini CLI)
+        # never share one number; an older cache without the split prints the one bucket
+        subscription = (f"subscription {lw.subscription_n} (Claude seat {lw.subscription_claude_n}"
+                        f" + other seats {lw.subscription_other_n})")
+    else:
+        subscription = f"subscription {na(lw.subscription_n)}"
+    mix = (f"local {na(lw.local_n)} / {subscription} / paid {na(lw.paid_n)}"
            + (f" / unclassified {lw.unclassified_n}" if lw.unclassified_n else ""))
     saved = _saved_segments(lw)
     return f"ledger {lw.window}: {na(lw.n)} executed ({by}) · mix {mix} · {saved}"

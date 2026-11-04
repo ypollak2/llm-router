@@ -1135,15 +1135,17 @@ def test_served_turn_with_ok_tool_result_is_routed_and_used(tmp_path, monkeypatc
         ("user", [_tr("toolu_lrA")], None),
     ], ["msg_lrA"])
     main = [u for u in units if u["kind"] == "claude_main_call"]
-    assert len(main) == 3  # denominator unchanged: one unit per assistant record
+    # W8 (D-364): a unit is one API MESSAGE, not one transcript record. The served message wrote two records
+    # (a text block and a tool_use block) and is one unit; the Claude message is the other.
+    assert len(main) == 2
     proxy = [u for u in main if u["lever"] == "proxy"]
     assert len(proxy) == 1  # one served call = one routed unit, however many records
     assert proxy[0]["outcome"] == "used" and proxy[0]["signal"] == "proxy_tool_result_ok"
     assert proxy[0]["model"] == "ollama/qwen3-coder:30b" and proxy[0]["task_type"] == "code"
     claude = [u for u in main if u["lever"] == "none"]
-    assert len(claude) == 2 and all(u["outcome"] == "not_routed" for u in claude)
+    assert len(claude) == 1 and all(u["outcome"] == "not_routed" for u in claude)
     kind = report["by_kind"]["claude_main_call"]
-    assert (kind["units"], kind["attempted"], kind["used"]) == (3, 1, 1)
+    assert (kind["units"], kind["attempted"], kind["used"]) == (2, 1, 1)
 
 
 @pytest.mark.parametrize("result,outcome,signal", [

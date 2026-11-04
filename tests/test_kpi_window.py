@@ -104,7 +104,7 @@ def test_ns_d1_units_outside_the_window_do_not_count(monkeypatch):
              + [unit(SINCE - 100 - i) for i in range(40)])
     seen_days = []
 
-    def fake_units(days=30, session_id=None, root=None, backfill=False):
+    def fake_units(days=30, session_id=None, root=None, backfill=False, **_):
         seen_days.append(days)
         return iter(units)
     monkeypatch.setattr(ns, "units", fake_units)

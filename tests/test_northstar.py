@@ -384,10 +384,12 @@ def test_report_schema_is_pinned(tmp_path):
     assert set(data["aggregate"].keys()) == {
         "n_sessions", "median", "p25", "max", "too_few",
         "strict_median", "strict_p25", "strict_max",  # P0.8-b: the NS user surfaces show
+        "strict_blind",  # D-364: sessions are measurable by n but no verdict reaches the strict numerator
     }
     assert set(data["sessions"][0].keys()) == {
         "session_id", "units", "used", "attempted", "unknown", "redo", "share",
         "strict_used", "strict_share",  # P0.8: the Stop line reads the strict rule
+        "strict_blind",  # D-364: no verdict among the session's units: strict_share is null, not 0
     }
     for kind in ns.ALL_KINDS:
         assert set(data["by_kind"][kind].keys()) == {"units", "attempted", "used", "redo", "unknown"}

@@ -255,12 +255,12 @@ def test_line_never_merges_estimate_and_verified():
                          unclassified_n=0, saved_usd=47.5, saved_n=6, verified_usd=0.5,
                          unverified_usd=47.0, verified_n=1, unverified_n=5)
     line = lw.line()
-    assert "est. saved $47.00 (n=5) · verified saved $0.50 (n=1)" in line, line
+    assert "est. saved $47.00 (n=5 calls) · verified saved $0.50 (n=1 calls)" in line, line
     assert "47.50" not in line and "n=6" not in line, line
     only_est = lv.LedgerWindow(as_of="x", window="24h", source="s", estimated=True, n=1,
                                saved_usd=2.0, saved_n=2, verified_usd=0.0, unverified_usd=2.0,
                                verified_n=0, unverified_n=2)
-    assert "est. saved $2.00 (n=2)" in only_est.line() and "verified" not in only_est.line()
+    assert "est. saved $2.00 (n=2 calls)" in only_est.line() and "verified" not in only_est.line()
     old_cache = lv.LedgerWindow(as_of="x", window="24h", source="s", estimated=True, n=1,
                                 saved_usd=2.5, saved_n=3)          # cache without the split
     assert "est. saved n/a" in old_cache.line() and "2.50" not in old_cache.line()
@@ -275,6 +275,6 @@ def test_saved_segments_half_unknown_split_prints_the_known_segment_and_na_for_t
 
     base = lv.LedgerWindow(as_of="T", source="usage", estimated=True, window="today", saved_usd=7.0, saved_n=6, unverified_usd=5.0, unverified_n=4,
                            verified_usd=None, verified_n=None)
-    assert lv._saved_segments(base) == "est. saved $5.00 (n=4) · verified saved n/a"
+    assert lv._saved_segments(base) == "est. saved $5.00 (n=4 calls) · verified saved n/a"
     flipped = replace(base, unverified_usd=None, unverified_n=None, verified_usd=2.0, verified_n=2)
-    assert lv._saved_segments(flipped) == "verified saved $2.00 (n=2) · est. saved n/a"
+    assert lv._saved_segments(flipped) == "verified saved $2.00 (n=2 calls) · est. saved n/a"
