@@ -1318,6 +1318,7 @@ class _AgentCall:
     result_text: str | None = None
     result_is_error: bool = False
     tur: object = None                # the result record's toolUseResult
+    tool_denial_kind: str | None = None  # the result record's toolDenialKind
 
 
 @dataclass
@@ -1346,6 +1347,7 @@ def _scan_agent_records(records, src_path: str | None, agents: _SessionAgents) -
                 if call is not None and call.src_path == src_path:
                     call.result_idx, call.result_text = i, _result_text(b)
                     call.result_is_error, call.tur = bool(b.get("is_error")), rec.get("toolUseResult")
+                    call.tool_denial_kind = rec.get("toolDenialKind")
 
 
 def _read_jsonl_matching(path: Path, needles: tuple[str, ...]):
@@ -1514,9 +1516,12 @@ def _codex_units(sessions, ns_rows, lo, hi) -> list[Unit]:
         marker = call.result_text is not None and carries_codex_text(call.result_text, hook_reason(stdout))
         # The deny SHAPE. When the transcript kept the hook's own stdout it must hold the current contract
         # (hookSpecificOutput.permissionDecision == "deny"); an honoured deny leaves no hook attachment, and
-        # then the harness's rendering of it is the evidence: an error result that opens "PreToolUse:Agent hook error".
+        # then the harness's rendering is the evidence: an error result that opens "PreToolUse:Agent hook error"
+        # or whose record has toolDenialKind == "permission-rule". Other denial kinds are not hook evidence.
         hj = hook_json(stdout) if stdout else None
-        rendered = bool(call.result_is_error) and (call.result_text or "").lstrip().startswith("PreToolUse:Agent hook error")
+        rendered = bool(call.result_is_error) and (
+            (call.result_text or "").lstrip().startswith("PreToolUse:Agent hook error")
+            or call.tool_denial_kind == "permission-rule")
         shape = is_deny_shape(hj) if hj is not None else rendered
         delivered = marker and shape and not launched
         # The same prompt asked again after a delivered result is the escape hatch (codex_reissue): the work was
