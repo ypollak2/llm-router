@@ -749,7 +749,10 @@ def parser():
     ap = argparse.ArgumentParser()
     default = h.parser().get_default("run_dir")
     ap.add_argument("--run-dir", type=Path, default=default)
-    ap.add_argument("--arm", required=True, choices=h.arms(h.STATIC, True))
+    ap.add_argument("--model", choices=tuple(h.AMEND6_MODELS), default=None,
+                    help="AMEND6: the local model under test (one run dir per model)")
+    ap.add_argument("--arm", required=True,
+                    choices=[*h.arms(h.STATIC, True), *h.AMEND6_MODELS])
     root = Path.home() / ".rsi/research"
     ap.add_argument("--noncloud-dir", type=Path,
                     default=root / "classifier-v2-release/ab/work/noncloud")
@@ -763,7 +766,7 @@ def parser():
 
 def main(argv=None, *, cfg=None):
     args = parser().parse_args(argv)
-    cfg = cfg or h.real_cfg(args.run_dir)
+    cfg = cfg or h.real_cfg(args.run_dir, args.model)
     try:
         # Imported research helpers may print model text; never forward their streams.
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):

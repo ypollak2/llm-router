@@ -284,7 +284,7 @@ def factory(tmp_path):
             git_sha=lambda: "deadbeef", amend1=run_dir / "AMEND1.md",
             amend2=run_dir / "AMEND2.md", amend3=run_dir / "AMEND3.md",
             amend4=run_dir / "AMEND4.md",
-            amend5=run_dir / "AMEND5.md",
+            amend5=run_dir / "AMEND5.md", amend6=run_dir / "AMEND6.md",
             gate=lambda constants: None,
         )
         pools = {s: pool_rows(s, 30 if small and s == "qa" else 75 if s == "code" else 130)
@@ -2263,3 +2263,314 @@ def test_sandbox_gitdir_unreadable_linked_gitdir_refuses(tmp_path):
             h.run_git(wt, "diff", "HEAD", sandbox=True)
     finally:
         gitdir.chmod(0o700)
+
+
+# AMEND6 (D-374): the local model under test is a per-run parameter; nothing else may change.
+AMEND6_PAST = "2030-03-01T00:00:00Z"
+MODELS6 = tuple(h.AMEND6_MODELS)
+BLOCK6_FREE_KEYS = {"REPO_SHA", "CODE_RUNNER_SHA256"}
+
+
+def amend6_text(**values):
+    block = {**h.AMEND6_FIXED, "REPO_SHA": "8" * 40, "CODE_RUNNER_SHA256": "d" * 64, **values}
+    return ("# AMEND6\n\n```text P20-AMEND6-CONSTANTS\n"
+            + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n")
+
+
+def freeze_amend6(cfg, *, text=None, date=AMEND6_PAST):
+    cfg.amend6.write_text(text if text is not None else amend6_text())
+    cfg.amend6.with_suffix(".sha256").write_text(
+        f"{h.sha256_file(cfg.amend6)}  {cfg.amend6.name}\nfrozen_utc {date}\n"
+    )
+
+
+def through_amend5(factory, label="run"):
+    cfg, c, pools = factory(label)
+    freeze_amend3(cfg, c)
+    freeze_amend4(cfg)
+    freeze_amend5(cfg)
+    return cfg, c, pools
+
+
+def with_model(cfg, model):
+    cfg = replace(cfg, model=model)
+    cfg.ollama.ids = {model: {h.AMEND6_MODELS[model]}}
+    return cfg
+
+
+def test_amend6_pins_match_the_prereg_and_the_machine():
+    assert h.AMEND6_MODELS == {"qwen3-coder:30b": h.CONSTANTS["ID_qwen3-coder:30b"],
+                               "qwen3.6:35b-a3b-coding": h.CONSTANTS["ID_qwen3.6:35b-a3b-coding"]}
+    assert set(h.AMEND6_MODELS) <= set(h.CONSTANTS["LOCAL_MODELS"].split(","))
+    assert h.QWEN38 not in h.AMEND6_MODELS
+
+
+@pytest.mark.parametrize("model", MODELS6)
+def test_amend6_changes_only_the_model_pins_and_the_two_sha_pins(factory, model):
+    cfg, c, _ = through_amend5(factory)
+    before = h.frozen(cfg)["constants"]
+    freeze_amend6(cfg)
+    got = h.frozen(with_model(cfg, model))
+    after = got["constants"]
+    changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
+    assert changed == {"LOCAL_MODELS", "CODE_LOCAL_MODELS", "SIZE_ORDER", "REPO_SHA",
+                       "CODE_RUNNER_SHA256", QWEN_ID, f"ID_{model}"}
+    assert after["LOCAL_MODELS"] == after["CODE_LOCAL_MODELS"] == after["SIZE_ORDER"] == model
+    assert {k: v for k, v in after.items() if k.startswith("ID_")} == {
+        f"ID_{model}": h.AMEND6_MODELS[model]}
+    assert after["REPO_SHA"] == "8" * 40 and after["CODE_RUNNER_SHA256"] == "d" * 64
+    assert "LOCAL_MODEL_CHOICES" not in after
+    # Items, pass bar, judge, reference, caps, plants and analysis keys are the AMEND5 values.
+    for key in ("SELECT_SEED", "N_TARGET_QA", "N_MIN", "JUDGE", "REFERENCE", "REPORT_ARMS",
+                "SPEND_CAP_USD", "G_MIN_PTS", "TIERS_WRITTEN", "QA_BASELINE", "REF_WINDOW",
+                "LOCAL_TIMEOUT_S", "RETRIES", "ANSWER_CAP_CHARS", "PLANTS_PASS_SHARE",
+                "MAX_REF_MISSING_SHARE", "QUIET_FREE_MEM_BASIS", "NIGHT_WINDOW"):
+        assert key in after and after[key] == before[key], key
+    for key in ("SELECT_SEED", "N_TARGET_QA", "N_MIN", "JUDGE", "REFERENCE", "REPORT_ARMS",
+                "SPEND_CAP_USD", "G_MIN_PTS", "TIERS_WRITTEN", "QA_BASELINE", "REF_WINDOW",
+                "LOCAL_TIMEOUT_S", "RETRIES", "ANSWER_CAP_CHARS", "PLANTS_PASS_SHARE",
+                "MAX_REF_MISSING_SHARE"):
+        assert after[key] == h.CONSTANTS[key], key  # the prereg's frozen value, word for word
+    assert after["SPEND_CAP_USD"] == "60.00" and after["JUDGE"] == "opus"
+    assert got["model"] == model and got["amend6_sha256"] == h.sha256_file(cfg.amend6)
+    assert got["amend6_frozen_utc"] == AMEND6_PAST
+
+
+KEYS_AMEND6_MAY_NOT_TOUCH = sorted(
+    (set(h.CONSTANTS) | set(h.FILL_KEYS)) - BLOCK6_FREE_KEYS
+    - {k for k in h.CONSTANTS if k.startswith("ID_")}
+) + ["LOCAL_MODEL_CHOICES2", "FITNESS_PASS_MARK2", "ID_qwen3.8-uncensored:latest"]
+
+
+def test_amend6_guard_list_covers_the_pass_bar_items_judge_and_caps():
+    # An empty or short list would pass everything (house rule 3): it must hold the real keys.
+    for key in ("SELECT_SEED", "N_TARGET_QA", "N_TARGET_TECH_OP", "N_MIN", "SESSION_CAP_SHARE",
+                "JUDGE", "REFERENCE", "REPORT_ARMS", "SPEND_CAP_USD", "FIRST_CALL_EST_USD",
+                "SAFETY_FACTOR", "G_MIN_PTS", "REF_WINDOW", "LOCAL_TIMEOUT_S", "REF_TIMEOUT_S",
+                "RETRIES", "ANSWER_CAP_CHARS", "JUDGE_CONTEXT_CAP_CHARS", "PLANTS_PASS_SHARE",
+                "REJUDGE_SHARE", "MAX_REF_MISSING_SHARE", "QA_TYPE_MIN_ITEMS", "TIERS_WRITTEN",
+                "QA_BASELINE", "QUIET_FREE_MEM_MIN_PCT", "QUIET_LOAD1_MAX", "POOL_QA_SHA256",
+                "POOL_CODE_SHA256", "N_REALISED_QA", "N_REALISED_CODE", "BUILD_MANIFEST_SHA256",
+                "GT_SPLIT_SHA256", "CLAUDE_OPUS_ID", "CLAUDE_SONNET_ID", "LABEL"):
+        assert key in KEYS_AMEND6_MAY_NOT_TOUCH, key
+    assert len(KEYS_AMEND6_MAY_NOT_TOUCH) > 60
+
+
+@pytest.mark.parametrize("key", KEYS_AMEND6_MAY_NOT_TOUCH)
+def test_amend6_refuses_every_other_constant(factory, key):
+    cfg, c, _ = through_amend5(factory)
+    value = h.CONSTANTS.get(key, "x")
+    freeze_amend6(cfg, text=amend6_text(**{key: value}))
+    with pytest.raises(h.Refuse, match="AMEND6 constants"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+@pytest.mark.parametrize("defect", [
+    dict(LOCAL_MODEL_CHOICES="qwen3-coder:30b"),
+    dict(LOCAL_MODEL_CHOICES="qwen3-coder:30b,qwen3.6:35b-a3b-coding,qwen3.5:latest"),
+    dict(LOCAL_MODEL_CHOICES=f"qwen3-coder:30b,{h.QWEN38}"),
+    {"ID_qwen3-coder:30b": "0" * 12},
+    {"ID_qwen3.6:35b-a3b-coding": "017eda0b7c34,2e16a80fe3d7"},
+    dict(REPO_SHA="zz"), dict(REPO_SHA="F" * 40), dict(REPO_SHA="8" * 39),
+    dict(CODE_RUNNER_SHA256="d" * 63), dict(CODE_RUNNER_SHA256="D" * 64),
+])
+def test_amend6_refuses_changed_or_malformed_values(factory, defect):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg, text=amend6_text(**defect))
+    with pytest.raises(h.Refuse, match="AMEND6 constants"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+@pytest.mark.parametrize("missing", ["LOCAL_MODEL_CHOICES", "ID_qwen3-coder:30b",
+                                     "ID_qwen3.6:35b-a3b-coding", "REPO_SHA",
+                                     "CODE_RUNNER_SHA256"])
+def test_amend6_refuses_a_missing_key(factory, missing):
+    cfg, c, _ = through_amend5(factory)
+    block = {**h.AMEND6_FIXED, "REPO_SHA": "8" * 40, "CODE_RUNNER_SHA256": "d" * 64}
+    del block[missing]
+    freeze_amend6(cfg, text="```text P20-AMEND6-CONSTANTS\n"
+                  + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n")
+    with pytest.raises(h.Refuse, match="AMEND6 constants"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_refuses_a_duplicate_key_and_a_missing_block(factory):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg, text=amend6_text().replace(
+        "```\n", f"REPO_SHA={'7' * 40}\n```\n", 1))
+    with pytest.raises(h.Refuse, match="AMEND6 constants"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+    freeze_amend6(cfg, text=amend6_text().replace("```text P20-AMEND6-CONSTANTS", "```text"))
+    with pytest.raises(h.Refuse, match="AMEND6 constants"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+@pytest.mark.parametrize("model", [None, "", h.QWEN38, "qwen3.5:latest", "gemma3:12b",
+                                   "qwen3-coder:30b ", "qwen3-coder", "sonnet",
+                                   "qwen3-coder:30b,qwen3.6:35b-a3b-coding"])
+def test_amend6_refuses_any_model_outside_the_two(factory, model):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    with pytest.raises(h.Refuse, match="AMEND6 requires --model"):
+        h.frozen(replace(cfg, model=model))
+
+
+@pytest.mark.parametrize("model", [MODELS6[0], h.QWEN38, "qwen3.5:latest"])
+def test_model_without_a_frozen_amend6_refuses(factory, model):
+    cfg, c, _ = through_amend5(factory)
+    cfg.amend6.write_text(amend6_text())  # a draft with no sidecar is inert
+    with pytest.raises(h.Refuse, match="--model requires a frozen AMEND6"):
+        h.frozen(replace(cfg, model=model))
+    assert "amend6_sha256" not in h.frozen(cfg)
+    assert h.frozen(cfg)["constants"]["LOCAL_MODELS"] == h.QWEN38
+
+
+def test_amend6_frozen_enforcement(factory):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    cfg = with_model(cfg, MODELS6[0])
+    good = h.frozen(cfg)["amend6_sha256"]
+    (cfg.run_dir / "PREREG-AMEND6.md").write_text("different")
+    with pytest.raises(h.Refuse, match="PREREG-AMEND6.md differs"):
+        h.frozen(cfg)
+    (cfg.run_dir / "PREREG-AMEND6.md").write_bytes(cfg.amend6.read_bytes())
+    assert h.frozen(cfg)["amend6_sha256"] == good
+    (cfg.run_dir / "PREREG-AMEND6.md").unlink()
+    for kwargs, message in [
+        (dict(date=AMEND5_PAST), "AMEND6 frozen_utc"),
+        (dict(date="2030-01-01T00:00:00Z"), "AMEND6 frozen_utc"),
+        (dict(date="2031-01-01T00:00:00Z"), "AMEND6 frozen_utc"),
+        (dict(date="2030-03-01T00:00:00"), "AMEND6 frozen_utc"),
+    ]:
+        freeze_amend6(cfg, **kwargs)
+        with pytest.raises(h.Refuse, match=message):
+            h.frozen(cfg)
+    freeze_amend6(cfg)
+    cfg.amend6.write_text(cfg.amend6.read_text() + " ")  # edited after the freeze
+    with pytest.raises(h.Refuse, match="AMEND6 is not frozen"):
+        h.frozen(cfg)
+    assert call(cfg, "select") == 2
+
+
+@pytest.mark.parametrize("missing", ["amend3", "amend4", "amend5"])
+def test_amend6_requires_the_whole_amendment_chain(factory, missing):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    getattr(cfg, missing).with_suffix(".sha256").unlink()
+    with pytest.raises(h.Refuse, match="requires a frozen AMEND"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_alone_refuses(factory):
+    cfg, c, _ = factory()
+    freeze_amend6(cfg)
+    with pytest.raises(h.Refuse, match="requires a frozen AMEND"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_earlier_amendments_still_refuse_when_tampered(factory):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    cfg.prereg.write_text(cfg.prereg.read_text() + "\nN_MIN=1\n")
+    with pytest.raises(h.Refuse, match="prereg is not frozen"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_cannot_change_a_constant_through_an_earlier_amendment_slot(factory):
+    """An AMEND5 block with the model keys or a pass-bar key is still refused."""
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    for extra in ({"LOCAL_MODELS": MODELS6[0]}, {"G_MIN_PTS": "0.0"}, {"JUDGE": "haiku"}):
+        freeze_amend5(cfg, text=amend5_text(**extra), date="2030-02-15T00:00:00Z")
+        with pytest.raises(h.Refuse, match="AMEND5 constants"):
+            h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_gate_receives_the_amend6_repo_sha(factory):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    seen = []
+    cfg = with_model(cfg, MODELS6[0])
+    cfg.gate = lambda constants: seen.append(constants["REPO_SHA"])
+    assert call(cfg, "status") == 0 and seen == ["8" * 40]
+    assert call(cfg, "select") == 0 and seen == ["8" * 40, "8" * 40]
+
+
+def test_amend6_status_without_a_model_is_not_frozen(factory, capsys):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    assert call(cfg, "status") == 0
+    assert json.loads(capsys.readouterr().out)["frozen"] is False
+
+
+def test_amend6_binds_a_run_dir_to_one_model(factory):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    first = with_model(cfg, MODELS6[0])
+    assert call(first, "select") == 0
+    rows = h.uses(first)
+    assert [r[2] for r in rows if r[0] == "model"] == [f"model={MODELS6[0]}"]
+    assert [r[0] for r in rows].index("model") < [r[0] for r in rows].index("selected")
+    assert h.frozen(first)["model"] == MODELS6[0]
+    with pytest.raises(h.Refuse, match="bound to another model"):
+        h.frozen(with_model(cfg, MODELS6[1]))
+    assert call(with_model(cfg, MODELS6[1]), "run", "--set", "qa") == 2
+    assert not first.ollama.calls and not cfg.claude.calls
+
+
+def test_amend6_refuses_a_run_dir_selected_before_it_existed(factory):
+    """The qwen3.8 run dir (b2) has a selection and no model line: it cannot be reused."""
+    cfg, c, _ = through_amend5(factory)
+    assert call(cfg, "select") == 0
+    freeze_amend6(cfg)
+    with pytest.raises(h.Refuse, match="selected without an AMEND6 model"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_select_without_a_model_line_is_the_same_as_before(factory):
+    cfg, c, _ = through_amend5(factory)
+    assert call(cfg, "select") == 0
+    assert not [r for r in h.uses(cfg) if r[0] == "model"]
+
+
+@pytest.mark.parametrize("model", MODELS6)
+def test_amend6_run_uses_the_pinned_model_and_refuses_the_others(factory, model):
+    cfg, c, _ = through_amend5(factory, "r")
+    freeze_amend6(cfg)
+    cfg = with_model(cfg, model)
+    assert call(cfg, "select") == 0
+    for other in (h.QWEN38, "qwen3.5:latest", *(m for m in MODELS6 if m != model)):
+        assert call(cfg, "run", "--set", "qa", "--arms", other) == 2
+    assert not cfg.ollama.calls and not cfg.claude.calls
+    cfg.ollama.ids = {model: {"ffffffffffff"}}
+    assert call(cfg, "run", "--set", "qa", "--arms", model) == 2  # identity differs: not a result
+    assert not cfg.ollama.calls
+    cfg.ollama.ids = {model: {h.AMEND6_MODELS[model]}}
+    assert call(cfg, "run", "--set", "qa", "--arms", model) == 0
+    rows = h.jsonl(cfg.run_dir / "answers/qa.jsonl")
+    assert rows and {r["arm"] for r in rows} == {model}
+    assert {call_[0] for call_ in cfg.ollama.calls} == {model}
+    assert all(call_[3]["temperature"] == 0 for call_ in cfg.ollama.calls)
+    assert all(t is False for t in cfg.ollama.thinks)  # AMEND2's think:false is unchanged
+
+
+@pytest.mark.parametrize("model", MODELS6)
+def test_amend6_score_log_records_the_hash_and_the_model(factory, model):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    cfg = with_model(cfg, model)
+    assert call(cfg, "select") == 0 and call(cfg, "score") == 0
+    started = next(row for row in h.uses(cfg) if row[0] == "started")
+    assert f"amend6_sha256={h.sha256_file(cfg.amend6)}" in started
+    assert f"model={model}" in started
+    assert f"amend5_sha256={h.sha256_file(cfg.amend5)}" in started
+
+
+def test_amend6_parser_takes_only_the_two_models(capsys):
+    ap = h.parser()
+    assert ap.parse_args(["--model", MODELS6[1], "status"]).model == MODELS6[1]
+    assert ap.parse_args(["status"]).model is None
+    for bad in (h.QWEN38, "qwen3.5:latest", "sonnet"):
+        with pytest.raises(SystemExit):
+            ap.parse_args(["--model", bad, "status"])
+    capsys.readouterr()

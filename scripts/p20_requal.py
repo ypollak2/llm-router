@@ -40,6 +40,7 @@ AMEND2 = REPO / "docs/prereg/PREREG-P20-requal-AMEND2.md"
 AMEND3 = REPO / "docs/prereg/PREREG-P20-requal-AMEND3.md"
 AMEND4 = REPO / "docs/prereg/PREREG-P20-requal-AMEND4.md"
 AMEND5 = REPO / "docs/prereg/PREREG-P20-requal-AMEND5.md"
+AMEND6 = REPO / "docs/prereg/PREREG-P20-requal-AMEND6.md"
 # AMEND3 (D-202): the exclusive lock a local model call holds; the P2.0-T harness takes the same
 # one (fcntl.flock LOCK_EX on this path). Tests point Cfg.lock_path or this name elsewhere.
 OLLAMA_LOCK = Path.home() / ".rsi/research/primary-plan/v16/requal/ollama.lock"
@@ -140,6 +141,14 @@ AMEND4_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}"}
 # qwen3.8 at 32k context takes ~51% of RAM, so the raw floor parked every call after warm-up).
 AMEND5_FIXED = {"QUIET_FREE_MEM_BASIS": "excl_own_arm"}
 AMEND5_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}"}
+# AMEND6 (D-374): the local arm under test is a per-run parameter (`--model`), limited to the two
+# models below, one run dir per model. AMEND2's qwen3.8 pin is replaced for that run and nothing
+# else changes: items, pass bar, judge, caps and analysis are the prereg's. REPO_SHA and
+# CODE_RUNNER_SHA256 are re-pinned because the runner and harness changed.
+AMEND6_MODELS = {"qwen3-coder:30b": "06c1097efce0", "qwen3.6:35b-a3b-coding": "017eda0b7c34"}
+AMEND6_FIXED = {"LOCAL_MODEL_CHOICES": ",".join(AMEND6_MODELS),
+                **{f"ID_{model}": pin for model, pin in AMEND6_MODELS.items()}}
+AMEND6_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}", "CODE_RUNNER_SHA256": r"[0-9a-f]{64}"}
 
 
 def amended(constants: dict, overrides: dict) -> dict:
@@ -469,6 +478,57 @@ def frozen(cfg: Cfg) -> dict:
         raise Refuse("refusing: AMEND4 requires a frozen AMEND3")
     elif cfg.amend5.with_suffix(".sha256").exists():
         raise Refuse("refusing: AMEND5 requires a frozen AMEND4")
+    if cfg.amend6.with_suffix(".sha256").exists():
+        # AMEND6 (D-374) is in force as soon as its sidecar exists; a draft without one is not.
+        if "amend5_sha256" not in out:
+            raise Refuse("refusing: AMEND6 requires a frozen AMEND5")
+        try:
+            sixth = check_prereg.check(cfg.amend6)
+            if not sixth["match"]:
+                raise ValueError("freeze")
+            sixth_text = cfg.amend6.read_text()
+        except (OSError, ValueError, IndexError, OverflowError) as exc:
+            raise Refuse("refusing: AMEND6 is not frozen") from exc
+        try:
+            sixth_epoch = datetime.fromisoformat(sixth["frozen_utc"].replace("Z", "+00:00"))
+            if (sixth_epoch.tzinfo is None
+                    or not fifth_epoch.timestamp() < sixth_epoch.timestamp() < cfg.now()):
+                raise ValueError("freeze order")
+        except (ValueError, OverflowError) as exc:
+            raise Refuse("refusing: AMEND6 frozen_utc") from exc
+        try:
+            sixth_overrides = parse_block(sixth_text, "```text P20-AMEND6-CONSTANTS")
+            if (sixth_overrides.keys() != AMEND6_FIXED.keys() | AMEND6_SHA_KEYS.keys()
+                    or any(sixth_overrides[k] != v for k, v in AMEND6_FIXED.items())
+                    or not all(re.fullmatch(pattern, sixth_overrides[k])
+                               for k, pattern in AMEND6_SHA_KEYS.items())):
+                raise ValueError("constants")
+        except (Refuse, ValueError) as exc:
+            raise Refuse("refusing: AMEND6 constants") from exc
+        sixth_copy = cfg.run_dir / "PREREG-AMEND6.md"
+        if sixth_copy.exists() and sixth_copy.read_bytes() != cfg.amend6.read_bytes():
+            raise Refuse("refusing: PREREG-AMEND6.md differs")
+        if cfg.model not in AMEND6_MODELS:
+            raise Refuse("refusing: AMEND6 requires --model " + " or ".join(AMEND6_MODELS))
+        rows = uses(cfg)
+        bound = {x[len("model="):] for row in rows if row and row[0] == "model"
+                 for x in row[2:] if x.startswith("model=")}
+        if bound - {cfg.model}:
+            raise Refuse("refusing: run dir is bound to another model")
+        if not bound and any(row and row[0] == "selected" for row in rows):
+            raise Refuse("refusing: run dir was selected without an AMEND6 model")
+        # One model per run: AMEND2's qwen3.8 pin and every other ID_ pin are replaced.
+        constants = {k: v for k, v in constants.items() if not k.startswith("ID_")}
+        constants.update(
+            LOCAL_MODELS=cfg.model, CODE_LOCAL_MODELS=cfg.model, SIZE_ORDER=cfg.model,
+            REPO_SHA=sixth_overrides["REPO_SHA"],
+            CODE_RUNNER_SHA256=sixth_overrides["CODE_RUNNER_SHA256"],
+            **{f"ID_{cfg.model}": AMEND6_MODELS[cfg.model]},
+        )
+        out.update(amend6_sha256=sixth["sha256"], amend6_frozen_utc=sixth["frozen_utc"],
+                   model=cfg.model)
+    elif cfg.model is not None:
+        raise Refuse("refusing: --model requires a frozen AMEND6")
     out["constants"] = constants
     return out
 
@@ -532,6 +592,8 @@ class Cfg:
     amend3: Path = AMEND3
     amend4: Path = AMEND4
     amend5: Path = AMEND5
+    amend6: Path = AMEND6
+    model: str | None = None
     lock_path: Path | None = None
     local_used: set = dc_field(default_factory=set)
     gate: Callable[[dict], None] | None = None
@@ -1453,6 +1515,8 @@ def select(cfg: Cfg, c: dict, dry_run: bool = False) -> dict:
         if selected[name]["n"] != int(c[f"N_REALISED_{name.upper()}"]):
             raise Refuse(f"refusing: N_REALISED_{name.upper()} differs")
         selected[name]["pool_sha256"] = pool_hash
+    if cfg.model is not None:  # AMEND6: this run dir now belongs to one model
+        append_use(cfg, "model", f"model={cfg.model}")
     for name in SETS:
         if selected[name]["n"] < int(c["N_MIN"]):
             append_use(cfg, "terminal", f"{name} n_min")
@@ -1927,6 +1991,8 @@ def score(cfg: Cfg, c: dict, freeze: dict, measurement: Path | None = None) -> d
               **({"amend3_sha256": freeze["amend3_sha256"]} if "amend3_sha256" in freeze else {}),
               **({"amend4_sha256": freeze["amend4_sha256"]} if "amend4_sha256" in freeze else {}),
               **({"amend5_sha256": freeze["amend5_sha256"]} if "amend5_sha256" in freeze else {}),
+              **({"amend6_sha256": freeze["amend6_sha256"], "model": freeze["model"]}
+                 if "amend6_sha256" in freeze else {}),
               "git_sha": cfg.git_sha(),
               "selection_sha256": optional_hash(cfg.run_dir / "selection.json"),
               "answers_sha256": combined_hash(cfg, "answers"),
@@ -2242,6 +2308,8 @@ def parser() -> argparse.ArgumentParser:
         Path.home() / ".rsi/research/primary-plan/v16/requal/b2",
     ))
     ap.add_argument("--run-dir", type=Path, default=Path(default))
+    ap.add_argument("--model", choices=tuple(AMEND6_MODELS), default=None,
+                    help="AMEND6: the local model under test (one run dir per model)")
     sub = ap.add_subparsers(dest="command", required=True)
     sub.add_parser("select").add_argument("--dry-run", action="store_true")
     for command in ("run", "judge"):
@@ -2264,18 +2332,18 @@ def parser() -> argparse.ArgumentParser:
     return ap
 
 
-def real_cfg(run_dir: Path) -> Cfg:
+def real_cfg(run_dir: Path, model: str | None = None) -> Cfg:
     def git_sha() -> str:
         return subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=60, check=True).stdout.strip()
 
     return Cfg(run_dir, ollama=OllamaHTTP(), claude=ClaudeCLI(run_dir), machine=Machine(),
-               quota=read_quota, git_sha=git_sha)
+               quota=read_quota, git_sha=git_sha, model=model)
 
 
 def main(argv: list[str] | None = None, *, cfg: Cfg | None = None) -> int:
     args = parser().parse_args(argv)
-    cfg = cfg or real_cfg(args.run_dir)
+    cfg = cfg or real_cfg(args.run_dir, args.model)
     try:
         prefreeze = args.command == "status" or (args.command == "select" and args.dry_run)
         freeze = None if prefreeze else frozen(cfg)

@@ -358,12 +358,56 @@ def test_code_gate_before_agent(setup, monkeypatch):
     assert before == {p: p.read_bytes() for p in cfg.run_dir.rglob("*") if p.is_file()}
 
 
-def test_arm_choices_are_amend2(setup):
+def test_arm_choices_are_amend2_plus_the_two_amend6_models(setup):
     action = next(a for a in r.parser()._actions if a.dest == "arm")
-    assert action.choices == [h.QWEN38, "sonnet"]
-    for old in ("qwen3.6:35b-a3b-coding", "qwen3-coder:30b"):
+    assert action.choices == [h.QWEN38, "sonnet", "qwen3-coder:30b", "qwen3.6:35b-a3b-coding"]
+    for old in ("qwen3.5:latest", "gemma3:12b", "haiku"):
         with pytest.raises(SystemExit):
             r.parser().parse_args(["--arm", old])
+    model = next(a for a in r.parser()._actions if a.dest == "model")
+    assert tuple(model.choices) == tuple(h.AMEND6_MODELS) and model.default is None
+    for bad in (h.QWEN38, "qwen3.5:latest", "sonnet"):
+        with pytest.raises(SystemExit):
+            r.parser().parse_args(["--arm", "sonnet", "--model", bad])
+
+
+def freeze_amend6_run(env, model):
+    """The setup's run dir, frozen through AMEND6 for `model` (the run dir is bound to it)."""
+    cfg, c, *_ = env
+    support.freeze_amend3(cfg, c)
+    support.freeze_amend4(cfg)
+    support.freeze_amend5(cfg)
+    support.freeze_amend6(cfg, text=support.amend6_text(
+        CODE_RUNNER_SHA256=h.sha256_file(Path(r.__file__))))
+    h.append_use(cfg, "model", f"model={model}")
+    cfg = replace(cfg, model=model)
+    cfg.ollama.ids = {model: {h.AMEND6_MODELS[model]}}
+    return cfg
+
+
+@pytest.mark.parametrize("model", support.MODELS6)
+def test_amend6_code_runner_runs_the_pinned_model_only(setup, model):
+    cfg = freeze_amend6_run(setup, model)
+    argv = setup[2]
+    other = next(m for m in support.MODELS6 if m != model)
+    for arm in (other, h.QWEN38):
+        assert r.main([*argv, "--model", model, "--arm", arm], cfg=cfg) == 2
+    assert pi_calls(setup) == 0 and not rows(setup)
+    assert r.main([*argv, "--model", model, "--arm", model], cfg=cfg) == 0
+    got = rows(setup)
+    assert got and {row["arm"] for row in got} == {model}
+    cfg.ollama.ids = {model: {"ffffffffffff"}}
+    assert r.main([*argv, "--model", other, "--arm", other], cfg=replace(cfg, model=other)) == 2
+
+
+def pi_calls(env):
+    return env[4].calls
+
+
+def test_amend6_code_runner_without_a_model_is_refused(setup):
+    cfg = freeze_amend6_run(setup, support.MODELS6[0])
+    assert r.main([*setup[2], "--arm", support.MODELS6[0]], cfg=replace(cfg, model=None)) == 2
+    assert pi_calls(setup) == 0 and not rows(setup)
 
 
 def test_pi_agent_thinking_off(setup):
