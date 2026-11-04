@@ -624,23 +624,34 @@ def check_and_update_hooks() -> list[str]:
     return updates
 
 
-# The rules section that teaches the text-job placeholder (`git commit -m "${LLM_TEXT:?}"`) is wrapped in
-# these markers in the template and rendered only when BOTH hold:
+# The rules section that teaches the text-job placeholder (`git commit -m "${LLM_TEXT:?}"`, and for a pull
+# request `gh pr create ... --body "${LLM_TEXT:?}"`) is marked up in the template and rendered per part.
+# The commit part is rendered only when ALL hold:
 #   (a) settings.json registers the text-job-bind hook. Why: pip upgrades refresh the rules but never
 #       register hooks, and a model taught the placeholder without the hook writes commands the shell
 #       aborts (`LLM_TEXT: parameter not set`);
 #   (b) a passed local-check lane exists for commit_message. Why: without one the hook denies every
-#       first placeholder commit (`no_lane`) after a few seconds, and nothing tells the model to stop.
-# Otherwise the plain text-job guidance is what the file says.
+#       placeholder commit (`no_lane`) right away, and nothing tells the model to stop;
+#   (c) LLM_ROUTER_LOCAL_TEXT_JOBS is not set to an "off" value, the same test the hook makes (`flag_off`).
+# The pull-request part also needs a passed pr_description lane. Otherwise the plain text-job guidance is
+# what the file says; with only a commit lane it says pull request bodies are written normally.
+#
+# Marker lines in the template (each on a line of its own, never shown to the model):
+#   <!-- llm_router-text-job-bind:begin commit -->   kept when the commit part is wanted
+#   <!-- llm_router-text-job-bind:begin pr -->       kept when the pull-request part is wanted too
+#   <!-- llm_router-text-job-bind:begin no-pr -->    kept when only the commit part is wanted
+#   <!-- llm_router-text-job-bind:end -->            closes the innermost region; regions nest
 _TEXT_JOB_BIND_HOOK = "llm_router-text-job-bind.py"
 _TEXT_JOB_BIND_LANE_JOB = "commit_message"
+_TEXT_JOB_BIND_PR_LANE_JOB = "pr_description"
 #: A typical job input, for the lane's "input fits" guard (a lane measured on small prompts only is not one).
 _TEXT_JOB_BIND_TYPICAL_INPUT_CHARS = 8000
-_BIND_MARK = "<!-- llm_router-text-job-bind:{} -->\n"
-_BIND_REGION_RE = re.compile(
-    re.escape(_BIND_MARK.format("begin")) + r".*?" + re.escape(_BIND_MARK.format("end")) + r"\n?", re.S
-)
-_BIND_MARKER_LINE_RE = re.compile(r"^<!-- llm_router-text-job-bind:(?:begin|end) -->\n", re.M)
+#: The hook's own switch (text_job_bind.engine): set to anything but these, local text jobs are off.
+_TEXT_JOB_BIND_FLAG = "LLM_ROUTER_LOCAL_TEXT_JOBS"
+_TEXT_JOB_BIND_FLAG_ON = frozenset({"1", "true", "on", "yes"})
+#: What only the pull-request part of the rules contains (the example line).
+_TEXT_JOB_BIND_PR_EXAMPLE = "gh pr create"
+_BIND_MARKER_LINE_RE = re.compile(r"^<!-- llm_router-text-job-bind:(?:begin (?P<cond>[a-z-]+)|end) -->$", re.M)
 
 
 def text_job_bind_registered() -> bool:
@@ -664,42 +675,85 @@ def text_job_bind_registered() -> bool:
     return False
 
 
-def text_job_bind_lane_available() -> bool:
-    """True when a passed local-check lane for commit_message is usable right now. Read-only.
+def text_job_bind_flag_off() -> bool:
+    """True when LLM_ROUTER_LOCAL_TEXT_JOBS is set to anything but 1/true/on/yes (the hook's own test).
 
-    The router's own check (``eligibility_routing.passed_lane_available``): files only (``local_routing.json``,
-    ``local_eligibility.json``, the discovery cache's digests), no HTTP and no model call. It imports the
-    router's provider module only when an enabled passed lane exists to be checked against the router's
-    context settings. Any failure counts as "no lane": the plain guidance, never an exception.
+    Read from the process environment only; no .env is read here (the MCP server has loaded its own).
     """
+    raw = os.environ.get(_TEXT_JOB_BIND_FLAG, "").strip().lower()
+    return bool(raw) and raw not in _TEXT_JOB_BIND_FLAG_ON
+
+
+def text_job_bind_lane_available(job: str = _TEXT_JOB_BIND_LANE_JOB) -> bool:
+    """True when local text jobs are not switched off and a passed local-check lane for ``job`` is usable now.
+
+    Read-only. The lane test is the router's own (``eligibility_routing.passed_lane_available``): files only
+    (``local_routing.json``, ``local_eligibility.json``, the discovery cache's digests), no HTTP and no model
+    call. It imports the router's provider module only when an enabled passed lane exists to be checked
+    against the router's context settings. Any failure counts as "no lane": plain guidance, never an exception.
+    """
+    if text_job_bind_flag_off():
+        return False
     try:
         from llm_router import eligibility_routing
 
         return bool(
-            eligibility_routing.passed_lane_available(
-                _TEXT_JOB_BIND_LANE_JOB, _TEXT_JOB_BIND_TYPICAL_INPUT_CHARS, time.time()
-            )
+            eligibility_routing.passed_lane_available(job, _TEXT_JOB_BIND_TYPICAL_INPUT_CHARS, time.time())
         )
     except Exception:  # noqa: BLE001 — a lane check that fails is "no lane"
         return False
 
 
-def text_job_bind_section_wanted() -> bool:
-    """The rules teach the placeholder only while the hook is registered AND a passed lane exists."""
-    return text_job_bind_registered() and text_job_bind_lane_available()
+def text_job_bind_parts() -> tuple[bool, bool]:
+    """(commit part, pull-request part) of the placeholder rules to render now.
+
+    The commit part needs the hook registered and a passed commit_message lane (and the off switch not set);
+    the pull-request part needs a passed pr_description lane as well. A hook that is not registered decides
+    it before any lane is looked up.
+    """
+    if not text_job_bind_registered() or not text_job_bind_lane_available(_TEXT_JOB_BIND_LANE_JOB):
+        return False, False
+    return True, text_job_bind_lane_available(_TEXT_JOB_BIND_PR_LANE_JOB)
+
+
+def _render_text_job_bind_blocks(text: str, *, commit: bool, pr: bool) -> str:
+    """Apply the marker regions of the template. Pure; marker lines never reach the output.
+
+    A dropped region leaves no extra blank line behind. A marker line it does not know drops its region.
+    """
+    keep = {"commit": commit, "pr": commit and pr, "no-pr": commit and not pr}
+    out: list[str] = []
+    stack: list[bool] = []
+    dropped = False
+    for line in text.splitlines(keepends=True):
+        m = _BIND_MARKER_LINE_RE.match(line.rstrip("\r\n"))
+        if m:
+            if m.group("cond"):
+                stack.append(keep.get(m.group("cond"), False))
+            elif stack:
+                stack.pop()
+            continue
+        if not all(stack):
+            dropped = True
+            continue
+        if dropped and not line.strip() and out and not out[-1].strip():
+            dropped = False
+            continue
+        dropped = False
+        out.append(line)
+    return "".join(out)
 
 
 def _render_text_job_bind_section(text: str) -> str:
-    """Keep (markers dropped) or remove every marked placeholder region, by ``text_job_bind_section_wanted``.
+    """The template with its placeholder regions kept or dropped by ``text_job_bind_parts``.
 
     A template without markers (every other host's rules) is returned untouched, without reading settings
     or checking a lane.
     """
     if not _BIND_MARKER_LINE_RE.search(text):
         return text
-    if text_job_bind_section_wanted():
-        return _BIND_MARKER_LINE_RE.sub("", text)
-    return _BIND_REGION_RE.sub("", text)
+    commit, pr = text_job_bind_parts()
+    return _render_text_job_bind_blocks(text, commit=commit, pr=pr)
 
 
 def _localized_rules_text(src: Path) -> str:
@@ -711,10 +765,11 @@ def _localized_rules_text(src: Path) -> str:
     session, to make a call that fails. Localizing at install/refresh time is the
     right boundary: the file is re-synced on upgrade and by the server at startup.
 
-    The text-job placeholder section is rendered only when the text-job-bind hook is registered AND a
-    passed commit_message lane exists (``text_job_bind_section_wanted``). The result therefore depends on
-    settings.json and on the local-check state, which is why callers compare the rendered text with the
-    installed text rather than a version number. This function only reads; it never writes settings.
+    The text-job placeholder section is rendered per part (``text_job_bind_parts``): the commit part only
+    while the text-job-bind hook is registered AND a passed commit_message lane exists AND the off switch
+    is not set; the pull-request part also needs a passed pr_description lane. The result therefore depends
+    on settings.json, the local-check state and the environment, which is why callers compare the rendered
+    text with the installed text rather than a version number. This function only reads; it never writes.
     """
     text = _render_text_job_bind_section(src.read_text(encoding="utf-8"))
     try:
@@ -732,14 +787,14 @@ class TextJobBindGap(NamedTuple):
 
 
 def text_job_bind_rules_gap() -> TextJobBindGap | None:
-    """Compare the installed rules file with the hook registration and the lane. Read-only; None when consistent.
+    """Compare the installed rules file with the hook registration, the switch and the lanes. Read-only.
 
-    danger: the rules teach the placeholder but the hook is not registered or its file is missing, so
-            every placeholder commit or PR aborts with ``LLM_TEXT: parameter not set``.
-    info:   the hook is registered but the rules are plain (no passed lane for commit_message yet, or the
-            rules have not been refreshed since one appeared), or the rules teach the placeholder while
-            the lane is gone (each placeholder commit is denied ``no_lane`` until the rules refresh).
-            Nothing aborts in these cases.
+    None when they agree and nothing is left to do.
+    danger: the rules teach a placeholder (either part) but the hook is not registered or its file is
+            missing, so every placeholder commit or PR aborts with ``LLM_TEXT: parameter not set``.
+    info:   the hook is registered but the rules differ from what would be rendered now, or render the
+            commit part only. Nothing aborts: a placeholder the hook cannot serve is denied at once
+            (``no_lane`` / ``flag_off``) and the model writes the text itself.
     """
     rules = rules_dir() / "llm_router.md"
     try:
@@ -747,6 +802,7 @@ def text_job_bind_rules_gap() -> TextJobBindGap | None:
     except OSError:
         return None  # no rules installed: a different finding, reported elsewhere
     teaches = PLACEHOLDER in text
+    teaches_pr = teaches and _TEXT_JOB_BIND_PR_EXAMPLE in text
     registered = text_job_bind_registered()
     hook_file = hooks_dst() / _TEXT_JOB_BIND_HOOK
     if teaches and not (registered and hook_file.is_file()):
@@ -764,30 +820,64 @@ def text_job_bind_rules_gap() -> TextJobBindGap | None:
         )
     if not registered:
         return None
-    lane = text_job_bind_lane_available()
-    if teaches and not lane:
+    refresh = "restart the MCP server or run `llm-router install` to refresh the rules"
+    job = _TEXT_JOB_BIND_LANE_JOB
+    pr_job = _TEXT_JOB_BIND_PR_LANE_JOB
+    if text_job_bind_flag_off():
+        off = f"{_TEXT_JOB_BIND_FLAG} turns local text jobs off here"
+        if teaches:
+            return TextJobBindGap(
+                "info",
+                f"{rules} teaches the placeholder but {off}, so each placeholder command is denied (flag_off)",
+                f"{refresh} without the section, or unset {_TEXT_JOB_BIND_FLAG}",
+            )
         return TextJobBindGap(
             "info",
-            f"{rules} teaches the placeholder but no passed lane for {_TEXT_JOB_BIND_LANE_JOB} exists now, so "
-            "each placeholder commit is denied (no_lane) after a few seconds",
-            "restart the MCP server or run `llm-router install` to refresh the rules without the section; "
-            "`llm-router local-check` creates the lane",
+            f"hook registered, rules plain: {off}, so the model writes commit messages and PR bodies itself",
+            f"unset {_TEXT_JOB_BIND_FLAG}; the rules add the placeholder section at the next MCP server start",
         )
-    if not teaches and not lane:
+    if not text_job_bind_lane_available(job):
+        if teaches:
+            return TextJobBindGap(
+                "info",
+                f"{rules} teaches the placeholder but no passed lane for {job} exists now, so "
+                "each placeholder command is denied (no_lane)",
+                f"{refresh} without the section; `llm-router local-check` creates the lane",
+            )
         return TextJobBindGap(
             "info",
-            f"hook registered, rules plain: no passed lane for {_TEXT_JOB_BIND_LANE_JOB} yet, so the model "
+            f"hook registered, rules plain: no passed lane for {job} yet, so the model "
             "still writes commit messages and PR bodies itself",
             "run `llm-router local-check`; the rules add the placeholder section at the next MCP server start",
         )
     if not teaches:
         return TextJobBindGap(
             "info",
-            f"the text-job-bind hook is registered and a passed lane for {_TEXT_JOB_BIND_LANE_JOB} exists, but "
+            f"the text-job-bind hook is registered and a passed lane for {job} exists, but "
             f"{rules} does not teach the placeholder yet, so the model still writes commit messages itself",
-            "restart the MCP server or run `llm-router install` to refresh the rules",
+            refresh,
         )
-    return None
+    if text_job_bind_lane_available(pr_job):
+        if not teaches_pr:
+            return TextJobBindGap(
+                "info",
+                f"a passed lane for {pr_job} exists but {rules} teaches the commit placeholder only, so the "
+                "model still writes PR bodies itself",
+                refresh,
+            )
+        return None
+    if teaches_pr:
+        return TextJobBindGap(
+            "info",
+            f"{rules} teaches the PR placeholder but no passed lane for {pr_job} exists now, so each "
+            "`gh pr create` placeholder is denied (no_lane)",
+            f"{refresh} without the PR part; `llm-router local-check` creates the lane",
+        )
+    return TextJobBindGap(
+        "info",
+        f"rules teach commit messages only: no passed lane for {pr_job} yet, so PR bodies are written normally",
+        "run `llm-router local-check`; the rules add the PR part at the next MCP server start",
+    )
 
 
 def _rules_content_differs(src: Path, dst: Path, rendered: str | None = None) -> bool:
@@ -861,9 +951,16 @@ def check_and_update_rules() -> str | None:
             _why = (
                 "added: hook registered and a passed commit_message lane"
                 if PLACEHOLDER in rendered
-                else "removed: hook not registered or no passed commit_message lane"
+                else "removed: hook not registered, no passed commit_message lane, or local text jobs off"
             )
             return f"Refreshed routing rules (text-job placeholder section {_why}){_where}"
+        if (_TEXT_JOB_BIND_PR_EXAMPLE in rendered) != (_TEXT_JOB_BIND_PR_EXAMPLE in _before):
+            _why = (
+                "added: a passed pr_description lane"
+                if _TEXT_JOB_BIND_PR_EXAMPLE in rendered
+                else "removed: no passed pr_description lane"
+            )
+            return f"Refreshed routing rules (text-job PR placeholder {_why}){_where}"
         return f"Refreshed routing rules (content drift at v{src_version}){_where}"
     return f"Updated routing rules v{dst_version} → v{src_version}{_where}"
 

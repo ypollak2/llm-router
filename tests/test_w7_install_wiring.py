@@ -27,9 +27,14 @@ NAME = "llm_router-text-job-bind.py"
 
 @pytest.fixture(autouse=True)
 def lane(monkeypatch):
-    """The router's lane check, stubbed: a passed commit_message lane exists unless a test says otherwise."""
-    state = SimpleNamespace(available=True)
-    monkeypatch.setattr(er, "passed_lane_available", lambda job, input_len, now, **kw: state.available)
+    """The router's lane check, stubbed: passed commit_message and pr_description lanes exist unless a test says
+    otherwise (``available`` / ``pr_available``). The off switch is cleared from the environment."""
+    monkeypatch.delenv("LLM_ROUTER_LOCAL_TEXT_JOBS", raising=False)
+    state = SimpleNamespace(available=True, pr_available=True)
+    monkeypatch.setattr(
+        er, "passed_lane_available",
+        lambda job, input_len, now, **kw: state.pr_available if job == "pr_description" else state.available,
+    )
     return state
 
 
@@ -431,3 +436,89 @@ def test_doctor_reports_every_mismatch_and_only_the_dangerous_one_is_an_issue(sa
     lane.available = False
     line = _text_job_bind_rules_line(issues)
     assert "no_lane" in line and issues == []
+
+
+# ---- per part and the off switch (R8) -------------------------------------------------------------------------
+
+PR_LINE = "gh pr create"
+
+
+def test_a_plain_install_with_only_a_commit_lane_teaches_commits_and_says_prs_are_written_normally(sandbox, lane):
+    lane.pr_available = False
+    ih.install(force=True)
+    body = _rules(sandbox)
+    assert PLACEHOLDER in body and PR_LINE not in body and "Pull request bodies have no placeholder here" in body
+    gap = ih.text_job_bind_rules_gap()
+    assert gap.level == "info" and "rules teach commit messages only" in gap.message
+    assert "pr_description" in gap.message and "local-check" in gap.fix
+
+
+def test_an_install_with_the_off_switch_set_teaches_nothing(sandbox, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_TEXT_JOBS", "0")
+    ih.install(force=True)
+    assert PLACEHOLDER not in _rules(sandbox) and ih.text_job_bind_registered()
+    gap = ih.text_job_bind_rules_gap()
+    assert gap.level == "info" and "LLM_ROUTER_LOCAL_TEXT_JOBS turns local text jobs off here" in gap.message
+    assert "unset LLM_ROUTER_LOCAL_TEXT_JOBS" in gap.fix
+
+
+# state after install (lanes at install time) -> state now -> (level, message fragment, fix fragment), None = consistent
+CASES = {
+    "full and consistent": ({}, {}, None),
+    "commit only, consistent": ({"pr_available": False}, {}, ("info", "rules teach commit messages only", "local-check")),
+    "pr lane gone": ({}, {"pr_available": False}, ("info", "teaches the PR placeholder but no passed lane for pr_description", "refresh the rules")),
+    "pr lane appeared": ({"pr_available": False}, {"pr_available": True}, ("info", "teaches the commit placeholder only", "refresh the rules")),
+    "commit lane gone": ({}, {"available": False}, ("info", "teaches the placeholder but no passed lane for commit_message", "local-check")),
+    "off switch set later": ({}, {"switch": "0"}, ("info", "teaches the placeholder but LLM_ROUTER_LOCAL_TEXT_JOBS turns local text jobs off", "unset LLM_ROUTER_LOCAL_TEXT_JOBS")),
+    "no commit lane yet": ({"available": False, "pr_available": False}, {}, ("info", "hook registered, rules plain: no passed lane for commit_message yet", "local-check")),
+    "off switch, plain rules": ({"available": False}, {"switch": "off"}, ("info", "hook registered, rules plain: LLM_ROUTER_LOCAL_TEXT_JOBS turns local text jobs off", "unset")),
+}
+
+
+def _arrange(sandbox, lane, monkeypatch, at_install: dict, now: dict) -> None:
+    lane.available, lane.pr_available = at_install.get("available", True), at_install.get("pr_available", True)
+    ih.install(force=True)
+    for k, v in now.items():
+        if k == "switch":
+            monkeypatch.setenv("LLM_ROUTER_LOCAL_TEXT_JOBS", v)
+        else:
+            setattr(lane, k, v)
+
+
+@pytest.mark.parametrize("name", list(CASES))
+def test_every_part_state_is_reported_by_the_gap_doctor_and_verify_and_none_of_it_is_an_issue(sandbox, lane, monkeypatch, name):
+    from llm_router.commands.doctor import _text_job_bind_rules_line
+    from llm_router.commands.verify import check_hooks
+
+    at_install, now, expected = CASES[name]
+    _verify_home(sandbox, monkeypatch)
+    _arrange(sandbox, lane, monkeypatch, at_install, now)
+    gap = ih.text_job_bind_rules_gap()
+    issues: list[str] = []
+    line = _text_job_bind_rules_line(issues)
+    ok, messages = check_hooks()
+    if expected is None:
+        assert gap is None and line is None and issues == []
+        assert ok is True and not [m for m in messages if m.startswith(("ℹ", "❌")) and "placeholder" in m]
+        return
+    level, message, fix = expected
+    assert gap.level == level and message in gap.message and fix in gap.fix, gap
+    assert line is not None and message in line and issues == [], "information is not an issue"
+    (v,) = [m for m in messages if message in m]
+    assert v.startswith("ℹ") and ok is True
+
+
+def test_the_danger_stays_for_either_part_when_the_hook_is_not_registered_or_its_file_is_missing(sandbox, lane):
+    ih.install(force=True)
+    (sandbox / ".claude" / "hooks" / NAME).unlink()
+    assert ih.text_job_bind_rules_gap().level == "danger"
+    ih.install(force=True)
+    (sandbox / ".claude" / "settings.json").write_text(json.dumps({"hooks": {}}))
+    for pr_lane in (True, False):
+        lane.pr_available = pr_lane
+        assert ih.text_job_bind_rules_gap().level == "danger"
+    # a commit-only text is dangerous too when nothing registers the hook
+    lane.pr_available = False
+    (sandbox / ".claude" / "rules" / "llm_router.md").write_text(
+        ih._render_text_job_bind_blocks((ih._RULES_SRC / "llm_router.md").read_text(encoding="utf-8"), commit=True, pr=False))
+    assert PLACEHOLDER in _rules(sandbox) and ih.text_job_bind_rules_gap().level == "danger"
