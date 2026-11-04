@@ -9,9 +9,12 @@ exactly one of:
   file, and the command now reads ``-F <file>`` / ``--body-file <file>``;
 * a DENY with a short reason that says what to do instead.
 
-There is no third answer. A placeholder command is never allowed through unchanged and a text
-that did not pass its checks is never used. A failure of any kind, in this module or in the
-model, ends in a deny.
+There is no third answer for a command whose placeholder is written the way the shell replaces it
+(`"${LLM_TEXT:?}"`): it is never allowed through unchanged, and a text that did not pass its checks is never used. A
+failure of any kind, in this module or in the model, ends in a deny. A mention of the variable written anywhere the
+shell would not replace it is denied when the line may run git or gh (see ``plan._runs_job_tool``, a deny-by-default
+rule with a short list of harmless commands); a line that only quotes it next to ``git commit`` in a ``grep``, an
+``echo`` or a here-document gets no decision.
 """
 
 from __future__ import annotations
@@ -152,6 +155,24 @@ def load_router() -> None:
     """Import the router's text-job tool. Slow (the model libraries load here), and none of it is the model's
     wait: ``_decide`` calls this BEFORE the ``text_job`` phase so the hook-latency KPI books it as router-added."""
     from llm_router.tools import text as text_tools  # noqa: F401
+
+
+def enter_state_dir() -> None:
+    """Make the owner's state directory the working directory of this process (only the hook process; nothing else is
+    touched). The router's configuration reads ``./.env`` and searches upward from the working directory for a project
+    config, so with the repository as the working directory a repository could set the router's database path, its
+    raw-prompt persistence or its routing policy for this process. Every path the hook uses for the repository is
+    absolute (``_decide`` makes the payload's ``cwd`` absolute first), so nothing else depends on the working directory."""
+    home = paths.llm_router_home()
+    for target in (home, Path.home()):
+        try:
+            if target == home:
+                state_files.private_dir(target)
+            os.chdir(target)
+            return
+        except OSError as exc:
+            _failopen("CHZ-FO-TEXTJOB-BIND-CHDIR", exc)
+    os.chdir(os.sep)
 
 
 def load_env() -> None:
@@ -317,6 +338,7 @@ _WHY = {
     "job_raised": "The text job failed.",
     "unreadable_result": "The text job answered in a form this hook could not read.",
     "empty": "The local model's text was empty.",
+    "too_long": "The local model's text was longer than any commit message or PR body can be.",
     "subject_too_long": "The local model's text failed the checks (subject line too long).",
     "generic_subject": "The local model's text failed the checks (generic subject).",
     "names_no_changed_file": "The local model's text failed the checks (it names no changed file).",
@@ -351,12 +373,13 @@ def decide(
     (default ``lane_gate``, again only for the real generator). ``lock_wait_s`` is how long a job waits for the machine-wide job
     lock. ``body_mode`` overrides ``LLM_ROUTER_TEXT_JOB_BODY`` / ``limits.COMMIT_BODY_MODE``."""
     t0 = mono() if started is None else started
-    if generate is generate_with_text_job:
+    real = generate is generate_with_text_job
+    if real:
         prepare = load_router if prepare is None else prepare
         gate = lane_gate if gate is None else gate
     try:
         return _decide(payload, generate, t0, budget_s, root or paths.state_path("text_job_bind"), record, now, mono,
-                       prepare, lock_wait_s, body_mode, gate)
+                       prepare, lock_wait_s, body_mode, gate, real)
     except Exception as exc:  # noqa: BLE001 -- see below: a placeholder command must still get a deny
         _failopen("CHZ-FO-TEXTJOB-BIND-DECIDE", exc)
         cmd = _command_of(payload)
@@ -518,7 +541,7 @@ def record_deadline(payload: dict, started: float | None = None) -> dict[str, fl
 
 
 def _decide(payload, generate, t0, budget_s, root, record, now, mono, prepare=None,
-            lock_wait_s=limits.LOCK_WAIT_SEC, body_mode=None, gate=None) -> Decision:
+            lock_wait_s=limits.LOCK_WAIT_SEC, body_mode=None, gate=None, real=False) -> Decision:
     cmd = _command_of(payload)
     if cmd is None:
         return Decision("pass")
@@ -530,9 +553,11 @@ def _decide(payload, generate, t0, budget_s, root, record, now, mono, prepare=No
 
     from llm_router.hooks import hook_payload as hp
 
-    load_env()
     tool_input = hp.tool_input(payload)
-    cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else os.getcwd()
+    cwd = os.path.abspath(payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else os.getcwd())
+    if real:  # before anything that could read a configuration: see enter_state_dir
+        enter_state_dir()
+    load_env()
 
     def lat() -> int:
         return int((mono() - t0) * 1000)
@@ -601,6 +626,8 @@ def _decide(payload, generate, t0, budget_s, root, record, now, mono, prepare=No
         outcome = res.status if res.status in ("rejected", "fallback") else "error"
         return deny(plan.job, outcome, res.reason, _deny_text(plan.job, _WHY.get(res.reason, "The local text job did not produce a checked text.")), **extra)
 
+    if len(res.text) > sanitize.MAX_CHARS:  # no PR body is that long (GitHub's limit); refuse before any cleaning runs
+        return deny(plan.job, "rejected", "too_long", _deny_text(plan.job, _WHY["too_long"]), **extra)
     text = clean_text(res.text)
     cleaned = sanitize.clean(text, pr_body=plan.job == JOB_PR)
     text = cleaned.text

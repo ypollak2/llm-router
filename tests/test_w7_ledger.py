@@ -273,10 +273,37 @@ def test_the_denied_by_reason_list_says_how_many_pairs_it_cut():
     assert text.count("\n    rejected:r") == 10 and "... and 3 more outcome:reason pairs (3 denials)" in text
 
 
-def test_a_command_the_scanner_cannot_read_is_classified_from_its_text():
-    """The fallback of executed_job: an unterminated quote is still a git commit the model tried to run."""
+def test_only_direct_executions_count_and_a_command_the_scanner_cannot_read_counts_for_nothing():
+    """R7: wrappers, loops-by-text and variable names were counted from the text: 111 of 263 'executions' in a day of real
+    transcripts, and none of the 111 had the placeholder on a git word."""
     from llm_router.text_job_bind.plan import executed_job
 
-    assert executed_job("git commit -m 'unterminated") == ("commit_message", False)
-    assert executed_job("gh pr create --body \"${LLM_TEXT:?}\" 'x") == ("pr_description", True)
-    assert executed_job("echo 'unterminated") == (None, False)
+    T = '"${LLM_TEXT:?}"'
+    direct = {
+        f"git commit -m {T}": ("commit_message", True), "git commit -m x": ("commit_message", False),
+        f"for f in a b; do git commit -m {T}; done": ("commit_message", True),
+        f"if true; then git -C /r commit -am {T}; fi": ("commit_message", True),
+        f"cd /r && git status && git commit -m {T}": ("commit_message", True),
+        f"gh pr create --title t --body {T}": ("pr_description", True), "gh 'pr' create --body x": ("pr_description", False),
+        f"git commit -m x && gh pr create --body {T}": ("pr_description", True),  # the one that holds the placeholder
+        "git commit -m x && gh pr create --body y": ("commit_message", False),
+        "echo hi | git commit -F -": ("commit_message", False),
+    }
+    for cmd, want in direct.items():
+        assert executed_job(cmd) == want, cmd
+    indirect = [
+        f"env X=1 git commit -m {T}", f"bash -c 'git commit -m x'", f"timeout 5 git commit -m {T}", f"G=git; $G commit -m {T}",
+        f"sudo git commit -m {T}", f"xargs git commit -m {T}", f"nohup git commit -m {T}",
+        "echo 'git commit -m x'", "grep -rn 'git commit' docs", "cat <<'EOF'\ngit commit -m x\nEOF", "git log --oneline",
+        "gh pr view 12", "git commit -m 'unterminated", "gh pr create --body \"${LLM_TEXT:?}\" 'x", "ls",
+    ]
+    for cmd in indirect:
+        assert executed_job(cmd) == (None, False), cmd
+
+
+def test_a_gh_pr_create_with_quoted_words_survives_the_line_prefilter(tmp_path):
+    root = tmp_path / "projects"
+    root.mkdir()
+    _transcript(root / "s.jsonl", [("gh 'pr' create --title t --body x", "2026-11-03T10:00:00Z"),
+                                   ("gh  pr  create --body y", "2026-11-03T10:01:00Z")])
+    assert ledger.scan_transcripts([root], 1_793_000_000.0)["n_commit_pr"] == 2

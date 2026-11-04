@@ -130,7 +130,7 @@ _DEFAULT_MAX_BYTES = 4 * 1024 * 1024
 #: minus the time spent waiting on a model (``MODEL_PHASES``), because a local
 #: draft that runs for 12 s is the answer, not overhead the router added.
 #:
-#: * every synchronous hook: 300 ms ("+300 ms sync p95");
+#: * every synchronous hook: 300 ms ("+300 ms sync p95"), except ``auto-route`` (D-217) and ``text-job-bind`` (D-370);
 #: * ``session-start``: 2,000 ms ("session-start 2 s");
 #: * ``statusline``: 100 ms ("statusline 100 ms"). Not a hook: the statusline
 #:   shell command records a sampled timing row through ``record-raw`` (see
@@ -154,7 +154,13 @@ HOOK_BUDGETS_MS: dict[str, int] = {
     "bash-compress": 300,
     "session-start": 2_000,
     "session-end": 300,
-    "text-job-bind": 300,  # W7 (D-360): router-added; the local model's wait is the ``text_job`` model phase
+    # W7 (D-360), budget D-370 (owner 2026-11-04): 1,500 ms router-added, not the PRD's 300. The hook runs once per git commit or
+    # gh pr create (the `if` filter keeps it off every other Bash call), and a successful job imports the router and the model
+    # libraries before it calls the model: measured with a stub model, router-added p50 1,154 ms / p95 1,187 ms at load ~4
+    # (builder, n=20) and p50 1,680 ms / p95 2,514 ms at load 5 to 8 (review, n=60). The local model's own wait is the
+    # ``text_job`` model phase and the wait for the machine-wide job slot is ``text_job_queue``; neither counts. A job the
+    # router would hand back anyway is denied before the import, p50 about 0.1 s. Every other hook keeps 300 ms.
+    "text-job-bind": 1_500,
     "codex-stop": 300,  # P35-3 (D-228): the house Stop-hook budget; stat + one JSON read, no llm_router import
     "statusline": 100,
 }

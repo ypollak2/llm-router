@@ -5,13 +5,19 @@ The text job is only as good as what it is shown, and the checks that judge its 
 the actual diff, in the shape those checks read (``diff --git`` headers), condensed so that
 every changed file is still named even when the diff is far larger than the model can read.
 
-Every git call is read-only, bounded in time and in bytes, and never takes an optional lock. None
-of them may run a command that the repository's own configuration names: the hook reads the repository
-BEFORE the permission check for the commit, so a hostile ``.git/config`` must not get a turn.
-``_NEUTRAL_CONFIG`` switches off the file-system monitor and the pager, every diff reads with
-``--no-ext-diff --no-textconv --ignore-submodules=dirty``, every log read with ``--no-show-signature`` (and the gpg
-programs pinned: a signed commit runs ``gpg.program`` when ``log.showSignature`` is on), and ``_filter_overrides``
-replaces every configured clean/smudge/process filter (they run when a diff reads the working tree).
+Every git call is read-only, bounded in time and in bytes, and never takes an optional lock. The hook reads the
+repository BEFORE the permission check for the commit, so a hostile ``.git/config`` must not get a turn. Two
+layers, which do not depend on each other:
+
+* the mechanisms that make git start a program named by the repository's configuration are switched off, each by
+  more than one means: ``_NEUTRAL_CONFIG`` (the file-system monitor, the pager, submodule logs, the gpg programs and
+  ``log.showSignature``), the flags every diff and log read passes (``--no-ext-diff``, ``--no-textconv``,
+  ``--ignore-submodules=dirty``, ``--no-show-signature``), and ``_filter_overrides``, which replaces every configured
+  clean/smudge/process filter (they run when a diff reads the working tree; a name with ``=`` in it only works
+  through ``GIT_CONFIG_COUNT``). This is a list of the mechanisms known to run programs, not a proof that git has no
+  other;
+* whatever does start runs with a scrubbed environment (``_ENV_KEEP``): the hook has loaded the owner's
+  ``.env`` by then, and the provider keys in it must never reach a program that a repository named.
 """
 
 from __future__ import annotations
@@ -33,6 +39,12 @@ _GIT_BYTES_CAP = 2_000_000
 _GIT_TIMEOUT_S = 20.0
 
 _ENV_EXTRA = {"GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C", "GIT_PAGER": "cat"}
+
+#: The ONLY variables of the hook's own environment that a git subprocess gets. Everything else is dropped: after the hook
+#: has loaded ``$LLM_ROUTER_HOME/.env`` its environment holds the owner's provider keys, and a program that a
+#: repository's configuration manages to start under git must not be handed them. (``GIT_*`` is rebuilt below; the
+#: hook's own ``GIT_DIR`` and friends never reach git, they cannot redirect which repository is read.)
+_ENV_KEEP = ("PATH", "HOME", "LANG", "TMPDIR", "USER", "LOGNAME", "SYSTEMROOT", "SYSTEMDRIVE", "TEMP", "TMP")
 
 #: Configuration that makes git run a program named in the repository's config, each set to a harmless
 #: value for every call the hook makes. ``core.fsmonitor`` runs a hook script when git refreshes the index;
@@ -74,20 +86,28 @@ class JobInput:
 RC_TIMEOUT = 124
 
 
-def _filter_overrides(repo: str) -> list[str]:
-    """``-c`` pairs that replace every filter driver configured for the repository with a harmless one.
+def _filter_overrides(repo: str) -> list[tuple[str, str]]:
+    """``(key, value)`` pairs that replace every filter driver configured for the repository with a harmless one.
 
     A clean filter runs when a diff compares the working tree (``git diff HEAD``); the program is named by
     ``filter.<name>.clean`` in the repository's own config. ``cat`` keeps the content, ``process`` is emptied
-    and ``required`` is cleared so a missing filter cannot abort the read."""
+    and ``required`` is cleared so a missing filter cannot abort the read. The pairs are handed to git through
+    ``GIT_CONFIG_COUNT`` / ``GIT_CONFIG_KEY_n`` / ``GIT_CONFIG_VALUE_n``, not ``-c name=value``: ``-c`` splits at
+    the first ``=``, so a filter NAMED ``a=b`` (a legal subsection) was never overridden by it.
+
+    When the list of configured filters cannot be read (a timeout, a git that fails) the diff is refused: it would
+    otherwise run with no overrides at all. ``rc 1`` is "no filter is configured"."""
     rc, out, _cut = _run_git(repo, ["config", "--name-only", "--get-regexp", r"^filter\."], _GIT_BYTES_CAP, 5.0, [])
-    if rc != 0:
+    if rc == 1:
         return []
+    if rc != 0:
+        raise InputRefused("git_config_unreadable", "git did not answer when asked which filters the repository configures, "
+                           "so the diff was not read.")
     names = {m.group(1) for line in out.splitlines() if (m := _FILTER_KEY.match(line.strip()))}
-    pairs: list[str] = []
+    pairs: list[tuple[str, str]] = []
     for n in sorted(names):
-        pairs += ["-c", f"filter.{n}.clean=cat", "-c", f"filter.{n}.smudge=cat", "-c", f"filter.{n}.process=",
-                  "-c", f"filter.{n}.required=false"]
+        pairs += [(f"filter.{n}.clean", "cat"), (f"filter.{n}.smudge", "cat"), (f"filter.{n}.process", ""),
+                  (f"filter.{n}.required", "false")]
     return pairs
 
 
@@ -104,13 +124,21 @@ def _git(repo: str, *args: str, cap: int | None = None, timeout: float | None = 
     return (rc, text, cut) if report_cut else (rc, text)
 
 
-def _run_git(repo: str, args: list[str], cap: int, timeout: float, extra_config: list[str]) -> tuple[int, str, bool]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+def _run_git(repo: str, args: list[str], cap: int, timeout: float,
+             extra_config: list[tuple[str, str]]) -> tuple[int, str, bool]:
+    # A scrubbed environment (see _ENV_KEEP), and the neutralising configuration twice: as ``-c`` (git of any age)
+    # and as GIT_CONFIG_COUNT entries (git 2.31 and newer; the only form that can carry a key with an ``=`` in it).
+    env = {k: v for k, v in os.environ.items() if k in _ENV_KEEP}
     env.update(_ENV_EXTRA)
+    pairs = [tuple(kv.split("=", 1)) for kv in _NEUTRAL_CONFIG] + list(extra_config)
+    env["GIT_CONFIG_COUNT"] = str(len(pairs))
+    for i, (key, value) in enumerate(pairs):
+        env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"] = key, value
     config: list[str] = []
-    for kv in _NEUTRAL_CONFIG:
-        config += ["-c", kv]
-    cmd = ["git", "--no-pager", "-C", repo, *config, *extra_config, *args]
+    for key, value in pairs:
+        if "=" not in key:  # a key with an `=` can only travel in the environment
+            config += ["-c", f"{key}={value}"]
+    cmd = ["git", "--no-pager", "-C", repo, *config, *args]
     try:
         # Its own session: on a timeout the whole process group dies, so a child that inherited the
         # pipe cannot keep a read blocked after git itself was killed.

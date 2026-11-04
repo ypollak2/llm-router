@@ -291,6 +291,14 @@ def test_the_placeholder_in_an_ordinary_command_is_left_to_the_shell(repo, tmp_p
     assert gen.calls == []
 
 
+def test_a_quote_the_shells_read_differently_hides_nothing(repo, tmp_path):
+    """R2: in "${Y:-'}" zsh, dash and ksh read the quote as a literal, bash as an opening quote; a scanner that picked one
+    could be made to see the placeholder inside a quoted region the shell does not see. The line is refused instead."""
+    line = "echo \"${Y:-'}\"; git commit -m '${LLM_TEXT:?}'; echo \"'\" \"}\""
+    d, rows = run(line, repo, tmp_path)
+    assert d.kind == "deny" and rows[0]["reason"] == "unreadable"
+
+
 def test_a_line_the_scanner_cannot_read_is_denied_when_it_names_git_or_gh_and_passed_when_it_does_not(repo, tmp_path):
     d, rows = run("git -C \"unterminated commit -m '${LLM_TEXT:?}'", repo, tmp_path)
     assert d.kind == "deny" and rows[0]["reason"] == "unreadable"
@@ -361,10 +369,11 @@ def test_mentions_closing_keywords_and_a_test_plan_are_neutralised_in_what_is_pu
     assert "me@example.com" in published  # an address is not a mention
     for closing in ("Fixes #12", "closes owner/repo#3", "resolves https://"):
         assert closing not in published
-    assert "refs #12" in published and "refs owner/repo#3" in published and "refs https://github.com/o/r/issues/9" in published
+    assert "refs #12" in published and "refs owner/repo#3" in published
+    assert "github.com" not in published  # every URL goes, the issue URL after "resolves" included: it names no issue any more
     assert "Ran pytest" not in published and sanitize.TEST_PLAN_PLACEHOLDER in published
     (row,) = rows
-    assert (row["stripped_mentions"], row["stripped_closing"], row["replaced_test_plan"]) == (2, 3, 1)
+    assert (row["stripped_mentions"], row["stripped_closing"], row["replaced_test_plan"]) == (2, 2, 1) and row["stripped_urls"] == 1
     assert "alice" not in json.dumps(row)
 
 
@@ -947,3 +956,116 @@ def test_a_lock_that_cannot_be_taken_is_not_reported_as_busy(repo, tmp_path, mon
     gen = Gen()
     d, rows = run(f"git commit -m {T}", repo, tmp_path, gen)
     assert d.kind == "rewrite" and len(gen.calls) == 1  # unserialised, but not refused as busy
+
+
+def test_a_text_longer_than_any_commit_message_or_pr_body_is_refused_before_cleaning(repo, tmp_path):
+    from llm_router.text_job_bind import sanitize as sz
+
+    d, rows = run(f"git commit -m {T}", repo, tmp_path, Gen(GenResult("accepted", "app: a.py\n" + "x" * sz.MAX_CHARS, "m", 1, "")))
+    assert d.kind == "deny" and files(tmp_path) == []
+    assert (rows[0]["outcome"], rows[0]["reason"]) == ("rejected", "too_long")
+
+
+# ---- R5: the router imported by the hook reads no configuration from the repository ----------------------------------
+
+def test_the_real_generator_runs_from_the_owners_state_directory_not_the_repository(repo, tmp_path, monkeypatch):
+    seen: dict = {}
+
+    def real(job, text, hint, t):
+        seen["text"] = text
+        return GenResult("accepted", MODEL_TEXT, "m", 1, "")
+
+    monkeypatch.setattr(engine, "generate_with_text_job", real)
+    monkeypatch.setattr(engine, "lane_gate", lambda *a: seen.update(gate_cwd=os.getcwd()))
+    monkeypatch.setattr(engine, "load_router", lambda: seen.update(load_cwd=os.getcwd()))
+    monkeypatch.chdir(repo)
+    d = decide(payload(f"git commit -m {T}", repo), generate=real, root=tmp_path / "b", record=lambda r: None)
+    home = os.path.realpath(os.environ["LLM_ROUTER_HOME"])
+    assert d.kind == "rewrite" and os.path.realpath(seen["gate_cwd"]) == home and os.path.realpath(seen["load_cwd"]) == home
+    assert SECRET_DIFF_LINE in seen["text"]  # the repository was still read, by absolute path
+
+
+def test_the_diff_is_still_read_from_the_repository_after_the_change_of_directory(repo, tmp_path, monkeypatch):
+    seen: list[str] = []
+
+    def gen(job, text, hint, t):
+        seen.append(text)
+        return GenResult("accepted", MODEL_TEXT, "m", 1, "")
+
+    monkeypatch.setattr(engine, "generate_with_text_job", gen)
+    monkeypatch.setattr(engine, "lane_gate", lambda *a: None)
+    monkeypatch.setattr(engine, "load_router", lambda: None)
+    monkeypatch.chdir(tmp_path)
+    rel = os.path.relpath(repo, tmp_path)  # a relative cwd in the payload must still point at the same repository
+    d = decide(payload(f"git commit -m {T}", repo) | {"cwd": rel}, generate=gen, root=tmp_path / "b", record=lambda r: None)
+    assert d.kind == "rewrite" and SECRET_DIFF_LINE in seen[0]
+
+
+def test_a_stub_generator_does_not_move_the_process(repo, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run(f"git commit -m {T}", repo, tmp_path)
+    assert os.path.realpath(os.getcwd()) == os.path.realpath(tmp_path)
+
+
+def test_the_router_configuration_of_a_hook_started_in_a_hostile_repository_is_the_owners(repo, tmp_path):
+    """The real thing, in a fresh process: a repository whose .env sets the router's database path and raw-prompt
+    persistence. After enter_state_dir() get_config() must not carry either (control: before it, it does)."""
+    import subprocess as sp
+    import sys
+
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+    (hostile / ".env").write_text(f"LLM_ROUTER_DB_PATH={tmp_path / 'planted.db'}\nLLM_ROUTER_PERSIST_RAW=true\n")
+    home = tmp_path / "ownerhome"
+    prog = (
+        "import json, sys\n"
+        "from llm_router.text_job_bind import engine\n"
+        "if sys.argv[1] == 'after':\n"
+        "    engine.enter_state_dir()\n"
+        "from llm_router import config\n"
+        "c = config.get_config()\n"
+        "print(json.dumps([str(c.llm_router_db_path), bool(getattr(c, 'llm_router_persist_raw', False))]))\n"
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("LLM_ROUTER_", "GIT_"))}
+    env.update(LLM_ROUTER_HOME=str(home), HOME=str(tmp_path / "h"))
+
+    def run_in_hostile(which: str) -> list:
+        r = sp.run([sys.executable, "-c", prog, which], cwd=hostile, env=env, capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stderr[-800:]
+        return __import__("json").loads(r.stdout.strip().splitlines()[-1])
+
+    before, after = run_in_hostile("before"), run_in_hostile("after")
+    assert "planted.db" in before[0] and before[1] is True, before  # control: from the repository, the repo's file is read
+    assert "planted.db" not in after[0] and after[1] is False, after
+
+
+# ---- R9: the verification is pinned for gh pr create, and for a placeholder left in the rewrite --------------------
+
+@pytest.mark.parametrize("cmd,rewritten", [
+    ("gh pr create --draft --title T --body {T}", "gh pr create --title T --body-file {p}"),              # --draft lost
+    ("gh pr create -d --title T --body {T}", "gh pr create --title T --body-file {p}"),                     # -d lost
+    ("gh pr create -db {T} --title T", "gh pr create --body-file {p} --title T"),                           # -d lost from the cluster
+    ("gh pr create --title T --body {T}", "gh pr create --draft --title T --body-file {p}"),                # --draft INVENTED
+    ("gh pr create --title T --body {T} --no-maintainer-edit", "gh pr create --title T --body-file {p}"),   # a long flag lost
+])
+def test_a_pr_rewrite_that_loses_or_adds_a_flag_is_never_emitted(repo, tmp_path, monkeypatch, cmd, rewritten):
+    from llm_router.text_job_bind import plan as plan_mod
+
+    git(repo, "checkout", "-q", "-b", "feat")
+    git(repo, "commit", "-qm", "feat: a change to a.py")
+    body = "## Summary\nChanges a.py.\n\n## Test plan\n"
+    monkeypatch.setattr(plan_mod.Plan, "rewrite", lambda self, path: rewritten.format(p=path, T=T))
+    d, rows = run(cmd.format(T=T), repo, tmp_path, Gen(GenResult("accepted", body, "m", 1, "")))
+    assert d.kind == "deny" and files(tmp_path) == []
+    assert (rows[0]["outcome"], rows[0]["reason"]) == ("error", "verify")
+
+
+def test_a_placeholder_left_in_an_otherwise_correct_rewrite_is_never_emitted(repo, tmp_path, monkeypatch):
+    """Everything else in this rewrite checks out (same commands, no message option, the file is read, same flags): only the
+    'no placeholder left' check can refuse it."""
+    from llm_router.text_job_bind import plan as plan_mod
+
+    monkeypatch.setattr(plan_mod.Plan, "rewrite", lambda self, path: f'git commit -F {path} --trailer "${{LLM_TEXT:?}}"')
+    d, rows = run(f"git commit -m {T}", repo, tmp_path)
+    assert d.kind == "deny" and files(tmp_path) == []
+    assert (rows[0]["outcome"], rows[0]["reason"]) == ("error", "verify")

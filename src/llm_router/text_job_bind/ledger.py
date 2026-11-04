@@ -221,7 +221,7 @@ def scan_transcripts(roots: list[Path], since: float, until: float | None = None
                     for line in fh:
                         if '"tool_use"' not in line or "Bash" not in line:
                             continue
-                        if "commit" not in line and "pr create" not in line:
+                        if "commit" not in line and "create" not in line:
                             continue
                         try:
                             obj = json.loads(line)

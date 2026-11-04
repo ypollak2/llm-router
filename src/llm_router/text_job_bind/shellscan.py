@@ -173,7 +173,7 @@ def _skip_dq(src: str, i: int, depth: int) -> int:
         elif c == "$" and src[j + 1:j + 2] == "(":
             j = _skip_paren(src, j + 1, depth + 1)
         elif c == "$" and src[j + 1:j + 2] == "{":
-            j = _skip_brace(src, j + 1, depth + 1)
+            j = _skip_brace(src, j + 1, depth + 1, in_dq=True)
         elif c == "`":
             j = _skip_backtick(src, j)
         else:
@@ -217,8 +217,11 @@ def _skip_paren(src: str, i: int, depth: int = 0) -> int:
     raise ScanError("unterminated command substitution")
 
 
-def _skip_brace(src: str, i: int, depth: int = 0) -> int:
-    """``src[i]`` is ``{`` of a ``${``; return the index after its matching ``}``."""
+def _skip_brace(src: str, i: int, depth: int = 0, in_dq: bool = False) -> int:
+    """``src[i]`` is ``{`` of a ``${``; return the index after its matching ``}``.
+
+    Inside double quotes a single quote in the word of ``${...}`` is a literal quote to zsh, dash and ksh and an opening
+    quote to others: the shells disagree on where the expansion ends, so a line that has one is refused."""
     if depth > _MAX_DEPTH:
         raise ScanError("parameter expansion is nested too deeply")
     level, j, n = 0, i, len(src)
@@ -228,6 +231,8 @@ def _skip_brace(src: str, i: int, depth: int = 0) -> int:
             j += 2
             continue
         if c == "'":
+            if in_dq:
+                raise ScanError("a single quote inside ${...} within double quotes is read differently by different shells")
             k = src.find("'", j + 1)
             if k < 0:
                 raise ScanError("unterminated single quote")
@@ -302,7 +307,7 @@ def _read_dollar(src: str, i: int, buf: list[str], pieces: list[Piece], in_dq: b
         pieces.append(Piece("exp", src[i:j]))
         return j
     if nxt == "{":
-        j = _skip_brace(src, i + 1)
+        j = _skip_brace(src, i + 1, in_dq=in_dq)
         _flush(buf, pieces)
         inner = src[i + 2:j - 1]
         pieces.append(Piece("tok" if _TOKEN_INNER.fullmatch(inner) else "exp", src[i:j]))

@@ -827,3 +827,13 @@ def test_the_two_env_vars_are_registered():
     from llm_router.env_registry import ENV_REGISTRY
 
     assert {"LLM_ROUTER_HOOK_LATENCY", "LLM_ROUTER_HOOK_LATENCY_MAX_BYTES"} <= set(ENV_REGISTRY)
+
+
+
+def test_the_text_job_hook_is_held_to_its_own_budget_and_nothing_else_moved():
+    """D-370: 1,500 ms for text-job-bind; no other hook's bar changed."""
+    assert hl.budget_ms("text-job-bind") == 1_500
+    others = {h: b for h, b in hl.HOOK_BUDGETS_MS.items() if h not in ("text-job-bind", "auto-route", "session-start", "statusline")}
+    assert others and set(others.values()) == {300}
+    # a router-added p95 between the old and the new bar is within budget for this hook and over it for any other
+    assert hl.budget_ms("enforce-route") == 300 and hl.budget_ms("an-unknown-hook") == hl.DEFAULT_BUDGET_MS == 300

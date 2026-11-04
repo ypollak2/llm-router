@@ -450,54 +450,81 @@ def _validate(plan: Plan, job_cmd: Command) -> None:
                 raise Unsupported("pr_body", "With --body-file the value must be exactly the placeholder.")
 
 
+#: Commands that read or print and never start another program with their arguments. A mention of the placeholder
+#: that sits only in these (a `grep`, an `echo`, a `cat` with a here-document) cannot be delivered to git.
+_HARMLESS = frozenset({
+    "echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "awk",
+    "sed", "ls", "tee", "touch", "cp", "mv", "date", "true", "false", "test", "[", "pwd", "which", "whoami", "sleep",
+    "basename", "dirname", "jq", "diff", "cmp", "less", "more", "file", "stat", "du", "df",
+})
+_GIT_WORD = re.compile(r"(?<![\w-])(?:git|gh)(?![\w-])")
+
+
 def _runs_job_tool(cmds: list[Command], command: str) -> bool:
-    """Does the line run ``git`` or ``gh`` (or something that may run them)? Decided from the scanned words, not
-    from a regex over the text, so ``git -C "dir with space" commit``, ``'git' commit``, ``gh 'pr' create`` and
-    ``git "commit"`` are all seen. A command that only QUOTES the placeholder (``grep``, ``echo``, ``cat`` with a
-    here-document) is not one. A wrapper (``bash -c``, ``env``, ``sudo``), a loop or group, or a command whose name is
-    not plain text counts when the text names a commit or PR command anywhere."""
+    """May this line run ``git`` or ``gh``? Decided from the scanned words, with a deny-by-default stance for anything
+    that is not known to be harmless:
+
+    * a command whose name is only known at run time (``$G commit``, ``$(which git) commit``, ``${GIT:-git} commit``);
+    * ``git`` or ``gh`` themselves, however quoted (``git -C "a b" commit``, ``'git' commit``, ``gh 'pr' create``);
+    * any other command, unless it is on the short harmless list, with ``git`` or ``gh`` among ALL its words (a wrapper
+      such as ``env`` or ``bash -c``, a loop or group, an interpreter, a build tool) or the text naming a commit or PR
+      command (so a wrapper with many words in front cannot hide it).
+
+    A command that only QUOTES the placeholder next to ``git commit`` (a ``grep``, an ``echo``, a ``cat`` with a
+    here-document) is not one."""
     textual = bool(COMMIT_CMD.search(command) or PR_CMD.search(command))
     for c in cmds:
         if not c.argv:
             continue
         name = c.argv[0].literal()
         if name is None:
-            if textual:
-                return True
-            continue
+            return True
         base = os.path.basename(name)
         if base in ("git", "gh"):
             return True
-        if c.structural or base in _WRAPPERS:
-            if textual or any(os.path.basename(w.literal() or "") in ("git", "gh") for w in c.argv[:6]):
+        if base in _HARMLESS and not c.structural:
+            continue
+        if textual and (c.structural or base in _WRAPPERS):
+            return True
+        for w in c.argv[1:]:
+            lit = w.literal()
+            if (lit is not None and os.path.basename(lit) in ("git", "gh")) or _GIT_WORD.search(w.raw):
                 return True
     return False
 
 
-def executed_job(command: str) -> tuple[str | None, bool]:
-    """``(job, uses_the_placeholder)`` for a Bash command that really RUNS ``git commit`` or ``gh pr create``;
-    ``(None, False)`` for one that only mentions them (an ``echo``, a ``grep``, a here-document, a doc).
+#: Words that start a command inside a loop, a conditional or a group; a command after one of them is run directly.
+_LEADING_KEYWORDS = frozenset({"do", "then", "else", "elif", "{", "!", "if", "while", "until", "time"})
 
-    For the adoption count over transcripts: a regex over the text counted every command that quoted ``git commit``.
-    The scanner reads the words; a line it cannot read falls back to the text, as the hook does."""
+
+def executed_job(command: str) -> tuple[str | None, bool]:
+    """``(job, uses_the_placeholder)`` for a Bash command that RUNS ``git commit`` or ``gh pr create`` DIRECTLY;
+    ``(None, False)`` for one that only mentions them (an ``echo``, a ``grep``, a here-document, a doc) or that runs
+    them through something else (``env``, ``bash -c``, ``timeout``, a variable holding the name).
+
+    For the adoption count over transcripts. A command in a loop or a conditional (``do git commit ...``) counts: the model
+    ran it. A line the scanner cannot read counts for nothing: a quote that never closes is not a commit. When a line has
+    both a commit and a PR command, the one that holds the placeholder is the one reported."""
     try:
         cmds = scan_commands(command)
     except ScanError:
-        job = JOB_COMMIT if COMMIT_CMD.search(command) else JOB_PR if PR_CMD.search(command) else None
-        return job, bool(job and MENTION.search(command))
-    textual = JOB_COMMIT if COMMIT_CMD.search(command) else JOB_PR if PR_CMD.search(command) else None
+        return None, False
+    found: list[tuple[str, bool]] = []
     for c in cmds:
-        if not c.argv:
+        argv = list(c.argv)
+        while argv and argv[0].literal() in _LEADING_KEYWORDS:
+            argv.pop(0)
+        if not argv:
             continue
-        name = c.argv[0].literal()
+        name = argv[0].literal()
         base = os.path.basename(name) if name is not None else ""
-        if base == "git" and _git_subcommand(c.argv[1:]) == "commit":
-            return JOB_COMMIT, any(w.has_token for w in c.argv)
-        if base == "gh" and len(c.argv) >= 3 and (c.argv[1].literal(), c.argv[2].literal()) == ("pr", "create"):
-            return JOB_PR, any(w.has_token for w in c.argv)
-        if textual and (name is None or c.structural or base in _WRAPPERS):
-            return textual, bool(MENTION.search(command))
-    return None, False
+        if base == "git" and _git_subcommand(argv[1:]) == "commit":
+            found.append((JOB_COMMIT, any(w.has_token for w in argv)))
+        elif base == "gh" and len(argv) >= 3 and (argv[1].literal(), argv[2].literal()) == ("pr", "create"):
+            found.append((JOB_PR, any(w.has_token for w in argv)))
+    if not found:
+        return None, False
+    return next((f for f in found if f[1]), found[0])
 
 
 def option_flags(job: str, command: str, index: int) -> frozenset[str]:

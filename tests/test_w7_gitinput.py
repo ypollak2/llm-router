@@ -487,3 +487,155 @@ def test_the_files_body_lists_what_git_counted_and_nothing_else():
     stats = [("a.py", 3, 1), ("b.bin", None, None), ("docs/c.md", 0, 2)]
     assert gitinput.files_body(stats) == "Changed files:\n- a.py (+3/-1)\n- b.bin (binary)\n- docs/c.md (+0/-2)"
     assert gitinput.files_body(stats, limit=2).endswith("- ... and 1 more files")
+
+
+# ---- R1: every filter name, and a scrubbed environment for whatever does run -------------------------------------
+
+def _filter_repo(repo: Path, tmp_path: Path, name: str, dump_env: bool = False) -> Path:
+    marks = tmp_path / "fmarks"
+    marks.mkdir()
+    s = tmp_path / "evilfilter.sh"
+    s.write_text(f"#!/bin/sh\n{'env > ' + str(marks) + '/env.txt' if dump_env else 'touch ' + str(marks) + '/ran'}\ncat\n")
+    s.chmod(0o755)
+    (repo / ".gitattributes").write_text(f"* filter={name}\n")
+    git(repo, "add", ".gitattributes")
+    git(repo, "commit", "-qm", "attrs")
+    git(repo, "config", f"filter.{name}.clean", str(s))
+    (repo / "a.py").write_text("changed\n")
+    return marks
+
+
+@pytest.mark.parametrize("name", ["a=b", "x=y=z", "dotted.name", "UPPER", "a=b.c=d"])  # an attribute value cannot hold a space
+def test_a_filter_with_any_legal_name_is_neutralised_including_an_equals_sign(repo, tmp_path, name):
+    marks = _filter_repo(repo, tmp_path, name)
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "diff", "HEAD"], cwd=repo, capture_output=True, env=env)
+    assert (marks / "ran").exists(), "control: plain git runs the filter, so this test can fail"
+    (marks / "ran").unlink()
+    inp = build_commit_input(str(repo), all_tracked=True)
+    assert "a.py" in inp.text and "+changed" in inp.text and not (marks / "ran").exists()
+
+
+def test_a_diff_is_refused_when_the_list_of_configured_filters_cannot_be_read(repo, monkeypatch):
+    real = gitinput._run_git
+
+    def flaky(repo_, args, cap, timeout, extra):
+        if args[:2] == ["config", "--name-only"]:
+            return gitinput.RC_TIMEOUT, "", False
+        return real(repo_, args, cap, timeout, extra)
+
+    monkeypatch.setattr(gitinput, "_run_git", flaky)
+    (repo / "a.py").write_text("changed\n")
+    with pytest.raises(InputRefused) as e:
+        build_commit_input(str(repo), all_tracked=True)
+    assert e.value.code == "git_config_unreadable"
+    # "no filter configured" (git config exits 1) is not an error
+    monkeypatch.setattr(gitinput, "_run_git", real)
+    assert "a.py" in build_commit_input(str(repo), all_tracked=True).text
+
+
+SECRETS = {"OPENAI_API_KEY": "sk-secret-from-the-owners-dotenv", "ANTHROPIC_API_KEY": "sk-ant-secret", "LLM_ROUTER_HOME_SECRET": "x",
+           "GEMINI_API_KEY": "g-secret", "GIT_DIR": "/nonexistent-git-dir"}
+
+
+def test_git_subprocesses_get_a_scrubbed_environment(repo, monkeypatch):
+    seen: list[dict] = []
+    real = subprocess.Popen
+
+    def spy(cmd, *a, **k):
+        seen.append(dict(k["env"]))
+        return real(cmd, *a, **k)
+
+    (repo / "a.py").write_text("changed\n")
+    git(repo, "add", "a.py")
+    for k, v in SECRETS.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr(gitinput.subprocess, "Popen", spy)
+    build_commit_input(str(repo))
+    assert len(seen) >= 4
+    for env in seen:
+        extra = set(env) - set(gitinput._ENV_KEEP)
+        assert all(k.startswith("GIT_") or k == "LC_ALL" for k in extra), extra
+        assert not any(("KEY" in k and not k.startswith("GIT_CONFIG_")) or "SECRET" in k or k.startswith("LLM_ROUTER") for k in env), sorted(env)
+        assert "GIT_DIR" not in env and env.get("GIT_CONFIG_COUNT", "0") != "0"
+
+
+def test_a_program_that_a_repository_does_get_to_run_sees_no_secret(repo, tmp_path, monkeypatch):
+    """The second layer, on its own: with the neutralisation bypassed (as if a mechanism nobody knew about fired), a
+    hostile clean filter that dumps its environment sees none of the owner's keys."""
+    marks = _filter_repo(repo, tmp_path, "evil", dump_env=True)
+    for k, v in SECRETS.items():
+        if k != "GIT_DIR":
+            monkeypatch.setenv(k, v)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "diff", "HEAD"], cwd=repo, capture_output=True, env=env)
+    control = (marks / "env.txt").read_text()
+    assert "OPENAI_API_KEY=sk-secret-from-the-owners-dotenv" in control, "control: plain git hands the filter the keys"
+    (marks / "env.txt").unlink()
+    monkeypatch.setattr(gitinput, "_filter_overrides", lambda repo_: [])  # neutralisation bypassed
+    # also drop the -c / env layers for the clean filter by running the diff through the runner directly
+    monkeypatch.setattr(gitinput, "_NEUTRAL_CONFIG", ())
+    build_commit_input(str(repo), all_tracked=True)
+    seen = (marks / "env.txt").read_text()
+    assert "OPENAI_API_KEY" not in seen and "sk-secret" not in seen and "LLM_ROUTER_HOME" not in seen
+    assert "PATH=" in seen and "HOME=" in seen
+
+
+# ---- R9: each layer of the signature hardening holds on its own ---------------------------------------------------
+
+def _signed_log_repo(repo: Path, tmp_path: Path) -> Path:
+    return _hostile(repo, tmp_path, ("gpg",))
+
+
+def test_the_gpg_program_is_pinned_even_when_a_caller_asks_for_signatures(repo, tmp_path):
+    """Kills 'the gpg.* pins removed': with --show-signature given explicitly, only the pinned program stands between a signed
+    commit and the repository's own."""
+    marks = _signed_log_repo(repo, tmp_path)
+    rc, _out = gitinput._git(str(repo), "log", "-3", "--show-signature", "--format=%s")
+    assert rc == 0 and _seen(marks) == []
+
+
+def test_log_show_signature_is_off_in_the_configuration_even_without_the_flag(repo, tmp_path):
+    """Kills 'log.showSignature=false removed': a log read WITHOUT --no-show-signature must not verify signatures either."""
+    marks = _signed_log_repo(repo, tmp_path)
+    rc, out = gitinput._git(str(repo), "log", "-3", "--format=%s")
+    assert rc == 0 and "signed commit" in out and _seen(marks) == []
+
+
+def test_the_flag_alone_also_holds_with_the_configuration_gone(repo, tmp_path, monkeypatch):
+    """The third layer: the flag on both log reads, with the pins and the key removed from the configuration."""
+    marks = _signed_log_repo(repo, tmp_path)
+    monkeypatch.setattr(gitinput, "_NEUTRAL_CONFIG", ())
+    (repo / "a.py").write_text("staged\n")
+    git(repo, "add", "a.py")
+    inp = build_commit_input(str(repo))
+    assert "a.py" in inp.text and "signed commit" in (inp.hint or "") and _seen(marks) == []
+
+
+def test_every_spawned_git_carries_each_pin_in_both_forms(repo, monkeypatch):
+    """Kills the mutants that drop one pin: the neutralising configuration reaches git as ``-c`` and through GIT_CONFIG_COUNT, for
+    every call, and names each mechanism."""
+    seen: list[tuple[list[str], dict]] = []
+    real = subprocess.Popen
+
+    def spy(cmd, *a, **k):
+        seen.append((list(cmd), dict(k["env"])))
+        return real(cmd, *a, **k)
+
+    (repo / "a.py").write_text("staged\n")
+    git(repo, "add", "a.py")
+    monkeypatch.setattr(gitinput.subprocess, "Popen", spy)
+    build_commit_input(str(repo))
+    must = {"core.fsmonitor": "false", "log.showSignature": "false", "gpg.program": "/usr/bin/false",
+            "gpg.openpgp.program": "/usr/bin/false", "gpg.x509.program": "/usr/bin/false", "gpg.ssh.program": "/usr/bin/false",
+            "core.pager": "cat", "diff.submodule": "short"}
+    assert len(seen) >= 4
+    for cmd, env in seen:
+        n = int(env["GIT_CONFIG_COUNT"])
+        in_env = {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(n)}
+        for key, value in must.items():
+            assert in_env.get(key) == value, (key, cmd[:6])
+            assert f"{key}={value}" in cmd, (key, cmd[:8])
+    logs = [c for c, _e in seen if "log" in c]
+    assert logs and all("--no-show-signature" in c for c in logs)

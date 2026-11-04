@@ -164,6 +164,15 @@ def test_pr_options_are_read_for_the_job_input():
     ("$G commit -m '${LLM_TEXT:?}' # git commit", "placeholder_spelling"),
     ("git log --grep='${LLM_TEXT:?}'", "placeholder_spelling"),
     ("env X=1 git commit -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    # R2: not a plannable git/gh shape and the placeholder is written where the shell would not replace it
+    ("G=git; $G commit -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("$(which git) commit -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("${GIT:-git} commit -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("G=gh; $G pr create --body '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("python3 -c 'import subprocess; subprocess.run([\"git\",\"commit\",\"-m\",\"${LLM_TEXT:?}\"])'", "placeholder_spelling"),
+    ("env A=1 B=2 C=3 D=4 E=5 F=6 G=7 H=8 git \"commit\" -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("xargs -n1 -I{} sh -c 'a b c d e f g h git commit -m \"${LLM_TEXT:?}\"'", "placeholder_spelling"),
+    ("find . -name x -exec git commit -m '${LLM_TEXT:?}' ';'", "placeholder_spelling"),
     # a placeholder the planner reads but cannot bind is refused with its own code, never passed through
     ('git ci -m "${LLM_TEXT:?}"', "not_commit"),
     ('git -C "/a b" ci -m "${LLM_TEXT:?}"', "not_commit"),
@@ -192,7 +201,10 @@ def test_refusals_carry_a_code(cmd, code):
     "grep -rn 'git commit -m \"${LLM_TEXT:?}\"' docs",
     "echo 'run git commit -m \"${LLM_TEXT:?}\"' >> NOTES.md",
     "cat <<'EOF' > doc.md\ngit commit -m \"${LLM_TEXT:?}\"\nEOF",
+    "make test '${LLM_TEXT:?}'", "sed -i 's/x/${LLM_TEXT:?}/' notes.md",
+    # the double-quoted form EXPANDS (and aborts when unset): not ours to decide, and the shell stops it
     "python3 -c \"print('gh pr create --body ${LLM_TEXT:?}')\"",
+
     f"grep -r {T} src/",
     "git commit -m \"$(cat <<'EOF'\nfix: a\nEOF\n)\"",
 ])
