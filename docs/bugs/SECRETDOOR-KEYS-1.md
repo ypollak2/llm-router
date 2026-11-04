@@ -24,7 +24,7 @@ status: fixed in `w11/codex-meter-reserve-local-fallback` (takes effect for ever
   redacts the same header forms. Checked on the real population: 131 full first prompts of workflow agents (675,930 characters,
   `scratchpad/gate0d-census/workflows-copy`) and 1,388 stored sub-agent prompt previews (692,392 characters, `agent_calls_ledger.jsonl` copy of
   2026-11-04): 0 high-precision hits before the change and 0 after, no text changed its verdict.
-- **Test.** `tests/test_w11_secret_door_key_formats.py` (87 cases): 17 private-key formats and 11 provider keys must be held, 13 questions,
+- **Test.** `tests/test_w11_secret_door_key_formats.py` (104 cases): 17 private-key formats and 11 provider keys must be held, 13 questions,
   placeholders and public certificates must not, the existing placeholder corpus still passes, the hook's own `_secret_door` holds the census
-  case, a key past the 16 KiB scan window is found, 1,500 headers cost under 2 s, and the long-blob false positive stays closed.
+  case, a key past the 16 KiB scan window is found, 18 adversarial 48 KB inputs scan in under 250 ms each (timing lane), and the long-blob false positive stays closed. The first version of the header check read 4 KB after every header and took 250.6 ms on the CI runner for the repeated-header input of `tests/test_lc12h_repair3.py` (budget 250 ms; 23 ms before, 7.5 ms now): it reads 1 KB lazily.
   Residual: a key glued directly to letters in front of `hf_` or `npm_` is not found.
