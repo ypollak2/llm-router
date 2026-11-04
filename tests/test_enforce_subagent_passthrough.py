@@ -1,10 +1,10 @@
-"""A hold belongs to the main thread: a sub-agent's tool call is never held by it.
+"""A hold belongs to the main thread: outside strict, a sub-agent's tool call is never denied by it.
 
-The pending route is written for the owner's prompt in the main thread. A sub-agent (Agent tool or a
-Workflow ``agent()``) shares the session id but cannot satisfy that hold: the router's MCP tools are not in
-its tool list (0 ``mcp__llm_router__*`` calls in 130 workflow agents, 2026-11-04). The hold could only block
-it: 4 ``blocked`` rows in hold_events.jsonl in 2026-11-03T20:22Z..2026-11-04T21:44Z, all inside sub-agents.
-The hook payload names a sub-agent with ``agent_id`` (text_job_binds.jsonl rows record it live).
+The pending route is written for the owner's prompt in the main thread. A sub-agent shares the session id. A Workflow
+agent has no routing tool to satisfy the hold with, so a denial could only stop its work. Its calls keep counting towards
+the trap, loop and count releases, so the main thread's hold is released when it was before this rule: removing them from
+the count would leave the main thread held for longer (review of the first version of this change).
+The hook payload names a sub-agent with ``agent_id``; ``agent_type`` alone is the main thread under ``claude --agent``.
 """
 from __future__ import annotations
 
@@ -19,6 +19,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOKS = [ROOT / "hooks" / "enforce-route.py", ROOT / "src" / "llm_router" / "hooks" / "enforce-route.py"]
+SUB = {"agent_id": "a123", "agent_type": "task-reviewer"}
+WRITE = {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}
+BASH = {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}
 
 
 def _run(hook, payload, home, mode="hard"):
@@ -40,44 +43,66 @@ def _pending(home, sid):
     return path
 
 
-def _decision(result):
+def _denied(result):
     out = result.stdout.strip()
-    return json.loads(out) if out else {}
-
-
-def _held(result):
-    d = _decision(result)
+    d = json.loads(out) if out else {}
     spec = d.get("hookSpecificOutput") or {}
     return d.get("decision") == "block" or spec.get("permissionDecision") == "deny"
 
 
-@pytest.mark.parametrize("hook", HOOKS, ids=["hooks", "package"])
-@pytest.mark.parametrize("tool,tool_input", [
-    ("Bash", {"command": "git status"}),
-    ("Write", {"file_path": "x", "content": "y"}),
-    ("Edit", {"file_path": "x", "old_string": "a", "new_string": "b"}),
-])
-def test_a_sub_agent_tool_call_is_not_held_and_the_hold_stays(tmp_path, hook, tool, tool_input):
+@pytest.fixture(params=HOOKS, ids=["hooks", "package"])
+def hook(request):
+    return request.param
+
+
+@pytest.mark.parametrize("mode", ["hard", "smart"])
+@pytest.mark.parametrize("call", [
+    BASH, WRITE, {"tool_name": "Edit", "tool_input": {"file_path": "x", "old_string": "a", "new_string": "b"}},
+], ids=["Bash", "Write", "Edit"])
+def test_a_sub_agent_call_is_not_denied_and_the_hold_stays(tmp_path, hook, mode, call):
     pending = _pending(tmp_path, "s1")
-    result = _run(hook, {"session_id": "s1", "agent_id": "a123", "agent_type": "task-reviewer",
-                         "tool_name": tool, "tool_input": tool_input}, tmp_path)
+    result = _run(hook, {"session_id": "s1", **SUB, **call}, tmp_path, mode)
     assert result.returncode == 0
-    assert not _held(result), result.stdout
-    assert pending.exists()  # the main thread's hold is untouched
+    assert not _denied(result), result.stdout
+    assert pending.exists()
 
 
-@pytest.mark.parametrize("hook", HOOKS, ids=["hooks", "package"])
-def test_the_main_thread_is_still_held(tmp_path, hook):
-    _pending(tmp_path, "s2")
-    result = _run(hook, {"session_id": "s2", "tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}},
-                  tmp_path)
-    assert _held(result), result.stdout
+def test_the_main_thread_is_still_held_after_one_call(tmp_path, hook):
+    pending = _pending(tmp_path, "s2")
+    assert _denied(_run(hook, {"session_id": "s2", **WRITE}, tmp_path))
+    assert pending.exists()
 
 
-@pytest.mark.parametrize("hook", HOOKS, ids=["hooks", "package"])
-def test_agent_type_alone_is_not_a_sub_agent(tmp_path, hook):
-    # `claude --agent x` runs the MAIN thread with agent_type set and no agent_id: the hold applies.
+def test_agent_type_alone_is_the_main_thread(tmp_path, hook):
     _pending(tmp_path, "s3")
-    result = _run(hook, {"session_id": "s3", "agent_type": "reviewer", "tool_name": "Write",
-                         "tool_input": {"file_path": "x", "content": "y"}}, tmp_path)
-    assert _held(result), result.stdout
+    assert _denied(_run(hook, {"session_id": "s3", "agent_type": "reviewer", **WRITE}, tmp_path))
+
+
+def test_sub_agent_calls_still_count_towards_the_trap_release(tmp_path, hook):
+    # Two same-tool calls in one turn release the hold, whoever made them: this is the release the main thread relied on.
+    pending = _pending(tmp_path, "s4")
+    assert not _denied(_run(hook, {"session_id": "s4", **SUB, **WRITE}, tmp_path))
+    assert pending.exists()
+    assert not _denied(_run(hook, {"session_id": "s4", **SUB, **WRITE}, tmp_path))
+    assert not pending.exists()
+    assert not _denied(_run(hook, {"session_id": "s4", **WRITE}, tmp_path))
+
+
+def test_a_sub_agent_call_then_the_same_tool_in_the_main_thread_releases_as_before(tmp_path, hook):
+    pending = _pending(tmp_path, "s5")
+    assert not _denied(_run(hook, {"session_id": "s5", **SUB, **WRITE}, tmp_path))
+    assert not _denied(_run(hook, {"session_id": "s5", **WRITE}, tmp_path))
+    assert not pending.exists()
+
+
+def test_strict_keeps_its_denials_for_sub_agents(tmp_path, hook):
+    pending = _pending(tmp_path, "s6")
+    for _ in range(2):
+        assert _denied(_run(hook, {"session_id": "s6", **SUB, **WRITE}, tmp_path, "strict"))
+    assert pending.exists()
+
+
+def test_the_pass_is_logged(tmp_path, hook):
+    _pending(tmp_path, "s7")
+    _run(hook, {"session_id": "s7", **SUB, **WRITE}, tmp_path)
+    assert "ALLOWED(subagent)" in (tmp_path / ".llm-router" / "enforcement.log").read_text()
