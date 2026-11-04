@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -20,6 +21,7 @@ from llm_router.paths import state_path
 from llm_router.resolver.eligibility_store import record_competence
 
 ROOT = Path(__file__).resolve().parents[1]
+_REAL_RUN = subprocess.run  # the F113 interpreter probes are local, side-effect free
 
 
 def _load_harness():
@@ -56,7 +58,12 @@ def isolate(tmp_path, monkeypatch):
     def forbidden(*args, **kwargs):
         raise AssertionError("real external call")
 
-    monkeypatch.setattr(h.subprocess, "run", forbidden)
+    def probe_only(argv, *args, **kwargs):
+        if list(argv[1:3]) == ["-I", "-c"]:  # python -I -c <probe>: the F113 import guard
+            return _REAL_RUN(argv, *args, **kwargs)
+        return forbidden()
+
+    monkeypatch.setattr(h.subprocess, "run", probe_only)
     monkeypatch.setattr(h, "urlopen", forbidden)
 
 
@@ -277,7 +284,7 @@ def factory(tmp_path):
             git_sha=lambda: "deadbeef", amend1=run_dir / "AMEND1.md",
             amend2=run_dir / "AMEND2.md", amend3=run_dir / "AMEND3.md",
             amend4=run_dir / "AMEND4.md",
-            amend5=run_dir / "AMEND5.md",
+            amend5=run_dir / "AMEND5.md", amend6=run_dir / "AMEND6.md",
             gate=lambda constants: None,
         )
         pools = {s: pool_rows(s, 30 if small and s == "qa" else 75 if s == "code" else 130)
@@ -381,9 +388,179 @@ def test_claude_boundary(tmp_path, monkeypatch):
     assert json.loads(path.read_text()) == {"disableAllHooks": True}
     assert path.stat().st_mode & 0o777 == 0o600
     assert "--tools" not in h.claude_argv("test-sonnet", tmp_path, tools=None)
-    env = h.claude_env()
+    env = h.claude_env(h.scratch_home(tmp_path / "agent"))
     assert "ANTHROPIC_BASE_URL" not in env and "ANTHROPIC_API_KEY" not in env
     assert env["LLM_ROUTER_SESSION_KIND"] == "research"
+
+
+def plant_real_home(tmp_path, monkeypatch):
+    """A fake 'real' HOME holding the files an uninstall-shaped deletion would remove."""
+    real = tmp_path / "realhome"
+    markers = [real / ".claude/settings.json", real / ".llm-router/proxy_default.json",
+               real / "Library/LaunchAgents/com.llm_router.proxy.plist"]
+    for m in markers:
+        m.parent.mkdir(parents=True, exist_ok=True)
+        m.write_text("MARKER")
+    monkeypatch.setenv("HOME", str(real))
+    monkeypatch.setattr(h, "real_home", lambda: real.resolve())
+    return real, markers
+
+
+def test_agent_env_is_minimal_and_scratch(tmp_path, monkeypatch):
+    real, _ = plant_real_home(tmp_path, monkeypatch)
+    for k, v in {"ANTHROPIC_BASE_URL": "x", "ANTHROPIC_API_KEY": "x", "LLM_ROUTER_HOME": "x",
+                 "LLM_ROUTER_ENFORCE": "x", "OPENAI_API_KEY": "x", "PATH": "/bin", "LANG": "C",
+                 "CLAUDE_CODE_OAUTH_TOKEN": "tok"}.items():
+        monkeypatch.setenv(k, v)
+    scratch = h.scratch_home(tmp_path / "scratch")
+    pi_env = h.agent_env(scratch)
+    claude_env = h.claude_env(scratch)
+    for env in (pi_env, claude_env):
+        assert Path(env["HOME"]) != real and env["HOME"] == str(scratch)
+        assert set(env) <= h.AGENT_ENV_ALLOWED
+        assert not [k for k in env if k.startswith("LLM_ROUTER_") and k != "LLM_ROUTER_SESSION_KIND"]
+        assert "OPENAI_API_KEY" not in env and "ANTHROPIC_BASE_URL" not in env
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in pi_env and claude_env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
+    assert "LLM_ROUTER_SESSION_KIND" not in pi_env
+    assert scratch.stat().st_mode & 0o777 == 0o700
+
+
+def test_credentials_file_sets_token_in_claude_env_only(tmp_path, monkeypatch, capsys):
+    plant_real_home(tmp_path, monkeypatch)
+    source = tmp_path / "cred-source"
+    source.write_text("SECRET-VALUE\n")
+    source.chmod(0o600)
+    monkeypatch.setenv(h.CLAUDE_CREDENTIALS_ENV, str(source))
+    scratch = h.scratch_home(tmp_path / "scratch")
+    env = h.claude_env(scratch)
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "SECRET-VALUE"
+    assert not (scratch / ".claude").exists()  # the value is never written anywhere
+    pi_env = h.agent_env(h.scratch_home(tmp_path / "s2"))
+    assert pi_env.keys() <= h.AGENT_ENV_ALLOWED and "CLAUDE_CODE_OAUTH_TOKEN" not in pi_env
+    assert not (tmp_path / "s2/.claude").exists()
+    monkeypatch.setenv(h.CLAUDE_CREDENTIALS_ENV, str(tmp_path / "missing-SECRET-PATH"))
+    with pytest.raises(h.Refuse) as err:
+        h.claude_env(h.scratch_home(tmp_path / "s3"))
+    assert "SECRET" not in str(err.value) and "SECRET" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mode", [0o640, 0o604, 0o644, 0o660])
+def test_credentials_file_refused_when_group_or_world_accessible(tmp_path, monkeypatch, mode):
+    plant_real_home(tmp_path, monkeypatch)
+    source = tmp_path / "cred-source"
+    source.write_text("SECRET-VALUE")
+    source.chmod(mode)
+    monkeypatch.setenv(h.CLAUDE_CREDENTIALS_ENV, str(source))
+    with pytest.raises(h.Refuse, match="group/world") as err:
+        h.claude_env(h.scratch_home(tmp_path / "scratch"))
+    assert "SECRET" not in str(err.value) and str(source) not in str(err.value)
+
+
+def test_credentials_file_empty_refused(tmp_path, monkeypatch):
+    plant_real_home(tmp_path, monkeypatch)
+    source = tmp_path / "cred-source"
+    source.write_text("  \n")
+    source.chmod(0o600)
+    monkeypatch.setenv(h.CLAUDE_CREDENTIALS_ENV, str(source))
+    with pytest.raises(h.Refuse, match="empty"):
+        h.claude_env(h.scratch_home(tmp_path / "scratch"))
+
+
+def python_stub(directory: Path, name: str, importable: bool) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / name
+    exe.write_text(f"#!/bin/sh\nexit {1 if importable else 0}\n")
+    exe.chmod(0o755)
+    return directory
+
+
+def test_import_guard_refuses_python_that_imports_llm_router(tmp_path, monkeypatch):
+    plant_real_home(tmp_path, monkeypatch)
+    bad = python_stub(tmp_path / "bad", "python3", importable=True)
+    clean = python_stub(tmp_path / "clean", "python", importable=False)
+    env = {"HOME": str(tmp_path / "s"), "PATH": f"{clean}{os.pathsep}{bad}"}
+    with pytest.raises(h.Refuse, match="importable"):
+        h.assert_agent_env(env)
+    env["PATH"] = str(clean)
+    h.assert_agent_env(env)  # only the clean python: passes
+    # A real interpreter that can import llm_router (this test process's) is refused.
+    real_py = tmp_path / "real"
+    real_py.mkdir()
+    (real_py / "python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    (real_py / "python3").chmod(0o755)
+    with pytest.raises(h.Refuse, match="importable"):
+        h.assert_agent_env({"HOME": str(tmp_path / "s"), "PATH": str(real_py)})
+
+
+def test_import_guard_probe_found_a_python_to_check(tmp_path):
+    # An empty set passes everything: the stubs must actually be discovered.
+    one = python_stub(tmp_path / "one", "python3", importable=False)
+    two = python_stub(tmp_path / "two", "python", importable=False)
+    assert len(h.agent_pythons(f"{one}{os.pathsep}{two}")) == 2
+
+
+def test_agent_env_sets_pythonnousersite(tmp_path, monkeypatch):
+    plant_real_home(tmp_path, monkeypatch)
+    for env in (h.agent_env(h.scratch_home(tmp_path / "a")), h.claude_env(h.scratch_home(tmp_path / "b"))):
+        assert env["PYTHONNOUSERSITE"] == "1"
+    assert "PYTHONNOUSERSITE" in h.AGENT_ENV_ALLOWED
+
+
+def test_grader_python_requires_clean_interpreter_with_pytest(tmp_path):
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    exe = clean / "python3"
+    exe.write_text(
+        "#!/bin/sh\ncase \"$*\" in *find_spec*) exit 0;; *'import pytest'*) exit 0;; esac\nexit 0\n"
+    )
+    exe.chmod(0o755)
+    assert h.grader_python({"PATH": str(clean)}) == str(exe)
+    exe.write_text("#!/bin/sh\ncase \"$*\" in *find_spec*) exit 0;; esac\nexit 1\n")
+    h._GRADER_PYTHON.clear()  # the interpreter changed under the same PATH: a new run re-probes
+    with pytest.raises(h.Refuse, match="pytest"):
+        h.grader_python({"PATH": str(clean)})
+    bad = python_stub(tmp_path / "bad", "python3", importable=True)
+    with pytest.raises(h.Refuse, match="importable"):
+        h.grader_python({"PATH": str(bad)})
+
+
+def test_agent_env_guard_refuses_real_home_and_strays(tmp_path, monkeypatch):
+    real, _ = plant_real_home(tmp_path, monkeypatch)
+    with pytest.raises(h.Refuse, match="real HOME"):
+        h.scratch_home(real)
+    with pytest.raises(h.Refuse, match="real HOME"):
+        h.assert_agent_env({"HOME": str(real), "PATH": "/bin"})
+    with pytest.raises(h.Refuse, match="real HOME"):  # caller's $HOME even if not the pw home
+        monkeypatch.setattr(h, "real_home", lambda: tmp_path / "elsewhere")
+        h.assert_agent_env({"HOME": str(real)})
+    with pytest.raises(h.Refuse, match="unexpected key"):
+        h.assert_agent_env({"HOME": str(tmp_path / "s"), "LLM_ROUTER_HOME": "x"})
+    with pytest.raises(h.Refuse, match="no HOME"):
+        h.assert_agent_env({"PATH": "/bin"})
+
+
+UNINSTALL_STUB = (
+    "import os, shutil, pathlib\n"
+    "home = pathlib.Path(os.path.expanduser('~'))\n"
+    "for rel in ('.claude/settings.json', '.llm-router/proxy_default.json',\n"
+    "            'Library/LaunchAgents/com.llm_router.proxy.plist'):\n"
+    "    (home / rel).parent.mkdir(parents=True, exist_ok=True)\n"
+    "    (home / rel).write_text('x'); (home / rel).unlink()\n"
+    "for d in ('.claude', '.llm-router', 'Library'):\n"
+    "    shutil.rmtree(home / d, ignore_errors=True)\n"
+    "(home / 'ran').write_text('1')\n"
+)
+
+
+def test_uninstall_shaped_agent_cannot_touch_real_home(tmp_path, monkeypatch):
+    real, markers = plant_real_home(tmp_path, monkeypatch)
+    scratch = h.scratch_home(tmp_path / "scratch")
+    for env in (h.claude_env(scratch), h.agent_env(scratch)):
+        out = GIT_RUN([sys.executable, "-c", UNINSTALL_STUB], env=env, check=False,
+                             capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        assert all(m.read_text() == "MARKER" for m in markers)
+        assert (scratch / "ran").is_file()  # the stub ran, against scratch
 
 
 def test_constants_and_real_freeze(factory, tmp_path):
@@ -1591,3 +1768,809 @@ def test_amend5_run_survives_own_model_residency(factory, amend5):
     quiet_rows = h.jsonl(cfg.run_dir / "quiet.jsonl")
     assert quiet_rows[0]["own_resident_pct"] == [0.0] * 3  # warm-up: not yet loaded
     assert all(r["own_resident_pct"] == [50.0] * 3 for r in quiet_rows[1:])
+
+
+def fake_exe(directory, name):
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / name
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    return directory
+
+
+def test_agent_path_drops_llm_router_and_keeps_needed_tools(tmp_path, monkeypatch):
+    real, _ = plant_real_home(tmp_path, monkeypatch)
+    bad = fake_exe(tmp_path / "bad", "llm-router")
+    fake_exe(bad, "node")  # node shares the dir with llm-router: dropped whole, fails closed
+    chu = fake_exe(tmp_path / "chu", "llm_router")
+    local = fake_exe(real / ".local/bin", "git")
+    good = fake_exe(tmp_path / "good", "node")
+    junk = fake_exe(tmp_path / "junk", "unrelated-tool")
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, (bad, chu, local, good, junk, "/bin"))))
+    env = h.agent_env(h.scratch_home(tmp_path / "scratch"))
+    dirs = env["PATH"].split(os.pathsep)
+    assert str(good) in dirs and "/bin" in dirs
+    for gone in (bad, chu, local, junk):
+        assert str(gone) not in dirs
+    for name in h.DENIED_EXECUTABLES:
+        assert shutil.which(name, path=env["PATH"]) is None
+
+
+def test_agent_env_refuses_when_llm_router_resolves_on_path(tmp_path, monkeypatch):
+    plant_real_home(tmp_path, monkeypatch)
+    bad = fake_exe(tmp_path / "bad", "llm-router")
+    with pytest.raises(h.Refuse, match="llm-router is reachable"):
+        h.assert_agent_env({"HOME": str(tmp_path / "s"), "PATH": f"/bin{os.pathsep}{bad}"})
+
+
+def test_agent_env_refuses_home_inside_real_home_unless_under_run_dir(tmp_path, monkeypatch):
+    real, _ = plant_real_home(tmp_path, monkeypatch)
+    inside = real / "stuff" / "scratch"
+    with pytest.raises(h.Refuse, match="inside the real HOME"):
+        h.assert_agent_env({"HOME": str(inside), "PATH": "/bin"})
+    with pytest.raises(h.Refuse, match="inside the real HOME"):
+        h.assert_agent_env({"HOME": str(inside), "PATH": "/bin"}, run_dir=real / "other")
+    h.assert_agent_env({"HOME": str(inside), "PATH": "/bin"}, run_dir=real / "stuff")
+
+
+@pytest.mark.parametrize("code", [2, 126, 127, 139])
+def test_import_guard_fails_closed_on_any_nonzero_probe_exit(tmp_path, code):
+    stub = tmp_path / "s"
+    stub.mkdir()
+    exe = stub / "python3"
+    exe.write_text(f"#!/bin/sh\nexit {code}\n")
+    exe.chmod(0o755)
+    with pytest.raises(h.Refuse, match="no clean answer"):
+        h.assert_no_llm_router_import({"PATH": str(stub)})
+
+
+def test_import_guard_refuses_on_signal_oserror_and_timeout(tmp_path, monkeypatch):
+    stub = python_stub(tmp_path / "s", "python3", importable=False)
+    env = {"PATH": str(stub)}
+    killed = tmp_path / "k"
+    killed.mkdir()
+    (killed / "python3").write_text("#!/bin/sh\nkill -9 $$\n")
+    (killed / "python3").chmod(0o755)
+    with pytest.raises(h.Refuse, match="no clean answer"):
+        h.assert_no_llm_router_import({"PATH": str(killed)})
+    for exc, text in ((OSError("/secret/path"), "could not run"),
+                      (subprocess.TimeoutExpired("x", 1), "timed out")):
+        def boom(*a, _e=exc, **k):
+            raise _e
+        monkeypatch.setattr(h.subprocess, "run", boom)
+        with pytest.raises(h.Refuse, match=text) as err:
+            h.assert_no_llm_router_import(env)
+        assert err.value.__cause__ is None and "/secret/path" not in str(err.value)
+    monkeypatch.undo()
+    h.assert_no_llm_router_import(env)
+
+
+def test_agent_pythons_finds_versioned_and_pypy_interpreters(tmp_path):
+    d = tmp_path / "d"
+    for name in ("python3.13", "pypy3", "pypy", "python", "python3-config", "pythonw.txt",
+                 "pythonw", "pythonista", "python3x", "pypyx", "python3.13t", "python3.12d", "python3m"):
+        python_stub(d, name, importable=False)
+    found = {Path(p).name for p in h.agent_pythons(str(d))}
+    assert found == {"python3.13", "pypy3", "pypy", "python", "python3.13t", "python3.12d",
+                     "python3m"}
+    bad = python_stub(tmp_path / "bad", "python3.11", importable=True)
+    with pytest.raises(h.Refuse, match="importable"):
+        h.assert_no_llm_router_import({"PATH": f"{d}{os.pathsep}{bad}"})
+
+
+def test_grader_python_hung_or_unrunnable_pytest_probe_refuses(tmp_path, monkeypatch):
+    stub = python_stub(tmp_path / "s", "python3", importable=False)
+    real_run = subprocess.run
+
+    def hung(argv, *a, **k):
+        if "import pytest" in argv:
+            raise subprocess.TimeoutExpired(argv, 1)
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr(h.subprocess, "run", hung)
+    with pytest.raises(h.Refuse, match="timed out"):
+        h.grader_python({"PATH": str(stub)})
+
+    def gone(argv, *a, **k):
+        if "import pytest" in argv:
+            raise OSError("nope")
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr(h.subprocess, "run", gone)
+    with pytest.raises(h.Refuse, match="could not run"):
+        h.grader_python({"PATH": str(stub)})
+
+
+def test_credentials_file_error_drops_the_path_cause(tmp_path, monkeypatch):
+    missing = tmp_path / "no-such-token-file"
+    with pytest.raises(h.Refuse) as err:
+        h.read_oauth_token(str(missing))
+    assert err.value.__cause__ is None and err.value.__suppress_context__
+    binary = tmp_path / "bin"
+    binary.write_bytes(b"\xff\xfe\x00")
+    binary.chmod(0o600)
+    with pytest.raises(h.Refuse, match="unusable"):
+        h.read_oauth_token(str(binary))
+
+
+def test_scan_for_token_refuses_by_kind_without_the_value(tmp_path):
+    token = "FAKE-OAUTH-TOKEN-0123456789"
+    h.scan_for_token(token, "patch", data="clean diff")
+    h.scan_for_token("", "patch", data=token)  # no token configured: nothing to find
+    with pytest.raises(h.Refuse, match="token found in patch") as err:
+        h.scan_for_token(token, "patch", data=f"+KEY={token}\n")
+    assert token not in str(err.value)
+    tree = tmp_path / "w"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "sub" / "ok.txt").write_text("nothing here")
+    h.scan_for_token(token, "work files", root=tree)
+    (tree / "sub" / "notes.txt").write_bytes(b"x" * ((1 << 20) - 5) + token.encode() + b"y")
+    with pytest.raises(h.Refuse, match="token found in work files") as err:
+        h.scan_for_token(token, "work files", root=tree)
+    assert token not in str(err.value) and "notes" not in str(err.value)
+
+
+TOKEN = "FAKE-OAUTH-TOKEN-0123456789"
+
+
+@pytest.mark.timeout(10)
+def test_scan_for_token_refuses_fifo_promptly(tmp_path):
+    tree = tmp_path / "w"
+    tree.mkdir()
+    os.mkfifo(tree / "pipe")  # no writer: a blocking open() would hang forever
+    with pytest.raises(h.Refuse, match="symlink or special file in work files") as err:
+        h.scan_for_token(TOKEN, "work files", root=tree)
+    assert TOKEN not in str(err.value) and "pipe" not in str(err.value)
+
+
+@pytest.mark.timeout(10)
+@pytest.mark.skipif(not os.path.exists("/dev/zero"), reason="needs /dev/zero")
+def test_scan_for_token_refuses_symlink_to_dev_zero(tmp_path):
+    tree = tmp_path / "w"
+    tree.mkdir()
+    (tree / "zero").symlink_to("/dev/zero")
+    with pytest.raises(h.Refuse, match="symlink or special file"):
+        h.scan_for_token(TOKEN, "work files", root=tree)
+
+
+def test_scan_for_token_does_not_follow_symlinks_outside_the_tree(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text(TOKEN)
+    tree = tmp_path / "w"
+    tree.mkdir()
+    (tree / "link").symlink_to(outside)
+    with pytest.raises(h.Refuse, match="symlink or special file") as err:
+        h.scan_for_token(TOKEN, "work files", root=tree)
+    assert "token found" not in str(err.value)  # refused for the kind, file not read
+    (tree / "link").unlink()
+    (tree / "dirlink").symlink_to(tmp_path)  # directory symlink: not followed, refused
+    with pytest.raises(h.Refuse, match="symlink or special file"):
+        h.scan_for_token(TOKEN, "work files", root=tree)
+
+
+def test_scan_for_token_refuses_oversized_file_and_total(tmp_path, monkeypatch):
+    tree = tmp_path / "w"
+    tree.mkdir()
+    (tree / "big").write_bytes(b"x" * 4096)
+    monkeypatch.setattr(h, "SCAN_FILE_CAP", 1024)
+    with pytest.raises(h.Refuse, match="oversized file in work files"):
+        h.scan_for_token(TOKEN, "work files", root=tree)
+    monkeypatch.setattr(h, "SCAN_FILE_CAP", 1 << 20)
+    monkeypatch.setattr(h, "SCAN_TOTAL_CAP", 6000)
+    (tree / "big2").write_bytes(b"x" * 4096)
+    with pytest.raises(h.Refuse, match="size cap exceeded"):
+        h.scan_for_token(TOKEN, "work files", root=tree)
+
+
+def test_scan_for_token_time_cap_refuses(tmp_path, monkeypatch):
+    tree = tmp_path / "w"
+    tree.mkdir()
+    (tree / "a").write_text("x")
+    monkeypatch.setattr(h, "SCAN_SECONDS", -1.0)
+    with pytest.raises(h.Refuse, match="time cap"):
+        h.scan_for_token(TOKEN, "work files", root=tree)
+
+
+def test_grader_python_is_cached_per_path(tmp_path, monkeypatch):
+    stub = python_stub(tmp_path / "s", "python3", importable=False)
+    env = {"PATH": str(stub)}
+    h._GRADER_PYTHON.pop(env["PATH"], None)
+    first = h.grader_python(env)
+    monkeypatch.setattr(h.subprocess, "run", lambda *a, **k: pytest.fail("re-probed"))
+    assert h.grader_python(env) == first
+    h._GRADER_PYTHON.pop(env["PATH"], None)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores chmod 000")
+def test_scan_for_token_refuses_an_unreadable_directory(tmp_path):
+    token = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+    root = tmp_path / "tree"
+    hidden = root / "a" / "hidden"
+    hidden.mkdir(parents=True)
+    (hidden / "t.txt").write_text(token)
+    hidden.chmod(0)
+    try:
+        with pytest.raises(h.Refuse, match="unreadable directory in work files") as info:
+            h.scan_for_token(token, "work files", root=root)
+        assert token not in str(info.value) and str(tmp_path) not in str(info.value)
+    finally:
+        hidden.chmod(0o700)
+
+
+def _repo(path):
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "f.txt").write_text("one\n")
+    h.run_git(path, "init", "-q")
+    h.run_git(path, "add", ".")
+    h.run_git(path, "-c", "user.name=T", "-c", "user.email=t@l", "-c", "commit.gpgsign=false",
+              "commit", "-qm", "base")
+    return path
+
+
+def test_run_git_non_utf8_output_is_bytes_not_an_exception(tmp_path):
+    repo = _repo(tmp_path / "r")
+    (repo / "f.txt").write_bytes(b"caf\xe9 \xff\xfe\n")
+    out = h.run_git(repo, "diff", "HEAD", sandbox=True)
+    assert b"caf\xe9" in out
+
+
+def test_run_git_broken_repo_and_missing_repo_refuse(tmp_path):
+    repo = _repo(tmp_path / "r")
+    (repo / ".git" / "HEAD").write_text("garbage\n")
+    with pytest.raises(h.Refuse, match="refusing"):
+        h.run_git(repo, "diff", "HEAD", sandbox=True)
+    shutil.rmtree(repo / ".git" / "objects")
+    with pytest.raises(h.Refuse, match="refusing"):
+        h.run_git(repo, "log", "-p", "--all", sandbox=True)
+    with pytest.raises(h.Refuse, match="no git repository"):
+        h.run_git(tmp_path, "diff", "HEAD", sandbox=True)
+
+
+def test_run_git_caps_output_and_time(tmp_path, monkeypatch):
+    repo = _repo(tmp_path / "r")
+    monkeypatch.setattr(h, "GIT_OUTPUT_CAP", 10)
+    with pytest.raises(h.Refuse, match="git log output over the size cap"):
+        h.run_git(repo, "log", "-p", "--all", sandbox=True)
+    monkeypatch.setattr(h, "GIT_OUTPUT_CAP", 1 << 20)
+    monkeypatch.setattr(h, "GIT_SECONDS", -1.0)
+    with pytest.raises(h.Refuse, match="timed out"):
+        h.run_git(repo, "log", "-p", "--all", sandbox=True)
+
+
+def test_run_git_ignores_malicious_repo_config(tmp_path):
+    """F117: an agent-written .git/config must not run anything (fsmonitor, textconv, external
+    diff, filters, hooks, pager, ssh, includes). The marker file is never created."""
+    repo = _repo(tmp_path / "r")
+    marker = tmp_path / "PWNED"
+    evil = tmp_path / "evil.sh"
+    evil.write_text(f"#!/bin/sh\necho x >> {marker}\ncat \"$@\" 2>/dev/null\n")
+    evil.chmod(0o755)
+    inc = tmp_path / "inc.cfg"
+    inc.write_text(f"[core]\n\tfsmonitor = {evil}\n")
+    (repo / ".gitattributes").write_text("*.txt diff=x filter=x\n")
+    hook = repo / ".git" / "hooks" / "post-index-change"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text(f"#!/bin/sh\necho x >> {marker}\n")
+    hook.chmod(0o755)
+    with (repo / ".git" / "config").open("a") as cfg:
+        cfg.write(
+            f"[core]\n\tfsmonitor = {evil}\n\thooksPath = {hook.parent}\n"
+            f"\tsshCommand = {evil}\n\tpager = {evil}\n\teditor = {evil}\n"
+            f"[diff]\n\texternal = {evil}\n[diff \"x\"]\n\ttextconv = {evil}\n"
+            f"\tcommand = {evil}\n[filter \"x\"]\n\tclean = {evil}\n\tsmudge = {evil}\n"
+            f"\tprocess = {evil}\n[gpg]\n\tprogram = {evil}\n[log]\n\tshowSignature = true\n"
+            f"[include]\n\tpath = {inc}\n"
+        )
+    (repo / "f.txt").write_text("two\n")
+    (repo / "new.txt").write_text("new\n")
+    for args in (("diff", "HEAD"), ("diff", "--name-only", "HEAD"),
+                 ("log", "-p", "--all"), ("ls-files", "--others", "--exclude-standard")):
+        h.run_git(repo, *args, sandbox=True)
+        assert not marker.exists(), args
+    # the trusted path (agent config IS read; core keys overridden, but a `filter=` attribute
+    # cannot be, so it is for harness-made repos and `worktree remove` only, never diff/status)
+    wt = tmp_path / "wt"
+    h.run_git(repo, "worktree", "add", "-q", "-b", "b3", str(wt))
+    h.run_git(wt, "worktree", "remove", "--force", str(wt))
+    assert not marker.exists()
+    # control: with no hardening the same config does run the program, so the test can fail
+    _REAL_RUN(["git", "-C", str(repo), "-c", "core.pager=cat", "status"],
+              capture_output=True, env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
+    assert marker.exists(), "control: unhardened git must trip the planted config"
+
+
+def test_run_git_sandbox_sees_linked_worktree(tmp_path):
+    repo = _repo(tmp_path / "r")
+    wt = tmp_path / "wt"
+    h.run_git(repo, "worktree", "add", "-q", "-b", "b2", str(wt))
+    (wt / "f.txt").write_text("changed\n")
+    assert b"changed" in h.run_git(wt, "diff", "HEAD", sandbox=True)
+
+
+def test_scan_for_token_vanished_entry_is_skipped_other_errors_refuse(tmp_path, monkeypatch):
+    root = tmp_path / "tree"
+    root.mkdir()
+    (root / "gone.txt").write_text("x")
+    (root / "ok.txt").write_text("y")
+    real_lstat = os.lstat
+
+    def lstat_with(exc):
+        def fake(path, *a, **k):
+            if str(path).endswith("gone.txt"):
+                raise exc
+            return real_lstat(path, *a, **k)
+        return fake
+
+    monkeypatch.setattr(h.os, "lstat", lstat_with(FileNotFoundError()))
+    h.scan_for_token("TOKEN-abcdef0123456789", "work files", root=root)
+    monkeypatch.setattr(h.os, "lstat", lstat_with(PermissionError()))
+    with pytest.raises(h.Refuse, match="unreadable entry in work files"):
+        h.scan_for_token("TOKEN-abcdef0123456789", "work files", root=root)
+
+
+# ---- F117 repair 1: scan only what the agent added; history-scrub bypasses R1-R4 ----------
+
+_TOKEN = "FAKE-OAUTH-TOKEN-abcdef0123456789"
+_ID = ("-c", "user.name=T", "-c", "user.email=t@l", "-c", "commit.gpgsign=false")
+
+
+def _commit(repo, msg="c"):
+    h.run_git(repo, "add", "-A")
+    h.run_git(repo, *_ID, "commit", "-qm", msg)
+    return h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+
+
+def test_scan_new_objects_cap_counts_only_agent_additions(tmp_path, monkeypatch):
+    """Blocker: a shared mirror's history can exceed the cap; only agent-added content counts."""
+    mirror = _repo(tmp_path / "mirror")
+    for i in range(6):  # base history: ~600 KB of incompressible content
+        (mirror / f"big{i}.bin").write_bytes(os.urandom(100_000))
+        _commit(mirror, f"base{i}")
+    wt = tmp_path / "wt"
+    h.run_git(mirror, "worktree", "add", "-q", "--detach", str(wt))  # noncloud shape
+    monkeypatch.setattr(h, "GIT_OUTPUT_CAP", 64_000)
+    baseline = h.git_object_ids(wt)
+    assert len(baseline) > 6
+    (wt / "fix.py").write_text("value = 1\n")
+    h.run_git(wt, "add", "-A")
+    h.run_git(wt, *_ID, "commit", "-qm", "agent")
+    h.scan_new_git_objects(_TOKEN, wt, baseline)  # small addition: passes under the small cap
+    # control: without a baseline the whole base history is scanned and hits the cap
+    with pytest.raises(h.Refuse, match="output over the size cap"):
+        h.scan_new_git_objects(_TOKEN, wt, None)
+    # and a big agent addition still trips the cap
+    (wt / "huge.bin").write_bytes(os.urandom(200_000))
+    h.run_git(wt, "add", "-A")
+    h.run_git(wt, *_ID, "commit", "-qm", "huge")
+    with pytest.raises(h.Refuse, match="output over the size cap"):
+        h.scan_new_git_objects(_TOKEN, wt, baseline)
+
+
+def test_scan_refuses_an_oversized_commit_object_before_reading_it(tmp_path, monkeypatch):
+    """Round 2: a tiny zlib bomb typed `commit` made git inflate it whole in memory. The declared
+    size is checked first (--batch-check); `--batch` never runs on it."""
+    repo = _repo(tmp_path / "r")
+    baseline = h.git_object_ids(repo)
+    bomb = repo / "bomb"
+    bomb.write_bytes(bytes(3_000_000))  # compresses to a few KB
+    h.run_git(repo, "hash-object", "-w", "-t", "commit", "--literally", str(bomb))
+    monkeypatch.setattr(h, "GIT_OBJECT_CAP", 1 << 20)
+    calls = []
+    real = h.run_git
+
+    def spy(work, *args, **kwargs):
+        calls.append(args[:2])
+        return real(work, *args, **kwargs)
+
+    monkeypatch.setattr(h, "run_git", spy)
+    with pytest.raises(h.Refuse, match=r"oversized git object \(commit\)"):
+        h.scan_new_git_objects(_TOKEN, repo, baseline)
+    assert ("cat-file", "--batch") not in calls
+    # under the limit the same object is read and scanned normally
+    monkeypatch.setattr(h, "GIT_OBJECT_CAP", 64 << 20)
+    h.scan_new_git_objects(_TOKEN, repo, baseline)
+
+
+def _hit(repo, baseline):
+    with pytest.raises(h.Refuse, match="token found in git objects") as info:
+        h.scan_new_git_objects(_TOKEN, repo, baseline)
+    assert _TOKEN not in str(info.value)
+
+
+def test_scan_new_objects_r1_replace_ref_hiding_a_commit(tmp_path):
+    repo = _repo(tmp_path / "r")
+    clean = h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+    baseline = h.git_object_ids(repo)
+    (repo / "f.txt").write_text(f"{_TOKEN}\n")
+    dirty = _commit(repo, "dirty")
+    h.run_git(repo, "reset", "-q", "--hard", clean)
+    h.run_git(repo, "replace", dirty, clean)  # refs/replace/<dirty> -> clean
+    _hit(repo, baseline)
+
+
+def test_git_env_disables_replace_objects(tmp_path):
+    assert h.git_env("x")["GIT_NO_REPLACE_OBJECTS"] == "1"
+    repo = _repo(tmp_path / "r")
+    first = h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+    (repo / "f.txt").write_text("two\n")
+    second = _commit(repo, "second")
+    h.run_git(repo, "replace", "-f", second, first)
+    shown = h.run_git(repo, "cat-file", "-p", second, sandbox=True)
+    assert b"second" in shown  # the real commit, not the replacement
+
+
+def test_scan_new_objects_r2_evil_merge_resolution(tmp_path):
+    repo = _repo(tmp_path / "r")
+    main = h.run_git(repo, "rev-parse", "--abbrev-ref", "HEAD").decode().strip()
+    baseline = h.git_object_ids(repo)
+    h.run_git(repo, "checkout", "-q", "-b", "side")
+    (repo / "g.txt").write_text("g\n")
+    _commit(repo, "side")
+    h.run_git(repo, "checkout", "-q", main)
+    (repo / "h.txt").write_text("h\n")
+    _commit(repo, "main")
+    h.run_git(repo, *_ID, "merge", "--no-commit", "--no-ff", "side")
+    (repo / "f.txt").write_text(f"{_TOKEN}\n")  # only the merge's resolution carries it
+    h.run_git(repo, "add", "-A")
+    h.run_git(repo, *_ID, "commit", "-qm", "merge")
+    h.run_git(repo, "checkout", "-q", "-b", "tip")
+    merge = h.run_git(repo, "rev-parse", "HEAD").decode().strip()
+    h.run_git(repo, "checkout", "-q", main)
+    h.run_git(repo, "reset", "-q", "--hard", "HEAD~1")
+    h.run_git(repo, "branch", "-f", "tip", merge)
+    h.run_git(repo, "checkout", "-q", main)
+    _hit(repo, baseline)
+
+
+def test_scan_new_objects_r3_tag_pointing_at_a_blob(tmp_path):
+    repo = _repo(tmp_path / "r")
+    baseline = h.git_object_ids(repo)
+    (tmp_path / "t.txt").write_text(f"{_TOKEN}\n")
+    blob = h.run_git(repo, "hash-object", "-w", str(tmp_path / "t.txt")).decode().strip()
+    h.run_git(repo, "tag", "blobtag", blob)
+    _hit(repo, baseline)
+
+
+def test_scan_new_objects_r4_unreachable_object(tmp_path):
+    repo = _repo(tmp_path / "r")
+    baseline = h.git_object_ids(repo)
+    (tmp_path / "t.txt").write_text(f"{_TOKEN}\n")
+    h.run_git(repo, "hash-object", "-w", str(tmp_path / "t.txt"))  # on no ref at all
+    _hit(repo, baseline)
+    # clean additions pass
+    other = _repo(tmp_path / "o")
+    base2 = h.git_object_ids(other)
+    (other / "n.txt").write_text("no secret\n")
+    _commit(other, "n")
+    h.scan_new_git_objects(_TOKEN, other, base2)
+
+
+def test_sandbox_diff_sees_a_same_second_same_size_edit(tmp_path):
+    repo = _repo(tmp_path / "r")
+    (repo / "f.txt").write_text("ONE\n")  # same size as "one\n", inside the commit's second
+    assert b"f.txt" in h.run_git(repo, "diff", "--name-only", "HEAD", sandbox=True)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores chmod 000")
+def test_sandbox_gitdir_unreadable_linked_gitdir_refuses(tmp_path):
+    repo = _repo(tmp_path / "r")
+    wt = tmp_path / "wt"
+    h.run_git(repo, "worktree", "add", "-q", "--detach", str(wt))
+    gitdir = next((repo / ".git" / "worktrees").iterdir())
+    gitdir.chmod(0)
+    try:
+        with pytest.raises(h.Refuse, match="unusable git metadata"):
+            h.run_git(wt, "diff", "HEAD", sandbox=True)
+    finally:
+        gitdir.chmod(0o700)
+
+
+# AMEND6 (D-374): the local model under test is a per-run parameter; nothing else may change.
+AMEND6_PAST = "2030-03-01T00:00:00Z"
+MODELS6 = tuple(h.AMEND6_MODELS)
+BLOCK6_FREE_KEYS = {"REPO_SHA", "CODE_RUNNER_SHA256"}
+
+
+def amend6_text(**values):
+    block = {**h.AMEND6_FIXED, "REPO_SHA": "8" * 40, "CODE_RUNNER_SHA256": "d" * 64, **values}
+    return ("# AMEND6\n\n```text P20-AMEND6-CONSTANTS\n"
+            + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n")
+
+
+def freeze_amend6(cfg, *, text=None, date=AMEND6_PAST):
+    cfg.amend6.write_text(text if text is not None else amend6_text())
+    cfg.amend6.with_suffix(".sha256").write_text(
+        f"{h.sha256_file(cfg.amend6)}  {cfg.amend6.name}\nfrozen_utc {date}\n"
+    )
+
+
+def through_amend5(factory, label="run"):
+    cfg, c, pools = factory(label)
+    freeze_amend3(cfg, c)
+    freeze_amend4(cfg)
+    freeze_amend5(cfg)
+    return cfg, c, pools
+
+
+def with_model(cfg, model):
+    cfg = replace(cfg, model=model)
+    cfg.ollama.ids = {model: {h.AMEND6_MODELS[model]}}
+    return cfg
+
+
+def test_amend6_pins_match_the_prereg_and_the_machine():
+    assert h.AMEND6_MODELS == {"qwen3-coder:30b": h.CONSTANTS["ID_qwen3-coder:30b"],
+                               "qwen3.6:35b-a3b-coding": h.CONSTANTS["ID_qwen3.6:35b-a3b-coding"]}
+    assert set(h.AMEND6_MODELS) <= set(h.CONSTANTS["LOCAL_MODELS"].split(","))
+    assert h.QWEN38 not in h.AMEND6_MODELS
+
+
+@pytest.mark.parametrize("model", MODELS6)
+def test_amend6_changes_only_the_model_pins_and_the_two_sha_pins(factory, model):
+    cfg, c, _ = through_amend5(factory)
+    before = h.frozen(cfg)["constants"]
+    freeze_amend6(cfg)
+    got = h.frozen(with_model(cfg, model))
+    after = got["constants"]
+    changed = {k for k in before.keys() | after.keys() if before.get(k) != after.get(k)}
+    assert changed == {"LOCAL_MODELS", "CODE_LOCAL_MODELS", "SIZE_ORDER", "REPO_SHA",
+                       "CODE_RUNNER_SHA256", QWEN_ID, f"ID_{model}"}
+    assert after["LOCAL_MODELS"] == after["CODE_LOCAL_MODELS"] == after["SIZE_ORDER"] == model
+    assert {k: v for k, v in after.items() if k.startswith("ID_")} == {
+        f"ID_{model}": h.AMEND6_MODELS[model]}
+    assert after["REPO_SHA"] == "8" * 40 and after["CODE_RUNNER_SHA256"] == "d" * 64
+    assert "LOCAL_MODEL_CHOICES" not in after
+    # Items, pass bar, judge, reference, caps, plants and analysis keys are the AMEND5 values.
+    for key in ("SELECT_SEED", "N_TARGET_QA", "N_MIN", "JUDGE", "REFERENCE", "REPORT_ARMS",
+                "SPEND_CAP_USD", "G_MIN_PTS", "TIERS_WRITTEN", "QA_BASELINE", "REF_WINDOW",
+                "LOCAL_TIMEOUT_S", "RETRIES", "ANSWER_CAP_CHARS", "PLANTS_PASS_SHARE",
+                "MAX_REF_MISSING_SHARE", "QUIET_FREE_MEM_BASIS", "NIGHT_WINDOW"):
+        assert key in after and after[key] == before[key], key
+    for key in ("SELECT_SEED", "N_TARGET_QA", "N_MIN", "JUDGE", "REFERENCE", "REPORT_ARMS",
+                "SPEND_CAP_USD", "G_MIN_PTS", "TIERS_WRITTEN", "QA_BASELINE", "REF_WINDOW",
+                "LOCAL_TIMEOUT_S", "RETRIES", "ANSWER_CAP_CHARS", "PLANTS_PASS_SHARE",
+                "MAX_REF_MISSING_SHARE"):
+        assert after[key] == h.CONSTANTS[key], key  # the prereg's frozen value, word for word
+    assert after["SPEND_CAP_USD"] == "60.00" and after["JUDGE"] == "opus"
+    assert got["model"] == model and got["amend6_sha256"] == h.sha256_file(cfg.amend6)
+    assert got["amend6_frozen_utc"] == AMEND6_PAST
+
+
+KEYS_AMEND6_MAY_NOT_TOUCH = sorted(
+    (set(h.CONSTANTS) | set(h.FILL_KEYS)) - BLOCK6_FREE_KEYS
+    - {k for k in h.CONSTANTS if k.startswith("ID_")}
+) + ["LOCAL_MODEL_CHOICES2", "FITNESS_PASS_MARK2", "ID_qwen3.8-uncensored:latest"]
+
+
+def test_amend6_guard_list_covers_the_pass_bar_items_judge_and_caps():
+    # An empty or short list would pass everything (house rule 3): it must hold the real keys.
+    for key in ("SELECT_SEED", "N_TARGET_QA", "N_TARGET_TECH_OP", "N_MIN", "SESSION_CAP_SHARE",
+                "JUDGE", "REFERENCE", "REPORT_ARMS", "SPEND_CAP_USD", "FIRST_CALL_EST_USD",
+                "SAFETY_FACTOR", "G_MIN_PTS", "REF_WINDOW", "LOCAL_TIMEOUT_S", "REF_TIMEOUT_S",
+                "RETRIES", "ANSWER_CAP_CHARS", "JUDGE_CONTEXT_CAP_CHARS", "PLANTS_PASS_SHARE",
+                "REJUDGE_SHARE", "MAX_REF_MISSING_SHARE", "QA_TYPE_MIN_ITEMS", "TIERS_WRITTEN",
+                "QA_BASELINE", "QUIET_FREE_MEM_MIN_PCT", "QUIET_LOAD1_MAX", "POOL_QA_SHA256",
+                "POOL_CODE_SHA256", "N_REALISED_QA", "N_REALISED_CODE", "BUILD_MANIFEST_SHA256",
+                "GT_SPLIT_SHA256", "CLAUDE_OPUS_ID", "CLAUDE_SONNET_ID", "LABEL"):
+        assert key in KEYS_AMEND6_MAY_NOT_TOUCH, key
+    assert len(KEYS_AMEND6_MAY_NOT_TOUCH) > 60
+
+
+@pytest.mark.parametrize("key", KEYS_AMEND6_MAY_NOT_TOUCH)
+def test_amend6_refuses_every_other_constant(factory, key):
+    cfg, c, _ = through_amend5(factory)
+    value = h.CONSTANTS.get(key, "x")
+    freeze_amend6(cfg, text=amend6_text(**{key: value}))
+    with pytest.raises(h.Refuse, match="AMEND6 constants"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+@pytest.mark.parametrize("defect", [
+    dict(LOCAL_MODEL_CHOICES="qwen3-coder:30b"),
+    dict(LOCAL_MODEL_CHOICES="qwen3-coder:30b,qwen3.6:35b-a3b-coding,qwen3.5:latest"),
+    dict(LOCAL_MODEL_CHOICES=f"qwen3-coder:30b,{h.QWEN38}"),
+    {"ID_qwen3-coder:30b": "0" * 12},
+    {"ID_qwen3.6:35b-a3b-coding": "017eda0b7c34,2e16a80fe3d7"},
+    dict(REPO_SHA="zz"), dict(REPO_SHA="F" * 40), dict(REPO_SHA="8" * 39),
+    dict(CODE_RUNNER_SHA256="d" * 63), dict(CODE_RUNNER_SHA256="D" * 64),
+])
+def test_amend6_refuses_changed_or_malformed_values(factory, defect):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg, text=amend6_text(**defect))
+    with pytest.raises(h.Refuse, match="AMEND6 constants"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+@pytest.mark.parametrize("missing", ["LOCAL_MODEL_CHOICES", "ID_qwen3-coder:30b",
+                                     "ID_qwen3.6:35b-a3b-coding", "REPO_SHA",
+                                     "CODE_RUNNER_SHA256"])
+def test_amend6_refuses_a_missing_key(factory, missing):
+    cfg, c, _ = through_amend5(factory)
+    block = {**h.AMEND6_FIXED, "REPO_SHA": "8" * 40, "CODE_RUNNER_SHA256": "d" * 64}
+    del block[missing]
+    freeze_amend6(cfg, text="```text P20-AMEND6-CONSTANTS\n"
+                  + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n")
+    with pytest.raises(h.Refuse, match="AMEND6 constants"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_refuses_a_duplicate_key_and_a_missing_block(factory):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg, text=amend6_text().replace(
+        "```\n", f"REPO_SHA={'7' * 40}\n```\n", 1))
+    with pytest.raises(h.Refuse, match="AMEND6 constants"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+    freeze_amend6(cfg, text=amend6_text().replace("```text P20-AMEND6-CONSTANTS", "```text"))
+    with pytest.raises(h.Refuse, match="AMEND6 constants"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+@pytest.mark.parametrize("model", [None, "", h.QWEN38, "qwen3.5:latest", "gemma3:12b",
+                                   "qwen3-coder:30b ", "qwen3-coder", "sonnet",
+                                   "qwen3-coder:30b,qwen3.6:35b-a3b-coding"])
+def test_amend6_refuses_any_model_outside_the_two(factory, model):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    with pytest.raises(h.Refuse, match="AMEND6 requires --model"):
+        h.frozen(replace(cfg, model=model))
+
+
+@pytest.mark.parametrize("model", [MODELS6[0], h.QWEN38, "qwen3.5:latest"])
+def test_model_without_a_frozen_amend6_refuses(factory, model):
+    cfg, c, _ = through_amend5(factory)
+    cfg.amend6.write_text(amend6_text())  # a draft with no sidecar is inert
+    with pytest.raises(h.Refuse, match="--model requires a frozen AMEND6"):
+        h.frozen(replace(cfg, model=model))
+    assert "amend6_sha256" not in h.frozen(cfg)
+    assert h.frozen(cfg)["constants"]["LOCAL_MODELS"] == h.QWEN38
+
+
+def test_amend6_frozen_enforcement(factory):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    cfg = with_model(cfg, MODELS6[0])
+    good = h.frozen(cfg)["amend6_sha256"]
+    (cfg.run_dir / "PREREG-AMEND6.md").write_text("different")
+    with pytest.raises(h.Refuse, match="PREREG-AMEND6.md differs"):
+        h.frozen(cfg)
+    (cfg.run_dir / "PREREG-AMEND6.md").write_bytes(cfg.amend6.read_bytes())
+    assert h.frozen(cfg)["amend6_sha256"] == good
+    (cfg.run_dir / "PREREG-AMEND6.md").unlink()
+    for kwargs, message in [
+        (dict(date=AMEND5_PAST), "AMEND6 frozen_utc"),
+        (dict(date="2030-01-01T00:00:00Z"), "AMEND6 frozen_utc"),
+        (dict(date="2031-01-01T00:00:00Z"), "AMEND6 frozen_utc"),
+        (dict(date="2030-03-01T00:00:00"), "AMEND6 frozen_utc"),
+    ]:
+        freeze_amend6(cfg, **kwargs)
+        with pytest.raises(h.Refuse, match=message):
+            h.frozen(cfg)
+    freeze_amend6(cfg)
+    cfg.amend6.write_text(cfg.amend6.read_text() + " ")  # edited after the freeze
+    with pytest.raises(h.Refuse, match="AMEND6 is not frozen"):
+        h.frozen(cfg)
+    assert call(cfg, "select") == 2
+
+
+@pytest.mark.parametrize("missing", ["amend3", "amend4", "amend5"])
+def test_amend6_requires_the_whole_amendment_chain(factory, missing):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    getattr(cfg, missing).with_suffix(".sha256").unlink()
+    with pytest.raises(h.Refuse, match="requires a frozen AMEND"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_alone_refuses(factory):
+    cfg, c, _ = factory()
+    freeze_amend6(cfg)
+    with pytest.raises(h.Refuse, match="requires a frozen AMEND"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_earlier_amendments_still_refuse_when_tampered(factory):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    cfg.prereg.write_text(cfg.prereg.read_text() + "\nN_MIN=1\n")
+    with pytest.raises(h.Refuse, match="prereg is not frozen"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_cannot_change_a_constant_through_an_earlier_amendment_slot(factory):
+    """An AMEND5 block with the model keys or a pass-bar key is still refused."""
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    for extra in ({"LOCAL_MODELS": MODELS6[0]}, {"G_MIN_PTS": "0.0"}, {"JUDGE": "haiku"}):
+        freeze_amend5(cfg, text=amend5_text(**extra), date="2030-02-15T00:00:00Z")
+        with pytest.raises(h.Refuse, match="AMEND5 constants"):
+            h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_gate_receives_the_amend6_repo_sha(factory):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    seen = []
+    cfg = with_model(cfg, MODELS6[0])
+    cfg.gate = lambda constants: seen.append(constants["REPO_SHA"])
+    assert call(cfg, "status") == 0 and seen == ["8" * 40]
+    assert call(cfg, "select") == 0 and seen == ["8" * 40, "8" * 40]
+
+
+def test_amend6_status_without_a_model_is_not_frozen(factory, capsys):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    assert call(cfg, "status") == 0
+    assert json.loads(capsys.readouterr().out)["frozen"] is False
+
+
+def test_amend6_binds_a_run_dir_to_one_model(factory):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    first = with_model(cfg, MODELS6[0])
+    assert call(first, "select") == 0
+    rows = h.uses(first)
+    assert [r[2] for r in rows if r[0] == "model"] == [f"model={MODELS6[0]}"]
+    assert [r[0] for r in rows].index("model") < [r[0] for r in rows].index("selected")
+    assert h.frozen(first)["model"] == MODELS6[0]
+    with pytest.raises(h.Refuse, match="bound to another model"):
+        h.frozen(with_model(cfg, MODELS6[1]))
+    assert call(with_model(cfg, MODELS6[1]), "run", "--set", "qa") == 2
+    assert not first.ollama.calls and not cfg.claude.calls
+
+
+def test_amend6_refuses_a_run_dir_selected_before_it_existed(factory):
+    """The qwen3.8 run dir (b2) has a selection and no model line: it cannot be reused."""
+    cfg, c, _ = through_amend5(factory)
+    assert call(cfg, "select") == 0
+    freeze_amend6(cfg)
+    with pytest.raises(h.Refuse, match="selected without an AMEND6 model"):
+        h.frozen(with_model(cfg, MODELS6[0]))
+
+
+def test_amend6_select_without_a_model_line_is_the_same_as_before(factory):
+    cfg, c, _ = through_amend5(factory)
+    assert call(cfg, "select") == 0
+    assert not [r for r in h.uses(cfg) if r[0] == "model"]
+
+
+@pytest.mark.parametrize("model", MODELS6)
+def test_amend6_run_uses_the_pinned_model_and_refuses_the_others(factory, model):
+    cfg, c, _ = through_amend5(factory, "r")
+    freeze_amend6(cfg)
+    cfg = with_model(cfg, model)
+    assert call(cfg, "select") == 0
+    for other in (h.QWEN38, "qwen3.5:latest", *(m for m in MODELS6 if m != model)):
+        assert call(cfg, "run", "--set", "qa", "--arms", other) == 2
+    assert not cfg.ollama.calls and not cfg.claude.calls
+    cfg.ollama.ids = {model: {"ffffffffffff"}}
+    assert call(cfg, "run", "--set", "qa", "--arms", model) == 2  # identity differs: not a result
+    assert not cfg.ollama.calls
+    cfg.ollama.ids = {model: {h.AMEND6_MODELS[model]}}
+    assert call(cfg, "run", "--set", "qa", "--arms", model) == 0
+    rows = h.jsonl(cfg.run_dir / "answers/qa.jsonl")
+    assert rows and {r["arm"] for r in rows} == {model}
+    assert {call_[0] for call_ in cfg.ollama.calls} == {model}
+    assert all(call_[3]["temperature"] == 0 for call_ in cfg.ollama.calls)
+    assert all(t is False for t in cfg.ollama.thinks)  # AMEND2's think:false is unchanged
+
+
+@pytest.mark.parametrize("model", MODELS6)
+def test_amend6_score_log_records_the_hash_and_the_model(factory, model):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend6(cfg)
+    cfg = with_model(cfg, model)
+    assert call(cfg, "select") == 0 and call(cfg, "score") == 0
+    started = next(row for row in h.uses(cfg) if row[0] == "started")
+    assert f"amend6_sha256={h.sha256_file(cfg.amend6)}" in started
+    assert f"model={model}" in started
+    assert f"amend5_sha256={h.sha256_file(cfg.amend5)}" in started
+
+
+def test_amend6_parser_takes_only_the_two_models(capsys):
+    ap = h.parser()
+    assert ap.parse_args(["--model", MODELS6[1], "status"]).model == MODELS6[1]
+    assert ap.parse_args(["status"]).model is None
+    for bad in (h.QWEN38, "qwen3.5:latest", "sonnet"):
+        with pytest.raises(SystemExit):
+            ap.parse_args(["--model", bad, "status"])
+    capsys.readouterr()

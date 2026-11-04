@@ -9,7 +9,10 @@ import hashlib
 import json
 import math
 import os
+import pwd
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -37,6 +40,7 @@ AMEND2 = REPO / "docs/prereg/PREREG-P20-requal-AMEND2.md"
 AMEND3 = REPO / "docs/prereg/PREREG-P20-requal-AMEND3.md"
 AMEND4 = REPO / "docs/prereg/PREREG-P20-requal-AMEND4.md"
 AMEND5 = REPO / "docs/prereg/PREREG-P20-requal-AMEND5.md"
+AMEND6 = REPO / "docs/prereg/PREREG-P20-requal-AMEND6.md"
 # AMEND3 (D-202): the exclusive lock a local model call holds; the P2.0-T harness takes the same
 # one (fcntl.flock LOCK_EX on this path). Tests point Cfg.lock_path or this name elsewhere.
 OLLAMA_LOCK = Path.home() / ".rsi/research/primary-plan/v16/requal/ollama.lock"
@@ -137,6 +141,14 @@ AMEND4_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}"}
 # qwen3.8 at 32k context takes ~51% of RAM, so the raw floor parked every call after warm-up).
 AMEND5_FIXED = {"QUIET_FREE_MEM_BASIS": "excl_own_arm"}
 AMEND5_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}"}
+# AMEND6 (D-374): the local arm under test is a per-run parameter (`--model`), limited to the two
+# models below, one run dir per model. AMEND2's qwen3.8 pin is replaced for that run and nothing
+# else changes: items, pass bar, judge, caps and analysis are the prereg's. REPO_SHA and
+# CODE_RUNNER_SHA256 are re-pinned because the runner and harness changed.
+AMEND6_MODELS = {"qwen3-coder:30b": "06c1097efce0", "qwen3.6:35b-a3b-coding": "017eda0b7c34"}
+AMEND6_FIXED = {"LOCAL_MODEL_CHOICES": ",".join(AMEND6_MODELS),
+                **{f"ID_{model}": pin for model, pin in AMEND6_MODELS.items()}}
+AMEND6_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}", "CODE_RUNNER_SHA256": r"[0-9a-f]{64}"}
 
 
 def amended(constants: dict, overrides: dict) -> dict:
@@ -466,6 +478,57 @@ def frozen(cfg: Cfg) -> dict:
         raise Refuse("refusing: AMEND4 requires a frozen AMEND3")
     elif cfg.amend5.with_suffix(".sha256").exists():
         raise Refuse("refusing: AMEND5 requires a frozen AMEND4")
+    if cfg.amend6.with_suffix(".sha256").exists():
+        # AMEND6 (D-374) is in force as soon as its sidecar exists; a draft without one is not.
+        if "amend5_sha256" not in out:
+            raise Refuse("refusing: AMEND6 requires a frozen AMEND5")
+        try:
+            sixth = check_prereg.check(cfg.amend6)
+            if not sixth["match"]:
+                raise ValueError("freeze")
+            sixth_text = cfg.amend6.read_text()
+        except (OSError, ValueError, IndexError, OverflowError) as exc:
+            raise Refuse("refusing: AMEND6 is not frozen") from exc
+        try:
+            sixth_epoch = datetime.fromisoformat(sixth["frozen_utc"].replace("Z", "+00:00"))
+            if (sixth_epoch.tzinfo is None
+                    or not fifth_epoch.timestamp() < sixth_epoch.timestamp() < cfg.now()):
+                raise ValueError("freeze order")
+        except (ValueError, OverflowError) as exc:
+            raise Refuse("refusing: AMEND6 frozen_utc") from exc
+        try:
+            sixth_overrides = parse_block(sixth_text, "```text P20-AMEND6-CONSTANTS")
+            if (sixth_overrides.keys() != AMEND6_FIXED.keys() | AMEND6_SHA_KEYS.keys()
+                    or any(sixth_overrides[k] != v for k, v in AMEND6_FIXED.items())
+                    or not all(re.fullmatch(pattern, sixth_overrides[k])
+                               for k, pattern in AMEND6_SHA_KEYS.items())):
+                raise ValueError("constants")
+        except (Refuse, ValueError) as exc:
+            raise Refuse("refusing: AMEND6 constants") from exc
+        sixth_copy = cfg.run_dir / "PREREG-AMEND6.md"
+        if sixth_copy.exists() and sixth_copy.read_bytes() != cfg.amend6.read_bytes():
+            raise Refuse("refusing: PREREG-AMEND6.md differs")
+        if cfg.model not in AMEND6_MODELS:
+            raise Refuse("refusing: AMEND6 requires --model " + " or ".join(AMEND6_MODELS))
+        rows = uses(cfg)
+        bound = {x[len("model="):] for row in rows if row and row[0] == "model"
+                 for x in row[2:] if x.startswith("model=")}
+        if bound - {cfg.model}:
+            raise Refuse("refusing: run dir is bound to another model")
+        if not bound and any(row and row[0] == "selected" for row in rows):
+            raise Refuse("refusing: run dir was selected without an AMEND6 model")
+        # One model per run: AMEND2's qwen3.8 pin and every other ID_ pin are replaced.
+        constants = {k: v for k, v in constants.items() if not k.startswith("ID_")}
+        constants.update(
+            LOCAL_MODELS=cfg.model, CODE_LOCAL_MODELS=cfg.model, SIZE_ORDER=cfg.model,
+            REPO_SHA=sixth_overrides["REPO_SHA"],
+            CODE_RUNNER_SHA256=sixth_overrides["CODE_RUNNER_SHA256"],
+            **{f"ID_{cfg.model}": AMEND6_MODELS[cfg.model]},
+        )
+        out.update(amend6_sha256=sixth["sha256"], amend6_frozen_utc=sixth["frozen_utc"],
+                   model=cfg.model)
+    elif cfg.model is not None:
+        raise Refuse("refusing: --model requires a frozen AMEND6")
     out["constants"] = constants
     return out
 
@@ -529,6 +592,8 @@ class Cfg:
     amend3: Path = AMEND3
     amend4: Path = AMEND4
     amend5: Path = AMEND5
+    amend6: Path = AMEND6
+    model: str | None = None
     lock_path: Path | None = None
     local_used: set = dc_field(default_factory=set)
     gate: Callable[[dict], None] | None = None
@@ -594,12 +659,690 @@ def claude_argv(model_id: str, run_dir: Path, tools: str | None) -> list[str]:
     return args + (["--tools", tools] if tools is not None else [])
 
 
-def claude_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env.pop("ANTHROPIC_BASE_URL", None)
-    env.pop("ANTHROPIC_API_KEY", None)
-    env["LLM_ROUTER_SESSION_KIND"] = "research"
+# F104 (incidents F86 2026-10-18, F86-2 2026-10-19): agent subprocesses ran with the owner's
+# real HOME and twice deleted the live llm-router install. Agents now get a per-task scratch
+# HOME and an allow-listed environment; nothing else from the caller's environment is passed.
+AGENT_PASS_ENV = ("PATH", "LANG", "LC_ALL", "USER", "LOGNAME")  # USER: macOS Keychain account
+CLAUDE_AUTH_ENV = ("CLAUDE_CODE_OAUTH_TOKEN",)  # subscription token; forwarded, never logged
+CLAUDE_CREDENTIALS_ENV = "P20_CLAUDE_CREDENTIALS_FILE"  # optional 0600 file holding the token
+AGENT_ENV_ALLOWED = frozenset(
+    AGENT_PASS_ENV + CLAUDE_AUTH_ENV
+    + ("HOME", "LLM_ROUTER_SESSION_KIND", "PYTHONNOUSERSITE")
+)
+# F113: user-site packages (where a pip --user llm_router would live) are off for agents.
+AGENT_FIXED_ENV = {"PYTHONNOUSERSITE": "1"}
+
+
+# F110 (rv-642): PATH was still the owner's, so an agent could run `llm-router uninstall`.
+# `launchctl` stays reachable (it lives in /bin); the threat is llm-router calling it, so
+# removing every llm-router executable from PATH is the guard. Not a sandbox.
+SYSTEM_PATH_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+AGENT_PATH_TOOLS = ("node", "npm", "npx", "git", "python", "python3", "uv")  # dirs kept
+# The legacy-brand CLI is not named here: the identity gate forbids that string in runtime code.
+DENIED_EXECUTABLES = ("llm-router", "llm_router")
+
+
+def has_denied_executable(path_dirs) -> bool:
+    joined = os.pathsep.join(map(str, path_dirs))
+    return any(shutil.which(name, path=joined) for name in DENIED_EXECUTABLES)
+
+
+def agent_path(path: str) -> str:
+    """Allow-listed PATH: system dirs plus caller dirs that hold a needed tool (node, git,
+    python, uv), minus any dir with an llm-router executable, ~/.local/bin and the uv
+    tool dirs. A dir holding both node and llm-router is dropped whole (fails closed)."""
+    home = real_home()
+    banned = {home / ".local/bin", home / ".local/share/uv"}
+    kept: list[str] = [d for d in SYSTEM_PATH_DIRS if Path(d).is_dir()]
+    for entry in path.split(os.pathsep):
+        if not entry or entry in kept:
+            continue
+        d = Path(entry)
+        resolved = d.resolve()
+        if any(resolved == b or b in resolved.parents for b in banned):
+            continue
+        if has_denied_executable([d]) or not any(
+            shutil.which(t, path=str(d)) for t in AGENT_PATH_TOOLS
+        ):
+            continue
+        kept.append(entry)
+    return os.pathsep.join(kept)
+
+
+# F115: any python*/pypy* executable (python3.13, pypy3, ...) is an interpreter an agent can run.
+# F117: bare python/pypy, or a version suffix with only the t/d/m ABI flags; pythonw, pythonista
+# and the like are not interpreters the agent can run for this purpose and are not probed.
+INTERPRETER_NAME = re.compile(r"(python|pypy)([0-9]+(\.[0-9]+)*[tdm]*)?")  # python3.13t, python3m, pypy3
+IMPORT_PROBE = (
+    "import importlib.util,sys; "
+    "sys.exit(0 if importlib.util.find_spec('llm_router') is None else 1)"
+)
+
+
+def agent_pythons(path: str) -> list[str]:
+    """Every distinct python*/pypy* executable in a directory of `path` (sorted per dir)."""
+    found: list[str] = []
+    for entry in path.split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            names = sorted(os.listdir(entry))
+        except OSError:
+            continue
+        for name in names:
+            if not INTERPRETER_NAME.fullmatch(name):
+                continue
+            exe = os.path.join(entry, name)
+            if os.path.isfile(exe) and os.access(exe, os.X_OK) and exe not in found:
+                found.append(exe)
+    return found
+
+
+def assert_no_llm_router_import(env: dict[str, str]) -> None:
+    """Refuse unless every python*/pypy* on env's PATH answers the probe with exit 0 (F115).
+
+    Fail closed: exit 0 ("not importable") is the only pass. Exit 1 (importable), any other
+    exit (2, 126/127 shim failure), a signal, a timeout or an OSError all refuse. Names no path."""
+    for exe in agent_pythons(env.get("PATH", "")):
+        try:
+            result = subprocess.run(
+                [exe, "-I", "-c", IMPORT_PROBE], env=env, stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=30, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise Refuse("refusing: python import probe timed out") from None
+        except OSError:
+            raise Refuse("refusing: python import probe could not run") from None
+        if result.returncode == 1:
+            raise Refuse("refusing: llm_router is importable from a python on the agent PATH")
+        if result.returncode != 0:
+            raise Refuse("refusing: python import probe gave no clean answer")
+
+
+_GRADER_PYTHON: dict[str, str] = {}
+
+
+def grader_python(env: dict[str, str]) -> str:
+    """The interpreter that runs agent-written code in the grader: first python on env's PATH
+    with pytest. It must not import llm_router (guard). A hung or unrunnable probe refuses
+    (it is not an agent failure)."""
+    path = env.get("PATH", "")
+    if path in _GRADER_PYTHON:
+        return _GRADER_PYTHON[path]
+    assert_no_llm_router_import(env)
+    for exe in agent_pythons(path):
+        try:
+            probe = subprocess.run(
+                [exe, "-I", "-c", "import pytest"], env=env, stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=30, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise Refuse("refusing: grader pytest probe timed out") from None
+        except OSError:
+            raise Refuse("refusing: grader pytest probe could not run") from None
+        if probe.returncode == 0:
+            _GRADER_PYTHON[path] = exe  # cache successes only: one probe pass per PATH per process
+            return exe
+    raise Refuse("refusing: no python on the agent PATH provides pytest for the grader")
+
+
+SCAN_FILE_CAP = 64 << 20     # bytes read from one file
+SCAN_TOTAL_CAP = 512 << 20   # bytes read from one tree
+SCAN_SECONDS = 120.0         # wall time for one tree
+
+
+def _scan_file(path: str, needle: bytes, kind: str, budget: list[int]) -> None:
+    """Open without following a symlink or blocking on a FIFO; read only a regular file."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise Refuse(f"refusing: unreadable or special file in {kind}") from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise Refuse(f"refusing: special file in {kind}")
+        if info.st_size > SCAN_FILE_CAP:
+            raise Refuse(f"refusing: oversized file in {kind}")
+        read, tail = 0, b""
+        while chunk := os.read(fd, 1 << 20):
+            read += len(chunk)
+            budget[0] -= len(chunk)
+            if read > SCAN_FILE_CAP or budget[0] < 0:
+                raise Refuse(f"refusing: scan size cap exceeded in {kind}")
+            if needle in tail + chunk:
+                raise Refuse(f"refusing: token found in {kind}")
+            tail = chunk[-len(needle):]
+    finally:
+        os.close(fd)
+
+
+def scan_for_token(token: str, kind: str, *, data=None, root: Path | None = None) -> None:
+    """F115: refuse when the OAuth token value appears in an artifact about to be stored.
+
+    `data` is str/bytes; `root` is a directory tree (every file, .git included). Compared in
+    memory; the message names only the artifact kind, never the value or a path. In a tree only
+    regular, non-symlink files and plain directories are accepted: a FIFO, device, socket or
+    symlink (an agent made it; it could block the harness or read outside the tree) refuses, as
+    does exceeding the per-file, total-size or time cap. Nothing is followed or opened blocking."""
+    if not token:
+        return
+    needle = token.encode()
+    if data is not None:
+        blob = data.encode(errors="replace") if isinstance(data, str) else data
+        if needle in blob:
+            raise Refuse(f"refusing: token found in {kind}")
+    if root is None:
+        return
+    root = Path(root)
+    if not root.is_dir() or root.is_symlink():
+        return
+    deadline = time.monotonic() + SCAN_SECONDS
+    budget = [SCAN_TOTAL_CAP]
+    def walk_error(_exc: OSError) -> None:
+        # F117: os.walk skips an unreadable directory silently; its token would be missed.
+        raise Refuse(f"refusing: unreadable directory in {kind}")
+
+    for base, dirs, files in os.walk(root, followlinks=False, onerror=walk_error):
+        for name in dirs + files:
+            if time.monotonic() > deadline:
+                raise Refuse(f"refusing: scan time cap exceeded in {kind}")
+            path = os.path.join(base, name)
+            try:
+                mode = os.lstat(path).st_mode
+            except FileNotFoundError:
+                continue  # F117: gone since the listing (a git child still finishing): nothing to scan
+            except OSError:
+                raise Refuse(f"refusing: unreadable entry in {kind}") from None
+            if stat.S_ISDIR(mode):
+                continue
+            if not stat.S_ISREG(mode):  # symlink (file or dir), FIFO, device, socket
+                raise Refuse(f"refusing: symlink or special file in {kind}")
+            _scan_file(path, needle, kind, budget)
+
+
+GIT_OUTPUT_CAP = 128 << 20   # bytes of one git command's stdout
+GIT_INDEX_CAP = 256 << 20    # bytes of an index copied into the sandbox git dir
+GIT_SECONDS = 120.0          # wall time of one git command
+GIT_OBJECT_CAP = 64 << 20    # declared size of one agent-added object (checked before reading it)
+GIT_MEMORY_CAP = 4 << 30     # RLIMIT_AS of the git child that reads the objects (where enforced)
+GIT_HARDEN = (
+    # Each key below can make git run a command named by repo config, or reach beyond the repo.
+    # The sandbox gitdir (below) already drops the agent's config; these cover the trusted path
+    # and are a second layer.
+    "core.fsmonitor=false", "core.hooksPath=/dev/null", "diff.external=",
+    "core.sshCommand=false", "core.gitProxy=false", "core.pager=cat", "core.editor=false",
+    "core.askPass=false", "core.alternateRefsCommand=false", "core.attributesFile=/dev/null",
+    "core.excludesFile=/dev/null", "core.untrackedCache=false", "gpg.program=false",
+    "gpg.openpgp.program=false", "gpg.x509.program=false", "gpg.ssh.program=false",
+    "log.showSignature=false", "credential.helper=", "protocol.ext.allow=never",
+    "diff.ignoreSubmodules=all", "status.submoduleSummary=false", "submodule.recurse=false",
+    "uploadpack.packObjectsHook=false", "sequence.editor=false",
+)
+
+
+def git_env(home: str) -> dict[str, str]:
+    """Environment for a harness git run: no system or global config, scratch HOME, no prompts."""
+    exe = shutil.which("git") or "/usr/bin/git"
+    return {
+        "PATH": os.pathsep.join([os.path.dirname(exe), "/usr/bin", "/bin"]),
+        "HOME": home, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_ATTR_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat", "GIT_EXTERNAL_DIFF": "",
+        # F117: an agent-written refs/replace/<oid> would otherwise show the harness a clean
+        # object where the agent stored a dirty one.
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+
+
+def _plain_file(path: Path, cap: int) -> bytes:
+    """Bytes of a regular, non-symlink file of at most `cap` bytes; Refuse otherwise."""
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > cap:
+            raise Refuse("refusing: unusable git metadata")
+        return path.read_bytes()
+    except OSError:
+        raise Refuse("refusing: unusable git metadata") from None
+
+
+def sandbox_gitdir(work: Path, into: Path) -> Path:
+    """F117: a git dir the harness wrote, for reading an agent-controlled repo. The agent owns
+    `work/.git/config` (and hooks, info/attributes, includes), and git runs commands that config
+    names (fsmonitor, textconv, filters, ...). So the agent's config is never read: this dir
+    holds a harness-written config, a copy of HEAD and the index, and points at the agent's
+    objects (alternates) and refs (symlinks) as data only. Linked worktrees are resolved from
+    the `.git` file. Nothing here is executed."""
+    dotgit = Path(work) / ".git"
+    if dotgit.is_symlink():
+        raise Refuse("refusing: .git is a symlink")
+    if dotgit.is_dir():
+        gitdir = common = dotgit
+    elif dotgit.is_file():
+        text = _plain_file(dotgit, 4096).decode(errors="replace").strip()
+        if not text.startswith("gitdir:"):
+            raise Refuse("refusing: unusable git metadata")
+        gitdir = (Path(work) / text[len("gitdir:"):].strip()).resolve()
+        common = gitdir
+        try:
+            has_common = (gitdir / "commondir").exists()
+        except OSError:
+            raise Refuse("refusing: unusable git metadata") from None
+        if has_common:
+            common = (gitdir / _plain_file(gitdir / "commondir", 4096).decode(
+                errors="replace").strip()).resolve()
+    else:
+        raise Refuse("refusing: no git repository")
+    head = _plain_file(gitdir / "HEAD", 4096)
+    if not (head.startswith(b"ref: refs/") or re.fullmatch(rb"[0-9a-f]{40,64}\n?", head)):
+        raise Refuse("refusing: unusable git metadata")
+    into.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (into / "HEAD").write_bytes(head)
+    (into / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfilemode = true\n"
+    )
+    try:
+        has_index = (gitdir / "index").exists()
+    except OSError:
+        raise Refuse("refusing: unusable git metadata") from None
+    if has_index:
+        (into / "index").write_bytes(_plain_file(gitdir / "index", GIT_INDEX_CAP))
+        # F117: the copy's mtime is "now", so git would trust the stat data of an entry edited
+        # in the same second (racy-clean) and miss the edit. Index mtime 1 (0 means "unset" to git) makes every entry
+        # racy, so git compares content.
+        os.utime(into / "index", (1, 1))
+    objects = common / "objects"
+    refs = common / "refs"
+    if objects.is_symlink() or not objects.is_dir() or refs.is_symlink() or not refs.is_dir():
+        raise Refuse("refusing: unusable git metadata")
+    (into / "objects" / "info").mkdir(parents=True)
+    (into / "objects" / "info" / "alternates").write_text(f"{objects.resolve()}\n")
+    os.symlink(refs.resolve(), into / "refs")
+    packed = common / "packed-refs"
+    try:
+        has_packed = packed.exists() or packed.is_symlink()
+    except OSError:
+        raise Refuse("refusing: unusable git metadata") from None
+    if has_packed:
+        if packed.is_symlink():
+            raise Refuse("refusing: unusable git metadata")
+        os.symlink(packed.resolve(), into / "packed-refs")
+    return into
+
+
+def _limit_memory(limit: int) -> Callable[[], None]:
+    def apply() -> None:
+        import resource
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+        except (OSError, ValueError):
+            pass  # not supported here; the declared-size check is the primary bound
+    return apply
+
+
+def run_git(work, *args: str, sandbox: bool = False, ok: tuple[int, ...] = (0,),
+            stdin_data: bytes | None = None, memory: int | None = None) -> bytes:
+    """F117: stdout bytes of one git command in `work`, hardened against agent-written config.
+
+    `sandbox=True` (use it for any repo an agent touched) reads through `sandbox_gitdir`, so the
+    agent's config is not read at all; otherwise the harness-made repo is used with HARDEN keys.
+    `stdin_data` is fed to git's stdin through a file. Output is capped (GIT_OUTPUT_CAP) and time-limited (GIT_SECONDS); a non-UTF-8 diff is
+    plain bytes. `memory` sets RLIMIT_AS on the child (best effort: macOS does not enforce it). Every failure (spawn, timeout, cap, exit code not in `ok`, broken repo) is a
+    Refuse that names only the git subcommand."""
+    import selectors
+    import tempfile
+
+    work = Path(work).resolve()
+    verb = next((a for a in args if not a.startswith("-") and "=" not in a), "?")
+    name = verb if re.fullmatch(r"[a-z-]+", verb) else "?"
+    extra = ["--no-textconv", "--no-ext-diff", "--ignore-submodules=all"] if name in (
+        "diff", "log") else []
+    cmd_at = next((i for i, a in enumerate(args) if a == verb), 0)
+    argv = ["git", "--no-pager"]
+    for key in GIT_HARDEN:
+        argv += ["-c", key]
+    argv += [*args[:cmd_at + 1], *extra, *args[cmd_at + 1:]]
+    with tempfile.TemporaryDirectory(prefix="p20git-") as tmp:
+        env = git_env(tmp)
+        stdin: Any = subprocess.DEVNULL
+        if stdin_data is not None:
+            feed = Path(tmp) / "stdin"
+            feed.write_bytes(stdin_data)
+            stdin = feed.open("rb")
+        if sandbox:
+            env["GIT_DIR"] = str(sandbox_gitdir(work, Path(tmp) / "gd"))
+            env["GIT_WORK_TREE"] = str(work)
+        else:
+            argv[1:1] = ["-C", str(work)]
+        try:
+            proc = subprocess.Popen(
+                argv, cwd=work if sandbox else tmp, env=env, stdin=stdin,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                preexec_fn=_limit_memory(memory) if memory else None,
+            )
+        except (OSError, ValueError):
+            raise Refuse(f"refusing: git {name} could not run") from None
+        finally:
+            if stdin is not subprocess.DEVNULL:
+                stdin.close()
+        chunks: list[bytes] = []
+        size = 0
+        deadline = time.monotonic() + GIT_SECONDS
+        problem = ""
+        with selectors.DefaultSelector() as sel:
+            sel.register(proc.stdout, selectors.EVENT_READ)
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    problem = "timed out"
+                    break
+                if not sel.select(min(left, 1.0)):
+                    continue
+                chunk = os.read(proc.stdout.fileno(), 1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > GIT_OUTPUT_CAP:
+                    problem = "output over the size cap"
+                    break
+                chunks.append(chunk)
+        if problem:
+            proc.kill()
+        try:
+            code = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            code = proc.wait()
+        finally:
+            proc.stdout.close()
+        if problem:
+            raise Refuse(f"refusing: git {name} {problem}")
+        if code not in ok:
+            raise Refuse(f"refusing: git {name} failed")
+    return b"".join(chunks)
+
+
+class AgentSurvived(Refuse):
+    """An agent process outlived the kill, or that could not be ruled out: nothing may be read."""
+
+
+def _ps_lines(*flags: str) -> list[str]:
+    try:
+        out = subprocess.run(["ps", *flags], stdin=subprocess.DEVNULL, capture_output=True,
+                             timeout=20, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return out.decode(errors="replace").splitlines()
+
+
+@dataclass(frozen=True)
+class ProcRow:
+    ppid: int
+    pgid: int
+    zombie: bool
+    start: str   # `ps lstart` text: with the pid it names one process (1 s resolution)
+
+
+def process_table() -> dict[int, ProcRow]:
+    """One `ps` snapshot of every process: pid -> parent, group, state, start time."""
+    table: dict[int, ProcRow] = {}
+    for line in _ps_lines("-axo", "pid=,ppid=,pgid=,stat=,lstart="):
+        parts = line.split(None, 4)
+        if len(parts) == 5 and all(x.isdigit() for x in parts[:3]):
+            table[int(parts[0])] = ProcRow(int(parts[1]), int(parts[2]), parts[3].startswith("Z"),
+                                           " ".join(parts[4].split()))
+    return table
+
+
+def track_agent_tree(known: dict[int, str], table: dict[int, ProcRow], leader: int) -> None:
+    """Record (pid -> start time) of every process below the agent leader or below an already
+    recorded pid whose start time still matches, in the same snapshot. A pid is only ever
+    recorded through a parent link to a process proven to be the agent's."""
+    kids: dict[int, list[int]] = {}
+    for pid, row in table.items():
+        kids.setdefault(row.ppid, []).append(pid)
+    stack = [leader] + [p for p, start in known.items() if p in table and table[p].start == start]
+    seen = set(stack)
+    while stack:
+        for pid in kids.get(stack.pop(), []):
+            if pid not in seen:
+                seen.add(pid)
+                known[pid] = table[pid].start
+                stack.append(pid)
+
+
+def stop_agent_processes(leader: int, known: dict[int, str], seconds: float = 10.0) -> None:
+    """F117: kill the agent and wait until it is gone, before any scan or purge reads the tree.
+
+    Only processes provably the agent's are signalled: `killpg(leader)` while the leader (a
+    session leader, so pgid == pid) is still unreaped, which the caller guarantees by not
+    waiting on it before this call (the table must still list it with pgid == leader), and each
+    pid in `known` whose start time, re-read now, equals the one recorded when it was first
+    seen below the agent. A pid whose identity cannot be re-verified is never signalled.
+    Raises AgentSurvived if the table cannot be read, the leader's row is missing, or something
+    is still alive at the end (the message names the pids only, never a command line)."""
+    import signal
+    deadline = time.monotonic() + seconds
+    while True:
+        table = process_table()
+        if not table:
+            raise AgentSurvived("refusing: agent process survived (process list unreadable)")
+        track_agent_tree(known, table, leader)
+        row = table.get(leader)
+        if row is None:
+            # F122: the caller never reaps the leader before this call, so even a dead one is
+            # listed (Z). Missing means a hidden or unparseable row: "stopped" cannot be shown.
+            raise AgentSurvived("refusing: agent process survived (leader missing from the "
+                                "process list, so it cannot be shown stopped)")
+        group = row.pgid == leader
+        if group:
+            try:
+                os.killpg(leader, signal.SIGKILL)
+            except OSError:
+                pass
+        alive = {pid for pid, start in known.items()
+                 if pid in table and table[pid].start == start and not table[pid].zombie
+                 and pid != os.getpid()}
+        for pid in alive:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        members = {pid for pid, r in table.items() if r.pgid == leader and not r.zombie}
+        if not alive and not (group and members):
+            return
+        if time.monotonic() > deadline:
+            left = sorted(alive | (members if group else set()))
+            raise AgentSurvived("refusing: agent process survived (pids: "
+                                f"{', '.join(map(str, left))})")
+        time.sleep(0.1)
+
+
+_last_holders: list[int] = []   # F122: pids found by the last holder check (message only)
+
+
+def _open_paths_of_others(dirs: list[Path], seconds: float) -> bool | None:
+    """True if some process other than this one has its cwd or an open file under any of
+    `dirs`, False if none, None if that could not be determined."""
+    roots = [os.path.realpath(d) for d in dirs]
+    me = os.getpid()
+    found: set[int] = set()
+
+    def under(path: str) -> bool:
+        return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+    proc = Path("/proc")
+    if (proc / "self" / "fd").exists():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit() or int(entry.name) == me:
+                continue
+            try:
+                links = [os.readlink(entry / "cwd")]
+                links += [os.readlink(f) for f in (entry / "fd").iterdir()]
+            except OSError:
+                continue
+            if any(under(link) for link in links):
+                found.add(int(entry.name))
+        _last_holders[:] = sorted(found)
+        return bool(found)
+    try:
+        done = subprocess.run(["lsof", "-nP", "-w", "-Fpn"], stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=seconds, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode not in (0, 1):
+        return None
+    pid = 0
+    for line in done.stdout.decode(errors="replace").splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith("n") and pid not in (0, me) and under(line[1:]):
+            found.add(pid)
+    _last_holders[:] = sorted(found)
+    return bool(found)
+
+
+def assert_dirs_unheld(dirs: list[Path], seconds: float = 60.0) -> None:
+    """F117: after the kill, refuse unless no other process holds (cwd or open file) the work
+    dir or the scratch HOME. A live process there would race the scan, so it is never scanned."""
+    _last_holders.clear()
+    held = _open_paths_of_others(dirs, seconds)
+    if held is None:
+        raise AgentSurvived("refusing: cannot rule out a surviving agent process")
+    if held:
+        pids = f" (pids: {', '.join(map(str, _last_holders))})" if _last_holders else ""
+        raise AgentSurvived(f"refusing: agent process survived{pids}")
+
+
+def git_object_ids(work) -> set[str]:
+    """F117: ids of every object in the repo's object store (loose, packed, alternates),
+    reachable or not. Take it before the agent runs and again after: the difference is what
+    the agent added."""
+    out = run_git(work, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)",
+                  sandbox=True)
+    return set(out.decode(errors="replace").split())
+
+
+def scan_new_git_objects(token: str, work, baseline: set[str] | None) -> None:
+    """F117: scan the raw content of every object not in `baseline` (all objects if None).
+    Raw objects cover what `log -p` hides: merges, tags, blobs on no branch, unreachable
+    commits, replaced objects. Only agent-added content counts against GIT_OUTPUT_CAP, so a
+    big shared mirror (noncloud) does not trip it."""
+    new = git_object_ids(work) - (baseline or set())
+    if not new:
+        return
+    ids = ("\n".join(sorted(new)) + "\n").encode()
+    # declared type and size first: git inflates a commit or tree whole in memory, so a tiny
+    # zlib bomb must be refused before it is read (blobs stream; the output cap bounds them)
+    info = run_git(work, "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+                   sandbox=True, stdin_data=ids).decode(errors="replace").splitlines()
+    if len(info) != len(new):
+        raise Refuse("refusing: unreadable git object")
+    for line in info:
+        parts = line.split()
+        if len(parts) != 3 or not parts[2].isdigit():
+            raise Refuse("refusing: unreadable git object")
+        if int(parts[2]) > GIT_OBJECT_CAP:
+            raise Refuse(f"refusing: oversized git object ({parts[1]})")
+    data = run_git(work, "cat-file", "--batch", sandbox=True, stdin_data=ids,
+                   memory=GIT_MEMORY_CAP)
+    scan_for_token(token, "git objects", data=data)
+
+
+def real_home() -> Path:
+    """The account's home from the user database, which an overridden $HOME cannot move."""
+    return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+
+
+def scratch_home(path: Path) -> Path:
+    """A fresh private directory to serve as an agent's HOME."""
+    if path.resolve() == real_home():
+        raise Refuse("refusing: agent scratch HOME is the real HOME")
+    if path.exists():
+        shutil.rmtree(path)
+    private_dir(path)
+    return path
+
+
+def assert_agent_env(env: dict[str, str], run_dir: Path | None = None) -> None:
+    """Refuse to launch an agent whose environment could reach the owner's install."""
+    home = env.get("HOME")
+    if not home:
+        raise Refuse("refusing: agent environment has no HOME")
+    resolved = Path(home).resolve()
+    caller = os.environ.get("HOME")
+    if resolved == real_home() or (caller and resolved == Path(caller).resolve()):
+        raise Refuse("refusing: agent HOME is the real HOME")
+    if resolved.is_relative_to(real_home()) and not (
+        run_dir is not None and resolved.is_relative_to(Path(run_dir).resolve())
+    ):
+        raise Refuse("refusing: agent HOME is inside the real HOME outside the run dir")
+    if env.get("PATH") is not None and has_denied_executable(env["PATH"].split(os.pathsep)):
+        raise Refuse("refusing: llm-router is reachable on the agent PATH")
+    if set(env) - AGENT_ENV_ALLOWED:
+        raise Refuse("refusing: unexpected key in agent environment")
+    if env.get("PATH") is not None:
+        assert_no_llm_router_import(env)
+
+
+def read_oauth_token(source: str) -> str:
+    """Token from the owner's file (`claude setup-token` output). Refuses a file that is
+    group/world accessible or empty. Errors name no path and no value (F113)."""
+    try:
+        fd = os.open(source, os.O_RDONLY)
+        try:
+            if os.fstat(fd).st_mode & 0o077:
+                raise Refuse("refusing: Claude credentials file is group/world accessible")
+            with os.fdopen(fd, "r") as handle:
+                fd = -1
+                token = handle.read().strip()
+        finally:
+            if fd >= 0:
+                os.close(fd)
+    except (OSError, ValueError):
+        # from None: the OSError text carries the file path (F115).
+        raise Refuse("refusing: Claude credentials file unusable") from None
+    if not token:
+        raise Refuse("refusing: Claude credentials file is empty")
+    return token
+
+
+def agent_env(home: Path, *, claude: bool = False, run_dir: Path | None = None) -> dict[str, str]:
+    """Minimal agent environment: scratch HOME, PATH/LANG, and (Claude only) auth material.
+
+    Auth is either CLAUDE_CODE_OAUTH_TOKEN passed through, or (F113) the token read from the
+    0600 file named by P20_CLAUDE_CREDENTIALS_FILE and set as CLAUDE_CODE_OAUTH_TOKEN in the
+    Claude child env only. Values are never printed, logged or written; failures name no path.
+    """
+    env = {k: os.environ[k] for k in AGENT_PASS_ENV if k in os.environ}
+    if "PATH" in env:
+        env["PATH"] = agent_path(env["PATH"])
+    env["HOME"] = str(home)
+    env.update(AGENT_FIXED_ENV)
+    if claude:
+        env["LLM_ROUTER_SESSION_KIND"] = "research"
+        env.update({k: os.environ[k] for k in CLAUDE_AUTH_ENV if os.environ.get(k)})
+        source = os.environ.get(CLAUDE_CREDENTIALS_ENV)
+        if source:
+            env[CLAUDE_AUTH_ENV[0]] = read_oauth_token(source)
+    assert_agent_env(env, run_dir)
     return env
+
+
+@contextlib.contextmanager
+def scrubbed_environ(env: dict[str, str]):
+    """Run code that builds a child env from os.environ (the Pi helper) with `env` instead."""
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(env)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def claude_env(home: Path, run_dir: Path | None = None) -> dict[str, str]:
+    return agent_env(home, claude=True, run_dir=run_dir)
 
 
 class ClaudeCLI:
@@ -607,7 +1350,7 @@ class ClaudeCLI:
         self.run_dir = run_dir
 
     def __call__(self, model_id: str, prompt: str, *, timeout: int) -> dict:
-        env = claude_env()
+        env = claude_env(scratch_home(self.run_dir / "claude_home"), self.run_dir)
         if "ANTHROPIC_BASE_URL" in env or "ANTHROPIC_API_KEY" in env:
             raise Refuse("refusing: Claude environment")
         cwd = self.run_dir / "claude_cwd"
@@ -772,6 +1515,8 @@ def select(cfg: Cfg, c: dict, dry_run: bool = False) -> dict:
         if selected[name]["n"] != int(c[f"N_REALISED_{name.upper()}"]):
             raise Refuse(f"refusing: N_REALISED_{name.upper()} differs")
         selected[name]["pool_sha256"] = pool_hash
+    if cfg.model is not None:  # AMEND6: this run dir now belongs to one model
+        append_use(cfg, "model", f"model={cfg.model}")
     for name in SETS:
         if selected[name]["n"] < int(c["N_MIN"]):
             append_use(cfg, "terminal", f"{name} n_min")
@@ -1246,6 +1991,8 @@ def score(cfg: Cfg, c: dict, freeze: dict, measurement: Path | None = None) -> d
               **({"amend3_sha256": freeze["amend3_sha256"]} if "amend3_sha256" in freeze else {}),
               **({"amend4_sha256": freeze["amend4_sha256"]} if "amend4_sha256" in freeze else {}),
               **({"amend5_sha256": freeze["amend5_sha256"]} if "amend5_sha256" in freeze else {}),
+              **({"amend6_sha256": freeze["amend6_sha256"], "model": freeze["model"]}
+                 if "amend6_sha256" in freeze else {}),
               "git_sha": cfg.git_sha(),
               "selection_sha256": optional_hash(cfg.run_dir / "selection.json"),
               "answers_sha256": combined_hash(cfg, "answers"),
@@ -1561,6 +2308,8 @@ def parser() -> argparse.ArgumentParser:
         Path.home() / ".rsi/research/primary-plan/v16/requal/b2",
     ))
     ap.add_argument("--run-dir", type=Path, default=Path(default))
+    ap.add_argument("--model", choices=tuple(AMEND6_MODELS), default=None,
+                    help="AMEND6: the local model under test (one run dir per model)")
     sub = ap.add_subparsers(dest="command", required=True)
     sub.add_parser("select").add_argument("--dry-run", action="store_true")
     for command in ("run", "judge"):
@@ -1583,18 +2332,18 @@ def parser() -> argparse.ArgumentParser:
     return ap
 
 
-def real_cfg(run_dir: Path) -> Cfg:
+def real_cfg(run_dir: Path, model: str | None = None) -> Cfg:
     def git_sha() -> str:
         return subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=60, check=True).stdout.strip()
 
     return Cfg(run_dir, ollama=OllamaHTTP(), claude=ClaudeCLI(run_dir), machine=Machine(),
-               quota=read_quota, git_sha=git_sha)
+               quota=read_quota, git_sha=git_sha, model=model)
 
 
 def main(argv: list[str] | None = None, *, cfg: Cfg | None = None) -> int:
     args = parser().parse_args(argv)
-    cfg = cfg or real_cfg(args.run_dir)
+    cfg = cfg or real_cfg(args.run_dir, args.model)
     try:
         prefreeze = args.command == "status" or (args.command == "select" and args.dry_run)
         freeze = None if prefreeze else frozen(cfg)
