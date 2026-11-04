@@ -378,6 +378,60 @@ canary mode; until it exists it behaves as `shadow`.
   proxy keeps prompt text. A turn with a secret pattern in it is skipped, router banners are cut out, and the
   labeller deletes entries after 7 days or once labelled. The ledger and the shadow records stay hash-only.
 
+## Classifier in the hooks: one verdict per prompt and per Agent spawn (`LLM_ROUTER_LOCAL_CLASSIFIER=shadow|on`)
+
+The proxy seam above only sees sessions that route through the proxy, and nothing read its verdict. The hooks now
+ask the same decision model themselves (`llm_router/door_verdict.py`), so a session without `ANTHROPIC_BASE_URL`
+still gets a verdict (`docs/bugs/CLS-HOOK-1.md`). Same switch, same model (`LLM_ROUTER_CLASSIFIER_BACKEND=systemone`,
+`LLM_ROUTER_DECISION_MODEL`), read by each hook per run:
+
+- `off`: zero Ollama calls. `shadow`: one text-free row per routed prompt (`auto-route.py`) and per routed Agent spawn
+  (`agent-route.py`) in `door_verdicts.jsonl`; nothing changes. `on`: the verdict decides, below. Unset means `shadow`
+  when the decision model is configured (backend `systemone` and `LLM_ROUTER_DECISION_MODEL`), else `off`: a machine
+  without it makes no call, and the chat backend's general model is never picked up by guesswork.
+- `shadow` never evicts another lane's model (`docs/bugs/CLS-EVICT-1.md`). Ollama here keeps one big model resident, so a
+  log-only verdict that loaded the decision model would push out the local text-job lane's model and make the next
+  commit message pay a cold load. In `shadow` the call is made only when the decision model is already resident or no
+  model is (one `/api/ps`); otherwise the row says `skipped_slot_busy` (or `skipped_slot_unknown` when `/api/ps` fails)
+  and no request is sent. Session start loads the decision model only in `on`.
+- Privacy. The classifier refuses a non-loopback Ollama (`refused_remote`, in the proxy path too) unless
+  `LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE=1`, and a prompt that holds a secret (`local_privacy.scan_secrets`, the door the
+  Agent hook's Codex path uses) is classified by no model (`withheld_secret`); both hooks go through `door_verdict.start`,
+  which runs that door first.
+- A prompt is never stalled (`docs/bugs/CLS-STALL-1.md`). `shadow` waits for nothing: a detached worker
+  (`python -m llm_router.door_verdict --worker`, the text on its stdin) makes the call and writes the row. `on` joins a
+  verdict made in a thread beside the hook's own work, at most `LLM_ROUTER_DOOR_VERDICT_PROMPT_BUDGET_MS` (2,000) from the
+  moment `start` was entered (the residency probe is inside it), and a prompt that finds the model not resident does
+  not wait for the load at all: the worker loads it and makes the verdict, this prompt keeps today's behaviour, the next
+  one decides. A hook that exits before its decision point logs `abandoned` without waiting. An Agent spawn waits under
+  `LLM_ROUTER_DOOR_VERDICT_BUDGET_MS` (8,000; its hook already runs for seconds). No detached child allowed
+  (`LLM_ROUTER_NO_DETACHED_SPAWN`) or the breaker open means the verdict is made in the hook's own thread.
+- Two failures in a row open a 60 s breaker; one slow call does not. In `on`, session start loads the decision model
+  (`LLM_ROUTER_CLASSIFIER_PRELOAD=off` restores the edit-model and generic warm-ups; a 22 GB model loaded by them evicts
+  the decision model).
+- What `on` decides. The model answers one question, the cheapest adequate Claude tier with a probability each, used as
+  a difficulty signal. `preferred_door(verdict, kind=..., local_lane=...)` is the seam a hook or a sub-agent fallback calls.
+
+  | Verdict (p_max >= its threshold) | Prompt door | Agent-spawn door |
+  |---|---|---|
+  | opus (`LLM_ROUTER_DOOR_OPUS_MIN_CONF`, 0.6) | `claude`: hint quieted (the passive `OBSERVATION [local-verdict]` line, no tool, no model) | `claude`: no Codex attempt, unit `unsuitable` / `verdict_claude` |
+  | haiku (`..._HAIKU_MIN_CONF`, 0.7) and a local lane exists | `local`: the hint gains a line naming the lane (`llm_text_job` for a passed commit-message or PR-description job, else `llm(prompt="local: ...")`) | `local`: reported to the caller (`_door_dec.door`); nothing in this tree runs a local sub-agent yet |
+  | sonnet (`..._SONNET_MIN_CONF`, 0.5), or haiku with no lane | `codex` when Codex is usable (binary present, not benched, the Plus meter reserve D-373 allows the router chain, the 5 h window admits): the hint gains `llm(prompt="codex: ...")`; else `mcp`, the hint as today | `codex`: the existing NS3 gates decide, unchanged |
+  | no verdict | today's behaviour | today's behaviour |
+
+  A local lane exists only on evidence: a fresh passed quality batch (`lane_quality.jsonl`) for the hook kind's doors and
+  the task group, or the local text-job routing switch for a detected commit-message / PR-description prompt, or the
+  caller says so. None exists for Q&A or code today, so `local` is rare. A verdict opens no door the existing gates keep
+  shut; Sonnet and Haiku are not counted as a non-Claude door.
+- A row: `ts`, `hook_kind`, `mode`, `session_id`, `tool_use_id` (join to `north_star_units.jsonl`), `text_sha`, `chars`,
+  `source`, `resident`, `ms`, `tier`, `confidence`, `door`, `reason`, `lane`, `applied`, `outcome` (`hint_quieted`,
+  `hint_prefers_codex`, `hint_prefers_local`, `no_hint_shown`, `codex_skipped`, `no_change`, `background_shadow`,
+  `background_cold`, `background_result` for a worker's verdict row, `exit_before_decision`).
+  `python scripts/door_verdict_report.py --days 7` prints coverage (inline and from workers), latency, cold share, the
+  door mix and the outcomes with their n.
+- `python scripts/door_verdict_check.py` (at most 30 model calls) and `python scripts/door_verdict_hook_cost.py` (20
+  calls) measure the verdict and what it adds to a prompt of the real hook, with the load average printed beside the result.
+
 ## Metrics
 
 Each call writes one row to `~/.llm-router/proxy_calls.jsonl` with shape,

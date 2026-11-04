@@ -77,6 +77,19 @@ def is_loopback_base(url: str | None) -> bool:
         return False
 
 
+def classifier_remote_allowed() -> bool:
+    """``LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE`` is the explicit opt-in to classify prompts on a NON-loopback Ollama.
+
+    Without it the routing classifier (``local_classifier``, ``door_verdict``) refuses a non-loopback base: a prompt text
+    would otherwise reach ``urllib.request.urlopen`` and leave the machine (W10 review, privacy)."""
+    return os.environ.get("LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def classifier_base_allowed(base_url: str | None) -> bool:
+    """True when the classifier may send text to ``base_url``: a loopback daemon, or the explicit opt-in."""
+    return is_loopback_base(base_url) or classifier_remote_allowed()
+
+
 def direct_ollama(model: object, api_base: str | None = None) -> bool:
     """True when ``model`` is an Ollama model served by a loopback daemon: its call goes direct."""
     return is_ollama_model(model) and is_loopback_base(ollama_api_base(api_base))

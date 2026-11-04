@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 79
+# llm_router-hook-version: 80
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -247,7 +247,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 79"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 80"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -5668,6 +5668,22 @@ def main() -> None:
         json.dump(_normalize_output_for_platform(output, hook_input), sys.stdout)
         sys.exit(0)
 
+    # ── W10: the local model's routing verdict for THIS prompt ─────────────────────────────────────────
+    # Started where the prompt enters routing: after zero-Claude edit (which needs its own model resident and
+    # must not be evicted by this call), the sidecar, a user prefix, the strict-ack bypass and the MCP shortcut
+    # (none of those takes a routing decision), and joined at the quiet decision below, so the wait overlaps the
+    # classification in between. LLM_ROUTER_LOCAL_CLASSIFIER=off (default): None, zero Ollama calls. shadow: logged,
+    # nothing changes. on: an opus-confident verdict quiets the hint (docs/bugs/CLS-HOOK-1.md). Fail-open.
+    _door_pending = None
+    if _forced is None:
+        try:
+            from llm_router import door_verdict as _door_verdict
+
+            _door_pending = _door_verdict.start(prompt, "prompt", session_id=session_id or None)
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("LR-FO-HOOK-DOOR-VERDICT-START", _exc)
+
     # W0-1: which layer classified this turn, and how sure it was (None = not measured).
     _cls_layer = _cls_conf = None
 
@@ -5877,7 +5893,22 @@ def main() -> None:
         "LLM_ROUTER_QA_ROUTING", "off").strip().lower() in ("1", "on", "true", "yes")
     _qa_quiet = _qa_task and not _qa_routing_on and not _forced
     _conversational_quiet = _conversational_task and not _qa_routing_on and not _forced
-    if (_qa_quiet or _conversational_quiet or _unservable_quiet
+    # W10: join the local model's verdict. Only an applied "claude" door (mode on, opus-confident) quiets the
+    # hint, the same passive display a quiet Q&A task gets; no verdict changes nothing.
+    _verdict_quiet = False
+    _door_dec = None
+    if _door_pending is not None:
+        try:
+            with _hl_phase("verdict_wait"):
+                _door_dec = _door_pending.decide(task_type=task_type, defer_log=True)
+            _verdict_quiet = bool(_door_dec.applied and _door_dec.door == "claude")
+            _debug_log(f"[INVOCATION {invocation_id:.3f}] DOOR_VERDICT door={_door_dec.door or '-'} "
+                       f"reason={_door_dec.reason} applied={_door_dec.applied} src={_door_dec.verdict.source} "
+                       f"ms={_door_dec.verdict.ms}")
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("LR-FO-HOOK-DOOR-VERDICT-DECIDE", _exc)
+    if (_qa_quiet or _conversational_quiet or _unservable_quiet or _verdict_quiet
             or _resolved_enforce in ("off", "shadow", "observe")):
         _enforce_mode = "shadow"
     elif _resolved_enforce in ("advise", "advisory"):
@@ -6731,6 +6762,16 @@ def main() -> None:
                 f"on this machine can serve this task; no routing directive."
             )
             indicator = f"👁 {task_type}/{complexity} — no provider, answered directly"
+        elif _verdict_quiet:
+            # W10: the local classifier kept this on Claude. Names no tool and no model, and does not say "would
+            # route" (the generic observation line below would, for a prompt that was deliberately not routed).
+            _vp = getattr(getattr(_door_dec, "verdict", None), "confidence", None)
+            directive = (
+                f"👁 OBSERVATION [local-verdict]: {task_type}/{complexity} — the local classifier rates this "
+                f"opus-level{f' (p_max {_vp:.2f})' if isinstance(_vp, float) else ''}; handle it directly; "
+                f"no routing directive."
+            )
+            indicator = f"👁 {task_type}/{complexity} — local verdict: opus-level, answered directly"
         else:
             directive = (
                 f"👁 OBSERVATION [{_enforce_mode}]: ✨ {task_type}/{complexity} ✨ "
@@ -6929,6 +6970,22 @@ def main() -> None:
             indicator = f"⚡ {task_type}/{complexity} → {tool_disp} · nothing held ({_hold_exempt})"
             _hold_event("exempt", session_id, reason=_hold_exempt, words=len(prompt.split()),
                         task=task_type)
+
+    # ── W10: the verdict's door for this prompt (local / Codex first), then its row ───────────────────────
+    # Advice appended to the hint, only where a hint is really shown: not a user prefix, not a prompt the hold policy
+    # exempts, not a passive display. The row is written here, with what the hook actually did with the verdict.
+    if _door_pending is not None:
+        try:
+            _door_outcome = ""
+            if _door_dec is not None and _door_dec.applied and _door_dec.door in ("local", "codex"):
+                if not _forced and not _hold_exempt and _enforce_mode != "shadow":
+                    directive = _door_verdict.hint_note(_door_dec.door, _door_dec.lane, _door_dec.verdict.tier) + directive
+                else:
+                    _door_outcome = "no_hint_shown"
+            _door_pending.record(_door_outcome)
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("LR-FO-HOOK-DOOR-VERDICT-NOTE", _exc)
 
     # ── Per-session paid-API spend cap (#3) ──────────────────────────────────────
     # Drafts are already free-only; this is the backstop for the rest of routing.

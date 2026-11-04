@@ -477,6 +477,13 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # F106 / D-235: 1 = ignore measured failed lanes in local_eligibility.json (pre-F106 chain).
     "LLM_ROUTER_IGNORE_ELIGIBILITY": ("llm_router", "eligibility_routing.py", 1),
     # Local Ollama classifier (one v6 verdict per human turn): off|shadow|on, default off.
+    "LLM_ROUTER_DOOR_VERDICT_BUDGET_MS": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_DOOR_OPUS_MIN_CONF": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_DOOR_HAIKU_MIN_CONF": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_DOOR_SONNET_MIN_CONF": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_DOOR_VERDICT_PROMPT_BUDGET_MS": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_CLASSIFIER_PRELOAD": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE": ("llm_router", "local_privacy.py", 1),
     "LLM_ROUTER_LOCAL_CLASSIFIER": ("llm_router", "local_classifier.py", 1),
     "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS": ("llm_router", "local_classifier.py", 1),
     # The classifier's own Ollama alias (M1.4): other callers load qwen3.5 at a different

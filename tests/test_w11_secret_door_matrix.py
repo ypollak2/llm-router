@@ -261,6 +261,7 @@ SINK_FILES: dict[str, tuple[int, str, str]] = {
     'digest.py': (1, 'probe', 'outbound text is a scrubbed alert / savings digest / team report built from counters, not prompt text'),
     'discover.py': (3, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'discovery_rescan.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'door_verdict.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'frameworks/openai_agents.py': (1, 'router door', 'an adapter whose client points at the llm-router gateway (a router door)'),
     'gemini_cli_agent.py': (1, 'primitive', 'the CLI runner itself; every caller has its own row'),
     'gemini_cli_quota.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
