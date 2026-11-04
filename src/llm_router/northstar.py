@@ -1454,7 +1454,8 @@ def _first_user_turn(records: list[dict]) -> tuple[str | None, float | None]:
 
 def build_sessions(days: int | None, root: Path | None = None,
                     session_id: str | None = None, *,
-                    backfill: bool = False, subagents: bool = False) -> dict[str, SessionUnits]:
+                    backfill: bool = False, subagents: bool = False,
+                    tool_sessions: dict[str, str] | None = None) -> dict[str, SessionUnits]:
     """Assemble every real, non-synthetic session in the last `days` days.
 
     Sub-agent sessions that join to a parent are folded in (their turns
@@ -1476,6 +1477,11 @@ def build_sessions(days: int | None, root: Path | None = None,
     A unit is one API MESSAGE: records sharing a ``message.id`` are one unit
     (deduped per session across its main and sub-agent files), a ``<synthetic>``
     record is none, and a record with no id stays one unit.
+
+    ``tool_sessions``, when given, is filled with ``tool_use id -> session`` for every
+    ``mcp__llm_router__*`` call the scan reads (the status line's 7-day local-OK figure joins a router row
+    logged under ``unknown:mcp`` to the session that made the call). A file the sub-agent index
+    serves holds no such call by construction, so nothing is missed. Nothing else changes.
     """
     root = root if root is not None else claude_projects_dir()
     cutoff = None
@@ -1581,6 +1587,8 @@ def build_sessions(days: int | None, root: Path | None = None,
             name = tu.get("name") or ""
             if not name.startswith("mcp__llm_router__"):
                 continue
+            if tool_sessions is not None and isinstance(tu.get("id"), str):
+                tool_sessions[tu["id"]] = target_sid
             tool_input = tu.get("input") if isinstance(tu.get("input"), dict) else {}
             mcp_unit = Unit(
                 kind=UNIT_ROUTED_MCP, session_id=target_sid, ts=_ts_of(obj),
@@ -1788,16 +1796,18 @@ def _judge_routed_mcp(su: SessionUnits, records: list[dict], units: list[Unit] |
 
 def units(days: int | None = 30, session_id: str | None = None,
           root: Path | None = None, *, backfill: bool = False,
-          verify_records: bool = False, subagents: bool = False) -> Iterator[dict]:
+          verify_records: bool = False, subagents: bool = False,
+          tool_sessions: dict[str, str] | None = None) -> Iterator[dict]:
     """One dict per classified unit. See the module docstring for the shape.
     ``backfill=True`` lets ``session_kind`` resolve from the backfill sidecar as a
     last resort (``session_kind_source == "backfill"``); see ``build_sessions``.
     ``verify_records=True`` attaches the ledger's verify records as ``verify`` (SHADOW,
     opt-in: the strict-used rule reads ``verify``, so NS and D2 never see a record until the
     verifier is wired in on purpose: ``llm-router kpi`` passes ``NS_ATTACH_VERIFY_RECORDS``).
-    ``subagents=True`` also reads the sub-agent transcripts (see ``build_sessions``)."""
+    ``subagents=True`` also reads the sub-agent transcripts (see ``build_sessions``);
+    ``tool_sessions`` is filled as there."""
     sessions = build_sessions(days=days, root=root, session_id=session_id, backfill=backfill,
-                              subagents=subagents)
+                              subagents=subagents, tool_sessions=tool_sessions)
     verify = load_verify_records() if verify_records else {}
     for sid in sorted(sessions):
         su = sessions[sid]

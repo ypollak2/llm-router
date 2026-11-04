@@ -49,7 +49,9 @@ row): the two numbers of the North Star goal for THIS session, read from
 
 ``local OK n/a (0 attempts, session)`` when the session made no local attempt, never 0%. The tick only reads it
 (one small JSON file) and formats it; nothing is counted here. The 7-day row carries the same two numbers over its
-own window and population (``local OK 88% (95/108, 7d, organic)``).
+own window and population (``local OK 88% (95/108, 7d, organic)``). When the refresher counted Codex model responses
+the 7-day figure is labelled ``routed (incl. Codex turns)`` (``llm-router kpi`` keeps ``off-Claude``: one call per run)
+and names delegated runs it had to count as one (``2 Codex runs est.``).
 """
 
 from __future__ import annotations
@@ -297,7 +299,13 @@ def _mix_pct(k: int, n: int) -> str:
     return f"{p:.2f}%" if 0 < p < 1 else f"{p:.1f}%"
 
 
-def _mix_segment(label: str, fig, noun: str, window: str, population: str) -> str | None:
+def _runs_est(runs) -> str:
+    """`` , 2 Codex runs est.``: delegated Codex runs with no rollout, counted as one response (an estimate)."""
+    n = _whole(runs)
+    return f", {n} Codex run{'s' if n != 1 else ''} est." if n else ""
+
+
+def _mix_segment(label: str, fig, noun: str, window: str, population: str, note: str = "") -> str | None:
     """``off-Claude 0.06% (4/7116 calls, 7d, organic)``: the share with its k/n, unit, window and
     population (``commands.kpi._call_mix_segment`` prints the same words). Below :data:`MIX_MIN_N`
     calls it is ``n/a`` with the same k/n. ``None`` when the figure is not two whole numbers."""
@@ -306,7 +314,7 @@ def _mix_segment(label: str, fig, noun: str, window: str, population: str) -> st
     if k is None or n is None or n <= 0 or not 0 <= k <= n or k != int(k) or n != int(n):
         return None
     k, n = int(k), int(n)
-    body = f"({k}/{n} {noun}, {window}, {population})"
+    body = f"({k}/{n} {noun}, {window}, {population}{note})"
     return f"{label} n/a {body}" if n < MIX_MIN_N else f"{label} {_mix_pct(k, n)} {body}"
 
 
@@ -349,8 +357,8 @@ def render_session_routing(routing: dict | None, *, now: float) -> str:
 
     Every missing or doubtful piece is ``n/a`` with its reason, never 0: no figure yet, one older than
     :data:`STALE_AFTER_S`, a transcript scan that has not reached the end (a share from part of the transcripts
-    would be inflated), fewer than :data:`MIX_MIN_N` calls (n/a with the same k/n, as the 7-day row). A run of
-    Codex the refresher could not count (no rollout) was counted as one call and is named."""
+    would be inflated), fewer than :data:`MIX_MIN_N` calls (n/a with the same k/n, as the 7-day row). A delegated
+    Codex run the refresher could not count (no rollout) was counted as one call and is named (``2 Codex runs est.``)."""
     r = routing if isinstance(routing, dict) and routing.get("v") == 1 else None
     computed = _num(r.get("computed_at")) if r else None
     fresh = r is not None and computed is not None and 0 <= now - computed <= STALE_AFTER_S
@@ -367,8 +375,7 @@ def render_session_routing(routing: dict | None, *, now: float) -> str:
     else:
         codex = r.get("codex")
         flagged = _whole(codex.get("flagged_runs")) if isinstance(codex, dict) else None
-        note = f", {flagged} Codex run{'s' if flagged != 1 else ''} counted as 1" if flagged else ""
-        routed = f"routed {_mix_pct(k, n)} ({k}/{n} calls, session{note})"
+        routed = f"routed {_mix_pct(k, n)} ({k}/{n} calls, session{_runs_est(flagged)})"
     local = _local_ok_segment({"k": (r.get("local") or {}).get("ok"), "n": (r.get("local") or {}).get("attempts")}
                               if isinstance(r.get("local"), dict) else None, "session") or "local OK n/a (session)"
     return _fit(f"{routed} · {local}")
@@ -393,7 +400,11 @@ def render_progress(cache: dict | None, *, now: float) -> str | None:
     window, population = _window_of(cm.get("window")), cm.get("population")
     if window is None or population not in _POPULATIONS:
         return None
-    segs = [_mix_segment("off-Claude", cm.get("outside_claude"), "calls", window, population),
+    # W9: a cache whose refresher counted Codex model responses says so in the label; `llm-router kpi` keeps one call per
+    # run and its row stays "off-Claude" (the two differ by the responses beyond the first, so they must not share a name)
+    codex_turns = cm.get("codex_turns") is True
+    segs = [_mix_segment("routed (incl. Codex turns)" if codex_turns else "off-Claude", cm.get("outside_claude"), "calls",
+                         window, population, _runs_est(cm.get("flagged_codex_runs")) if codex_turns else ""),
             _mix_segment("<Opus", cm.get("below_opus"), "Claude calls", window, population)]
     if any(s is None for s in segs):
         return None

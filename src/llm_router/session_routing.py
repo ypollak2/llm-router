@@ -4,42 +4,68 @@ The North Star asks for more than 15% of LLM calls to be answered by a non-Claud
 counts that for a session, in the detached refresher only (``statusline_snapshot.build``); the per-tick renderer
 reads the result and computes nothing.
 
+UNITS (one word per count; the status line prints the same word beside every number)
+
+* a CALL is one model API response: a Claude ``message.id``, a Codex ``response_id``, or one router attempt that a
+  non-Claude model answered and the router accepted;
+* an ATTEMPT is one try of one model by the router's chain, whatever its outcome (a local model that is not
+  installed is an attempt that failed). Attempts are counted only for the local-OK figure;
+* a RUN is one delegated ``codex exec``; it is many calls.
+
 DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
 
 ``routed X% (n/N calls, session)``
 
 * N = every LLM call the session made = Claude calls + non-Claude calls.
 * Claude calls = unique ``message.id`` over the session's transcript files: the main ``<sid>.jsonl``,
-  ``<sid>/subagents/agent-*.jsonl`` AND ``<sid>/subagents/workflows/wf_*/agent-*.jsonl`` (workflow agents are a
-  third of a busy session and a one-level glob misses them). One id is one call whichever file repeats it (a forked
+  ``<sid>/subagents/agent-*.jsonl`` AND ``<sid>/subagents/workflows/wf_*/agent-*.jsonl`` (workflow agents were 4,675
+  of the 13,872 Claude calls of session 1a45a332 on 2026-11-04, and a one-level glob misses them; source:
+  ``~/.rsi/research/primary-plan/v16/w9-evidence/``). One id is one call whichever file repeats it (a forked
   sub-agent replays its parent's messages). A ``<synthetic>`` record is no call. A message the per-call proxy
   served from a non-Claude model (``proxy_calls.jsonl``, ``decision: served``) moves to the non-Claude side.
-  Router calls answered by a Claude model count here too.
-* n = non-Claude calls:
-  - each MODEL RESPONSE of a Codex run agent-route delegated for this session (``north_star_units.jsonl`` rows
-    ``delegated`` / ``codex_blocked`` / ``codex_failed``; ``codex_rollouts`` counts the responses in the rollout, the
-    run's sub-agent threads included). A run with no countable response is counted as ONE and flagged (``flagged``);
-    a ``codex_failed`` run with none counts zero (it may never have reached the model);
-  - each router-executed call that a non-Claude provider answered (``routing_decisions``, ``success = 1``): local
-    (Ollama) calls, Codex calls made by the router's own chain, and every MCP ``llm_*`` call whose answer came from
-    a non-Claude model. An MCP call is attributed by the ``tool_use`` id its transcript block carries, so a call the
-    MCP server logged under another session id still lands in the session that made it. A cache hit, a refused or
-    breaker-held call and a caller-cancelled call are no call. The routing row of a Codex delegation (written by the
-    same run) is the run itself and is not counted twice.
+  Router attempts accepted from a Claude model count here too.
+* n = non-Claude calls whose answer was USED:
+  - each model response of a Codex run agent-route DELEGATED for this session (``north_star_units.jsonl`` rows
+    ``delegated``; ``codex_rollouts`` counts the responses in the rollout, the run's sub-agent threads included). A
+    run with no countable response is counted as ONE and flagged. A ``codex_blocked`` / ``codex_failed`` run is
+    DISCARDED (``northstar._CODEX_ATTEMPT_OUTCOMES``: Claude re-runs the work), so its responses are not in n;
+    they are reported apart (``codex.discarded_responses``) and never inside routed%;
+  - each router attempt a non-Claude provider answered and the router accepted (``execution_events``
+    ``attempt_completed``): local (Ollama) attempts, Codex via the router's own chain, every MCP ``llm_*`` call
+    answered by a non-Claude model. The attempt belongs to the session when its route (``correlation_id`` or
+    ``trace_id``) is a ``routing_decisions`` row of the session or one named by an MCP ``tool_use`` id in the
+    session's transcripts, so a call the MCP server logged under ``unknown:mcp`` still lands in the session that
+    made it. An attempt a text job's acceptance check rejected (``text_job_local_attempts.jsonl``, ``rejected``)
+    is not a call used and is not in n. A cache hit, a refused or breaker-held call is no attempt;
   - a Claude Code message served by a non-Claude model (proxy).
 
 ``local OK Y% (a/b, session)``
 
-* b = local-model attempts: the session's ``routing_decisions`` rows whose provider is local (Ollama, LM Studio, vLLM,
-  llama.cpp), failures included, cache hits / refusals / cancelled calls excluded;
-* a = those that succeeded (the local route succeeded; a text job's result also needs the acceptance check, which
-  the router records in the same row's ``success``).
-* b = 0 prints ``local OK n/a (0 attempts)``, never 0%.
+* b = LOCAL ATTEMPTS of the session: every ``execution_events`` attempt of a local provider (Ollama, LM Studio,
+  vLLM, llama.cpp), whatever its outcome (``attempt_completed``, ``attempt_failed``, ``attempt_rejected``), so a
+  local model that errored and was rescued by the next chain entry is a failed attempt in b;
+* a = those that were used: ``attempt_completed`` and not rejected afterwards by a text job's acceptance check
+  (``text_job_local_attempts.jsonl`` ``rejected`` row, matched to the completed attempt of the same model that
+  finished at most :data:`_GATE_WINDOW_S` seconds before it).
+* ``routing_decisions.success`` is NOT used anywhere here: it is "the response is usable" for the whole call
+  (``router.py``), not "the local model worked", and a call rescued by a later chain entry has success 1 while
+  its first local attempts failed.
+* b = 0 prints ``local OK n/a (0 attempts, session)``, never 0%.
 
-WHAT IS NOT COUNTED (and why it is not a zero): a call the router made with no session id on its row and no
-transcript ``tool_use`` to join through; a Codex run whose rollout was rotated away (counted as one, flagged); a
-sub-agent transcript of the legacy top-level layout. The result carries ``complete: False`` while the transcript scan
-has not reached the end (a first scan of a 400 MB session takes several runs); the renderers then print ``n/a``.
+WHAT IS NOT COUNTED (and why it is not a zero): a router call whose route has no ``execution_events`` row (the
+agent-route ``direct`` delegations, counted as Codex runs above, and rows older than the event ledger); a call with
+no session id on its route and no transcript ``tool_use`` to join through; a Codex run whose rollout was rotated
+away (counted as one, flagged); a sub-agent transcript of the legacy top-level layout. The result carries
+``complete: False`` while the transcript scan has not reached the end (a first scan of a 400 MB session takes
+several runs); the renderers then print ``n/a``.
+
+REPRODUCE (any machine with the same ledgers)::
+
+    python -c "import json; from llm_router import session_routing as sr; print(json.dumps(sr.compute('<session id>'), indent=1))"
+
+reading ``$LLM_ROUTER_HOME/usage.db`` (``execution_events``, ``routing_decisions``), ``north_star_units.jsonl``,
+``text_job_local_attempts.jsonl``, ``proxy_calls.jsonl``, ``$CLAUDE_PROJECTS_DIR/*/<session>*`` and
+``$CODEX_HOME/sessions``.
 
 Refresher only: reads transcripts, the router database and rollout files. Never imported by the tick.
 """
@@ -52,7 +78,6 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any
 
 from llm_router import failopen, paths
 
@@ -66,13 +91,16 @@ KEEP_INDEXES = 20
 CODEX_CACHE_NAME = "codex_counts.json"
 _SAFE_SID = re.compile(r"[A-Za-z0-9._-]{1,128}")
 _MCP_PREFIX = "mcp__llm_router__"
-#: ``routing_decisions.reason_code`` of a row that is no model call.
-_NOT_A_CALL = frozenset({"cache_hit", "breaker_open", "refused_no_research_provider", "error_cancelled"})
 _CLAUDE_PROVIDERS = frozenset({"cc", "anthropic", "claude", "claude_code"})
+#: ``execution_events.provider`` values that are no model attempt.
+_NOT_A_MODEL = frozenset({"", "none", "cache", "test"})
 _CODEX_OUTCOMES = ("delegated", "codex_blocked", "codex_failed")
-#: A delegation's routing row is written this long before its north_star_units row (both are UTC).
-_TWIN_BEFORE_S = 20.0
-_TWIN_AFTER_S = 3.0
+#: Runs agent-route discarded (Claude re-runs the work): never in the routed share (``northstar``).
+_DISCARDED_OUTCOMES = frozenset({"codex_blocked", "codex_failed"})
+_ATTEMPT_EVENTS = {"attempt_completed": "ok", "attempt_failed": "error", "attempt_rejected": "rejected"}
+#: A text job writes its acceptance row right after the route returns: the completed attempt it judged ended at
+#: most this long before the row.
+_GATE_WINDOW_S = 10.0
 _IN_CHUNK = 400
 
 
@@ -192,12 +220,12 @@ def _scan_file(path: Path, entry: dict | None, models: list[str], deadline: floa
         with open(path, "rb") as fh:
             fh.seek(entry["offset"])
             for line in fh:
+                n += 1
+                if (n & 2047) == 0 and time.monotonic() > deadline:
+                    return entry, False                     # BEFORE this line is consumed: the next run reads it
                 if not line.endswith(b"\n"):
                     break                                   # a partial last line: read whole next time
                 entry["offset"] += len(line)
-                n += 1
-                if (n & 2047) == 0 and time.monotonic() > deadline:
-                    return entry, False
                 if b'"type":"assistant"' not in line:
                     continue
                 try:
@@ -242,12 +270,12 @@ def _scan_proxy(session_id: str, state: dict, deadline: float) -> bool:
     with open(path, "rb") as fh:
         fh.seek(state.get("offset", 0))
         for line in fh:
+            n += 1
+            if (n & 8191) == 0 and time.monotonic() > deadline:
+                return False                                # BEFORE this line is consumed: the next run reads it
             if not line.endswith(b"\n"):
                 break
             state["offset"] = state.get("offset", 0) + len(line)
-            n += 1
-            if (n & 8191) == 0 and time.monotonic() > deadline:
-                return False
             if needle not in line or b'"served"' not in line:
                 continue
             try:
@@ -343,9 +371,16 @@ def _save_codex_cache(cache: dict) -> None:
     _atomic_json(_codex_cache_path(), cache)
 
 
+def run_key(row: dict) -> str:
+    """The identity of one delegated run in ``north_star_units.jsonl``: session, time, thread and tool call. Two
+    rows with the same ``ts`` are two runs, not one (the cache used to key on ``ts`` alone)."""
+    return "|".join(str(row.get(k) or "") for k in ("session_id", "ts", "thread_id", "tool_use_id"))
+
+
 def codex_run_responses(rows: list[dict], now: float) -> list[dict]:
     """``[{row, responses, flagged, how}]`` for each Codex row, in order. ``responses`` is what the run adds to the
-    call count (see the module docstring). A finished run's count is cached by its row (a rollout never changes)."""
+    call count (see the module docstring). A finished run's count is cached by its identity (a rollout never
+    changes)."""
     from llm_router import codex_rollouts as cr
 
     if not rows:
@@ -355,7 +390,7 @@ def codex_run_responses(rows: list[dict], now: float) -> list[dict]:
     index = None
     out: list[dict] = []
     for row in rows:
-        key = f"{row.get('ts')}"
+        key = run_key(row)
         hit = cache.get(key)
         if isinstance(hit, dict) and isinstance(hit.get("responses"), int):
             responses, how = hit["responses"], hit.get("how", "rollout")
@@ -373,21 +408,21 @@ def codex_run_responses(rows: list[dict], now: float) -> list[dict]:
             if responses is None:
                 how = "none"
             elif now - float(row["ts"]) > 120.0:
-                cache[key] = {"responses": responses, "how": how}
+                cache[key] = {"responses": responses, "how": how, "at": float(row["ts"])}
                 dirty = True
-        flagged = responses is None and row.get("outcome") != "codex_failed"
+        flagged = responses is None and row.get("outcome") == "delegated"      # only a counted run needs the flag
         if responses is None:
-            responses = 1 if flagged else 0
+            responses = 1 if row.get("outcome") != "codex_failed" else 0
         out.append({"row": row, "responses": responses, "flagged": flagged, "how": how})
     if dirty:
-        if len(cache) > 5000:                               # a bounded file: drop the oldest keys
-            for k in sorted(cache, key=lambda x: float(x) if re.fullmatch(r"[0-9.]+", x) else 0.0)[:len(cache) - 5000]:
+        if len(cache) > 5000:                               # a bounded file: drop the oldest runs
+            for k in sorted(cache, key=lambda x: (cache[x] or {}).get("at", 0.0))[:len(cache) - 5000]:
                 cache.pop(k, None)
         _save_codex_cache(cache)
     return out
 
 
-# ── router-executed calls (routing_decisions) ──────────────────────────────────────────────────────────────
+# ── router attempts (execution_events) and the text-job acceptance gate ───────────────────────────────────
 
 def _ts(value: object) -> float | None:
     from datetime import datetime, timezone
@@ -399,62 +434,175 @@ def _ts(value: object) -> float | None:
         return None
 
 
-def router_rows(session_id: str, tool_use_ids: list[str]) -> list[dict] | None:
-    """The runtime ``routing_decisions`` rows of the session, plus those named by one of its MCP ``tool_use``
-    ids. ``None`` when the database cannot be read (unknown, not zero)."""
+def classify_attempt(provider: object, model: object) -> str | None:
+    """``local`` | ``claude`` | ``other`` (a non-Claude provider, Codex included) | None (not a model attempt)."""
+    from llm_router import ledger_view as lv
+
+    p = str(provider or "").strip().lower()
+    if p in _NOT_A_MODEL:
+        return None
+    if p in _CLAUDE_PROVIDERS or _is_claude(model):
+        return "claude"
+    if p in lv.LOCAL_PROVIDERS or str(model or "").startswith(("ollama/", "ollama_chat/")):
+        return "local"
+    return "other"
+
+
+def _event_attempt(row: tuple) -> dict | None:
+    key, ts, provider, model, event_type, accepted = row
+    outcome = _ATTEMPT_EVENTS.get(event_type)
+    kind = classify_attempt(provider, model)
+    if outcome is None or kind is None or not isinstance(ts, (int, float)):
+        return None
+    return {"id": key, "ts": float(ts), "provider": str(provider), "model": str(model or ""), "outcome": outcome,
+            "kind": kind, "used": outcome == "ok" and accepted != 0, "gate_rejected": False}
+
+
+def _chunks(items: list, size: int = _IN_CHUNK):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def session_attempts(session_id: str, tool_use_ids: list[str]) -> list[dict] | None:
+    """Every router attempt of the session (see the module docstring), or ``None`` when the ledger cannot be
+    read: unknown, not zero."""
     from llm_router import ledger_view as lv
 
     con = lv._connect(None, 1.0)
     if con is None:
         return None
     try:
-        cols = lv._columns(con, "routing_decisions")
-        if not {"final_provider", "success", "session_id"} <= cols:
+        rd, ev = lv._columns(con, "routing_decisions"), lv._columns(con, "execution_events")
+        if not ({"correlation_id", "session_id"} <= rd and {"event_type", "provider", "model", "session_id", "ts"} <= ev):
             return None
-        want = ["id", "timestamp", "final_provider", "final_model", "success",
-                "reason_code" if "reason_code" in cols else "NULL", "session_id",
-                "tool_use_id" if "tool_use_id" in cols else "NULL"]
-        base = f"SELECT {', '.join(want)} FROM routing_decisions WHERE "
-        prov = " AND provenance = 'runtime'" if "provenance" in cols else ""
-        found: dict[Any, tuple] = {}
-        for row in con.execute(base + "session_id = ?" + prov, (session_id,)):
-            found[row[0]] = row
-        if "tool_use_id" in cols:
-            ids = [t for t in tool_use_ids if t]
-            for i in range(0, len(ids), _IN_CHUNK):
-                chunk = ids[i:i + _IN_CHUNK]
-                marks = ",".join("?" for _ in chunk)
-                for row in con.execute(base + f"tool_use_id IN ({marks})" + prov, chunk):
-                    found.setdefault(row[0], row)
+        prov = " AND provenance = 'runtime'" if "provenance" in rd else ""
+        trace_col = "trace_id" if "trace_id" in rd else "NULL"
+        base = f"SELECT correlation_id, {trace_col} FROM routing_decisions WHERE "
+        corr: set[str] = set()
+        trace: set[str] = set()
+
+        def take(rows) -> None:
+            for c, t in rows:
+                if c:
+                    corr.add(c)
+                if t:
+                    trace.add(t)
+
+        take(con.execute(base + "session_id = ?" + prov, (session_id,)))
+        if "tool_use_id" in rd:
+            for chunk in _chunks([t for t in tool_use_ids if t]):
+                take(con.execute(base + f"tool_use_id IN ({','.join('?' for _ in chunk)})" + prov, chunk))
+        marks = ",".join("?" for _ in _ATTEMPT_EVENTS)
+        sel = ("SELECT rowid, ts, provider, model, event_type, "
+               f"{'accepted' if 'accepted' in ev else 'NULL'} FROM execution_events WHERE event_type IN ({marks}) AND ")
+        found: dict[int, dict] = {}
+        for column, values in (("session_id", sorted(corr)), ("trace_id", sorted(trace) if "trace_id" in ev else [])):
+            for chunk in _chunks(values):
+                q = sel + f"{column} IN ({','.join('?' for _ in chunk)})"
+                for row in con.execute(q, [*_ATTEMPT_EVENTS, *chunk]):
+                    a = _event_attempt(row)
+                    if a is not None:
+                        found.setdefault(row[0], a)
     finally:
         con.close()
-    keys = ("id", "ts", "provider", "model", "success", "reason", "session_id", "tool_use_id")
-    out = []
-    for row in found.values():
-        d = dict(zip(keys, row))
-        d["ts"] = _ts(d["ts"])
-        out.append(d)
-    return out
+    return sorted(found.values(), key=lambda a: a["ts"])
 
 
-def classify_router_row(row: dict) -> str | None:
-    """``local`` | ``codex`` | ``other`` (a non-Claude provider) | ``claude`` | None (no call at all)."""
+def window_attempts(since: float, until: float, tool_sessions: dict[str, str]) -> list[dict] | None:
+    """Every router attempt in ``[since, until]`` with the session it belongs to (``session`` key, None when it
+    cannot be placed). A route logged under ``unknown:mcp`` (the MCP server does not know the Claude session) is
+    placed through the ``tool_use`` id its transcript block carries (``tool_sessions``, filled by the unit pass)."""
     from llm_router import ledger_view as lv
 
-    provider = str(row.get("provider") or "").strip().lower()
-    if provider in ("", "none", "cache", "test") or str(row.get("reason") or "") in _NOT_A_CALL:
+    con = lv._connect(None, 1.0)
+    if con is None:
         return None
-    if provider in _CLAUDE_PROVIDERS or _is_claude(row.get("model")):
-        return "claude"
-    if provider in lv.LOCAL_PROVIDERS or str(row.get("model") or "").startswith(("ollama/", "ollama_chat/")):
-        return "local"
-    return "codex" if provider == "codex" else "other"
+    try:
+        rd, ev = lv._columns(con, "routing_decisions"), lv._columns(con, "execution_events")
+        if not ({"correlation_id", "session_id", "timestamp"} <= rd and {"event_type", "provider", "model", "session_id", "ts"} <= ev):
+            return None
+        prov = " AND provenance = 'runtime'" if "provenance" in rd else ""
+        trace_col = "trace_id" if "trace_id" in rd else "NULL"
+        tool_col = "tool_use_id" if "tool_use_id" in rd else "NULL"
+        from datetime import datetime, timezone
+
+        lo = datetime.fromtimestamp(since - 86400.0, timezone.utc).strftime("%Y-%m-%d")
+        by_corr: dict[str, tuple] = {}
+        by_trace: dict[str, tuple] = {}
+        for c, t, sid, tool in con.execute(
+                f"SELECT correlation_id, {trace_col}, session_id, {tool_col} FROM routing_decisions "
+                f"WHERE timestamp >= ?{prov}", (lo,)):
+            if c:
+                by_corr.setdefault(c, (sid, tool))
+            if t:
+                by_trace.setdefault(t, (sid, tool))
+        marks = ",".join("?" for _ in _ATTEMPT_EVENTS)
+        trace_ev = "trace_id" if "trace_id" in ev else "NULL"
+        out: list[dict] = []
+        for row in con.execute(
+                f"SELECT rowid, ts, provider, model, event_type, {'accepted' if 'accepted' in ev else 'NULL'}, "
+                f"session_id, {trace_ev} FROM execution_events WHERE event_type IN ({marks}) AND ts >= ? AND ts <= ?",
+                [*_ATTEMPT_EVENTS, since, until]):
+            a = _event_attempt(row[:6])
+            if a is None:
+                continue
+            sid, tool = by_corr.get(row[6]) or by_trace.get(row[7]) or (None, None)
+            real = sid if isinstance(sid, str) and sid and not sid.startswith("unknown") else None
+            a["session"] = real or tool_sessions.get(tool) if tool else real
+            out.append(a)
+    finally:
+        con.close()
+    return sorted(out, key=lambda a: a["ts"])
 
 
-def local_figures(rows: list[dict]) -> dict:
-    """``{attempts, ok}`` of the local rows (see the module docstring)."""
-    local = [r for r in rows if classify_router_row(r) == "local"]
-    return {"attempts": len(local), "ok": sum(1 for r in local if r.get("success") == 1)}
+def _norm_model(model: str) -> str:
+    return model.replace("ollama_chat/", "ollama/", 1)
+
+
+def text_job_rejections(since: float) -> list[tuple[float, str]]:
+    """``(ts, model)`` of every local text-job attempt the acceptance check rejected since ``since`` (the router
+    answered; the job threw the answer away)."""
+    from llm_router import text_job_ledger as tj
+
+    out: list[tuple[float, str]] = []
+    try:
+        text = paths.state_path(tj.LOCAL_ATTEMPTS_FILENAME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        ts = row.get("ts") if isinstance(row, dict) else None
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts >= since \
+                and row.get("outcome") == tj.OUTCOME_REJECTED and isinstance(row.get("model"), str):
+            out.append((float(ts), row["model"]))
+    return sorted(out)
+
+
+def apply_text_job_gate(attempts: list[dict], rejections: list[tuple[float, str]]) -> int:
+    """Mark the completed local attempt each text-job rejection judged as not used (one-to-one, the latest
+    unmarked completed attempt of the same model that ended up to :data:`_GATE_WINDOW_S` before the row).
+    Returns how many were marked."""
+    marked = 0
+    for ts, model in rejections:
+        best = None
+        for a in attempts:
+            if a["kind"] == "local" and a["used"] and _norm_model(a["model"]) == _norm_model(model) \
+                    and 0.0 <= ts - a["ts"] <= _GATE_WINDOW_S and (best is None or a["ts"] > best["ts"]):
+                best = a
+        if best is not None:
+            best["used"], best["gate_rejected"] = False, True
+            marked += 1
+    return marked
+
+
+def local_figures(attempts: list[dict]) -> dict:
+    """``{attempts, ok, gate_rejected}`` of the local attempts (see the module docstring)."""
+    local = [a for a in attempts if a["kind"] == "local"]
+    return {"attempts": len(local), "ok": sum(1 for a in local if a["used"]),
+            "gate_rejected": sum(1 for a in local if a["gate_rejected"])}
 
 
 # ── the session figure ────────────────────────────────────────────────────────────────────────────────────
@@ -465,6 +613,13 @@ def _part(code: str, fn):
     except Exception as exc:  # noqa: BLE001 -- one source failing must not blank the others
         failopen.record(code, exc)
         return None
+
+
+def _router_attempts(session_id: str, mcp_ids: list[str]) -> list[dict] | None:
+    attempts = session_attempts(session_id, mcp_ids)
+    if attempts:
+        apply_text_job_gate(attempts, text_job_rejections(attempts[0]["ts"]))
+    return attempts
 
 
 def compute(session_id: str, now: float | None = None, *, budget_s: float = BUDGET_S, root: Path | None = None) -> dict | None:
@@ -480,39 +635,33 @@ def compute(session_id: str, now: float | None = None, *, budget_s: float = BUDG
     t = _part("CHZ-FO-ROUTING-TRANSCRIPT", lambda: transcript_figures(session_id, budget_s=budget_s, root=root))
     mcp_ids = t["mcp_tool_use_ids"] if t else []
     runs = _part("CHZ-FO-ROUTING-CODEX", lambda: codex_run_responses(_ns_rows(session_id), now))
-    rows = _part("CHZ-FO-ROUTING-ROWS", lambda: router_rows(session_id, mcp_ids))
+    attempts = _part("CHZ-FO-ROUTING-ROWS", lambda: _router_attempts(session_id, mcp_ids))
 
-    delegated_ts = [r["row"]["ts"] for r in runs or () if r["row"].get("outcome") == "delegated"]
-    codex_calls = sum(r["responses"] for r in runs or ())
-    by_class = {"local": 0, "codex": 0, "other": 0, "claude": 0}
-    for r in rows or ():
-        if r.get("success") != 1:
-            continue
-        kind = classify_router_row(r)
-        if kind is None:
-            continue
-        if kind == "codex" and r.get("reason") == "direct" and r.get("ts") is not None and any(
-                -_TWIN_AFTER_S <= d - r["ts"] <= _TWIN_BEFORE_S for d in delegated_ts):
-            continue                                        # the delegation's own routing row: the run is counted above
-        by_class[kind] += 1
+    used = {"local": 0, "other": 0, "claude": 0}
+    for a in attempts or ():
+        if a["used"]:
+            used[a["kind"]] += 1
+    delegated = [r for r in runs or () if r["row"].get("outcome") == "delegated"]
+    discarded = [r for r in runs or () if r["row"].get("outcome") in _DISCARDED_OUTCOMES]
+    codex_calls = sum(r["responses"] for r in delegated)
 
     complete = bool(t and t["complete"])
     # No main transcript on disk: the Claude side is unknown, and "0 Claude calls" would make every share 100%.
-    known = t is not None and t["files"]["main"] > 0 and runs is not None and rows is not None
-    non_claude = (t["proxy_served"] + t["other_model"] + codex_calls + by_class["local"] + by_class["codex"]
-                  + by_class["other"]) if known else None
-    claude = (t["claude"] + by_class["claude"]) if known else None
+    known = t is not None and t["files"]["main"] > 0 and runs is not None and attempts is not None
+    non_claude = (t["proxy_served"] + t["other_model"] + codex_calls + used["local"] + used["other"]) if known else None
+    claude = (t["claude"] + used["claude"]) if known else None
     result = {
         "v": SCHEMA, "session_id": session_id, "computed_at": now, "complete": complete,
         "claude": claude, "non_claude": non_claude,
         "total": None if non_claude is None or claude is None else claude + non_claude,
         "unclassified": t["unclassified"] if t else None,
         "by_source": None if not known else {
-            "codex_runs": codex_calls, "router_local": by_class["local"], "router_codex": by_class["codex"],
-            "router_other": by_class["other"], "proxy": t["proxy_served"], "transcript_other": t["other_model"]},
+            "codex_runs": codex_calls, "router_local": used["local"], "router_other": used["other"],
+            "proxy": t["proxy_served"], "transcript_other": t["other_model"]},
         "codex": None if runs is None else {
-            "runs": len(runs), "responses": codex_calls, "flagged_runs": sum(1 for r in runs if r["flagged"])},
-        "local": local_figures(rows) if rows is not None else None,
+            "runs": len(delegated), "responses": codex_calls, "flagged_runs": sum(1 for r in delegated if r["flagged"]),
+            "discarded_runs": len(discarded), "discarded_responses": sum(r["responses"] for r in discarded)},
+        "local": local_figures(attempts) if attempts is not None else None,
         "files": t["files"] if t else None,
     }
     if t is not None:
@@ -522,15 +671,18 @@ def compute(session_id: str, now: float | None = None, *, budget_s: float = BUDG
 
 # ── the 7-day organic window (the call mix's extra figures) ─────────────────────────────────────────────────
 
-def window_extras(since: float, until: float, now: float, kind_of) -> dict:
+def window_extras(since: float, until: float, now: float, kind_of, tool_sessions: dict[str, str] | None = None) -> dict:
     """What the 7-day call mix adds on top of the NS unit list, over ``[since, until]`` and the organic population
     (``kind_of(session_id, stamp)`` -> true for a session of the population):
 
-    * ``codex_extra``: model responses beyond the one the unit list already counts for each Codex run in a counted
-      session (minus one for a failed run that never got a response: the list counts that unit, nothing was served), ``by_session`` its per-session split, ``runs`` / ``flagged_runs`` for the disclosure;
-    * ``local``: ``{attempts, ok}`` of the local ``routing_decisions`` rows of the same sessions.
-
-    Rows with no session id cannot be placed in a population and are left out; ``unattributed_local`` counts them."""
+    * ``codex_extra``: the correction to the unit list's one-call-per-Codex-row count. A DELEGATED run counts its
+      model responses (``responses - 1`` beyond the unit); a ``codex_blocked`` / ``codex_failed`` run is discarded
+      work and leaves the count (``-1``: the list counts that unit, Claude re-ran the work). ``by_session`` is its
+      per-session split, ``runs`` / ``flagged_runs`` the delegated runs and those counted as one;
+    * ``local``: ``{attempts, ok}`` of the local router attempts of the same sessions, by the same definition as the
+      session figure (an attempt is OK when used). An attempt on a route logged under ``unknown:mcp`` is placed
+      through its ``tool_use`` id (``tool_sessions``); ``unattributed_local`` counts the local attempts that no
+      session could be found for (not in ``local``)."""
     rows = [r for r in _ns_rows(None) if since <= r["ts"] <= until and kind_of(r.get("session_id"), r.get("session_kind"))]
     runs = codex_run_responses(rows, now)
     extra = 0
@@ -539,39 +691,14 @@ def window_extras(since: float, until: float, now: float, kind_of) -> dict:
         row = r["row"]
         if not row.get("model"):
             continue                                        # the unit list leaves a model-less row unclassified
-        more = r["responses"] - 1       # -1: a failed run with no response is a unit the list counts and that served nothing
+        more = r["responses"] - 1 if row.get("outcome") == "delegated" else -1
         extra += more
         if more and isinstance(row.get("session_id"), str):
             by_session[row["session_id"]] = by_session.get(row["session_id"], 0) + more
-    local = {"attempts": 0, "ok": 0}
-    unattributed = 0
-    from datetime import datetime, timezone
-
-    from llm_router import ledger_view as lv
-
-    con = lv._connect(None, 1.0)
-    if con is not None:
-        try:
-            cols = lv._columns(con, "routing_decisions")
-            if {"final_provider", "success", "session_id", "timestamp"} <= cols:
-                prov = " AND provenance = 'runtime'" if "provenance" in cols else ""
-                reason = "reason_code" if "reason_code" in cols else "NULL"
-                lo = datetime.fromtimestamp(since - 86400.0, timezone.utc).strftime("%Y-%m-%d")
-                for sid, ts, provider, model, success, why in con.execute(
-                        f"SELECT session_id, timestamp, final_provider, final_model, success, {reason} "
-                        f"FROM routing_decisions WHERE timestamp >= ?{prov}", (lo,)):
-                    t = _ts(ts)
-                    if t is None or not since <= t <= until:
-                        continue
-                    row = {"provider": provider, "model": model, "reason": why}
-                    if classify_router_row(row) != "local":
-                        continue
-                    if not sid or not kind_of(sid, None):
-                        unattributed += 0 if sid else 1
-                        continue
-                    local["attempts"] += 1
-                    local["ok"] += 1 if success == 1 else 0
-        finally:
-            con.close()
-    return {"codex_extra": extra, "by_session": by_session, "runs": len(runs),
-            "flagged_runs": sum(1 for r in runs if r["flagged"]), "local": local, "unattributed_local": unattributed}
+    attempts = window_attempts(since, until, tool_sessions or {}) or []
+    placed = [a for a in attempts if a["session"] and kind_of(a["session"], None)]
+    apply_text_job_gate(placed, text_job_rejections(since))
+    local = local_figures(placed)
+    return {"codex_extra": extra, "by_session": by_session, "runs": sum(1 for r in runs if r["row"].get("outcome") == "delegated"),
+            "flagged_runs": sum(1 for r in runs if r["flagged"]), "local": local,
+            "unattributed_local": sum(1 for a in attempts if a["kind"] == "local" and not a["session"])}

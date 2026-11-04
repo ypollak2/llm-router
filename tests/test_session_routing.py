@@ -31,6 +31,7 @@ NOW = 1_793_780_000.0                    # 2026-11-05 ~08:53 UTC
 T1 = "01a1a58b-2c03-7532-b50a-ef6cf42e84e5"
 T2 = "01a1a58b-8d4c-7bf2-aa7a-dd3dfc08b288"       # sub-agent thread spawned by T1
 T3 = "01a1a592-9c91-7d72-9cd6-4283cb4af094"       # a run with no rollout on disk
+T4 = "01a1a593-2810-7fb3-878e-ee80ac8c1f8e"
 
 
 @pytest.fixture
@@ -125,9 +126,37 @@ def test_an_unfinished_scan_says_so_and_resumes(env, monkeypatch):
     assert done["complete"] is True and done["claude"] == 5000
 
 
+def test_a_scan_interrupted_mid_file_resumes_without_losing_the_line_it_stopped_on(env, monkeypatch):
+    """The budget is checked every 2048 lines. The line it stops on must not be consumed (the old order advanced the
+    offset first, so the 2048th line of an interrupted scan was never read)."""
+    _home, projects, _codex = env
+    main = _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(5000)])
+    models: list[str] = []
+    entry, finished = sr._scan_file(main, None, models, deadline=-1.0)       # expires at the first check, line 2048
+    assert finished is False and len(entry["msgs"]) == 2047 and "m2047" not in entry["msgs"]
+    entry, finished = sr._scan_file(main, entry, models, deadline=time.monotonic() + 60)
+    assert finished is True and len(entry["msgs"]) == 5000 and "m2047" in entry["msgs"]
+    assert entry["offset"] == main.stat().st_size
+    # the same through the public figure: a clock that runs out at the second 2048-line check (line 4096)
+    sid2 = "22222222-2222-3333-4444-555555555555"
+    _write(projects / "-p" / f"{sid2}.jsonl", *[_assistant(f"x{i}") for i in range(6000)])
+    calls = {"n": 0}
+
+    def clock() -> float:
+        calls["n"] += 1
+        return 0.0 if calls["n"] <= 3 else 10.0            # deadline, file check, line-2048 check pass; line 4096 fails
+
+    with monkeypatch.context() as m:
+        m.setattr(sr.time, "monotonic", clock)
+        cut = sr.transcript_figures(sid2, budget_s=1.0)
+    assert cut["complete"] is False and cut["claude"] == 4095
+    done = sr.transcript_figures(sid2, budget_s=60)
+    assert done["complete"] is True and done["claude"] == 6000
+
+
 def test_no_main_transcript_makes_the_claude_side_unknown_not_zero(env):
     home, _projects, _codex = env
-    _routing_db(home, [(1, "2026-11-05 08:00:00", "ollama", "ollama/q", 1, "router_chain", SID, None)])
+    _one_local_ok(home)
     r = sr.compute(SID, NOW, budget_s=30)
     assert r["total"] is None and r["claude"] is None and r["non_claude"] is None
     assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local OK 100% (1/1, session)"
@@ -150,15 +179,33 @@ def _utc(seconds: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(seconds))
 
 
-def _routing_db(home: Path, rows):
+def _routing_db(home: Path, routes=(), events=()):
+    """The two router tables. ``routes``: ``(correlation_id, session_id, tool_use_id)``; ``events``: ``(correlation_id,
+    ts, provider, model, outcome)``, outcome ``ok`` / ``error`` / ``rejected`` (an ``execution_events`` attempt, whose
+    ``session_id`` column holds the route's correlation id, as in the real ledger)."""
     con = sqlite3.connect(home / "usage.db")
     con.execute("CREATE TABLE routing_decisions (id INTEGER PRIMARY KEY, timestamp TEXT, final_provider TEXT, "
-                "final_model TEXT, success INTEGER, reason_code TEXT, session_id TEXT, tool_use_id TEXT, "
-                "provenance TEXT DEFAULT 'runtime')")
-    con.executemany("INSERT INTO routing_decisions (id, timestamp, final_provider, final_model, success, reason_code, "
-                    "session_id, tool_use_id) VALUES (?,?,?,?,?,?,?,?)", rows)
+                "final_model TEXT, success INTEGER, reason_code TEXT, correlation_id TEXT, trace_id TEXT, "
+                "session_id TEXT, tool_use_id TEXT, provenance TEXT DEFAULT 'runtime')")
+    con.execute("CREATE TABLE execution_events (event_id TEXT, ts REAL, session_id TEXT, trace_id TEXT, "
+                "event_type TEXT, provider TEXT, model TEXT, accepted INTEGER)")
+    kinds = {"ok": ("attempt_completed", 1), "error": ("attempt_failed", None), "rejected": ("attempt_rejected", None)}
+    for i, (corr, sid, tool) in enumerate(routes):
+        con.execute("INSERT INTO routing_decisions (timestamp, final_provider, final_model, success, reason_code, "
+                    "correlation_id, trace_id, session_id, tool_use_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (_utc(NOW - 100), "ollama", "ollama/q", 1, "router_unhinted", corr, f"trace-{corr}", sid, tool))
+    for i, (corr, ts, provider, model, outcome) in enumerate(events):
+        con.execute("INSERT INTO execution_events (event_id, ts, session_id, trace_id, event_type, provider, model, "
+                    "accepted) VALUES (?,?,?,?,?,?,?,?)", (f"e{i}", ts, corr, None, kinds[outcome][0], provider, model,
+                                                           kinds[outcome][1]))
     con.commit()
     con.close()
+
+
+def _one_local_ok(home: Path, n: int = 1) -> None:
+    """``n`` routes of the session, each one local attempt that was used."""
+    _routing_db(home, [(f"c{i}", SID, None) for i in range(n)],
+                [(f"c{i}", NOW - 50 + i, "ollama", "ollama/qwen3.5:latest", "ok") for i in range(n)])
 
 
 def _ns(home: Path, *rows: dict):
@@ -264,46 +311,70 @@ def test_agent_route_writes_the_thread_into_the_unit_row():
 def test_the_session_figure_from_every_source(env):
     home, projects, codex = env
     _layout(projects)                                                      # 6 Claude calls (see the first test)
-    _write(projects / "-Users-x" / f"{SID}.jsonl", _assistant("m9", tool_ids=("tu_mcp_other_session",)))
+    _write(projects / "-Users-x" / f"{SID}.jsonl", _assistant("m9", tool_ids=("tu_mine",)))
     start = NOW - 400
     _rollout(codex, T1, start, ["r1", "r2", "r3"])
     _rollout(codex, T2, start + 5, ["r4"], parent=T1)
-    ts = _utc
+    _rollout(codex, T4, start + 200, ["b1", "b2"])
     _routing_db(home, [
-        (1, ts(NOW - 50), "ollama", "ollama/qwen3.5", 1, "router_chain", SID, None),           # local, worked
-        (2, ts(NOW - 49), "ollama", "ollama/qwen3.5", 0, "router_chain", SID, None),           # local, failed: an attempt
-        (3, ts(NOW - 48), "ollama", "ollama/qwen3.5", 1, "error_cancelled", SID, None),        # cancelled: no call
-        (4, ts(NOW - 47), "cache", "", 1, "cache_hit", SID, None),                             # cache hit: no call
-        (5, ts(NOW - 46), "ollama", "ollama/q", 1, "router_chain", "unknown:mcp", "tu_mcp_other_session"),  # MCP, other session id
-        (6, ts(NOW - 45), "ollama", "ollama/q", 1, "router_chain", "unknown:mcp", "tu_not_mine"),           # not this session
-        (7, ts(NOW - 44), "gemini", "gemini-2.5", 1, "router_chain", SID, None),               # another non-Claude provider
-        (8, ts(NOW - 43), "anthropic", "claude-sonnet-5-5", 1, "router_chain", SID, None),     # a Claude answer: Claude side
-        (9, ts(NOW - 100), "codex", "gpt-6-astra", 1, "direct", SID, None),                    # the delegation's twin row
+        ("c1", SID, None), ("c2", SID, None), ("c3", "unknown:mcp", "tu_mine"), ("c4", "unknown:mcp", "tu_not_mine"),
+        ("c5", SID, None), ("c6", SID, None), ("c7", SID, None), ("c8", SID, None), ("c9", SID, None)], [
+        # c1: the first local model is not installed, the second answers: 2 attempts, 1 used
+        ("c1", NOW - 90, "ollama", "ollama/qwen3.8:latest", "error"),
+        ("c1", NOW - 89, "ollama", "ollama/qwen3.5:latest", "ok"),
+        # c2: the router completed it, the text job's acceptance check rejected it (below): not used
+        ("c2", NOW - 80, "ollama", "ollama/qwen3.5:latest", "ok"),
+        # c3: an MCP call logged under unknown:mcp, joined by its tool_use id: used
+        ("c3", NOW - 70, "ollama", "ollama/qwen3.5:latest", "ok"),
+        # c4: another session's MCP call
+        ("c4", NOW - 60, "ollama", "ollama/qwen3.5:latest", "ok"),
+        ("c5", NOW - 50, "gemini", "gemini-2.5", "ok"),                    # another non-Claude provider, used
+        ("c6", NOW - 40, "anthropic", "claude-sonnet-5-5", "ok"),          # a Claude answer: the Claude side
+        ("c7", NOW - 30, "cache", "", "ok"),                               # a cache hit: no attempt
+        ("c7", NOW - 30, "test", "m", "ok"),                               # a test provider: no attempt
+        ("c8", NOW - 20, "codex", "gpt-6-astra", "ok"),                    # Codex through the router chain: one call
+        ("c9", NOW - 10, "ollama", "ollama/qwen3.5:latest", "rejected"),   # answered, the router rejected it
     ])
+    _write(home / "text_job_local_attempts.jsonl",
+           json.dumps({"ts": NOW - 79, "job": "commit_message", "model": "ollama/qwen3.5:latest", "outcome": "rejected"}) + "\n")
     _ns(home, {"ts": NOW - 99, "outcome": "delegated", "model": "gpt-6-astra", "duration_sec": 300.0, "thread_id": T1},
-        {"ts": NOW - 30, "outcome": "codex_failed", "model": "gpt-6-astra"},                    # failed, no thread: zero
-        {"ts": NOW - 20, "outcome": "codex_blocked", "model": "gpt-6-astra", "duration_sec": 5.0, "thread_id": T3},  # no rollout: 1
+        {"ts": NOW - 98, "outcome": "delegated", "model": "gpt-6-astra", "duration_sec": 5.0, "thread_id": T3},   # no rollout: 1
+        {"ts": NOW - 97, "outcome": "codex_blocked", "model": "gpt-6-astra", "duration_sec": 5.0, "thread_id": T4},
+        {"ts": NOW - 30, "outcome": "codex_failed", "model": "gpt-6-astra"},
         {"ts": NOW - 10, "outcome": "benched", "model": ""})                                    # not a run
     r = sr.compute(SID, NOW, budget_s=30)
     assert r["complete"] is True
-    assert r["codex"] == {"runs": 3, "responses": 5, "flagged_runs": 1}      # 4 + 0 + 1
-    assert r["by_source"] == {"codex_runs": 5, "router_local": 2, "router_codex": 0, "router_other": 1,
-                              "proxy": 0, "transcript_other": 0}
+    # n counts DELEGATED runs only: 4 responses + 1 flagged; the blocked run's 2 responses are discarded work
+    assert r["codex"] == {"runs": 2, "responses": 5, "flagged_runs": 1, "discarded_runs": 2, "discarded_responses": 2}
+    assert r["by_source"] == {"codex_runs": 5, "router_local": 2, "router_other": 2, "proxy": 0, "transcript_other": 0}
     assert r["claude"] == 6 + 1 + 1                                          # layout + m9 + the Claude router answer
-    assert r["non_claude"] == 5 + 2 + 1 == 8
-    assert r["total"] == 16
-    assert r["local"] == {"attempts": 3, "ok": 2}                            # 1 ok, 1 failed, 1 MCP ok; cancelled/cache excluded
-    # 16 calls is under the 50-call floor: n/a with its k/n, exactly as the 7-day row does
-    assert tick.render_session_routing(r, now=NOW) == "routed n/a (8/16 calls, session) · local OK 67% (2/3, session)"
-    r["total"] = 200                                                         # past the floor: the flagged run is named
+    assert r["non_claude"] == 5 + 2 + 2 == 9 and r["total"] == 17
+    # b = c1 x2, c2, c3, c9; a = c1's second and c3 (c2 was rejected by the text job, c9 by the router)
+    assert r["local"] == {"attempts": 5, "ok": 2, "gate_rejected": 1}
+    # 17 calls is under the 50-call floor: n/a with its k/n, exactly as the 7-day row does
+    assert tick.render_session_routing(r, now=NOW) == "routed n/a (9/17 calls, session) · local OK 40% (2/5, session)"
+    r["total"] = 200                                                         # past the floor: the estimated run is named
     assert tick.render_session_routing(r, now=NOW) == \
-        "routed 4.0% (8/200 calls, session, 1 Codex run counted as 1) · local OK 67% (2/3, session)"
+        "routed 4.5% (9/200 calls, session, 1 Codex run est.) · local OK 40% (2/5, session)"
+
+
+def test_a_job_rejected_three_times_is_not_three_calls_and_not_three_local_successes(env):
+    home, projects, _codex = env
+    _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(60)])
+    _routing_db(home, [(f"j{i}", SID, None) for i in range(3)],
+                [(f"j{i}", NOW - 100 + 10 * i, "ollama", "ollama/qwen3.5:latest", "ok") for i in range(3)])
+    _write(home / "text_job_local_attempts.jsonl", *[
+        json.dumps({"ts": NOW - 100 + 10 * i + 1, "job": "commit_message", "model": "ollama/qwen3.5:latest",
+                    "outcome": "rejected"}) + "\n" for i in range(3)])
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["local"] == {"attempts": 3, "ok": 0, "gate_rejected": 3} and r["non_claude"] == 0
+    assert tick.render_session_routing(r, now=NOW) == "routed 0.0% (0/60 calls, session) · local OK 0% (0/3, session)"
 
 
 def test_the_figure_is_shown_as_a_share_from_fifty_calls(env):
     home, projects, _codex = env
     _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(96)])
-    _routing_db(home, [(i, "2026-11-05 08:00:00", "ollama", "ollama/q", 1, "router_chain", SID, None) for i in range(1, 5)])
+    _one_local_ok(home, 4)
     r = sr.compute(SID, NOW, budget_s=30)
     assert (r["non_claude"], r["total"]) == (4, 100)
     assert tick.render_session_routing(r, now=NOW) == "routed 4.0% (4/100 calls, session) · local OK 100% (4/4, session)"
@@ -312,9 +383,9 @@ def test_the_figure_is_shown_as_a_share_from_fifty_calls(env):
 def test_no_local_attempt_is_na_never_zero_percent(env):
     home, projects, _codex = env
     _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(60)])
-    _routing_db(home, [])
+    _routing_db(home)
     r = sr.compute(SID, NOW, budget_s=30)
-    assert r["local"] == {"attempts": 0, "ok": 0} and r["non_claude"] == 0
+    assert r["local"] == {"attempts": 0, "ok": 0, "gate_rejected": 0} and r["non_claude"] == 0
     line = tick.render_session_routing(r, now=NOW)
     assert "local OK n/a (0 attempts, session)" in line and "0%" not in line.split("local OK")[1]
     assert line.startswith("routed 0.0% (0/60 calls, session)")              # a measured zero: n is shown beside it
@@ -332,7 +403,7 @@ def test_an_unreadable_router_database_is_unknown_not_zero(env):
 def test_a_fresh_result_is_reused_and_a_stale_one_recomputed(env):
     home, projects, _codex = env
     main = _write(projects / "-p" / f"{SID}.jsonl", _assistant("a"))
-    _routing_db(home, [])
+    _routing_db(home)
     first = sr.compute(SID, NOW, budget_s=30)
     with open(main, "a", encoding="utf-8") as fh:
         fh.write(_assistant("b"))
@@ -349,7 +420,7 @@ def test_an_unsafe_session_id_is_refused(env):
 def test_the_snapshot_carries_the_routing_figure_and_its_row(env, monkeypatch):
     home, projects, _codex = env
     _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(80)])
-    _routing_db(home, [(1, "2026-11-05 08:00:00", "ollama", "ollama/q", 1, "router_chain", SID, None)])
+    _one_local_ok(home)
     data = snap.build(SID, NOW)
     assert data["routing"]["total"] == 81 and data["routing"]["non_claude"] == 1
     assert data["routing_line"] == "routed 1.2% (1/81 calls, session) · local OK 100% (1/1, session)"
@@ -367,7 +438,7 @@ def test_a_failed_count_is_na_in_the_snapshot_and_does_not_blank_the_other_field
 def test_the_tick_prints_the_session_row_between_the_line_and_the_seven_day_row(env):
     home, projects, _codex = env
     _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(80)])
-    _routing_db(home, [(1, "2026-11-05 08:00:00", "ollama", "ollama/q", 1, "router_chain", SID, None)])
+    _one_local_ok(home)
     snap.refresh(host="claude_code", session_id=SID, now=NOW)
     routing = tick.read_session_routing(str(home), SID)
     cache = {"written_at": NOW, "call_mix": {"window": "7d", "population": "organic",
@@ -379,6 +450,24 @@ def test_the_tick_prints_the_session_row_between_the_line_and_the_seven_day_row(
     assert rows[2] == ("off-Claude 1.0% (6/600 calls, 7d, organic) · <Opus 0.0% (0/594 Claude calls, 7d, organic)"
                        " · local OK 90% (9/10, 7d, organic)")
     assert len(tick.render_rows(cache, now=NOW)) == 2                         # no session in the JSON: no session row
+
+
+def test_the_seven_day_label_says_when_codex_turns_are_counted_and_flags_estimated_runs():
+    base = {"window": "7d", "population": "organic", "outside_claude": {"k": 105, "n": 13977},
+            "below_opus": {"k": 0, "n": 13872}, "local_ok": {"k": 3, "n": 4}}
+    cache = {"written_at": NOW, "call_mix": dict(base, codex_turns=True, flagged_codex_runs=0)}
+    assert tick.render_progress(cache, now=NOW).startswith(
+        "routed (incl. Codex turns) 0.75% (105/13977 calls, 7d, organic) · <Opus")
+    cache["call_mix"]["flagged_codex_runs"] = 2
+    assert "(105/13977 calls, 7d, organic, 2 Codex runs est.)" in tick.render_progress(cache, now=NOW)
+    cache["call_mix"]["flagged_codex_runs"] = 1
+    assert "(105/13977 calls, 7d, organic, 1 Codex run est.)" in tick.render_progress(cache, now=NOW)
+    # a cache from a refresher that did not count Codex turns keeps the name `llm-router kpi` prints
+    assert tick.render_progress({"written_at": NOW, "call_mix": base}, now=NOW).startswith("off-Claude 0.75% (105/13977")
+    for bad in (True, 1, "yes"):                                              # only the boolean True relabels
+        cache["call_mix"]["codex_turns"] = bad
+        if bad is not True:
+            assert tick.render_progress(cache, now=NOW).startswith("off-Claude")
 
 
 def test_the_seven_day_row_is_as_before_when_the_cache_has_no_local_ok(env):
@@ -422,28 +511,45 @@ def test_the_tick_reads_the_snapshot_by_its_file_name_characters(env):
 def test_the_window_counts_codex_responses_and_local_ok_for_the_organic_population(env):
     home, _projects, codex = env
     _rollout(codex, T1, NOW - 400, ["r1", "r2", "r3", "r4"])
-    ts = _utc
+    ok, bad = "ok", "error"
     _routing_db(home, [
-        (1, ts(NOW - 3600), "ollama", "ollama/q", 1, "router_chain", "organic-s", None),
-        (2, ts(NOW - 3500), "ollama", "ollama/q", 0, "router_chain", "organic-s", None),
-        (3, ts(NOW - 3400), "ollama", "ollama/q", 1, "router_chain", "research-s", None),     # not the population
-        (4, ts(NOW - 3300), "ollama", "ollama/q", 1, "router_chain", None, None),             # no session id: unplaceable
-        (5, ts(NOW - 86400 * 30), "ollama", "ollama/q", 1, "router_chain", "organic-s", None),  # outside the window
+        ("o1", "organic-s", None), ("o2", "organic-s", None), ("r1", "research-s", None), ("n1", None, None),
+        ("m1", "unknown:mcp", "tu_organic"), ("m2", "unknown:mcp", "tu_research"), ("m3", "unknown:mcp", "tu_nobody"),
+        ("old", "organic-s", None)], [
+        ("o1", NOW - 3600, "ollama", "ollama/q", bad), ("o1", NOW - 3599, "ollama", "ollama/q2", ok),
+        ("o2", NOW - 3500, "ollama", "ollama/q2", ok),
+        ("r1", NOW - 3400, "ollama", "ollama/q", ok),                          # not the population
+        ("n1", NOW - 3300, "ollama", "ollama/q", ok),                          # NULL session, no tool id: unplaceable
+        ("m1", NOW - 3200, "ollama", "ollama/q", ok),                          # unknown:mcp placed by tool_use id: organic
+        ("m2", NOW - 3100, "ollama", "ollama/q", ok),                          # placed, research: out
+        ("m3", NOW - 3000, "ollama", "ollama/q", ok),                          # unknown:mcp, no transcript: unplaceable
+        ("old", NOW - 86400 * 30, "ollama", "ollama/q", ok),                   # outside the window
+        ("o2", NOW - 2900, "gemini", "gemini-2.5", ok),                        # not local: not in the local figure
     ])
+    _write(home / "text_job_local_attempts.jsonl",
+           json.dumps({"ts": NOW - 3499, "job": "j", "model": "ollama/q2", "outcome": "rejected"}) + "\n")
     _ns(home, {"ts": NOW - 300, "outcome": "delegated", "model": "gpt-6-astra", "duration_sec": 100.0, "thread_id": T1,
                "session_id": "organic-s", "session_kind": "organic"},
+        {"ts": NOW - 250, "outcome": "delegated", "model": "gpt-6-astra", "duration_sec": 5.0, "thread_id": T3,
+         "session_id": "organic-s", "session_kind": "organic"},
         {"ts": NOW - 200, "outcome": "codex_failed", "model": "gpt-6-astra", "session_id": "organic-s",
          "session_kind": "organic"},
+        {"ts": NOW - 150, "outcome": "codex_blocked", "model": "gpt-6-astra", "duration_sec": 5.0, "thread_id": T4,
+         "session_id": "organic-s", "session_kind": "organic"},
         {"ts": NOW - 100, "outcome": "delegated", "model": "gpt-6-astra", "duration_sec": 5.0, "thread_id": T3,
          "session_id": "research-s", "session_kind": "research"})
-    def organic(sid, stamp):
-        return sid == "organic-s"
 
-    x = sr.window_extras(NOW - 7 * 86400, NOW, NOW, organic)
-    # delegated: 4 responses, +3 beyond the unit the list counts; failed with no response: -1; the research run is out
-    assert x["codex_extra"] == 3 - 1 and x["runs"] == 2 and x["flagged_runs"] == 0
-    assert x["by_session"] == {"organic-s": 2}
-    assert x["local"] == {"attempts": 2, "ok": 1} and x["unattributed_local"] == 1
+    def organic(sid, stamp):
+        return sid == "organic-s" or sid == "sess-from-tool"
+
+    x = sr.window_extras(NOW - 7 * 86400, NOW, NOW, organic, {"tu_organic": "sess-from-tool", "tu_research": "research-s"})
+    # the unit list counts one unit per row: delegated 4 responses = +3, delegated with no rollout = +0 (flagged),
+    # failed and blocked are discarded work and leave the count (-1 each); the research run is out
+    assert x["codex_extra"] == 3 + 0 - 1 - 1 and x["runs"] == 2 and x["flagged_runs"] == 1
+    assert x["by_session"] == {"organic-s": 3 - 1 - 1}
+    # organic local attempts: o1 x2, o2 (rejected by the text job: not used), m1 = 4 attempts, 2 used
+    assert x["local"] == {"attempts": 4, "ok": 2, "gate_rejected": 1}
+    assert x["unattributed_local"] == 2                                       # n1 and m3
 
 
 def test_call_mix_adds_the_extras_to_the_unit_counts():
@@ -462,6 +568,10 @@ def test_call_mix_adds_the_extras_to_the_unit_counts():
               "local": {"ok": 3, "attempts": 5}, "unattributed_local": 2}
     cm = kpi._call_mix(units, frozenset({"organic"}), _Index(), sessions=True, extras=extras)
     assert cm["outside_claude"] == {"k": 5, "n": 13} and cm["sessions"] == {"s": 13}
+    # a discarded Codex run leaves the count: the unit the list counted is taken back
+    gone = kpi._call_mix(units, frozenset({"organic"}), _Index(), sessions=True,
+                         extras=dict(extras, codex_extra=-1, by_session={"s": -1}))
+    assert gone["outside_claude"] == {"k": 0, "n": 8} and gone["sessions"] == {"s": 8}
     assert cm["local_ok"] == {"k": 3, "n": 5, "unattributed_attempts": 2}
     assert cm["codex"] == {"runs": 1, "extra_responses": 4, "flagged_runs": 0}
 
@@ -473,7 +583,7 @@ def test_the_refresher_caches_local_ok_and_the_flagged_runs():
         "population": "organic", "outside_claude": {"k": 5, "n": 100}, "below_opus": {"k": 0, "n": 95},
         "local_ok": {"k": 3, "n": 4, "unattributed_attempts": 7}, "codex": {"flagged_runs": 2}}}
     cm = rf._call_mix(card)
-    assert cm["local_ok"] == {"k": 3, "n": 4} and cm["flagged_codex_runs"] == 2
+    assert cm["local_ok"] == {"k": 3, "n": 4} and cm["flagged_codex_runs"] == 2 and cm["codex_turns"] is True
     card["call_mix"]["local_ok"] = {"k": 5, "n": 4}                          # impossible: not cached, the row omits it
     assert "local_ok" not in rf._call_mix(card)
     del card["call_mix"]["local_ok"]                                         # an older scorecard: as before
@@ -483,7 +593,7 @@ def test_the_refresher_caches_local_ok_and_the_flagged_runs():
 def test_the_files_the_refresher_writes_are_private(env):
     home, projects, _codex = env
     _write(projects / "-p" / f"{SID}.jsonl", _assistant("a"))
-    _routing_db(home, [])
+    _routing_db(home)
     sr.compute(SID, NOW, budget_s=30)
     assert stat.S_IMODE(os.stat(paths.state_path(sr.INDEX_DIR, f"{SID}.json")).st_mode) == 0o600
 
@@ -494,7 +604,7 @@ def test_the_tick_script_prints_the_session_row_only_once_the_session_has_a_snap
 
     home, projects, _codex = env
     _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(80)])
-    _routing_db(home, [(1, "2026-11-05 08:00:00", "ollama", "ollama/q", 1, "router_chain", SID, None)])
+    _one_local_ok(home)
     script = Path(tick.__file__)
     run_env = {**os.environ, "NO_COLOR": "1", "LLM_ROUTER_STATUSLINE_REFRESH_CMD": "true"}
 
@@ -507,3 +617,57 @@ def test_the_tick_script_prints_the_session_row_only_once_the_session_has_a_snap
     snap.refresh(host="claude_code", session_id=SID)                          # the detached refresher's job
     got = rows()
     assert len(got) == 2 and got[1] == "routed 1.2% (1/81 calls, session) · local OK 100% (1/1, session)"
+
+
+# ── the full layout's third row, from a segment cache the test writes (no refresher, no installed package) ──
+
+def _full_layout(tmp_path: Path, kv: dict[str, str], stdin_sid: str = SID) -> list[str]:
+    import subprocess
+
+    script = Path(__file__).resolve().parents[1] / "src" / "llm_router" / "hooks" / "statusline-command.sh"
+    state = tmp_path / ".llm-router"
+    state.mkdir(exist_ok=True)
+    (state / f"statusline_seg_{stdin_sid}.kv").write_text("".join(f"{k}={v}\n" for k, v in kv.items()))
+    env = {"HOME": str(tmp_path), "LLM_ROUTER_HOME": str(state), "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+           "NO_COLOR": "1", "LLM_ROUTER_STATUSLINE_REFRESH_CMD": "true"}
+    out = subprocess.run(["bash", str(script)], input=json.dumps({"session_id": stdin_sid}), env=env,
+                         capture_output=True, text=True, timeout=30).stdout
+    return out.splitlines()
+
+
+def test_the_full_layout_prints_the_routing_row_under_the_snapshot_row(tmp_path):
+    now = int(time.time())
+    row = "routed 0.74% (104/13976 calls, session) · local OK 40% (2/5, session)"
+    lines = _full_layout(tmp_path, {"v": "1", "written": str(now), "snap_line": "router: m (r) | offload n/a",
+                                    "snap_at": str(now), "route_line": row})
+    assert len(lines) == 3, lines
+    assert lines[1].startswith("router: ") and lines[2] == row
+
+
+def test_a_stale_snapshot_turns_both_rows_to_na_and_a_control_character_never_reaches_the_terminal(tmp_path):
+    now = int(time.time())
+    lines = _full_layout(tmp_path, {"v": "1", "written": str(now), "snap_line": "router: m (r)",
+                                    "snap_at": str(now - 3600), "route_line": "routed 1.0% (1/100 calls, session)"})
+    assert lines[1:] == ["n/a", "routed n/a (session) · local OK n/a (session)"], lines
+    hostile = _full_layout(tmp_path, {"v": "1", "written": str(now), "snap_line": "router: m",
+                                      "snap_at": str(now), "route_line": "routed \x1b[31m1.0%\x1b[0m \u009b(1/100)"})
+    assert "\x1b" not in hostile[2] and "\u009b" not in hostile[2], hostile
+
+
+def test_a_segment_cache_without_a_routing_row_prints_none(tmp_path):
+    now = int(time.time())
+    lines = _full_layout(tmp_path, {"v": "1", "written": str(now), "snap_line": "router: m", "snap_at": str(now)})
+    assert len(lines) == 2 and lines[1] == "router: m"
+
+
+def test_two_runs_with_the_same_timestamp_are_two_runs_not_one_cache_entry(env):
+    home, _projects, codex = env
+    _rollout(codex, T1, NOW - 600, ["a1", "a2"])
+    _rollout(codex, T4, NOW - 590, ["b1", "b2", "b3"])
+    rows = [{"lever": "agent_route_codex", "session_id": SID, "ts": NOW - 500, "outcome": "delegated", "model": "m",
+             "thread_id": T1, "tool_use_id": "tu1"},
+            {"lever": "agent_route_codex", "session_id": SID, "ts": NOW - 500, "outcome": "delegated", "model": "m",
+             "thread_id": T4, "tool_use_id": "tu2"}]
+    assert [r["responses"] for r in sr.codex_run_responses(rows, NOW)] == [2, 3]
+    assert [r["responses"] for r in sr.codex_run_responses(rows, NOW)] == [2, 3]      # and again from the cache
+    assert sr.run_key(rows[0]) != sr.run_key(rows[1])

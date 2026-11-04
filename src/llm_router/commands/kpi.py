@@ -453,14 +453,14 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
             joins)
 
 
-def _ns_units(days: int, win: "_Window | None") -> list[dict]:
+def _ns_units(days: int, win: "_Window | None", tool_sessions: dict[str, str] | None = None) -> list[dict]:
     """The unit stream NS, D1, D2 and the call mix read: sub-agent transcripts included (the NS
     definition counts them), and verify records attached only through the seam
     (``northstar.NS_ATTACH_VERIFY_RECORDS``, False until a verifier is connected: D-364)."""
     from llm_router import northstar as ns
 
     return list(ns.units(days=_wall_days(days, win), backfill=True, subagents=True,
-                         verify_records=ns.NS_ATTACH_VERIFY_RECORDS))
+                         verify_records=ns.NS_ATTACH_VERIFY_RECORDS, tool_sessions=tool_sessions))
 
 
 def _blind(result: dict) -> dict:
@@ -2859,7 +2859,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     all_rows = pl.read_rows()
     index = sk.KindIndex(all_rows)
     until_ts = None if win is None else win.until
-    unit_list = _ns_units(days, win)  # one pass: NS/D1/D2, the call mix and verify_shadow
+    tool_sessions: dict[str, str] | None = {} if routing_detail else None   # filled by the same pass
+    unit_list = _ns_units(days, win, tool_sessions)  # one pass: NS/D1/D2, the call mix and verify_shadow
     ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index, win, unit_list)
     kpis_diag = joins.pop("diag")
     extras = None
@@ -2868,7 +2869,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
 
         extras = session_routing.window_extras(
             win.since if win is not None else now_ts - days * 86400.0, win.until if win is not None else now_ts,
-            now_ts, lambda sid, stamp: isinstance(sid, str) and bool(sid) and index.resolve(sid, stamp).kind in allowed)
+            now_ts, lambda sid, stamp: isinstance(sid, str) and bool(sid) and index.resolve(sid, stamp).kind in allowed,
+            tool_sessions or {})
     call_mix_r = _call_mix(unit_list, allowed, index, win, sessions=call_mix_sessions, extras=extras)
     d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index, win), days, now_ts)
     pop = _proxy_population(all_rows, days, allowed, now_ts, until=until_ts)
