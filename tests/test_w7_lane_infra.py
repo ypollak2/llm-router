@@ -352,14 +352,14 @@ async def test_cancel_in_the_first_attempt_records_no_row_anywhere(monkeypatch, 
     monkeypatch.setenv(FLAG, "1")
     sink: dict = {}
     await _cancel_mid_route(monkeypatch, sink)
-    assert sink == {} and not attempts() and not finals()
+    assert set(sink) <= {"jid"} and not attempts() and not finals()  # no result filled: only the job's id (W9b)
     assert lr.is_enabled(BARE, JOB)
 
 
 async def test_cancel_with_the_flag_unset_records_no_row_anywhere(monkeypatch, lane_on):
     sink: dict = {}
     await _cancel_mid_route(monkeypatch, sink)
-    assert sink == {} and not attempts() and not finals()
+    assert set(sink) <= {"jid"} and not attempts() and not finals()  # no result filled: only the job's id (W9b)
 
 
 async def test_cancel_after_a_rejected_attempt_leaves_the_job_excluded(monkeypatch, lane_on):
@@ -371,7 +371,8 @@ async def test_cancel_after_a_rejected_attempt_leaves_the_job_excluded(monkeypat
     rows = attempts()
     assert [r["outcome"] for r in rows] == ["rejected", "infra"]
     assert len({r["jid"] for r in rows}) == 1 and [r["try"] for r in rows] == [1, 2]
-    assert not finals() and sink == {}
+    assert not finals() and set(sink) <= {"jid"}  # no result filled: only the job's id (W9b)
+    assert rows[1].get("unfinished") is True and "unfinished" not in rows[0]  # the marker says it is no attempt
     assert lr._recent_outcomes(LOCAL, JOB, None, None) == []
 
 
@@ -389,7 +390,7 @@ async def test_the_hooks_wait_for_timeout_cancels_without_a_quality_row(monkeypa
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(run(sink), timeout=1.0)
     assert entered.is_set(), "the timeout fired before the route was reached: the test would be vacuous"
-    assert sink == {} and not attempts() and not finals()
+    assert set(sink) <= {"jid"} and not attempts() and not finals()  # no result filled: only the job's id (W9b)
 
 
 # ------------------------------------------------------------------ 6. the structured sink (F8)
@@ -399,6 +400,7 @@ async def test_sink_on_acceptance(monkeypatch):
     sink: dict = {}
     out = await run(sink)
     assert "_Structured: status=accepted, attempts=1_" in out and GOOD in out
+    assert len(sink.pop("jid")) == 12                                         # W9b: the job's id rides the sink
     assert sink == {"status": "accepted", "attempts": 1, "model": LOCAL, "text": GOOD, "reasons": [],
                     "codes": [], "fallback": "", "infra": False}
 

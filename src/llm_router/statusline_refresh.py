@@ -19,7 +19,7 @@ the file is older than a minute. The expensive work lives here:
                         their ``window`` and ``population``. With ``routing_detail``
                         (W9) ``outside_claude`` counts a delegated Codex run as its model
                         responses and drops discarded runs (``codex_turns: true``, so the
-                        row is labelled ``routed (incl. Codex turns)``, not ``off-Claude``:
+                        row is labelled ``routed (incl. Codex turns and binds)``, not ``off-Claude``:
                         ``llm-router kpi`` keeps one call per run), ``flagged_codex_runs``
                         counts runs estimated as one response, and ``local_ok`` is the
                         local attempts that were used over all local attempts.
@@ -157,6 +157,8 @@ def _call_mix(card: dict) -> dict | None:
         out["sessions"] = {sid: n for sid, n in sessions.items()
                            if isinstance(sid, str) and _SAFE_ID.fullmatch(sid)
                            and isinstance(n, int) and not isinstance(n, bool) and n > 0}
+    if cm.get("detail_unavailable") is True:
+        out["detail_unavailable"] = True                          # Codex turns / binds / local OK could not be counted: n/a, not a partial count
     codex, local = cm.get("codex"), cm.get("local_ok")
     if isinstance(codex, dict) and isinstance(codex.get("flagged_runs"), int) and not isinstance(codex["flagged_runs"], bool):
         out["codex_turns"] = True                                 # Codex runs count as their model responses: the row's label says so

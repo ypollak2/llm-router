@@ -727,7 +727,32 @@ async def _sink_of(monkeypatch, responses, flag="1", lane=True, **kw):
 
 async def test_the_sink_carries_an_accepted_text_and_its_model(monkeypatch):
     r, sink, _ = await _sink_of(monkeypatch, [_resp("app: set x in app.py\n\nSecond paragraph.")])
-    assert r == GenResult("accepted", "app: set x in app.py\n\nSecond paragraph.", "ollama/test-model", 1, "")
+    assert r[:5] == GenResult("accepted", "app: set x in app.py\n\nSecond paragraph.", "ollama/test-model", 1, "")[:5]
+    assert r.jid == sink["jid"] and len(r.jid) == 12                          # W9b: the job's id rides the result
+
+
+async def test_the_jid_the_bind_row_gets_is_the_jid_of_the_jobs_attempt_rows(monkeypatch, tmp_path, repo):
+    """The status line finds a bind job's attempts by this id and by nothing else (``session_routing.link_bind_job``)."""
+    from llm_router import paths
+
+    r, sink, _ = await _sink_of(monkeypatch, [_resp("app: set x in app.py\n\nSecond paragraph.")])
+    rows = [json.loads(line) for line in paths.state_path("text_job_local_attempts.jsonl").read_text().splitlines()]
+    assert rows and {row["jid"] for row in rows} == {r.jid}
+
+
+def test_a_bind_row_carries_the_jid_of_an_accepted_job_and_of_one_handed_back(repo, tmp_path):
+    jid = "0123456789ab"
+    d, rows = run(f"git commit -m {T}", repo, tmp_path, Gen(GenResult("accepted", MODEL_TEXT, "ollama/stub", 1, "", jid)))
+    assert d.kind == "rewrite" and rows[0]["kind"] == "bound" and rows[0]["jid"] == jid
+    d, rows = run(f"git commit -m {T}", repo, tmp_path, Gen(GenResult("rejected", "", "m", 3, "generic_subject", jid)))
+    assert d.kind == "deny" and rows[0]["kind"] == "denied" and rows[0]["jid"] == jid
+    d, rows = run(f"git commit -m {T}", repo, tmp_path, Gen(GenResult("accepted", MODEL_TEXT, "m", 1, "")))
+    assert "jid" not in rows[0]                                               # a result with none names none
+
+
+def test_a_malformed_jid_in_the_sink_is_not_recorded():
+    for bad in ("", "xyz", "0123456789AB", "0123456789abc", None, 7):
+        assert engine.result_from_sink({"status": "accepted", "attempts": 1, "model": "m", "text": "t", "jid": bad}).jid == ""
 
 
 async def test_a_rejection_reason_comes_from_the_check_not_from_the_models_words(monkeypatch):

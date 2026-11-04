@@ -1228,6 +1228,8 @@ async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | Non
     last_codes: list[str] = []
     feedback: str | None = None
     jid = uuid.uuid4().hex[:12]  # D-367: ties every sidecar row of this call; the monitor counts jobs
+    if sink is not None:
+        sink["jid"] = jid  # from the start: a job that times out or raises still names its attempt rows (the bind ledger's link)
     timed_out, timed_model = False, "none"  # F18: an attempt hit attempt_timeout_s
     try_judged = False  # this try left its own rows in the sidecar (so the job is not unfinished)
 
