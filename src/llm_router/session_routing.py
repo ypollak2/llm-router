@@ -333,7 +333,7 @@ def _save_codex_cache(cache: dict) -> None:
     _atomic_json(_codex_cache_path(), cache)
 
 
-def codex_run_counts(rows: list[dict], now: float) -> list[dict]:
+def codex_run_responses(rows: list[dict], now: float) -> list[dict]:
     """``[{row, responses, flagged, how}]`` for each Codex row, in order. ``responses`` is what the run adds to the
     call count (see the module docstring). A finished run's count is cached by its row (a rollout never changes)."""
     from llm_router import codex_rollouts as cr
@@ -468,7 +468,7 @@ def compute(session_id: str, now: float | None = None, *, budget_s: float = BUDG
         return prior
     t = _part("CHZ-FO-ROUTING-TRANSCRIPT", lambda: transcript_figures(session_id, budget_s=budget_s, root=root))
     mcp_ids = t["mcp_tool_use_ids"] if t else []
-    runs = _part("CHZ-FO-ROUTING-CODEX", lambda: codex_run_counts(_ns_rows(session_id), now))
+    runs = _part("CHZ-FO-ROUTING-CODEX", lambda: codex_run_responses(_ns_rows(session_id), now))
     rows = _part("CHZ-FO-ROUTING-ROWS", lambda: router_rows(session_id, mcp_ids))
 
     delegated_ts = [r["row"]["ts"] for r in runs or () if r["row"].get("outcome") == "delegated"]
@@ -521,7 +521,7 @@ def window_extras(since: float, until: float, now: float, kind_of) -> dict:
 
     Rows with no session id cannot be placed in a population and are left out; ``unattributed_local`` counts them."""
     rows = [r for r in _ns_rows(None) if since <= r["ts"] <= until and kind_of(r.get("session_id"), r.get("session_kind"))]
-    runs = codex_run_counts(rows, now)
+    runs = codex_run_responses(rows, now)
     extra = 0
     by_session: dict[str, int] = {}
     for r in runs:
