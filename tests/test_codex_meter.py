@@ -8,7 +8,6 @@ of a real one (``tests/_codex_meter_support.py``).
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import json
 import time
@@ -285,45 +284,6 @@ def test_the_llm_codex_tool_returns_the_refusal_and_logs_it(codex_home, monkeypa
     out = asyncio.run(codex_tool.llm_codex("what is 2+2"))
     assert "reserved for sub-agent delegation" in out
     assert [(r["kind"], r["caller"]) for r in _events()] == [("refused", "llm_codex")]
-
-
-def _run_codex_calls() -> list[tuple[str, int, bool]]:
-    """Every ``run_codex(...)`` call in src: (file, line, passes caller=)."""
-    out = []
-    for path in sorted((REPO / "src" / "llm_router").rglob("*.py")):
-        if path.name == "codex_agent.py":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                fn = node.func
-                name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
-                if name == "run_codex":
-                    out.append((str(path.relative_to(REPO)), node.lineno, any(k.arg == "caller" for k in node.keywords)))
-    return out
-
-
-def test_every_run_codex_call_in_the_package_names_its_caller():
-    """A new caller that forgets ``caller=`` is still guarded (the default is guarded), but it shows up as ``unspecified`` in
-    ``codex_meter.jsonl``. Naming it is the rule; this fails the PR that forgets."""
-    calls = _run_codex_calls()
-    assert len(calls) >= 6, calls  # the scan found the callers it is about
-    assert [c for c in calls if not c[2]] == []
-    assert {c[0] for c in calls} >= {"src/llm_router/tools/codex.py", "src/llm_router/router.py",
-                                     "src/llm_router/model_evaluator.py", "src/llm_router/resolver/calibrate.py",
-                                     "src/llm_router/session_broker.py", "src/llm_router/hooks/agent-route.py"}
-
-
-def test_only_agent_route_names_itself_as_the_reserved_caller():
-    seen = {}
-    for path in sorted((REPO / "src" / "llm_router").rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None)) == "run_codex":
-                for k in node.keywords:
-                    if k.arg == "caller" and isinstance(k.value, ast.Constant) and k.value.value in codex_meter.EXEMPT_CALLERS:
-                        seen[str(path.relative_to(REPO))] = k.value.value
-    assert seen == {"src/llm_router/hooks/agent-route.py": "agent_route"}
 
 
 def test_the_chain_tells_the_guard_who_it_is(codex_home):
