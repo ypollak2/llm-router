@@ -1,0 +1,1 @@
+The P2.0 benchmark harness uses a quiet-gate load limit of 6.0 instead of 4.0 once a frozen PREREG-P20-requal-AMEND7 is in force (D-375); without that sidecar the limit stays 4.0. AMEND7 sets no other constant (the free-memory floor, readings, interval, models, items, judge and caps stay), and tests prove the frozen guard refuses a change to any other key.

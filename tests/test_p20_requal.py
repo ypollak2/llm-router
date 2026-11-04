@@ -285,6 +285,7 @@ def factory(tmp_path):
             amend2=run_dir / "AMEND2.md", amend3=run_dir / "AMEND3.md",
             amend4=run_dir / "AMEND4.md",
             amend5=run_dir / "AMEND5.md", amend6=run_dir / "AMEND6.md",
+            amend7=run_dir / "AMEND7.md",
             gate=lambda constants: None,
         )
         pools = {s: pool_rows(s, 30 if small and s == "qa" else 75 if s == "code" else 130)
@@ -2574,3 +2575,321 @@ def test_amend6_parser_takes_only_the_two_models(capsys):
         with pytest.raises(SystemExit):
             ap.parse_args(["--model", bad, "status"])
     capsys.readouterr()
+
+
+# AMEND7 (D-375): the quiet gate's one-minute load limit is 6.0 under a frozen AMEND7 and 4.0
+# otherwise; nothing else may change.
+AMEND7_PAST = "2030-03-10T00:00:00Z"
+BLOCK7_FREE_KEYS = {"REPO_SHA", "CODE_RUNNER_SHA256"}
+
+
+def amend7_text(**values):
+    block = {**h.AMEND7_FIXED, "REPO_SHA": "7" * 40, "CODE_RUNNER_SHA256": "b" * 64, **values}
+    return ("# AMEND7\n\n```text P20-AMEND7-CONSTANTS\n"
+            + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n")
+
+
+def freeze_amend7(cfg, *, text=None, date=AMEND7_PAST):
+    cfg.amend7.write_text(text if text is not None else amend7_text())
+    cfg.amend7.with_suffix(".sha256").write_text(
+        f"{h.sha256_file(cfg.amend7)}  {cfg.amend7.name}\nfrozen_utc {date}\n"
+    )
+
+
+def through_amend6(factory, model=MODELS6[0], label="run"):
+    """The factory's run dir frozen through AMEND6 for `model`; AMEND7 is not yet written."""
+    cfg, c, pools = through_amend5(factory, label)
+    freeze_amend6(cfg)
+    return with_model(cfg, model), c, pools
+
+
+def passes(cfg, constants, arm):
+    try:
+        h.quiet(cfg, constants, arm)
+    except h.Park:
+        return False
+    return True
+
+
+def test_amend7_load_limit_is_6_only_with_a_frozen_amend7(factory):
+    cfg, c, _ = through_amend6(factory)
+    assert h.CONSTANTS["QUIET_LOAD1_MAX"] == "4.0"  # the prereg's value is never edited
+    before = h.frozen(cfg)
+    assert before["constants"]["QUIET_LOAD1_MAX"] == "4.0" and "amend7_sha256" not in before
+    cfg.amend7.write_text(amend7_text())  # a draft with no sidecar is inert
+    assert h.frozen(cfg) == before
+    freeze_amend7(cfg)
+    after = h.frozen(cfg)
+    assert after["constants"]["QUIET_LOAD1_MAX"] == "6.0"
+    assert after["amend7_sha256"] == h.sha256_file(cfg.amend7)
+    assert after["amend7_frozen_utc"] == AMEND7_PAST
+    cfg.amend7.with_suffix(".sha256").unlink()  # without the sidecar the limit is 4.0 again
+    assert h.frozen(cfg) == before
+
+
+@pytest.mark.parametrize("load", [0.0, 1.5, 3.99, 4.0, 4.01, 5.0, 5.99, 6.0, 6.01, 9.0,
+                                  float("nan"), float("inf"), -1.0 * float("inf")])
+def test_amend7_quiet_gate_boundary(factory, load):
+    arm = MODELS6[0]
+    cfg, c, _ = through_amend6(factory)
+    under6 = h.frozen(cfg)["constants"]
+    freeze_amend7(cfg)
+    under7 = h.frozen(cfg)["constants"]
+    cfg.machine.load = load
+    finite = math.isfinite(load)
+    assert passes(cfg, under6, arm) == (finite and load < 4.0)
+    assert passes(cfg, under7, arm) == (finite and load < 6.0)
+
+
+def test_amend7_gate_still_needs_three_readings_free_memory_and_no_foreign_model(factory):
+    arm = MODELS6[0]
+    cfg, c, _ = through_amend6(factory)
+    freeze_amend7(cfg)
+    c7 = h.frozen(cfg)["constants"]
+    cfg.machine.load = 5.99
+    got = h.quiet(cfg, c7, arm)
+    assert got["load1"] == [5.99] * 3 and len(got["free_mem_pct"]) == 3  # READINGS unchanged
+    cfg.machine.free = [39.9]  # the free-memory floor (40) is not touched
+    with pytest.raises(h.Park, match="machine not quiet"):
+        h.quiet(cfg, c7, arm)
+    cfg.machine.free = [40.0]
+    cfg.ollama.resident = ["foreign"]
+    with pytest.raises(h.Park, match="foreign model resident"):
+        h.quiet(cfg, c7, arm)
+    cfg.ollama.resident = []
+    loads = iter([5.0, 5.0, 6.0])  # one reading at the limit parks the whole gate
+    cfg.machine.load1 = lambda: next(loads)
+    with pytest.raises(h.Park, match="machine not quiet"):
+        h.quiet(cfg, c7, arm)
+
+
+@pytest.mark.parametrize("model", MODELS6)
+def test_amend7_changes_only_the_load_limit_and_the_two_sha_pins(factory, model):
+    cfg, c, _ = through_amend6(factory, model)
+    before = h.frozen(cfg)
+    freeze_amend7(cfg)
+    after = h.frozen(cfg)
+    expected = {**before["constants"], "QUIET_LOAD1_MAX": "6.0",
+                "REPO_SHA": "7" * 40, "CODE_RUNNER_SHA256": "b" * 64}
+    assert after["constants"] == expected  # the whole config dict, key for key
+    changed = {k for k in expected if before["constants"][k] != after["constants"][k]}
+    assert changed == {"QUIET_LOAD1_MAX", "REPO_SHA", "CODE_RUNNER_SHA256"}
+    assert before["constants"]["QUIET_LOAD1_MAX"] == "4.0"
+    assert after.keys() - before.keys() == {"amend7_sha256", "amend7_frozen_utc"}
+    assert {k: after[k] for k in before if k != "constants"} == {
+        k: v for k, v in before.items() if k != "constants"}
+    got = after["constants"]
+    for key in ("QUIET_FREE_MEM_MIN_PCT", "QUIET_READINGS", "QUIET_INTERVAL_S", "SELECT_SEED",
+                "N_TARGET_QA", "N_MIN", "JUDGE", "REFERENCE", "REPORT_ARMS", "SPEND_CAP_USD",
+                "G_MIN_PTS", "LOCAL_TIMEOUT_S", "REF_TIMEOUT_S", "RETRIES", "ANSWER_CAP_CHARS",
+                "REF_WINDOW", "TIERS_WRITTEN", "QA_BASELINE", "MAX_REF_MISSING_SHARE"):
+        assert got[key] == h.CONSTANTS[key], key  # the prereg's frozen value, word for word
+    assert got["QUIET_FREE_MEM_BASIS"] == "excl_own_arm" and got["NIGHT_WINDOW"] == "none"
+    assert got["LOCAL_MODELS"] == got["CODE_LOCAL_MODELS"] == got["SIZE_ORDER"] == model
+    assert {k: v for k, v in got.items() if k.startswith("ID_")} == {
+        f"ID_{model}": h.AMEND6_MODELS[model]}
+    assert after["model"] == model and after["amend6_sha256"] == before["amend6_sha256"]
+
+
+KEYS_AMEND7_MAY_NOT_TOUCH = sorted(
+    (set(h.CONSTANTS) | set(h.FILL_KEYS)) - {"QUIET_LOAD1_MAX"} - BLOCK7_FREE_KEYS
+) + ["LOCAL_MODEL_CHOICES", "QUIET_FREE_MEM_BASIS", "ID_qwen3.8-uncensored:latest",
+     "QUIET_LOAD1_MAX2", "QUIET_LOAD1_MIN"]
+
+
+def test_amend7_guard_list_covers_the_gate_knobs_items_judge_and_caps():
+    # An empty or short list would pass everything (house rule 3): it must hold the real keys.
+    for key in ("QUIET_FREE_MEM_MIN_PCT", "QUIET_READINGS", "QUIET_INTERVAL_S",
+                "QUIET_FREE_MEM_BASIS", "NIGHT_WINDOW", "LOCAL_TIMEOUT_S", "REF_TIMEOUT_S",
+                "RETRIES", "ANSWER_CAP_CHARS", "SELECT_SEED", "N_TARGET_QA", "N_MIN", "JUDGE",
+                "REFERENCE", "REPORT_ARMS", "SPEND_CAP_USD", "G_MIN_PTS", "LOCAL_MODELS",
+                "CODE_LOCAL_MODELS", "SIZE_ORDER", "LOCAL_MODEL_CHOICES", "ID_qwen3-coder:30b",
+                "ID_qwen3.6:35b-a3b-coding", "POOL_QA_SHA256", "CLAUDE_OPUS_ID", "LABEL"):
+        assert key in KEYS_AMEND7_MAY_NOT_TOUCH, key
+    assert "QUIET_LOAD1_MAX" not in KEYS_AMEND7_MAY_NOT_TOUCH
+    assert not BLOCK7_FREE_KEYS & set(KEYS_AMEND7_MAY_NOT_TOUCH)
+    assert len(KEYS_AMEND7_MAY_NOT_TOUCH) > 60
+
+
+@pytest.mark.parametrize("key", KEYS_AMEND7_MAY_NOT_TOUCH)
+def test_amend7_refuses_every_other_constant(factory, key):
+    cfg, c, _ = through_amend6(factory)
+    value = h.CONSTANTS.get(key, "x")
+    freeze_amend7(cfg, text=amend7_text(**{key: value}))
+    with pytest.raises(h.Refuse, match="AMEND7 constants"):
+        h.frozen(cfg)
+
+
+@pytest.mark.parametrize("defect", [
+    dict(QUIET_LOAD1_MAX="4.0"), dict(QUIET_LOAD1_MAX="6"), dict(QUIET_LOAD1_MAX="6.00"),
+    dict(QUIET_LOAD1_MAX="5.9"), dict(QUIET_LOAD1_MAX="6.1"), dict(QUIET_LOAD1_MAX="7.0"),
+    dict(QUIET_LOAD1_MAX="8.0"), dict(QUIET_LOAD1_MAX="inf"), dict(QUIET_LOAD1_MAX="nan"),
+    dict(QUIET_LOAD1_MAX=""), dict(QUIET_LOAD1_MAX=" 6.0"), dict(QUIET_LOAD1_MAX="6.0 "),
+    dict(REPO_SHA="zz"), dict(REPO_SHA="F" * 40), dict(REPO_SHA="7" * 39),
+    dict(REPO_SHA="7" * 41), dict(CODE_RUNNER_SHA256="b" * 63),
+    dict(CODE_RUNNER_SHA256="B" * 64), dict(CODE_RUNNER_SHA256="b" * 65),
+])
+def test_amend7_refuses_changed_or_malformed_values(factory, defect):
+    cfg, c, _ = through_amend6(factory)
+    freeze_amend7(cfg, text=amend7_text(**defect))
+    with pytest.raises(h.Refuse, match="AMEND7 constants"):
+        h.frozen(cfg)
+
+
+@pytest.mark.parametrize("missing", ["QUIET_LOAD1_MAX", "REPO_SHA", "CODE_RUNNER_SHA256"])
+def test_amend7_refuses_a_missing_key(factory, missing):
+    cfg, c, _ = through_amend6(factory)
+    block = {**h.AMEND7_FIXED, "REPO_SHA": "7" * 40, "CODE_RUNNER_SHA256": "b" * 64}
+    del block[missing]
+    freeze_amend7(cfg, text="```text P20-AMEND7-CONSTANTS\n"
+                  + "".join(f"{k}={v}\n" for k, v in block.items()) + "```\n")
+    with pytest.raises(h.Refuse, match="AMEND7 constants"):
+        h.frozen(cfg)
+
+
+def test_amend7_refuses_a_duplicate_key_and_a_missing_block(factory):
+    cfg, c, _ = through_amend6(factory)
+    freeze_amend7(cfg, text=amend7_text().replace(
+        "```\n", "QUIET_LOAD1_MAX=6.0\n```\n", 1))
+    with pytest.raises(h.Refuse, match="AMEND7 constants"):
+        h.frozen(cfg)
+    freeze_amend7(cfg, text=amend7_text().replace("```text P20-AMEND7-CONSTANTS", "```text"))
+    with pytest.raises(h.Refuse, match="AMEND7 constants"):
+        h.frozen(cfg)
+    freeze_amend7(cfg, text=amend7_text().replace(
+        "```text P20-AMEND7-CONSTANTS", "```text P20-AMEND6-CONSTANTS"))
+    with pytest.raises(h.Refuse, match="AMEND7 constants"):
+        h.frozen(cfg)
+
+
+def test_amend7_frozen_enforcement(factory):
+    cfg, c, _ = through_amend6(factory)
+    freeze_amend7(cfg)
+    good = h.frozen(cfg)["amend7_sha256"]
+    (cfg.run_dir / "PREREG-AMEND7.md").write_text("different")
+    with pytest.raises(h.Refuse, match="PREREG-AMEND7.md differs"):
+        h.frozen(cfg)
+    (cfg.run_dir / "PREREG-AMEND7.md").write_bytes(cfg.amend7.read_bytes())
+    assert h.frozen(cfg)["amend7_sha256"] == good
+    (cfg.run_dir / "PREREG-AMEND7.md").unlink()
+    for kwargs, message in [
+        (dict(date=AMEND6_PAST), "AMEND7 frozen_utc"),  # strictly after AMEND6
+        (dict(date="2030-02-15T00:00:00Z"), "AMEND7 frozen_utc"),
+        (dict(date="2031-01-01T00:00:00Z"), "AMEND7 frozen_utc"),  # after now
+        (dict(date="2030-03-10T00:00:00"), "AMEND7 frozen_utc"),  # no timezone
+    ]:
+        freeze_amend7(cfg, **kwargs)
+        with pytest.raises(h.Refuse, match=message):
+            h.frozen(cfg)
+    freeze_amend7(cfg)
+    cfg.amend7.write_text(cfg.amend7.read_text() + " ")  # edited after the freeze
+    with pytest.raises(h.Refuse, match="AMEND7 is not frozen"):
+        h.frozen(cfg)
+    assert call(cfg, "select") == 2
+    cfg.amend7.write_text(amend7_text())
+    cfg.amend7.with_suffix(".sha256").write_text("not a sidecar\n")  # a malformed sidecar
+    with pytest.raises(h.Refuse, match="AMEND7 is not frozen"):
+        h.frozen(cfg)
+
+
+def test_amend7_status_reports_frozen_only_when_the_whole_chain_holds(factory, capsys):
+    cfg, c, _ = through_amend6(factory)
+    freeze_amend7(cfg)
+    assert call(cfg, "status") == 0
+    assert json.loads(capsys.readouterr().out)["frozen"] is True
+    cfg.amend7.write_text(cfg.amend7.read_text() + " ")
+    assert call(cfg, "status") == 0
+    assert json.loads(capsys.readouterr().out)["frozen"] is False
+
+
+@pytest.mark.parametrize("missing", ["amend3", "amend4", "amend5", "amend6"])
+def test_amend7_requires_the_whole_amendment_chain(factory, missing):
+    cfg, c, _ = through_amend6(factory)
+    freeze_amend7(cfg)
+    getattr(cfg, missing).with_suffix(".sha256").unlink()
+    with pytest.raises(h.Refuse, match="requires a frozen AMEND"):
+        h.frozen(cfg)
+
+
+def test_amend7_without_a_frozen_amend6_refuses(factory):
+    cfg, c, _ = through_amend5(factory)
+    freeze_amend7(cfg)
+    with pytest.raises(h.Refuse, match="AMEND7 requires a frozen AMEND6"):
+        h.frozen(cfg)
+    cfg, c, _ = factory("alone")
+    freeze_amend7(cfg)
+    with pytest.raises(h.Refuse, match="AMEND7 requires a frozen AMEND6"):
+        h.frozen(cfg)
+
+
+def test_amend7_earlier_amendments_still_refuse_when_tampered(factory):
+    cfg, c, _ = through_amend6(factory)
+    freeze_amend7(cfg)
+    cfg.prereg.write_text(cfg.prereg.read_text() + "\nN_MIN=1\n")
+    with pytest.raises(h.Refuse, match="prereg is not frozen"):
+        h.frozen(cfg)
+    cfg, c, _ = through_amend6(factory, label="second")
+    freeze_amend7(cfg)
+    cfg.amend6.write_text(cfg.amend6.read_text() + " ")
+    with pytest.raises(h.Refuse, match="AMEND6 is not frozen"):
+        h.frozen(cfg)
+
+
+def test_amend7_cannot_move_the_load_limit_through_an_earlier_amendment_slot(factory):
+    """An AMEND5 or AMEND6 block that carries QUIET_LOAD1_MAX is refused: only AMEND7 sets it."""
+    cfg, c, _ = through_amend6(factory)
+    freeze_amend7(cfg)
+    freeze_amend5(cfg, text=amend5_text(QUIET_LOAD1_MAX="9.0"), date="2030-02-15T00:00:00Z")
+    with pytest.raises(h.Refuse, match="AMEND5 constants"):
+        h.frozen(cfg)
+    freeze_amend5(cfg)
+    freeze_amend6(cfg, text=amend6_text(QUIET_LOAD1_MAX="9.0"))
+    with pytest.raises(h.Refuse, match="AMEND6 constants"):
+        h.frozen(cfg)
+
+
+def test_amend7_gate_receives_the_amend7_repo_sha(factory):
+    cfg, c, _ = through_amend6(factory)
+    freeze_amend7(cfg)
+    seen = []
+    cfg.gate = lambda constants: seen.append(constants["REPO_SHA"])
+    assert call(cfg, "status") == 0 and seen == ["7" * 40]
+    assert call(cfg, "select") == 0 and seen == ["7" * 40, "7" * 40]
+
+
+@pytest.mark.parametrize("model", MODELS6)
+def test_amend7_score_log_records_the_hash_and_the_model(factory, model):
+    cfg, c, _ = through_amend6(factory, model)
+    freeze_amend7(cfg)
+    assert call(cfg, "select") == 0 and call(cfg, "score") == 0
+    started = next(row for row in h.uses(cfg) if row[0] == "started")
+    assert f"amend7_sha256={h.sha256_file(cfg.amend7)}" in started
+    assert f"amend6_sha256={h.sha256_file(cfg.amend6)}" in started
+    assert f"model={model}" in started
+
+
+@pytest.mark.parametrize("amend7", [False, True])
+def test_amend7_run_passes_a_load_of_5_5_only_with_a_frozen_amend7(factory, amend7):
+    """The condition AMEND7 changes: a machine at load1 5.5 (the owner's VM) parked every call
+    under AMEND6 (rc 3, no call, no row); under AMEND7 it runs and quiet.jsonl keeps the readings."""
+    model = MODELS6[0]
+    cfg, c, _ = through_amend6(factory, model)
+    if amend7:
+        freeze_amend7(cfg)
+    assert call(cfg, "select") == 0
+    cfg.machine.load = 5.5
+    rc = call(cfg, "run", "--set", "qa", "--arms", model)
+    rows = h.jsonl(cfg.run_dir / "answers/qa.jsonl")
+    if not amend7:
+        assert rc == 3 and rows == [] and not cfg.ollama.calls
+        assert not (cfg.run_dir / "quiet.jsonl").exists()
+        return
+    assert rc == 0 and rows and {r["arm"] for r in rows} == {model}
+    quiet_rows = h.jsonl(cfg.run_dir / "quiet.jsonl")
+    assert quiet_rows and len(quiet_rows) == len(rows) + 1  # + warm-up
+    assert all(row["load1"] == [5.5] * 3 for row in quiet_rows)  # the readings each call passed on
+    assert all(max(row["load1"]) < 6.0 for row in quiet_rows)
+    cfg.machine.load = 6.0
+    assert call(cfg, "run", "--set", "qa", "--arms", model) == 0  # nothing left to run
+    cfg.ollama.calls.clear()
+    assert not cfg.ollama.calls
