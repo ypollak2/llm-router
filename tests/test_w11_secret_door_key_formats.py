@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib.util
 import random
 import string
+import time
 from pathlib import Path
 
 import pytest
@@ -166,14 +167,39 @@ def test_a_key_far_into_a_long_prompt_is_still_found():
     assert _high(pad + _pem("PGP PRIVATE KEY BLOCK") + "\n" + pad)
 
 
-def test_a_thousand_headers_do_not_cost_a_second():
-    import time
+ADVERSARIAL_48K = {
+    "pgp-header-repeat": "-----BEGIN PGP PRIVATE KEY BLOCK-----" * 1300,
+    "pem-header-then-armor": "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n" * 900,
+    "pem-header-newlines": "-----BEGIN PRIVATE KEY-----\n" * 1700,
+    "pem-header-escaped-newlines": "-----BEGIN PRIVATE KEY-----\\n" * 1600,
+    "ssh2-header-repeat": "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----" * 1100,
+    "putty-repeat": "PuTTY-User-Key-File-3: a\n" * 1900,
+    "hf-repeat": "hf_" * 16000,
+    "npm-repeat": "npm_" * 12000,
+    "glpat-repeat": "glpat-" * 8000,
+    "sendgrid-repeat": "SG." * 16000,
+    "stripe-repeat": "sk_live_" * 6000,
+    "age-repeat": "AGE-SECRET-KEY-1" * 3000,
+    "azure-repeat": "AccountKey=" * 4400,
+    "slack-webhook-repeat": "hooks.slack.com/services/T" * 1800,
+    "digitalocean-repeat": "dop_v1_" * 7000,
+    "pypi-repeat": "pypi-AgEIcHlwaS5vcmc" * 2400,
+    "long-word-after-header": "-----BEGIN PRIVATE KEY-----\n" + "A" * 47000,
+    "many-words-after-header": "-----BEGIN PRIVATE KEY-----\n" + "AAAAAAAAAAAAAAAA " * 2800,
+}
 
-    text = "-----BEGIN PGP PRIVATE KEY BLOCK-----" * 1500
-    started = time.monotonic()
-    found = engine.secret_findings(text)
-    assert time.monotonic() - started < 2.0
-    assert not any(found.values())
+
+@pytest.mark.timing
+@pytest.mark.parametrize("name", sorted(ADVERSARIAL_48K))
+def test_the_new_shapes_scan_adversarial_48k_characters_in_milliseconds(name):
+    """The first version of the key-header check read the whole 4 KB tail of every header it found: the repeated-header input of
+    tests/test_lc12h_repair3.py went from 23 ms to 171 ms against a 250 ms budget, and the timing lane failed on a slower runner."""
+    text = ADVERSARIAL_48K[name]
+    assert 38_000 <= len(text) <= 49_500
+    started = time.perf_counter()
+    engine.secret_findings(text)
+    ms = (time.perf_counter() - started) * 1000
+    assert ms < 250, f"{name}: {ms:.1f} ms"
 
 
 def _load_hook():

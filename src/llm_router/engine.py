@@ -499,35 +499,49 @@ def _random_looking(body: str, *, bits: float = 3.5, distinct: int = 10) -> bool
 #: A literal backslash-``n`` (or ``\\n``, ``\r``, ``\t``): how a key looks inside a JSON, YAML or shell-quoted string, such as
 #: the ``private_key`` of a Google service-account file. It is a line break, not key material.
 _PEM_ESCAPED_BREAK = re.compile(r"(?:\\{1,2}[nrt])+")
-#: The closing line of a key block (``-----END ...``, or the four-dash ssh.com form).
-_PEM_END = re.compile(r"-{4,5} ?END")
 #: An armor header inside a block: PGP ``Version:`` / ``Comment:``, RFC 1421 ``Proc-Type:`` / ``DEK-Info:``. Base64 has no colon.
-_PEM_ARMOR_HEADER = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,40}:[^\n]*$")
+_PEM_ARMOR_HEADER = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,40}:")
 _BASE64_TOKEN = re.compile(r"[A-Za-z0-9+/=]+")
+_WORD = re.compile(r"\S+")
+#: How much of what follows a key header is read: 16 PEM lines, far more than the 16 characters it takes to tell key material
+#: from prose, and bounded because it is paid once per header found.
+_PEM_LOOKAHEAD = 1024
+#: A key quoted, commented or concatenated in source keeps its quote, comma, ``+`` or ``#`` outside the base64.
+_PEM_WORD_STRIP = "\"',+\\#>|"
+
+
+def _pem_material_is_real(words: list[str]) -> bool:
+    joined = "".join(words)
+    return bool(joined) and not _is_placeholder(joined) \
+        and _random_looking(joined, bits=3.0, distinct=min(12, max(8, len(joined) // 3)))
 
 
 def _pem_block_is_real(text: str, end: int) -> bool:
     """A key header followed by key material: base64 that is not filler (not a bare header in a question).
 
-    The body is what follows the header up to the closing ``-----END`` line, with armor headers dropped and escaped line
-    breaks read as breaks. Key material is the run of whole base64 tokens, each at least 16 characters, that starts the
-    body: a PEM line is 64 or 76 characters, a key pasted onto one line keeps its line-sized runs, and a sentence after a
-    bare header starts with a short word, so it is not a body. What follows that run (a short final line, a comment, the
-    rest of the question) does not matter. A truncated paste (``MIIEowIBAAKCAQEA7``) is still the start of a key."""
-    tail = _PEM_ESCAPED_BREAK.sub("\n", text[end:end + 4096])
-    body = _PEM_END.split(tail, 1)[0]
-    lines = [ln.strip() for ln in body.splitlines()]
-    # a key quoted, commented or concatenated in source keeps its quote, comma, ``+`` or ``#`` outside the base64
-    words = [t for t in (w.strip("\"',+\\#>|") for w in " ".join(
-        ln for ln in lines if ln and not _PEM_ARMOR_HEADER.match(ln)).split()) if t]
+    Key material is the run of whole base64 words, each at least 16 characters, that starts the body once armor headers
+    (``Version:``, ``Proc-Type:``) and blank lines are skipped and escaped line breaks (``\\n``) are read as breaks: a PEM line is 64 or
+    76 characters, a key pasted onto one line keeps its line-sized runs, and a sentence after a bare header starts with a short word,
+    so it is not a body. The run ends at the first word that is not such a token (``-----END``, a short last line, a comment, the rest
+    of the question) and what follows does not matter. A truncated paste (``MIIEowIBAAKCAQEA7``) is still the start of a key.
+
+    Lazy on purpose: this runs once per header found, and a text of 1,700 headers must not cost 1,700 full reads of the tail."""
+    tail = text[end:end + _PEM_LOOKAHEAD]
+    if "\\" in tail:
+        tail = _PEM_ESCAPED_BREAK.sub("\n", tail)
     material: list[str] = []
-    for word in words:
-        if len(word) < 16 or _BASE64_TOKEN.fullmatch(word) is None:
-            break
-        material.append(word)
-    joined = "".join(material)
-    return bool(joined) and not _is_placeholder(joined) \
-        and _random_looking(joined, bits=3.0, distinct=min(12, max(8, len(joined) // 3)))
+    for line in tail.split("\n"):
+        line = line.strip()
+        if not line or (not material and _PEM_ARMOR_HEADER.match(line)):
+            continue
+        for m in _WORD.finditer(line):
+            word = m.group().strip(_PEM_WORD_STRIP)
+            if not word:
+                continue
+            if len(word) < 16 or _BASE64_TOKEN.fullmatch(word) is None:
+                return _pem_material_is_real(material)
+            material.append(word)
+    return _pem_material_is_real(material)
 
 
 def _putty_key_is_real(text: str, end: int) -> bool:
