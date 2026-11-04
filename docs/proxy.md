@@ -385,27 +385,42 @@ ask the same decision model themselves (`llm_router/door_verdict.py`), so a sess
 still gets a verdict (`docs/bugs/CLS-HOOK-1.md`). Same switch, same model (`LLM_ROUTER_CLASSIFIER_BACKEND=systemone`,
 `LLM_ROUTER_DECISION_MODEL`), read by each hook per run:
 
-- `off` (default): zero Ollama calls. `shadow`: one text-free row per routed prompt (`auto-route.py`) and per routed
-  Agent spawn (`agent-route.py`) in `door_verdicts.jsonl`; nothing changes. `on`: the verdict decides, below.
-- The call runs in a thread beside the hook's own work and is joined at the decision, under one budget
-  (`LLM_ROUTER_DOOR_VERDICT_BUDGET_MS`, default 8,000). It waits through a cold load (nimble:9b: 2.0 s idle, 6.7 s
-  measured while another model was being evicted; 5.8 s and 4.4 s at load average 6.8). Two failures in a row open a 60 s breaker; one slow call does not.
-- Session start loads the decision model (`LLM_ROUTER_CLASSIFIER_PRELOAD=off` restores the edit-model and generic
-  warm-ups; a 22 GB model loaded by them evicts the decision model).
-- What `on` decides. The model answers one question, the cheapest adequate Claude tier with a probability for each. A
-  verdict of opus with p_max >= `LLM_ROUTER_DOOR_OPUS_MIN_CONF` (0.6) picks the `claude` door: the prompt hint is
-  quieted (the passive `OBSERVATION [shadow]` display, no directive, no hold), or the spawn makes no Codex attempt
-  (unit `unsuitable`, `reason_code=verdict_claude`). Any other verdict picks `mcp` (or `local` where a fresh
-  quality batch passed a local lane) for a prompt and `codex` for a spawn, and the existing gates decide as before.
-  No verdict (off, timeout, breaker, parse error) is today's behaviour. A verdict never opens a door the gates keep
-  shut, and Sonnet and Haiku are not counted as a non-Claude door.
-- A row: `ts`, `hook_kind`, `mode`, `session_id`, `tool_use_id` (join to `north_star_units.jsonl`), `text_sha`,
-  `chars`, `source`, `resident` (was the model loaded when the call began), `ms`, `tier`, `confidence`, `door`,
-  `reason`, `applied`, `outcome` (`hint_quieted`, `codex_skipped`, `no_change`, `exit_before_decision`).
-  `python scripts/door_verdict_report.py --days 7` prints coverage, latency, cold share, the door mix and the outcomes
-  with their n.
-- `python scripts/door_verdict_check.py` is the cheap real check: at most 30 model calls on ten fixed synthetic prompts.
+- `off`: zero Ollama calls. `shadow`: one text-free row per routed prompt (`auto-route.py`) and per routed Agent spawn
+  (`agent-route.py`) in `door_verdicts.jsonl`; nothing changes. `on`: the verdict decides, below. Unset means `shadow`
+  when the decision model is configured (backend `systemone` and `LLM_ROUTER_DECISION_MODEL`), else `off`: a machine
+  without it makes no call, and the chat backend's general model is never picked up by guesswork.
+- A prompt is never stalled (`docs/bugs/CLS-STALL-1.md`). `shadow` waits for nothing: a detached worker
+  (`python -m llm_router.door_verdict --worker`, the text on its stdin) makes the call and writes the row. `on` joins a
+  verdict made in a thread beside the hook's own work, for at most `LLM_ROUTER_DOOR_VERDICT_PROMPT_BUDGET_MS` (2,000),
+  and a prompt that finds the model not resident (one `/api/ps`, a few ms) does not wait for the load at all: the worker
+  loads it and makes the verdict, this prompt keeps today's behaviour, the next one decides. An Agent spawn waits under
+  `LLM_ROUTER_DOOR_VERDICT_BUDGET_MS` (8,000; its hook already runs for seconds). No detached child allowed
+  (`LLM_ROUTER_NO_DETACHED_SPAWN`) or the breaker open means the verdict is made in the hook's own thread.
+- Two failures in a row open a 60 s breaker; one slow call does not. Session start loads the decision model
+  (`LLM_ROUTER_CLASSIFIER_PRELOAD=off` restores the edit-model and generic warm-ups; a 22 GB model loaded by them evicts
+  the decision model).
+- What `on` decides. The model answers one question, the cheapest adequate Claude tier with a probability each, used as
+  a difficulty signal. `preferred_door(verdict, kind=..., local_lane=...)` is the seam a hook or a sub-agent fallback calls.
 
+  | Verdict (p_max >= its threshold) | Prompt door | Agent-spawn door |
+  |---|---|---|
+  | opus (`LLM_ROUTER_DOOR_OPUS_MIN_CONF`, 0.6) | `claude`: hint quieted (the passive `OBSERVATION [shadow]` display) | `claude`: no Codex attempt, unit `unsuitable` / `verdict_claude` |
+  | haiku (`..._HAIKU_MIN_CONF`, 0.7) and a local lane exists | `local`: the hint gains a line naming the lane (`llm_text_job` for a passed commit-message or PR-description job, else `llm(prompt="local: ...")`) | `local`: reported to the caller (`_door_dec.door`); nothing in this tree runs a local sub-agent yet |
+  | sonnet (`..._SONNET_MIN_CONF`, 0.5), or haiku with no lane | `codex` when Codex is usable (binary present, not benched): the hint gains `llm(prompt="codex: ...")`; else `mcp`, the hint as today | `codex`: the existing NS3 gates decide, unchanged |
+  | no verdict | today's behaviour | today's behaviour |
+
+  A local lane exists only on evidence: a fresh passed quality batch (`lane_quality.jsonl`) for the hook kind's doors and
+  the task group, or the local text-job routing switch for a detected commit-message / PR-description prompt, or the
+  caller says so. None exists for Q&A or code today, so `local` is rare. A verdict opens no door the existing gates keep
+  shut; Sonnet and Haiku are not counted as a non-Claude door.
+- A row: `ts`, `hook_kind`, `mode`, `session_id`, `tool_use_id` (join to `north_star_units.jsonl`), `text_sha`, `chars`,
+  `source`, `resident`, `ms`, `tier`, `confidence`, `door`, `reason`, `lane`, `applied`, `outcome` (`hint_quieted`,
+  `hint_prefers_codex`, `hint_prefers_local`, `no_hint_shown`, `codex_skipped`, `no_change`, `background_shadow`,
+  `background_cold`, `background_result` for a worker's verdict row, `exit_before_decision`).
+  `python scripts/door_verdict_report.py --days 7` prints coverage (inline and from workers), latency, cold share, the
+  door mix and the outcomes with their n.
+- `python scripts/door_verdict_check.py` (at most 30 model calls) and `python scripts/door_verdict_hook_cost.py` (20
+  calls) measure the verdict and what it adds to a prompt of the real hook, with the load average printed beside the result.
 
 ## Metrics
 

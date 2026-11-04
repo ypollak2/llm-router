@@ -5896,11 +5896,12 @@ def main() -> None:
     # W10: join the local model's verdict. Only an applied "claude" door (mode on, opus-confident) quiets the
     # hint, the same passive display a quiet Q&A task gets; no verdict changes nothing.
     _verdict_quiet = False
+    _door_dec = None
     if _door_pending is not None:
         try:
             with _hl_phase("verdict_wait"):
-                _door_dec = _door_pending.decide(task_type=task_type)
-            _verdict_quiet = bool(_door_dec.applied)
+                _door_dec = _door_pending.decide(task_type=task_type, defer_log=True)
+            _verdict_quiet = bool(_door_dec.applied and _door_dec.door == "claude")
             _debug_log(f"[INVOCATION {invocation_id:.3f}] DOOR_VERDICT door={_door_dec.door or '-'} "
                        f"reason={_door_dec.reason} applied={_door_dec.applied} src={_door_dec.verdict.source} "
                        f"ms={_door_dec.verdict.ms}")
@@ -6959,6 +6960,22 @@ def main() -> None:
             indicator = f"⚡ {task_type}/{complexity} → {tool_disp} · nothing held ({_hold_exempt})"
             _hold_event("exempt", session_id, reason=_hold_exempt, words=len(prompt.split()),
                         task=task_type)
+
+    # ── W10: the verdict's door for this prompt (local / Codex first), then its row ───────────────────────
+    # Advice appended to the hint, only where a hint is really shown: not a user prefix, not a prompt the hold policy
+    # exempts, not a passive display. The row is written here, with what the hook actually did with the verdict.
+    if _door_pending is not None:
+        try:
+            _door_outcome = ""
+            if _door_dec is not None and _door_dec.applied and _door_dec.door in ("local", "codex"):
+                if not _forced and not _hold_exempt and _enforce_mode != "shadow":
+                    directive = _door_verdict.hint_note(_door_dec.door, _door_dec.lane, _door_dec.verdict.tier) + directive
+                else:
+                    _door_outcome = "no_hint_shown"
+            _door_pending.record(_door_outcome)
+        except Exception as _exc:                                    # noqa: BLE001
+            from llm_router import failopen as _fo
+            _fo.record("LR-FO-HOOK-DOOR-VERDICT-NOTE", _exc)
 
     # ── Per-session paid-API spend cap (#3) ──────────────────────────────────────
     # Drafts are already free-only; this is the backstop for the rest of routing.

@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -68,11 +69,11 @@ def _verdict_rows(home: Path) -> list[dict]:
 PROMPT = "What does os.path.join do on Windows when the second argument is absolute?"
 
 
-def _prompt(tmp_path, mode: str, url: str, **extra):
+def _prompt(tmp_path, mode: str, url: str, prompt: str = PROMPT, **extra):
     env = hook_env(tmp_path, LLM_ROUTER_QA_ROUTING="on", LLM_ROUTER_ENFORCE="suggest",
                    LLM_ROUTER_DIRECT_EXECUTION="0", LLM_ROUTER_DISABLE_LLM_CLASSIFIERS="1",
                    **_classifier_env(url, mode), **extra)
-    payload = {"hook_event_name": "UserPromptSubmit", "prompt": PROMPT, "session_id": "door-s1", "cwd": str(tmp_path)}
+    payload = {"hook_event_name": "UserPromptSubmit", "prompt": prompt, "session_id": "door-s1", "cwd": str(tmp_path)}
     proc = run_hook(AUTO_ROUTE, payload, env)
     assert proc.returncode == 0, proc.stderr[-400:]
     return proc
@@ -125,6 +126,72 @@ def test_on_with_a_down_model_is_todays_hook(tmp_path, fake):
     assert SHOWN in proc.stdout
     r = _verdict_rows(tmp_path)[0]
     assert (r["door"], r["applied"], r["source"]) == ("", False, "timeout")
+
+
+HAIKU = {"haiku": 0.9, "sonnet": 0.08, "opus": 0.02}
+
+
+def _codex(tmp_path):
+    return str(write_codex_stub(tmp_path / "bin", argv_log=tmp_path / "codex_argv.jsonl", answer="x"))
+
+
+def test_on_names_the_codex_door_for_a_sonnet_verdict(tmp_path, fake):
+    fake.probs = SONNET
+    proc = _prompt(tmp_path, "on", fake.url, CODEX_PATH=_codex(tmp_path))
+    assert SHOWN in proc.stdout and "CODEX VERDICT" in proc.stdout and 'prompt=\\"codex: ' in proc.stdout
+    r = _verdict_rows(tmp_path)[0]
+    assert (r["door"], r["applied"], r["outcome"]) == ("codex", True, "hint_prefers_codex")
+
+
+def test_shadow_adds_no_door_note_even_for_a_sonnet_verdict(tmp_path, fake):
+    fake.probs = SONNET
+    proc = _prompt(tmp_path, "shadow", fake.url, CODEX_PATH=_codex(tmp_path))
+    assert "VERDICT" not in proc.stdout
+    assert _verdict_rows(tmp_path)[0]["applied"] is False
+
+
+def test_on_names_the_local_lane_for_a_confident_haiku_where_a_lane_passed(tmp_path, fake):
+    fake.probs = HAIKU
+    (tmp_path / ".llm-router").mkdir(exist_ok=True)
+    (tmp_path / ".llm-router" / "lane_quality.jsonl").write_text(json.dumps(
+        {"ts": time.time(), "door": "mcp", "served_class": "local", "task_group": "qa", "kind": "audit",
+         "n": 30, "acceptable": 28, "source": "t"}) + "\n")
+    proc = _prompt(tmp_path, "on", fake.url, CODEX_PATH=_codex(tmp_path))
+    assert "LOCAL VERDICT" in proc.stdout and 'prompt=\\"local: ' in proc.stdout and "CODEX VERDICT" not in proc.stdout
+    r = _verdict_rows(tmp_path)[0]
+    assert (r["door"], r["lane"], r["outcome"]) == ("local", "qa", "hint_prefers_local")
+
+
+def test_on_without_a_passed_lane_a_haiku_verdict_goes_to_codex(tmp_path, fake):
+    fake.probs = HAIKU
+    proc = _prompt(tmp_path, "on", fake.url, CODEX_PATH=_codex(tmp_path))
+    assert "CODEX VERDICT" in proc.stdout and "LOCAL VERDICT" not in proc.stdout
+
+
+def test_on_sends_a_commit_message_prompt_to_the_local_text_job_when_its_switch_is_on(tmp_path, fake):
+    from llm_router.local_check import routing
+
+    fake.probs = HAIKU
+    state = tmp_path / ".llm-router"
+    state.mkdir(exist_ok=True)
+    routing.enable("qwen3.6:35b-a3b-coding", "commit_message", "manual", path=state / routing.routing_path().name)
+    proc = _prompt(tmp_path, "on", fake.url, prompt="Write a commit message for the staged diff in the retry module",
+                   CODEX_PATH=_codex(tmp_path))
+    assert "LOCAL VERDICT" in proc.stdout and "llm_text_job" in proc.stdout
+    r = _verdict_rows(tmp_path)[0]
+    assert (r["door"], r["lane"], r["outcome"]) == ("local", "text_job:commit_message", "hint_prefers_local")
+
+
+def test_a_quiet_prompt_gets_no_door_note_and_the_row_says_so(tmp_path, fake):
+    """A Q&A prompt shown as a passive observation (QA routing off) has no hint to carry the note."""
+    fake.probs = SONNET
+    env = hook_env(tmp_path, LLM_ROUTER_ENFORCE="suggest", LLM_ROUTER_DIRECT_EXECUTION="0",
+                   CODEX_PATH=_codex(tmp_path), **_classifier_env(fake.url, "on"))
+    payload = {"hook_event_name": "UserPromptSubmit", "prompt": PROMPT, "session_id": "door-s9", "cwd": str(tmp_path)}
+    proc = run_hook(AUTO_ROUTE, payload, env)
+    assert proc.returncode == 0 and "VERDICT" not in proc.stdout
+    r = _verdict_rows(tmp_path)[0]
+    assert (r["door"], r["outcome"]) == ("codex", "no_hint_shown")
 
 
 def _raw(tmp_path, url: str, prompt: str, session: str):

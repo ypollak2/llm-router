@@ -3187,11 +3187,12 @@ def _main() -> None:
     # returns unconditionally, which is why Codex delegation was unreachable before
     # this change. See the NS3 docstring above _try_codex_subagent_delegation.
     _verdict_claude = False
+    _door_dec = None  # a sub-agent fallback (W11) reads ``_door_dec.door == "local"`` here, before the Codex attempt
     if _door_pending is not None:
         try:
             with _hl_phase("verdict_wait"):
                 _door_dec = _door_pending.decide(task_type=task_type)
-            _verdict_claude = bool(_door_dec.applied)
+            _verdict_claude = bool(_door_dec.applied and _door_dec.door == "claude")
             if _verdict_claude:  # the unit stays countable: same outcome as any spawn the Codex lever declines
                 _record_north_star_unit(
                     "agent_route_codex", model="", outcome="unsuitable",

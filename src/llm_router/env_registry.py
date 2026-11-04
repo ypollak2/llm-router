@@ -479,6 +479,9 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # Local Ollama classifier (one v6 verdict per human turn): off|shadow|on, default off.
     "LLM_ROUTER_DOOR_VERDICT_BUDGET_MS": ("llm_router", "door_verdict.py", 1),
     "LLM_ROUTER_DOOR_OPUS_MIN_CONF": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_DOOR_HAIKU_MIN_CONF": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_DOOR_SONNET_MIN_CONF": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_DOOR_VERDICT_PROMPT_BUDGET_MS": ("llm_router", "door_verdict.py", 1),
     "LLM_ROUTER_CLASSIFIER_PRELOAD": ("llm_router", "door_verdict.py", 1),
     "LLM_ROUTER_LOCAL_CLASSIFIER": ("llm_router", "local_classifier.py", 1),
     "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS": ("llm_router", "local_classifier.py", 1),

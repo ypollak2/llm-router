@@ -59,6 +59,14 @@ def test_a_cold_model_is_waited_for_and_answers(ollama):
     assert again.ok and again.resident is True      # now warm
 
 
+def test_a_prompt_is_never_held_longer_than_two_seconds_but_a_spawn_may_wait(ollama, monkeypatch):
+    assert dv.budget_s("prompt") == 2.0 and dv.budget_s("agent") == dv.budget_s() == 8.0
+    monkeypatch.setenv("LLM_ROUTER_DOOR_VERDICT_PROMPT_BUDGET_MS", "999999")
+    assert dv.budget_s("prompt") == 8.0                       # never above the full budget
+    monkeypatch.setenv("LLM_ROUTER_DOOR_VERDICT_BUDGET_MS", "1000")
+    assert dv.budget_s("prompt") == 1.0 and dv.budget_s("agent") == 1.0
+
+
 def test_the_hook_budget_is_longer_than_the_proxys_two_seconds(ollama, monkeypatch):
     assert dv.budget_s() == 8.0
     monkeypatch.setenv("LLM_ROUTER_DOOR_VERDICT_BUDGET_MS", "250")
@@ -72,8 +80,22 @@ def test_off_makes_zero_calls(ollama, monkeypatch):
     assert dv.start("anything at all", "prompt") is None
     assert dv.classify("anything at all", "prompt").source == "off"
     assert ollama.calls == 0
+
+
+def test_unset_means_shadow_only_when_the_decision_model_is_configured(ollama, monkeypatch):
+    """The default (W10 follow-up): a deploy produces coverage data without anyone editing .env, but a machine with no
+    decision model (the chat backend would pick up a general model) makes no call."""
     monkeypatch.delenv("LLM_ROUTER_LOCAL_CLASSIFIER")
+    assert dv.mode() == dv.DEFAULT_MODE == "shadow"
+    monkeypatch.delenv("LLM_ROUTER_DECISION_MODEL")
     assert dv.mode() == "off"
+    monkeypatch.setenv("LLM_ROUTER_DECISION_MODEL", "nimble:9b")
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_BACKEND", "chat")
+    assert dv.mode() == "off"
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_BACKEND", "systemone")
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "typo")
+    assert dv.mode() == "off"                       # anything but shadow / on, once set, is off
+    assert ollama.calls == 0
 
 
 def test_no_model_configured_is_off_not_a_failed_request(ollama, monkeypatch):
@@ -146,36 +168,127 @@ def _v(tier, conf, kind="prompt", source="llm"):
     return dv.DoorVerdict(kind, source, tier, conf)
 
 
+@pytest.fixture
+def doors(monkeypatch):
+    """No local lane, Codex usable: the state of this machine today with Codex not benched."""
+    monkeypatch.setattr(dv, "local_lane_for", lambda kind, task_type=None, text=None: "")
+    monkeypatch.setattr(dv, "codex_usable", lambda: True)
+
+
 @pytest.mark.parametrize("v,kind,door,reason", [
     (_v("opus", 0.7), "prompt", "claude", "opus_confident"),
     (_v("opus", 0.6), "agent", "claude", "opus_confident"),
     (_v("opus", 0.59), "prompt", "mcp", "opus_unsure"),
     (_v("opus", 0.5), "agent", "codex", "opus_unsure"),
-    (_v("sonnet", 0.9), "prompt", "mcp", "tier_sonnet"),
-    (_v("haiku", 0.9), "agent", "codex", "tier_haiku"),
+    (_v("sonnet", 0.9), "prompt", "codex", "tier_sonnet"),
+    (_v("sonnet", 0.5), "prompt", "codex", "tier_sonnet"),
+    (_v("sonnet", 0.49), "prompt", "mcp", "tier_sonnet"),       # a tie resolved up, or no preference: the default door
+    (_v("sonnet", 0.9), "agent", "codex", "tier_sonnet"),
+    (_v("haiku", 0.9), "agent", "codex", "tier_haiku"),         # no local lane: the next door
+    (_v("haiku", 0.9), "prompt", "codex", "tier_haiku"),
+    (_v("haiku", 0.6), "prompt", "mcp", "tier_haiku"),          # under the haiku threshold
     (_v(None, None, source="timeout"), "prompt", "", "no_verdict"),
     (None, "agent", "", "no_verdict"),
 ])
-def test_pick_door(v, kind, door, reason, monkeypatch):
-    monkeypatch.setattr(dv, "local_lane_passed", lambda task_type: False)
+def test_pick_door(v, kind, door, reason, doors):
     assert dv.pick_door(v, kind=kind) == (door, reason)
 
 
-def test_a_passed_local_lane_makes_the_prompt_door_local(monkeypatch):
-    monkeypatch.setattr(dv, "local_lane_passed", lambda task_type: True)
-    assert dv.pick_door(_v("haiku", 0.9), kind="prompt") == ("local", "tier_haiku")
-    assert dv.pick_door(_v("haiku", 0.9), kind="agent") == ("codex", "tier_haiku")   # sub-agents never go "local"
+def test_a_prompt_whose_codex_is_unusable_stays_on_the_default_door(monkeypatch):
+    monkeypatch.setattr(dv, "local_lane_for", lambda kind, task_type=None, text=None: "")
+    monkeypatch.setattr(dv, "codex_usable", lambda: False)
+    assert dv.pick_door(_v("sonnet", 0.9), kind="prompt") == ("mcp", "tier_sonnet")
+    assert dv.pick_door(_v("sonnet", 0.9, "agent"), kind="agent") == ("codex", "tier_sonnet")   # the NS3 gates decide
 
 
-def test_local_lane_passed_reads_fresh_quality_batches_and_nothing_else(tmp_path, monkeypatch):
+def test_a_confident_haiku_goes_local_first_where_a_lane_exists(monkeypatch):
+    monkeypatch.setattr(dv, "codex_usable", lambda: True)
+    c = dv.preferred_door(_v("haiku", 0.8), kind="prompt", local_lane="qa")
+    assert (c.door, c.reason, c.lane) == ("local", "haiku_local_lane", "qa")
+    # the seam a sub-agent fallback uses: it says it has a lane
+    c = dv.preferred_door(_v("haiku", 0.8, "agent"), kind="agent", local_lane=True)
+    assert (c.door, c.lane) == ("local", "caller")
+    # and says it has none
+    assert dv.preferred_door(_v("haiku", 0.8, "agent"), kind="agent", local_lane=False).door == "codex"
+    # a lane is not enough for a haiku verdict that is not confident, or for another tier
+    assert dv.preferred_door(_v("haiku", 0.69), kind="prompt", local_lane=True).door == "mcp"
+    assert dv.preferred_door(_v("sonnet", 0.95), kind="prompt", local_lane=True).door == "codex"
+    assert dv.preferred_door(_v("opus", 0.95), kind="prompt", local_lane=True).door == "claude"
+
+
+def test_the_local_lane_is_looked_up_from_evidence_when_the_caller_does_not_say(monkeypatch):
+    seen = []
+    monkeypatch.setattr(dv, "local_lane_for", lambda kind, task_type=None, text=None: seen.append((kind, task_type, text)) or "code")
+    monkeypatch.setattr(dv, "codex_usable", lambda: True)
+    c = dv.preferred_door(_v("haiku", 0.9, "agent"), kind="agent", task_type="code", text="t")
+    assert c.door == "local" and seen == [("agent", "code", "t")]
+
+
+@pytest.mark.parametrize("text,job", [
+    ("Write a commit message for the diff I just made", "commit_message"),
+    ("please draft a good commit message for this change", "commit_message"),
+    ("Write the PR description for this branch", "pr_description"),
+    ("generate a pull request summary", "pr_description"),
+    ("what is a commit message convention?", None),
+    ("commit this", None),
+    ("explain the PR", None),
+    ("", None),
+    (None, None),
+])
+def test_text_job_of(text, job):
+    assert dv.text_job_of(text) == job
+
+
+def test_local_lane_for_needs_evidence_and_matches_the_hook_kind(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
-    assert dv.local_lane_passed("query") is False        # no file: no lane
+    assert dv.local_lane_for("prompt", "query") == ""                 # no file: no lane
     now = time.time()
     (tmp_path / "lane_quality.jsonl").write_text(json.dumps(
         {"ts": now, "door": "mcp", "served_class": "local", "task_group": "qa", "kind": "audit",
          "n": 30, "acceptable": 27, "source": "t"}) + "\n")
-    assert dv.local_lane_passed("query") is True          # Q&A lane passed
-    assert dv.local_lane_passed("code") is False          # the code lane did not
+    assert dv.local_lane_for("prompt", "query") == "qa"               # a passed Q&A lane on the MCP door
+    assert dv.local_lane_for("prompt", "code") == ""                  # the code lane did not pass
+    assert dv.local_lane_for("agent", "query") == ""                  # a sub-agent needs a sub-agent lane
+    (tmp_path / "lane_quality.jsonl").write_text(json.dumps(
+        {"ts": now, "door": "subagent", "served_class": "local", "task_group": "code", "kind": "audit",
+         "n": 30, "acceptable": 27, "source": "t"}) + "\n")
+    assert dv.local_lane_for("agent", "code") == "code"
+
+
+def test_a_failed_batch_is_no_lane(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    (tmp_path / "lane_quality.jsonl").write_text(json.dumps(
+        {"ts": time.time(), "door": "mcp", "served_class": "local", "task_group": "qa", "kind": "audit",
+         "n": 30, "acceptable": 13, "source": "t"}) + "\n")
+    assert dv.local_lane_for("prompt", "query") == ""
+
+
+def test_a_commit_message_prompt_has_a_local_lane_only_when_the_text_job_switch_is_on(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    from llm_router.local_check import routing
+
+    text = "Write a commit message for the staged diff"
+    assert dv.local_lane_for("prompt", "generate", text) == ""
+    routing.enable("qwen3.6:35b-a3b-coding", "commit_message", "manual")
+    assert dv.local_lane_for("prompt", "generate", text) == "text_job:commit_message"
+    assert dv.local_lane_for("prompt", "generate", "Write the PR description") == ""      # a different job, not enabled
+    assert dv.local_lane_for("agent", "generate", text) == ""                              # sub-agents take no text-job lane
+
+
+def test_hint_notes_name_the_door_and_its_prefix():
+    assert 'llm_text_job(job="commit_message"' in dv.hint_note("local", "text_job:commit_message")
+    assert 'prompt="local: ' in dv.hint_note("local", "qa", "haiku")
+    assert 'prompt="codex: ' in dv.hint_note("codex", "", "sonnet") and "sonnet-level" in dv.hint_note("codex", "", "sonnet")
+    assert dv.hint_note("claude") == dv.hint_note("mcp") == dv.hint_note("") == ""
+
+
+def test_the_haiku_and_sonnet_thresholds_are_tunable(monkeypatch):
+    assert (dv.haiku_min_conf(), dv.sonnet_min_conf()) == (0.7, 0.5)
+    monkeypatch.setenv("LLM_ROUTER_DOOR_HAIKU_MIN_CONF", "0.9")
+    monkeypatch.setenv("LLM_ROUTER_DOOR_SONNET_MIN_CONF", "0.8")
+    assert (dv.haiku_min_conf(), dv.sonnet_min_conf()) == (0.9, 0.8)
+    monkeypatch.setenv("LLM_ROUTER_DOOR_HAIKU_MIN_CONF", "x")
+    assert dv.haiku_min_conf() == dv.DEFAULT_HAIKU_MIN_CONF
 
 
 def test_the_opus_threshold_is_tunable(monkeypatch):
@@ -251,6 +364,136 @@ def test_blank_text_and_unknown_kind_start_nothing(ollama):
     assert dv.start("   ", "prompt") is None
     assert dv.start("text", "other") is None
     assert ollama.calls == 0
+
+
+# ---- never stall a prompt (CLS-STALL-1) ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def detached(monkeypatch):
+    """Allow the hook's detached worker (the suite forbids detached children everywhere else, F44)."""
+    monkeypatch.delenv("LLM_ROUTER_NO_DETACHED_SPAWN")
+
+
+def _wait_rows(pred, timeout: float = 20.0) -> list[dict]:
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        rows = [r for r in dv.read_rows() if pred(r)]
+        if rows:
+            return rows
+        time.sleep(0.1)
+    return []
+
+
+OPUS = {"haiku": 0.05, "sonnet": 0.15, "opus": 0.8}
+
+
+@pytest.mark.timing
+def test_shadow_never_waits_for_the_model(ollama, detached):
+    ollama.first_call_delay = 1.5
+    t0 = time.monotonic()
+    h = dv.start("a prompt", "prompt", session_id="s1")
+    dec = h.decide()
+    assert time.monotonic() - t0 < 1.0
+    assert isinstance(h, dv.Deferred) and (dec.door, dec.applied, dec.verdict.source) == ("", False, "deferred")
+    (bg,) = _wait_rows(lambda r: r.get("outcome") == "background_result")
+    assert (bg["source"], bg["tier"], bg["text_sha"], bg["session_id"], bg["applied"]) == ("llm", "sonnet", h.sha, "s1", False)
+    assert [r["outcome"] for r in dv.read_rows() if r["outcome"] != "background_result"] == ["background_shadow"]
+
+
+def test_the_worker_row_holds_no_prompt_text(ollama, detached):
+    dv.start("the launch code is swordfish-7731", "prompt").decide()
+    _wait_rows(lambda r: r.get("outcome") == "background_result")
+    raw = paths.state_path(dv.LEDGER).read_text()
+    assert "swordfish" not in raw and "launch" not in raw
+
+
+@pytest.mark.timing
+def test_on_defers_a_prompt_that_finds_the_model_cold_and_the_next_one_decides(ollama, detached, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+    ollama.probs = OPUS
+    ollama.first_call_delay = 1.2
+    t0 = time.monotonic()
+    first = dv.start("first prompt after an eviction", "prompt")
+    d1 = first.decide()
+    assert time.monotonic() - t0 < 1.0                      # the hook did not wait for the load
+    assert isinstance(first, dv.Deferred) and (d1.door, d1.applied) == ("", False)
+    assert _wait_rows(lambda r: r.get("outcome") == "background_result")      # the worker loaded the model and answered
+    second = dv.start("second prompt, model now loaded", "prompt")
+    assert isinstance(second, dv.Pending)
+    d2 = second.decide()
+    assert (d2.door, d2.applied) == ("claude", True)
+
+
+def test_on_decides_inline_when_the_model_is_warm(ollama, detached, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+    ollama.resident = True
+    assert isinstance(dv.start("a prompt", "prompt"), dv.Pending)
+
+
+def test_an_agent_spawn_waits_even_when_the_model_is_cold(ollama, detached, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+    ollama.probs = OPUS
+    h = dv.start("a spawn brief", "agent")
+    assert isinstance(h, dv.Pending)
+    assert h.decide().applied is True
+
+
+def test_shadow_with_the_breaker_open_makes_no_worker(ollama, detached):
+    dv.note_result(False)
+    dv.note_result(False)
+    assert dv.breaker_open()
+    assert isinstance(dv.start("a prompt", "prompt"), dv.Pending)     # returns a "breaker" row at once, spawns nothing
+
+
+def test_without_a_detached_child_shadow_makes_the_verdict_inline(ollama):
+    h = dv.start("a prompt", "prompt")                # the suite's default: detached children are forbidden
+    assert isinstance(h, dv.Pending) and h.decide().verdict.ok
+
+
+def test_summarize_covers_a_deferred_decision_by_its_background_row():
+    rows = [
+        {"kind": "door_verdict", "source": "deferred", "outcome": "background_cold", "door": "", "hook_kind": "prompt"},
+        {"kind": "door_verdict", "source": "llm", "tier": "sonnet", "ms": 5800.0, "resident": False,
+         "outcome": "background_result", "door": "mcp", "hook_kind": "prompt"},
+        {"kind": "door_verdict", "source": "llm", "tier": "opus", "ms": 350.0, "resident": True,
+         "outcome": "hint_quieted", "door": "claude", "applied": True, "hook_kind": "prompt"},
+        {"kind": "door_verdict", "source": "deferred", "outcome": "background_shadow", "door": "", "hook_kind": "agent"},
+    ]
+    sm = dv.summarize(rows)
+    assert (sm["n"], sm["inline_verdicts"], sm["deferred"], sm["background_verdicts"]) == (3, 1, 2, 1)
+    assert sm["verdicts"] == 2 and sm["coverage"] == round(2 / 3, 4) and sm["inline_coverage"] == round(1 / 3, 4)
+    assert sm["cold_n"] == 1 and sm["cold_share"] == 0.5 and sm["latency_ms_p50"] == 3075.0
+    assert sm["outcomes"] == {"background_cold": 1, "hint_quieted": 1, "background_shadow": 1}
+
+
+def test_the_row_says_what_the_verdict_asked_the_hook_to_do(ollama, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+    monkeypatch.setattr(dv, "codex_usable", lambda: True)
+    monkeypatch.setattr(dv, "local_lane_for", lambda kind, task_type=None, text=None: "")
+    dv.start("what does os.path.join do", "prompt").decide(task_type="query")
+    assert _rows()[-1]["outcome"] == "hint_prefers_codex" and _rows()[-1]["door"] == "codex"
+    # the Agent hook acts only on the claude door: a codex door there is "no_change" (the NS3 gates already go first)
+    dv.start("a spawn brief", "agent").decide(task_type="analyze")
+    assert (_rows()[-1]["door"], _rows()[-1]["applied"], _rows()[-1]["outcome"]) == ("codex", False, "no_change")
+
+
+def test_defer_log_lets_the_hook_record_what_it_did(ollama, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+    monkeypatch.setattr(dv, "codex_usable", lambda: True)
+    h = dv.start("what does os.path.join do", "prompt")
+    dec = h.decide(task_type="query", defer_log=True)
+    assert dec.door == "codex" and _rows() == []              # nothing written yet
+    h.record("no_hint_shown")
+    h.record("again")                                        # once
+    assert [r["outcome"] for r in _rows()] == ["no_hint_shown"]
+
+
+def test_a_decision_not_recorded_before_exit_is_still_written(ollama):
+    h = dv.start("a prompt", "prompt")
+    h.decide(defer_log=True)
+    h._at_exit()
+    assert _rows()[-1]["outcome"] == "exit_before_record"
 
 
 # ---- the warm-up ------------------------------------------------------------------------------------------------

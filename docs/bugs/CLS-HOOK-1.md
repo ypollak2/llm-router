@@ -19,11 +19,18 @@ status: fixed in `w10/local-classifier-decides` (deploy: install the hooks; `LLM
 - **Fix.** `llm_router.door_verdict`: the hook-side client. `auto-route.py` starts one verdict per routed prompt (after
   zero-Claude edit, the sidecar, a user prefix, the strict-ack bypass and the MCP shortcut) and joins it at the
   quiet decision; `agent-route.py` starts one per routed spawn and joins it before the Codex attempt (Explore,
-  allowlisted and retrieval-only spawns take no routing decision and get none). `LLM_ROUTER_LOCAL_CLASSIFIER`:
-  `off` (default, zero calls), `shadow` (a text-free row in `door_verdicts.jsonl`, nothing changes), `on` (a verdict
-  of opus with p_max >= 0.6 quiets the prompt hint, or keeps the spawn on Claude with the unit recorded as
-  `unsuitable` / `reason_code=verdict_claude`). No verdict means today's behaviour. A verdict never opens a door the
-  existing gates keep shut (`qa_policy`, lane tests, Codex bench, window and budget).
+  allowlisted and retrieval-only spawns take no routing decision and get none). `LLM_ROUTER_LOCAL_CLASSIFIER`: `off`
+  (zero calls), `shadow` (a text-free row in `door_verdicts.jsonl`, written by a detached worker, nothing changes; the
+  default when the decision model is configured), `on` (the verdict decides). The tier is used as a difficulty signal:
+  opus with p_max >= 0.6 picks `claude` (the prompt hint is quieted, or the spawn makes no Codex attempt, unit
+  `unsuitable` / `reason_code=verdict_claude`); haiku with p_max >= 0.7 picks `local` where a local lane can do the job
+  (a passed quality batch, or a commit-message / PR-description prompt with the local text-job switch on, or the caller
+  says it has one: `preferred_door(..., local_lane=...)` is the seam for a sub-agent fallback); sonnet, or haiku with no
+  lane, picks `codex` (a prompt hint gains `llm(prompt="codex: ...")` when Codex is usable; a spawn goes through the
+  existing NS3 gates). No verdict means today's behaviour. A verdict opens no door the existing gates keep shut.
+  Share of the 7-day proxy verdicts (n=1,755, 2026-10-28 to 2026-11-03, `classifier_shadow.jsonl`) that reach each
+  door at its threshold: claude (opus >= 0.6) 72 (4.1%); local-eligible (haiku >= 0.7) 120 (6.8%, before the lane test,
+  which fails today for Q&A and code); codex (sonnet >= 0.5) 937 (53.4%) and the haiku verdicts below 0.7 add more.
 - **Test.** `tests/test_door_verdict.py` (a real HTTP server speaking the Ollama wire format) and
   `tests/test_door_verdict_hooks.py` (real hook subprocesses, a real executable standing in for `codex`):
   `test_shadow_logs_one_verdict_for_the_prompt_and_changes_nothing`,
