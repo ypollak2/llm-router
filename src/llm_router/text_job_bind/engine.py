@@ -12,7 +12,7 @@ exactly one of:
 There is no third answer for a command whose placeholder is written the way the shell replaces it
 (`"${LLM_TEXT:?}"`): it is never allowed through unchanged, and a text that did not pass its checks is never used. A
 failure of any kind, in this module or in the model, ends in a deny. A mention of the variable written anywhere the
-shell would not replace it is denied unless every command on the line is a harmless reader (see ``plan._runs_job_tool``
+shell would not replace it is denied unless every command on the line is a harmless reader (see ``plan._may_run``
 and, for a line the scanner cannot read, ``plan.unreadable_line_is_harmless``: deny-by-default, with a short list of
 harmless commands); a line that only quotes it next to ``git commit`` in a ``grep``, an ``echo`` or a here-document gets
 no decision.

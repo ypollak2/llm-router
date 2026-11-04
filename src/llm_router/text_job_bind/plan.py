@@ -37,6 +37,15 @@ STRAY_MESSAGE = (
     "file and run git commit -F <file>."
 )
 
+STRAY_OTHER_MESSAGE = (
+    "LLM_TEXT is written where bash would not replace it, on a line that also has {names}. The hook cannot tell whether "
+    "that would hand the text to git or gh as a commit message or PR body, so it refused. Nothing was run. A line that only "
+    "prints or searches (echo, printf, cat, grep, rg, ... with plain words, and no $(...), backticks or ${{...}} that "
+    "evaluates anything) passes without a decision; to keep the text out of the way, write it to a file with the editor or "
+    'printf in a command of its own. To bind a commit message or PR body, write the placeholder exactly as "${{LLM_TEXT:?}}" '
+    "as the value of -m (git commit) or --body (gh pr create)."
+)
+
 #: Env assignments that cannot change which repository ``git`` acts on or which index it reads.
 _GIT_ENV_OK = frozenset({
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
@@ -446,12 +455,61 @@ def _validate(plan: Plan, job_cmd: Command) -> None:
 
 #: Commands that read or print and never start another program with their arguments. A mention of the placeholder
 #: that sits only in these (a `grep`, an `echo`, a `cat` with a here-document) cannot be delivered to git. NOT on the list:
-#: ``awk`` (``system()``) and ``sed`` (the ``e`` command), which can run a program built from their own arguments.
+#: ``awk`` (``system()``) and ``sed`` (the ``e`` command), which can run a program built from their own arguments; the pagers
+#: ``less`` and ``more`` (``LESSOPEN``); and ``test`` / ``[``, whose ``-v NAME`` and (in zsh) ``-eq`` operands evaluate a
+#: subscript or an arithmetic expression, and so run the ``$(...)`` inside it.
 _HARMLESS = frozenset({
     "echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr",
-    "ls", "tee", "touch", "cp", "mv", "cd", "mkdir", "date", "true", "false", "test", "[", "pwd", "which", "whoami", "sleep",
-    "basename", "dirname", "jq", "diff", "cmp", "less", "more", "file", "stat", "du", "df",
+    "ls", "tee", "touch", "cp", "mv", "cd", "mkdir", "date", "true", "false", "pwd", "which", "whoami", "sleep",
+    "basename", "dirname", "jq", "diff", "cmp", "file", "stat", "du", "df",
 })
+_SEARCH_COMMANDS = frozenset({"grep", "egrep", "fgrep", "rg", "ag"})
+#: Commands whose arguments may be options that run a program (``rg --pre``, ``sort --compress-program``): no expansion in them,
+#: since the value of a variable can be such an option, quoted or not.
+_NO_EXPANSION_ARGS = _SEARCH_COMMANDS | {"sort"}
+#: Options of a harmless command that name a program to run: ``rg --pre`` and ``--hostname-bin``, ``ag --pager``,
+#: ``sort --compress-program``, ``git grep --open-files-in-pager``. A long option may be abbreviated (``--comp``), so a word
+#: that is a prefix of one of these (four characters or more) counts too; ``-O`` in a short cluster of a search command too.
+_EXEC_OPTIONS = ("--pre", "--hostname-bin", "--pager", "--compress-program", "--open-files-in-pager")
+_PLAIN_REF = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*|\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+#: A ``printf`` format whose every conversion is ``%s`` or ``%%``: nothing in it evaluates an argument (zsh evaluates the
+#: arguments of ``%d`` and the like as arithmetic, and so runs a ``$(...)`` inside an expression).
+_PRINTF_SAFE_FORMAT = re.compile(r"(?:[^%]|%%|%[-0-9.]*s)*")
+#: What on a line mentioning the placeholder runs a command whatever else the line does, looked for in the TEXT (quotes are what
+#: shells disagree about, so none is trusted): bash ``$[x]`` (second-level arithmetic: ``x`` may be ``a[$(cmd)]``), zsh
+#: ``${(e)x}`` and bash ``${!y}``, zsh ``$~x`` / ``${~x}`` (glob substitution: a qualifier ``*(e:cmd:)`` runs ``cmd``),
+#: ``${NAME:?message}`` with a ``$`` or backtick in the message (the message is expanded), and ``printf -v NAME`` (a NAME
+#: ``a[$(cmd)]`` is evaluated).
+_RUNS_CODE_TEXT = re.compile(
+    r"\$\[|\$[~=^]|\$\{[(!~=^+]|\$\{[A-Za-z_]\w*:?\?[^}]*[$`]|\bprintf\b[^;&|\n]*?\s-[A-Za-z]*v"
+)
+#: A shell startup file, a git hook or config, or ``.ssh/`` named anywhere on a line that holds a stray mention: writing one runs
+#: code later, in some other shell. (Reading one is refused too: the line is over-denied rather than parsed for a direction.)
+_STARTUP_FILE = re.compile(
+    r"(?:^|[/\s'\"=])\.(?:zshrc|zshenv|zprofile|zlogin|bashrc|bash_profile|bash_login|profile|inputrc|gitconfig)\b"
+    r"|\.git/(?:hooks|config)\b|\.ssh/"
+)
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(['\"]?)([A-Za-z_]\w*)\1([^\n]*)\n(.*?)(?:\n[ \t]*\2[ \t]*(?=\n|\Z)|\Z)", re.S)
+
+
+def _runs_code_in_text(command: str) -> bool:
+    """Does the TEXT of the line hold something that runs a command whatever else it says: :data:`_RUNS_CODE_TEXT`, or an
+    unquoted here-document (the shell expands its body) whose body has ``$(...)`` or a backtick?"""
+    if _RUNS_CODE_TEXT.search(command):
+        return True
+    return any(not m.group(1) and ("$(" in m.group(4) or "`" in m.group(4)) for m in _HEREDOC.finditer(command))
+
+
+def _exec_option(t: str, search: bool) -> bool:
+    """Is the (unquoted) word an option that names a program to run?"""
+    if t.startswith("--"):
+        name = t.split("=", 1)[0]
+        return any((o.startswith(name) and len(name) >= 4) or name.startswith(o) for o in _EXEC_OPTIONS)
+    return search and t.startswith("-") and "O" in t
+
+
+def _v_option(t: str) -> bool:
+    return t.startswith("-") and not t.startswith("--") and "v" in t
 
 
 def _substitutes(w: Word) -> bool:
@@ -459,69 +517,154 @@ def _substitutes(w: Word) -> bool:
     return any(p.kind == "exp" and p.text.startswith(("$(", "`")) for p in w.pieces)
 
 
-def _runs_job_tool(cmds: list[Command], command: str) -> bool:
-    """May this line run anything but a harmless reader? Deny-by-default: ``False`` only when EVERY command on the line is
-    on the :data:`_HARMLESS` list, written with a plain name, outside any group, loop or keyword, and no word of the line
-    (nor an assignment or a redirection target) runs a command with ``$(...)`` or backticks.
+def _non_plain_expansion(w: Word) -> bool:
+    """Does the word expand anything but a plain ``$NAME`` / ``${NAME}``? ``${x:y}``, ``${a[i]}``, ``$[x]``, ``${X:-$(cmd)}``
+    evaluate or run what they are given."""
+    return any(p.kind == "exp" and not _PLAIN_REF.fullmatch(p.text) for p in w.pieces)
 
-    So ``git``, ``gh`` however quoted, a name only known at run time (``$G commit``, ``${GIT:-git} commit``), a wrapper
-    (``env``, ``timeout``, ``xargs``, ``bash -c``, ``exec "$G"``), an interpreter reading a here-document, a build tool, a
-    loop or a group, ``awk`` and ``sed`` are all "may run git". The decision does not look for the word ``git``: a name
-    held in a variable (``G=git; timeout 5 $G commit``) or built from quotes has none to find.
 
-    A command that only QUOTES the placeholder next to ``git commit`` (a ``grep``, an ``echo``, a ``cat`` with a
-    here-document) is not one."""
+def _printf_unsafe(argv: list[Word]) -> bool:
+    """A ``printf`` that could evaluate an argument: ``-v`` (assigns to a name that is evaluated), a format that is not literal
+    or has a conversion other than ``%s`` / ``%%`` while some argument is an expansion."""
+    rest = argv[1:]
+    texts = [w.literal() if w.literal() is not None else w.raw for w in rest]
+    if any(_v_option(t) for t in texts):
+        return True
+    i = next((k for k, t in enumerate(texts) if not t.startswith("-")), None)
+    if i is None:
+        return False
+    fmt = rest[i].literal()
+    if fmt is None:
+        return True
+    return not _PRINTF_SAFE_FORMAT.fullmatch(fmt) and any(w.has_expansion or w.has_token for w in rest[i + 1:])
+
+
+def _may_run(cmds: list[Command]) -> list[str]:
+    """What on this line may run git or gh: ``[]`` when EVERY command is on the :data:`_HARMLESS` list, written with a plain
+    name, outside any group, loop or keyword, with no variable set in front of it, and no word of the line (nor an assignment
+    or a redirection target) runs a command or expands anything but a plain ``$NAME`` / ``${NAME}``; ``grep`` and ``rg`` have
+    no expansion in their arguments and no option that runs a program; ``printf`` cannot evaluate an argument. Otherwise the
+    names, for the message.
+
+    Deny-by-default. So ``git``, ``gh`` however quoted, a name only known at run time (``$G commit``, ``${GIT:-git} commit``),
+    a wrapper (``env``, ``timeout``, ``xargs``, ``bash -c``, ``exec "$G"``), an interpreter reading a here-document, a build
+    tool, a loop or a group, ``awk`` and ``sed`` are all "may run git". The decision does not look for the word ``git``: a
+    name held in a variable (``G=git; timeout 5 $G commit``) or built from quotes has none to find.
+
+    A command that only QUOTES the placeholder next to ``git commit`` (a ``grep``, an ``echo``) is not one."""
+    bad: list[str] = []
+
+    def add(name: str) -> None:
+        if name not in bad:
+            bad.append(name)
+
     for c in cmds:
-        if any(_substitutes(w) for w in (*c.assigns, *c.argv, *(t for _o, t in c.redirs))):
-            return True
+        words = (*c.assigns, *c.argv, *(t for _o, t in c.redirs))
+        if any(_substitutes(w) for w in words):
+            add("a command substitution")
+        elif any(_non_plain_expansion(w) for w in words):
+            add("an expansion that evaluates or runs its operand")
         if c.structural:
-            return True
+            add("a group, loop or keyword")
+            continue
         if not c.argv:
             continue  # bare assignments
         name = c.argv[0].literal()
-        if name is None or os.path.basename(name) not in _HARMLESS:
-            return True
+        if name is None:
+            add(c.argv[0].raw[:30])
+            continue
+        base = name  # the exact name: ``./echo`` is whatever file is called that, and ``/bin/echo`` is not on the list either
+        if base not in _HARMLESS:
+            add(os.path.basename(name) or name)
+            continue
+        if c.assigns:
+            add("a variable set in front of a command")
+        texts = [w.literal() if w.literal() is not None else w.raw for w in c.argv[1:]]
+        if any(_exec_option(t, base in _SEARCH_COMMANDS) for t in texts):
+            add(f"{base} with an option that runs a program")
+        if base in _NO_EXPANSION_ARGS and any(w.has_expansion or w.has_token for w in c.argv[1:]):
+            add(f"{base} with an expansion in its arguments")
+        if base == "printf" and _printf_unsafe(list(c.argv)):
+            add("printf that could evaluate an argument")
+    return bad
+
+
+#: Read-only git and gh commands, used ONLY to choose the wording of a refusal: nothing passes because it is on these lists.
+_READ_ONLY_GIT = frozenset({
+    "log", "show", "diff", "status", "grep", "blame", "rev-parse", "rev-list", "ls-files", "shortlog", "describe",
+})
+_READ_ONLY_GH = frozenset({
+    ("pr", "view"), ("pr", "list"), ("pr", "diff"), ("pr", "checks"), ("pr", "status"), ("issue", "view"), ("issue", "list"),
+    ("run", "view"), ("run", "list"), ("repo", "view"),
+})
+
+
+def _may_commit(cmds: list[Command]) -> bool:
+    """Could a ``git`` or ``gh`` on the line be the commit or the PR? ``False`` only for one that is known to read: this picks
+    the wording of the refusal and never lets a line through."""
+    for c in cmds:
+        if not c.argv:
+            continue
+        base = os.path.basename(c.argv[0].literal() or "")
+        if base == "git":
+            if _git_subcommand(list(c.argv[1:])) not in _READ_ONLY_GIT:
+                return True
+        elif base == "gh":
+            lits = [w.literal() for w in c.argv[1:3]]
+            if len(lits) < 2 or None in lits or (lits[0], lits[1]) not in _READ_ONLY_GH:
+                return True
     return False
 
 
-_HEREDOC = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(['\"]?)([A-Za-z_]\w*)\1([^\n]*)\n(.*?)(?:\n[ \t]*\2[ \t]*(?=\n|\Z)|\Z)", re.S)
 _COMMAND_START = re.compile(r"\$\(|[;&|()`\n]")
 _LEADING = frozenset({"{", "}", "!", "if", "then", "else", "elif", "do", "while", "until", "time"})
-_ASSIGN_WORD = re.compile(r"[A-Za-z_]\w*=\S*$")
-
-
-def _without_heredoc_bodies(text: str) -> str:
-    """``text`` with the body of every here-document removed (it is data for the command that owns it), unless the body is
-    expanded (an unquoted delimiter) and holds ``$(...)`` or a backtick: that runs, so it stays and is judged."""
-    def drop(m: re.Match) -> str:
-        if not m.group(1) and ("$(" in m.group(4) or "`" in m.group(4)):
-            return m.group(0)
-        return "<<" + m.group(2) + m.group(3)
-
-    return _HEREDOC.sub(drop, text)
+_PLAIN_ASSIGN = re.compile(r"[A-Za-z_]\w*=[A-Za-z0-9_./:,@%+=-]*$")
+_ASSIGN_START = re.compile(r"[A-Za-z_]\w*=")
 
 
 def unreadable_line_is_harmless(command: str) -> bool:
     """May a line that mentions the placeholder but that the scanner cannot read be left to the shell?
 
     Only when EVERY command in it is a harmless reader (the :data:`_HARMLESS` list: ``echo``, ``printf``, ``grep``,
-    ``cat`` ...). There are no scanned words to go by, so this reads the text and over-approximates: every ``;``, ``&``,
-    ``|``, parenthesis, backtick, ``$(`` and newline starts a command, quotes or not, and the first word of each (quotes
-    and backslashes taken out: ``g'i't`` is ``git``) must be exactly a harmless name. A name only known at run time
-    (``$G``), ``awk``, ``sed``, an interpreter, a shell that a pipe feeds, ``git`` and ``gh`` all fail it, with or without
-    the words ``git commit`` in the line. The body of a here-document is data for its command and is not judged (but
-    the command is: ``cat <<EOF`` passes, ``sh <<EOF`` and ``python3 - <<EOF`` do not)."""
-    if len(command) > MAX_COMMAND_CHARS:
+    ``cat`` ...). There are no scanned words to go by, and the quoting of such a line is exactly what shells disagree about,
+    so this reads the text and trusts no quote: every ``;``, ``&``, ``|``, parenthesis, backtick, ``$(`` and newline starts a
+    command, quotes or not (a here-document body is judged like any other lines, and ``<<`` inside a string is no escape), and
+    the first word of each, with quotes and backslashes taken out (``g'i't`` is ``git``), must be exactly a harmless name. A
+    name only known at run time (``$G``), ``awk``, ``sed``, an interpreter, a shell that a pipe feeds, ``git`` and ``gh`` all
+    fail it, with or without the words ``git commit`` in the line. A statement of plain ``NAME=value`` assignments passes;
+    ``NAME=value`` in front of a command does not, and neither does a ``NAME=`` whose value has a quote, a ``$`` or a
+    backslash in it (where it ends depends on the quoting). The same refusals as for a readable line: :func:`_runs_code_in_text`,
+    the options that run a program, an expansion in the arguments of ``grep`` and ``rg``, a ``printf`` that could evaluate an
+    argument."""
+    if len(command) > MAX_COMMAND_CHARS or _runs_code_in_text(command) or _STARTUP_FILE.search(command):
         return False
-    for segment in _COMMAND_START.split(_without_heredoc_bodies(command)):
+    for segment in _COMMAND_START.split(command):
         words = segment.split()
-        while words and (words[0] in _LEADING or _ASSIGN_WORD.match(words[0])):
-            words.pop(0)
-        if not words:
+        if words and all(_PLAIN_ASSIGN.match(w) for w in words):
             continue
-        name = words[0].replace("'", "").replace('"', "").replace("\\", "")
-        if os.path.basename(name) not in _HARMLESS:
+        while words and words[0] in _LEADING:
+            words.pop(0)
+        if not words or all(_PLAIN_ASSIGN.match(w) for w in words):
+            continue
+        if _ASSIGN_START.match(words[0]):
             return False
+        plain = [w.replace("'", "").replace('"', "").replace("\\", "") for w in words]
+        base = plain[0]  # the exact name, as for a readable line
+        if base not in _HARMLESS:
+            return False
+        rest = plain[1:]
+        if any(_exec_option(t, base in _SEARCH_COMMANDS) for t in rest):
+            return False
+        if base in _NO_EXPANSION_ARGS and any("$" in MENTION.sub("", t) for t in rest):
+            return False
+        if base == "printf":
+            if any(_v_option(t) for t in rest):
+                return False
+            fmt = next((t for t in rest if not t.startswith("-")), None)
+            others = rest[rest.index(fmt) + 1:] if fmt is not None else []
+            if fmt is not None and ("$" in MENTION.sub("", fmt) or (
+                    not _PRINTF_SAFE_FORMAT.fullmatch(fmt) and any("$" in MENTION.sub("", t) for t in others))):
+                return False
     return True
 
 
@@ -599,6 +742,14 @@ def analyse(command: str, cwd: str) -> Plan | None:
     :class:`~llm_router.text_job_bind.shellscan.ScanError` when the line cannot be read.
     """
     cmds = scan_commands(command)
+    if _runs_code_in_text(command):
+        raise Unsupported(
+            "expansion_runs_code",
+            "The line has an expansion that runs a command whatever else it does: $[...] (arithmetic that evaluates its "
+            "operand), ${(...)}, ${!...}, a ${NAME:?message} whose message expands something, printf -v, or an unquoted "
+            "here-document whose body holds $(...) or backticks. Nothing was run. Write the text to a file, quote the "
+            "here-document delimiter (<<'EOF'), and run the placeholder command on its own.",
+        )
     for c in cmds:
         for w in (*c.assigns, *c.argv, *(t for _o, t in c.redirs)):
             if w.token_in_expansion:
@@ -607,8 +758,16 @@ def analyse(command: str, cwd: str) -> Plan | None:
                     "The placeholder is inside $(...), backticks or $'...'; use it as a plain \"${LLM_TEXT:?}\" argument.",
                 )
     valid = sum(1 for c in cmds for w in (*c.assigns, *c.argv, *(t for _o, t in c.redirs)) for p in w.pieces if p.kind == "tok")
-    if len(MENTION.findall(command)) > valid and _runs_job_tool(cmds, command):
-        raise Unsupported("placeholder_spelling", STRAY_MESSAGE)
+    if len(MENTION.findall(command)) > valid:
+        names = _may_run(cmds)
+        if _STARTUP_FILE.search(command):
+            names.append("a shell startup file, git hook or git config")
+        if names:
+            raise Unsupported(
+                "placeholder_spelling",
+                STRAY_MESSAGE if _may_commit(cmds) or COMMIT_CMD.search(command) or PR_CMD.search(command)
+                else STRAY_OTHER_MESSAGE.format(names=", ".join(names[:3])),
+            )
     holders = [k for k, c in enumerate(cmds) if any(w.has_token for w in c.argv)]
     elsewhere = any(w.has_token for c in cmds for w in (*c.assigns, *(t for _o, t in c.redirs)))
     if not holders and not elsewhere:

@@ -331,7 +331,8 @@ def test_a_line_the_scanner_cannot_read_and_that_may_run_anything_but_a_reader_i
 
 @pytest.mark.parametrize("line", [
     "echo \"unterminated '${LLM_TEXT:?}'", DIVERGENT + " '${LLM_TEXT:?}'", DIVERGENT + "; grep -n '${LLM_TEXT:?}' notes.md",
-    "cat <<'EOF'\ngit commit -m '${LLM_TEXT:?}'\nEOF\n" + DIVERGENT, "cd /repo && printf '%s' '${LLM_TEXT:?}' | grep -c \"unterminated",
+    # (a here-document on an unreadable line is no longer passed: which `<<` is real is a quoting question; tests/test_w7_deny_only.py)
+    "cd /repo && printf '%s' '${LLM_TEXT:?}' | grep -c \"unterminated",
 ])
 def test_a_line_the_scanner_cannot_read_but_that_only_reads_and_prints_is_left_to_the_shell(repo, tmp_path, line):
     d, rows = run(line, repo, tmp_path)
