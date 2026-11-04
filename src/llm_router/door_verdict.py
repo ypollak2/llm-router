@@ -152,9 +152,16 @@ def _write_state(data: dict) -> None:
         failopen.record("LR-FO-DOOR-VERDICT-STATE", exc)
 
 
+def _num(d: dict, key: str) -> float | None:
+    """A stored number, or None: an absent or malformed value is unknown, never 0 (docs: unknown-as-number lint)."""
+    v = d.get(key)
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
 def breaker_open(now: float | None = None) -> bool:
     now = time.time() if now is None else now
-    return _read_state().get("open_until", 0.0) > now
+    until = _num(_read_state(), "open_until")
+    return until is not None and until > now
 
 
 def note_result(ok: bool, now: float | None = None) -> None:
@@ -165,7 +172,9 @@ def note_result(ok: bool, now: float | None = None) -> None:
         if st.get("fails") or st.get("open_until"):
             _write_state({"fails": 0, "last_fail": 0.0, "open_until": 0.0})
         return
-    fails = (int(st.get("fails", 0)) + 1) if now - float(st.get("last_fail", 0.0)) <= BREAKER_WINDOW_S else 1
+    last, prior = _num(st, "last_fail"), _num(st, "fails")
+    consecutive = last is not None and prior is not None and now - last <= BREAKER_WINDOW_S
+    fails = int(prior) + 1 if consecutive and prior is not None else 1
     _write_state({"fails": fails, "last_fail": now,
                   "open_until": now + BREAKER_SKIP_S if fails >= BREAKER_FAILS else 0.0})
 
@@ -177,8 +186,11 @@ def _resident(model: str, base_url: str) -> bool | None:
     """Is ``model`` loaded right now? One short ``/api/ps``; None when Ollama cannot say."""
     import urllib.request
 
+    from llm_router import local_privacy
+
     try:
-        with urllib.request.urlopen(f"{base_url}/api/ps", timeout=0.5) as resp:  # noqa: S310 - local URL
+        req = urllib.request.Request(f"{base_url}/api/ps")
+        with local_privacy.open_url(req, base_url=base_url, timeout=0.5) as resp:  # the one sanctioned local sink
             models = json.loads(resp.read()).get("models")
         if not isinstance(models, list):
             return None
@@ -229,7 +241,7 @@ def preload_enabled() -> bool:
 def warm() -> str | None:
     """Load the decision model with the keep_alive the verdict calls use (session start, in the detached child),
     so the first prompt finds it resident. Returns the model, or None when off, unconfigured or it did not load.
-    Never raises. Session start used to warm ``model_discovery.local_model()`` (qwen3.8-uncensored, 22 GB)
+    Never raises. Session start used to warm ``model_discovery.local_model()`` (the user's general model, 22 GB here)
     instead, which also evicts the decision model when memory is short (docs/bugs/CLS-COLD-1.md)."""
     try:
         if not preload_enabled():
@@ -425,7 +437,10 @@ def read_rows(days: float | None = None) -> list[dict]:
                     r = json.loads(line)
                 except ValueError:
                     continue
-                if isinstance(r, dict) and (cutoff is None or float(r.get("ts", 0)) >= cutoff):
+                if not isinstance(r, dict):
+                    continue
+                ts = _num(r, "ts")
+                if cutoff is None or (ts is not None and ts >= cutoff):
                     out.append(r)
     except OSError:
         return []

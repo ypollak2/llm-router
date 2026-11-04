@@ -199,7 +199,7 @@ the proxy env when one is set.
 | `local_classifier.py` (`_post`, eval harness only) | classifier input | fixed |
 | `hooks/tool_intercept.py` (`describe_image`) | image bytes | fixed |
 | `proxy/server.py` (local-model backend on the shared httpx client; warm-up `httpx.post`) | prompt text | open |
-| `context_summary.py`, `model_discovery.py`, `discover.py`, `ollama_watchdog.py`, `warm.py`, `local_context_guard.py`, `quickstart.py`, `seats.py`, `commands/doctor.py`, `commands/verify.py`, `commands/pi.py`, `resolver/inventory.py`, `resource_map.py`, `runtime_offer.py`, `service_manager.py`, `model_pull.py`, `discovery_rescan.py`, `local_platforms.py` (`/api/tags`, `/api/ps`, `/api/show`, `/api/version`, pulls) | model names and health only, no user text | open |
+| `context_summary.py`, `model_discovery.py`, `discover.py`, `ollama_watchdog.py`, `warm.py`, `local_context_guard.py`, `quickstart.py`, `seats.py`, `commands/doctor.py`, `commands/verify.py`, `commands/pi.py`, `resolver/inventory.py`, `resource_map.py`, `runtime_offer.py`, `service_manager.py`, `model_pull.py`, `discovery_rescan.py`, `door_verdict.py` (the residency probe `/api/ps` only; its prompt-bearing verdict call goes through `local_classifier.py`), `local_platforms.py` (`/api/tags`, `/api/ps`, `/api/show`, `/api/version`, pulls) | model names and health only, no user text | open |
 Details and measurements: [docs/local-check-routing.md](docs/local-check-routing.md) ("HTTP proxy environment").
 
 **Encryption Status:**

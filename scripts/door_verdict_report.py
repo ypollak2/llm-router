@@ -24,19 +24,23 @@ def main() -> int:
     ap.add_argument("--file", type=Path, default=None)
     args = ap.parse_args()
     path = args.file or paths.state_path(dv.LEDGER)
-    cutoff = time.time() - args.days * 86400
-    rows = []
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                r = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(r, dict) and float(r.get("ts", 0)) >= cutoff:
-                rows.append(r)
-    except OSError as exc:
-        print(f"cannot read {path}: {exc}", file=sys.stderr)
-        return 1
+    if args.file is None:
+        rows = dv.read_rows(args.days)
+    else:
+        cutoff = time.time() - args.days * 86400
+        rows = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                ts = r.get("ts") if isinstance(r, dict) else None
+                if isinstance(ts, (int, float)) and ts >= cutoff:
+                    rows.append(r)
+        except OSError as exc:
+            print(f"cannot read {path}: {exc}", file=sys.stderr)
+            return 1
     s = dv.summarize(rows)
     s["source"] = str(path)
     s["window_days"] = args.days

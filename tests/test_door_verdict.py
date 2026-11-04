@@ -46,6 +46,7 @@ def _rows() -> list[dict]:
 # ---- the model call --------------------------------------------------------------------------------------------
 
 
+@pytest.mark.timing
 def test_a_cold_model_is_waited_for_and_answers(ollama):
     """CLS-COLD-1: the proxy path returned ``cold`` (no verdict) for a model that was not resident."""
     ollama.first_call_delay = 0.8
@@ -219,6 +220,7 @@ def test_no_verdict_keeps_todays_behaviour(ollama, monkeypatch):
     assert (dec.door, dec.applied) == ("", False)
 
 
+@pytest.mark.timing
 def test_a_late_model_reads_as_a_timeout_not_a_hang(ollama, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_DOOR_VERDICT_BUDGET_MS", "300")
     ollama.first_call_delay = 2.0
