@@ -191,7 +191,8 @@ async def test_llm_text_job_path_keeps_the_failed_lane_model(env, home, monkeypa
 
     async def wrapped(*a, **k):
         seen.append(k.get("eligibility_exempt_reason"))
-        return await real(*a, complexity_hint="simple", **k)
+        # llm_text_job passes its own fixed tier (moderate); only a caller that passes none gets "simple".
+        return await real(*a, **{"complexity_hint": "simple", **k})
 
     async def _build(*a, **k):
         return list(CHAIN)
