@@ -151,6 +151,12 @@ def _call_mix(card: dict) -> dict | None:
         out["sessions"] = {sid: n for sid, n in sessions.items()
                            if isinstance(sid, str) and _SAFE_ID.fullmatch(sid)
                            and isinstance(n, int) and not isinstance(n, bool) and n > 0}
+    codex, local = cm.get("codex"), cm.get("local_ok")
+    if isinstance(codex, dict) and isinstance(codex.get("flagged_runs"), int):
+        out["flagged_codex_runs"] = codex["flagged_runs"]         # runs counted as one response: the row says so
+    if isinstance(local, dict) and all(isinstance(local.get(v), int) and not isinstance(local.get(v), bool) for v in ("k", "n")) \
+            and 0 <= local["k"] <= local["n"]:
+        out["local_ok"] = {"k": local["k"], "n": local["n"]}      # n = 0 is a measured "no attempts", printed as such
     return out if out["outside_claude"]["n"] > 0 else None
 
 
@@ -209,7 +215,7 @@ def build(now: float | None = None) -> dict[str, Any]:
     def _card() -> dict:
         from llm_router.commands.kpi import compute_scorecard
 
-        return compute_scorecard(days=7, now=now_ts, call_mix_sessions=True)
+        return compute_scorecard(days=7, now=now_ts, call_mix_sessions=True, routing_detail=True)
 
     card = _part("CHZ-FO-STATUSLINE-KPI", _card)
     if card is not None:

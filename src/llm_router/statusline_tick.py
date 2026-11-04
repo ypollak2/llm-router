@@ -39,6 +39,17 @@ is not a measured zero. One more row (:func:`render_progress`) carries the two p
 beside it, from the same refresher pass::
 
     off-Claude 0.06% (4/7116 calls, 7d, organic) · <Opus 86.9% (6181/7112 Claude calls, 7d, organic)
+
+A session row (:func:`render_session_routing`) stands between them once the refresher has written this session's
+snapshot (the session JSON names the session; a cold session has no snapshot and so no row, as for the progress
+row): the two numbers of the North Star goal for THIS session, read from
+``snapshots/claude_code-<session>.json``, key ``routing`` (``llm_router.session_routing`` defines them)::
+
+    routed 0.74% (104/13976 calls, session) · local OK 75% (3/4, session)
+
+``local OK n/a (0 attempts, session)`` when the session made no local attempt, never 0%. The tick only reads it
+(one small JSON file) and formats it; nothing is counted here. The 7-day row carries the same two numbers over its
+own window and population (``local OK 88% (95/108, 7d, organic)``).
 """
 
 from __future__ import annotations
@@ -299,6 +310,70 @@ def _mix_segment(label: str, fig, noun: str, window: str, population: str) -> st
     return f"{label} n/a {body}" if n < MIX_MIN_N else f"{label} {_mix_pct(k, n)} {body}"
 
 
+def _whole(value) -> int | None:
+    """A non-negative whole number, or None (a bool, a float with a fraction and a negative are not counts)."""
+    v = _num(value)
+    return int(v) if v is not None and v >= 0 and v == int(v) else None
+
+
+def _local_ok_segment(fig, scope: str) -> str | None:
+    """``local OK 75% (3/4, session)``: local-model attempts that worked, over all local attempts. No attempt is
+    ``local OK n/a (0 attempts, <scope>)``, never 0%. ``None`` when the figure is not two whole numbers with
+    ``k <= n`` (the segment is then not shown, or shown as n/a by the caller)."""
+    k = _whole(fig.get("k")) if isinstance(fig, dict) else None
+    n = _whole(fig.get("n")) if isinstance(fig, dict) else None
+    if k is None or n is None or k > n:
+        return None
+    if n == 0:
+        return f"local OK n/a (0 attempts, {scope})"
+    return f"local OK {100.0 * k / n:.0f}% ({k}/{n}, {scope})"
+
+
+def read_session_routing(home: str, session: str | None) -> dict | None:
+    """The ``routing`` figure of ``snapshots/claude_code-<session>.json`` (written by the refresher), or None.
+    One small file; the id is reduced to the snapshot's own file-name characters."""
+    if not session:
+        return None
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session)
+    try:
+        with open(os.path.join(home, "snapshots", f"claude_code-{safe}.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    routing = data.get("routing") if isinstance(data, dict) else None
+    return routing if isinstance(routing, dict) else None
+
+
+def render_session_routing(routing: dict | None, *, now: float) -> str:
+    """The session row: ``routed X% (n/N calls, session) · local OK Y% (a/b, session)``. Pure: no I/O.
+
+    Every missing or doubtful piece is ``n/a`` with its reason, never 0: no figure yet, one older than
+    :data:`STALE_AFTER_S`, a transcript scan that has not reached the end (a share from part of the transcripts
+    would be inflated), fewer than :data:`MIX_MIN_N` calls (n/a with the same k/n, as the 7-day row). A run of
+    Codex the refresher could not count (no rollout) was counted as one call and is named."""
+    r = routing if isinstance(routing, dict) and routing.get("v") == 1 else None
+    computed = _num(r.get("computed_at")) if r else None
+    fresh = r is not None and computed is not None and 0 <= now - computed <= STALE_AFTER_S
+    if not fresh:
+        return "routed n/a (session) · local OK n/a (session)"
+    assert r is not None
+    k, n = _whole(r.get("non_claude")), _whole(r.get("total"))
+    if r.get("complete") is not True:
+        routed = "routed n/a (counting transcripts, session)"
+    elif k is None or n is None or n == 0 or k > n:
+        routed = "routed n/a (session)"
+    elif n < MIX_MIN_N:
+        routed = f"routed n/a ({k}/{n} calls, session)"
+    else:
+        codex = r.get("codex")
+        flagged = _whole(codex.get("flagged_runs")) if isinstance(codex, dict) else None
+        note = f", {flagged} Codex run{'s' if flagged != 1 else ''} counted as 1" if flagged else ""
+        routed = f"routed {_mix_pct(k, n)} ({k}/{n} calls, session{note})"
+    local = _local_ok_segment({"k": (r.get("local") or {}).get("ok"), "n": (r.get("local") or {}).get("attempts")}
+                              if isinstance(r.get("local"), dict) else None, "session") or "local OK n/a (session)"
+    return _fit(f"{routed} · {local}")
+
+
 def render_progress(cache: dict | None, *, now: float) -> str | None:
     """The row under the status line: the two progress lines beside a blind NS (D-364), from the same
     cache pass as NS (same window, same organic population)::
@@ -322,13 +397,21 @@ def render_progress(cache: dict | None, *, now: float) -> str | None:
             _mix_segment("<Opus", cm.get("below_opus"), "Claude calls", window, population)]
     if any(s is None for s in segs):
         return None
+    local = _local_ok_segment(cm.get("local_ok"), f"{window}, {population}")
+    if local:                                         # absent from a cache an older refresher wrote: the row is as before
+        segs.append(local)
     return _fit(" · ".join(segs))  # type: ignore[arg-type]
 
 
 def render_rows(cache: dict | None, *, now: float, env_mode: str | None = None, color: bool = False,
-                usage: dict | None = None, usage_ttl_s: float = DEFAULT_USAGE_TTL_S) -> list[str]:
-    """Every row the tick prints: the status line, then the progress row when the cache has one."""
+                usage: dict | None = None, usage_ttl_s: float = DEFAULT_USAGE_TTL_S,
+                routing: dict | None = None, session: bool = False) -> list[str]:
+    """Every row the tick prints: the status line, the session routing row when the caller knows the session
+    (``session=True``; ``routing`` is its snapshot figure, None = not counted yet), then the progress row when
+    the cache has one."""
     rows = [render(cache, now=now, env_mode=env_mode, color=color, usage=usage, usage_ttl_s=usage_ttl_s)]
+    if session:
+        rows.append(render_session_routing(routing, now=now))
     progress = render_progress(cache, now=now)
     if progress:
         rows.append(progress)
@@ -638,12 +721,14 @@ def main() -> int:
     now = time.time()
     home = router_home()
     cache = read_cache(home)
-    maybe_refresh(home, cache, now, session_of(raw))
+    session = session_of(raw)
+    maybe_refresh(home, cache, now, session)
     usage = read_usage(home)
     maybe_append_history(home, usage, now)
     color = not os.environ.get("NO_COLOR")
+    routing = read_session_routing(home, session)       # None = no snapshot yet (a cold session): no row, as for the progress row
     rows = render_rows(cache, now=now, env_mode=os.environ.get("LLM_ROUTER_ENFORCE"), color=color,
-                       usage=usage, usage_ttl_s=usage_ttl())
+                       usage=usage, usage_ttl_s=usage_ttl(), routing=routing, session=routing is not None)
     sys.stdout.write("\n".join(rows) + "\n")
     return 0
 

@@ -863,6 +863,14 @@ def _failopen(code: str, exc: BaseException | None = None, detail: str = "") -> 
         pass
 
 
+def _thread_meta(res) -> dict:
+    """``{"thread_id": ...}`` when the Codex run reported the thread it opened, else ``{}``. The id names the
+    rollout file the run wrote, which is where ``llm_router.session_routing`` counts the run's model responses
+    (a row without it is counted as one response and flagged)."""
+    tid = getattr(res, "thread_id", "") if res is not None else ""
+    return {"thread_id": tid} if isinstance(tid, str) and tid else {}
+
+
 def _record_north_star_unit(lever: str, *, model: str, outcome: str, **meta) -> float | None:
     """Append one North-Star routing unit as a JSON line — the NS1-readable
     signal for this lever (``lever="agent_route_codex"``).
@@ -2210,7 +2218,7 @@ def _note_codex_failure(path: str, status: str, res, subagent_type: str,
         "agent_route_codex", model=model, outcome="codex_failed",
         subagent_type=subagent_type, task_type=task_type,
         complexity=complexity, session_id=session_id, path=path,
-        reason=(reason or code)[:200], reason_code=code,
+        reason=(reason or code)[:200], reason_code=code, **_thread_meta(res),
     )
 
 
@@ -2721,7 +2729,7 @@ def _discard_blocked_codex(res, marker: str, *, subagent_type, task_type, comple
         complexity=complexity, session_id=session_id, path=path,
         duration_sec=res.duration_sec, sandbox=sandbox,
         reason=f"Codex reported blocked work (marker: {marker}); not delivered, a Claude sub-agent runs it",
-        reason_code="blocked_answer",
+        reason_code="blocked_answer", **_thread_meta(res),
     )
     if os.environ.get("LLM_ROUTER_ROUTE_BANNER", "on").strip().lower() not in ("0", "off", "false", "no"):
         try:
@@ -2959,6 +2967,7 @@ def _try_codex_subagent_delegation(
         answer_chars=len(res.content),
         **({"truncated": True} if getattr(res, "truncated", False) else {}),
         **({"reason_code": res.reason_code} if getattr(res, "reason_code", "") else {}),
+        **_thread_meta(res),
     )
     if sandbox == _CODEX_SANDBOX_WRITE:
         # Only a run that could write has a diff of its own to verify. After a read-only run ``git diff HEAD`` would be

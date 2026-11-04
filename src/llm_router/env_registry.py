@@ -532,7 +532,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "OPENROUTER_API_KEY": ("provider_credential", "commands/doctor.py", 1),
     "PERPLEXITY_API_KEY": ("provider_credential", "commands/demo.py", 1),
     "VAULT_TOKEN": ("provider_credential", "org_policy.py", 1),
-    # ── external_tool  (24) ──
+    # ── external_tool  (25) ──
     "CLAUDE_CODE_PATH": ("external_tool", "claude_agent.py", 1),
     # Codex's own state directory; codex_meter.py reads the rollouts under it (read-only) for the Plus meter.
     "CODEX_HOME": ("external_tool", "codex_meter.py", 1),
@@ -552,6 +552,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "CLAUDE_CODE_ENTRYPOINT": ("external_tool", "hooks/agent-route.py", 1),
     "CLAUDE_SESSION_ID": ("external_tool", "hooks/context-capture.py", 6),
     "CODEX_PATH": ("external_tool", "codex_agent.py", 1),
+    # Codex's own state directory (default ~/.codex); codex_rollouts reads its sessions/ to count a run's model responses.
+    "CODEX_HOME": ("external_tool", "codex_rollouts.py", 1),
     "GEMINI_CLI_PATH": ("external_tool", "gemini_cli_agent.py", 1),
     "GEMINI_CLI_TIER": ("external_tool", "gemini_cli_quota.py", 1),
     "HOST": ("external_tool", "server.py", 1),
