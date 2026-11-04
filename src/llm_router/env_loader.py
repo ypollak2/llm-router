@@ -145,3 +145,35 @@ def load_dotenv_files(
             dest[key] = value
             applied[key] = value
     return applied
+
+
+def load_user_dotenv(target: "dict[str, str] | None" = None) -> "dict[str, str]":
+    """Load ONLY the user's own ``$LLM_ROUTER_HOME/.env`` (``~/.llm-router/.env`` by default) into ``target``.
+
+    For a process that runs inside whatever repository the model happens to be working in and decides something on
+    the user's behalf (the text-job-bind hook): neither the working directory's ``.env`` (repository content, which
+    could turn the user's off switch back on, move the state directory or change what is published) nor ``~/.env`` is
+    read. The real process environment still wins, and a key already in ``target`` is never overwritten. Returns the
+    keys it applied (never log the values).
+    """
+    dest = os.environ if target is None else target
+    applied: dict[str, str] = {}
+    env_path = paths.regular_file_or_none(paths.state_path(".env"))
+    if env_path is None:
+        return applied
+    for key, value in _parse_env_file(env_path).items():
+        if key in dest:
+            continue
+        dest[key] = value
+        applied[key] = value
+    return applied
+
+
+def user_dotenv_value(name: str) -> "str | None":
+    """The value ``$LLM_ROUTER_HOME/.env`` gives ``name``, or ``None`` (no file, no such key). Read-only; it does not touch
+    ``os.environ`` and does not consider it: the caller decides what the real environment's own value means.
+
+    For a decision taken BEFORE the process has loaded that file (the MCP server renders the rules text while it is being
+    imported, ahead of ``load_dotenv_files()``)."""
+    env_path = paths.regular_file_or_none(paths.state_path(".env"))
+    return None if env_path is None else _parse_env_file(env_path).get(name)

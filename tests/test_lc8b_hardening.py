@@ -264,13 +264,14 @@ def test_rescued_errors_follow_the_7_of_20_rule(home):
     assert lr.demotion_check(LOCAL, JOB) is True                        # 7 of the last 20
 
 
-def test_llm_text_job_with_a_dead_ollama_demotes_end_to_end(home, monkeypatch):
+def _dead_ollama_jobs(home, monkeypatch, served_text):
+    """20 `llm_text_job` calls through the real tool: the router tried ollama, it failed, gemini answered."""
     from llm_router.tools import text as T
     from llm_router.types import LLMResponse
     lr.enable(BARE, JOB, "local_check")
 
-    async def fake_route(*a, **k):                       # the router tried ollama, it failed, gemini answered
-        return LLMResponse(content="feat: touch src/a.py", model=GEMINI, input_tokens=1, output_tokens=1,
+    async def fake_route(*a, **k):
+        return LLMResponse(content=served_text, model=GEMINI, input_tokens=1, output_tokens=1,
                            cost_usd=0.0, latency_ms=1.0, provider="gemini", chain_attempts=[LOCAL, GEMINI])
 
     async def noop(*a, **k):
@@ -282,6 +283,18 @@ def test_llm_text_job_with_a_dead_ollama_demotes_end_to_end(home, monkeypatch):
     diff = "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a\n+b\n"
     for _ in range(20):
         asyncio.run(T.llm_text_job(JOB, diff, object(), hint="ab"))
+
+
+def test_llm_text_job_with_a_dead_ollama_that_gemini_rescues_keeps_the_lane_when_the_jobs_are_accepted(home, monkeypatch):
+    """D-367 / S7: 20 jobs, every one accepted (by gemini), the local model failing each time. The jobs did not
+    fail, so the lane stays on. (Before D-367 this demoted: LC-8b counted every rescued failure per attempt.)"""
+    _dead_ollama_jobs(home, monkeypatch, "feat: touch src/a.py")
+    assert lr.is_enabled(BARE, JOB)
+    assert [r["outcome"] for r in read_attempts(home)] == ["error"] * 20 and all(r["acc"] for r in read_attempts(home))
+
+
+def test_llm_text_job_with_a_dead_ollama_demotes_end_to_end_when_the_rescuer_fails_the_jobs_too(home, monkeypatch):
+    _dead_ollama_jobs(home, monkeypatch, "nothing useful")
     assert not lr.is_enabled(BARE, JOB) and lr.entry(BARE, JOB)["reason"] == lr.DEMOTE_REASON
 
 

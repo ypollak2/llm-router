@@ -1997,6 +1997,7 @@ def _enrich_response(
     failed_attempt_cost: float = 0.0,
     quality_degraded: bool = False,
     quality_degraded_reason: str = "",
+    chain_errors: list | None = None,
 ) -> LLMResponse:
     """Add explainability fields to a successful LLMResponse.
 
@@ -2017,6 +2018,7 @@ def _enrich_response(
         # FIELD, not only by a log line the caller never sees.
         quality_degraded=quality_degraded,
         quality_degraded_reason=quality_degraded_reason,
+        chain_errors=[(str(m), str(e)) for m, e in (chain_errors or [])],  # W7: why earlier entries failed
     )
 
 
@@ -3980,6 +3982,7 @@ async def _dispatch_model_loop(
                 response, classification_data, effective_complexity,
                 task_type, chain_attempts,
                 failed_attempt_cost=_failed_attempt_cost,  # RED1-8-01
+                chain_errors=chain_errors,
             )
 
         except Exception as e:
@@ -4306,6 +4309,7 @@ async def _dispatch_model_loop(
                         response, classification_data, effective_complexity,
                         task_type, chain_attempts,
                         failed_attempt_cost=_failed_attempt_cost,  # RED1-8-01
+                        chain_errors=chain_errors,
                     )
 
                 except Exception as e:
@@ -4481,6 +4485,7 @@ async def _dispatch_model_loop(
                 "every candidate was rejected by a dispatch gate; "
                 "the best rejected answer was served"
             ),
+            chain_errors=chain_errors,
         )
 
     _emit_ledger_terminal(correlation_id, "failed", route_succeeded=False)

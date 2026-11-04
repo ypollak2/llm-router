@@ -6,6 +6,7 @@ from llm_router import paths
 import asyncio
 import os
 import time
+import uuid
 
 from mcp.server.mcpserver import Context
 
@@ -1112,7 +1113,57 @@ async def llm_text_job(
             truncated at 40 KB with a note.
         hint: Optional extra context (e.g. a ticket id, a PR title stub).
     """
+    return await _llm_text_job(job, input_text, ctx, hint, None)
+
+
+#: ``LiveCheckRefused`` messages (the router's own fixed words, never model text) that name the environment, not the
+#: pass: the daemon did not answer, or the model is no longer installed.
+_INFRA_LIVE_REFUSALS = frozenset({"ollama did not answer", "model not listed"})
+
+#: Why a ``llm_text_job`` call handed the job back without judging a model answer (``sink["fallback"]``).
+FALLBACK_FLAG_OFF = "flag_off"
+FALLBACK_NO_LANE = "no_lane"
+FALLBACK_LANE_UNVERIFIED = "lane_unverified"
+FALLBACK_LANE_REFUSED = "lane_refused"
+FALLBACK_LOCAL_FAILED = "local_failed"
+FALLBACK_UNKNOWN_JOB = "unknown_job"
+
+#: The extra clause for a lane that IS enabled and passed but cannot be used right now (F16).
+_LANE_GAP_CLAUSE = {
+    "unverified": ("its model digest could not be verified (Ollama was not reachable when the digest cache was "
+                   "last refreshed, the cache is stale, or the installed model no longer matches the one that passed)"),
+    "stale": "its local-check pass is stale (past its 30 days, or only a pre-registered lane stands in for it)",
+    "settings": "the router's route-time settings or the input size do not match what the pass measured",
+}
+
+
+def _fill_sink(sink: dict | None, status: str, attempts: int, *, model: str = "none", text: str = "",
+               reasons: list[str] | None = None, codes: list[str] | None = None, fallback: str = "",
+               infra: bool = False) -> None:
+    """Hand the caller the structured result (F8) so it need not parse the returned string.
+
+    ``codes`` and ``fallback`` are fixed strings chosen by the checks and by this module, never model text.
+    """
+    if sink is not None:
+        sink.update(status=status, attempts=int(attempts), model=model, text=text, reasons=list(reasons or []),
+                    codes=list(codes or []), fallback=fallback, infra=bool(infra))
+
+
+async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | None, sink: dict | None,
+                        attempt_timeout_s: float | None = None) -> str:
+    """The body of ``llm_text_job``. When ``sink`` is a dict it is filled at every return path (and before a
+    route error is re-raised) with: ``status`` (accepted | rejected | fallback), ``attempts`` (int), ``model``
+    (served model name or "none"), ``text`` (the accepted text, else ""), ``reasons`` (the per-attempt check
+    reasons), ``codes`` (stable codes of the LAST failed check), ``fallback`` ("" unless status is fallback, then
+    flag_off | no_lane | lane_unverified | lane_refused | local_failed | unknown_job) and ``infra`` (the fallback
+    or error was an infrastructure failure). A cancelled call fills nothing and records no outcome.
+
+    ``attempt_timeout_s`` (F18) caps each ``route_and_call`` attempt. A capped attempt is an ``infra`` outcome
+    (row ``infra``, reason "attempt timed out", never ``rejected``) and the next attempt runs if any remain; a job
+    that ends without an accepted text after a capped attempt is a fallback (``local_failed``, ``infra`` True),
+    not a rejection. Every row the call writes to the local-attempts sidecar carries the call's ``jid`` (D-367)."""
     from llm_router.text_jobs import (
+        CODE_FAILED_CHECKS,
         JOB_NAMES,
         MAX_JOB_ATTEMPTS,
         build_prompt,
@@ -1123,12 +1174,15 @@ async def llm_text_job(
         STATUS_ACCEPTED,
         STATUS_FALLBACK,
         STATUS_REJECTED,
+        is_infra_error,
+        record_job_unfinished,
         record_local_attempts,
         record_text_job_outcome,
     )
 
     if job not in JOB_NAMES:
         record_text_job_outcome(job=job, model="none", status=STATUS_FALLBACK, attempts=0)
+        _fill_sink(sink, STATUS_FALLBACK, 0, fallback=FALLBACK_UNKNOWN_JOB)
         return (
             f"Unknown job {job!r}. Supported: {', '.join(JOB_NAMES)}. "
             "_Structured: status=fallback, attempts=0_\n"
@@ -1140,17 +1194,22 @@ async def llm_text_job(
     from llm_router import eligibility_routing
 
     flag = _local_text_jobs_flag()
+    why, why_code = None, ""
     if flag is False:
-        why = (f"Local text jobs are turned off ({_ENV_LOCAL_TEXT_JOBS} is 0/false/no/off, "
-               "or a value that is not recognised: unrecognised values fail closed).")
-    elif flag is None and not eligibility_routing.passed_lane_available(
-            job, len(truncated_input) + len(hint or ""), time.time()):
-        why = (f"No passed local-check lane covers {job} (run `llm-router local-check`, "
-               f"or set {_ENV_LOCAL_TEXT_JOBS}=1 to enable text jobs without one).")
-    else:
-        why = None
+        why, why_code = (f"Local text jobs are turned off ({_ENV_LOCAL_TEXT_JOBS} is 0/false/no/off, "
+                         "or a value that is not recognised: unrecognised values fail closed)."), FALLBACK_FLAG_OFF
+    elif flag is None:
+        job_len, now = len(truncated_input) + len(hint or ""), time.time()
+        if not eligibility_routing.passed_lane_available(job, job_len, now):
+            why, why_code = (f"No passed local-check lane covers {job} (run `llm-router local-check`, "
+                             f"or set {_ENV_LOCAL_TEXT_JOBS}=1 to enable text jobs without one)."), FALLBACK_NO_LANE
+            gap = _LANE_GAP_CLAUSE.get(eligibility_routing.passed_lane_diagnosis(job, job_len, now))
+            if gap is not None:  # F16: a lane IS enabled and passed, but cannot be used right now
+                why += f" A lane for {job} is enabled and passed, but {gap}."
+                why_code = FALLBACK_LANE_UNVERIFIED
     if why is not None:
         record_text_job_outcome(job=job, model="none", status=STATUS_FALLBACK, attempts=0)
+        _fill_sink(sink, STATUS_FALLBACK, 0, fallback=why_code)
         return (
             f"Local text jobs are disabled: {why} "
             "_Structured: status=fallback, attempts=0_\n"
@@ -1166,16 +1225,22 @@ async def llm_text_job(
     attempt = 0
     _local_touched: set[str] = set()
     completed = False
+    last_codes: list[str] = []
+    feedback: str | None = None
+    jid = uuid.uuid4().hex[:12]  # D-367: ties every sidecar row of this call; the monitor counts jobs
+    timed_out, timed_model = False, "none"  # F18: an attempt hit attempt_timeout_s
+    try_judged = False  # this try left its own rows in the sidecar (so the job is not unfinished)
 
     _tj_token = eligibility_routing.set_text_job_context(job, len(truncated_input) + len(hint or ""))  # LC-8
     _req_token = eligibility_routing.set_require_passed_first() if flag is None else None  # LC-12b
     try:
         for attempt in range(1, MAX_JOB_ATTEMPTS + 1):
-            feedback = history[-1] if history else None
+            try_judged = False
             system_prompt, prompt = build_prompt(job, truncated_input, hint=hint, feedback=feedback)
 
+            cap = None
             try:
-                resp = await route_and_call(
+                pending = route_and_call(
                     TaskType.GENERATE,
                     prompt,
                     system_prompt=system_prompt,
@@ -1184,25 +1249,54 @@ async def llm_text_job(
                     route_directive_id=_read_hook_route_directive(),
                     eligibility_exempt_reason=eligibility_routing.TEXT_JOB_REASON,  # F112 / D-242
                 )
+                if attempt_timeout_s is not None and attempt_timeout_s > 0:
+                    async with asyncio.timeout(attempt_timeout_s) as cap:  # F18
+                        resp = await pending
+                else:
+                    resp = await pending
             except Exception as exc:
+                if cap is not None and cap.expired():
+                    # F18: OUR per-attempt cap fired (not a timeout the router raised itself). The attempt was never
+                    # judged: an infra outcome, not a rejection. The router annotates the cancellation it saw.
+                    timed_out = True
+                    trace = (getattr(exc, "chain_attempts", None) or getattr(exc.__cause__, "chain_attempts", None)
+                             or getattr(exc.__context__, "chain_attempts", None) or [])
+                    _local_touched.update(record_local_attempts(
+                        job=job, served_model="", chain_attempts=trace, accepted=False, exc=exc,
+                        jid=jid, attempt=attempt,
+                    ))
+                    timed_model = trace[0] if trace and timed_model == "none" else timed_model
+                    history.append("attempt timed out")
+                    continue
                 overflow = isinstance(exc.__cause__, eligibility_routing.OverflowSwitchRefused)  # LC-12g
                 refused = overflow or isinstance(exc, eligibility_routing.PassedModelNotInChain)
                 trace = [] if refused else (getattr(exc, "chain_attempts", None) or [])
                 if not refused:
                     try:
-                        _local_touched.update(record_local_attempts(
-                            job=job, served_model="", chain_attempts=trace, accepted=False,
-                        ))
+                        touched_now = record_local_attempts(
+                            job=job, served_model="", chain_attempts=trace, accepted=False, exc=exc,
+                            jid=jid, attempt=attempt,
+                        )
+                        _local_touched.update(touched_now)
+                        try_judged = bool(touched_now)
                     except Exception as record_exc:  # noqa: BLE001 -- preserve the original route error
                         from llm_router import failopen
                         failopen.record("CHZ-FO-TEXTJOB-LOCAL-ATTEMPTS", record_exc)
+                infra = is_infra_error(exc) or (
+                    isinstance(exc, eligibility_routing.LiveCheckRefused) and str(exc) in _INFRA_LIVE_REFUSALS)
                 if _req_token is None:
+                    _fill_sink(sink, STATUS_FALLBACK, attempt - 1 if refused else attempt,
+                               model=resp.model if resp is not None else (trace[0] if trace else "none"),
+                               reasons=history, fallback=FALLBACK_LANE_REFUSED if refused else FALLBACK_LOCAL_FAILED,
+                               infra=infra)
                     raise  # flag on: the router's own error, as before
                 # LC-12b / D-277: flag unset = the passed local model alone. A refusal or a local failure hands
                 # the job back; no cloud model was or will be called. Attempts count what really ran.
                 tried = attempt - 1 if refused else attempt
                 model = resp.model if resp is not None else (trace[0] if trace else "none")
                 record_text_job_outcome(job=job, model=model, status=STATUS_FALLBACK, attempts=tried)
+                _fill_sink(sink, STATUS_FALLBACK, tried, model=model, reasons=history,
+                           fallback=FALLBACK_LANE_REFUSED if refused else FALLBACK_LOCAL_FAILED, infra=infra)
                 cause = (f"the local-only eligibility step failed for {job} ({type(exc.__cause__).__name__ if exc.__cause__ else 'error'})"
                          if isinstance(exc, eligibility_routing.EligibilityStepFailed)
                          else f"the passed local model no longer matches its pass for {job} ({exc})"
@@ -1222,11 +1316,16 @@ async def llm_text_job(
             result_text = check.text
             # LC-8b: one row per LOCAL attempt (incl. a local failure the next chain entry rescued).
             _local_touched.update(record_local_attempts(
-                job=job, served_model=resp.model, chain_attempts=getattr(resp, "chain_attempts", None) or [], accepted=check.ok))
+                job=job, served_model=resp.model, chain_attempts=getattr(resp, "chain_attempts", None) or [],
+                accepted=check.ok, jid=jid, attempt=attempt, more=not check.ok and attempt < MAX_JOB_ATTEMPTS,
+                chain_errors=getattr(resp, "chain_errors", None)))
             if check.ok:
                 accepted = True
+                last_codes = []
                 break
-            history.append(check.reason or "acceptance check failed")
+            feedback = check.reason or "acceptance check failed"
+            history.append(feedback)
+            last_codes = list(check.codes) or [CODE_FAILED_CHECKS]
         completed = True
     finally:
         if _req_token is not None:
@@ -1236,10 +1335,18 @@ async def llm_text_job(
         except Exception as exc:  # noqa: BLE001 -- cleanup must not replace a route error
             from llm_router import failopen
             failopen.record("CHZ-FO-TEXTJOB-CTX-RESET", exc)
-        status = STATUS_ACCEPTED if accepted else STATUS_REJECTED
+        if timed_out and not accepted:
+            status = STATUS_FALLBACK
+        else:
+            status = STATUS_ACCEPTED if accepted else STATUS_REJECTED
+        if not completed and not try_judged and _local_touched:
+            # D-367: cancelled, or ended on an error that left this try unjudged: a half-finished job. An infra
+            # row per local model keeps the demotion monitor from ever counting its earlier rows as a failed job.
+            record_job_unfinished(job=job, models=sorted(_local_touched), jid=jid, attempt=attempt)
         try:
-            if completed and resp is not None:
-                record_text_job_outcome(job=job, model=resp.model, status=status, attempts=attempt)
+            if completed and (resp is not None or timed_out):
+                record_text_job_outcome(job=job, model=resp.model if resp is not None else timed_model,
+                                        status=status, attempts=attempt)
         except Exception as exc:  # noqa: BLE001
             from llm_router import failopen
             failopen.record("CHZ-FO-TEXTJOB-OUTCOME", exc)
@@ -1251,6 +1358,18 @@ async def llm_text_job(
                 from llm_router import failopen
                 failopen.record("CHZ-FO-TEXTJOB-DEMOTION", exc)
 
+    if timed_out and not accepted:
+        # F18: no text was accepted and a capped attempt never produced an answer: the job is handed back, not rejected.
+        _fill_sink(sink, STATUS_FALLBACK, attempt, model=resp.model if resp is not None else timed_model,
+                   reasons=history, fallback=FALLBACK_LOCAL_FAILED, infra=True)
+        return (
+            "A local text job attempt timed out before the model answered (queueing or contention), so no answer "
+            "was judged. "
+            f"_Structured: status=fallback, attempts={attempt}_\n"
+            "Do this job yourself."
+        )
+    _fill_sink(sink, status, attempt, model=resp.model if resp else "none", text=result_text if accepted else "",
+               reasons=history, codes=last_codes)
     lines = [resp.header() if resp else "no response", ""]
     lines.append(f"_Structured: status={status}, attempts={attempt}_")
     if was_truncated:

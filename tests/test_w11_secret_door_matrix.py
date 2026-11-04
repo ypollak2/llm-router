@@ -93,7 +93,7 @@ MATRIX: dict[tuple[str, str, str], tuple[int, str, str]] = {
     ("tools/text.py", "llm_reason", "route_and_call"): (1, ROUTER, "MCP"),
     ("tools/text.py", "llm_code", "route_and_call"): (1, ROUTER, "MCP"),
     ("tools/text.py", "llm_edit", "route_and_call"): (1, ROUTER, "MCP llm_edit (exempt only from eligibility)"),
-    ("tools/text.py", "llm_text_job", "route_and_call"): (1, ROUTER, "MCP text job; also pass-only local"),
+    ("tools/text.py", "_llm_text_job", "route_and_call"): (1, ROUTER, "MCP text job; also pass-only local"),
     ("tui/cli.py", "_run_classic_mode", "route_and_call"): (1, ROUTER, "TUI classic mode"),
     # ---- gateway / SDK doors reach the router through these (route_payload_async) or their own chain cut
     ("gateway.py", "_route", "route_payload_async"): (1, ROUTER, "gateway /route; chat, responses, messages, ollama"),

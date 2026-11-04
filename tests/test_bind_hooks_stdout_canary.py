@@ -160,6 +160,11 @@ PAYLOADS: dict[str, dict] = {
     "status-bar.py": {"hook_event_name": "UserPromptSubmit", "prompt": "hello there", "session_id": "s1"},
     "subagent-start.py": {"hook_event_name": "SubagentStart", "agent_id": "a1", "agent_type": "general-purpose",
                           "session_id": "s1"},
+    # BIND W7 (text-job-bind): a placeholder command with a refused shape (a `git add` before the commit), so main()
+    # runs to its one JSON decision (a deny) through _Channel.send's json.dumps, with no model and no git needed.
+    "text-job-bind.py": {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "toolu_3",
+                         "tool_input": {"command": 'git add a.py && git commit -m "${LLM_TEXT:?}"'},
+                         "session_id": "s1", "cwd": "/tmp"},
     "usage-refresh.py": {"hook_event_name": "PostToolUse", "tool_name": "mcp__llm_router__llm", "tool_input": {},
                          "tool_response": {}, "session_id": "s1"},
 }

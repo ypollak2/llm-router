@@ -61,13 +61,16 @@ def _lines():
 
 
 def test_budgets_are_the_prd_bars():
-    sync_hooks = set(hl.HOOK_BUDGETS_MS) - {"session-start", "statusline", "auto-route"}
+    sync_hooks = set(hl.HOOK_BUDGETS_MS) - {"session-start", "statusline", "auto-route", "text-job-bind"}
     assert sync_hooks, "the table lost its sync hooks"
     assert {h: hl.HOOK_BUDGETS_MS[h] for h in sync_hooks} == {h: 300 for h in sync_hooks}
     assert hl.HOOK_BUDGETS_MS["session-start"] == 2_000
     assert hl.HOOK_BUDGETS_MS["status-bar"] == 300
     assert hl.HOOK_BUDGETS_MS["statusline"] == 100
     assert hl.HOOK_BUDGETS_MS["auto-route"] == 750  # D-217: owner-ratified PRD deviation
+    # D-370 (owner 2026-11-04): the text-job hook runs once per commit or PR, not per call, and imports the router on a
+    # successful job; other hooks keep their existing budgets (asserted above)
+    assert hl.HOOK_BUDGETS_MS["text-job-bind"] == 1_500
     assert hl.DEFAULT_BUDGET_MS == 300
 
 

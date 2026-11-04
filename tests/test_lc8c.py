@@ -79,7 +79,7 @@ def test_recent_window_survives_rotation(home, monkeypatch):
     assert path.with_name(path.name + ".1").exists()
     assert lr._recent_outcomes(LOCAL, JOB, None, path) == ["ok"] * 19
     L._append_local_attempt(JOB, LOCAL, "error")
-    assert lr._recent_outcomes(LOCAL, JOB, None, path) == ["ok"] * 19 + ["error"]
+    assert lr._recent_outcomes(LOCAL, JOB, None, path) == ["ok"] * 19 + ["failed"]  # D-367: job verdicts, not row outcomes
 
 
 def test_recent_tails_skip_partial_first_line(home, monkeypatch):
