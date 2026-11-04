@@ -292,7 +292,7 @@ def test_only_direct_executions_count_and_a_command_the_scanner_cannot_read_coun
     for cmd, want in direct.items():
         assert executed_job(cmd) == want, cmd
     indirect = [
-        f"env X=1 git commit -m {T}", f"bash -c 'git commit -m x'", f"timeout 5 git commit -m {T}", f"G=git; $G commit -m {T}",
+        f"env X=1 git commit -m {T}", "bash -c 'git commit -m x'", f"timeout 5 git commit -m {T}", f"G=git; $G commit -m {T}",
         f"sudo git commit -m {T}", f"xargs git commit -m {T}", f"nohup git commit -m {T}",
         "echo 'git commit -m x'", "grep -rn 'git commit' docs", "cat <<'EOF'\ngit commit -m x\nEOF", "git log --oneline",
         "gh pr view 12", "git commit -m 'unterminated", "gh pr create --body \"${LLM_TEXT:?}\" 'x", "ls",
