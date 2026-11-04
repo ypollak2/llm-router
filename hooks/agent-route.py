@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 29
+# llm_router-hook-version: 30
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -3155,6 +3155,7 @@ def _main() -> None:
     # ── W10: the local model's routing verdict for THIS spawn ────────────────────────────────────────────
     # Started here (Explore, allowlisted and retrieval-only spawns are approved above without a routing
     # decision, so they get none), joined just before the Codex attempt, so the wait overlaps classify.
+    # ``start`` runs the secret door itself, first: a brief that holds a secret is classified by no model.
     # LLM_ROUTER_LOCAL_CLASSIFIER=off (default): None, zero Ollama calls. shadow: logged only. on: an
     # opus-confident verdict keeps the spawn on Claude (no Codex attempt). Fail-open on every path.
     _door_pending = None

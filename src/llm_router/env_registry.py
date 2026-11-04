@@ -483,6 +483,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_DOOR_SONNET_MIN_CONF": ("llm_router", "door_verdict.py", 1),
     "LLM_ROUTER_DOOR_VERDICT_PROMPT_BUDGET_MS": ("llm_router", "door_verdict.py", 1),
     "LLM_ROUTER_CLASSIFIER_PRELOAD": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE": ("llm_router", "local_privacy.py", 1),
     "LLM_ROUTER_LOCAL_CLASSIFIER": ("llm_router", "local_classifier.py", 1),
     "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS": ("llm_router", "local_classifier.py", 1),
     # The classifier's own Ollama alias (M1.4): other callers load qwen3.5 at a different

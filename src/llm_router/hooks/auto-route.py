@@ -6762,6 +6762,16 @@ def main() -> None:
                 f"on this machine can serve this task; no routing directive."
             )
             indicator = f"👁 {task_type}/{complexity} — no provider, answered directly"
+        elif _verdict_quiet:
+            # W10: the local classifier kept this on Claude. Names no tool and no model, and does not say "would
+            # route" (the generic observation line below would, for a prompt that was deliberately not routed).
+            _vp = getattr(getattr(_door_dec, "verdict", None), "confidence", None)
+            directive = (
+                f"👁 OBSERVATION [local-verdict]: {task_type}/{complexity} — the local classifier rates this "
+                f"opus-level{f' (p_max {_vp:.2f})' if isinstance(_vp, float) else ''}; handle it directly; "
+                f"no routing directive."
+            )
+            indicator = f"👁 {task_type}/{complexity} — local verdict: opus-level, answered directly"
         else:
             directive = (
                 f"👁 OBSERVATION [{_enforce_mode}]: ✨ {task_type}/{complexity} ✨ "

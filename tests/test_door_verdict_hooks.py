@@ -106,7 +106,10 @@ def test_shadow_logs_one_verdict_for_the_prompt_and_changes_nothing(tmp_path, fa
 def test_on_quiets_the_hint_for_a_confident_opus_verdict(tmp_path, fake):
     fake.probs = OPUS
     proc = _prompt(tmp_path, "on", fake.url)
-    assert SHOWN not in proc.stdout and QUIET in proc.stdout
+    assert SHOWN not in proc.stdout and "OBSERVATION [local-verdict]" in proc.stdout
+    # it says why, names no tool or model, and is not the generic "would route" observation of the shadow mode
+    assert "would route" not in proc.stdout and "[shadow]" not in proc.stdout and "llm(" not in proc.stdout
+    assert "opus-level" in proc.stdout and "p_max 0.80" in proc.stdout
     r = _verdict_rows(tmp_path)[0]
     assert (r["door"], r["applied"], r["outcome"]) == ("claude", True, "hint_quieted")
 
@@ -192,6 +195,37 @@ def test_a_quiet_prompt_gets_no_door_note_and_the_row_says_so(tmp_path, fake):
     assert proc.returncode == 0 and "VERDICT" not in proc.stdout
     r = _verdict_rows(tmp_path)[0]
     assert (r["door"], r["outcome"]) == ("codex", "no_hint_shown")
+
+
+def test_on_does_not_name_codex_when_the_meter_reserve_refuses(tmp_path, fake):
+    """D-373: the router chain may not spend the Plus meter below the reserve; a hint that sent Claude to that call would
+    be a refused call. Reserve 0 refuses everything (the counters verdict), so the hint stays the default one."""
+    fake.probs = SONNET
+    proc = _prompt(tmp_path, "on", fake.url, CODEX_PATH=_codex(tmp_path), LLM_ROUTER_CODEX_RESERVE_PCT="0")
+    assert SHOWN in proc.stdout and "CODEX VERDICT" not in proc.stdout
+    assert _verdict_rows(tmp_path)[0]["door"] == "mcp"
+
+
+def test_on_does_not_name_codex_when_the_window_budget_is_spent(tmp_path, fake):
+    fake.probs = SONNET
+    proc = _prompt(tmp_path, "on", fake.url, CODEX_PATH=_codex(tmp_path), LLM_ROUTER_CODEX_WINDOW_BUDGET="0")
+    assert SHOWN in proc.stdout and "CODEX VERDICT" not in proc.stdout
+
+
+def test_a_prompt_with_a_secret_is_never_sent_to_the_model_by_either_hook(tmp_path, fake):
+    secret = "ghp_Zk3Qx9LmW2vTb7Yc4Rn8Hd5Pf1Js6GaE0uXo"
+    _prompt(tmp_path, "shadow", fake.url, prompt=f"What does this token do? {secret}")
+    assert fake.calls == 0
+    rows = _verdict_rows(tmp_path)
+    assert rows and rows[0]["source"] == "withheld_secret" and secret not in json.dumps(rows)
+
+
+def test_shadow_does_not_load_the_decision_model_over_the_text_job_lanes_model(tmp_path, fake):
+    """CLS-EVICT-1: the lane model stays resident; the verdict says why it was skipped."""
+    fake.others = ["qwen3.6:35b-a3b-coding"]
+    proc = _prompt(tmp_path, "shadow", fake.url)
+    assert SHOWN in proc.stdout and fake.calls == 0 and fake.others == ["qwen3.6:35b-a3b-coding"]
+    assert _verdict_rows(tmp_path)[0]["source"] == "skipped_slot_busy"
 
 
 def _raw(tmp_path, url: str, prompt: str, session: str):
@@ -293,18 +327,23 @@ def _session_start_module():
     return mod
 
 
-def test_session_start_warms_the_decision_model_and_skips_the_other_two(monkeypatch, fake):
-    for k, v in _classifier_env(fake.url, "shadow").items():
+def test_session_start_warms_the_decision_model_only_in_on_and_skips_the_other_two(monkeypatch, fake):
+    for k, v in _classifier_env(fake.url, "on").items():
         monkeypatch.setenv(k, v)
     mod = _session_start_module()
-    calls = []
-    monkeypatch.setattr(mod, "_warm_edit_model_bg", lambda: calls.append("edit"))
-    monkeypatch.setattr(mod, "_warm_ollama_bg", lambda: calls.append("generic"))
     assert mod._warm_classifier_bg() == "nimble:9b" and fake.resident
     # the child's step order: classifier first, the other two only when it did not load
     src = (HOOKS_SRC / "session-start.py").read_text()
     assert src.index("_step(_warm_classifier_bg)") < src.index("_step(_warm_edit_model_bg)")
     assert "if not _step(_warm_classifier_bg):" in src
+
+
+def test_session_start_in_shadow_loads_nothing_so_the_old_warm_ups_run(monkeypatch, fake):
+    """CLS-EVICT-1: a log-only verdict must not put nimble in front of the models the other lanes warm."""
+    for k, v in _classifier_env(fake.url, "shadow").items():
+        monkeypatch.setenv(k, v)
+    mod = _session_start_module()
+    assert mod._warm_classifier_bg() == "" and fake.calls == 0 and not fake.resident
 
 
 def test_session_start_falls_back_to_the_old_warm_ups_when_nothing_loaded(monkeypatch, fake):

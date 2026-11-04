@@ -17,10 +17,11 @@ status: fixed for the hook path in `w10/local-classifier-decides`; the proxy sha
   not resident (2026-11-04 08:05Z-08:30Z, this machine): 2.04, 4.44, 4.78, 5.02 (timed out at a 5 s budget), 5.82, 6.71 and
   10.12 s. The 2.04 s one ran on a quiet machine; the other six at load average 5.3-6.8, with gemma3:12b or qwen3.8 resident
   or being evicted. Median 5.02 s. The 4.44 s and 10.12 s values are the session-start preload (`door_verdict.warm`).
-- **Fix.** The hook client waits through the load (budget 8,000 ms, `LLM_ROUTER_DOOR_VERDICT_BUDGET_MS`) in a thread beside
-  the hook's own work. With the classifier on, session start loads the decision model through its own endpoint
-  (`door_verdict.warm`, detached child, same keep_alive as the verdict calls) and skips the edit and generic warm-ups;
-  `LLM_ROUTER_CLASSIFIER_PRELOAD=off` restores the old order. The trade is disclosed: the zero-Claude edit model is no
-  longer pinned at session start (0 of 571 real prompts were edit-eligible in 30 days, ROUTING-RESEARCH-20261103).
-- **Test.** `test_a_cold_model_is_waited_for_and_answers`, `test_session_start_warms_the_decision_model_and_skips_the_other_two`,
-  `test_warm_loads_the_decision_model_with_the_verdict_keep_alive`, `test_warm_is_a_noop_when_off_or_opted_out`.
+- **Fix.** The hook client never makes a prompt wait for the load (docs/bugs/CLS-STALL-1.md). In `on`, session start loads
+  the decision model through its own endpoint (`door_verdict.warm`, detached child, same keep_alive as the verdict calls)
+  and skips the edit and generic warm-ups; `LLM_ROUTER_CLASSIFIER_PRELOAD=off` restores the old order. In `shadow` it
+  loads nothing (docs/bugs/CLS-EVICT-1.md): a log-only verdict must not evict another lane's model. The trade in `on` is
+  disclosed: the zero-Claude edit model is no longer pinned at session start (0 of 571 real prompts were edit-eligible in
+  30 days, ROUTING-RESEARCH-20261103).
+- **Test.** `test_a_cold_model_is_waited_for_and_answers`, `test_session_start_warms_the_decision_model_only_in_on_and_skips_the_other_two`,
+  `test_warm_loads_the_decision_model_only_in_on`, `test_warm_is_a_noop_when_off_or_opted_out`.

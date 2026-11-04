@@ -97,8 +97,10 @@ def main() -> int:
         return 2
     model = lc._model()
     if dv.mode() == "off" or not model:
-        print("set LLM_ROUTER_LOCAL_CLASSIFIER=shadow and LLM_ROUTER_DECISION_MODEL", file=sys.stderr)
+        print("set LLM_ROUTER_LOCAL_CLASSIFIER=shadow (or on) and LLM_ROUTER_DECISION_MODEL", file=sys.stderr)
         return 2
+    os.environ["LLM_ROUTER_LOCAL_CLASSIFIER"] = "on"   # shadow would skip a call while another model is resident, and
+    #                                                    does not preload: this check measures the call itself
     calls = 0
 
     def spend(n: int) -> None:

@@ -19,6 +19,9 @@ class FakeOllama:
         self.probs = {"haiku": 0.1, "sonnet": 0.7, "opus": 0.2}
         self.first_call_delay = 0.0     # the model "loads" on the first call
         self.fail = False               # answer 500
+        self.others: list[str] = []     # other models resident (the local text-job lane's model, say)
+        self.post_delay = 0.0           # every /v1/systemone call takes this long
+        self.ps_fail = False            # /api/ps answers 500 (residency unknown)
         self.calls = 0
         self.resident = False
         self.lock = threading.Lock()
@@ -38,7 +41,11 @@ class FakeOllama:
 
             def do_GET(self):  # noqa: N802
                 if self.path == "/api/ps":
-                    self._send(200, {"models": [{"name": "nimble:9b"}] if outer.resident else []})
+                    if outer.ps_fail:
+                        self._send(500, {"error": "boom"})
+                        return
+                    names = (["nimble:9b"] if outer.resident else []) + list(outer.others)
+                    self._send(200, {"models": [{"name": n} for n in names]})
                 else:
                     self._send(404, {})
 
@@ -49,8 +56,12 @@ class FakeOllama:
                     outer.calls += 1
                     first = not outer.resident
                     outer.resident = True
+                    if first:
+                        outer.others.clear()   # a single-slot Ollama: loading nimble evicts whatever else was resident
                 if first and outer.first_call_delay:
                     time.sleep(outer.first_call_delay)
+                if outer.post_delay:
+                    time.sleep(outer.post_delay)
                 if outer.fail:
                     self._send(500, {"error": "boom"})
                     return

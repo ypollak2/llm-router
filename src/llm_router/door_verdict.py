@@ -251,45 +251,78 @@ def note_result(ok: bool, now: float | None = None) -> None:
 # ---- the call -------------------------------------------------------------------------------------------------
 
 
-def _resident(model: str, base_url: str) -> bool | None:
-    """Is ``model`` loaded right now? One short ``/api/ps``; None when Ollama cannot say."""
+def _resident_models(base_url: str, timeout: float = 0.5) -> list[str] | None:
+    """The models Ollama has loaded right now, from one short ``/api/ps``; None when it cannot say."""
     import urllib.request
 
     from llm_router import local_privacy
 
     try:
         req = urllib.request.Request(f"{base_url}/api/ps")
-        with local_privacy.open_url(req, base_url=base_url, timeout=0.5) as resp:  # the one sanctioned local sink
+        with local_privacy.open_url(req, base_url=base_url, timeout=timeout) as resp:  # the one sanctioned local sink
             models = json.loads(resp.read()).get("models")
         if not isinstance(models, list):
             return None
-        names = {str(m.get("name") or m.get("model") or "") for m in models if isinstance(m, dict)}
-        norm = model if ":" in model else f"{model}:latest"
-        return any(n == model or n == norm for n in names)
+        return [str(m.get("name") or m.get("model") or "") for m in models if isinstance(m, dict)]
     except Exception:  # noqa: BLE001 - an unknown residency is logged as None, never an error
         return None
 
 
+def _is_resident(model: str, names: list[str] | None) -> bool | None:
+    if names is None:
+        return None
+    norm = model if ":" in model else f"{model}:latest"
+    return any(n == model or n == norm for n in names)
+
+
+def _resident(model: str, base_url: str, timeout: float = 0.5) -> bool | None:
+    """Is ``model`` loaded right now? None when Ollama cannot say (or the base is not one the classifier may use)."""
+    from llm_router import local_privacy
+
+    if not local_privacy.classifier_base_allowed(base_url):
+        return None
+    return _is_resident(model, _resident_models(base_url, timeout))
+
+
 def classify(text: str, kind: str, context: str = "", timeout_s: float | None = None) -> DoorVerdict:
-    """One synchronous verdict (the worker thread's body, and the 30-call check's). Never raises."""
+    """One synchronous verdict (a worker thread's body, and the checks'). ``timeout_s`` bounds the whole call, the
+    residency probe included. Never raises.
+
+    ``shadow`` never evicts: it classifies only when the model is already resident or nothing is (``/api/ps``), and
+    otherwise answers ``skipped_slot_busy`` without a request, so the local text-job lane's model is not pushed out of
+    memory by a log-only verdict (W10 review). ``on`` loads the model as before. A non-loopback Ollama is refused
+    (``refused_remote``) unless ``LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE`` is set."""
     t0 = time.perf_counter()
+    total = timeout_s if timeout_s is not None else budget_s(kind)
 
     def took() -> float:
         return round((time.perf_counter() - t0) * 1000.0, 1)
 
     try:
-        if mode() == "off":
+        m = mode()
+        if m == "off":
             return DoorVerdict(kind, "off")
         if breaker_open():
             return DoorVerdict(kind, "breaker")
         from llm_router import local_classifier as lc
+        from llm_router import local_privacy
 
         model = lc._model()
         if not model:
             return DoorVerdict(kind, "off")
-        resident = _resident(model, lc._base_url())
+        base = lc._base_url()
+        if not local_privacy.classifier_base_allowed(base):
+            return DoorVerdict(kind, "refused_remote", ms=took(), model=model)
+        names = _resident_models(base, min(0.5, max(0.1, total / 4)))
+        resident = _is_resident(model, names)
+        if m == "shadow" and resident is not True:
+            if names is None:
+                return DoorVerdict(kind, "skipped_slot_unknown", ms=took(), model=model, resident=None)
+            if names:
+                return DoorVerdict(kind, "skipped_slot_busy", ms=took(), model=model, resident=False)
+        left = max(0.2, total - (time.perf_counter() - t0))
         v = lc.classify_local(lc.Assembled(context or NO_CONTEXT.get(kind, NO_CONTEXT["prompt"]), text),
-                              model=model, timeout_s=timeout_s if timeout_s is not None else budget_s())
+                              model=model, timeout_s=left)
         out = DoorVerdict(kind, v.source, v.tier, v.confidence, took(), model, resident)
         if v.source in ("llm", "timeout"):  # a parse_error still means the model answered: it is up
             note_result(out.ok)
@@ -302,8 +335,10 @@ def classify(text: str, kind: str, context: str = "", timeout_s: float | None = 
 
 
 def preload_enabled() -> bool:
-    """``LLM_ROUTER_CLASSIFIER_PRELOAD=off`` keeps the old session start (edit model first, no decision model)."""
-    return mode() != "off" and os.environ.get("LLM_ROUTER_CLASSIFIER_PRELOAD", "on").strip().lower() not in (
+    """Session start loads the decision model only in ``on``: in ``shadow`` the verdict is log-only and must never
+    evict the model another lane (the local text jobs) is using, so the old edit / general warm-ups stay.
+    ``LLM_ROUTER_CLASSIFIER_PRELOAD=off`` keeps them in ``on`` too."""
+    return mode() == "on" and os.environ.get("LLM_ROUTER_CLASSIFIER_PRELOAD", "on").strip().lower() not in (
         "0", "off", "false", "no")
 
 
@@ -382,16 +417,23 @@ def local_lane_for(kind: str, task_type: str | None = None, text: str | None = N
 
 
 def codex_usable() -> bool:
-    """Codex can take a call now: a binary exists and neither the account nor a configured Codex model is benched
-    (``provider_reset``). The same two reads the Agent hook's delegation gate makes; budget and window gates stay
-    where they are."""
+    """Codex can take a prompt's ``codex:`` call now. The gates that call meets, read without spending anything:
+    a binary exists; neither the account nor a configured Codex model is benched (``provider_reset``); the Plus meter
+    reserve lets the router chain spend (``codex_meter.check``, D-373: it reserves Codex for sub-agent delegation, so
+    this is false whenever the weekly meter is at the reserve or no reading and no counter allows it); and the 5 h
+    delegation window still admits work (``codex_window.admit``, so a prompt hint never takes the last slots of
+    the window that sub-agent delegation is protecting)."""
     try:
-        from llm_router import codex_agent, provider_reset
+        from llm_router import codex_agent, codex_meter, codex_window, provider_reset
 
         if not codex_agent.is_codex_available():
             return False
         keys = ["codex"] + [f"codex:{m.split('/', 1)[-1]}" for m in codex_agent.CODEX_MODELS]
-        return all(provider_reset.get_provider_reset_until(k) is None for k in keys)
+        if any(provider_reset.get_provider_reset_until(k) is not None for k in keys):
+            return False
+        if not codex_meter.check("router_chain").allowed:
+            return False
+        return codex_window.admit(complexity="moderate", deep_reasoning=False).allowed
     except Exception as exc:  # noqa: BLE001
         from llm_router import failopen
 
@@ -484,15 +526,16 @@ class _Handle:
         self._lock = threading.Lock()
         atexit.register(self._at_exit)
 
-    def verdict(self) -> DoorVerdict:  # pragma: no cover - subclasses
+    def verdict(self, wait: bool = True) -> DoorVerdict:  # pragma: no cover - subclasses
         raise NotImplementedError
 
-    def decide(self, *, task_type: str | None = None, outcome: str = "", defer_log: bool = False) -> DoorDecision:
+    def decide(self, *, task_type: str | None = None, outcome: str = "", defer_log: bool = False,
+               wait: bool = True) -> DoorDecision:
         """Join the verdict, pick the door. ``applied`` only in ``on`` mode and only for a door that changes what the
-        hook builds (``_ACTING``). Never raises."""
+        hook builds (``_ACTING``). ``wait=False`` takes only what has already arrived. Never raises."""
         self._task_type = task_type
         try:
-            v = self.verdict()
+            v = self.verdict(wait=wait)
             c = preferred_door(v, kind=self.kind, task_type=task_type, text=self._text if self.kind == "prompt" else None)
             dec = DoorDecision(c.door, c.reason, mode() == "on" and c.door in _ACTING[self.kind], v, c.lane)
         except Exception as exc:  # noqa: BLE001
@@ -529,33 +572,38 @@ class _Handle:
         if self._logged:
             return
         if self._dec is None:
-            self.decide(outcome="exit_before_decision")
+            self.decide(outcome="exit_before_decision", wait=False)  # an early exit never waits for the model
         else:
             self.record("exit_before_record")
 
 
 class Pending(_Handle):
-    """One in-flight verdict made in a thread of this process, joined under the budget at ``decide``."""
+    """One in-flight verdict made in a thread of this process, joined under the budget at ``decide``. The budget runs
+    from ``t0`` (the moment ``start`` was entered), so the residency probe and the call are inside it."""
 
     def __init__(self, text: str, kind: str, *, session_id: str | None = None, context: str = "",
-                 tool_use_id: str | None = None) -> None:
+                 tool_use_id: str | None = None, t0: float | None = None) -> None:
         super().__init__(text, kind, session_id=session_id, tool_use_id=tool_use_id)
-        self._t0 = time.monotonic()
+        self._t0 = time.monotonic() if t0 is None else t0
         self._budget = budget_s(kind)
         self._box: list[DoorVerdict] = []
         self._thread = threading.Thread(target=self._work, args=(text, context), daemon=True)
         self._thread.start()
 
     def _work(self, text: str, context: str) -> None:
-        self._box.append(classify(text, self.kind, context, timeout_s=self._budget))
+        left = max(0.2, self._budget - (time.monotonic() - self._t0))
+        self._box.append(classify(text, self.kind, context, timeout_s=left))
 
-    def verdict(self) -> DoorVerdict:
-        """Wait until the budget (measured from ``start``) is spent; a late call reads as a timeout."""
-        left = self._budget - (time.monotonic() - self._t0)
-        self._thread.join(max(0.0, left))
+    def verdict(self, wait: bool = True) -> DoorVerdict:
+        """Wait until the budget (measured from ``start``) is spent; a late call reads as a timeout. Without ``wait``,
+        only an answer that is already here counts, and a missing one is ``abandoned``."""
+        if wait:
+            left = self._budget - (time.monotonic() - self._t0)
+            self._thread.join(max(0.0, left))
         if self._box:
             return self._box[0]
-        return DoorVerdict(self.kind, "timeout", ms=round((time.monotonic() - self._t0) * 1000.0, 1))
+        ms = round((time.monotonic() - self._t0) * 1000.0, 1)
+        return DoorVerdict(self.kind, "timeout" if wait else "abandoned", ms=ms)
 
 
 class Deferred(_Handle):
@@ -570,15 +618,37 @@ class Deferred(_Handle):
             "text": text[-2000:], "kind": kind, "context": context, "session_id": self.session_id,
             "tool_use_id": self.tool_use_id, "sha": self.sha, "chars": self.chars})
 
-    def verdict(self) -> DoorVerdict:
+    def verdict(self, wait: bool = True) -> DoorVerdict:
         return DoorVerdict(self.kind, "deferred" if self.spawned else "error")
 
-    def decide(self, *, task_type: str | None = None, outcome: str = "", defer_log: bool = False) -> DoorDecision:
+    def decide(self, *, task_type: str | None = None, outcome: str = "", defer_log: bool = False,
+               wait: bool = True) -> DoorDecision:
         self._task_type = task_type
         self._dec = DoorDecision("", f"deferred_{self.why}", False, self.verdict())
         if not defer_log:
             self.record(outcome or f"background_{self.why}")
         return self._dec
+
+
+class Withheld(_Handle):
+    """A prompt that holds a secret (the secret door): it is classified by no model, loopback or not. The row says so."""
+
+    def verdict(self, wait: bool = True) -> DoorVerdict:
+        return DoorVerdict(self.kind, "withheld_secret")
+
+
+def _holds_secret(text: str) -> bool:
+    """The secret door (``local_privacy.scan_secrets``, the one the Agent hook's NS3 / DIRECT paths use). A door error
+    holds: fail closed."""
+    try:
+        from llm_router import local_privacy
+
+        return bool(local_privacy.scan_secrets(text))
+    except Exception as exc:  # noqa: BLE001
+        from llm_router import failopen
+
+        failopen.record("LR-FO-DOOR-VERDICT-SECRET", exc)
+        return True
 
 
 def spawn_allowed() -> bool:
@@ -637,25 +707,31 @@ def _model_and_url() -> tuple[str, str] | None:
 
 
 def start(text: str, kind: str, *, session_id: str | None = None, context: str = "",
-          tool_use_id: str | None = None) -> Pending | Deferred | None:
+          tool_use_id: str | None = None) -> Pending | Deferred | Withheld | None:
     """Begin a verdict, or None when the classifier is off or there is nothing to classify. Never raises.
 
-    ``shadow`` always defers to a worker (nothing depends on the answer, so nothing waits for it). ``on`` decides from
-    a verdict made in this process; a PROMPT that finds the model not resident defers instead of waiting for the load.
-    Without a detached child (``LLM_ROUTER_NO_DETACHED_SPAWN``) or with the breaker open, the verdict is made here."""
+    The secret door runs first: a prompt that holds a secret is classified by no model (``Withheld``). ``shadow``
+    always defers to a worker (nothing depends on the answer, so nothing waits for it). ``on`` decides from a verdict
+    made in this process; a PROMPT that finds the model not resident defers instead of waiting for the load. Without a
+    detached child (``LLM_ROUTER_NO_DETACHED_SPAWN``) or with the breaker open, the verdict is made here. The budget of
+    a verdict made here runs from this call, so no step of it (the probe included) can hold a prompt past it."""
     try:
+        t0 = time.monotonic()
         m = mode()
         if m == "off" or kind not in KINDS or not (text or "").strip():
             return None
-        kw = {"session_id": session_id, "context": context, "tool_use_id": tool_use_id}
+        kw = {"session_id": session_id, "tool_use_id": tool_use_id}
+        if _holds_secret(text):
+            return Withheld(text, kind, **kw)
+        kw["context"] = context
         if spawn_allowed() and not breaker_open():
             if m == "shadow":
                 return Deferred(text, kind, "shadow", **kw)
             if kind == "prompt":
                 mu = _model_and_url()
-                if mu is not None and _resident(*mu) is False:
+                if mu is not None and _resident(*mu, timeout=min(0.25, budget_s(kind) / 4)) is False:
                     return Deferred(text, kind, "cold", **kw)
-        return Pending(text, kind, **kw)
+        return Pending(text, kind, t0=t0, **kw)
     except Exception as exc:  # noqa: BLE001
         from llm_router import failopen
 
@@ -709,6 +785,8 @@ def summarize(rows: list[dict]) -> dict:
         "n": n, "verdicts": covered, "coverage": round(covered / n, 4) if n else None,
         "inline_verdicts": len(inline_ok), "inline_coverage": round(len(inline_ok) / n, 4) if n else None,
         "deferred": len(deferred), "background_verdicts": len(bg_ok),
+        "background_by_source": {k: sum(1 for r in bg if str(r.get("source")) == k)
+                                 for k in sorted({str(r.get("source")) for r in bg})},
         "by_source": by_source, "latency_ms_p50": _pct(ms_ok, 0.5), "latency_ms_p95": _pct(ms_ok, 0.95),
         "cold_n": cold, "residency_known_n": len(known),
         "cold_share": round(cold / len(known), 4) if known else None,
@@ -739,7 +817,7 @@ def read_rows(days: float | None = None) -> list[dict]:
     return out
 
 
-__all__ = ["DoorVerdict", "DoorChoice", "DoorDecision", "Pending", "Deferred", "classify", "mode", "pick_door",
+__all__ = ["DoorVerdict", "DoorChoice", "DoorDecision", "Pending", "Deferred", "Withheld", "classify", "mode", "pick_door",
            "preferred_door", "hint_note", "start", "summarize", "read_rows", "local_lane_for", "text_job_of", "codex_usable",
            "warm", "preload_enabled", "spawn_allowed"]
 

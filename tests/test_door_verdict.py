@@ -499,12 +499,17 @@ def test_a_decision_not_recorded_before_exit_is_still_written(ollama):
 # ---- the warm-up ------------------------------------------------------------------------------------------------
 
 
-def test_warm_loads_the_decision_model_with_the_verdict_keep_alive(ollama, monkeypatch):
+def test_warm_loads_the_decision_model_only_in_on(ollama, monkeypatch):
+    # shadow (the fixture's mode): log-only, so it must not load a model over whatever the other lanes use
+    assert dv.warm() is None and ollama.calls == 0 and not dv.preload_enabled()
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+    assert dv.preload_enabled()
     assert dv.warm() == "nimble:9b"
     assert ollama.resident is True and ollama.calls == 1
 
 
 def test_warm_is_a_noop_when_off_or_opted_out(ollama, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
     monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_PRELOAD", "off")
     assert dv.warm() is None
     monkeypatch.delenv("LLM_ROUTER_CLASSIFIER_PRELOAD")
@@ -513,9 +518,166 @@ def test_warm_is_a_noop_when_off_or_opted_out(ollama, monkeypatch):
     assert ollama.calls == 0
 
 
-def test_warm_reports_a_model_that_did_not_load(ollama):
+def test_warm_reports_a_model_that_did_not_load(ollama, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
     ollama.fail = True
     assert dv.warm() is None
+
+
+# ---- shadow never evicts another lane's model (CLS-EVICT-1) -----------------------------------------------------
+
+
+def test_shadow_skips_when_another_model_is_resident_and_never_loads_over_it(ollama):
+    ollama.others = ["qwen3.6:35b-a3b-coding"]          # the local text-job lane's model
+    v = dv.classify("write a commit message", "prompt")
+    assert (v.source, v.resident, v.ok) == ("skipped_slot_busy", False, False)
+    assert ollama.calls == 0 and ollama.others == ["qwen3.6:35b-a3b-coding"]      # no request, nothing evicted
+    assert not dv.breaker_open()                        # a skip is not a failure
+
+
+def test_shadow_classifies_when_the_slot_is_free_or_nimble_is_already_resident(ollama):
+    assert dv.classify("first, nothing resident", "prompt").ok and ollama.calls == 1
+    ollama.others = ["gemma3:12b"]                      # nimble resident beside a small model: allowed
+    assert dv.classify("second", "prompt").ok and ollama.calls == 2
+
+
+def test_shadow_does_not_guess_when_residency_is_unknown(ollama):
+    ollama.ps_fail = True
+    v = dv.classify("a prompt", "prompt")
+    assert v.source == "skipped_slot_unknown" and ollama.calls == 0
+
+
+def test_on_loads_the_decision_model_even_beside_another_resident_model(ollama, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+    ollama.others = ["qwen3.6:35b-a3b-coding"]
+    assert dv.classify("a prompt", "prompt").ok and ollama.calls == 1
+
+
+def test_a_skipped_shadow_decision_leaves_a_row_that_says_why(ollama, detached):
+    ollama.others = ["qwen3.6:35b-a3b-coding"]
+    dv.start("a prompt", "prompt").decide()
+    (bg,) = _wait_rows(lambda r: r.get("outcome") == "background_result")
+    assert bg["source"] == "skipped_slot_busy" and ollama.calls == 0
+    assert dv.summarize(dv.read_rows())["background_by_source"] == {"skipped_slot_busy": 1}
+
+
+# ---- privacy: loopback only, and the secret door first ---------------------------------------------------------
+
+
+@pytest.mark.timing
+def test_a_non_loopback_ollama_is_refused_before_any_request(ollama, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_URL", "http://192.0.2.7:11434")       # TEST-NET: nothing is sent anywhere
+    t0 = time.monotonic()
+    v = dv.classify("a prompt", "prompt")
+    assert v.source == "refused_remote" and not v.ok and time.monotonic() - t0 < 1.0
+    from llm_router import local_classifier as lc
+
+    assert lc.classify_local("a prompt").source == "refused_remote"             # the shared client refuses too
+    assert dv.warm() is None
+
+
+def test_the_remote_opt_in_is_explicit_and_only_that_env(monkeypatch):
+    from llm_router import local_privacy as lp
+
+    assert lp.classifier_base_allowed("http://127.0.0.1:11434") and lp.classifier_base_allowed("http://localhost:11434")
+    assert not lp.classifier_base_allowed("http://192.0.2.7:11434")
+    assert not lp.classifier_base_allowed(None)
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE", "1")
+    assert lp.classifier_base_allowed("http://192.0.2.7:11434")
+
+
+def test_with_the_opt_in_a_remote_base_is_used(ollama, monkeypatch):
+    from llm_router import local_classifier as lc
+
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_URL", "http://192.0.2.7:11434")
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE", "1")
+    seen = []
+    monkeypatch.setattr(dv, "_resident_models", lambda base, timeout=0.5: [])
+    monkeypatch.setattr(lc, "classify_local", lambda *a, **k: seen.append(k) or lc.Verdict(
+        None, "sonnet", None, None, None, None, None, "direct", "llm", "nimble:9b", "sys1", 1.0, 0.7))
+    assert dv.classify("a prompt", "prompt").ok and len(seen) == 1
+
+
+SECRET = "my token is ghp_Zk3Qx9LmW2vTb7Yc4Rn8Hd5Pf1Js6GaE0uXo please use it"
+
+
+@pytest.mark.parametrize("kind", ["prompt", "agent"])
+def test_a_prompt_holding_a_secret_is_classified_by_no_model(ollama, kind):
+    h = dv.start(SECRET, kind, session_id="s3")
+    assert isinstance(h, dv.Withheld)
+    dec = h.decide()
+    assert (dec.door, dec.verdict.source, dec.applied) == ("", "withheld_secret", False)
+    assert ollama.calls == 0
+    raw = paths.state_path(dv.LEDGER).read_text()
+    assert "ghp_" not in raw and _rows()[-1]["source"] == "withheld_secret"
+
+
+def test_a_secret_prompt_is_withheld_even_where_a_worker_would_have_run(ollama, detached):
+    assert isinstance(dv.start(SECRET, "prompt"), dv.Withheld) and ollama.calls == 0
+
+
+# ---- the 2 s bound is the whole thing, and an early exit never waits ---------------------------------------------
+
+
+@pytest.mark.timing
+def test_a_prompt_decided_in_process_is_bounded_to_two_seconds_in_all(ollama, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+    ollama.resident = True
+    ollama.post_delay = 6.0
+    t0 = time.monotonic()
+    h = dv.start("a prompt", "prompt")
+    dec = h.decide()
+    assert time.monotonic() - t0 < 2.4                      # the probe is inside the budget, not before it
+    assert dec.verdict.source == "timeout" and dec.door == ""
+
+
+@pytest.mark.timing
+def test_an_early_exit_never_waits_for_the_model(ollama, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+    ollama.resident = True
+    ollama.post_delay = 6.0
+    h = dv.start("a prompt", "prompt")
+    t0 = time.monotonic()
+    h._at_exit()                                           # what atexit runs when the hook calls sys.exit early
+    assert time.monotonic() - t0 < 0.5
+    r = _rows()[-1]
+    assert (r["source"], r["outcome"]) == ("abandoned", "exit_before_decision")
+
+
+# ---- the Codex hint respects every gate the call will meet -------------------------------------------------------
+
+
+@pytest.fixture
+def codex_gates(monkeypatch):
+    from llm_router import codex_agent, codex_meter, codex_window, provider_reset
+
+    class V:
+        allowed = True
+
+    state = {"meter": True, "window": True, "bench": None, "binary": True}
+    monkeypatch.setattr(codex_agent, "is_codex_available", lambda: state["binary"])
+    monkeypatch.setattr(provider_reset, "get_provider_reset_until", lambda k, now=None: state["bench"])
+    monkeypatch.setattr(codex_meter, "check", lambda caller, now=None: type("V", (), {"allowed": state["meter"]})())
+    monkeypatch.setattr(codex_window, "admit", lambda **kw: type("A", (), {"allowed": state["window"]})())
+    return state
+
+
+def test_codex_usable_when_every_gate_allows(codex_gates):
+    assert dv.codex_usable() is True
+
+
+@pytest.mark.parametrize("gate,value", [("meter", False), ("window", False), ("bench", 9e9), ("binary", False)])
+def test_codex_unusable_when_any_gate_refuses(codex_gates, gate, value):
+    codex_gates[gate] = value
+    assert dv.codex_usable() is False
+
+
+def test_the_meter_is_asked_as_the_router_chain(monkeypatch, codex_gates):
+    from llm_router import codex_meter
+
+    seen = []
+    monkeypatch.setattr(codex_meter, "check", lambda caller, now=None: seen.append(caller) or type("V", (), {"allowed": True})())
+    assert dv.codex_usable() and seen == ["router_chain"]       # the name the llm() door's Codex call is checked under
 
 
 # ---- the report -------------------------------------------------------------------------------------------------

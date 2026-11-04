@@ -40,7 +40,7 @@ TIERS = ("local", "haiku", "sonnet", "opus")
 MODEL_TIERS = ("haiku", "sonnet", "opus")  # what the rubric can say; ``local`` is derived
 DIMS = ("scope", "ambiguity", "repo_knowledge", "reasoning_depth", "execution_load", "risk")
 DERIVATIONS = ("direct", "rule")
-SOURCES = ("llm", "cache", "timeout", "parse_error", "cold", "off", "abstain")
+SOURCES = ("llm", "cache", "timeout", "parse_error", "cold", "off", "abstain", "refused_remote")
 BACKENDS = ("chat", "systemone")  # LLM_ROUTER_CLASSIFIER_BACKEND; anything else reads as ``chat``
 # complexity is only filled for callers that still key on it; tier is never derived from it.
 TIER_TO_COMPLEXITY = {"local": "simple", "haiku": "simple", "sonnet": "moderate", "opus": "complex"}
@@ -255,6 +255,14 @@ def _now() -> float:
     return time.monotonic()
 
 
+def _base_refused() -> bool:
+    """True when the Ollama base is not loopback and the user has not opted in (``LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE``):
+    a prompt must not leave the machine to be classified. ``urlopen`` would otherwise be used for such a base."""
+    from llm_router import local_privacy
+
+    return not local_privacy.classifier_base_allowed(_base_url())
+
+
 def _fail(source: str, model: str, derivation: str, ms: float = 0.0) -> Verdict:
     if backend() == "systemone":
         from llm_router import decision_classifier
@@ -354,6 +362,8 @@ def classify_local(assembled: str, *, model: str | None = None, timeout_s: float
         derivation = DEFAULT_DERIVATION
     if not model:  # D-205: no setting and nothing discovered -> off, never an empty model name
         return _fail("off", model, derivation)
+    if _base_refused():
+        return _fail("refused_remote", model, derivation)
     if not assembled or not str(assembled).strip():
         return _fail("parse_error", model, derivation)
     budget = timeout_s if timeout_s is not None else _timeout_s()
@@ -487,6 +497,8 @@ async def _is_loaded(model: str, budget: float) -> bool:
 
 
 async def _warm(model: str) -> None:
+    if _base_refused():
+        return
     if backend() == "systemone":
         # A decision model refuses /api/generate and /api/chat ("does not support generate"),
         # so it loads only through its own endpoint; any state works, it is not cached.
@@ -591,6 +603,8 @@ async def classify_async(assembled: str, *, session_id: str | None, text_sha: st
         derivation = DEFAULT_DERIVATION
     if mode() == "off" or not model:  # no model: off, zero Ollama calls (D-205)
         return _fail("off", model, derivation)
+    if _base_refused():
+        return _fail("refused_remote", model, derivation)
     key = _key(session_id, text_sha, model, derivation, t_h, t_s)
     hit = _cache_get(key)
     if hit is not None:

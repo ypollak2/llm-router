@@ -20,17 +20,22 @@ status: fixed in `w10/local-classifier-decides` (deploy: install the hooks; `LLM
   zero-Claude edit, the sidecar, a user prefix, the strict-ack bypass and the MCP shortcut) and joins it at the
   quiet decision; `agent-route.py` starts one per routed spawn and joins it before the Codex attempt (Explore,
   allowlisted and retrieval-only spawns take no routing decision and get none). `LLM_ROUTER_LOCAL_CLASSIFIER`: `off`
-  (zero calls), `shadow` (a text-free row in `door_verdicts.jsonl`, written by a detached worker, nothing changes; the
-  default when the decision model is configured), `on` (the verdict decides). The tier is used as a difficulty signal:
+  (zero calls), `shadow` (a text-free row in `door_verdicts.jsonl`, written by a detached worker, nothing changes and no other lane's model is
+  evicted: CLS-EVICT-1; the default when the decision model is configured), `on` (the verdict decides). The tier is used as a difficulty signal:
   opus with p_max >= 0.6 picks `claude` (the prompt hint is quieted, or the spawn makes no Codex attempt, unit
   `unsuitable` / `reason_code=verdict_claude`); haiku with p_max >= 0.7 picks `local` where a local lane can do the job
   (a passed quality batch, or a commit-message / PR-description prompt with the local text-job switch on, or the caller
   says it has one: `preferred_door(..., local_lane=...)` is the seam for a sub-agent fallback); sonnet, or haiku with no
   lane, picks `codex` (a prompt hint gains `llm(prompt="codex: ...")` when Codex is usable; a spawn goes through the
   existing NS3 gates). No verdict means today's behaviour. A verdict opens no door the existing gates keep shut.
-  Share of the 7-day proxy verdicts (n=1,755, 2026-10-28 to 2026-11-03, `classifier_shadow.jsonl`) that reach each
-  door at its threshold: claude (opus >= 0.6) 72 (4.1%); local-eligible (haiku >= 0.7) 120 (6.8%, before the lane test,
-  which fails today for Q&A and code); codex (sonnet >= 0.5) 937 (53.4%) and the haiku verdicts below 0.7 add more.
+  Shares below are of the PROXY's turn-first rows, not of hook traffic (the hooks logged nothing before this change):
+  `classifier_shadow.jsonl` copy, 7 days 2026-10-28T08:03Z to 2026-11-03T16:34Z, n=1,755 verdicts. At the default
+  thresholds a verdict of that kind would have reached: claude door (opus >= 0.6) 72 (4.1%); local door (haiku >= 0.7)
+  120 (6.8%) before the lane test, which fails today for Q&A and code, so those 120 fall to the Codex door; codex door for
+  a PROMPT (sonnet >= 0.5, 937 = 53.4%, plus those haiku >= 0.7 with no lane, 120 = 6.8%) 1,057 (60.2%), and only when
+  Codex is usable (binary, not benched, meter reserve and window admit); the rest, 626 (35.7%), keep the default `mcp`
+  door (haiku < 0.7, sonnet < 0.5, opus < 0.6). For an Agent spawn every non-claude verdict is the `codex` door and the
+  existing NS3 gates decide.
 - **Test.** `tests/test_door_verdict.py` (a real HTTP server speaking the Ollama wire format) and
   `tests/test_door_verdict_hooks.py` (real hook subprocesses, a real executable standing in for `codex`):
   `test_shadow_logs_one_verdict_for_the_prompt_and_changes_nothing`,
