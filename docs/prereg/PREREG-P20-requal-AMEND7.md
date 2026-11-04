@@ -27,7 +27,7 @@ Owner decision D-375 (2026-11-04T21:29Z; the choice, verbatim: "Amend: load limi
 The quiet gate (AMEND3) runs before every local model call: `QUIET_READINGS` = 3 readings,
 `QUIET_INTERVAL_S` = 10 s apart; each needs load1 < `QUIET_LOAD1_MAX` (4.0 in the prereg) and free memory,
 counting the arm's own resident model (AMEND5), >= `QUIET_FREE_MEM_MIN_PCT` (40); otherwise the call parks
-(exit 3). Evidence that 4.0 cannot be met on the machine the run has to use:
+(exit 3). Evidence that the 4.0 gate did not pass on the machine the run has to use:
 
 * **AMEND6 made no local call in 4 h 50 min.** `run-qa` of `a6-qwen3-coder-30b` exited 3 ("machine not
   quiet") 145 times between 2026-11-04T16:37:13Z and 21:27:03Z, one attempt every 2 min: 90 times from
@@ -92,7 +92,7 @@ dirs together (a6 spent 0.00, above); rule R2 holds it, the script's own guard s
 
 The code reads load in one place (`quiet()`, before a call). It never uses load to change a request, a
 prompt, an option or a scoring rule, and `wall_s` is written to rows and ledgers but never read by `score`.
-Load therefore acts only through wall-clock time. Every outcome that depends on local wall-clock time, with
+As far as the code shows, load therefore acts through wall-clock time. Every outcome that depends on local wall-clock time, with
 the direction of its effect on the local arm (checked against `scripts/p20_requal.py` and
 `scripts/p20_code_runner.py` at `REPO_SHA`):
 
