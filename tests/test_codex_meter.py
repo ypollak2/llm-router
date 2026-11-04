@@ -162,6 +162,15 @@ def test_the_line_is_tunable_and_can_be_switched_off(codex_home, monkeypatch):
     assert codex_meter.reserve_pct() == codex_meter.DEFAULT_RESERVE_PCT
 
 
+def _no_process(monkeypatch) -> None:
+    """The CLI must not be started. Patch the spawn itself: ``find_codex_binary`` is also asked, on a fresh worker, by the
+    availability cache that route_and_call builds its chain from, which is not a start."""
+    async def boom(*_a, **_k):
+        raise AssertionError("a Codex process was started")
+
+    monkeypatch.setattr(codex_agent.asyncio, "create_subprocess_exec", boom)
+
+
 def _spend_daily(count: int, now: float | None = None) -> None:
     today = datetime.fromtimestamp(time.time() if now is None else now, timezone.utc).date().isoformat()
     path = paths.state_path(codex_meter.DAILY_COUNTER_FILE)
@@ -253,6 +262,7 @@ def test_run_codex_refuses_a_guarded_caller_before_anything_starts(codex_home, m
         raise AssertionError("a refused call must not look for the CLI")
 
     monkeypatch.setattr(codex_agent, "find_codex_binary", boom)
+    _no_process(monkeypatch)
     res = _run(model="gpt-6-astra", caller="llm_codex")
     assert not res.success and res.reason_code == "meter_reserved" and res.duration_sec == 0.0
     assert "reserved for sub-agent delegation" in res.content
@@ -280,7 +290,7 @@ def test_the_llm_codex_tool_returns_the_refusal_and_logs_it(codex_home, monkeypa
 
     _meter_at(codex_home, 72.0)
     monkeypatch.setattr(codex_tool, "is_codex_available", lambda: True)
-    monkeypatch.setattr(codex_agent, "find_codex_binary", lambda: pytest.fail("started the CLI"))
+    _no_process(monkeypatch)
     out = asyncio.run(codex_tool.llm_codex("what is 2+2"))
     assert "reserved for sub-agent delegation" in out
     assert [(r["kind"], r["caller"]) for r in _events()] == [("refused", "llm_codex")]
@@ -330,6 +340,7 @@ async def test_a_refused_chain_entry_fails_over_to_the_next_provider_and_is_not_
     from llm_router.router import route_and_call
     from llm_router.types import RoutingProfile, TaskType
 
+    codex_agent._reset_codex_cache_for_tests()  # a fresh worker: nothing cached about the CLI yet
     _meter_at(codex_home, 91.0)
     monkeypatch.setenv("LLM_ROUTER_PROVIDER_RESET_PATH", str(tmp_path / "reset.json"))
     monkeypatch.delenv("LLM_ROUTER_DISABLE_SUBPROCESS_BACKENDS", raising=False)
@@ -337,7 +348,7 @@ async def test_a_refused_chain_entry_fails_over_to_the_next_provider_and_is_not_
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: True)
     monkeypatch.setattr("llm_router.router.is_gemini_cli_available", lambda: False)
     monkeypatch.setattr("llm_router.claude_usage.get_claude_pressure", lambda: 0.97)
-    monkeypatch.setattr(codex_agent, "find_codex_binary", lambda: pytest.fail("started the CLI"))
+    _no_process(monkeypatch)
     try:
         await route_and_call(TaskType.CODE, "refactor this function", profile=RoutingProfile.BALANCED)
     except Exception:  # noqa: BLE001 -- every other provider is absent in the test environment
