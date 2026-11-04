@@ -238,10 +238,10 @@ def test_end_to_end_from_the_unit_stream_to_the_two_rows(monkeypatch, sessions):
     assert data["call_mix"]["outside_claude"] == {"k": 5, "n": 100} and data["call_mix"]["below_opus"] == {"k": 75, "n": 95}
     out = tick.render_rows(data, now=time.time())
     assert "NS strict 0/130 (blind) 7d units" in out[0]
-    # W9: the refresher also counted Codex model responses (the label says so; `llm-router kpi` keeps "off-Claude") and
-    # measured the local attempts: none here, so n/a with its unit and window, not 0%
+    # W9: the refresher also counted Codex model responses (the label says so; `llm-router kpi` keeps "off-Claude").
+    # This home has no attempt ledger, so the local figure is unknown: n/a with its window, never "0 attempts"
     assert out[1] == ("routed (incl. Codex turns) 5.0% (5/100 calls, 7d, organic) · <Opus 78.9% (75/95 Claude calls, 7d,"
-                      " organic) · local OK n/a (0 attempts, 7d, organic)")
+                      " organic) · local OK n/a (7d, organic)")
 
 
 def test_the_widest_realistic_status_row_still_fits_and_keeps_its_hooks_warning():

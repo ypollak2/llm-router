@@ -32,11 +32,16 @@ DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
     they are reported apart (``codex.discarded_responses``) and never inside routed%;
   - each router attempt a non-Claude provider answered and the router accepted (``execution_events``
     ``attempt_completed``): local (Ollama) attempts, Codex via the router's own chain, every MCP ``llm_*`` call
-    answered by a non-Claude model. The attempt belongs to the session when its route (``correlation_id`` or
-    ``trace_id``) is a ``routing_decisions`` row of the session or one named by an MCP ``tool_use`` id in the
-    session's transcripts, so a call the MCP server logged under ``unknown:mcp`` still lands in the session that
-    made it. An attempt a text job's acceptance check rejected (``text_job_local_attempts.jsonl``, ``rejected``)
-    is not a call used and is not in n. A cache hit, a refused or breaker-held call is no attempt;
+    answered by a non-Claude model. The attempt belongs to the session when its route is a ``routing_decisions`` row
+    of the session or one named by an MCP ``tool_use`` id in the session's transcripts, so a call the MCP server
+    logged under ``unknown:mcp`` still lands in the session that made it. The event names its route by
+    ``correlation_id``, which is only 8 hex characters (``router.py``), so the join is constrained (:class:`_Routes`):
+    the trace ids must agree, or, when either side has none, the event must have ended inside the window before the
+    route was logged; a route that cannot be told from another is unplaceable. An attempt a text job's acceptance
+    check rejected (``text_job_local_attempts.jsonl`` ``rejected``) is not a call used and is not in n; the row is
+    matched to its attempt by job identity (:func:`_same_job`: the ``tool_use`` id of the ``llm_text_job`` call, else
+    the session), never by model and time alone, and one function does it for the session and the 7-day population.
+    A cache hit, a refused or breaker-held call is no attempt;
   - a Claude Code message served by a non-Claude model (proxy).
 
 ``local OK Y% (a/b, session)``
@@ -45,8 +50,9 @@ DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
   vLLM, llama.cpp), whatever its outcome (``attempt_completed``, ``attempt_failed``, ``attempt_rejected``), so a
   local model that errored and was rescued by the next chain entry is a failed attempt in b;
 * a = those that were used: ``attempt_completed`` and not rejected afterwards by a text job's acceptance check
-  (``text_job_local_attempts.jsonl`` ``rejected`` row, matched to the completed attempt of the same model that
-  finished at most :data:`_GATE_WINDOW_S` seconds before it).
+  (``text_job_local_attempts.jsonl`` ``rejected`` row of the same job or session, same model, that ended at most
+  :data:`_GATE_WINDOW_S` seconds after the completion). Rows written before the ledger carried ``session_id`` and
+  ``tool_use_id`` name no job and are matched to nothing: their attempts read as used.
 * ``routing_decisions.success`` is NOT used anywhere here: it is "the response is usable" for the whole call
   (``router.py``), not "the local model worked", and a call rescued by a later chain entry has success 1 while
   its first local attempts failed.
@@ -101,6 +107,10 @@ _ATTEMPT_EVENTS = {"attempt_completed": "ok", "attempt_failed": "error", "attemp
 #: A text job writes its acceptance row right after the route returns: the completed attempt it judged ended at
 #: most this long before the row.
 _GATE_WINDOW_S = 10.0
+#: An attempt ends at most this long before its route is logged (a call can run for minutes) and at most this long
+#: after (the clocks of the two writers).
+_ROUTE_BEFORE_S = 900.0
+_ROUTE_AFTER_S = 10.0
 _IN_CHUNK = 400
 
 
@@ -463,9 +473,53 @@ def _chunks(items: list, size: int = _IN_CHUNK):
         yield items[i:i + size]
 
 
+def _real_session(sid: object) -> str | None:
+    """``sid`` when it names a session (``unknown:mcp`` and the other ``unknown*`` placeholders do not)."""
+    return sid if isinstance(sid, str) and sid and not sid.startswith("unknown") else None
+
+
+class _Routes:
+    """The ``routing_decisions`` rows an attempt can belong to, indexed by correlation id and by trace id.
+
+    ``correlation_id`` is ``uuid4().hex[:8]`` (``router.py``): 32 bits, so two routes can share one. An event whose
+    ``session_id`` column (its route's correlation id) names a route is therefore accepted only when the trace ids
+    agree (32 hex characters: exact) or, when either side has none, when the event ended inside the window before
+    the route was logged (:data:`_ROUTE_BEFORE_S` / :data:`_ROUTE_AFTER_S`). Two routes that both satisfy it with
+    different identities make the event unplaceable (``None``), not a guess."""
+
+    def __init__(self) -> None:
+        self.by_corr: dict[str, list[tuple]] = {}
+        self.by_trace: dict[str, tuple[str | None, str | None]] = {}
+
+    def add(self, corr: object, trace: object, ts: object, sid: object, tool: object) -> None:
+        ident = (sid if isinstance(sid, str) else None, tool if isinstance(tool, str) and tool else None)
+        if isinstance(corr, str) and corr:
+            self.by_corr.setdefault(corr, []).append((trace if isinstance(trace, str) and trace else None, _ts(ts)) + ident)
+        if isinstance(trace, str) and trace:
+            self.by_trace.setdefault(trace, ident)
+
+    def place(self, corr: object, trace: object, ts: float) -> tuple[str | None, str | None] | None:
+        """``(session_id, tool_use_id)`` of the route an event belongs to, or None."""
+        if isinstance(trace, str) and trace and trace in self.by_trace:
+            return self.by_trace[trace]
+        found = set()
+        for r_trace, r_ts, sid, tool in self.by_corr.get(corr, []) if isinstance(corr, str) else ():
+            if r_trace and isinstance(trace, str) and trace:
+                continue                                     # both carry a trace id and it is not the same route's
+            if r_ts is not None and -_ROUTE_AFTER_S <= r_ts - ts <= _ROUTE_BEFORE_S:
+                found.add((sid, tool))
+        return next(iter(found)) if len(found) == 1 else None
+
+
+def _attempt_query(ev: set[str], marks: str) -> str:
+    return ("SELECT rowid, ts, provider, model, event_type, "
+            f"{'accepted' if 'accepted' in ev else 'NULL'}, session_id, "
+            f"{'trace_id' if 'trace_id' in ev else 'NULL'} FROM execution_events WHERE event_type IN ({marks}) AND ")
+
+
 def session_attempts(session_id: str, tool_use_ids: list[str]) -> list[dict] | None:
-    """Every router attempt of the session (see the module docstring), or ``None`` when the ledger cannot be
-    read: unknown, not zero."""
+    """Every router attempt of the session (see the module docstring), each with the ``tool_use`` id of its route
+    (``tool``) and ``session``, or ``None`` when the ledger cannot be read: unknown, not zero."""
     from llm_router import ledger_view as lv
 
     con = lv._connect(None, 1.0)
@@ -476,32 +530,26 @@ def session_attempts(session_id: str, tool_use_ids: list[str]) -> list[dict] | N
         if not ({"correlation_id", "session_id"} <= rd and {"event_type", "provider", "model", "session_id", "ts"} <= ev):
             return None
         prov = " AND provenance = 'runtime'" if "provenance" in rd else ""
-        trace_col = "trace_id" if "trace_id" in rd else "NULL"
-        base = f"SELECT correlation_id, {trace_col} FROM routing_decisions WHERE "
-        corr: set[str] = set()
-        trace: set[str] = set()
-
-        def take(rows) -> None:
-            for c, t in rows:
-                if c:
-                    corr.add(c)
-                if t:
-                    trace.add(t)
-
-        take(con.execute(base + "session_id = ?" + prov, (session_id,)))
+        base = ("SELECT correlation_id, " + ("trace_id" if "trace_id" in rd else "NULL") + ", "
+                + ("timestamp" if "timestamp" in rd else "NULL") + ", session_id, "
+                + ("tool_use_id" if "tool_use_id" in rd else "NULL") + " FROM routing_decisions WHERE ")
+        routes = _Routes()
+        for row in con.execute(base + "session_id = ?" + prov, (session_id,)):
+            routes.add(*row)
         if "tool_use_id" in rd:
             for chunk in _chunks([t for t in tool_use_ids if t]):
-                take(con.execute(base + f"tool_use_id IN ({','.join('?' for _ in chunk)})" + prov, chunk))
+                for row in con.execute(base + f"tool_use_id IN ({','.join('?' for _ in chunk)})" + prov, chunk):
+                    routes.add(row[0], row[1], row[2], session_id, row[4])    # the MCP call is the session's
         marks = ",".join("?" for _ in _ATTEMPT_EVENTS)
-        sel = ("SELECT rowid, ts, provider, model, event_type, "
-               f"{'accepted' if 'accepted' in ev else 'NULL'} FROM execution_events WHERE event_type IN ({marks}) AND ")
+        sel = _attempt_query(ev, marks)
         found: dict[int, dict] = {}
-        for column, values in (("session_id", sorted(corr)), ("trace_id", sorted(trace) if "trace_id" in ev else [])):
+        for column, values in (("session_id", sorted(routes.by_corr)), ("trace_id", sorted(routes.by_trace) if "trace_id" in ev else [])):
             for chunk in _chunks(values):
-                q = sel + f"{column} IN ({','.join('?' for _ in chunk)})"
-                for row in con.execute(q, [*_ATTEMPT_EVENTS, *chunk]):
-                    a = _event_attempt(row)
-                    if a is not None:
+                for row in con.execute(sel + f"{column} IN ({','.join('?' for _ in chunk)})", [*_ATTEMPT_EVENTS, *chunk]):
+                    a = _event_attempt(row[:6])
+                    placed = routes.place(row[6], row[7], row[1]) if a is not None else None
+                    if a is not None and placed is not None:
+                        a["session"], a["tool"] = session_id, placed[1]
                         found.setdefault(row[0], a)
     finally:
         con.close()
@@ -509,9 +557,10 @@ def session_attempts(session_id: str, tool_use_ids: list[str]) -> list[dict] | N
 
 
 def window_attempts(since: float, until: float, tool_sessions: dict[str, str]) -> list[dict] | None:
-    """Every router attempt in ``[since, until]`` with the session it belongs to (``session`` key, None when it
-    cannot be placed). A route logged under ``unknown:mcp`` (the MCP server does not know the Claude session) is
-    placed through the ``tool_use`` id its transcript block carries (``tool_sessions``, filled by the unit pass)."""
+    """Every router attempt in ``[since, until]`` with the session it belongs to (``session``, None when it cannot
+    be placed) and its route's ``tool_use`` id (``tool``). A route logged under ``unknown:mcp`` (the MCP server does
+    not know the Claude session) is placed through the ``tool_use`` id its transcript block carries
+    (``tool_sessions``, filled by the unit pass). ``None`` when the ledger cannot be read."""
     from llm_router import ledger_view as lv
 
     con = lv._connect(None, 1.0)
@@ -522,33 +571,24 @@ def window_attempts(since: float, until: float, tool_sessions: dict[str, str]) -
         if not ({"correlation_id", "session_id", "timestamp"} <= rd and {"event_type", "provider", "model", "session_id", "ts"} <= ev):
             return None
         prov = " AND provenance = 'runtime'" if "provenance" in rd else ""
-        trace_col = "trace_id" if "trace_id" in rd else "NULL"
-        tool_col = "tool_use_id" if "tool_use_id" in rd else "NULL"
         from datetime import datetime, timezone
 
         lo = datetime.fromtimestamp(since - 86400.0, timezone.utc).strftime("%Y-%m-%d")
-        by_corr: dict[str, tuple] = {}
-        by_trace: dict[str, tuple] = {}
-        for c, t, sid, tool in con.execute(
-                f"SELECT correlation_id, {trace_col}, session_id, {tool_col} FROM routing_decisions "
-                f"WHERE timestamp >= ?{prov}", (lo,)):
-            if c:
-                by_corr.setdefault(c, (sid, tool))
-            if t:
-                by_trace.setdefault(t, (sid, tool))
-        marks = ",".join("?" for _ in _ATTEMPT_EVENTS)
-        trace_ev = "trace_id" if "trace_id" in ev else "NULL"
-        out: list[dict] = []
+        routes = _Routes()
         for row in con.execute(
-                f"SELECT rowid, ts, provider, model, event_type, {'accepted' if 'accepted' in ev else 'NULL'}, "
-                f"session_id, {trace_ev} FROM execution_events WHERE event_type IN ({marks}) AND ts >= ? AND ts <= ?",
-                [*_ATTEMPT_EVENTS, since, until]):
+                "SELECT correlation_id, " + ("trace_id" if "trace_id" in rd else "NULL") + ", timestamp, session_id, "
+                + ("tool_use_id" if "tool_use_id" in rd else "NULL") + f" FROM routing_decisions WHERE timestamp >= ?{prov}",
+                (lo,)):
+            routes.add(*row)
+        marks = ",".join("?" for _ in _ATTEMPT_EVENTS)
+        out: list[dict] = []
+        for row in con.execute(_attempt_query(ev, marks) + "ts >= ? AND ts <= ?", [*_ATTEMPT_EVENTS, since, until]):
             a = _event_attempt(row[:6])
             if a is None:
                 continue
-            sid, tool = by_corr.get(row[6]) or by_trace.get(row[7]) or (None, None)
-            real = sid if isinstance(sid, str) and sid and not sid.startswith("unknown") else None
-            a["session"] = real or tool_sessions.get(tool) if tool else real
+            sid, tool = routes.place(row[6], row[7], row[1]) or (None, None)
+            a["session"] = _real_session(sid) or (tool_sessions.get(tool) if tool else None)
+            a["tool"] = tool
             out.append(a)
     finally:
         con.close()
@@ -559,12 +599,15 @@ def _norm_model(model: str) -> str:
     return model.replace("ollama_chat/", "ollama/", 1)
 
 
-def text_job_rejections(since: float) -> list[tuple[float, str]]:
-    """``(ts, model)`` of every local text-job attempt the acceptance check rejected since ``since`` (the router
-    answered; the job threw the answer away)."""
+def text_job_rejections(since: float, tool_sessions: dict[str, str] | None = None) -> list[dict]:
+    """Every local text-job attempt the acceptance check rejected since ``since`` (the router answered; the job
+    threw the answer away): ``{ts, model, session, tool}``. ``session`` is the row's session id when it names one,
+    else the session its ``tool_use`` id belongs to (``tool_sessions``); ``tool`` is the ``tool_use`` id of the
+    ``llm_text_job`` call. A row written before the ledger carried either (no ``session_id``, no ``tool_use_id``)
+    names no session and is matched to nothing."""
     from llm_router import text_job_ledger as tj
 
-    out: list[tuple[float, str]] = []
+    out: list[dict] = []
     try:
         text = paths.state_path(tj.LOCAL_ATTEMPTS_FILENAME).read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -575,22 +618,35 @@ def text_job_rejections(since: float) -> list[tuple[float, str]]:
         except ValueError:
             continue
         ts = row.get("ts") if isinstance(row, dict) else None
-        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts >= since \
-                and row.get("outcome") == tj.OUTCOME_REJECTED and isinstance(row.get("model"), str):
-            out.append((float(ts), row["model"]))
-    return sorted(out)
+        if not (isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts >= since
+                and row.get("outcome") == tj.OUTCOME_REJECTED and isinstance(row.get("model"), str)):
+            continue
+        tool = row.get("tool_use_id") if isinstance(row.get("tool_use_id"), str) and row.get("tool_use_id") else None
+        out.append({"ts": float(ts), "model": row["model"], "tool": tool,
+                    "session": _real_session(row.get("session_id")) or (tool_sessions or {}).get(tool or "")})
+    return sorted(out, key=lambda r: r["ts"])
 
 
-def apply_text_job_gate(attempts: list[dict], rejections: list[tuple[float, str]]) -> int:
-    """Mark the completed local attempt each text-job rejection judged as not used (one-to-one, the latest
-    unmarked completed attempt of the same model that ended up to :data:`_GATE_WINDOW_S` before the row).
+def _same_job(attempt: dict, rejection: dict) -> bool:
+    """Whether a rejection belongs to the call that made this attempt: the same ``tool_use`` id when both carry
+    one (two ids are two jobs, whatever else matches), else the same session. Never by model and time alone."""
+    if rejection["tool"] and attempt.get("tool"):
+        return rejection["tool"] == attempt["tool"]
+    return bool(rejection["session"]) and rejection["session"] == attempt.get("session")
+
+
+def apply_text_job_gate(attempts: list[dict], rejections: list[dict]) -> int:
+    """Mark the completed local attempt each text-job rejection judged as not used. ONE function for the session
+    figure and the 7-day population. A rejection is matched to an attempt of the SAME job or session (:func:`_same_job`),
+    of the same model, that ended up to :data:`_GATE_WINDOW_S` before the row, one-to-one (the latest unmarked one).
     Returns how many were marked."""
     marked = 0
-    for ts, model in rejections:
+    for r in rejections:
         best = None
         for a in attempts:
-            if a["kind"] == "local" and a["used"] and _norm_model(a["model"]) == _norm_model(model) \
-                    and 0.0 <= ts - a["ts"] <= _GATE_WINDOW_S and (best is None or a["ts"] > best["ts"]):
+            if a["kind"] == "local" and a["used"] and _norm_model(a["model"]) == _norm_model(r["model"]) \
+                    and 0.0 <= r["ts"] - a["ts"] <= _GATE_WINDOW_S and _same_job(a, r) \
+                    and (best is None or a["ts"] > best["ts"]):
                 best = a
         if best is not None:
             best["used"], best["gate_rejected"] = False, True
@@ -618,7 +674,7 @@ def _part(code: str, fn):
 def _router_attempts(session_id: str, mcp_ids: list[str]) -> list[dict] | None:
     attempts = session_attempts(session_id, mcp_ids)
     if attempts:
-        apply_text_job_gate(attempts, text_job_rejections(attempts[0]["ts"]))
+        apply_text_job_gate(attempts, text_job_rejections(attempts[0]["ts"], dict.fromkeys(mcp_ids, session_id)))
     return attempts
 
 
@@ -682,7 +738,8 @@ def window_extras(since: float, until: float, now: float, kind_of, tool_sessions
     * ``local``: ``{attempts, ok}`` of the local router attempts of the same sessions, by the same definition as the
       session figure (an attempt is OK when used). An attempt on a route logged under ``unknown:mcp`` is placed
       through its ``tool_use`` id (``tool_sessions``); ``unattributed_local`` counts the local attempts that no
-      session could be found for (not in ``local``)."""
+      session could be found for (not in ``local``). ``local`` and ``unattributed_local`` are ``None`` when the attempt
+      ledger cannot be read: unknown, which every renderer prints as n/a."""
     rows = [r for r in _ns_rows(None) if since <= r["ts"] <= until and kind_of(r.get("session_id"), r.get("session_kind"))]
     runs = codex_run_responses(rows, now)
     extra = 0
@@ -695,10 +752,13 @@ def window_extras(since: float, until: float, now: float, kind_of, tool_sessions
         extra += more
         if more and isinstance(row.get("session_id"), str):
             by_session[row["session_id"]] = by_session.get(row["session_id"], 0) + more
-    attempts = window_attempts(since, until, tool_sessions or {}) or []
-    placed = [a for a in attempts if a["session"] and kind_of(a["session"], None)]
-    apply_text_job_gate(placed, text_job_rejections(since))
-    local = local_figures(placed)
+    attempts = window_attempts(since, until, tool_sessions or {})
+    local = None                                            # the ledger could not be read: unknown, never "0 attempts"
+    unattributed = None
+    if attempts is not None:
+        placed = [a for a in attempts if a["session"] and kind_of(a["session"], None)]
+        apply_text_job_gate(placed, text_job_rejections(since, tool_sessions))
+        local = local_figures(placed)
+        unattributed = sum(1 for a in attempts if a["kind"] == "local" and not a["session"])
     return {"codex_extra": extra, "by_session": by_session, "runs": sum(1 for r in runs if r["row"].get("outcome") == "delegated"),
-            "flagged_runs": sum(1 for r in runs if r["flagged"]), "local": local,
-            "unattributed_local": sum(1 for a in attempts if a["kind"] == "local" and not a["session"])}
+            "flagged_runs": sum(1 for r in runs if r["flagged"]), "local": local, "unattributed_local": unattributed}

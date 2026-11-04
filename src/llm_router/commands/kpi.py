@@ -608,8 +608,9 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
     if extras:
         out["codex"] = {"runs": extras["runs"], "extra_responses": extras["codex_extra"],
                         "flagged_runs": extras["flagged_runs"]}
-        out["local_ok"] = {"k": extras["local"]["ok"], "n": extras["local"]["attempts"],
-                           "unattributed_attempts": extras["unattributed_local"]}
+        if extras.get("local") is not None:       # None = the attempt ledger could not be read: no figure, not "0 attempts"
+            out["local_ok"] = {"k": extras["local"]["ok"], "n": extras["local"]["attempts"],
+                               "unattributed_attempts": extras["unattributed_local"]}
     return out
 
 
@@ -2865,12 +2866,15 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     kpis_diag = joins.pop("diag")
     extras = None
     if routing_detail:
-        from llm_router import session_routing
+        from llm_router import failopen, session_routing
 
-        extras = session_routing.window_extras(
-            win.since if win is not None else now_ts - days * 86400.0, win.until if win is not None else now_ts,
-            now_ts, lambda sid, stamp: isinstance(sid, str) and bool(sid) and index.resolve(sid, stamp).kind in allowed,
-            tool_sessions or {})
+        try:
+            extras = session_routing.window_extras(
+                win.since if win is not None else now_ts - days * 86400.0, win.until if win is not None else now_ts,
+                now_ts, lambda sid, stamp: isinstance(sid, str) and bool(sid) and index.resolve(sid, stamp).kind in allowed,
+                tool_sessions or {})
+        except Exception as exc:  # noqa: BLE001 -- the extras are a refinement: NS and the rest of the scorecard stand without them
+            failopen.record("CHZ-FO-ROUTING-WINDOW", exc)
     call_mix_r = _call_mix(unit_list, allowed, index, win, sessions=call_mix_sessions, extras=extras)
     d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index, win), days, now_ts)
     pop = _proxy_population(all_rows, days, allowed, now_ts, until=until_ts)

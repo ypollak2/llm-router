@@ -10,7 +10,8 @@ of that, so the status line counts what the rollout shows:
   one sampling request; the analogue of a Claude ``message.id``). A forked or resumed rollout repeats the lines of
   its parent, so responses are counted as a SET of ids across the run's thread and every descendant thread;
 * a rollout from a Codex CLI that writes no ``token_usage_record`` is counted by its ``token_count`` events that
-  carry usage (one per response), summed;
+  carry usage (one per response), as a set of line digests across the same files: a replayed parent line is one
+  response, not two;
 * a run whose rollout cannot be found, or holds neither record, has NO countable responses: the caller counts the
   run as one response and flags it. It is never counted as zero (the run did happen) and never guessed larger.
 
@@ -23,6 +24,7 @@ or the per-tick renderer: it lists and reads rollout files.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -136,10 +138,11 @@ class RolloutIndex:
         return [self.files[t][1] for t in members]
 
 
-def _responses_of(path: Path, ids: set[str]) -> int:
-    """Add the ``response_id`` of every ``token_usage_record`` line to ``ids``; return the ``token_count``
-    events that carry usage (the fallback count when the file has no ``token_usage_record``)."""
-    usage_events = 0
+def _responses_of(path: Path, ids: set[str], usage_events: set[bytes]) -> None:
+    """Add the ``response_id`` of every ``token_usage_record`` line to ``ids``, and a digest of every ``token_count``
+    event that carries usage to ``usage_events`` (the fallback when the file has no ``token_usage_record``). A forked
+    or resumed rollout replays its parent's lines verbatim (timestamp and ordinal included), so both are SETS: the
+    same line in two files is one response."""
     try:
         with open(path, "rb") as fh:
             for line in fh:
@@ -152,10 +155,9 @@ def _responses_of(path: Path, ids: set[str]) -> int:
                     if isinstance(rid, str) and rid:
                         ids.add(rid)
                 elif b'"token_count"' in line and b'"last_token_usage"' in line:   # info:null carries no usage
-                    usage_events += 1
+                    usage_events.add(hashlib.sha1(line.strip()).digest())
     except OSError:
-        return 0
-    return usage_events
+        return
 
 
 def count_run(index: RolloutIndex, thread_id: str, end: float) -> RunCount:
@@ -166,13 +168,13 @@ def count_run(index: RolloutIndex, thread_id: str, end: float) -> RunCount:
     if not files:
         return RunCount(None)
     ids: set[str] = set()
-    token_counts = 0
+    usage_events: set[bytes] = set()
     for path in files:
-        token_counts += _responses_of(path, ids)
+        _responses_of(path, ids, usage_events)
     if ids:
         return RunCount(len(ids), threads=len(files), how="rollout")
-    if token_counts:
-        return RunCount(token_counts, threads=len(files), how="token_count")
+    if usage_events:
+        return RunCount(len(usage_events), threads=len(files), how="token_count")
     return RunCount(None, threads=len(files))
 
 

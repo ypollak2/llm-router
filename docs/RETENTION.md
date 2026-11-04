@@ -19,9 +19,9 @@ copies do not outlive their TTL). This file lists the history files that have a 
 
 | Item | Value |
 |---|---|
-| Files | `session_routing/<session>.json` (scan state: per transcript file a byte offset, a 16-hex head digest, the message ids with a model slot, and the MCP `tool_use` ids; plus the proxy ledger offset and the ids it served), `session_routing/<session>.result.json` (the last figure, about 700 bytes), `session_routing/codex_counts.json` (model responses of finished Codex runs, keyed by run identity: session, `ts`, thread and tool call of the delegation row). No prompt text and no answer text: ids, models, counts. |
+| Files | `session_routing/<session>.json` (scan state: per transcript file a byte offset, a 16-hex head digest, the message ids with a model slot, and the MCP `tool_use` ids; plus the proxy ledger offset and the ids it served), `session_routing/<session>.result.json` (the last figure: counts and flags only), `session_routing/codex_counts.json` (model responses of finished Codex runs, keyed by run identity: session, `ts`, thread and tool call of the delegation row). No prompt text and no answer text: ids, models, counts. |
 | Writer | `session_routing.compute`, called only from `statusline_snapshot.build`, which only the detached refresher runs. Never the per-tick renderer, never a hook. Files are 0600, replaced atomically. |
-| Kept | The newest 20 sessions (index and result each, `session_routing.KEEP_INDEXES`); `codex_counts.json` at most 5,000 entries, oldest dropped. A deleted file is rebuilt by the next refresh (a first scan of a 400 MB session takes one to three runs; the line reads `routed n/a (counting transcripts, session)` meanwhile). |
+| Kept | The newest 20 sessions (index and result each, `session_routing.KEEP_INDEXES`); `codex_counts.json` at most 5,000 entries, oldest dropped. A deleted file is rebuilt by the next refresh: a scan is resumable by byte offset and spends at most `session_routing.BUDGET_S` seconds per run, and while it has not reached the end of the transcripts the line reads `routed n/a (counting transcripts, session)`. |
 | Failure | A failed write is recorded with `failopen` codes `CHZ-FO-ROUTING-WRITE` / `CHZ-FO-ROUTING-PRUNE`; the figure is still returned, the next run is just slower. |
 
 ## `active_days.jsonl` (P3.7, S7, D-26 option A)

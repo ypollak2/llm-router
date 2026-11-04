@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import textwrap
@@ -180,9 +181,11 @@ def _utc(seconds: float) -> str:
 
 
 def _routing_db(home: Path, routes=(), events=()):
-    """The two router tables. ``routes``: ``(correlation_id, session_id, tool_use_id)``; ``events``: ``(correlation_id,
-    ts, provider, model, outcome)``, outcome ``ok`` / ``error`` / ``rejected`` (an ``execution_events`` attempt, whose
-    ``session_id`` column holds the route's correlation id, as in the real ledger)."""
+    """The two router tables. ``routes``: ``(correlation_id, session_id, tool_use_id[, trace_id])``; ``events``:
+    ``(correlation_id, ts, provider, model, outcome[, trace_id])``, outcome ``ok`` / ``error`` / ``rejected`` (an
+    ``execution_events`` attempt, whose ``session_id`` column holds the route's correlation id, as in the real
+    ledger). A route is logged just after its last attempt, as the router does; a route with trace id ``None`` has
+    none, and an event with ``None`` none."""
     con = sqlite3.connect(home / "usage.db")
     con.execute("CREATE TABLE routing_decisions (id INTEGER PRIMARY KEY, timestamp TEXT, final_provider TEXT, "
                 "final_model TEXT, success INTEGER, reason_code TEXT, correlation_id TEXT, trace_id TEXT, "
@@ -190,13 +193,18 @@ def _routing_db(home: Path, routes=(), events=()):
     con.execute("CREATE TABLE execution_events (event_id TEXT, ts REAL, session_id TEXT, trace_id TEXT, "
                 "event_type TEXT, provider TEXT, model TEXT, accepted INTEGER)")
     kinds = {"ok": ("attempt_completed", 1), "error": ("attempt_failed", None), "rejected": ("attempt_rejected", None)}
-    for i, (corr, sid, tool) in enumerate(routes):
+    for route in routes:
+        corr, sid, tool = route[:3]
+        trace = route[3] if len(route) > 3 else f"trace-{corr}"
+        last = max([e[1] for e in events if e[0] == corr], default=NOW - 101)
         con.execute("INSERT INTO routing_decisions (timestamp, final_provider, final_model, success, reason_code, "
                     "correlation_id, trace_id, session_id, tool_use_id) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (_utc(NOW - 100), "ollama", "ollama/q", 1, "router_unhinted", corr, f"trace-{corr}", sid, tool))
-    for i, (corr, ts, provider, model, outcome) in enumerate(events):
+                    (_utc(last + 1), "ollama", "ollama/q", 1, "router_unhinted", corr, trace, sid, tool))
+    for i, ev in enumerate(events):
+        corr, ts, provider, model, outcome = ev[:5]
+        trace = ev[5] if len(ev) > 5 else None
         con.execute("INSERT INTO execution_events (event_id, ts, session_id, trace_id, event_type, provider, model, "
-                    "accepted) VALUES (?,?,?,?,?,?,?,?)", (f"e{i}", ts, corr, None, kinds[outcome][0], provider, model,
+                    "accepted) VALUES (?,?,?,?,?,?,?,?)", (f"e{i}", ts, corr, trace, kinds[outcome][0], provider, model,
                                                            kinds[outcome][1]))
     con.commit()
     con.close()
@@ -224,8 +232,8 @@ def _rollout(codex: Path, thread: str, start: float, responses, *, parent: str |
                                                               "timestamp": "x"}})]
     for rid in (fork_of or []) + list(responses):
         if token_count_only:
-            lines.append(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
-                "last_token_usage": {"input_tokens": 1}}}}))
+            lines.append(json.dumps({"timestamp": f"t-{rid}", "type": "event_msg", "payload": {
+                "type": "token_count", "info": {"last_token_usage": {"input_tokens": 1}}}}))
         else:       # as a real rollout: the record, then a token_count that carries the same usage
             lines.append(json.dumps({"type": "token_usage_record", "payload": {"thread_id": thread, "response_id": rid}}))
             lines.append(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
@@ -336,7 +344,8 @@ def test_the_session_figure_from_every_source(env):
         ("c9", NOW - 10, "ollama", "ollama/qwen3.5:latest", "rejected"),   # answered, the router rejected it
     ])
     _write(home / "text_job_local_attempts.jsonl",
-           json.dumps({"ts": NOW - 79, "job": "commit_message", "model": "ollama/qwen3.5:latest", "outcome": "rejected"}) + "\n")
+           json.dumps({"ts": NOW - 79, "job": "commit_message", "model": "ollama/qwen3.5:latest", "outcome": "rejected",
+                       "session_id": SID}) + "\n")
     _ns(home, {"ts": NOW - 99, "outcome": "delegated", "model": "gpt-6-astra", "duration_sec": 300.0, "thread_id": T1},
         {"ts": NOW - 98, "outcome": "delegated", "model": "gpt-6-astra", "duration_sec": 5.0, "thread_id": T3},   # no rollout: 1
         {"ts": NOW - 97, "outcome": "codex_blocked", "model": "gpt-6-astra", "duration_sec": 5.0, "thread_id": T4},
@@ -365,7 +374,7 @@ def test_a_job_rejected_three_times_is_not_three_calls_and_not_three_local_succe
                 [(f"j{i}", NOW - 100 + 10 * i, "ollama", "ollama/qwen3.5:latest", "ok") for i in range(3)])
     _write(home / "text_job_local_attempts.jsonl", *[
         json.dumps({"ts": NOW - 100 + 10 * i + 1, "job": "commit_message", "model": "ollama/qwen3.5:latest",
-                    "outcome": "rejected"}) + "\n" for i in range(3)])
+                    "outcome": "rejected", "session_id": SID}) + "\n" for i in range(3)])
     r = sr.compute(SID, NOW, budget_s=30)
     assert r["local"] == {"attempts": 3, "ok": 0, "gate_rejected": 3} and r["non_claude"] == 0
     assert tick.render_session_routing(r, now=NOW) == "routed 0.0% (0/60 calls, session) · local OK 0% (0/3, session)"
@@ -527,7 +536,8 @@ def test_the_window_counts_codex_responses_and_local_ok_for_the_organic_populati
         ("o2", NOW - 2900, "gemini", "gemini-2.5", ok),                        # not local: not in the local figure
     ])
     _write(home / "text_job_local_attempts.jsonl",
-           json.dumps({"ts": NOW - 3499, "job": "j", "model": "ollama/q2", "outcome": "rejected"}) + "\n")
+           json.dumps({"ts": NOW - 3499, "job": "j", "model": "ollama/q2", "outcome": "rejected",
+                       "session_id": "organic-s"}) + "\n")
     _ns(home, {"ts": NOW - 300, "outcome": "delegated", "model": "gpt-6-astra", "duration_sec": 100.0, "thread_id": T1,
                "session_id": "organic-s", "session_kind": "organic"},
         {"ts": NOW - 250, "outcome": "delegated", "model": "gpt-6-astra", "duration_sec": 5.0, "thread_id": T3,
@@ -671,3 +681,142 @@ def test_two_runs_with_the_same_timestamp_are_two_runs_not_one_cache_entry(env):
     assert [r["responses"] for r in sr.codex_run_responses(rows, NOW)] == [2, 3]
     assert [r["responses"] for r in sr.codex_run_responses(rows, NOW)] == [2, 3]      # and again from the cache
     assert sr.run_key(rows[0]) != sr.run_key(rows[1])
+
+
+# ── delta review: identity, not model and time ──────────────────────────────────────────────────────────
+
+SID_B = "bbbbbbbb-2222-3333-4444-555555555555"
+
+
+def _rejection(ts: float, **identity) -> str:
+    return json.dumps({"ts": ts, "job": "commit_message", "model": "ollama/qwen3.5:latest", "outcome": "rejected",
+                       **identity}) + "\n"
+
+
+def test_another_sessions_text_job_rejection_cannot_suppress_my_accepted_output(env):
+    """M1: the rejection ledger is global; matching by model and time alone marked a neighbour's accepted attempt."""
+    home, projects, _codex = env
+    _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(60)])
+    _routing_db(home, [("a1", SID, None)], [("a1", NOW - 80, "ollama", "ollama/qwen3.5:latest", "ok")])
+    _write(home / "text_job_local_attempts.jsonl", _rejection(NOW - 79, session_id=SID_B, tool_use_id="tu_of_b"))
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["local"] == {"attempts": 1, "ok": 1, "gate_rejected": 0}
+
+
+def test_a_rejection_matches_by_job_then_by_session_and_never_without_an_identity(env):
+    home, projects, _codex = env
+    _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(60)])
+    cases = {                                    # rejection identity -> is my attempt marked?
+        "same session, no tool id": ({"session_id": SID}, True),
+        "same tool id": ({"session_id": "unknown:mcp", "tool_use_id": "tu_mine"}, True),
+        "same session, another job": ({"session_id": SID, "tool_use_id": "tu_other_job"}, False),
+        "another session": ({"session_id": SID_B}, False),
+        "no identity (a row written before the ledger carried one)": ({}, False),
+    }
+    for name, (identity, expect) in cases.items():
+        (home / "usage.db").unlink(missing_ok=True)
+        (home / "text_job_local_attempts.jsonl").unlink(missing_ok=True)
+        shutil.rmtree(home / sr.INDEX_DIR, ignore_errors=True)
+        _routing_db(home, [("a1", SID, "tu_mine")], [("a1", NOW - 80, "ollama", "ollama/qwen3.5:latest", "ok")])
+        _write(home / "text_job_local_attempts.jsonl", _rejection(NOW - 79, **identity))
+        r = sr.compute(SID, NOW, budget_s=30)
+        assert (r["local"]["gate_rejected"] == 1) is expect, (name, r["local"])
+
+
+def test_the_session_and_the_seven_day_population_apply_one_gate(env):
+    """S4: the same attempts and the same rejections give the same marks in both populations."""
+    home, projects, _codex = env
+    _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(60)])
+    _routing_db(home, [("a1", SID, "tu1"), ("a2", SID, "tu2"), ("b1", SID_B, "tu3")], [
+        ("a1", NOW - 80, "ollama", "ollama/qwen3.5:latest", "ok"),
+        ("a2", NOW - 60, "ollama", "ollama/qwen3.5:latest", "ok"),
+        ("b1", NOW - 79, "ollama", "ollama/qwen3.5:latest", "ok")])
+    _write(home / "text_job_local_attempts.jsonl", _rejection(NOW - 79, session_id=SID, tool_use_id="tu1"))
+    session = sr.compute(SID, NOW, budget_s=30)["local"]
+
+    def mine(sid, stamp):
+        return sid == SID
+
+    window = sr.window_extras(NOW - 7 * 86400, NOW, NOW, mine, {})["local"]
+    assert session == {"attempts": 2, "ok": 1, "gate_rejected": 1}
+    assert {k: window[k] for k in ("attempts", "ok", "gate_rejected")} == session
+
+
+def test_a_text_job_row_carries_its_session_and_tool_use_id(env, monkeypatch):
+    from llm_router import call_identity, text_job_ledger as tj
+
+    home, _p, _c = env
+    monkeypatch.setattr(tj, "_resolve_session_id", lambda: SID)
+    token = call_identity.bind("toolu_text_job")
+    try:
+        tj._append_local_attempt("commit_message", "ollama/qwen3.5:latest", tj.OUTCOME_REJECTED)
+    finally:
+        call_identity.reset(token)
+    tj._append_local_attempt("commit_message", "ollama/qwen3.5:latest", tj.OUTCOME_OK)        # outside an MCP call
+    rows = [json.loads(line) for line in (home / tj.LOCAL_ATTEMPTS_FILENAME).read_text().splitlines()]
+    assert rows[0]["session_id"] == SID and rows[0]["tool_use_id"] == "toolu_text_job"
+    assert rows[1]["session_id"] == SID and "tool_use_id" not in rows[1]
+
+
+def test_a_colliding_correlation_id_cannot_import_another_sessions_attempts(env):
+    """M2: the id is 8 hex characters. Session B's route shares it; its attempts must not be mine."""
+    home, projects, _codex = env
+    _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(60)])
+    _routing_db(home, [("abcd1234", SID, None, "trace-mine"), ("abcd1234", SID_B, None, "trace-theirs")], [
+        ("abcd1234", NOW - 50, "ollama", "ollama/qwen3.5:latest", "ok", "trace-mine"),
+        ("abcd1234", NOW - 40, "ollama", "ollama/qwen3.5:latest", "ok", "trace-theirs"),     # another route, same 8 hex
+        ("abcd1234", NOW - 3 * 3600, "ollama", "ollama/qwen3.5:latest", "error", None),      # same id, hours earlier, no trace
+        ("abcd1234", NOW - 45, "ollama", "ollama/qwen3.5:latest", "error", None),            # no trace, inside the window: mine
+    ])
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["local"] == {"attempts": 2, "ok": 1, "gate_rejected": 0}
+
+
+def test_two_routes_that_both_fit_a_colliding_id_make_the_attempt_unplaceable(env):
+    home, projects, _codex = env
+    _write(projects / "-p" / f"{SID}.jsonl", *[_assistant(f"m{i}") for i in range(60)])
+    _routing_db(home, [("abcd1234", SID, "tu1", None), ("abcd1234", SID, "tu2", None)],
+                [("abcd1234", NOW - 50, "ollama", "ollama/qwen3.5:latest", "ok", None)])
+    assert sr.compute(SID, NOW, budget_s=30)["local"] == {"attempts": 0, "ok": 0, "gate_rejected": 0}
+
+
+def test_the_legacy_token_count_fallback_does_not_double_count_replayed_parent_history(env):
+    """M3: a forked child replays its parent's lines; counted as a set of line digests across the run's files."""
+    _home, _p, codex = env
+    start = NOW - 200
+    _rollout(codex, T1, start, ["r1", "r2", "r3"], token_count_only=True)
+    _rollout(codex, T2, start + 20, ["r4", "r5"], parent=T1, fork_of=["r2", "r3"], token_count_only=True)
+    rc = cr.count_run(cr.RolloutIndex(start - 10, NOW), T1, NOW - 100)
+    assert (rc.responses, rc.threads, rc.how) == (5, 2, "token_count")
+
+
+def test_unavailable_attempt_data_is_unknown_in_the_seven_day_figure_not_zero_attempts(env):
+    """M4: no execution_events table means no figure, and the row says n/a, never `0 attempts`."""
+    home, _projects, _codex = env
+    con = sqlite3.connect(home / "usage.db")                                 # a database with no attempt ledger
+    con.execute("CREATE TABLE routing_decisions (id INTEGER PRIMARY KEY, correlation_id TEXT, session_id TEXT, "
+                "timestamp TEXT)")
+    con.commit()
+    con.close()
+
+    def anyone(sid, stamp):
+        return True
+
+    x = sr.window_extras(NOW - 7 * 86400, NOW, NOW, anyone, {})
+    assert x["local"] is None and x["unattributed_local"] is None
+    from llm_router.commands import kpi
+
+    class _Index:
+        def resolve(self, sid, stamp=None):
+            return type("R", (), {"kind": "organic"})()
+
+    cm = kpi._call_mix([{"kind": "claude_main_call", "model": "claude-opus-5-5", "session_id": "s", "ts": None,
+                         "session_kind": "organic"}] * 3, frozenset({"organic"}), _Index(), extras=x)
+    assert "local_ok" not in cm and cm["codex"]["runs"] == 0
+    from llm_router import statusline_refresh as rf
+
+    cached = rf._call_mix({"window_days": 7, "call_mix": {**cm, "outside_claude": {"k": 0, "n": 3},
+                                                            "below_opus": {"k": 0, "n": 3}, "population": "organic"}})
+    assert cached["codex_turns"] is True and "local_ok" not in cached
+    row = tick.render_progress({"written_at": NOW, "call_mix": cached}, now=NOW)
+    assert row.endswith("local OK n/a (7d, organic)") and "0 attempts" not in row
