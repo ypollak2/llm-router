@@ -41,6 +41,7 @@ AMEND3 = REPO / "docs/prereg/PREREG-P20-requal-AMEND3.md"
 AMEND4 = REPO / "docs/prereg/PREREG-P20-requal-AMEND4.md"
 AMEND5 = REPO / "docs/prereg/PREREG-P20-requal-AMEND5.md"
 AMEND6 = REPO / "docs/prereg/PREREG-P20-requal-AMEND6.md"
+AMEND7 = REPO / "docs/prereg/PREREG-P20-requal-AMEND7.md"
 # AMEND3 (D-202): the exclusive lock a local model call holds; the P2.0-T harness takes the same
 # one (fcntl.flock LOCK_EX on this path). Tests point Cfg.lock_path or this name elsewhere.
 OLLAMA_LOCK = Path.home() / ".rsi/research/primary-plan/v16/requal/ollama.lock"
@@ -149,6 +150,11 @@ AMEND6_MODELS = {"qwen3-coder:30b": "06c1097efce0", "qwen3.6:35b-a3b-coding": "0
 AMEND6_FIXED = {"LOCAL_MODEL_CHOICES": ",".join(AMEND6_MODELS),
                 **{f"ID_{model}": pin for model, pin in AMEND6_MODELS.items()}}
 AMEND6_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}", "CODE_RUNNER_SHA256": r"[0-9a-f]{64}"}
+# AMEND7 (D-375): the quiet gate's one-minute load limit is 6.0 instead of 4.0. It changes no other
+# constant (the free-memory floor, readings, interval and every item, arm and cap stay). REPO_SHA
+# and CODE_RUNNER_SHA256 are re-pinned because scripts/ and tests/ changed.
+AMEND7_FIXED = {"QUIET_LOAD1_MAX": "6.0"}
+AMEND7_SHA_KEYS = {"REPO_SHA": r"[0-9a-f]{40}", "CODE_RUNNER_SHA256": r"[0-9a-f]{64}"}
 
 
 def amended(constants: dict, overrides: dict) -> dict:
@@ -529,6 +535,38 @@ def frozen(cfg: Cfg) -> dict:
                    model=cfg.model)
     elif cfg.model is not None:
         raise Refuse("refusing: --model requires a frozen AMEND6")
+    if cfg.amend7.with_suffix(".sha256").exists():
+        # AMEND7 (D-375) is in force as soon as its sidecar exists; a draft without one is not.
+        if "amend6_sha256" not in out:
+            raise Refuse("refusing: AMEND7 requires a frozen AMEND6")
+        try:
+            seventh = check_prereg.check(cfg.amend7)
+            if not seventh["match"]:
+                raise ValueError("freeze")
+            seventh_text = cfg.amend7.read_text()
+        except (OSError, ValueError, IndexError, OverflowError) as exc:
+            raise Refuse("refusing: AMEND7 is not frozen") from exc
+        try:
+            seventh_epoch = datetime.fromisoformat(seventh["frozen_utc"].replace("Z", "+00:00"))
+            if (seventh_epoch.tzinfo is None
+                    or not sixth_epoch.timestamp() < seventh_epoch.timestamp() < cfg.now()):
+                raise ValueError("freeze order")
+        except (ValueError, OverflowError) as exc:
+            raise Refuse("refusing: AMEND7 frozen_utc") from exc
+        try:
+            seventh_overrides = parse_block(seventh_text, "```text P20-AMEND7-CONSTANTS")
+            if (seventh_overrides.keys() != AMEND7_FIXED.keys() | AMEND7_SHA_KEYS.keys()
+                    or any(seventh_overrides[k] != v for k, v in AMEND7_FIXED.items())
+                    or not all(re.fullmatch(pattern, seventh_overrides[k])
+                               for k, pattern in AMEND7_SHA_KEYS.items())):
+                raise ValueError("constants")
+        except (Refuse, ValueError) as exc:
+            raise Refuse("refusing: AMEND7 constants") from exc
+        seventh_copy = cfg.run_dir / "PREREG-AMEND7.md"
+        if seventh_copy.exists() and seventh_copy.read_bytes() != cfg.amend7.read_bytes():
+            raise Refuse("refusing: PREREG-AMEND7.md differs")
+        constants = {**constants, **seventh_overrides}
+        out.update(amend7_sha256=seventh["sha256"], amend7_frozen_utc=seventh["frozen_utc"])
     out["constants"] = constants
     return out
 
@@ -593,6 +631,7 @@ class Cfg:
     amend4: Path = AMEND4
     amend5: Path = AMEND5
     amend6: Path = AMEND6
+    amend7: Path = AMEND7
     model: str | None = None
     lock_path: Path | None = None
     local_used: set = dc_field(default_factory=set)
@@ -1993,6 +2032,7 @@ def score(cfg: Cfg, c: dict, freeze: dict, measurement: Path | None = None) -> d
               **({"amend5_sha256": freeze["amend5_sha256"]} if "amend5_sha256" in freeze else {}),
               **({"amend6_sha256": freeze["amend6_sha256"], "model": freeze["model"]}
                  if "amend6_sha256" in freeze else {}),
+              **({"amend7_sha256": freeze["amend7_sha256"]} if "amend7_sha256" in freeze else {}),
               "git_sha": cfg.git_sha(),
               "selection_sha256": optional_hash(cfg.run_dir / "selection.json"),
               "answers_sha256": combined_hash(cfg, "answers"),
