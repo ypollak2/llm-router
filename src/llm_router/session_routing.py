@@ -70,8 +70,9 @@ DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
   its first local attempts failed.
 * b = 0 prints ``local OK n/a (0 attempts, session)``, never 0%.
 
-A ledger that exists and cannot be read (``LedgerUnreadable``: the bind ledger, the text-job attempt ledger, the
-router database) makes the figures that need it unknown, printed n/a; a ledger that does not exist holds nothing.
+A ledger that exists and cannot be read (``LedgerUnreadable``: the Codex delegation ledger, the bind ledger, the
+text-job attempt ledger, the router database) makes the figures that need it unknown, printed n/a; a ledger that does
+not exist holds nothing.
 
 WHAT IS NOT COUNTED (and why it is not a zero): a router call whose route has no ``execution_events`` row (the
 agent-route ``direct`` delegations, counted as Codex runs above, and rows older than the event ledger); a call with
@@ -372,9 +373,16 @@ def transcript_figures(session_id: str, *, budget_s: float = BUDGET_S, root: Pat
 # ── Codex runs ────────────────────────────────────────────────────────────────────────────────────────────
 
 def _ns_rows(session_id: str | None) -> list[dict]:
+    """The Codex delegation rows (``north_star_units.jsonl``). A missing ledger holds no run; one that exists and
+    cannot be read raises :class:`LedgerUnreadable` (the number of Codex calls is then unknown, and the routed share
+    is n/a, not the undercount of a zero)."""
     from llm_router import northstar
 
-    rows = [r for r in northstar._load_north_star_ledger()
+    try:
+        ledger = northstar._read_north_star_ledger()
+    except OSError as exc:
+        raise LedgerUnreadable(str(northstar._north_star_units_path())) from exc
+    rows = [r for r in ledger
             if r.get("lever") == "agent_route_codex" and r.get("outcome") in _CODEX_OUTCOMES
             and isinstance(r.get("ts"), (int, float)) and not isinstance(r.get("ts"), bool)]
     return rows if session_id is None else [r for r in rows if r.get("session_id") == session_id]
@@ -878,8 +886,15 @@ def window_extras(since: float, until: float, now: float, kind_of, tool_sessions
       session could be found for (not in ``local``). ``local`` and ``unattributed_local`` are ``None`` when the attempt
       ledgers cannot be read: unknown, which every renderer prints as n/a. An unreadable bind ledger raises
       :class:`LedgerUnreadable` (the number of calls is then unknown, and the caller keeps the figures without
-      the extras)."""
-    rows = [r for r in _ns_rows(None) if since <= r["ts"] <= until and kind_of(r.get("session_id"), r.get("session_kind"))]
+      the extras). An unreadable Codex ledger sets ``codex_unknown``; bind and local figures remain measured."""
+    codex_unknown = False
+    try:
+        codex_rows = _ns_rows(None)
+    except LedgerUnreadable as exc:
+        failopen.record("CHZ-FO-ROUTING-LEDGER", exc)
+        codex_rows = []
+        codex_unknown = True
+    rows = [r for r in codex_rows if since <= r["ts"] <= until and kind_of(r.get("session_id"), r.get("session_kind"))]
     runs = codex_run_responses(rows, now)
     extra = 0
     by_session: dict[str, int] = {}
@@ -913,6 +928,6 @@ def window_extras(since: float, until: float, now: float, kind_of, tool_sessions
             unattributed = sum(1 for a in folded if a["kind"] == "local" and not a["session"])
         except LedgerUnreadable as exc:
             failopen.record("CHZ-FO-ROUTING-LEDGER", exc)     # whether an attempt was used is unknown: local stays None
-    return {"codex_extra": extra, "bind_extra": bind_extra, "by_session": by_session,
+    return {"codex_extra": extra, "codex_unknown": codex_unknown, "bind_extra": bind_extra, "by_session": by_session,
             "runs": sum(1 for r in runs if r["row"].get("outcome") == "delegated"),
             "flagged_runs": sum(1 for r in runs if r["flagged"]), "local": local, "unattributed_local": unattributed}

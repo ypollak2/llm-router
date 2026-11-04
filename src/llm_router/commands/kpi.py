@@ -607,8 +607,8 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
     }
     if sessions:
         out["sessions"] = dict(sorted(by_session.items(), key=lambda kv: -kv[1])[:CALL_MIX_SESSIONS])
-    if detail_failed:
-        out["detail_unavailable"] = True          # the extras were asked for and could not be built: the status line says n/a
+    if detail_failed or (extras and extras.get("codex_unknown")):
+        out["detail_unavailable"] = True          # routed count is unknown; independently measured local_ok remains available
     if extras:
         out["codex"] = {"runs": extras["runs"], "extra_responses": extras["codex_extra"],
                         "flagged_runs": extras["flagged_runs"], "bind_jobs": extras.get("bind_extra", 0)}

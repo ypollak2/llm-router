@@ -1064,3 +1064,94 @@ def test_a_timed_out_or_raised_bind_job_keeps_its_jid_and_its_earlier_attempts_c
     _attempt_rows(home, (t - 40, "rejected", jid), (t - 20, "error", jid))
     r2 = sr.compute(SID, NOW, budget_s=30)
     assert r2["non_claude"] == 0 and _local(r2) == (2, 0, 1)
+
+
+# ── the Codex delegation ledger: missing holds nothing, unreadable is unknown ───────────────────────────────
+
+def test_a_missing_codex_ledger_counts_nothing_and_an_unreadable_one_makes_routed_na(env):
+    home = _bound_session(env)
+    _routing_db(home, [("c1", SID, None)], [("c1", NOW - 50, "ollama", "ollama/qwen3.5:latest", "ok")])
+    r = sr.compute(SID, NOW, budget_s=30)                                    # no north_star_units.jsonl at all
+    assert r["non_claude"] == 1 and r["codex"] == {"runs": 0, "responses": 0, "flagged_runs": 0,
+                                                    "discarded_runs": 0, "discarded_responses": 0}
+    assert tick.render_session_routing(r, now=NOW) == "routed 1.6% (1/61 calls, session) · local OK 100% (1/1, session)"
+    (home / "north_star_units.jsonl").mkdir()                                # exists, and cannot be read as a file
+    shutil.rmtree(home / sr.INDEX_DIR)
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["non_claude"] is None and r["total"] is None and r["codex"] is None
+    # the local figure does not depend on the Codex ledger and stays
+    assert r["local"] == {"attempts": 1, "ok": 1, "gate_rejected": 0}
+    assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local OK 100% (1/1, session)"
+
+
+def test_unreadable_codex_window_preserves_local(env):
+    home, _projects, _codex = env
+    _routing_db(home, [("c1", SID, None)], [("c1", NOW - 50, "ollama", LOCAL_MODEL, "ok")])
+
+    def anyone(sid, stamp):
+        return True
+
+    x = sr.window_extras(NOW - 7 * 86400, NOW, NOW, anyone, {})              # missing: nothing recorded
+    assert x["codex_extra"] == 0 and x["runs"] == 0
+    (home / "north_star_units.jsonl").mkdir()
+    x = sr.window_extras(NOW - 7 * 86400, NOW, NOW, anyone, {})
+    assert x["codex_unknown"] is True
+    assert x["codex_extra"] == x["runs"] == x["flagged_runs"] == 0
+    assert x["local"] == {"attempts": 1, "ok": 1, "gate_rejected": 0}
+
+
+def test_the_lenient_reader_keeps_its_old_behaviour_for_the_unit_builders(env):
+    from llm_router import northstar
+
+    home, _projects, _codex = env
+    assert northstar._load_north_star_ledger() == [] and northstar._read_north_star_ledger() == []     # missing
+    (home / "north_star_units.jsonl").mkdir()
+    assert northstar._load_north_star_ledger() == []                         # the unit builders can do without it
+    with pytest.raises(OSError):
+        northstar._read_north_star_ledger()
+    (home / "north_star_units.jsonl").rmdir()
+    _write(home / "north_star_units.jsonl", '{"lever": "agent_route_codex", "ts": 1}\nnot json\n[1]\n')
+    assert northstar._read_north_star_ledger() == northstar._load_north_star_ledger() == [{"lever": "agent_route_codex", "ts": 1}]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read permission-denied files")
+def test_strict_codex_reader_permission_denied(env):
+    from llm_router import northstar
+
+    home, _, _ = env
+    path = home / "north_star_units.jsonl"
+    path.write_text('{"lever":"agent_route_codex","ts":1}\n')
+    path.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            northstar._read_north_star_ledger()
+        with pytest.raises(sr.LedgerUnreadable):
+            sr._ns_rows(None)
+    finally:
+        path.chmod(0o600)
+
+
+def test_strict_codex_reader_partial_read_error(env, monkeypatch):
+    import io
+
+    from llm_router import northstar
+
+    home, _, _ = env
+    path = home / "north_star_units.jsonl"
+    original = Path.open
+
+    class BrokenRead(io.StringIO):
+        def read(self, *args, **kwargs):
+            assert super().read(10)
+            raise OSError("disk fault after partial read")
+
+    def open_file(self, *args, **kwargs):
+        if self == path:
+            return BrokenRead('{"lever":"agent_route_codex","ts":1}\n')
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    with pytest.raises(OSError, match="disk fault"):
+        northstar._read_north_star_ledger()
+    with pytest.raises(sr.LedgerUnreadable):
+        sr._ns_rows(None)

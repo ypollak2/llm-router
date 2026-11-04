@@ -410,7 +410,7 @@ def render_progress(cache: dict | None, *, now: float) -> str | None:
     segs = [first, _mix_segment("<Opus", cm.get("below_opus"), "Claude calls", window, population)]
     if any(s is None for s in segs):
         return None
-    local = None if unavailable else _local_ok_segment(cm.get("local_ok"), f"{window}, {population}")
+    local = _local_ok_segment(cm.get("local_ok"), f"{window}, {population}")
     if local:
         segs.append(local)
     elif codex_turns or unavailable:                  # this refresher measured attempts and could not: unknown, not "0 attempts"

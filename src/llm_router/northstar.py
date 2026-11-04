@@ -984,15 +984,8 @@ def _north_star_units_path() -> Path:
     return paths.state_path("north_star_units.jsonl")
 
 
-def _load_north_star_ledger() -> list[dict]:
-    """All rows of ``north_star_units.jsonl`` (``hooks/agent-route.py``'s
-    ``_record_north_star_unit``). Same read pattern as ``_load_edit_outcomes``."""
-    path = _north_star_units_path()
+def _parse_north_star_rows(text: str) -> list[dict]:
     rows: list[dict] = []
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return rows
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -1004,6 +997,28 @@ def _load_north_star_ledger() -> list[dict]:
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+def _load_north_star_ledger() -> list[dict]:
+    """All rows of ``north_star_units.jsonl`` (``hooks/agent-route.py``'s
+    ``_record_north_star_unit``). Same read pattern as ``_load_edit_outcomes``: an unreadable file reads as
+    no rows (the unit builders can do without it). A caller that must tell "nothing recorded" from "cannot
+    be read" uses :func:`_read_north_star_ledger`."""
+    try:
+        return _parse_north_star_rows(_north_star_units_path().read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return []
+
+
+def _read_north_star_ledger() -> list[dict]:
+    """The rows of ``north_star_units.jsonl``: ``[]`` when the file does not exist (nothing was recorded), and
+    the ``OSError`` RAISED when it exists and cannot be read (a directory, a permission error, a disk fault).
+    The status line counts Codex calls from these rows, and "unreadable" must reach it as unknown, not as 0."""
+    try:
+        text = _north_star_units_path().read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return []
+    return _parse_north_star_rows(text)
 
 
 # ── verify records (verifier PR B, SHADOW) ──────────────────────────────────
