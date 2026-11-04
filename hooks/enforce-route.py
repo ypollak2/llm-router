@@ -2313,8 +2313,8 @@ def _main() -> None:
         _hold_event("released", session_id, tool_use_id=_tuid, how="count", tool=tool_name, task=task_type)
         sys.exit(0)  # Allow this tool call to prevent deadlock
 
-    # A hold belongs to the main thread: a Workflow sub-agent (the payload's agent_id) has no routing tool to satisfy it
-    # with, so a denial could only stop its work. It is never denied. Its calls were counted above, so the valves release
+    # A hold belongs to the main thread: a Workflow sub-agent (the payload's agent_id) made 0 routing-tool calls in 142
+    # transcripts (2026-11-04), so a denial could only stop its work. It is never denied. Its calls were counted above, so the valves release
     # the main thread's hold at the same moment as before this rule. Strict has no free valve and keeps its denials.
     if hook_input.get("agent_id") and not _strict:
         _log_violation(session_id, tool_name, expected_tool, outcome="ALLOWED(subagent)")
