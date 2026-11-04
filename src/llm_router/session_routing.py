@@ -61,7 +61,7 @@ INDEX_DIR = "session_routing"
 #: A result younger than this is reused (the snapshot refresher runs at most every 10 s on a ledger change).
 FRESH_S = 20.0
 #: Seconds of transcript scanning one run may spend; the rest is resumed by the next run (offsets are persisted).
-BUDGET_S = 6.0
+BUDGET_S = 4.0
 KEEP_INDEXES = 20
 CODEX_CACHE_NAME = "codex_counts.json"
 _SAFE_SID = re.compile(r"[A-Za-z0-9._-]{1,128}")
@@ -138,6 +138,12 @@ def _load_result(session_id: str) -> dict | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) and data.get("v") == SCHEMA else None
+
+
+def _progress(index: dict) -> tuple:
+    """What a scan moves: the byte offsets of the files and of the proxy ledger, and the set of files."""
+    return (tuple(sorted((k, e.get("offset", 0)) for k, e in index["files"].items())),
+            index["proxy"].get("offset", 0), len(index["models"]))
 
 
 def session_files(session_id: str, root: Path | None = None) -> list[Path]:
@@ -259,6 +265,7 @@ def transcript_figures(session_id: str, *, budget_s: float = BUDGET_S, root: Pat
     deadline = time.monotonic() + budget_s
     index = _load_index(session_id)
     models: list[str] = index["models"]
+    before = _progress(index)
     files = session_files(session_id, root)
     finished = True
     live = {str(p) for p in files}
@@ -302,7 +309,8 @@ def transcript_figures(session_id: str, *, budget_s: float = BUDGET_S, root: Pat
                   "subagents": sum(1 for p in files if "subagents" in p.parts and "workflows" not in p.parts),
                   "workflows": sum(1 for p in files if "workflows" in p.parts)},
     }
-    _save_index(session_id, index)               # progress is kept even when the scan did not finish
+    if _progress(index) != before:                # progress is kept even when the scan did not finish; an idle
+        _save_index(session_id, index)            # refresh rewrites nothing
     return out
 
 
