@@ -161,9 +161,10 @@ can still park often. `drive.sh` keeps retrying a parked stage every 2 min for u
 
 Paths (durable; the scratchpad is not used): `REQ7=/Users/yaliandrona/.rsi/research/primary-plan/v16/requal-amend7`
 holds `wt/` (a git worktree of branch `prereg/p20-requal-amend7`, checked out at the freeze commit, created at
-the freeze), `agentbin/` (below), the scripts `env.sh`, `drive.sh`, `pipeline.sh`, `watch.sh`, `record-env.sh`
-(copied from `requal-amend6/` and adapted; `requal-amend6/` is history and is not edited) and one run dir per
-model, `a7-qwen3-coder-30b` and `a7-qwen3.6-35b-a3b-coding`.
+the freeze), `agentbin/` (below; built before the freeze), the scripts `env.sh`, `drive.sh`, `pipeline.sh`,
+`watch.sh`, `record-env.sh` (copied from `requal-amend6/` and adapted; `requal-amend6/` is history and is not
+edited), the read-only `report-load.py` (prints items 1 to 3 of the load disclosure for a run dir) and one run dir
+per model, `a7-qwen3-coder-30b` and `a7-qwen3.6-35b-a3b-coding`.
 
 * **R1. One environment for both runs (AMEND6's R1, with REQ7).** Both runs use the same `PATH`, exported
   before every command: `$REQ7/agentbin/bin:$HOME/.local/node/current/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin`.
@@ -218,8 +219,8 @@ model, `a7-qwen3-coder-30b` and `a7-qwen3.6-35b-a3b-coding`.
    freeze. Also run `scripts/p20_prefreeze_smoke.py` under the R1 PATH (four PASS lines).
 4. Commit `PREREG-P20-requal-AMEND7.sha256` (`<sha256>  PREREG-P20-requal-AMEND7.md` plus
    `frozen_utc <date -u>`, after 2026-11-04T16:00:10Z).
-5. Create `$REQ7/wt` as a worktree at the freeze commit, build `$REQ7/agentbin` as R1 says, then start
-   `$REQ7/pipeline.sh` under `nohup`, with the Mac kept awake (`pipeline.sh` starts `caffeinate -i -w` on its own
+5. Create `$REQ7/wt` as a worktree at the freeze commit, check `$REQ7/agentbin` against R1 (python 3.14.6,
+   pytest 9.0.2, no `llm_router`, `claude` sha256 above), then start `$REQ7/pipeline.sh` under `nohup`, with the Mac kept awake (`pipeline.sh` starts `caffeinate -i -w` on its own
    pid) and Ollama otherwise idle, under rules R1 to R4.
 
 ## Constants (override AMEND6's REPO_SHA and CODE_RUNNER_SHA256; add the load limit)
