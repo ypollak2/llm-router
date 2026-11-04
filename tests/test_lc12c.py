@@ -449,3 +449,61 @@ def test_repeated_text_jobs_never_get_the_local_model_quality_skipped(e2e, monke
         assert _job_of(size)["status"] == "accepted"
     assert e2e.state["tried"] == [LOCAL] * 4
     assert not quality_feedback.should_skip_model(LOCAL, "generate", "moderate")
+
+
+def _prompts_seen(world, monkeypatch):
+    """Record the prompt text of every model call the e2e world makes."""
+    seen: list[str] = []
+    inner = router._call_text
+
+    async def spy(model, *a, **k):
+        seen.append(repr(a) + repr(k))
+        return await inner(model, *a, **k)
+
+    monkeypatch.setattr(router, "_call_text", spy)
+    return seen
+
+
+@pytest.mark.parametrize("size", [16100, 39000])
+def test_text_job_prompt_reaches_the_model_whole(e2e, monkeypatch, size):
+    """TJCHAIN-3. Compaction kept the first 20 and last 10 lines of the fenced diff; the model wrote about what it could
+    not see. The tail of the middle of the diff must reach the model."""
+    from tests.test_lc12 import DIFF
+    _wide_pass(e2e)
+    seen = _prompts_seen(e2e, monkeypatch)
+    filler = "".join(f"+line {i} MARK{i}\n" for i in range(size // 16))
+    sink: dict = {}
+    import asyncio
+    text = DIFF + filler
+    asyncio.run(T._llm_text_job(JOB, text[:size], None, None, sink))
+    _drain()
+    assert sink["status"] == "accepted", sink
+    middle = f"MARK{size // 32}"
+    assert any(middle in s for s in seen), "the middle of the input never reached the model"
+
+
+def test_any_other_large_prompt_is_still_compacted(e2e, monkeypatch):
+    """TJCHAIN-3 changes text jobs only."""
+    import asyncio
+    seen = _prompts_seen(e2e, monkeypatch)
+    from unittest.mock import AsyncMock, Mock
+    compact = AsyncMock(side_effect=lambda p, t: (p, Mock(tokens_saved_estimate=0)))
+    monkeypatch.setattr(router, "compact_structural", compact)
+    asyncio.run(router.route_and_call(TaskType.GENERATE, "x" * 20000, temperature=0.2))
+    _drain()
+    assert compact.await_count == 1
+    assert seen
+
+
+def test_low_scores_of_other_calls_do_not_hand_back_a_text_job(e2e, monkeypatch):
+    """TJCHAIN-2. A text job has one key with llm_generate (generate, moderate). Three low llm_generate scores must not
+    make the local model skip for a text job; the same key still skips for a normal route."""
+    from llm_router import quality_feedback
+    _wide_pass(e2e)
+    for _ in range(3):
+        quality_feedback.record_quality(LOCAL, "generate", "moderate", 0.3)
+    assert quality_feedback.should_skip_model(LOCAL, "generate", "moderate")
+    out = _job_of(2000)
+    assert out["status"] == "accepted", out
+    assert e2e.state["tried"] == [LOCAL]
+

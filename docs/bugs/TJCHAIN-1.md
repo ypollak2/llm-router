@@ -23,14 +23,15 @@ status: fixed in `fix/text-job-chain-any-size` (deploy: restart the MCP server; 
   PREMIUM chain held no local model. `eligibility_routing.prefer_passed` moves a model that is already in the chain
   and adds nothing, so `passed_model_leads` was False and `_drop_failed_eligibility` raised `PassedModelNotInChain`
   (flag unset). With `=1` the same chain ran on cloud entries. The lane's own scope was never the limit.
-- **Fix.** `_llm_text_job` passes `complexity_hint="moderate"`, the tier the inputs that worked already had (BALANCED).
-  The chain no longer depends on the size or the wording of the input. Nothing was added to `prefer_passed`; every
+- **Fix.** `_llm_text_job` passes `complexity_hint="moderate"`, a fixed tier (BALANCED). The passed model now leads the
+  chain at any size or wording inside the lane's scope. Nothing was added to `prefer_passed`; every
   guard of the lane stays: enabled, passed, digest-verified, settings-matched, inside `scope.max_prompt_chars`,
   loopback only, and a pass-only job is served by the passed model alone or handed back.
-- **Known and left alone.** Router compaction (`config.compaction_threshold` 4000 tokens, `compact_structural`) still
-  runs on a text-job prompt: on one real diff (`git diff a727cb26~1 a727cb26`, cut at the 40000-char input cap) a
-  40020-char prompt came back as 3978 chars, a 12020-char prompt was unchanged and a 16020-char one came back as 4234
-  (n=1 diff, `compact_structural(prompt, 4000)`). The lane was qualified on whole inputs. Not changed here.
+- **Compaction, TJCHAIN-3.** With the chain fixed, a replay showed the next defect: `compact_structural` in
+  `src/llm_router/compaction.py` also ran on text-job prompts over the threshold in `src/llm_router/config.py`, and kept
+  the first 20 and last 10 lines of the fenced diff. A judged sample of accepted messages (`~/.rsi/research/primary-plan/v16/coord/textjob-replay/JUDGE-20261104.md`,
+  n=19, one judge, raw diffs from squash commits): under 16000 chars 6 of 7 accurate, 0 wrong; at 16000 and over 3 of 12
+  accurate, 5 wrong. The acceptance check caught none. A text job is no longer compacted; see `docs/bugs/TJCHAIN-3.md`.
 - **Test.** `tests/test_lc12c.py`: `test_text_job_chain_leads_with_the_passed_model_at_any_input_size` (300, 2000 and
   40000 chars, flag unset and `=1`), `test_text_job_chain_ignores_the_engines_verdict_on_the_wording`, the scope
   boundary (`test_input_over_the_lane_scope_is_handed_back_and_calls_no_model`, 3000 runs, 3001 is refused) and the

@@ -26,10 +26,10 @@ status: fixed in `fix/text-job-chain-any-size` (deploy: restart the MCP server; 
 - **Fix.** A call with `eligibility_exempt_reason == TEXT_JOB_REASON` (only `llm_text_job` passes it; `llm_edit` passes
   `validated_edit`) skips the whole block: its answer is not scored, escalated or recorded and goes to `check_output`.
   Every other call keeps the escalation unchanged (tested with no exemption and with `validated_edit`).
-- **Known and left alone.** `should_skip_model` also reads scores recorded by other callers
-  (`tools/text.py::_record_quality` for `llm_generate`, `llm_query` and the others), so a local model those calls
-  taught the breaker to skip for `generate` at `moderate` is skipped for a text job too. Text jobs do not exempt the
-  breaker. Not measured.
+- **The breaker read.** `should_skip_model` also reads scores recorded by other callers (`tools/text.py::_record_quality`
+  for `llm_generate`, `llm_query` and the others), and with a fixed tier every text job shares one key with `llm_generate`.
+  A text job no longer reads it either: three low `llm_generate` scores would otherwise hand back every later job in a
+  long-lived server.
 - **Test.** `tests/test_lc12c.py`:
   `test_low_scoring_text_job_answer_is_not_escalated_and_reaches_its_own_check` (`check_output`
   called once with the local answer, `score_response` never called, nothing recorded),
