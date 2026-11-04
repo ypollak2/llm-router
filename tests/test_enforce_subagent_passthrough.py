@@ -1,7 +1,7 @@
 """A hold belongs to the main thread: outside strict, a sub-agent's tool call is never denied by it.
 
 The pending route is written for the owner's prompt in the main thread. A sub-agent shares the session id. A Workflow
-agent has no routing tool to satisfy the hold with, so a denial could only stop its work. Its calls keep counting towards
+agent made 0 routing-tool calls in 142 transcripts (2026-11-04), so a denial could only stop its work. Its calls keep counting towards
 the trap, loop and count releases, so the main thread's hold is released when it was before this rule: removing them from
 the count would leave the main thread held for longer (review of the first version of this change).
 The hook payload names a sub-agent with ``agent_id``; ``agent_type`` alone is the main thread under ``claude --agent``.
@@ -106,3 +106,33 @@ def test_the_pass_is_logged(tmp_path, hook):
     _pending(tmp_path, "s7")
     _run(hook, {"session_id": "s7", **SUB, **WRITE}, tmp_path)
     assert "ALLOWED(subagent)" in (tmp_path / ".llm-router" / "enforcement.log").read_text()
+
+
+def test_sub_agent_calls_still_count_towards_the_count_release(tmp_path, hook):
+    # Four held calls of different tools: no same-tool block in one turn, so only the count valve can release at the 4th.
+    pending = _pending(tmp_path, "s8")
+    calls = [WRITE, {"tool_name": "Edit", "tool_input": {"file_path": "x", "old_string": "a", "new_string": "b"}},
+             {"tool_name": "MultiEdit", "tool_input": {"file_path": "x", "edits": []}}, BASH]
+    for call in calls[:3]:
+        assert not _denied(_run(hook, {"session_id": "s8", **SUB, **call}, tmp_path))
+        assert pending.exists()
+    assert not _denied(_run(hook, {"session_id": "s8", **SUB, **calls[3]}, tmp_path))
+    assert not pending.exists()
+    assert "AUTO-PIVOT (count)" in (tmp_path / ".llm-router" / "enforcement.log").read_text()
+
+
+def test_sub_agent_calls_still_count_towards_the_loop_release(tmp_path, hook):
+    # The same tool over three turns (turn_id moves, so the per-turn trap never fires): only the loop valve can release.
+    pending = _pending(tmp_path, "s9")
+    for turn in (1, 2):
+        data = json.loads(pending.read_text())
+        data["turn_id"] = turn
+        pending.write_text(json.dumps(data))
+        assert not _denied(_run(hook, {"session_id": "s9", **SUB, **WRITE}, tmp_path))
+        assert pending.exists()
+    data = json.loads(pending.read_text())
+    data["turn_id"] = 3
+    pending.write_text(json.dumps(data))
+    assert not _denied(_run(hook, {"session_id": "s9", **SUB, **WRITE}, tmp_path))
+    assert not pending.exists()
+    assert "AUTO-PIVOT (loop)" in (tmp_path / ".llm-router" / "enforcement.log").read_text()
