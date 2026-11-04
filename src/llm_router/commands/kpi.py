@@ -453,14 +453,14 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
             joins)
 
 
-def _ns_units(days: int, win: "_Window | None") -> list[dict]:
+def _ns_units(days: int, win: "_Window | None", tool_sessions: dict[str, str] | None = None) -> list[dict]:
     """The unit stream NS, D1, D2 and the call mix read: sub-agent transcripts included (the NS
     definition counts them), and verify records attached only through the seam
     (``northstar.NS_ATTACH_VERIFY_RECORDS``, False until a verifier is connected: D-364)."""
     from llm_router import northstar as ns
 
     return list(ns.units(days=_wall_days(days, win), backfill=True, subagents=True,
-                         verify_records=ns.NS_ATTACH_VERIFY_RECORDS))
+                         verify_records=ns.NS_ATTACH_VERIFY_RECORDS, tool_sessions=tool_sessions))
 
 
 def _blind(result: dict) -> dict:
@@ -543,7 +543,7 @@ CALL_MIX_SESSIONS = 50
 
 
 def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window | None" = None, *,
-              sessions: bool = False) -> dict:
+              sessions: bool = False, extras: dict | None = None) -> dict:
     """Two descriptive figures over the SAME unit list, window and population ``_ns_d1_d2`` reads:
 
     * ``outside_claude``: calls answered by a non-Claude model / all calls;
@@ -559,7 +559,13 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
 
     ``sessions=True`` adds ``sessions`` (calls per session id, the largest ``CALL_MIX_SESSIONS``): only the
     status line refresher asks, because it prints a session's ledger rows against its calls. ``kpi --json``
-    carries no session id."""
+    carries no session id.
+
+    ``extras`` (``session_routing.window_extras``, the status line refresher only) corrects the one place the unit
+    list undercounts: a Codex run agent-route delegated is ONE unit but several model responses, and the
+    responses (``codex_extra``) are added to ``outside_claude`` (k and n), with ``codex`` carrying the run counts
+    and the flagged runs it could not count. It also adds ``local_ok`` (``{k, n}``: local routes that succeeded
+    over local attempts, same window and population) for the second status line figure."""
     from llm_router import northstar as ns
 
     claude = dict.fromkeys(("opus", "sonnet", "haiku", "claude-other"), 0)
@@ -585,6 +591,10 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
         sid = u.get("session_id")
         if isinstance(sid, str) and sid:
             by_session[sid] = by_session.get(sid, 0) + 1
+    if extras:
+        outside += int(extras["codex_extra"])
+        for sid, more in extras["by_session"].items():
+            by_session[sid] = by_session.get(sid, 0) + int(more)
     n_claude = sum(claude.values())
     n_calls = n_claude + outside
     out = {
@@ -595,6 +605,12 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
     }
     if sessions:
         out["sessions"] = dict(sorted(by_session.items(), key=lambda kv: -kv[1])[:CALL_MIX_SESSIONS])
+    if extras:
+        out["codex"] = {"runs": extras["runs"], "extra_responses": extras["codex_extra"],
+                        "flagged_runs": extras["flagged_runs"]}
+        if extras.get("local") is not None:       # None = the attempt ledger could not be read: no figure, not "0 attempts"
+            out["local_ok"] = {"k": extras["local"]["ok"], "n": extras["local"]["attempts"],
+                               "unattributed_attempts": extras["unattributed_local"]}
     return out
 
 
@@ -2821,11 +2837,13 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
                       schema_since: float | None = None, now: float | None = None,
                       since_policy: str | None = None,
                       since: float | None = None, until: float | None = None,
-                      call_mix_sessions: bool = False) -> dict:
+                      call_mix_sessions: bool = False, routing_detail: bool = False) -> dict:
     """The scorecard over the last ``days`` days, or over the absolute window
     ``[since, until]`` (epoch seconds; both or neither). A window replaces ``days`` and
     ``now``: "now" becomes ``until``, so a historical check does not drift as time passes.
-    ``call_mix_sessions`` adds calls-per-session to ``call_mix`` (the status line refresher only)."""
+    ``call_mix_sessions`` adds calls-per-session to ``call_mix`` (the status line refresher only).
+    ``routing_detail`` also counts the model responses of each Codex run and the local-OK pair in ``call_mix``
+    (``_call_mix`` ``extras``; the status line refresher only: it reads rollout files)."""
     from llm_router import session_kind as sk
     from llm_router.proxy import ledger as pl
 
@@ -2842,10 +2860,22 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     all_rows = pl.read_rows()
     index = sk.KindIndex(all_rows)
     until_ts = None if win is None else win.until
-    unit_list = _ns_units(days, win)  # one pass: NS/D1/D2, the call mix and verify_shadow
+    tool_sessions: dict[str, str] | None = {} if routing_detail else None   # filled by the same pass
+    unit_list = _ns_units(days, win, tool_sessions)  # one pass: NS/D1/D2, the call mix and verify_shadow
     ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index, win, unit_list)
     kpis_diag = joins.pop("diag")
-    call_mix_r = _call_mix(unit_list, allowed, index, win, sessions=call_mix_sessions)
+    extras = None
+    if routing_detail:
+        from llm_router import failopen, session_routing
+
+        try:
+            extras = session_routing.window_extras(
+                win.since if win is not None else now_ts - days * 86400.0, win.until if win is not None else now_ts,
+                now_ts, lambda sid, stamp: isinstance(sid, str) and bool(sid) and index.resolve(sid, stamp).kind in allowed,
+                tool_sessions or {})
+        except Exception as exc:  # noqa: BLE001 -- the extras are a refinement: NS and the rest of the scorecard stand without them
+            failopen.record("CHZ-FO-ROUTING-WINDOW", exc)
+    call_mix_r = _call_mix(unit_list, allowed, index, win, sessions=call_mix_sessions, extras=extras)
     d3_r = _fold_user_signals(_d3_redo_rate(days, allowed, index, win), days, now_ts)
     pop = _proxy_population(all_rows, days, allowed, now_ts, until=until_ts)
     d4_r = _d4_tier_mix(pop)

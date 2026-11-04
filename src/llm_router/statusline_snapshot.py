@@ -13,6 +13,10 @@ line and computes nothing, so the surfaces agree by construction::
 Rules: an unknown field prints ``n/a`` (never 0) and still names its n and window; a snapshot older
 than :data:`STALE_S` reads as ``n/a`` as a whole; no model or plan name is written here (D-205), every
 name is a value read from a ledger. A part that fails is recorded (``failopen``) and prints ``n/a``.
+
+A sixth thing rides beside the line, not in it: ``routing``, the session's two North Star numbers
+(``session_routing``: routed share of calls, local attempts that worked), and ``routing_line``, its row
+(``routed X% (n/N calls, session) · local OK Y% (a/b, session)``). The fast tick prints it from ``routing``.
 """
 from __future__ import annotations
 
@@ -284,8 +288,25 @@ def _judge_field() -> dict | None:
     return {"mean": d["mean"], "n": d["n"], "window": d["window"]["label"]}
 
 
+def _routing_field(session_id: str, now: float) -> dict | None:
+    from llm_router import session_routing
+
+    return session_routing.compute(session_id, now)
+
+
+def routing_line(routing: dict | None, now: float) -> str:
+    """The session routing row (``routed X% (n/N calls, session) · local OK Y% (a/b, session)``), pre-rendered by
+    the tick's own pure renderer so the full layout and the fast tick print the same words."""
+    from llm_router import statusline_tick
+
+    return statusline_tick.render_session_routing(routing, now=now)
+
+
 def build(session_id: str, now: float) -> dict:
-    """The fields (each failing on its own to unknown) and the rendered line."""
+    """The fields (each failing on its own to unknown), the rendered line, and the session's routing figure.
+
+    ``routing`` (``session_routing.compute``) sits beside ``fields``, not in them: it is not one of the five
+    fields of ``line``. It is its own row (``routing_line``); a failed count is None and prints ``n/a``."""
     actions = _part("CHZ-FO-SNAP-ACTIONS", lambda: _actions(session_id, now))
     saved = _part("CHZ-FO-SNAP-SAVED", lambda: saved_field(actions, now))
     quality = _part("CHZ-FO-SNAP-QUALITY", lambda: quality_field(now)) or {
@@ -301,8 +322,9 @@ def build(session_id: str, now: float) -> dict:
         "saved": saved.to_dict() if saved is not None else None,
         "judge": _part("CHZ-FO-SNAP-JUDGE", _judge_field),
     }
+    routing = _part("CHZ-FO-SNAP-ROUTING", lambda: _routing_field(session_id, now))
     return {"v": SCHEMA, "written_at": now, "session_id": session_id, "fields": fields,
-            "line": render_line(fields)}
+            "line": render_line(fields), "routing": routing, "routing_line": routing_line(routing, now)}
 
 
 # ── write / read ───────────────────────────────────────────────────────────────

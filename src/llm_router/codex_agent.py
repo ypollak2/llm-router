@@ -362,6 +362,8 @@ def is_codex_plugin_available() -> bool:
 _STDOUT_LINE_LIMIT = 8 * 1024 * 1024
 _STDOUT_TOTAL_CAP = 64 * 1024 * 1024
 _STDERR_CAP = 256 * 1024
+#: A Codex thread id is a UUID; anything else the stream carries is not recorded (it ends up in a glob).
+_THREAD_ID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 
 #: Appended to the returned text when the stdout total cap killed the run: the answer is partial.
 TRUNCATION_MARKER = "[truncated: output cap]"
@@ -410,6 +412,10 @@ class CodexResult:
             record it in the ledger so a failed delegation is never reasonless.
         truncated: ``True`` when stdout was clipped (an over-long line was
             dropped or the total-bytes cap was hit); the answer may be partial.
+        thread_id: The Codex thread the run opened (``thread.started``'s ``thread_id``), or ``""``
+            when the run never reported one. It names the rollout file the run wrote under
+            ``$CODEX_HOME/sessions`` (``rollout-<time>-<thread_id>.jsonl``), which is where the
+            model responses of the run can be counted (``llm_router.session_routing``).
     """
     content: str
     model: str
@@ -417,6 +423,7 @@ class CodexResult:
     duration_sec: float
     reason_code: str = ""
     truncated: bool = False
+    thread_id: str = ""
 
     @property
     def success(self) -> bool:
@@ -793,9 +800,10 @@ async def run_codex(
         assert proc.stdout is not None
         truncated = capped = False
         total = 0
+        thread_id = ""
 
         async def _consume() -> None:
-            nonlocal truncated, capped, total
+            nonlocal truncated, capped, total, thread_id
             lines = proc.stdout.__aiter__()
             while True:
                 try:
@@ -876,6 +884,10 @@ async def run_codex(
                     if msg and msg not in codex_errors:  # the two events repeat it
                         codex_errors.append(msg)
                 elif ev_type in ("turn.started", "thread.started"):
+                    if ev_type == "thread.started" and not thread_id:
+                        tid = ev.get("thread_id")
+                        if isinstance(tid, str) and _THREAD_ID.fullmatch(tid):
+                            thread_id = tid     # the rollout file's name carries it (session_routing counts the run's responses there)
                     if on_event:
                         try:
                             await on_event(ev_type, "")
@@ -899,7 +911,7 @@ async def run_codex(
                          + (f"\n[partial output]\n{partial}" if partial else "")),
                 model=model, exit_code=124,
                 duration_sec=time.monotonic() - start,
-                reason_code="timeout", truncated=truncated,
+                reason_code="timeout", truncated=truncated, thread_id=thread_id,
             )
         except asyncio.CancelledError:
             await _kill_tree(proc)  # never leave the tree running if cancelled
@@ -918,7 +930,7 @@ async def run_codex(
                 content="codex: " + "; ".join(e for e in codex_errors if e),
                 model=model, exit_code=proc.returncode or 1,
                 duration_sec=duration, reason_code="cli_error",
-                truncated=truncated,
+                truncated=truncated, thread_id=thread_id,
             )
         had_real_answer = bool(output)
         if not output and stderr_buf:
@@ -947,7 +959,7 @@ async def run_codex(
                 reason_code=("output_cap_exceeded" if capped
                              else "nonzero_exit" if proc.returncode
                              else "empty_completion"),
-                truncated=truncated,
+                truncated=truncated, thread_id=thread_id,
             )
 
         # We killed it ourselves at the byte cap: the answer so far stands.
@@ -959,7 +971,7 @@ async def run_codex(
             exit_code=rc, duration_sec=duration,
             reason_code=("output_cap_exceeded" if capped
                          else "nonzero_exit" if rc else ""),
-            truncated=truncated,
+            truncated=truncated, thread_id=thread_id,
         )
     except Exception as e:
         return CodexResult(

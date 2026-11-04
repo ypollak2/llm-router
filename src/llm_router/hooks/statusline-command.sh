@@ -331,14 +331,14 @@ s_v="" s_written="" s_usage="" s_session_pct="" s_weekly_pct="" s_usage_stale=""
 s_ctx_human="" s_ctx_pct="" s_money="" s_mix_local="" s_mix_paid="" s_proxy_down=""
 s_mix_sub="" s_mix_unc="" s_mix_n="" s_mix_win="" s_money_n="" s_money_win=""
 s_mix_claude="" s_mix_other="" s_mix_cover=""
-s_money_m="" s_money_m_n="" s_snap="" s_snap_at=""
+s_money_m="" s_money_m_n="" s_snap="" s_snap_at="" s_route=""
 s_health="" s_last="" s_last_stale="" s_last_tok=""
 _seg_load() {
     s_v="" s_written="" s_usage="" s_session_pct="" s_weekly_pct="" s_usage_stale="" s_reset=""
     s_ctx_human="" s_ctx_pct="" s_money="" s_mix_local="" s_mix_paid="" s_proxy_down=""
     s_mix_sub="" s_mix_unc="" s_mix_n="" s_mix_win="" s_money_n="" s_money_win=""
     s_mix_claude="" s_mix_other="" s_mix_cover=""
-    s_money_m="" s_money_m_n="" s_snap="" s_snap_at=""
+    s_money_m="" s_money_m_n="" s_snap="" s_snap_at="" s_route=""
     s_health="" s_last="" s_last_stale="" s_last_tok=""
     [ -r "$_seg_file" ] || return 1
     local k v
@@ -360,6 +360,7 @@ _seg_load() {
             money_n) s_money_n="$v" ;;           money_win) s_money_win="$v" ;;
             money_m) s_money_m="$v" ;;           money_m_n) s_money_m_n="$v" ;;
             snap_line) s_snap="$v" ;;            snap_at) s_snap_at="$v" ;;
+            route_line) s_route="$v" ;;
         esac
     done < "$_seg_file"
     # Every value used in arithmetic or a numeric test must be digits only: the file
@@ -387,8 +388,11 @@ _seg_load() {
     LC_ALL=C
     s_snap="${s_snap//[$'\001'-$'\037'$'\177']/}"
     s_snap="${s_snap//$'\302'[$'\200'-$'\237']/}"
+    s_route="${s_route//[$'\001'-$'\037'$'\177']/}"
+    s_route="${s_route//$'\302'[$'\200'-$'\237']/}"
     if [ -n "$_lc_set" ]; then LC_ALL="$_lc_was"; else unset LC_ALL; fi
     s_snap="${s_snap:0:400}"
+    s_route="${s_route:0:300}"
     # A window label is printed, so only the ledger's own names pass (data, never code).
     case "$s_mix_win" in session|session~) ;; *) s_mix_win="" ;; esac
     case "$s_money_win" in today|session|24h|7d|month|lifetime) ;; *) s_money_win="" ;; esac
@@ -600,13 +604,25 @@ printf '%s\n' "$result"
 # Five fields, each with its n and window, pre-rendered by statusline_snapshot (the refresher above
 # wrote it into the kv file): this prints it and computes nothing. Past 15 minutes (900 s) of data
 # age, or with no stamp, the row reads n/a. No process: builtins only.
+_snap_age=999999
+[ -n "$s_snap_at" ] && [ "$_now" -gt 0 ] && _snap_age=$(( _now - s_snap_at ))
 if [ -n "$s_snap" ]; then
-    _snap_age=999999
-    [ -n "$s_snap_at" ] && [ "$_now" -gt 0 ] && _snap_age=$(( _now - s_snap_at ))
     if [ "$_snap_age" -ge 0 ] && [ "$_snap_age" -le 900 ]; then
         printf '%s\n' "${_DIM}${s_snap}${_RESET}"
     else
         printf '%s\n' "${_DIM}n/a${_RESET}"
+    fi
+fi
+
+# ── Third row: the session routing row (this PR) ─────────────────────────────
+# "routed X% (n/N calls, session) · local OK Y% (a/b, session)", pre-rendered by the refresher next to the
+# snapshot (statusline_snapshot.routing_line) and cleaned above like the snapshot line. It is gated by the
+# snapshot's own data time: past 15 minutes (900 s) or with no stamp it reads n/a, never a stale share.
+if [ -n "$s_route" ]; then
+    if [ "$_snap_age" -ge 0 ] && [ "$_snap_age" -le 900 ]; then
+        printf '%s\n' "${_DIM}${s_route}${_RESET}"
+    else
+        printf '%s\n' "${_DIM}routed n/a (session) · local OK n/a (session)${_RESET}"
     fi
 fi
 

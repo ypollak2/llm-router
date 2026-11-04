@@ -221,6 +221,16 @@ def _local_name(model: str) -> str | None:
 def _append_local_attempt(job: str, model: str, outcome: str, *, jid: str | None = None,
                           attempt: int | None = None, more: bool = False, acc: bool = False) -> None:
     row: dict = {"ts": time.time(), "job": job, "model": model, "outcome": outcome}
+    try:    # who asked: lets a reader match this row to the call and session it belongs to (never by model and time)
+        from llm_router import call_identity
+
+        sid, tool = _resolve_session_id(), call_identity.tool_use_id()
+        if sid:
+            row["session_id"] = sid
+        if tool:
+            row["tool_use_id"] = tool
+    except Exception:  # noqa: BLE001 -- identity is a refinement of the row; the row itself must still be written
+        pass
     if jid:
         row["jid"] = jid  # D-367: the demotion monitor counts JOBS (every row of one call), not rows
         if attempt is not None:

@@ -434,15 +434,22 @@ def test_both_prints_full_line_then_fast_line(tmp_path):
     # "segments pending"; the build lands later, at a time no test controls. Build
     # the cache first so the `both` render and the full render below read the same
     # one (docs/bugs/SLT-FLAKE-1.md).
+    # The refresher must run THIS checkout's package, not whichever llm-router is installed on the machine (an older
+    # one writes no `route_line`): the interpreter cache names the test's own python, which imports the repo.
+    state = tmp_path / ".llm-router"
+    state.mkdir(exist_ok=True)
+    (state / ".statusline_python").write_text(f"{sys.executable}\n{int(time.time())}\nfull\n")
     _run(_env(tmp_path, "true", fast=False))
     assert wait_for_cache(tmp_path), "the detached build never wrote the segment cache"
     out, _ = _both(tmp_path)
     lines = out.splitlines()
-    # P35-2: the full layout is two rows now (the line, then the snapshot row), then the fast line.
-    assert len(lines) == 3, out
+    # P35-2: the full layout is two rows (the line, then the snapshot row); W9 adds the session routing row; then the
+    # fast line (it has no stdin here, so it prints no session row of its own and the row never doubles).
+    assert len(lines) == 4, out
     assert not lines[0].startswith("llm-router · "), lines[0]
     assert lines[1].startswith("router: "), lines[1]
-    assert lines[2].startswith("llm-router · "), lines[2]
+    assert lines[2].startswith("routed "), lines[2]
+    assert lines[3].startswith("llm-router · "), lines[3]
     assert "segments pending" not in lines[0], lines[0]
     full, _ = _run(_env(tmp_path, "true", fast=False))
     assert lines[0] == full.splitlines()[0]
