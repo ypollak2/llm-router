@@ -70,8 +70,9 @@ DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
   its first local attempts failed.
 * b = 0 prints ``local OK n/a (0 attempts, session)``, never 0%.
 
-A ledger that exists and cannot be read (``LedgerUnreadable``: the bind ledger, the text-job attempt ledger, the
-router database) makes the figures that need it unknown, printed n/a; a ledger that does not exist holds nothing.
+A ledger that exists and cannot be read (``LedgerUnreadable``: the Codex delegation ledger, the bind ledger, the
+text-job attempt ledger, the router database) makes the figures that need it unknown, printed n/a; a ledger that does
+not exist holds nothing.
 
 WHAT IS NOT COUNTED (and why it is not a zero): a router call whose route has no ``execution_events`` row (the
 agent-route ``direct`` delegations, counted as Codex runs above, and rows older than the event ledger); a call with
@@ -372,9 +373,16 @@ def transcript_figures(session_id: str, *, budget_s: float = BUDGET_S, root: Pat
 # ── Codex runs ────────────────────────────────────────────────────────────────────────────────────────────
 
 def _ns_rows(session_id: str | None) -> list[dict]:
+    """The Codex delegation rows (``north_star_units.jsonl``). A missing ledger holds no run; one that exists and
+    cannot be read raises :class:`LedgerUnreadable` (the number of Codex calls is then unknown, and the routed share
+    is n/a, not the undercount of a zero)."""
     from llm_router import northstar
 
-    rows = [r for r in northstar._load_north_star_ledger()
+    try:
+        ledger = northstar._read_north_star_ledger()
+    except OSError as exc:
+        raise LedgerUnreadable(str(northstar._north_star_units_path())) from exc
+    rows = [r for r in ledger
             if r.get("lever") == "agent_route_codex" and r.get("outcome") in _CODEX_OUTCOMES
             and isinstance(r.get("ts"), (int, float)) and not isinstance(r.get("ts"), bool)]
     return rows if session_id is None else [r for r in rows if r.get("session_id") == session_id]
