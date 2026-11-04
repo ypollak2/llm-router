@@ -45,7 +45,7 @@ async def llm_codex(
         # Returned, not raised: an uncaught exception reaches the model as a bare "Error executing tool".
         return str(refusal)
 
-    result = await run_codex(prompt, model=model)
+    result = await run_codex(prompt, model=model, caller="llm_codex")
 
     # Log to usage table so dashboard includes direct llm_codex calls
     try:

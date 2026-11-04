@@ -145,7 +145,7 @@ async def eval_codex_model(task_type: str = "reasoning") -> Optional[ModelScore]
         codex_entry = accepted_codex_entry("codex/gpt-5.4")  # F27 allow-list
         if codex_entry is None:
             return None
-        result = await run_codex(prompt, model=codex_entry[len("codex/"):], timeout=10)
+        result = await run_codex(prompt, model=codex_entry[len("codex/"):], timeout=10, caller="evaluator")
         latency_ms = (time.time() - start) * 1000
         
         if not result.success:

@@ -261,6 +261,9 @@ def _isolate_user_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))
     for _x in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         monkeypatch.delenv(_x, raising=False)
+    # A developer's own CODEX_HOME would send `codex_meter` (the D-373 reserve) to read their real rollouts: unset, Codex's
+    # directory is `~/.codex` under the per-test HOME above. A test that needs one sets it itself.
+    monkeypatch.delenv("CODEX_HOME", raising=False)
 
 
 @pytest.fixture(autouse=True)

@@ -84,6 +84,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # ~17 a ChatGPT Plus account managed before its usage limit). 0 blocks all
     # Codex delegation (kill switch); it does not remove the cap.
     "LLM_ROUTER_CODEX_WINDOW_BUDGET": ("llm_router", "codex_window.py", 1),
+    # 2026-11-04 (D-373): weekly Plus-meter percentage (default 60) at or above which every Codex caller except
+    # agent-route refuses; "off" disables the reserve. Read in codex_meter.py.
+    "LLM_ROUTER_CODEX_RESERVE_PCT": ("llm_router", "codex_meter.py", 1),
+    # 2026-11-04 (R2): "off" stops the router lifting a Codex bench itself (fresh-meter headroom, one canary per 3 h).
+    "LLM_ROUTER_CODEX_BENCH_PROBE": ("llm_router", "codex_bench.py", 1),
     # 2026-09-28: opt-in override that keeps agent-route active (Codex/DIRECT
     # routing) in a headless (CLAUDE_CODE_ENTRYPOINT=sdk-*) session. Default
     # off — see the headless-guard note in hooks/agent-route.py.
@@ -529,6 +534,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "VAULT_TOKEN": ("provider_credential", "org_policy.py", 1),
     # ── external_tool  (24) ──
     "CLAUDE_CODE_PATH": ("external_tool", "claude_agent.py", 1),
+    # Codex's own state directory; codex_meter.py reads the rollouts under it (read-only) for the Plus meter.
+    "CODEX_HOME": ("external_tool", "codex_meter.py", 1),
     # P0.13: the project root llm_act may write in, when the MCP client sends no roots.
     "CLAUDE_PROJECT_DIR": ("external_tool", "tools/agentic.py", 1),
     "CLAUDE_CODE_SESSION_ID": ("external_tool", "hooks/agent-depth-release.py", 3),

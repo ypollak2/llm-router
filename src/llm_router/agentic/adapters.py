@@ -140,6 +140,21 @@ class CodexAdapter:
             return "codex"
 
     @staticmethod
+    def _reserve_refusal() -> str | None:
+        """D-373: why the Plus meter is not this tier's to spend now, else None. This adapter starts ``codex exec`` itself (not
+        through ``run_codex``), so the reserve guard is applied here: tier 1 of ``llm_delegate`` / ``llm_act`` is a caller like
+        any other. A guard that fails refuses."""
+        try:
+            from llm_router import codex_meter
+
+            return codex_meter.refusal("agentic_codex")
+        except Exception as exc:  # noqa: BLE001 -- counted; the meter is unknown, so the tier is not started
+            from llm_router import failopen
+
+            failopen.record("CHZ-FO-AGENTIC-CODEX-RESERVE", exc)
+            return "Codex is reserved for sub-agent delegation (D-373); the reserve guard failed"
+
+    @staticmethod
     def _unprotected_refusal(binary: str) -> str | None:
         """Why this CLI must not be started (it lacks ``--ignore-rules``), with the log line and fail-open row, else None."""
         try:
@@ -168,9 +183,10 @@ class CodexAdapter:
         prompt = pack_prompt(milestone, frozen_context)
         assert self.runner is not None  # set in __post_init__
         binary = self._resolve_binary()
-        refusal = self._unprotected_refusal(binary)
+        refusal = self._reserve_refusal() or self._unprotected_refusal(binary)
         if refusal is not None:
-            # a CLI without --ignore-rules is not started: this tier is unavailable and the escalation moves on
+            # the meter is reserved (D-373), or a CLI without --ignore-rules: not started. This tier is unavailable and the
+            # escalation moves on
             proc = ProcResult(127, "", refusal)
         else:
             proc = self.runner(self._codex_argv(binary, prompt), "")

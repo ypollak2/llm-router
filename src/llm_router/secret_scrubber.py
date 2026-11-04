@@ -86,8 +86,10 @@ SECRET_PATTERNS = {
         r"(?P<secret>eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
     ),
     "env_key_assignment": re.compile(r"\b[A-Z][A-Z0-9_]*_(?:API_)?KEY\s*[=:]\s*\S+"),
+    # The same header shapes as ``engine``: PEM, PGP armor (``PRIVATE KEY BLOCK``) and the four-dash ssh.com form.
     "private_key": re.compile(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
+        r"-{4,5} ?BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)? ?-{4,5}[\s\S]*?"
+        r"-{4,5} ?END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)? ?-{4,5}"
     ),
 }
 
