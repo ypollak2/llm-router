@@ -182,7 +182,8 @@ def _scan_file(path: Path, entry: dict | None, models: list[str], deadline: floa
     except OSError:
         return entry or {"offset": 0, "head": "", "msgs": {}, "mcp": []}, True
     head = _head(path)
-    if not entry or entry.get("head") != head or size < entry.get("offset", 0):
+    seen = entry.get("offset") if entry else None
+    if not entry or entry.get("head") != head or not isinstance(seen, int) or size < seen:
         entry = {"offset": 0, "head": head, "msgs": {}, "mcp": []}
     msgs: dict[str, int] = entry["msgs"]
     mcp: list[str] = entry["mcp"]
@@ -232,7 +233,8 @@ def _scan_proxy(session_id: str, state: dict, deadline: float) -> bool:
         state.update(offset=0, served=[], missing=True)
         return True
     state.pop("missing", None)
-    if size < state.get("offset", 0):
+    seen = state.get("offset")
+    if not isinstance(seen, int) or size < seen:
         state.update(offset=0, served=[])
     served: list[str] = state.setdefault("served", [])
     needle = session_id.encode()
@@ -472,7 +474,8 @@ def compute(session_id: str, now: float | None = None, *, budget_s: float = BUDG
         return None
     now = time.time() if now is None else now
     prior = _load_result(session_id)
-    if prior and prior.get("complete") and 0 <= now - float(prior.get("computed_at", 0)) < FRESH_S:
+    stamp = prior.get("computed_at") if prior else None
+    if prior and prior.get("complete") and isinstance(stamp, (int, float)) and 0 <= now - stamp < FRESH_S:
         return prior
     t = _part("CHZ-FO-ROUTING-TRANSCRIPT", lambda: transcript_figures(session_id, budget_s=budget_s, root=root))
     mcp_ids = t["mcp_tool_use_ids"] if t else []

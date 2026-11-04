@@ -238,7 +238,9 @@ def test_end_to_end_from_the_unit_stream_to_the_two_rows(monkeypatch, sessions):
     assert data["call_mix"]["outside_claude"] == {"k": 5, "n": 100} and data["call_mix"]["below_opus"] == {"k": 75, "n": 95}
     out = tick.render_rows(data, now=time.time())
     assert "NS strict 0/130 (blind) 7d units" in out[0]
-    assert out[1] == "off-Claude 5.0% (5/100 calls, 7d, organic) · <Opus 78.9% (75/95 Claude calls, 7d, organic)"
+    # W9: the same cache pass also measured the local attempts; none here, so n/a with its unit and window, not 0%
+    assert out[1] == ("off-Claude 5.0% (5/100 calls, 7d, organic) · <Opus 78.9% (75/95 Claude calls, 7d, organic)"
+                      " · local OK n/a (0 attempts, 7d, organic)")
 
 
 def test_the_widest_realistic_status_row_still_fits_and_keeps_its_hooks_warning():

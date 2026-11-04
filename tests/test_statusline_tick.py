@@ -438,11 +438,15 @@ def test_both_prints_full_line_then_fast_line(tmp_path):
     assert wait_for_cache(tmp_path), "the detached build never wrote the segment cache"
     out, _ = _both(tmp_path)
     lines = out.splitlines()
-    # P35-2: the full layout is two rows now (the line, then the snapshot row), then the fast line.
-    assert len(lines) == 3, out
+    # P35-2: the full layout is two rows (the line, then the snapshot row); W9 adds the session routing row
+    # (absent when the refresher's interpreter imports an older installed package that writes no `route_line`: a
+    # mixed deploy shows no row, never a wrong one); then the fast line (it has no stdin here, so it prints no
+    # session row of its own).
+    routed = [i for i, ln in enumerate(lines) if ln.startswith("routed ")]
+    assert routed in ([], [2]) and len(lines) == 3 + len(routed), out
     assert not lines[0].startswith("llm-router · "), lines[0]
     assert lines[1].startswith("router: "), lines[1]
-    assert lines[2].startswith("llm-router · "), lines[2]
+    assert lines[-1].startswith("llm-router · "), lines[-1]
     assert "segments pending" not in lines[0], lines[0]
     full, _ = _run(_env(tmp_path, "true", fast=False))
     assert lines[0] == full.splitlines()[0]
