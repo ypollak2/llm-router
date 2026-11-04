@@ -44,10 +44,8 @@ DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
     A cache hit, a refused or breaker-held call is no attempt;
   - each ACCEPTED text-job-bind job of the session (``text_job_binds.jsonl``, ``bound`` / ``accepted``): the hook runs
     outside any MCP server, so its router rows are logged under ``unknown:non_mcp`` with no ``tool_use`` id and the
-    attempt join above cannot reach them. One job is one call, whatever its tries; its model decides the side.
-    The job's own attempts are the ``text_job_local_attempts.jsonl`` rows of the ``jid`` that ended with the job
-    (:func:`link_bind_job`); a router attempt of the session inside the job's own time window and on one of its
-    models is the same work and is taken out, so nothing counts twice;
+    attempt join above cannot reach them. One job is one call, whatever its tries; its model decides the side. A job
+    that was handed back (rejected, fallback, timeout, error) is no call;
   - a Claude Code message served by a non-Claude model (proxy).
 
 ``local OK Y% (a/b, session)``
@@ -55,9 +53,14 @@ DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
 * b = LOCAL ATTEMPTS of the session: every ``execution_events`` attempt of a local provider (Ollama, LM Studio,
   vLLM, llama.cpp), whatever its outcome (``attempt_completed``, ``attempt_failed``, ``attempt_rejected``), so a
   local model that errored and was rescued by the next chain entry is a failed attempt in b;
-* b also holds the local attempts of the session's accepted text-job-bind jobs (``text_job_local_attempts.jsonl`` rows:
-  ``ok`` used, ``rejected`` thrown away by the acceptance check, ``error`` / ``infra`` failed); a job whose rows
-  cannot be linked contributes its one accepted attempt;
+* b also holds the local attempts of the session's text-job-bind jobs, accepted or handed back
+  (``text_job_local_attempts.jsonl`` rows of the job's ``jid``: ``ok`` used, ``rejected`` thrown away by the
+  acceptance check, ``error`` / ``infra`` failed; every attempt of a job that was handed back is not used, so ``a``
+  gets nothing from it). The bind row names its ``jid`` (written since the hook recorded it) and the job is linked to
+  its rows by that id and by nothing else: a row without a ``jid``, a ``jid`` with no rows, or rows that name
+  another session link to nothing, and an accepted job then contributes only what its own row proves (the call, and
+  one used attempt on its model). A router attempt is dropped for a job only when its route carries the bind row's
+  ``tool_use`` id; never by model and time. The hook's own router rows are not in the session's attempts at all;
 * a = those that were used: ``attempt_completed`` and not rejected afterwards by a text job's acceptance check
   (``text_job_local_attempts.jsonl`` ``rejected`` row of the same job or session, same model, that ended at most
   :data:`_GATE_WINDOW_S` seconds after the completion). Rows written before the ledger carried ``session_id`` and
@@ -66,6 +69,9 @@ DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
   (``router.py``), not "the local model worked", and a call rescued by a later chain entry has success 1 while
   its first local attempts failed.
 * b = 0 prints ``local OK n/a (0 attempts, session)``, never 0%.
+
+A ledger that exists and cannot be read (``LedgerUnreadable``: the bind ledger, the text-job attempt ledger, the
+router database) makes the figures that need it unknown, printed n/a; a ledger that does not exist holds nothing.
 
 WHAT IS NOT COUNTED (and why it is not a zero): a router call whose route has no ``execution_events`` row (the
 agent-route ``direct`` delegations, counted as Codex runs above, and rows older than the event ledger); a call with
@@ -613,15 +619,12 @@ def text_job_rejections(since: float, tool_sessions: dict[str, str] | None = Non
     threw the answer away): ``{ts, model, session, tool}``. ``session`` is the row's session id when it names one,
     else the session its ``tool_use`` id belongs to (``tool_sessions``); ``tool`` is the ``tool_use`` id of the
     ``llm_text_job`` call. A row written before the ledger carried either (no ``session_id``, no ``tool_use_id``)
-    names no session and is matched to nothing."""
+    names no session and is matched to nothing. Raises :class:`LedgerUnreadable` (the ledger exists and cannot be
+    read: whether an attempt was rejected is unknown)."""
     from llm_router import text_job_ledger as tj
 
     out: list[dict] = []
-    try:
-        text = paths.state_path(tj.LOCAL_ATTEMPTS_FILENAME).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return out
-    for line in text.splitlines():
+    for line in _ledger_lines(paths.state_path(tj.LOCAL_ATTEMPTS_FILENAME)):
         try:
             row = json.loads(line)
         except ValueError:
@@ -665,23 +668,33 @@ def apply_text_job_gate(attempts: list[dict], rejections: list[dict]) -> int:
 
 # ── text-job-bind jobs (the hook runs outside MCP: its router rows name no session) ─────────────────────────
 
-_LINK_BEFORE_S = 3.0        # the job's last attempt row is written right before the bind row (ms apart in practice)
-_LINK_AFTER_S = 1.0
-_CLAIM_SLACK_S = 3.0
+class LedgerUnreadable(Exception):
+    """A ledger exists and cannot be read: what it holds is unknown, which no renderer may print as zero."""
+
+
+def _ledger_lines(path: Path) -> list[str]:
+    """The lines of a ledger: ``[]`` when it does not exist (nothing was ever recorded), a raised
+    :class:`LedgerUnreadable` when it exists and cannot be read (unknown, never an empty ledger)."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise LedgerUnreadable(str(path)) from exc
 
 
 def bind_jobs(since: float = 0.0, until: float | None = None, *, session_id: str | None = None) -> list[dict]:
-    """The accepted jobs of ``text_job_binds.jsonl`` (``kind: bound``, ``outcome: accepted``) with a real session id:
-    ``{ts, model, session, latency_s}``. ``denied`` and ``handwritten`` rows are no call. One session when asked."""
+    """The jobs of ``text_job_binds.jsonl`` that ran the local text job (``bound`` and ``denied`` rows with a real
+    session id): ``{ts, model, session, tool, jid, accepted, latency_s}``. ``accepted`` is ``bound`` / ``accepted``:
+    the only rows that are a call. A job that was handed back (``rejected``, ``fallback``, ``timeout``, ``error``) still
+    made local attempts; they are in b with ``a = 0`` and add nothing to n. ``handwritten`` rows ran nothing. ``jid``
+    (written by the hook since this change) names the job's attempt rows; a row without one is linked to nothing.
+    Raises :class:`LedgerUnreadable`."""
     from llm_router import text_job_ledger as tj
     from llm_router.text_job_bind import ledger as bl
 
     out: list[dict] = []
-    try:
-        text = bl.ledger_path().read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return out
-    for line in text.splitlines():
+    for line in _ledger_lines(bl.ledger_path()):
         try:
             row = json.loads(line)
         except ValueError:
@@ -690,25 +703,24 @@ def bind_jobs(since: float = 0.0, until: float | None = None, *, session_id: str
         sid = _real_session(row.get("session_id")) if isinstance(row, dict) else None
         if not (isinstance(ts, (int, float)) and not isinstance(ts, bool) and sid and ts >= since
                 and (until is None or ts <= until) and (session_id is None or sid == session_id)
-                and row.get("kind") == bl.KIND_BOUND and row.get("outcome") == tj.STATUS_ACCEPTED
-                and isinstance(row.get("model"), str) and row["model"]):
+                and row.get("kind") in (bl.KIND_BOUND, bl.KIND_DENIED) and isinstance(row.get("model"), str) and row["model"]):
             continue
         lat = row.get("latency_ms")
-        out.append({"ts": float(ts), "model": row["model"], "session": sid,
+        jid = row.get("jid") if isinstance(row.get("jid"), str) and row["jid"] else None
+        out.append({"ts": float(ts), "model": row["model"], "session": sid, "jid": jid,
+                    "tool": row.get("tool_use_id") if isinstance(row.get("tool_use_id"), str) and row["tool_use_id"] else None,
+                    "accepted": row.get("kind") == bl.KIND_BOUND and row.get("outcome") == tj.STATUS_ACCEPTED,
                     "latency_s": float(lat) / 1000.0 if isinstance(lat, (int, float)) and not isinstance(lat, bool) and lat >= 0 else 0.0})
     return sorted(out, key=lambda j: j["ts"])
 
 
 def text_job_jid_groups() -> dict[str, list[dict]]:
-    """Every row of ``text_job_local_attempts.jsonl`` that names a job (``jid``), by ``jid``, in time order."""
+    """Every row of ``text_job_local_attempts.jsonl`` that names a job (``jid``), by ``jid``, in time order.
+    Raises :class:`LedgerUnreadable`."""
     from llm_router import text_job_ledger as tj
 
     groups: dict[str, list[dict]] = {}
-    try:
-        text = paths.state_path(tj.LOCAL_ATTEMPTS_FILENAME).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return groups
-    for line in text.splitlines():
+    for line in _ledger_lines(paths.state_path(tj.LOCAL_ATTEMPTS_FILENAME)):
         try:
             row = json.loads(line)
         except ValueError:
@@ -725,22 +737,13 @@ def text_job_jid_groups() -> dict[str, list[dict]]:
 
 
 def link_bind_job(job: dict, groups: dict[str, list[dict]]) -> list[dict] | None:
-    """The attempt rows of one accepted bind job, or None when they cannot be told apart. The job's ``jid`` group is
-    the one whose LAST row was written within a few seconds of the bind row; for a local model that row must be an
-    ``ok`` of the job's model, and no row of the group may name another session. Two groups that fit is None, not a
-    guess."""
-    found: list[list[dict]] = []
-    for rows in groups.values():
-        last = rows[-1]
-        if not -_LINK_AFTER_S <= job["ts"] - last["ts"] <= _LINK_BEFORE_S:
-            continue
-        if any(r["session"] and r["session"] != job["session"] for r in rows):
-            continue
-        if classify_attempt(*_provider_model(job["model"])) == "local" and not (
-                last["outcome"] == "ok" and _norm_model(last["model"]) == _norm_model(job["model"])):
-            continue
-        found.append(rows)
-    return found[0] if len(found) == 1 else None
+    """The attempt rows of one bind job: those of the ``jid`` its own row names, and nothing else. A job whose row
+    names none (written before the hook recorded it), whose ``jid`` has no rows, or whose rows name another session
+    is linked to nothing: it contributes only what its own row proves. Never by model and time."""
+    rows = groups.get(job["jid"]) if job["jid"] else None
+    if not rows or any(r["session"] and r["session"] != job["session"] for r in rows):
+        return None
+    return rows
 
 
 def _provider_model(model: str) -> tuple[str, str]:
@@ -749,24 +752,30 @@ def _provider_model(model: str) -> tuple[str, str]:
 
 
 def fold_bind_jobs(attempts: list[dict], jobs: list[dict], groups: dict[str, list[dict]]) -> list[dict]:
-    """``attempts`` with each accepted bind job's own attempts in place of whatever router attempts the job already
-    left in them. A router attempt that ended inside the job's window (its latency plus a few seconds) on one of the
-    job's models is the same work: it is dropped, so a route later attributed to the session never counts twice. The
-    job adds its linked attempt rows (``bind: True``, session set) and, when none of them is the accepted one (a
-    served-by-Codex job, or rows that could not be linked), one used attempt of the served model. Returns a new list."""
+    """``attempts`` with the attempts of each bind job added. Returns a new list.
+
+    * a job's linked rows (:func:`link_bind_job`) are attempts of the job's session: ``ok`` is used when the job was
+      accepted, ``rejected`` is thrown away by the acceptance check, ``error`` / ``infra`` failed; every row of a job
+      that was handed back is not used (``a = 0``);
+    * an ACCEPTED job with no used attempt among them (its row names no ``jid``, a served-by-Codex job, rows rotated
+      away) adds the one used attempt its own row proves, on the model that served it (the call in n);
+    * a router attempt is taken out only when it belongs to the job by identity: its route carries the ``tool_use`` id
+      of the bind row. Never by model and time: another call of the session, or another job's attempts, on the same
+      model in the same seconds are not this job's. (The hook's own route is logged under ``unknown:non_mcp`` and is
+      not in ``attempts`` at all; a route that ever carries the bind row's ``tool_use`` id is the same work.)"""
     out = list(attempts)
     for job in jobs:
+        if job["tool"]:
+            out = [a for a in out if not (a.get("tool") == job["tool"] and not a.get("bind"))]
         rows = link_bind_job(job, groups) or []
-        models = {_norm_model(r["model"]) for r in rows} | {_norm_model(job["model"])}
-        lo, hi = job["ts"] - job["latency_s"] - _CLAIM_SLACK_S, job["ts"] + _CLAIM_SLACK_S
-        out = [a for a in out if not (lo <= a["ts"] <= hi and _norm_model(a["model"]) in models)]
-        added = [{"id": ("bind", r["ts"]), "ts": r["ts"], "provider": "ollama", "model": r["model"],
+        added = [{"id": ("bind", job["jid"], r["ts"]), "ts": r["ts"], "provider": "ollama", "model": r["model"],
                   "outcome": "ok" if r["outcome"] == "ok" else "rejected" if r["outcome"] == "rejected" else "error",
-                  "kind": "local", "used": r["outcome"] == "ok", "gate_rejected": r["outcome"] == "rejected",
-                  "session": job["session"], "tool": None, "bind": True} for r in rows]
+                  "kind": "local", "used": job["accepted"] and r["outcome"] == "ok",
+                  "gate_rejected": r["outcome"] == "rejected", "session": job["session"], "tool": None, "bind": True}
+                 for r in rows]
         kind = classify_attempt(*_provider_model(job["model"]))
-        if kind is not None and not any(a["used"] for a in added):
-            added.append({"id": ("bind", job["ts"]), "ts": job["ts"], "provider": _provider_model(job["model"])[0],
+        if job["accepted"] and kind is not None and not any(a["used"] for a in added):
+            added.append({"id": ("bind", job["jid"], job["ts"]), "ts": job["ts"], "provider": _provider_model(job["model"])[0],
                           "model": job["model"], "outcome": "ok", "kind": kind, "used": True, "gate_rejected": False,
                           "session": job["session"], "tool": None, "bind": True})
         out += added
@@ -791,6 +800,8 @@ def _part(code: str, fn):
 
 
 def _router_attempts(session_id: str, mcp_ids: list[str]) -> list[dict] | None:
+    """The session's router attempts with the text-job gate and the bind jobs applied, or None when any ledger it
+    reads is unreadable (unknown, never an empty ledger)."""
     attempts = session_attempts(session_id, mcp_ids)
     if attempts is None:
         return None
@@ -863,7 +874,9 @@ def window_extras(since: float, until: float, now: float, kind_of, tool_sessions
       definition as the session figure (an attempt is OK when used). An attempt on a route logged under ``unknown:mcp`` is placed
       through its ``tool_use`` id (``tool_sessions``); ``unattributed_local`` counts the local attempts that no
       session could be found for (not in ``local``). ``local`` and ``unattributed_local`` are ``None`` when the attempt
-      ledger cannot be read: unknown, which every renderer prints as n/a."""
+      ledgers cannot be read: unknown, which every renderer prints as n/a. An unreadable bind ledger raises
+      :class:`LedgerUnreadable` (the number of calls is then unknown, and the caller keeps the figures without
+      the extras)."""
     rows = [r for r in _ns_rows(None) if since <= r["ts"] <= until and kind_of(r.get("session_id"), r.get("session_kind"))]
     runs = codex_run_responses(rows, now)
     extra = 0
@@ -876,23 +889,28 @@ def window_extras(since: float, until: float, now: float, kind_of, tool_sessions
         extra += more
         if more and isinstance(row.get("session_id"), str):
             by_session[row["session_id"]] = by_session.get(row["session_id"], 0) + more
-    # accepted text-job-bind jobs of the population: one call each (the unit list has none), on the model that served
+    # text-job-bind jobs of the population (an unreadable bind ledger raises: the whole extras are then unknown and the
+    # caller falls back to the figures without them). An accepted job is one call (the unit list has none), on the model
+    # that served it; a job handed back adds attempts only.
     jobs = [j for j in bind_jobs(since, until) if kind_of(j["session"], None)]
     bind_extra = 0
     for j in jobs:
-        if classify_attempt(*_provider_model(j["model"])) in ("local", "other"):
+        if j["accepted"] and classify_attempt(*_provider_model(j["model"])) in ("local", "other"):
             bind_extra += 1
             by_session[j["session"]] = by_session.get(j["session"], 0) + 1
     attempts = window_attempts(since, until, tool_sessions or {})
     local = None                                            # the ledger could not be read: unknown, never "0 attempts"
     unattributed = None
     if attempts is not None:
-        placed = [a for a in attempts if a["session"] and kind_of(a["session"], None)]
-        apply_text_job_gate(placed, text_job_rejections(since, tool_sessions))
-        folded = fold_bind_jobs(attempts, jobs, text_job_jid_groups()) if jobs else attempts
-        placed = [a for a in folded if a["session"] and kind_of(a["session"], None)]
-        local = local_figures(placed)
-        unattributed = sum(1 for a in folded if a["kind"] == "local" and not a["session"])
+        try:
+            placed = [a for a in attempts if a["session"] and kind_of(a["session"], None)]
+            apply_text_job_gate(placed, text_job_rejections(since, tool_sessions))
+            folded = fold_bind_jobs(attempts, jobs, text_job_jid_groups()) if jobs else attempts
+            placed = [a for a in folded if a["session"] and kind_of(a["session"], None)]
+            local = local_figures(placed)
+            unattributed = sum(1 for a in folded if a["kind"] == "local" and not a["session"])
+        except LedgerUnreadable as exc:
+            failopen.record("CHZ-FO-ROUTING-LEDGER", exc)     # whether an attempt was used is unknown: local stays None
     return {"codex_extra": extra, "bind_extra": bind_extra, "by_session": by_session,
             "runs": sum(1 for r in runs if r["row"].get("outcome") == "delegated"),
             "flagged_runs": sum(1 for r in runs if r["flagged"]), "local": local, "unattributed_local": unattributed}

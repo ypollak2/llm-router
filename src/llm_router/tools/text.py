@@ -1139,7 +1139,7 @@ _LANE_GAP_CLAUSE = {
 
 def _fill_sink(sink: dict | None, status: str, attempts: int, *, model: str = "none", text: str = "",
                reasons: list[str] | None = None, codes: list[str] | None = None, fallback: str = "",
-               infra: bool = False) -> None:
+               infra: bool = False, jid: str = "") -> None:
     """Hand the caller the structured result (F8) so it need not parse the returned string.
 
     ``codes`` and ``fallback`` are fixed strings chosen by the checks and by this module, never model text.
@@ -1147,6 +1147,8 @@ def _fill_sink(sink: dict | None, status: str, attempts: int, *, model: str = "n
     if sink is not None:
         sink.update(status=status, attempts=int(attempts), model=model, text=text, reasons=list(reasons or []),
                     codes=list(codes or []), fallback=fallback, infra=bool(infra))
+        if jid:  # the job's id in the attempts sidecar: the caller's own record of the job (the bind ledger) names its rows by it
+            sink["jid"] = jid
 
 
 async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | None, sink: dict | None,
@@ -1288,7 +1290,7 @@ async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | Non
                     _fill_sink(sink, STATUS_FALLBACK, attempt - 1 if refused else attempt,
                                model=resp.model if resp is not None else (trace[0] if trace else "none"),
                                reasons=history, fallback=FALLBACK_LANE_REFUSED if refused else FALLBACK_LOCAL_FAILED,
-                               infra=infra)
+                               infra=infra, jid=jid)
                     raise  # flag on: the router's own error, as before
                 # LC-12b / D-277: flag unset = the passed local model alone. A refusal or a local failure hands
                 # the job back; no cloud model was or will be called. Attempts count what really ran.
@@ -1296,7 +1298,7 @@ async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | Non
                 model = resp.model if resp is not None else (trace[0] if trace else "none")
                 record_text_job_outcome(job=job, model=model, status=STATUS_FALLBACK, attempts=tried)
                 _fill_sink(sink, STATUS_FALLBACK, tried, model=model, reasons=history,
-                           fallback=FALLBACK_LANE_REFUSED if refused else FALLBACK_LOCAL_FAILED, infra=infra)
+                           fallback=FALLBACK_LANE_REFUSED if refused else FALLBACK_LOCAL_FAILED, infra=infra, jid=jid)
                 cause = (f"the local-only eligibility step failed for {job} ({type(exc.__cause__).__name__ if exc.__cause__ else 'error'})"
                          if isinstance(exc, eligibility_routing.EligibilityStepFailed)
                          else f"the passed local model no longer matches its pass for {job} ({exc})"
@@ -1361,7 +1363,7 @@ async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | Non
     if timed_out and not accepted:
         # F18: no text was accepted and a capped attempt never produced an answer: the job is handed back, not rejected.
         _fill_sink(sink, STATUS_FALLBACK, attempt, model=resp.model if resp is not None else timed_model,
-                   reasons=history, fallback=FALLBACK_LOCAL_FAILED, infra=True)
+                   reasons=history, fallback=FALLBACK_LOCAL_FAILED, infra=True, jid=jid)
         return (
             "A local text job attempt timed out before the model answered (queueing or contention), so no answer "
             "was judged. "
@@ -1369,7 +1371,7 @@ async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | Non
             "Do this job yourself."
         )
     _fill_sink(sink, status, attempt, model=resp.model if resp else "none", text=result_text if accepted else "",
-               reasons=history, codes=last_codes)
+               reasons=history, codes=last_codes, jid=jid)
     lines = [resp.header() if resp else "no response", ""]
     lines.append(f"_Structured: status={status}, attempts={attempt}_")
     if was_truncated:

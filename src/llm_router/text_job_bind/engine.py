@@ -55,6 +55,7 @@ class GenResult(NamedTuple):
     model: str
     attempts: int
     reason: str
+    jid: str = ""  # the job's id in ``text_job_local_attempts.jsonl`` ("" when the job never started): the bind row's link to its attempts
 
 
 Generate = Callable[[str, str, "str | None", float], GenResult]
@@ -89,17 +90,18 @@ def result_from_sink(sink: dict) -> GenResult:
     status = sink.get("status")
     attempts = int(sink.get("attempts") or 0)
     model = str(sink.get("model") or "unknown")
+    jid = sink.get("jid") if isinstance(sink.get("jid"), str) and re.fullmatch(r"[0-9a-f]{12}", sink["jid"]) else ""
     if status == "accepted":
-        return GenResult("accepted", str(sink.get("text") or ""), model, attempts, "")
+        return GenResult("accepted", str(sink.get("text") or ""), model, attempts, "", jid)
     if status == "rejected":
         codes = [c for c in (sink.get("codes") or []) if isinstance(c, str)]
-        return GenResult("rejected", "", model, attempts, codes[0] if codes else "failed_checks")
+        return GenResult("rejected", "", model, attempts, codes[0] if codes else "failed_checks", jid)
     if status == "fallback":
         if sink.get("infra"):
-            return GenResult("fallback", "", model, attempts, "local_infra")
+            return GenResult("fallback", "", model, attempts, "local_infra", jid)
         code = sink.get("fallback")
-        return GenResult("fallback", "", model, attempts, code if isinstance(code, str) and code in _WHY else "local_failed")
-    return GenResult("error", "", "unknown", 0, "unreadable_result")
+        return GenResult("fallback", "", model, attempts, code if isinstance(code, str) and code in _WHY else "local_failed", jid)
+    return GenResult("error", "", "unknown", 0, "unreadable_result", jid)
 
 
 def attempt_cap_s() -> float | None:
@@ -618,6 +620,8 @@ def _decide(payload, generate, t0, budget_s, root, record, now, mono, prepare=No
             res = generate(plan.job, inp.text, inp.hint, remaining)
         _model_started.clear()
     extra = {"in_chars": len(inp.text), "attempts": res.attempts, "model": res.model}
+    if res.jid:
+        extra["jid"] = res.jid  # lets a reader find this job's own attempt rows (the status line's local OK) by identity
     if res.status == "timeout":
         _start_cooldown(root, now())
         return deny(plan.job, "timeout", "budget", _deny_text(plan.job, f"The local {LABEL[plan.job]} job did not finish in {int(budget_s)} s."), **extra)

@@ -399,6 +399,7 @@ async def test_sink_on_acceptance(monkeypatch):
     sink: dict = {}
     out = await run(sink)
     assert "_Structured: status=accepted, attempts=1_" in out and GOOD in out
+    assert len(sink.pop("jid")) == 12                                         # W9b: the job's id rides the sink
     assert sink == {"status": "accepted", "attempts": 1, "model": LOCAL, "text": GOOD, "reasons": [],
                     "codes": [], "fallback": "", "infra": False}
 

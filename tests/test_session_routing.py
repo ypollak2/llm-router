@@ -825,13 +825,16 @@ def test_unavailable_attempt_data_is_unknown_in_the_seven_day_figure_not_zero_at
 # ── text-job-bind jobs: the hook runs outside MCP, so its router rows name no session ───────────────────────
 
 LOCAL_MODEL = "ollama/qwen3.6:35b-a3b-coding"
+JID = "063cddf43b57"
 
 
 def _bind(home: Path, ts: float, *, session: str = SID, kind: str = "bound", outcome: str = "accepted",
-          model: str = LOCAL_MODEL, latency_ms: int = 18791) -> None:
-    _write(home / "text_job_binds.jsonl", json.dumps({
-        "kind": kind, "job": "commit_message", "outcome": outcome, "session_id": session, "tool_use_id": "toolu_bash",
-        "latency_ms": latency_ms, "model": model, "attempts": 1, "ts": ts}) + "\n")
+          model: str = LOCAL_MODEL, latency_ms: int = 18791, jid: str | None = JID, tool: str = "toolu_bash") -> None:
+    row = {"kind": kind, "job": "commit_message", "outcome": outcome, "session_id": session, "tool_use_id": tool,
+           "latency_ms": latency_ms, "model": model, "attempts": 1, "ts": ts}
+    if jid:
+        row["jid"] = jid
+    _write(home / "text_job_binds.jsonl", json.dumps(row) + "\n")
 
 
 def _attempt_rows(home: Path, *rows: tuple) -> None:
@@ -847,7 +850,11 @@ def _bound_session(env, *, claude: int = 60):
     return home
 
 
-def test_an_accepted_bind_job_is_one_call_and_its_attempt_is_a_local_ok(env):
+def _local(r: dict) -> tuple:
+    return (r["local"]["attempts"], r["local"]["ok"], r["local"]["gate_rejected"])
+
+
+def test_an_accepted_bind_job_is_one_call_and_its_attempts_are_found_by_its_jid(env):
     """The 2026-11-04 10:39Z commit: accepted, written by the local model, router rows under `unknown:non_mcp`."""
     home = _bound_session(env)
     t = NOW - 100
@@ -855,95 +862,138 @@ def test_an_accepted_bind_job_is_one_call_and_its_attempt_is_a_local_ok(env):
     before = sr.compute(SID, NOW, budget_s=30)
     assert (before["non_claude"], before["local"]["attempts"]) == (0, 0)     # the router rows are not the session's
     _bind(home, t)
-    _attempt_rows(home, (t - 0.005, "ok", "063cddf43b57"))
+    _attempt_rows(home, (t - 20, "rejected", JID), (t - 0.005, "ok", JID))
     shutil.rmtree(home / sr.INDEX_DIR)
     r = sr.compute(SID, NOW, budget_s=30)
     assert (r["non_claude"], r["total"]) == (1, 61) and r["by_source"]["router_local"] == 1
-    assert r["local"] == {"attempts": 1, "ok": 1, "gate_rejected": 0}
-    assert tick.render_session_routing(r, now=NOW) == "routed 1.6% (1/61 calls, session) · local OK 100% (1/1, session)"
+    assert _local(r) == (2, 1, 1)                                             # the rejected try and the accepted one
+    assert tick.render_session_routing(r, now=NOW) == "routed 1.6% (1/61 calls, session) · local OK 50% (1/2, session)"
 
 
-def test_a_job_that_needed_two_tries_is_one_call_and_two_local_attempts(env):
+def test_a_bind_row_without_a_jid_is_one_call_and_borrows_no_attempts(env):
+    """A row written before the hook recorded the jid: its own row proves the call and one used attempt, nothing
+    more, even though exactly one attempt group fits it in time."""
     home = _bound_session(env)
     t = NOW - 100
     _routing_db(home)
-    _bind(home, t)
-    _attempt_rows(home, (t - 20, "rejected", "j2"), (t - 0.005, "ok", "j2"))
+    _bind(home, t, jid=None)
+    _attempt_rows(home, (t - 20, "rejected", "jOther"), (t - 0.005, "ok", "jOther"))       # time-adjacent, not its jid
     r = sr.compute(SID, NOW, budget_s=30)
-    assert r["non_claude"] == 1 and r["local"] == {"attempts": 2, "ok": 1, "gate_rejected": 1}
+    assert r["non_claude"] == 1 and _local(r) == (1, 1, 0)
 
 
-def test_a_bind_job_served_by_codex_is_one_other_call_and_its_failed_local_try_is_counted(env):
+def test_a_codex_served_bind_never_inherits_an_unrelated_local_ok(env):
     home = _bound_session(env)
     t = NOW - 100
     _routing_db(home)
-    _bind(home, t, model="codex/gpt-6-astra")
-    _attempt_rows(home, (t - 0.005, "error", "j3"), (t - 0.004, "infra", "j3"))
+    _bind(home, t, model="codex/gpt-6-astra", jid=None)
+    _attempt_rows(home, (t - 0.005, "ok", "jOther"))                          # another job's attempt, a heartbeat away
     r = sr.compute(SID, NOW, budget_s=30)
     assert r["non_claude"] == 1 and r["by_source"]["router_other"] == 1 and r["by_source"]["router_local"] == 0
-    assert r["local"] == {"attempts": 2, "ok": 0, "gate_rejected": 0}
-
-
-def test_two_jobs_that_fit_the_bind_row_are_not_guessed_but_the_accepted_call_still_counts(env):
-    home = _bound_session(env)
-    t = NOW - 100
-    _routing_db(home)
-    _bind(home, t)
-    _attempt_rows(home, (t - 20, "rejected", "jA"), (t - 0.005, "ok", "jA"), (t - 0.004, "ok", "jB"))
-    r = sr.compute(SID, NOW, budget_s=30)
-    # not jA's two rows (a guess): the one accepted attempt the bind row itself proves
-    assert r["non_claude"] == 1 and r["local"] == {"attempts": 1, "ok": 1, "gate_rejected": 0}
-
-
-def test_only_this_sessions_accepted_binds_count(env):
-    home = _bound_session(env)
-    t = NOW - 100
-    _routing_db(home)
-    _bind(home, t - 50, session=SID_B)                                        # another session's job
-    _bind(home, t - 40, kind="denied", outcome="unsupported")
-    _bind(home, t - 30, kind="handwritten", outcome="none")
-    _bind(home, t - 20, outcome="rejected")
-    _attempt_rows(home, (t - 49.9, "ok", "jX"))
-    r = sr.compute(SID, NOW, budget_s=30)
-    assert r["non_claude"] == 0 and r["local"] == {"attempts": 0, "ok": 0, "gate_rejected": 0}
-    # a job whose rows name another session is not linked to this one: only the accepted call counts, no attempt row
-    _bind(home, t - 10, model="codex/gpt-6-astra")
-    _write(home / "text_job_local_attempts.jsonl", json.dumps({
-        "ts": t - 10.005, "job": "j", "model": LOCAL_MODEL, "outcome": "error", "jid": "jY", "session_id": SID_B}) + "\n")
+    assert _local(r) == (0, 0, 0)
+    # with its own jid the job's failed local tries are its own and are counted
+    _bind(home, t - 50, model="codex/gpt-6-astra", jid="jOwn", tool="toolu_other")
+    _attempt_rows(home, (t - 50.005, "error", "jOwn"), (t - 50.004, "infra", "jOwn"))
     shutil.rmtree(home / sr.INDEX_DIR)
     r = sr.compute(SID, NOW, budget_s=30)
-    assert r["non_claude"] == 1 and r["by_source"]["router_other"] == 1
-    assert r["local"] == {"attempts": 0, "ok": 0, "gate_rejected": 0}
+    assert r["non_claude"] == 2 and _local(r) == (2, 0, 0)
 
 
-def test_a_router_attempt_the_session_can_see_is_not_counted_again_when_the_bind_job_claims_it(env):
-    """If the hook's route is ever attributed to the session, the job and its own attempt are one call."""
+def test_a_job_that_was_handed_back_adds_its_attempts_to_b_and_nothing_to_n(env):
+    """Claude then writes the text itself: the local tries were still made."""
     home = _bound_session(env)
     t = NOW - 100
-    _routing_db(home, [("c1", SID, None), ("c2", SID, None)],
-                [("c1", t - 0.01, "ollama", LOCAL_MODEL, "ok"),                       # the bind job's own attempt
-                 ("c2", t - 3600, "ollama", LOCAL_MODEL, "ok")])                      # an hour earlier: another call
-    _bind(home, t)
-    _attempt_rows(home, (t - 0.005, "ok", "jZ"))
+    _routing_db(home)
+    _bind(home, t, kind="denied", outcome="rejected", jid="jRej")
+    _attempt_rows(home, (t - 30, "rejected", "jRej"), (t - 20, "ok", "jRej"), (t - 10, "error", "jRej"))
+    _bind(home, t + 10, kind="denied", outcome="fallback", jid="jFb", tool="toolu_2")
+    _attempt_rows(home, (t + 9, "infra", "jFb"))
+    _bind(home, t + 20, kind="denied", outcome="unsupported", jid=None, tool="toolu_3")     # ran nothing, names nothing
+    _bind(home, t + 30, kind="handwritten", outcome="none", jid=None, tool="toolu_4")
     r = sr.compute(SID, NOW, budget_s=30)
-    assert r["non_claude"] == 2 and r["local"] == {"attempts": 2, "ok": 2, "gate_rejected": 0}
+    assert r["non_claude"] == 0 and _local(r) == (4, 0, 1)                    # a = 0: nothing of a handed-back job is used
+    assert r["by_source"]["router_local"] == 0
 
 
-def test_the_seven_day_population_counts_the_same_bind_jobs(env):
+def test_only_this_sessions_jobs_count_and_rows_naming_another_session_are_not_linked(env):
+    home = _bound_session(env)
+    t = NOW - 100
+    _routing_db(home)
+    _bind(home, t - 50, session=SID_B, jid="jB")                              # another session's job
+    _attempt_rows(home, (t - 50.005, "ok", "jB"))
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["non_claude"] == 0 and _local(r) == (0, 0, 0)
+    _bind(home, t - 10, model="codex/gpt-6-astra", jid="jMine", tool="toolu_m")
+    _write(home / "text_job_local_attempts.jsonl", json.dumps({
+        "ts": t - 10.005, "job": "j", "model": LOCAL_MODEL, "outcome": "error", "jid": "jMine", "session_id": SID_B}) + "\n")
+    shutil.rmtree(home / sr.INDEX_DIR)
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["non_claude"] == 1 and _local(r) == (0, 0, 0)                    # rows that name another session: not its rows
+
+
+def test_an_unrelated_same_model_call_in_the_jobs_window_is_not_removed(env):
+    """M1: the window and the model are not an identity. Another MCP call of the session on the same model, and a
+    second bind job whose window overlaps the first, both stay."""
+    home = _bound_session(env)
+    t = NOW - 100
+    _routing_db(home, [("c1", SID, "tu_mcp"), ("c2", SID, "toolu_bash")],
+                [("c1", t - 5, "ollama", LOCAL_MODEL, "ok"),                      # an MCP call, same model, inside the window
+                 ("c2", t - 0.01, "ollama", LOCAL_MODEL, "ok")])                  # a route that carries THIS job's tool_use id
+    _bind(home, t, jid="jA", tool="toolu_bash")
+    _attempt_rows(home, (t - 0.005, "ok", "jA"))
+    _bind(home, t + 4, jid="jB", tool="toolu_other")                            # overlaps the first job's window
+    _attempt_rows(home, (t + 3.995, "ok", "jB"))
+    r = sr.compute(SID, NOW, budget_s=30)
+    # kept: the MCP call, job A's attempt, job B's attempt. Removed: only the route carrying A's tool_use id (same work).
+    assert _local(r) == (3, 3, 0) and r["non_claude"] == 3
+
+
+def test_a_missing_bind_ledger_is_nothing_recorded_and_an_unreadable_one_is_unknown(env):
+    home = _bound_session(env)
+    _routing_db(home, [("c1", SID, None)], [("c1", NOW - 50, "ollama", LOCAL_MODEL, "ok")])
+    r = sr.compute(SID, NOW, budget_s=30)                                     # no text_job_binds.jsonl at all
+    assert r["non_claude"] == 1 and _local(r) == (1, 1, 0)
+    (home / "text_job_binds.jsonl").mkdir()                                   # exists, and cannot be read as a file
+    shutil.rmtree(home / sr.INDEX_DIR)
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["non_claude"] is None and r["total"] is None and r["local"] is None
+    assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local OK n/a (session)"
+
+
+def test_an_unreadable_attempt_ledger_is_unknown_not_an_empty_one(env):
+    home = _bound_session(env)
+    t = NOW - 100
+    _routing_db(home)
+    _bind(home, t)
+    (home / "text_job_local_attempts.jsonl").mkdir()
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["local"] is None and r["non_claude"] is None                      # not "1 call, 1 of 1": the rows are unknown
+    x = sr.window_extras(NOW - 7 * 86400, NOW, NOW, lambda sid, stamp: sid == SID, {})
+    assert x["local"] is None and x["bind_extra"] == 1                         # the call count is the bind row's own
+    (home / "text_job_binds.jsonl").unlink()
+    (home / "text_job_binds.jsonl").mkdir()
+    with pytest.raises(sr.LedgerUnreadable):
+        sr.window_extras(NOW - 7 * 86400, NOW, NOW, lambda sid, stamp: sid == SID, {})
+
+
+def test_the_seven_day_population_counts_the_same_jobs(env):
     home, _projects, _codex = env
     t = NOW - 100
     _routing_db(home, [("4b11e0a0", "unknown:non_mcp", None)], [("4b11e0a0", t - 0.01, "ollama", LOCAL_MODEL, "ok")])
-    _bind(home, t)                                                            # organic
-    _bind(home, t - 50, session=SID_B)                                        # not the population
-    _attempt_rows(home, (t - 0.005, "ok", "j1"), (t - 49.995, "ok", "j9"))
+    _bind(home, t)                                                            # organic, accepted
+    _attempt_rows(home, (t - 0.005, "ok", JID))
+    _bind(home, t - 50, session=SID_B, jid="jB")                              # not the population
+    _attempt_rows(home, (t - 49.995, "ok", "jB"))
+    _bind(home, t - 30, kind="denied", outcome="rejected", jid="jR", tool="toolu_r")   # organic, handed back
+    _attempt_rows(home, (t - 30.005, "rejected", "jR"))
 
     def organic(sid, stamp):
         return sid == SID
 
     x = sr.window_extras(NOW - 7 * 86400, NOW, NOW, organic, {})
-    assert x["bind_extra"] == 1 and x["by_session"] == {SID: 1}
-    assert x["local"] == {"attempts": 1, "ok": 1, "gate_rejected": 0}
-    assert x["unattributed_local"] == 0                                       # the unplaced router event is the job's own
+    assert x["bind_extra"] == 1 and x["by_session"] == {SID: 1}              # the handed-back job is no call
+    assert x["local"] == {"attempts": 2, "ok": 1, "gate_rejected": 1}
+    assert x["unattributed_local"] == 1                                       # the hook's unplaced router event stays unplaced
     from llm_router.commands import kpi
 
     class _Index:
