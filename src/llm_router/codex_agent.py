@@ -405,7 +405,8 @@ class CodexResult:
         duration_sec: Wall-clock execution time in seconds.
         reason_code: Short machine-readable cause, set on EVERY failure (empty
             on success): ``binary_missing``, ``timeout``, ``spawn_error``,
-            ``cli_error``, ``empty_completion``, ``nonzero_exit``. Callers
+            ``cli_error``, ``empty_completion``, ``nonzero_exit``, ``meter_reserved`` (D-373: the Plus
+            meter is reserved for agent-route, nothing was started). Callers
             record it in the ledger so a failed delegation is never reasonless.
         truncated: ``True`` when stdout was clipped (an over-long line was
             dropped or the total-bytes cap was hit); the answer may be partial.
@@ -606,6 +607,7 @@ async def run_codex(
     transcript_path: str | None = None,
     target_window: int = CODEX_TARGET_WINDOW,
     sandbox: str | None = None,
+    caller: str = "",
 ) -> CodexResult:
     """Run a task through the Codex CLI agent as a subprocess.
 
@@ -657,6 +659,10 @@ async def run_codex(
             removed after it). ``"read-only"`` is the same without writes. Both ignore execpolicy rules
             (:func:`codex_exec_args`). Anything else is refused: no caller may ask for ``danger-full-access``
             through here.
+        caller: Who is spending the Plus meter. D-373 reserves the meter for sub-agent delegation: every caller
+            except ``"agent_route"`` is refused (``reason_code="meter_reserved"``, no process started) once the
+            weekly meter passes the reserve line, and a caller that names nothing is guarded too
+            (:mod:`llm_router.codex_meter`).
 
     Returns:
         A ``CodexResult`` with the process output, model name, exit code,
@@ -664,6 +670,19 @@ async def run_codex(
         in the result.
     """
     from llm_router.safe_subprocess import get_safe_env
+
+    # D-373: before any work is done for the call (context pack, binary probe), not after it.
+    try:
+        from llm_router import codex_meter
+
+        reserved = codex_meter.refusal(caller)
+    except Exception as exc:  # noqa: BLE001 -- a broken guard refuses; it never opens the meter
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-CODEX-RESERVE-GUARD", exc, detail=str(caller)[:40])
+        reserved = "Codex is reserved for sub-agent delegation (D-373); the reserve guard failed, so this caller was not run."
+    if reserved is not None:
+        return CodexResult(content=reserved, model=model, exit_code=1, duration_sec=0.0, reason_code="meter_reserved")
 
     try:
         from llm_router.context_pack import build_pack

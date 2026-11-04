@@ -110,10 +110,14 @@ def log_bench(provider: str, trigger: str, until: float, now: float | None = Non
     })
 
 
-def log_unban(provider: str, until: float | None, now: float | None = None) -> None:
-    """The owner cleared ``provider``'s bench. ``until`` is what the entry held."""
+def log_unban(provider: str, until: float | None, now: float | None = None, *, source: str = "owner") -> None:
+    """``provider``'s bench was cleared before it lapsed. ``until`` is what the entry held. ``source`` is who cleared it:
+    ``owner`` (``llm-router provider unban``, the default, and the only value written without a ``source`` field), or ``meter`` /
+    ``canary`` when the router did (``codex_bench``). Any of them shows the bench was wrong, so ``judge`` counts them alike."""
     row: dict = {"kind": "unban", "provider": provider,
                  "ts": round(time.time() if now is None else now, 3)}
+    if source != "owner":
+        row["source"] = source[:20]
     if isinstance(until, (int, float)) and not isinstance(until, bool):
         row["until"] = round(until, 3)
     _write(row)

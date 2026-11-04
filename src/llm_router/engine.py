@@ -358,7 +358,26 @@ _SECRET_SHAPES = {
     "aws_key_id": re.compile(r"(?<![A-Z])(?:AKIA|ASIA)[0-9A-Z]{16}(?:\b|" + _TAIL_FILLER + ")"),
     "github_token": re.compile(_UNGLUED + r"gh[pousr]_[A-Za-z0-9]{36,255}|" + _GLUED + r"gh[pousr]_(?![A-Za-z0-9]{0,29}[a-z]{7})[A-Za-z0-9]{36}(?![A-Za-z0-9])|github_pat_[A-Za-z0-9_]{50,255}"),
     "slack_token": re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,256}"),
-    "private_key": re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----"),
+    # PEM / OpenSSH / PKCS#8 (``-----BEGIN [RSA |EC |OPENSSH |ENCRYPTED ]PRIVATE KEY-----``), PGP armor (``PRIVATE KEY BLOCK``,
+    # which the old header regex never matched) and the ssh.com form with four dashes (``---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----``).
+    "private_key": re.compile(r"-{4,5} ?BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)? ?-{4,5}"),
+    # PuTTY ``.ppk``: the header line; the key is real only when a ``Private-Lines:`` section follows (``_putty_key_is_real``).
+    "putty_key": re.compile(r"PuTTY-User-Key-File-\d{1,2}:[ \t]*[\w-]{1,40}"),
+    # Provider credentials with a distinctive prefix. A placeholder (``sk_live_xxxxxxxx``, ``hf_...``) is exempted by the
+    # value itself, as for the shapes above. A prefix of 8 characters or more is not anchored on the left, so a key glued to
+    # preceding text is still found. ``hf_`` and ``npm_`` are 3 and 4 characters: inside a 100 KB random base64url blob one
+    # turns up by chance about once in ten blobs (tests/test_secdet_token_not_surroundings.py), so they must start a run;
+    # a key glued to letters in front of ``hf_`` is the price (``SG.`` needs a ``.``, which a base64url blob never holds).
+    "stripe_key": re.compile(r"[sr]k_live_[0-9A-Za-z]{24,255}"),
+    "sendgrid_key": re.compile(r"SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}"),
+    "huggingface_token": re.compile(r"(?<![A-Za-z0-9_-])hf_[A-Za-z0-9]{34,255}"),
+    "npm_token": re.compile(r"(?<![A-Za-z0-9_-])npm_[A-Za-z0-9]{36,255}"),
+    "gitlab_token": re.compile(r"glpat-[A-Za-z0-9_-]{20,255}"),
+    "pypi_token": re.compile(r"pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,512}"),
+    "digitalocean_token": re.compile(r"do[opr]_v1_[a-f0-9]{64}"),
+    "slack_webhook": re.compile(r"hooks\.slack\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/[A-Za-z0-9]{20,}"),
+    "age_key": re.compile(r"AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}"),
+    "azure_storage_key": re.compile(r"AccountKey=[A-Za-z0-9+/]{86}=="),
     "jwt": re.compile(r"eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,512}"),
     "bearer_token": re.compile(r"Bearer\s{1,8}(?=[A-Za-z0-9._~+/-]{0,300}\d)[A-Za-z0-9._~+/-]{30,512}=*"),
     "db_url_password": re.compile(
@@ -377,13 +396,19 @@ _ASSIGN = re.compile(
 #: nearby ``.env.example`` / ``.example`` host / "sample config" label is page- or site-controlled text and exempts nothing
 #: (SECDET). A percent-encoded prefix (``sk%2Dant-``) is read decoded; a key glued to preceding letters is found.
 HIGH_PRECISION = frozenset({"anthropic_key", "openrouter_key", "openai_key", "google_key", "aws_key_id",
-                            "github_token", "slack_token", "private_key", "bearer_token", "db_url_password", "jwt"})
+                            "github_token", "slack_token", "private_key", "bearer_token", "db_url_password", "jwt",
+                            "putty_key", "stripe_key", "sendgrid_key", "huggingface_token", "npm_token", "gitlab_token",
+                            "pypi_token", "digitalocean_token", "slack_webhook", "age_key", "azure_storage_key"})
 #: What a person reads in a refusal (the category, never the value).
 SECRET_LABELS = {
     "anthropic_key": "Anthropic API key", "openrouter_key": "OpenRouter API key", "openai_key": "OpenAI API key",
     "google_key": "Google API key", "aws_key_id": "AWS access key", "github_token": "GitHub token",
     "slack_token": "Slack token", "private_key": "private key block", "jwt": "JWT",
     "bearer_token": "bearer token", "db_url_password": "database URL password",
+    "putty_key": "private key block", "stripe_key": "Stripe live key", "sendgrid_key": "SendGrid API key",
+    "huggingface_token": "Hugging Face token", "npm_token": "npm token", "gitlab_token": "GitLab token",
+    "pypi_token": "PyPI token", "digitalocean_token": "DigitalOcean token", "slack_webhook": "Slack webhook URL",
+    "age_key": "age secret key", "azure_storage_key": "Azure storage key",
     "assigned_literal": "assigned secret literal",
 }
 
@@ -403,7 +428,9 @@ _COMMON_PASSWORDS = frozenset({
     "localpass", "localhost", "guest", "default", "letmein", "qwerty", "qwertyuiop", "12345678", "123456789",
     "1234567890", "redis", "mongo", "mongodb", "rabbitmq", "secretpassword", "dbpassword", "dbpass",
     "supersecret", "foobarbaz", "hunter2", "welcome", "welcome1", "p@ssw0rd", "p@ssword"})
-_KEY_PREFIX = re.compile(r"^(?:sk-ant-|sk-or-v1-|sk-(?:proj-|svcacct-)?|AIza|gh[pousr]_|github_pat_|xox[baprs]-)")
+_KEY_PREFIX = re.compile(
+    r"^(?:sk-ant-|sk-or-v1-|sk-(?:proj-|svcacct-)?|AIza|gh[pousr]_|github_pat_|xox[baprs]-|[sr]k_live_|SG\.|hf_|npm_|glpat-|"
+    r"pypi-AgEIcHlwaS5vcmc|do[opr]_v1_|AGE-SECRET-KEY-1|AccountKey=|hooks\.slack\.com/services/)")
 _FILLER_RUN = re.compile(r"[xX*0.]{8,}")
 
 
@@ -469,13 +496,45 @@ def _random_looking(body: str, *, bits: float = 3.5, distinct: int = 10) -> bool
     return len(set(body)) >= distinct and _entropy(body) >= bits
 
 
+#: A literal backslash-``n`` (or ``\\n``, ``\r``, ``\t``): how a key looks inside a JSON, YAML or shell-quoted string, such as
+#: the ``private_key`` of a Google service-account file. It is a line break, not key material.
+_PEM_ESCAPED_BREAK = re.compile(r"(?:\\{1,2}[nrt])+")
+#: The closing line of a key block (``-----END ...``, or the four-dash ssh.com form).
+_PEM_END = re.compile(r"-{4,5} ?END")
+#: An armor header inside a block: PGP ``Version:`` / ``Comment:``, RFC 1421 ``Proc-Type:`` / ``DEK-Info:``. Base64 has no colon.
+_PEM_ARMOR_HEADER = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,40}:[^\n]*$")
+_BASE64_TOKEN = re.compile(r"[A-Za-z0-9+/=]+")
+
+
 def _pem_block_is_real(text: str, end: int) -> bool:
-    """A PEM private-key header followed by a base64 body that is not filler (not a bare header in a question)."""
-    tail = text[end:end + 4096]
-    body = tail.split("-----END", 1)[0]
-    body = "".join(body.split())
-    return len(body) >= 40 and re.fullmatch(r"[A-Za-z0-9+/=]+", body) is not None and not _is_placeholder(body) \
-        and _random_looking(body, bits=3.0, distinct=12)
+    """A key header followed by key material: base64 that is not filler (not a bare header in a question).
+
+    The body is what follows the header up to the closing ``-----END`` line, with armor headers dropped and escaped line
+    breaks read as breaks. Key material is the run of whole base64 tokens, each at least 16 characters, that starts the
+    body: a PEM line is 64 or 76 characters, a key pasted onto one line keeps its line-sized runs, and a sentence after a
+    bare header starts with a short word, so it is not a body. What follows that run (a short final line, a comment, the
+    rest of the question) does not matter. A truncated paste (``MIIEowIBAAKCAQEA7``) is still the start of a key."""
+    tail = _PEM_ESCAPED_BREAK.sub("\n", text[end:end + 4096])
+    body = _PEM_END.split(tail, 1)[0]
+    lines = [ln.strip() for ln in body.splitlines()]
+    # a key quoted, commented or concatenated in source keeps its quote, comma, ``+`` or ``#`` outside the base64
+    words = [t for t in (w.strip("\"',+\\#>|") for w in " ".join(
+        ln for ln in lines if ln and not _PEM_ARMOR_HEADER.match(ln)).split()) if t]
+    material: list[str] = []
+    for word in words:
+        if len(word) < 16 or _BASE64_TOKEN.fullmatch(word) is None:
+            break
+        material.append(word)
+    joined = "".join(material)
+    return bool(joined) and not _is_placeholder(joined) \
+        and _random_looking(joined, bits=3.0, distinct=min(12, max(8, len(joined) // 3)))
+
+
+def _putty_key_is_real(text: str, end: int) -> bool:
+    """A PuTTY ``.ppk`` header followed, within the file, by a ``Private-Lines:`` section and a base64 line: the private half."""
+    tail = text[end:end + 8192]
+    m = re.search(r"Private-Lines:[ \t]*\d+[ \t]*\r?\n[ \t]*([A-Za-z0-9+/=]{16,})", tail)
+    return m is not None and not _is_placeholder(m.group(1)) and _random_looking(m.group(1), bits=3.0, distinct=10)
 
 
 def _db_password_is_real(user: str, password: str) -> bool:
@@ -588,6 +647,8 @@ def _findings(text: str) -> dict[str, bool]:
                     break
                 if name == "private_key":
                     high = _pem_block_is_real(text, offset + m.end())  # the body may lie past this window
+                elif name == "putty_key":
+                    high = _putty_key_is_real(text, offset + m.end())
                 elif name == "db_url_password":
                     high = _db_password_is_real(m.group(1), m.group(2))
                 elif name == "jwt":

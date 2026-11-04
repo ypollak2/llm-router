@@ -321,7 +321,7 @@ async def codex_adapter(job: dict) -> dict:
     model = job.get("model", "")
     # Strip a leading provider prefix ("codex/gpt-5.5" -> "gpt-5.5").
     model_name = model.split("/", 1)[1] if "/" in model else model
-    result = await run_codex(job.get("prompt", ""), model=model_name)
+    result = await run_codex(job.get("prompt", ""), model=model_name, caller="session_broker")
     if not result.success:
         return {"status": "error", "error": f"codex exit {result.exit_code}: "
                                              f"{result.content[:200]}"}

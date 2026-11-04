@@ -260,6 +260,17 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _SUBPROCESS_ERROR_CONTENT_CAP = 200
 
 
+def _codex_caller() -> str:
+    """D-373: who the chain tells the Codex meter guard it is. A Codex-served text job is named apart from the rest of the
+    chain so ``codex_meter.jsonl`` shows which of the two was refused."""
+    try:
+        from llm_router import eligibility_routing
+
+        return "text_job" if eligibility_routing._text_job_ctx.get() else "router_chain"
+    except Exception:  # noqa: BLE001 -- the label only; an unnamed caller is guarded all the same
+        return "router_chain"
+
+
 def _format_subprocess_chain_error(
     agent: str,
     exit_code: int,
@@ -3579,6 +3590,7 @@ async def _dispatch_model_loop(
                         # session's project scope is for OKF retrieval only
                         # here, not for moving where the Codex subprocess runs.
                         context_root=_codex_scope_root,
+                        caller=_codex_caller(),  # D-373: the Plus meter is reserved for agent-route
                     )
                     if not codex_result.success:
                         # The chain error below keeps only the first 200 chars;

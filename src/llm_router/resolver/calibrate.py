@@ -159,7 +159,7 @@ class CloudCompleter:
             kw = {"working_dir": tmp, "timeout": int(timeout), "context_root": tmp}
             if model.startswith("codex/"):
                 from llm_router.codex_agent import run_codex
-                res = asyncio.run(run_codex(prompt, model=name, **kw))
+                res = asyncio.run(run_codex(prompt, model=name, caller="calibrate", **kw))
             elif model.startswith("claude_subscription/"):
                 from llm_router.claude_agent import run_claude
                 res = asyncio.run(run_claude(prompt, model=name, **kw))
