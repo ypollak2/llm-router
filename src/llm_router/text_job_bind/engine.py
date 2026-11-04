@@ -40,6 +40,8 @@ COOLDOWN_FILE = "cooldown.json"
 _COMMIT_CMD = COMMIT_CMD
 _PR_CMD = PR_CMD
 _ON = frozenset({"1", "true", "on", "yes"})
+#: A command line the scanner cannot read is let through only if it does not name git or gh at all.
+_NAMES_GIT_OR_GH = re.compile(r"(?<![\w-])(?:git|gh)(?![\w-])")
 
 
 class GenResult(NamedTuple):
@@ -111,6 +113,41 @@ def attempt_cap_s() -> float | None:
         return None
 
 
+def lane_gate(job: str, input_text: str, hint: str | None) -> GenResult | None:
+    """The flag and lane checks of ``llm_text_job``, made BEFORE the router is imported.
+
+    ``None`` means "go on". A fallback result means the job would be handed back anyway (flag off, no lane, a lane
+    that cannot be verified): the hook can deny in about the time it takes to read two state files instead of paying
+    for the model libraries first. It asks the router's own functions the same questions with the same arguments as
+    ``tools.text._llm_text_job`` (``eligibility_routing.passed_lane_available`` / ``passed_lane_diagnosis``, the
+    input cut at ``text_jobs.MAX_INPUT_CHARS`` plus the hint) and maps the answer to the same codes; a test runs both
+    over the same states. A gate that cannot be read does not decide: the full path does."""
+    flag = os.environ.get("LLM_ROUTER_LOCAL_TEXT_JOBS", "").strip().lower()
+    if flag and flag not in _ON:
+        reason = "flag_off"
+    else:
+        # a truthy flag would let the router try cloud models; the hook runs local-only, so it counts as unset
+        try:
+            from llm_router import eligibility_routing as er
+            from llm_router.text_jobs import truncate_input
+
+            cut, _ = truncate_input(input_text)
+            length, now = len(cut) + len(hint or ""), time.time()
+            if er.passed_lane_available(job, length, now):
+                return None
+            reason = "no_lane" if er.passed_lane_diagnosis(job, length, now) == "none" else "lane_unverified"
+        except Exception as exc:  # noqa: BLE001 -- an unreadable gate is the full path's to decide
+            _failopen("CHZ-FO-TEXTJOB-BIND-GATE", exc)
+            return None
+    try:
+        from llm_router.text_job_ledger import STATUS_FALLBACK, record_text_job_outcome
+
+        record_text_job_outcome(job=job, model="none", status=STATUS_FALLBACK, attempts=0)  # as the router's own gate does
+    except Exception as exc:  # noqa: BLE001 -- a ledger row never changes the answer
+        _failopen("CHZ-FO-TEXTJOB-BIND-GATE-LEDGER", exc)
+    return GenResult("fallback", "", "none", 0, reason)
+
+
 def load_router() -> None:
     """Import the router's text-job tool. Slow (the model libraries load here), and none of it is the model's
     wait: ``_decide`` calls this BEFORE the ``text_job`` phase so the hook-latency KPI books it as router-added."""
@@ -118,13 +155,15 @@ def load_router() -> None:
 
 
 def load_env() -> None:
-    """Apply ``$LLM_ROUTER_HOME/.env`` (and the project's, filtered) the way the MCP server does, so the off switch
+    """Apply the user's own ``$LLM_ROUTER_HOME/.env`` (and ONLY that file), so the off switch
     ``LLM_ROUTER_LOCAL_TEXT_JOBS=0`` and the context/think settings the lane was checked with reach this process.
-    The real environment always wins. Best-effort."""
+    The repository's ``.env`` is not read: this hook runs inside whatever repository the model is working in and
+    decides what gets published, so repository content must not be able to undo the owner's settings. The real
+    environment always wins. Best-effort."""
     try:
-        from llm_router.env_loader import load_dotenv_files
+        from llm_router.env_loader import load_user_dotenv
 
-        load_dotenv_files()
+        load_user_dotenv()
     except Exception as exc:  # noqa: BLE001 -- a missing .env loader never changes the answer
         _failopen("CHZ-FO-TEXTJOB-BIND-ENV", exc)
 
@@ -303,18 +342,21 @@ def decide(
     prepare: Callable[[], None] | None = None,
     lock_wait_s: float = limits.LOCK_WAIT_SEC,
     body_mode: str | None = None,
+    gate: Callable[[str, str, "str | None"], "GenResult | None"] | None = None,
 ) -> Decision:
     """What to say about the Bash call in ``payload``. Never raises.
 
     ``prepare`` loads what the model call needs (default: the router, only when ``generate`` is the real
-    one); it runs outside the model phase. ``lock_wait_s`` is how long a job waits for the machine-wide job
+    one); it runs outside the model phase. ``gate`` is the flag and lane check that runs before ``prepare``
+    (default ``lane_gate``, again only for the real generator). ``lock_wait_s`` is how long a job waits for the machine-wide job
     lock. ``body_mode`` overrides ``LLM_ROUTER_TEXT_JOB_BODY`` / ``limits.COMMIT_BODY_MODE``."""
     t0 = mono() if started is None else started
-    if prepare is None and generate is generate_with_text_job:
-        prepare = load_router
+    if generate is generate_with_text_job:
+        prepare = load_router if prepare is None else prepare
+        gate = lane_gate if gate is None else gate
     try:
         return _decide(payload, generate, t0, budget_s, root or paths.state_path("text_job_bind"), record, now, mono,
-                       prepare, lock_wait_s, body_mode)
+                       prepare, lock_wait_s, body_mode, gate)
     except Exception as exc:  # noqa: BLE001 -- see below: a placeholder command must still get a deny
         _failopen("CHZ-FO-TEXTJOB-BIND-DECIDE", exc)
         cmd = _command_of(payload)
@@ -351,17 +393,20 @@ def _row(payload: dict, job: str, cmd: str, kind: str, outcome: str, reason: str
     return row
 
 
-def _model_phase():
-    """The wait on the local model, named for the G1 hook-latency KPI: it is the answer, not
-    router-added time (``hook_latency.MODEL_PHASES``). A no-op outside an armed hook process."""
+def _phase(name: str):
+    """A named phase for the G1 hook-latency KPI; a no-op outside an armed hook process."""
     try:
         from llm_router.hook_latency import phase
 
-        return phase("text_job")
+        return phase(name)
     except Exception:  # noqa: BLE001 -- timing metadata never changes the answer
-        import contextlib
-
         return contextlib.nullcontext()
+
+
+def _model_phase():
+    """The wait on the local model, named for the G1 hook-latency KPI: it is the answer, not
+    router-added time (``hook_latency.MODEL_PHASES``)."""
+    return _phase("text_job")
 
 
 def _safe_record(record: Callable[[dict], None], row: dict) -> None:
@@ -380,15 +425,21 @@ def _subject(text: str) -> str:
     return next((ln.strip() for ln in text.split("\n") if ln.strip()), "")
 
 
-def _assemble(job: str, text: str, mode: str, stats: list) -> str:
-    """The text the file holds, by body mode. A PR body is the model's own (cleaned); a commit message is the
-    model's subject plus, by ``mode``, nothing, a list of the changed files built from git, or the model's body."""
+def _assemble(job: str, text: str, mode: str, stats: list) -> tuple[str, sanitize.Cleaned | None]:
+    """The text the file holds, by body mode, and what cleaning the file list needed (or ``None``). A PR body is the
+    model's own (cleaned already); a commit message is the model's subject plus, by ``mode``, nothing, a list of
+    the changed files built from git, or the model's body.
+
+    The file list has no model text, but a file NAME is still text that gets published: names are quoted when they
+    hold a control character (``gitinput.quote_name``) and the list goes through the same cleaning as model text, so
+    a file called ``Fixes #12.md`` or ``cc @someone.md`` closes nothing and notifies nobody."""
     if job != JOB_COMMIT or mode == "model":
-        return text
+        return text, None
     subject = _subject(text)
     if mode == "none" or not stats:
-        return subject
-    return subject + "\n\n" + gitinput.files_body(stats)
+        return subject, None
+    body = sanitize.clean(gitinput.files_body(stats), pr_body=False)
+    return subject + "\n\n" + body.text, body
 
 
 def _describe(plan: Plan, text: str) -> str:
@@ -422,15 +473,20 @@ def _job_lock(root: Path, wait_s: float, mono: Callable[[], float] = time.monoto
     held = False
     try:
         end = mono() + max(0.0, wait_s)
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                held = True
-                break
-            except OSError:
-                if mono() >= end:
+        with _phase("text_job_queue"):  # waiting for another job's model time is not router time (hook_latency.MODEL_PHASES)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    held = True
                     break
-                time.sleep(0.05)
+                except BlockingIOError:
+                    if mono() >= end:
+                        break
+                    time.sleep(0.05)
+                except OSError as exc:  # not contention: the lock cannot be taken at all, so do not call it "busy"
+                    _failopen("CHZ-FO-TEXTJOB-BIND-LOCK", exc)
+                    held = True
+                    break
         yield held
     finally:
         if held:
@@ -443,7 +499,7 @@ def _job_lock(root: Path, wait_s: float, mono: Callable[[], float] = time.monoto
 _model_started: list[float] = []
 
 
-def record_deadline(payload: dict) -> dict[str, float]:
+def record_deadline(payload: dict, started: float | None = None) -> dict[str, float]:
     """The deadline guard fired: the hook is about to answer with a deny and exit without having decided.
     Leave what a timeout inside the engine leaves: a ledger row and the cooldown. Returns the model wait that is
     still open, as ``{"text_job": ms}`` for ``hook_latency.finish_now`` to book (so the G1 figure does not count it
@@ -451,7 +507,8 @@ def record_deadline(payload: dict) -> dict[str, float]:
     try:
         cmd = _command_of(payload) or ""
         job = handwritten_job(cmd) or JOB_COMMIT
-        _safe_record(ledger.record_row, _row(payload, job, cmd, ledger.KIND_DENIED, "timeout", "deadline_guard"))
+        extra = {} if started is None else {"latency_ms": int((time.monotonic() - started) * 1000)}
+        _safe_record(ledger.record_row, _row(payload, job, cmd, ledger.KIND_DENIED, "timeout", "deadline_guard", **extra))
         _start_cooldown(paths.state_path("text_job_bind"), time.time())
         if _model_started:
             return {"text_job": (time.monotonic() - _model_started[0]) * 1000.0}
@@ -461,7 +518,7 @@ def record_deadline(payload: dict) -> dict[str, float]:
 
 
 def _decide(payload, generate, t0, budget_s, root, record, now, mono, prepare=None,
-            lock_wait_s=limits.LOCK_WAIT_SEC, body_mode=None) -> Decision:
+            lock_wait_s=limits.LOCK_WAIT_SEC, body_mode=None, gate=None) -> Decision:
     cmd = _command_of(payload)
     if cmd is None:
         return Decision("pass")
@@ -491,7 +548,7 @@ def _decide(payload, generate, t0, budget_s, root, record, now, mono, prepare=No
     except Unsupported as u:
         return deny(guess, "unsupported", u.code, f"{u.message} Nothing was run. Or write the text yourself and run it without the placeholder.")
     except ScanError as e:
-        if handwritten_job(cmd) is None:
+        if handwritten_job(cmd) is None and not _NAMES_GIT_OR_GH.search(cmd):
             return Decision("pass")  # a doc or script that merely mentions the placeholder
         return deny(guess, "unsupported", "unreadable",
                     f"The command could not be read as a plain git/gh command ({e}). Nothing was run. "
@@ -510,6 +567,12 @@ def _decide(payload, generate, t0, budget_s, root, record, now, mono, prepare=No
                else gitinput.build_pr_input(plan.repo_dir, base=plan.base, head=plan.head, title=plan.title))
     except gitinput.InputRefused as r:
         return deny(plan.job, "refused", r.code, f"{r.message} Nothing was run. Or write the text yourself and run it without the placeholder.")
+
+    if gate is not None:  # the checks that would hand the job back anyway, before the router import is paid for
+        held = gate(plan.job, inp.text, inp.hint)
+        if held is not None:
+            return deny(plan.job, held.status, held.reason, _deny_text(plan.job, _WHY.get(held.reason, _WHY["local_failed"])),
+                        in_chars=len(inp.text), attempts=0, model="none")
 
     if prepare is not None:  # the router import: seconds, and not the model's wait
         try:
@@ -543,8 +606,11 @@ def _decide(payload, generate, t0, budget_s, root, record, now, mono, prepare=No
     text = cleaned.text
     mode = _body_mode(body_mode)
     extra.update(body_mode=mode if plan.job == JOB_COMMIT else "model", stripped_mentions=cleaned.mentions,
-                 stripped_closing=cleaned.closing, replaced_test_plan=cleaned.test_plan)
-    text = _assemble(plan.job, text, mode, inp.stats)
+                 stripped_closing=cleaned.closing, replaced_test_plan=cleaned.test_plan, stripped_urls=cleaned.urls)
+    text, listed = _assemble(plan.job, text, mode, inp.stats)
+    if listed is not None:
+        extra.update(stripped_mentions=extra["stripped_mentions"] + listed.mentions,
+                     stripped_closing=extra["stripped_closing"] + listed.closing, stripped_urls=extra["stripped_urls"] + listed.urls)
     if not text.strip():
         return deny(plan.job, "rejected", "empty", _deny_text(plan.job, _WHY["empty"]), **extra)
     try:

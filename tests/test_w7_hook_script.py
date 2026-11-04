@@ -262,6 +262,7 @@ def test_the_deadline_guard_leaves_a_ledger_row_the_cooldown_and_a_latency_row(r
     assert r.returncode == 0 and one_object(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
     (row,) = ledger_rows(env)
     assert (row["kind"], row["outcome"], row["reason"]) == ("denied", "timeout", "deadline_guard")
+    assert row["latency_ms"] >= 3500  # the hook's own clock, from its start to the guard
     until = json.loads((home / "text_job_bind" / "cooldown.json").read_text())["until"]
     assert until > time.time() + 200  # the cooldown, as after a timeout inside the engine
     lat = [json.loads(ln) for ln in (home / "hook_latency.jsonl").read_text().splitlines()]
@@ -340,3 +341,28 @@ def test_loading_the_router_is_booked_as_router_added_time_not_as_the_models_wai
     (lat,) = [json.loads(ln) for ln in (home / "hook_latency.jsonl").read_text().splitlines()]
     assert lat["router_added_ms"] >= 950, lat
     assert lat["phases_ms"]["text_job"] < 500, lat
+
+
+def test_the_wait_for_the_job_slot_is_booked_as_queue_time_in_the_latency_row(repo, env, tmp_path):
+    """S10c: three parallel hooks used to book 0.06, 2.1 and 4.1 s of router time for the same work, and a busy deny
+    booked its whole wait."""
+    import fcntl
+
+    home = Path(env["LLM_ROUTER_HOME"])
+    (home / "text_job_bind").mkdir(parents=True, mode=0o700)
+    fd = os.open(home / "text_job_bind" / "job.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        prelude = ("from llm_router import hook_latency\n"
+                   "hook_latency.begin('text-job-bind', 'PreToolUse', hook._HOOK_T0)\n"
+                   "_o2 = engine.decide\n"
+                   "engine.decide = lambda payload, **kw: _o2(payload, lock_wait_s=1.5, **kw)\n")
+        r = run_wrapped(tmp_path, stdin_for(f"git commit -m {T}", repo), env, prelude=prelude)
+    finally:
+        os.close(fd)
+    assert r.returncode == 0 and "Another commit-message or PR job" in one_object(r.stdout)["reason"]
+    (row,) = ledger_rows(env)
+    assert (row["outcome"], row["reason"]) == ("busy", "lock_held")
+    (lat,) = [json.loads(ln) for ln in (home / "hook_latency.jsonl").read_text().splitlines()]
+    assert lat["phases_ms"]["text_job_queue"] >= 1400, lat
+    assert lat["router_added_ms"] <= lat["elapsed_ms"] - 1400, lat

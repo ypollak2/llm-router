@@ -150,8 +150,23 @@ def test_pr_options_are_read_for_the_job_input():
     ('git commit -m "${LLM_TEXT:-fallback}"', "placeholder_spelling"),
     ("git commit -F - <<'EOF'\n${LLM_TEXT:?}\nEOF", "placeholder_spelling"),
     ("git commit -F - <<EOF\n${LLM_TEXT:?}\nEOF", "placeholder_spelling"),
-    ("cat <<'EOF' > doc.md\ngit commit -m \"${LLM_TEXT:?}\"\nEOF", "placeholder_spelling"),
     ("bash -c 'git commit -m \"${LLM_TEXT:?}\"'", "placeholder_spelling"),
+    # S1: shapes the old regex missed; the scanner sees the words, so these are git/gh commands too
+    ('git -C "/path with space/repo" commit -m \'${LLM_TEXT:?}\'', "placeholder_spelling"),
+    ("git -P commit -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("'git' commit -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ('git "commit" -m \'${LLM_TEXT:?}\'', "placeholder_spelling"),
+    ("git comm\\it -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("gh 'pr' create --body '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("git ci -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("git -c user.name='A B' commit -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("for f in a b; do git commit -m '${LLM_TEXT:?}'; done", "placeholder_spelling"),
+    ("$G commit -m '${LLM_TEXT:?}' # git commit", "placeholder_spelling"),
+    ("git log --grep='${LLM_TEXT:?}'", "placeholder_spelling"),
+    ("env X=1 git commit -m '${LLM_TEXT:?}'", "placeholder_spelling"),
+    # a placeholder the planner reads but cannot bind is refused with its own code, never passed through
+    ('git ci -m "${LLM_TEXT:?}"', "not_commit"),
+    ('git -C "/a b" ci -m "${LLM_TEXT:?}"', "not_commit"),
     (f"git commit -m {T} # ${{LLM_TEXT:?}}", "placeholder_spelling"),
     (f"git commit -m {T} && echo '$LLM_TEXT'", "placeholder_spelling"),
     ("gh pr create --body '${LLM_TEXT:?}'", "placeholder_spelling"),
@@ -173,6 +188,11 @@ def test_refusals_carry_a_code(cmd, code):
     "git status",
     f"echo {T}",
     f"printf '%s' {T} > notes.txt",
+    # S12b: a command that only QUOTES the placeholder next to "git commit" is not a git command: no decision
+    "grep -rn 'git commit -m \"${LLM_TEXT:?}\"' docs",
+    "echo 'run git commit -m \"${LLM_TEXT:?}\"' >> NOTES.md",
+    "cat <<'EOF' > doc.md\ngit commit -m \"${LLM_TEXT:?}\"\nEOF",
+    "python3 -c \"print('gh pr create --body ${LLM_TEXT:?}')\"",
     f"grep -r {T} src/",
     "git commit -m \"$(cat <<'EOF'\nfix: a\nEOF\n)\"",
 ])
@@ -346,3 +366,12 @@ def test_a_flag_dropped_with_an_extra_message_would_have_changed_what_git_did(re
     assert "f.txt" in shown, shown  # -a staged the tracked change
     assert "Signed-off-by: t <t@t>" in shown, shown  # -s signed it off
     assert "Extra paragraph" in shown
+
+
+@pytest.mark.parametrize("cmd", [
+    '\'git\' commit -m ' + T, 'git "commit" -m ' + T, "git comm\\it -m " + T, "gh 'pr' create --title t --body " + T,
+    'git -C "/path with space/repo" commit -m ' + T, "git -P commit -m " + T,
+])
+def test_odd_but_valid_quoting_of_the_command_still_binds(cmd):
+    p = plan(cmd)
+    assert p is not None and "LLM_TEXT" not in p.rewrite("P")

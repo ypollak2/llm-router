@@ -151,7 +151,7 @@ def _arm_deadline(chan: _Channel, payload: dict) -> None:
                     from llm_router.hook_latency import finish_now
                     from llm_router.text_job_bind import engine
 
-                    finish_now(engine.record_deadline(payload))
+                    finish_now(engine.record_deadline(payload, _HOOK_T0))
                 except Exception as exc:  # noqa: BLE001 -- the deny is out; bookkeeping must not stop the exit
                     print(f"llm-router: deadline bookkeeping failed ({type(exc).__name__})", file=sys.stderr)
             sys.stderr.flush()

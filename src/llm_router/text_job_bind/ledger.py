@@ -66,6 +66,17 @@ def read_rows(since: float | None = None) -> list[dict]:
     return rows
 
 
+#: Denial reasons that mean the job never reached the model: the lane or the flag said no, the router could not be
+#: loaded, or the budget was gone before the call. Everything else that is not a capacity or shape refusal had a
+#: model run (or stall) behind it.
+NO_MODEL_REASONS = frozenset({"no_lane", "flag_off", "lane_unverified", "lane_refused", "router_import_failed",
+                              "no_time_left", "local_infra", "unknown_job"})
+
+
+def _model_ran(row: dict) -> bool:
+    return row.get("reason") not in NO_MODEL_REASONS
+
+
 #: Denied outcomes by what went wrong. A command-shape refusal says nothing about the model; a capacity refusal says
 #: nothing about the model either (the lane was busy or paused); only the third group is the model's.
 SHAPE_OUTCOMES = frozenset({"unsupported", "refused"})
@@ -119,7 +130,7 @@ def summarize(rows: list[dict], *, transcripts: dict | None = None) -> dict:
     for r in (*bound, *denied):
         groups.setdefault(f"{r.get('kind')}:{r.get('outcome')}", []).append(r)
     by_outcome = {k: _latency_block(v) for k, v in sorted(groups.items())}
-    reached_model = len(bound) + len(model)
+    reached_model = len(bound) + sum(1 for r in model if _model_ran(r))
     out_chars = sum(int(r.get("out_chars") or 0) for r in bound)
     hand_chars = sum(int(r.get("cmd_chars") or 0) for r in hand)
     stamps = [r["ts"] for r in rows if isinstance(r.get("ts"), (int, float))]
@@ -128,12 +139,14 @@ def summarize(rows: list[dict], *, transcripts: dict | None = None) -> dict:
     if transcripts is not None and transcripts.get("n_commit_pr"):
         adoption = transcripts["n_placeholder"] / transcripts["n_commit_pr"]
     elif transcripts is not None:
-        reason = "the transcripts in the window hold no git commit or gh pr create command"
-    elif hand:
-        adoption, reason = (used / total if total else None), None
+        reason = ("no transcript files were found for the window" if not transcripts.get("files")
+                  else "the transcripts in the window hold no git commit or gh pr create command")
     else:
-        reason = ("the ledger has no hand-written rows (the hook is registered with an `if` filter and never sees a "
-                  "command without the placeholder); run the report with --transcripts for a denominator")
+        # The ledger never gives a rate. A hook registered with an `if` filter sees only the hand-written commands that
+        # happen to spawn it (a `$(...)` elsewhere on the line), so any share computed from its rows reflects the
+        # filter, not the model's habits. The denominator is the transcripts'.
+        reason = ("the ledger is not a denominator: the hook is registered with an `if` filter and sees only some "
+                  "hand-written commands; run the report with --transcripts")
     return {
         "n_rows": len(rows),
         "n_commit_pr_commands": total,
@@ -145,7 +158,7 @@ def summarize(rows: list[dict], *, transcripts: dict | None = None) -> dict:
         "n_denied_model": len(model),
         "n_handwritten": len(hand),
         "adoption": adoption,
-        "adoption_source": ("transcripts" if transcripts is not None else "ledger" if hand else None),
+        "adoption_source": "transcripts" if transcripts is not None and adoption is not None else None,
         "adoption_unavailable_reason": reason,
         "transcripts": transcripts,
         "denominator_known": bool(hand) or bool(transcripts and transcripts.get("n_commit_pr")),
@@ -185,11 +198,11 @@ def scan_transcripts(roots: list[Path], since: float, until: float | None = None
     transcripts (sub-agent transcripts included), and how many of them used the placeholder.
 
     This is the denominator the ledger cannot give. Only ``tool_use`` blocks are counted (a command the model
-    wrote, not one a document quotes), each once per ``tool_use`` id, inside ``[since, until]``. Transcripts older
+    wrote, not one a document quotes), and only commands that really RUN ``git commit`` or ``gh pr create``
+    (``plan.executed_job`` reads the words; an ``echo`` or ``grep`` that quotes them is not one), each once per ``tool_use`` id, inside ``[since, until]``. Transcripts older
     than the host's retention are gone, so the window is whatever the files still hold; ``files`` and
     ``first``/``last`` say what was read."""
-    from llm_router.text_job_bind.plan import COMMIT_CMD, PR_CMD
-    from llm_router.text_job_bind.shellscan import MENTION
+    from llm_router.text_job_bind.plan import executed_job
 
     seen: set[str] = set()
     n_total = n_placeholder = files = 0
@@ -223,14 +236,17 @@ def scan_transcripts(roots: list[Path], since: float, until: float | None = None
                             if not (isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Bash"):
                                 continue
                             cmd = (block.get("input") or {}).get("command") if isinstance(block.get("input"), dict) else None
-                            if not isinstance(cmd, str) or not (COMMIT_CMD.search(cmd) or PR_CMD.search(cmd)):
+                            if not isinstance(cmd, str):
+                                continue
+                            job, placeholder = executed_job(cmd)
+                            if job is None:  # it only mentions git commit / gh pr create (echo, grep, a document)
                                 continue
                             uid = str(block.get("id") or f"{path}:{hash(cmd)}")
                             if uid in seen:
                                 continue
                             seen.add(uid)
                             n_total += 1
-                            n_placeholder += 1 if MENTION.search(cmd) else 0
+                            n_placeholder += 1 if placeholder else 0
                             if ts is not None:
                                 stamps.append(ts)
             except OSError:
@@ -263,11 +279,11 @@ def render(summary: dict) -> str:
             f"{t['files']} transcript files used the placeholder ({pct(s['adoption'])}); transcripts: "
             f"{_iso(t['first']) or 'n/a'} to {_iso(t['last']) or 'n/a'}"
         )
-    elif s["adoption"] is not None:
-        lines.append(f"  adoption: {s['n_placeholder']} of {s['n_commit_pr_commands']} commands in the ledger "
-                     f"({pct(s['adoption'])})")
     else:
         lines.append(f"  adoption: n/a - {s['adoption_unavailable_reason']}")
+        if s["n_handwritten"]:
+            lines.append(f"    (the ledger holds {s['n_placeholder']} placeholder commands and {s['n_handwritten']} "
+                         "hand-written rows; that is a count, not a rate)")
     lines += [
         f"  bound: {s['n_bound']} of {s['n_placeholder']} placeholder commands ({pct(s['bound_rate'])}); "
         f"when the model actually ran: {s['n_bound']} of {s['n_reached_model']} ({pct(s['bound_rate_when_model_ran'])})",
@@ -292,6 +308,10 @@ def render(summary: dict) -> str:
         lines.append(f"  {job}: bound {c[KIND_BOUND]}, denied {c[KIND_DENIED]}, hand-written {c[KIND_HANDWRITTEN]}")
     if s["denied_by_reason"]:
         lines.append("  denied by outcome:reason")
-        for k, v in list(s["denied_by_reason"].items())[:10]:
+        shown = list(s["denied_by_reason"].items())[:10]
+        for k, v in shown:
             lines.append(f"    {k}: {v}")
+        if len(s["denied_by_reason"]) > len(shown):
+            lines.append(f"    ... and {len(s['denied_by_reason']) - len(shown)} more outcome:reason pairs "
+                         f"({sum(s['denied_by_reason'].values()) - sum(v for _k, v in shown)} denials)")
     return "\n".join(lines)

@@ -76,7 +76,8 @@ def test_summary_arithmetic_with_exact_numbers():
     s = ledger.summarize(rows)
     assert s["n_commit_pr_commands"] == 10 and s["n_placeholder"] == 6 and s["n_handwritten"] == 4
     assert s["n_bound"] == 3 and s["n_denied"] == 3
-    assert s["adoption"] == pytest.approx(0.6) and s["bound_rate"] == pytest.approx(0.5)
+    assert s["adoption"] is None  # the ledger alone is never a denominator, even with hand-written rows (S11)
+    assert s["bound_rate"] == pytest.approx(0.5)
     assert s["bound_latency_ms_p50"] == 3000 and s["bound_latency_ms_p95"] == 5000
     assert s["bound_out_chars"] == 2400 and s["est_output_tokens_avoided"] == 600
     assert s["handwritten_cmd_chars"] == 800 and s["est_output_tokens_still_handwritten"] == 200
@@ -96,7 +97,11 @@ def test_without_handwritten_rows_adoption_is_n_a_not_a_hundred_percent():
     assert "adoption: n/a" in text and "`if` filter" in text and "--transcripts" in text and "100%" not in text
     assert s["adoption_unavailable_reason"] and s["adoption_source"] is None
     assert "still spent on hand-written" not in text
-    assert ledger.summarize(rows + [row("handwritten", cmd_chars=100)])["adoption"] == pytest.approx(0.75)
+    # a hand-written row does not turn the ledger into a denominator: a hook registered with an `if` filter sees only the
+    # hand-written commands that happen to spawn it, so 3 of 4 would reflect the filter, not the model's habits
+    with_hand = ledger.summarize(rows + [row("handwritten", cmd_chars=100)])
+    assert with_hand["adoption"] is None and "75%" not in ledger.render(with_hand)
+    assert "that is a count, not a rate" in ledger.render(with_hand)
 
 
 def test_an_empty_ledger_reports_n_a_not_zero_percent():
@@ -108,7 +113,7 @@ def test_an_empty_ledger_reports_n_a_not_zero_percent():
 
 def test_the_rendered_report_carries_n_and_labels_estimates():
     text = ledger.render(ledger.summarize([row("bound", latency_ms=10, out_chars=400), row("handwritten", cmd_chars=100)]))
-    assert "1 of 2" in text and "n=1" in text
+    assert "n=1" in text and "adoption: n/a" in text and "bound: 1 of 1" in text
     assert text.count("estimate") >= 2 and "/ 4" in text
 
 
@@ -201,8 +206,13 @@ def test_adoption_comes_from_transcripts_or_is_n_a_with_its_reason(tmp_path):
     assert "adoption: 2 of 5 git commit / gh pr create commands in 2 transcript files used the placeholder (40%)" in text
     # nothing to count: n/a and why, never a percentage over nothing
     empty = ledger.summarize([row("bound", latency_ms=1)], transcripts=ledger.scan_transcripts([tmp_path / "nowhere"], since))
-    assert empty["adoption"] is None and "no git commit or gh pr create" in empty["adoption_unavailable_reason"]
-    assert "adoption: n/a - the transcripts in the window hold no" in ledger.render(empty)
+    assert empty["adoption"] is None and "no transcript files were found" in empty["adoption_unavailable_reason"]
+    quiet = tmp_path / "quiet"
+    quiet.mkdir()
+    _transcript(quiet / "q.jsonl", [("ls -la", "2026-11-03T10:00:00Z")])
+    none_run = ledger.summarize([], transcripts=ledger.scan_transcripts([quiet], since))
+    assert none_run["adoption"] is None and "hold no git commit or gh pr create" in none_run["adoption_unavailable_reason"]
+    assert "adoption: n/a - the transcripts in the window hold no" in ledger.render(none_run)
 
 
 def test_the_report_command_scans_transcripts_on_request(tmp_path):
@@ -219,3 +229,54 @@ def test_the_report_command_scans_transcripts_on_request(tmp_path):
     assert r.returncode == 0, r.stderr
     s = json.loads(r.stdout)
     assert s["adoption"] == pytest.approx(0.5) and s["transcripts"]["n_commit_pr"] == 2
+
+
+def test_transcripts_count_commands_that_run_git_commit_not_commands_that_quote_it(tmp_path):
+    """S11a: a regex over the text counted every command that mentioned `git commit` (an echo, a grep, a heredoc)."""
+    root = tmp_path / "projects"
+    root.mkdir()
+    T = '"${LLM_TEXT:?}"'
+    _transcript(root / "s.jsonl", [
+        (f"git commit -m {T}", "2026-11-03T10:00:00Z"),                                  # runs git commit, placeholder
+        ("git -C /r commit -am 'by hand'", "2026-11-03T10:01:00Z"),                       # runs git commit
+        ("gh pr create --title t --body 'b'", "2026-11-03T10:02:00Z"),                   # runs gh pr create
+        ("echo 'run git commit -m \"${LLM_TEXT:?}\"' >> NOTES.md", "2026-11-03T10:03:00Z"),   # quotes it
+        ("grep -rn 'git commit' docs", "2026-11-03T10:04:00Z"),                          # quotes it
+        ("cat <<'EOF' > d.md\ngit commit -m \"${LLM_TEXT:?}\"\nEOF", "2026-11-03T10:05:00Z"),  # quotes it
+        ("git log --grep='git commit'", "2026-11-03T10:06:00Z"),                         # git, but not a commit
+        ("gh pr view 12", "2026-11-03T10:07:00Z"),                                        # gh, but not a create
+        ("git status && git commit -m x", "2026-11-03T10:08:00Z"),                       # runs git commit
+    ])
+    t = ledger.scan_transcripts([root], 1_793_000_000.0)
+    assert (t["n_commit_pr"], t["n_placeholder"]) == (4, 1)
+
+
+def test_jobs_that_never_reached_the_model_are_not_in_the_model_ran_bucket():
+    """S11c: 1 bound + 3 no_lane read '1 of 4' before; the model ran once."""
+    rows = [row("bound", latency_ms=1)] + [row("denied", outcome="fallback", reason="no_lane", latency_ms=5)] * 3
+    s = ledger.summarize(rows)
+    assert (s["n_reached_model"], s["bound_rate_when_model_ran"], s["bound_rate"]) == (1, 1.0, 0.25)
+    assert "when the model actually ran: 1 of 1 (100%)" in ledger.render(s)
+    rows += [row("denied", outcome=o, reason=r) for o, r in (
+        ("fallback", "flag_off"), ("fallback", "lane_unverified"), ("fallback", "lane_refused"), ("error", "router_import_failed"),
+        ("timeout", "no_time_left"), ("fallback", "local_infra"))]
+    assert ledger.summarize(rows)["n_reached_model"] == 1
+    ran = rows + [row("denied", outcome="rejected", reason="generic_subject"), row("denied", outcome="timeout", reason="budget"),
+                  row("denied", outcome="error", reason="verify"), row("denied", outcome="fallback", reason="local_failed")]
+    s = ledger.summarize(ran)
+    assert s["n_reached_model"] == 5 and s["bound_rate_when_model_ran"] == pytest.approx(0.2)
+
+
+def test_the_denied_by_reason_list_says_how_many_pairs_it_cut():
+    rows = [row("denied", outcome="rejected", reason=f"r{i}") for i in range(13)]
+    text = ledger.render(ledger.summarize(rows))
+    assert text.count("\n    rejected:r") == 10 and "... and 3 more outcome:reason pairs (3 denials)" in text
+
+
+def test_a_command_the_scanner_cannot_read_is_classified_from_its_text():
+    """The fallback of executed_job: an unterminated quote is still a git commit the model tried to run."""
+    from llm_router.text_job_bind.plan import executed_job
+
+    assert executed_job("git commit -m 'unterminated") == ("commit_message", False)
+    assert executed_job("gh pr create --body \"${LLM_TEXT:?}\" 'x") == ("pr_description", True)
+    assert executed_job("echo 'unterminated") == (None, False)

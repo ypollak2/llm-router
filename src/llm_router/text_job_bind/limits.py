@@ -29,8 +29,9 @@ LOCK_WAIT_SEC = 10.0
 
 #: What a bound commit message holds besides the model's subject: ``files`` (default) a list of the changed files
 #: with their added/deleted line counts, built from git, with no model text; ``none`` the subject only; ``model``
-#: the model's own body. An independent read of real messages found a false statement in about one body in six,
-#: so the model's body is opt-in. The environment variable overrides this constant.
+#: the model's own body. An independent read of 39 real messages found 5 clearly false bodies among the 18 that had
+#: one (coord/rv-PR820-delta-quality-20261103.md), so the model's body is opt-in. The environment variable overrides
+#: this constant.
 COMMIT_BODY_MODE = "files"
 BODY_MODE_ENV = "LLM_ROUTER_TEXT_JOB_BODY"
 BODY_MODES = ("model", "files", "none")

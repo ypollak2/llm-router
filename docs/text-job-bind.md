@@ -32,9 +32,15 @@ The placeholder must be written exactly as `"${LLM_TEXT:?}"`. Only a spelling th
 aborts the command when the variable is unset is the placeholder (proved against `bash` and `zsh` in
 `tests/test_w7_shellscan.py`): `$LLM_TEXT` and `${LLM_TEXT}` expand to nothing and would post an empty body, so
 they are not accepted. A mention of `$LLM_TEXT` anywhere the shell does not replace it (single quotes, after a
-backslash, in a here-document, in a comment, as `${LLM_TEXT:-x}`) in a command that commits or opens a PR is
-denied, never passed through: it would be committed as literal text. To commit text that itself mentions the
-placeholder, write the message to a file and run `git commit -F <file>`.
+backslash, in a here-document, in a comment, as `${LLM_TEXT:-x}`) on a line that runs `git` or `gh` is denied,
+never passed through: it would be committed as literal text. "Runs git or gh" is decided from the words the
+scanner reads, not from a pattern over the text, so `git -C "dir with space" commit`, `'git' commit`,
+`gh 'pr' create`, `git "commit"`, a loop around it and an unknown alias (`git ci`) are all seen; a wrapper
+(`bash -c`, `env`, `sudo`, ...) or a command whose name is not plain text counts when the text names a commit
+or PR command. A command that only QUOTES the placeholder next to the words `git commit` (a `grep`, an `echo`, a
+`cat` with a here-document) does not run either, and passes with no decision. A line the scanner cannot read
+is denied if it names `git` or `gh`. To commit text that itself mentions the placeholder, write the message to
+a file and run `git commit -F <file>`.
 The rules text that teaches this is the section "Commit messages and PR bodies" of
 `src/llm_router/rules/llm_router.md`, which every session and every sub-agent loads.
 
@@ -52,8 +58,9 @@ matcher `Bash`):
 2. Builds the job input from the repository as it is now: `git diff --cached` (`git diff HEAD` with
    `-a`), or for a PR the commits, the changed files and the diff against the base. Every git read is
    read-only, bounded and hardened: the repository's own configuration cannot run a program from it
-   (file-system monitor, pager, external diff, textconv, clean/smudge filters, submodule log; see
-   `gitinput.py`, and `tests/test_w7_gitinput.py` for a hostile configuration). The true list of changed
+   (file-system monitor, pager, external diff, textconv, clean/smudge filters, submodule log, and the gpg
+   programs that `git log --show-signature` would run for a signed commit; see `gitinput.py`, and
+   `tests/test_w7_gitinput.py` for a hostile configuration with a control that shows plain git runs each of them). The true list of changed
    files comes from `git diff --numstat`, so a patch that git was stopped from printing in full still reports
    the real file count. The list shows the first names and counts the rest; the diff shows as many files as
    the size budget allows, a file that does not fit keeps its header and a note while there is room, and the
@@ -63,9 +70,15 @@ matcher `Bash`):
    files, by its name without the extension, with up to three offered (the router's acceptance check
    wants exactly that; without the offer the retry loop has to ask for it, and every rejected attempt
    counts toward the lane monitor described under "Measuring it").
-3. Loads `$LLM_ROUTER_HOME/.env` the way the MCP server does (so the documented off switch
-   `LLM_ROUTER_LOCAL_TEXT_JOBS=0` and the context settings reach the hook), loads the router (this is router
-   time, not the model's wait), takes the machine-wide job lock, and runs the router's own `llm_text_job` (same
+3. Loads the user's own `$LLM_ROUTER_HOME/.env` (and ONLY that file: not the repository's `.env`, which is
+   repository content and could turn the owner's off switch back on, move the state directory or change what is
+   published, and not `~/.env`), so the documented off switch `LLM_ROUTER_LOCAL_TEXT_JOBS=0` and the context
+   settings reach the hook. Then it asks the router's own questions about the flag and the lane (the same
+   functions with the same arguments as `llm_text_job`, over the input cut at the router's limit; a test runs
+   both over the same state files): a job that would be handed back anyway (no passed lane, a lane that cannot
+   be verified, the off switch) is denied here, in a few tens of milliseconds, before the model libraries are
+   imported. Otherwise it loads the router (seconds; this is router time, not the model's wait), takes the
+   machine-wide job lock, and runs the router's own `llm_text_job` (same
    prompts, same acceptance checks, same ledgers), local model only: a passed `llm-router local-check` lane
    is required, and `LLM_ROUTER_LOCAL_TEXT_JOBS=1` (the full routing chain, cloud models included) is treated
    as unset for this hook. The reasons the hook reports come from the router's structured result, not from
@@ -74,15 +87,21 @@ matcher `Bash`):
    One job at a time per machine: Ollama serves one request at a time and most commits come from parallel
    sub-agents. A job that cannot get the lock within `limits.LOCK_WAIT_SEC` is denied at once as "busy, write it
    yourself" (outcome `busy`); that is a capacity answer, it starts no cooldown and counts as no failure of the
-   model. Each model attempt is capped at the MCP door's per-attempt share of its deadline
+   model. The wait is booked in its own latency phase (`text_job_queue`, a model phase for the G1 KPI: it is
+   another job's model time), not as router time. Each model attempt is capped at the MCP door's per-attempt share of its deadline
    (`mcp_door.MCP_DEADLINE_DEFAULT_S * mcp_door.ATTEMPT_SHARE`, reused, not copied), inside the hook's budget, so
    one slow attempt cannot use the whole budget. The lane was validated at two attempts per job, not three; the
    cap trades a slow third attempt for time, and what that costs in accepted jobs is not quantified.
 4. Cleans the text before it is published. `@name` would notify that person, `Fixes #12` or a closing keyword
-   with an issue URL would close an issue, and a `Test plan` section is the model's guess presented as a
-   result: mentions lose their `@`, closing keywords become `refs`, and the content under a `Test plan` heading
-   is replaced by a line that says the model does not run tests (`sanitize.py`; the ledger counts what was done,
-   never the text). A commit message holds the model's subject and, by `limits.COMMIT_BODY_MODE` (override
+   with an issue URL would close an issue, a test, testing or verification section is the model's guess
+   presented as a result, and a remote image is fetched by whoever opens the PR with whatever its URL carries:
+   mentions lose their `@`, closing keywords become `refs`, the content under any heading (or bold line) titled
+   test plan, tests, testing, test results, how to test, verification, validation, manual testing or QA is
+   replaced by a line that says the model does not run tests, and remote images and links (`http(s)`,
+   protocol-relative, `data:`, and their reference definitions and HTML forms) are removed, keeping the visible
+   text; relative links and anchors stay (`sanitize.py`; the ledger counts what was done, never the text). A
+   file NAME is text too: names in the `files` body are quoted when they hold a control character (a newline in
+   a name could forge a `Signed-off-by:` trailer) and the list goes through the same cleaning. A commit message holds the model's subject and, by `limits.COMMIT_BODY_MODE` (override
    `LLM_ROUTER_TEXT_JOB_BODY`), one of: `files` (the default: the body is a list of the changed files with
    their added and deleted line counts, built from git, with no model text), `none` (the subject only) or
    `model` (the model's own body). An independent read of 39 real messages found 5 clearly false bodies among the 18
@@ -106,8 +125,8 @@ and run the command again without the placeholder"). There is no allow path for 
 
 The placeholder is a shell variable with `:?`. If nothing replaced it (the hook is not registered, was
 killed at its timeout, or runs on a host that ignores `updatedInput`) the command does not run: Claude
-Code 2.1.317 refuses a command with a braced variable it cannot check ("A variable in braces in this
-command can't be checked before it runs") and, where permissions are bypassed, the shell aborts it with
+Code 2.1.317 does not run a command with a braced variable it cannot check without asking ("A variable in
+braces in this command can't be checked before it runs") and, where permissions are bypassed, the shell aborts it with
 `LLM_TEXT: parameter not set`. Either way the placeholder text is never committed or posted; a literal
 `@llm`-style placeholder would be committed in the bypassed case, and in a PR body it would mention a
 GitHub user. This holds only for the spelling that expands and aborts (see "What the model writes"); a
@@ -150,12 +169,16 @@ the Claude plugin bundle (`hooks/hooks.json`) carries the same entry. The Codex 
 placeholder convention and the `updatedInput` protocol are Claude Code's.
 
 The rules text that teaches the placeholder is rendered by `check_and_update_rules` (at MCP server start) only
-when the registration is present in `settings.json`; an install whose hook is not registered (a pip upgrade
-never registers hooks) gets the rules without that section, so the model keeps writing its own messages
-instead of writing a placeholder that the shell then refuses. Registering later adds the section at the next
-MCP start, and removing the registration removes it. `llm-router doctor` and `llm-router verify` report the
-mismatch: rules that teach the placeholder while the hook is not registered (or its file is missing) is the
-dangerous one.
+when BOTH hold at render time: the hook is registered in `settings.json`, and a passed local-check lane for
+`commit_message` exists (`eligibility_routing.passed_lane_available`, read-only, file reads only). An install whose
+hook is not registered (a pip upgrade never registers hooks) gets the rules without that section, so the model keeps
+writing its own messages instead of writing a placeholder that the shell then refuses; an install that registered the
+hook but has no passed lane yet gets the plain text-job guidance too, because every placeholder commit would
+otherwise be denied after a few seconds for want of a lane. The section appears at the next MCP start once both
+hold, and goes away at the next start after either stops holding. `llm-router doctor` and `llm-router verify`
+report the mismatches: rules that teach the placeholder while the hook is not registered (or its file is missing)
+is the dangerous one; "registered, rules plain, no passed lane yet" and "rules teach it but the lane is gone" are
+information.
 
 Before registering, read `text_job_local_attempts.jsonl` (see "Measuring it"): the lane that backs the hook
 may already be near its safety valve.
@@ -177,20 +200,24 @@ outcome and a reason). The report states its window and its units, and prints:
 - the estimated Claude output tokens avoided (characters bound divided by 4, an estimate). Read every figure
   with its N.
 
-Adoption needs a denominator, and the registered `if` filter takes it away: the hook never sees a hand-written
-commit or PR command, so the ledger has no `handwritten` rows. The report therefore prints adoption as n/a, with
-the reason, unless it is given `--transcripts`: it then counts the `git commit` and `gh pr create` commands the
-model ran through the Bash tool in the Claude Code transcripts (sub-agent transcripts included) inside the
-window, and how many used the placeholder, with both counts and the range of the transcripts it read. A
-percentage over the ledger alone would only reflect the filter. Transcripts the host has already deleted are
-not in it.
+Adoption needs a denominator, and the ledger can never give one: a hook registered with the `if` filter sees only
+the hand-written commands that happen to spawn it, so any rows of kind `handwritten` are a count, not a rate, and
+the report never turns them into a percentage. It prints adoption as n/a, with the reason, unless it is given
+`--transcripts`: it then counts the commands the model ran through the Bash tool in the Claude Code transcripts
+(sub-agent transcripts included) inside the window that really RUN `git commit` or `gh pr create` (the scanner
+reads the words; an `echo`, `grep` or here-document that quotes them is not counted; a line it cannot read falls
+back to the text), and how many used the placeholder, with both counts and the range of the transcripts it read.
+Transcripts the host has already deleted are not in it. "Where the model actually ran" leaves out the denials
+that never reached it (no lane, off switch, lane unverified, router not loadable, no time left).
 
 The router watches the lane behind the hook. `local_check.routing.demotion_check` turns a (model, job) lane
 off (`demoted: fallbacks` in `local_routing.json`) when too large a share of its latest jobs failed
 (`DEMOTE_RATE` over `DEMOTE_WINDOW` in `src/llm_router/local_check/routing.py`). A job fails only if every
 try was rejected; a timeout, a busy lane, a cooldown or a model that is not available is not a quality failure
-and does not count. A demoted lane answers every placeholder command with a denial (`no_lane`, a second or
-two): Claude writes the text itself and nothing is bound until `llm-router local-check enable commit_message
+and does not count; a call whose answer was accepted counts as ok even when an earlier chain entry that the router
+rescued it from had failed (`acc` rows), and under `LLM_ROUTER_LOCAL_TEXT_JOBS=1` the router's `chain_errors` tell a
+rescued timeout (`infra`) from a rescued bad answer. A demoted lane answers every placeholder command with a denial (`no_lane`, given before the router is loaded, so within a
+blink of an eye): Claude writes the text itself and nothing is bound until `llm-router local-check enable commit_message
 --model <model>` is run, which also restarts the window. The window is shared with every other use of the
 lane, so read `text_job_local_attempts.jsonl` before the hook is registered, and check `llm-router doctor` for
 demotion notices afterwards.

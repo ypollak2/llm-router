@@ -341,12 +341,22 @@ def _hostile(repo: Path, tmp_path: Path, names: tuple[str, ...]) -> Path:
     (repo / ".gitattributes").write_text("* filter=evil\n*.txt diff=evil\n")
     git(repo, "add", ".gitattributes")
     git(repo, "commit", "-qm", "attrs")
+    if "gpg" in names:  # a commit with a signature header, so that `git log --show-signature` has something to verify
+        tree = git(repo, "rev-parse", "HEAD^{tree}").strip()
+        parent = git(repo, "rev-parse", "HEAD").strip()
+        raw = (f"tree {tree}\nparent {parent}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n"
+               "gpgsig -----BEGIN PGP SIGNATURE-----\n \n abcd\n -----END PGP SIGNATURE-----\n\nsigned commit\n")
+        sha = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"], cwd=repo, input=raw, check=True,
+                             capture_output=True, text=True).stdout.strip()
+        git(repo, "update-ref", "HEAD", sha)
     cfg = {"core.fsmonitor": "fsmonitor", "filter.evil.clean": "clean", "filter.evil.smudge": "smudge",
            "diff.external": "external", "diff.evil.command": "drvcommand", "diff.evil.textconv": "textconv",
-           "core.pager": "pager", "pager.diff": "pagerdiff", "filter.a.b.clean": "dotted"}
+           "core.pager": "pager", "pager.diff": "pagerdiff", "filter.a.b.clean": "dotted", "gpg.program": "gpg"}
     for key, name in cfg.items():
         if name in names:
             git(repo, "config", key, script(name))
+    if "gpg" in names:
+        git(repo, "config", "log.showSignature", "true")
     return marks
 
 
@@ -357,7 +367,7 @@ def _seen(marks: Path) -> list[str]:
     return got
 
 
-ALL_VECTORS = ("fsmonitor", "clean", "smudge", "external", "drvcommand", "textconv", "pager", "pagerdiff", "dotted")
+ALL_VECTORS = ("fsmonitor", "clean", "smudge", "external", "drvcommand", "textconv", "pager", "pagerdiff", "dotted", "gpg")
 
 
 def test_a_hostile_repository_config_runs_nothing_when_the_hook_reads_the_repository(repo, tmp_path):
@@ -370,6 +380,8 @@ def test_a_hostile_repository_config_runs_nothing_when_the_hook_reads_the_reposi
     subprocess.run(["git", "diff", "HEAD"], cwd=repo, capture_output=True, env=env)
     control = set(_seen(marks))
     assert {"clean", "external", "fsmonitor"} <= control, control
+    subprocess.run(["git", "log", "-5", "--format=%s"], cwd=repo, capture_output=True, env=env)
+    assert _seen(marks) == ["gpg"], "plain `git log` must run the configured gpg program (else this vector proves nothing)"
     git(repo, "add", "a.py")
     subprocess.run(["git", "diff", "--cached"], cwd=repo, capture_output=True, env=env)
     _seen(marks)

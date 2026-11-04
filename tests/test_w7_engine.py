@@ -284,15 +284,27 @@ def test_an_unreadable_commit_command_is_denied_but_an_unreadable_doc_is_not(rep
 
 def test_the_placeholder_in_an_ordinary_command_is_left_to_the_shell(repo, tmp_path):
     gen = Gen()
-    d, rows = run(f"echo {T}", repo, tmp_path, gen)
-    assert d.kind == "pass" and rows == []
+    for c in (f"echo {T}", "grep -rn 'git commit -m \"${LLM_TEXT:?}\"' docs",
+              "echo 'git commit -m \"${LLM_TEXT:?}\"' >> NOTES.md", "cat <<'EOF' > d.md\ngit commit -m \"${LLM_TEXT:?}\"\nEOF"):
+        d, rows = run(c, repo, tmp_path, gen)
+        assert d.kind == "pass" and rows == [], c  # not a git or gh command: no decision, no row
     assert gen.calls == []
+
+
+def test_a_line_the_scanner_cannot_read_is_denied_when_it_names_git_or_gh_and_passed_when_it_does_not(repo, tmp_path):
+    d, rows = run("git -C \"unterminated commit -m '${LLM_TEXT:?}'", repo, tmp_path)
+    assert d.kind == "deny" and rows[0]["reason"] == "unreadable"
+    d, rows = run("echo \"unterminated '${LLM_TEXT:?}'", repo, tmp_path)
+    assert d.kind == "pass" and rows == []
 
 
 @pytest.mark.parametrize("cmd", [
     "git commit -m '${LLM_TEXT:?}'", "git commit -m \\${LLM_TEXT:?}", "git commit -m $LLM_TEXT",
     'git commit -m "${LLM_TEXT}"', "git commit -F - <<'EOF'\n${LLM_TEXT:?}\nEOF",
-    "cat <<'EOF'\ngit commit -m \"${LLM_TEXT:?}\"\nEOF", "bash -c 'git commit -m \"${LLM_TEXT:?}\"'",
+    "bash -c 'git commit -m \"${LLM_TEXT:?}\"'",
+    # S1: the shapes a regex over the text missed
+    'git -C "/path with space/repo" commit -m \'${LLM_TEXT:?}\'', "'git' commit -m '${LLM_TEXT:?}'", "gh 'pr' create --body '${LLM_TEXT:?}'",
+    "git ci -m '${LLM_TEXT:?}'", 'git "commit" -m \'${LLM_TEXT:?}\'',
 ])
 def test_a_placeholder_the_shell_would_not_replace_is_denied_never_passed_through(repo, tmp_path, cmd):
     """F2/F3: written in single quotes, after a backslash, in a quoted here-document, or without the abort guard,
@@ -456,8 +468,9 @@ def test_the_router_home_dotenv_reaches_the_hook_process(repo, tmp_path, monkeyp
         seen.append(os.environ.get("LLM_ROUTER_TEXT_JOB_PROBE"))
         return GenResult("accepted", MODEL_TEXT, "m", 1, "")
 
+    (tmp_path / ".env").write_text("LLM_ROUTER_TEXT_JOB_PROBE=from-the-repository\nLLM_ROUTER_LOCAL_TEXT_JOBS=1\n")  # the cwd
     d, _ = run(f"git commit -m {T}", repo, tmp_path, gen)  # type: ignore[arg-type]
-    assert d.kind == "rewrite" and seen == ["from-dotenv"]
+    assert d.kind == "rewrite" and seen == ["from-dotenv"]  # the owner's file won; the working directory's was not read
     # and the documented off switch, set in that file, is what generate_with_text_job sees
     assert os.environ.get("LLM_ROUTER_LOCAL_TEXT_JOBS") == "0"
     assert engine.generate_with_text_job("commit_message", "x", None, 5).reason == "flag_off"
@@ -503,6 +516,7 @@ def test_prepare_defaults_to_the_router_loader_exactly_for_the_real_generator(re
     monkeypatch.setattr(engine, "load_router", lambda: loaded.append("load"))
     real = lambda *a: GenResult("accepted", MODEL_TEXT, "m", 1, "")  # noqa: E731 -- stands in for generate_with_text_job
     monkeypatch.setattr(engine, "generate_with_text_job", real)
+    monkeypatch.setattr(engine, "lane_gate", lambda *a: None)  # this test is about the loader, not the lane
     d = decide(payload(f"git commit -m {T}", repo), generate=real, root=tmp_path / "b1", record=lambda r: None)
     assert d.kind == "rewrite" and loaded == ["load"]
     loaded.clear()
@@ -600,6 +614,8 @@ def test_the_deadline_guard_records_a_row_and_starts_the_cooldown(repo, tmp_path
     assert engine._cooldown_remaining(tmp_path / "router_home" / "text_job_bind", engine.time.time()) > 0
     assert open_phases == {"text_job": 3000.0}  # still open: handed to the recorder
     assert engine.record_deadline(payload("ls", repo)) == {}  # no model call was in flight
+    engine.record_deadline(payload(f"git commit -m {T}", repo), started=100.0 - 5.0)
+    assert ledger.read_rows()[-1]["latency_ms"] == 5000  # the row carries the hook's own elapsed time
 
 
 # ---- F16: the sweep, and the reasons the model is told -----------------------------------------------------
@@ -759,3 +775,175 @@ def test_generate_times_out_and_reports_it(monkeypatch):
     r = engine.generate_with_text_job("commit_message", "x", None, 5)
     assert (r.status, r.reason) == ("error", "job_raised")
     assert "fell over" not in repr(r)
+
+
+# ---- S12a: the flag check of the verification is pinned ----------------------------------------------------------
+
+@pytest.mark.parametrize("cmd,dropped", [
+    (f"git commit -am {T}", lambda path: f"git commit -F {path}"),                         # -a lost
+    (f"git commit -m {T} -sm 'x'", lambda path: f"git commit -F {path}"),                  # -s lost
+    (f"git commit --no-verify -m {T}", lambda path: f"git commit -F {path}"),             # a long flag lost
+    (f"git commit -m {T}", lambda path: f"git commit -a -F {path}"),                       # a flag INVENTED
+])
+def test_a_rewrite_that_loses_or_adds_a_flag_is_never_emitted(repo, tmp_path, monkeypatch, cmd, dropped):
+    from llm_router.text_job_bind import plan as plan_mod
+
+    monkeypatch.setattr(plan_mod.Plan, "rewrite", lambda self, path: dropped(path))
+    d, rows = run(cmd, repo, tmp_path)
+    assert d.kind == "deny" and files(tmp_path) == []
+    assert (rows[0]["outcome"], rows[0]["reason"]) == ("error", "verify")
+
+
+# ---- S3: a file NAME is published text too ----------------------------------------------------------------------
+
+HOSTILE_NAMES = [
+    "evil\nSigned-off-by: Eve <eve@example.com>\nCloses #4242.md",
+    "esc\x1b[31mred.md",
+    "Fixes #12.md",
+    "cc @victim.md",
+    'quote"and\\slash.md',
+]
+
+
+def test_hostile_file_names_cannot_forge_trailers_or_close_issues_in_the_files_body(repo, tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_TEXT_JOB_BODY", "files")
+    for i, name in enumerate(HOSTILE_NAMES):
+        (repo / name).write_text(f"x{i}\n")
+    git(repo, "add", "-A")
+    d, rows = run(f"git commit -m {T}", repo, tmp_path)
+    assert d.kind == "rewrite"
+    out = files(tmp_path)[0].read_text()
+    assert "\x1b" not in out
+    # git's own reading of the message: no trailer at all, so nothing here can be taken for a sign-off
+    parsed = subprocess.run(["git", "interpret-trailers", "--parse"], input=out, capture_output=True, text=True, cwd=repo).stdout
+    assert "Signed-off-by" not in parsed and "Closes" not in parsed and parsed.strip() == ""
+    assert "\\nSigned-off-by: Eve" in out  # the newline is visible as an escape inside a quoted name, not a line break
+    assert "refs #12.md" in out and "cc victim.md" in out and "@victim" not in out
+    # and the commit that the rewritten command makes carries none of it
+    res = subprocess.run(["bash", "-c", d.tool_input["command"]], cwd=repo, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    msg = git(repo, "log", "-1", "--format=%B")
+    assert "\nSigned-off-by: Eve" not in "\n" + msg and "\nCloses #4242" not in "\n" + msg
+    assert git(repo, "log", "-1", "--format=%(trailers)").strip() == ""
+    assert rows[0]["stripped_closing"] >= 1 and rows[0]["stripped_mentions"] >= 1
+
+
+def test_quote_name_leaves_ordinary_names_alone_and_escapes_the_rest():
+    from llm_router.text_job_bind.gitinput import quote_name
+
+    for ok in ("src/a.py", "docs/guide v2.md", "ünïcode/файл.md", "a-b_c.d"):
+        assert quote_name(ok) == ok
+    assert quote_name("a\nb") == '"a\\nb"'
+    assert quote_name("a\tb\rc") == '"a\\tb\\rc"'
+    assert quote_name('q"s\\') == '"q\\"s\\\\"'
+    assert quote_name("e\x1b[0m") == '"e\\033[0m"'
+    assert quote_name("l s") == '"l\\342\\200\\250s"'
+    assert quote_name("b‮di") == '"b\\342\\200\\256di"'
+
+
+def test_a_repositorys_dotenv_cannot_undo_the_owners_settings(repo, tmp_path, monkeypatch):
+    """S5: the hook runs inside whatever repository the model is in. Its .env (and ~/.env) must not be read: the
+    owner's off switch, the state directory and the body mode stay what the owner set."""
+    monkeypatch.undo()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    home = tmp_path / "home"
+    (home / ".llm-router").mkdir(parents=True)
+    (home / ".llm-router" / ".env").write_text("LLM_ROUTER_LOCAL_TEXT_JOBS=0\nLLM_ROUTER_TEXT_JOB_BODY=files\n")
+    (home / ".env").write_text("LLM_ROUTER_TEXT_JOB_PROBE_HOME=from-home-dotenv\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))
+    for k in ("LLM_ROUTER_LOCAL_TEXT_JOBS", "LLM_ROUTER_TEXT_JOB_BODY", "LLM_ROUTER_TEXT_JOB_PROBE_HOME", "LLM_ROUTER_TEXT_JOB_ELSEWHERE"):
+        monkeypatch.delenv(k, raising=False)
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+    (hostile / ".env").write_text(
+        f"LLM_ROUTER_LOCAL_TEXT_JOBS=1\nLLM_ROUTER_TEXT_JOB_BODY=model\nLLM_ROUTER_HOME={tmp_path / 'elsewhere'}\n"
+        "LLM_ROUTER_TEXT_JOB_ELSEWHERE=yes\nOLLAMA_HOST=http://attacker.example\nPYTHONPATH=/tmp/evil\n")
+    monkeypatch.chdir(hostile)
+    from llm_router import env_loader
+
+    engine.load_env()
+    assert os.environ.get("LLM_ROUTER_LOCAL_TEXT_JOBS") == "0", "the owner's off switch must survive a hostile repo .env"
+    assert os.environ.get("LLM_ROUTER_TEXT_JOB_BODY") == "files"
+    assert os.environ.get("LLM_ROUTER_HOME") == str(home / ".llm-router")
+    assert os.environ.get("OLLAMA_HOST") != "http://attacker.example" and os.environ.get("PYTHONPATH") != "/tmp/evil"
+    assert "LLM_ROUTER_TEXT_JOB_ELSEWHERE" not in os.environ and "LLM_ROUTER_TEXT_JOB_PROBE_HOME" not in os.environ
+    # the off switch really is what the hook then sees
+    assert engine.generate_with_text_job("commit_message", "x", None, 5).reason == "flag_off"
+    # and the loader itself: only the user's state file, the real environment wins, nothing is overwritten
+    target = {"LLM_ROUTER_TEXT_JOB_BODY": "none"}
+    assert env_loader.load_user_dotenv(target) == {"LLM_ROUTER_LOCAL_TEXT_JOBS": "0"} and target["LLM_ROUTER_TEXT_JOB_BODY"] == "none"
+    for k in ("LLM_ROUTER_LOCAL_TEXT_JOBS", "LLM_ROUTER_TEXT_JOB_BODY"):
+        os.environ.pop(k, None)
+
+
+# ---- S10: the gate runs before the router is loaded; the queue wait is not router time ---------------------------
+
+def test_a_job_the_router_would_hand_back_is_denied_before_the_router_is_loaded(repo, tmp_path, monkeypatch):
+    loaded: list[str] = []
+    monkeypatch.setattr(engine, "load_router", lambda: loaded.append("load"))
+    real = lambda *a: GenResult("accepted", MODEL_TEXT, "m", 1, "")  # noqa: E731 -- stands in for generate_with_text_job
+    monkeypatch.setattr(engine, "generate_with_text_job", real)
+    for reason in ("no_lane", "lane_unverified", "flag_off"):
+        monkeypatch.setattr(engine, "lane_gate", lambda job, text, hint, r=reason: GenResult("fallback", "", "none", 0, r))
+        rows: list[dict] = []
+        d = decide(payload(f"git commit -m {T}", repo), generate=real, root=tmp_path / "b", record=rows.append)
+        assert d.kind == "deny" and loaded == [], reason
+        assert (rows[0]["outcome"], rows[0]["reason"], rows[0]["attempts"]) == ("fallback", reason, 0)
+        assert "yourself" in d.reason and files(tmp_path) == []
+    monkeypatch.setattr(engine, "lane_gate", lambda job, text, hint: None)
+    d = decide(payload(f"git commit -m {T}", repo), generate=real, root=tmp_path / "b", record=lambda r: None)
+    assert d.kind == "rewrite" and loaded == ["load"]
+
+
+def test_a_stub_generator_gets_neither_the_gate_nor_the_loader(repo, tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "lane_gate", lambda *a: (_ for _ in ()).throw(AssertionError("gate must not run")))
+    monkeypatch.setattr(engine, "load_router", lambda: (_ for _ in ()).throw(AssertionError("loader must not run")))
+    d, _ = run(f"git commit -m {T}", repo, tmp_path)
+    assert d.kind == "rewrite"
+
+
+def test_the_wait_for_the_job_slot_is_its_own_phase_not_router_time(repo, tmp_path, monkeypatch):
+    import fcntl
+    import threading
+
+    phases: list[str] = []
+
+    class Phase:
+        def __init__(self, name):
+            self.name = name
+
+        def __enter__(self):
+            phases.append("enter:" + self.name)
+
+        def __exit__(self, *a):
+            phases.append("exit:" + self.name)
+            return False
+
+    monkeypatch.setattr(engine, "_phase", lambda name: Phase(name))
+    root = tmp_path / "bind"
+    root.mkdir(mode=0o700)
+    fd = os.open(root / "job.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    threading.Timer(0.3, lambda: (fcntl.flock(fd, fcntl.LOCK_UN), os.close(fd))).start()
+    d = decide(payload(f"git commit -m {T}", repo), generate=Gen(), root=root, record=lambda r: None, lock_wait_s=10.0)
+    assert d.kind == "rewrite"
+    # the wait was inside text_job_queue, which hook_latency counts as a model phase; the model call inside text_job
+    assert phases[:2] == ["enter:text_job_queue", "exit:text_job_queue"] and "enter:text_job" in phases
+    from llm_router import hook_latency
+
+    assert {"text_job", "text_job_queue"} <= set(hook_latency.MODEL_PHASES)
+    assert hook_latency.model_ms({"text_job_queue": 1500.0, "text_job": 200.0}) == 1700.0
+
+
+def test_a_lock_that_cannot_be_taken_is_not_reported_as_busy(repo, tmp_path, monkeypatch):
+    import fcntl
+
+    def broken(fd, op):
+        raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr(fcntl, "flock", broken)
+    gen = Gen()
+    d, rows = run(f"git commit -m {T}", repo, tmp_path, gen)
+    assert d.kind == "rewrite" and len(gen.calls) == 1  # unserialised, but not refused as busy

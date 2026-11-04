@@ -19,7 +19,7 @@ import re
 import shlex
 from dataclasses import dataclass, field
 
-from llm_router.text_job_bind.shellscan import MENTION, Command, Piece, Word, scan_commands
+from llm_router.text_job_bind.shellscan import MENTION, Command, Piece, ScanError, Word, scan_commands
 
 JOB_COMMIT = "commit_message"
 JOB_PR = "pr_description"
@@ -28,6 +28,12 @@ JOB_PR = "pr_description"
 #: command the model writes, including ones the scanner cannot read.
 COMMIT_CMD = re.compile(r"(?<![\w-])git\s+(?:(?:-C|-c)\s+\S+\s+|--[\w-]+(?:=\S+)?\s+)*commit(?![\w-])")
 PR_CMD = re.compile(r"(?<![\w-])gh\s+pr\s+create(?![\w-])")
+
+#: Commands that run another command line: a mention of the placeholder next to a git/gh command inside them is ours.
+_WRAPPERS = frozenset({
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "env", "sudo", "doas", "su", "xargs", "eval", "exec", "command",
+    "builtin", "nohup", "time", "timeout", "nice", "ionice", "watch", "ssh", "script", "parallel", "busybox",
+})
 
 STRAY_MESSAGE = (
     "LLM_TEXT is written where bash would not replace it with the checked text (single quotes, after a "
@@ -444,6 +450,56 @@ def _validate(plan: Plan, job_cmd: Command) -> None:
                 raise Unsupported("pr_body", "With --body-file the value must be exactly the placeholder.")
 
 
+def _runs_job_tool(cmds: list[Command], command: str) -> bool:
+    """Does the line run ``git`` or ``gh`` (or something that may run them)? Decided from the scanned words, not
+    from a regex over the text, so ``git -C "dir with space" commit``, ``'git' commit``, ``gh 'pr' create`` and
+    ``git "commit"`` are all seen. A command that only QUOTES the placeholder (``grep``, ``echo``, ``cat`` with a
+    here-document) is not one. A wrapper (``bash -c``, ``env``, ``sudo``), a loop or group, or a command whose name is
+    not plain text counts when the text names a commit or PR command anywhere."""
+    textual = bool(COMMIT_CMD.search(command) or PR_CMD.search(command))
+    for c in cmds:
+        if not c.argv:
+            continue
+        name = c.argv[0].literal()
+        if name is None:
+            if textual:
+                return True
+            continue
+        base = os.path.basename(name)
+        if base in ("git", "gh"):
+            return True
+        if c.structural or base in _WRAPPERS:
+            if textual or any(os.path.basename(w.literal() or "") in ("git", "gh") for w in c.argv[:6]):
+                return True
+    return False
+
+
+def executed_job(command: str) -> tuple[str | None, bool]:
+    """``(job, uses_the_placeholder)`` for a Bash command that really RUNS ``git commit`` or ``gh pr create``;
+    ``(None, False)`` for one that only mentions them (an ``echo``, a ``grep``, a here-document, a doc).
+
+    For the adoption count over transcripts: a regex over the text counted every command that quoted ``git commit``.
+    The scanner reads the words; a line it cannot read falls back to the text, as the hook does."""
+    try:
+        cmds = scan_commands(command)
+    except ScanError:
+        job = JOB_COMMIT if COMMIT_CMD.search(command) else JOB_PR if PR_CMD.search(command) else None
+        return job, bool(job and MENTION.search(command))
+    textual = JOB_COMMIT if COMMIT_CMD.search(command) else JOB_PR if PR_CMD.search(command) else None
+    for c in cmds:
+        if not c.argv:
+            continue
+        name = c.argv[0].literal()
+        base = os.path.basename(name) if name is not None else ""
+        if base == "git" and _git_subcommand(c.argv[1:]) == "commit":
+            return JOB_COMMIT, any(w.has_token for w in c.argv)
+        if base == "gh" and len(c.argv) >= 3 and (c.argv[1].literal(), c.argv[2].literal()) == ("pr", "create"):
+            return JOB_PR, any(w.has_token for w in c.argv)
+        if textual and (name is None or c.structural or base in _WRAPPERS):
+            return textual, bool(MENTION.search(command))
+    return None, False
+
+
 def option_flags(job: str, command: str, index: int) -> frozenset[str]:
     """The valueless options (``a``, ``s``, ``no-verify``, ``draft``, ...) of command ``index`` of the line.
 
@@ -473,7 +529,7 @@ def analyse(command: str, cwd: str) -> Plan | None:
                     "The placeholder is inside $(...), backticks or $'...'; use it as a plain \"${LLM_TEXT:?}\" argument.",
                 )
     valid = sum(1 for c in cmds for w in (*c.assigns, *c.argv, *(t for _o, t in c.redirs)) for p in w.pieces if p.kind == "tok")
-    if len(MENTION.findall(command)) > valid and (COMMIT_CMD.search(command) or PR_CMD.search(command)):
+    if len(MENTION.findall(command)) > valid and _runs_job_tool(cmds, command):
         raise Unsupported("placeholder_spelling", STRAY_MESSAGE)
     holders = [k for k, c in enumerate(cmds) if any(w.has_token for w in c.argv)]
     elsewhere = any(w.has_token for c in cmds for w in (*c.assigns, *(t for _o, t in c.redirs)))

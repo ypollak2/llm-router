@@ -185,9 +185,9 @@ DEFAULT_TIMEOUT_MS = 60_000
 #: Phases that are time spent waiting on a model, not time the router added:
 #: ``draft_chain`` (the whole DIRECT draft chain), ``zce_model`` (the
 #: zero-Claude edit's model call), ``text_job`` (the text-job-bind hook's wait on the local
-#: model) and ``cold_wait`` (Ollama's own model-load time). ``cold_wait`` is usually reported from INSIDE one of the other two;
+#: model), ``text_job_queue`` (its wait for the machine-wide job slot: another job's model time) and ``cold_wait`` (Ollama's own model-load time). ``cold_wait`` is usually reported from INSIDE one of the other two;
 #: the recorder knows when it is (``_model_depth``) and subtracts it once.
-MODEL_PHASES: tuple[str, ...] = ("draft_chain", "zce_model", "codex_delegation", "text_job", "cold_wait")
+MODEL_PHASES: tuple[str, ...] = ("draft_chain", "zce_model", "codex_delegation", "text_job", "text_job_queue", "cold_wait")
 
 #: Hooks whose row ALWAYS carries ``router_added_ms`` (elapsed minus ``MODEL_PHASES``,
 #: the same definition ``agent-route`` writes), also when no model phase ran. Their

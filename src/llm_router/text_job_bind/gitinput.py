@@ -9,8 +9,9 @@ Every git call is read-only, bounded in time and in bytes, and never takes an op
 of them may run a command that the repository's own configuration names: the hook reads the repository
 BEFORE the permission check for the commit, so a hostile ``.git/config`` must not get a turn.
 ``_NEUTRAL_CONFIG`` switches off the file-system monitor and the pager, every diff reads with
-``--no-ext-diff --no-textconv --ignore-submodules=dirty``, and ``_filter_overrides`` replaces every
-configured clean/smudge/process filter (they run when a diff reads the working tree).
+``--no-ext-diff --no-textconv --ignore-submodules=dirty``, every log read with ``--no-show-signature`` (and the gpg
+programs pinned: a signed commit runs ``gpg.program`` when ``log.showSignature`` is on), and ``_filter_overrides``
+replaces every configured clean/smudge/process filter (they run when a diff reads the working tree).
 """
 
 from __future__ import annotations
@@ -41,7 +42,11 @@ _NEUTRAL_CONFIG = (
     "core.quotepath=false", "color.ui=never", "diff.noprefix=false", "diff.mnemonicprefix=false",
     "core.fsmonitor=false", "core.pager=cat", "pager.diff=false", "pager.log=false", "diff.submodule=short",
     "core.untrackedCache=false",
+    # a signed commit in the log runs the configured gpg program when log.showSignature is on
+    "log.showSignature=false", "gpg.program=/usr/bin/false", "gpg.openpgp.program=/usr/bin/false",
+    "gpg.x509.program=/usr/bin/false", "gpg.ssh.program=/usr/bin/false",
 )
+_LOG_FLAGS = ("--no-show-signature",)
 _DIFF_FLAGS = ("--no-color", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty")
 _FILTER_KEY = re.compile(r"^filter\.(.+)\.(clean|smudge|process|required)$")
 
@@ -236,8 +241,31 @@ def files_body(stats: list, limit: int | None = None) -> str:
     return "\n".join(lines)
 
 
+_ESCAPES = {"\n": "\\n", "\t": "\\t", "\r": "\\r", '"': '\\"', "\\": "\\\\"}
+
+
+def quote_name(path: str) -> str:
+    """A file name as it may appear in a line of text: unchanged when it holds nothing that could change what the
+    line means, else in double quotes with C escapes (the way git itself prints such a name). A newline in a name
+    would end the line and start another that looks like a trailer (``Signed-off-by: ...``); an ESC, a bidi control or a
+    U+2028 would do the same to a terminal or a reader."""
+    if not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F or c in '"\\\u2028\u2029\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069'
+               for c in path):
+        return path
+    out = []
+    for c in path:
+        if c in _ESCAPES:
+            out.append(_ESCAPES[c])
+        elif ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F or c in "\u2028\u2029\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069":
+            out.append("".join(f"\\{b:03o}" for b in c.encode("utf-8")))
+        else:
+            out.append(c)
+    return '"' + "".join(out) + '"'
+
+
 def _stat_line(path: str, a: int | None, d: int | None) -> str:
-    return f"{path} (binary)" if a is None or d is None else f"{path} (+{a}/-{d})"
+    name = quote_name(path)
+    return f"{name} (binary)" if a is None or d is None else f"{name} (+{a}/-{d})"
 
 
 def condense(patch: str, *, budget: int = INPUT_BUDGET_CHARS, block_lines: int = BLOCK_MAX_LINES,
@@ -348,7 +376,7 @@ def build_commit_input(repo: str, *, all_tracked: bool = False) -> JobInput:
     stats, complete = _numstat(repo, *args[1:])
     text, files, omitted = condense(patch, label="Changed files", stats=stats or None, stats_complete=complete,
                                     patch_cut=patch_cut)
-    rc, log = _git(repo, "log", "-5", "--format=%s")
+    rc, log = _git(repo, "log", "-5", *_LOG_FLAGS, "--format=%s")
     subjects = [t for t in (_subject_for_hint(s) for s in log.splitlines() if s.strip()) if t] if rc == 0 else []
     parts: list[str] = []
     if subjects:
@@ -392,7 +420,7 @@ def build_pr_input(repo: str, *, base: str | None = None, head: str | None = Non
     if rc != 0 or not count.strip().isdigit() or int(count.strip()) == 0:
         raise InputRefused("no_commits", f"The branch has no commits ahead of {base_ref}, so there is nothing to describe.")
     n = int(count.strip())
-    rc, log = _git(repo, "log", "-40", "--format=%h %s", f"{base_ref}..{head_ref}")
+    rc, log = _git(repo, "log", "-40", *_LOG_FLAGS, "--format=%h %s", f"{base_ref}..{head_ref}")
     lines = [ln[:160] for ln in log.splitlines() if ln.strip()]
     commits = "\n".join(lines) + (f"\n... and {n - len(lines)} more" if n > len(lines) else "")
     span = f"{base_ref}...{head_ref}"
