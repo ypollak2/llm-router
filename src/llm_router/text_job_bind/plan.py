@@ -46,11 +46,47 @@ STRAY_OTHER_MESSAGE = (
     "as the value of -m (git commit) or --body (gh pr create)."
 )
 
+FILE_CHANGER_NOTE = (
+    " cp and mv change files, so they are not treated as readers: run them in a command of their own, not on a line that "
+    "mentions LLM_TEXT."
+)
+
+ENV_MESSAGE = (
+    "The line mentions LLM_TEXT and also sets {what}. The hook builds the text from the repository as it is when the hook runs, "
+    "in its own environment, so it cannot know which program, directory or repository the command would reach after that "
+    "assignment, and it refused. Take the assignment out of this line (a bare NAME=value, NAME=value in front of a command, "
+    "export, declare, env and ${{NAME:=...}} all count). To act on another repository write `cd <dir> && git commit ...` or "
+    "`git -C <dir> commit ...`, and call git and gh by their plain names. GIT_AUTHOR_* and GIT_COMMITTER_* may still be set."
+)
+
 #: Env assignments that cannot change which repository ``git`` acts on or which index it reads.
 _GIT_ENV_OK = frozenset({
     "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
     "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
 })
+#: Variables that a line which mentions the placeholder must not set (see :func:`_env_effect`): each changes which program, directory,
+#: configuration or startup file a LATER command on the line (or a shell or hook it starts) uses, while the text was built from the
+#: repository as the hook sees it. ``PATH`` and ``HOME`` are the two the hook's own git reads depend on (``gitinput._ENV_KEEP``);
+#: the others are the inputs of the same kind that the shell and git read. Every ``GIT_*`` name outside :data:`_GIT_ENV_OK` and every
+#: ``DYLD_*`` / ``LD_*`` name is refused too, without a list: git has dozens that redirect the repository, the index, the
+#: configuration, the editor or a helper program, and the dynamic loader reads more than ``LD_PRELOAD``.
+_ENV_EFFECT = {
+    "PATH": "decides which program git, gh or a git hook is",
+    "CDPATH": "changes where `cd <dir>` goes, so the repository the hook read is not the one the command reaches",
+    "HOME": "moves `~` and the global git configuration (hooks, editor, aliases)",
+    "XDG_CONFIG_HOME": "moves the global git configuration (hooks, editor, aliases)",
+    "IFS": "changes how the shell splits words, so the words the hook read are not the words that run",
+    "BASH_ENV": "names a file that every non-interactive bash started later runs first",
+    "ENV": "names a startup file that a shell started later runs first",
+    "ZDOTDIR": "moves the startup files of every zsh started later",
+    "SHELLOPTS": "sets shell options (xtrace, with PS4) in every bash started later",
+    "BASHOPTS": "sets shell options in every bash started later",
+    "PS4": "is expanded, command substitutions included, by a shell that traces",
+    "EDITOR": "names the editor git falls back to when GIT_EDITOR and core.editor are not set",
+    "VISUAL": "names the editor git falls back to when GIT_EDITOR and core.editor are not set",
+}
+_GIT_EFFECT = "redirects the repository, index, configuration, editor or a helper program that git uses"
+_LOADER_EFFECT = "makes the dynamic loader load other code into every program that starts later"
 
 #: Commands that read or print and change nothing a diff or a commit list depends on.
 _NEUTRAL_COMMANDS = frozenset({
@@ -456,13 +492,16 @@ def _validate(plan: Plan, job_cmd: Command) -> None:
 #: Commands that read or print and never start another program with their arguments. A mention of the placeholder
 #: that sits only in these (a `grep`, an `echo`, a `cat` with a here-document) cannot be delivered to git. NOT on the list:
 #: ``awk`` (``system()``) and ``sed`` (the ``e`` command), which can run a program built from their own arguments; the pagers
-#: ``less`` and ``more`` (``LESSOPEN``); and ``test`` / ``[``, whose ``-v NAME`` and (in zsh) ``-eq`` operands evaluate a
-#: subscript or an arithmetic expression, and so run the ``$(...)`` inside it.
+#: ``less`` and ``more`` (``LESSOPEN``); ``test`` / ``[``, whose ``-v NAME`` and (in zsh) ``-eq`` operands evaluate a
+#: subscript or an arithmetic expression, and so run the ``$(...)`` inside it; and ``cp`` / ``mv``, which change files (a line
+#: that runs one before a commit changes what the generated text describes; :data:`_FILE_CHANGERS`).
 _HARMLESS = frozenset({
     "echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr",
-    "ls", "tee", "touch", "cp", "mv", "cd", "mkdir", "date", "true", "false", "pwd", "which", "whoami", "sleep",
+    "ls", "tee", "touch", "cd", "mkdir", "date", "true", "false", "pwd", "which", "whoami", "sleep",
     "basename", "dirname", "jq", "diff", "cmp", "file", "stat", "du", "df",
 })
+#: Commands that were on :data:`_HARMLESS` and are not any more because they change files: named in the refusal.
+_FILE_CHANGERS = frozenset({"cp", "mv"})
 _SEARCH_COMMANDS = frozenset({"grep", "egrep", "fgrep", "rg", "ag"})
 #: Commands whose arguments may be options that run a program (``rg --pre``, ``sort --compress-program``): no expansion in them,
 #: since the value of a variable can be such an option, quoted or not.
@@ -498,6 +537,83 @@ def _runs_code_in_text(command: str) -> bool:
     if _RUNS_CODE_TEXT.search(command):
         return True
     return any(not m.group(1) and ("$(" in m.group(4) or "`" in m.group(4)) for m in _HEREDOC.finditer(command))
+
+
+_NAME_ASSIGN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\+?=")
+#: Commands whose arguments are assignments: ``export PATH=x``, ``declare -x PATH=x``, ``env PATH=x git ...``.
+_ASSIGNING_COMMANDS = frozenset({"export", "declare", "typeset", "readonly", "local", "env"})
+#: An assignment written inside an expansion: ``${NAME:=x}`` / ``${NAME=x}``, ``$((NAME=1))``.
+_EXPANSION_ASSIGN = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*):?=|\$\(\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:[-+*/%&|^]|<<|>>)?=(?!=)"
+)
+#: The same shapes looked for in the TEXT of a line the scanner cannot read (quotes are trusted no more than elsewhere on such a
+#: line): any ``NAME=`` or ``NAME+=`` that does not continue a longer name.
+_ASSIGN_IN_TEXT = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\+?=|" + _EXPANSION_ASSIGN.pattern)
+
+
+def _env_effect(name: str) -> str | None:
+    """What setting this variable would change for a later command, or ``None`` when it is not one the hook refuses."""
+    if name in _GIT_ENV_OK:
+        return None
+    if name in _ENV_EFFECT:
+        return _ENV_EFFECT[name]
+    if name.startswith("GIT_"):
+        return _GIT_EFFECT
+    if name.startswith(("DYLD_", "LD_")):
+        return _LOADER_EFFECT
+    return None
+
+
+def _lead(w: Word) -> str:
+    """The literal text a word starts with (``PATH=`` for ``PATH="$X"`` and for ``"PATH=$X"``), else ``""``."""
+    return w.pieces[0].text if w.pieces and w.pieces[0].kind == "lit" else ""
+
+
+def _env_assignments(cmds: list[Command]) -> list[str]:
+    """The variables of :func:`_env_effect` that the line sets, once each, in order: in front of a command (``PATH=x git ...``), on
+    their own (``PATH=x;``), appended (``PATH+=x``, which the scanner reads as a command word), after ``export`` / ``declare`` /
+    ``typeset`` / ``readonly`` / ``local`` / ``env``, or inside an expansion (``${PATH:=x}``, ``$((IFS=1))``)."""
+    found: list[str] = []
+
+    def see(name: str) -> None:
+        if _env_effect(name) and name not in found:
+            found.append(name)
+
+    for c in cmds:
+        for a in c.assigns:
+            see(a.raw.split("=", 1)[0])
+        if c.argv:
+            m = _NAME_ASSIGN.match(_lead(c.argv[0]))
+            if m:
+                see(m.group(1))
+            if c.argv[0].literal() in _ASSIGNING_COMMANDS:
+                for w in c.argv[1:]:
+                    m = _NAME_ASSIGN.match(_lead(w))
+                    if m:
+                        see(m.group(1))
+        for w in (*c.assigns, *c.argv, *(t for _o, t in c.redirs)):
+            for p in w.pieces:
+                if p.kind == "exp":
+                    for m in _EXPANSION_ASSIGN.finditer(p.text):
+                        see(m.group(1) or m.group(2))
+    return found
+
+
+def env_assignments_in_text(command: str) -> list[str]:
+    """:func:`_env_assignments` for a line the scanner cannot read: every ``NAME=`` in the text counts, in a quote or not."""
+    found: list[str] = []
+    for m in _ASSIGN_IN_TEXT.finditer(command):
+        name = next(g for g in m.groups() if g)
+        if _env_effect(name) and name not in found:
+            found.append(name)
+    return found
+
+
+def env_refusal(names: list[str]) -> Unsupported:
+    """The refusal for a line that mentions the placeholder and sets one of ``names``. The code stays ``git_env`` for a ``GIT_*``
+    name (what a prefix on the commit already got) and is ``env_assignment`` for the others."""
+    what = "; ".join(f"{n} ({_env_effect(n)})" for n in names[:3])
+    return Unsupported("git_env" if names[0].startswith("GIT_") else "env_assignment", ENV_MESSAGE.format(what=what))
 
 
 def _exec_option(t: str, search: bool) -> bool:
@@ -575,7 +691,8 @@ def _may_run(cmds: list[Command]) -> list[str]:
             continue
         base = name  # the exact name: ``./echo`` is whatever file is called that, and ``/bin/echo`` is not on the list either
         if base not in _HARMLESS:
-            add(os.path.basename(name) or name)
+            short = os.path.basename(name) or name
+            add(f"{short} (it changes files)" if short in _FILE_CHANGERS else short)
             continue
         if c.assigns:
             add("a variable set in front of a command")
@@ -636,7 +753,8 @@ def unreadable_line_is_harmless(command: str) -> bool:
     backslash in it (where it ends depends on the quoting). The same refusals as for a readable line: :func:`_runs_code_in_text`,
     the options that run a program, an expansion in the arguments of ``grep`` and ``rg``, a ``printf`` that could evaluate an
     argument."""
-    if len(command) > MAX_COMMAND_CHARS or _runs_code_in_text(command) or _STARTUP_FILE.search(command):
+    if (len(command) > MAX_COMMAND_CHARS or _runs_code_in_text(command) or _STARTUP_FILE.search(command)
+            or env_assignments_in_text(command)):
         return False
     for segment in _COMMAND_START.split(command):
         words = segment.split()
@@ -750,6 +868,10 @@ def analyse(command: str, cwd: str) -> Plan | None:
             "here-document whose body holds $(...) or backticks. Nothing was run. Write the text to a file, quote the "
             "here-document delimiter (<<'EOF'), and run the placeholder command on its own.",
         )
+    if MENTION.search(command):  # bound or stray, the same: what a later command on the line resolves or runs must not change
+        named = _env_assignments(cmds)
+        if named:
+            raise env_refusal(named)
     for c in cmds:
         for w in (*c.assigns, *c.argv, *(t for _o, t in c.redirs)):
             if w.token_in_expansion:
@@ -766,7 +888,8 @@ def analyse(command: str, cwd: str) -> Plan | None:
             raise Unsupported(
                 "placeholder_spelling",
                 STRAY_MESSAGE if _may_commit(cmds) or COMMIT_CMD.search(command) or PR_CMD.search(command)
-                else STRAY_OTHER_MESSAGE.format(names=", ".join(names[:3])),
+                else STRAY_OTHER_MESSAGE.format(names=", ".join(names[:3]))
+                + (FILE_CHANGER_NOTE if any(n.split(" ")[0] in _FILE_CHANGERS for n in names) else ""),
             )
     holders = [k for k, c in enumerate(cmds) if any(w.has_token for w in c.argv)]
     elsewhere = any(w.has_token for c in cmds for w in (*c.assigns, *(t for _o, t in c.redirs)))

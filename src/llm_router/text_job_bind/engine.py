@@ -34,7 +34,8 @@ from typing import Callable, NamedTuple
 from llm_router import paths, state_files
 from llm_router.text_job_bind import gitinput, ledger, limits, sanitize
 from llm_router.text_job_bind.plan import (
-    COMMIT_CMD, JOB_COMMIT, JOB_PR, PR_CMD, Plan, Unsupported, analyse, option_flags, unreadable_line_is_harmless,
+    COMMIT_CMD, JOB_COMMIT, JOB_PR, PR_CMD, Plan, Unsupported, analyse, env_assignments_in_text, env_refusal, option_flags,
+    unreadable_line_is_harmless,
 )
 from llm_router.text_job_bind.shellscan import MENTION, ScanError, scan_commands
 
@@ -582,6 +583,11 @@ def _decide(payload, generate, t0, budget_s, root, record, now, mono, prepare=No
     except ScanError as e:
         if unreadable_line_is_harmless(cmd):
             return Decision("pass")  # every command in it is a harmless reader (an echo, a grep, a cat): the shell stops the rest
+        named = env_assignments_in_text(cmd)
+        if named:  # say which assignment it was: "could not be read" would send the model to simplify a line it must change
+            refusal = env_refusal(named)
+            return deny(guess, "unsupported", refusal.code,
+                        f"{refusal.message} Nothing was run. Or write the text yourself and run it without the placeholder.")
         return deny(guess, "unsupported", "unreadable",
                     f"The command could not be read as a plain git/gh command ({e}). Nothing was run. "
                     "Simplify it, or write the text yourself and run it without the placeholder.")

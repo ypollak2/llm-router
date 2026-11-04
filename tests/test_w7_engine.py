@@ -350,6 +350,45 @@ def test_a_readable_line_that_may_run_anything_but_a_reader_is_denied_through_th
     assert d.kind == "deny" and gen.calls == [] and rows[0]["reason"] == "placeholder_spelling", line
 
 
+@pytest.mark.parametrize("line,reason,name", [
+    (f"PATH=/tmp/x; git commit -m {T}", "env_assignment", "PATH"),
+    (f"IFS=/ git commit -m {T}", "env_assignment", "IFS"),
+    (f"export BASH_ENV=/tmp/x; git commit -m {T}", "env_assignment", "BASH_ENV"),
+    (f"LD_PRELOAD=/tmp/x.so gh pr create --title t --body {T}", "env_assignment", "LD_PRELOAD"),
+    (f"GIT_INDEX_FILE=/tmp/i; git commit -m {T}", "git_env", "GIT_INDEX_FILE"),
+    (f"PATH=/tmp/x; echo {T}", "env_assignment", "PATH"),
+    # a line the scanner cannot read: judged on its text, and told which assignment it was (not just "could not be read")
+    (DIVERGENT + "; PATH=/tmp/x; echo '${LLM_TEXT:?}'", "env_assignment", "PATH"),
+    (DIVERGENT + f"; GIT_DIR=/tmp/x git commit -m {T}", "git_env", "GIT_DIR"),
+])
+def test_a_line_that_sets_what_a_later_command_resolves_through_is_denied_with_the_assignment_named(repo, tmp_path, line, reason, name):
+    gen = Gen()
+    d, rows = run(line, repo, tmp_path, gen)
+    assert d.kind == "deny" and gen.calls == [] and files(tmp_path) == [], line
+    assert (rows[0]["outcome"], rows[0]["reason"]) == ("unsupported", reason), line
+    assert f"also sets {name} (" in d.reason and "Take the assignment out of this line" in d.reason, d.reason
+    assert d.reason.rstrip().endswith("run it without the placeholder.")
+
+
+def test_the_identity_variables_and_the_same_line_refusal_are_unchanged(repo, tmp_path):
+    gen = Gen()
+    d, _ = run(f"GIT_AUTHOR_NAME=a GIT_COMMITTER_EMAIL=a@b.c git commit -m {T}", repo, tmp_path, gen)
+    assert d.kind == "rewrite" and len(gen.calls) == 1
+    (repo / "b.py").write_text("b\n")
+    d, rows = run(f"git add b.py && git commit -m {T}", repo, tmp_path, gen)
+    assert d.kind == "deny" and "same line" in d.reason and rows[0]["reason"] == "mutating_predecessor"
+
+
+@pytest.mark.parametrize("cmd", ["cp a.py b.py", "mv a.py b.py"])
+def test_cp_and_mv_next_to_a_mention_are_no_longer_left_to_the_shell(repo, tmp_path, cmd):
+    gen = Gen()
+    d, rows = run(f"{cmd}; echo '${{LLM_TEXT:?}}'", repo, tmp_path, gen)
+    assert d.kind == "deny" and gen.calls == [] and rows[0]["reason"] == "placeholder_spelling"
+    assert "(it changes files)" in d.reason
+    d, rows = run(DIVERGENT + f"; {cmd}; echo '${{LLM_TEXT:?}}'", repo, tmp_path, gen)
+    assert d.kind == "deny" and rows[0]["reason"] == "unreadable"
+
+
 @pytest.mark.parametrize("cmd", [
     "git commit -m '${LLM_TEXT:?}'", "git commit -m \\${LLM_TEXT:?}", "git commit -m $LLM_TEXT",
     'git commit -m "${LLM_TEXT}"', "git commit -F - <<'EOF'\n${LLM_TEXT:?}\nEOF",
