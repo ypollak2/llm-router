@@ -24,6 +24,8 @@ beside ``--check``, and an environment prefix (``VAR=x cmd``) on anything but a 
 The list is conservative on purpose: a false ``technical_op`` would let a local model take a
 step that changes the user's files; a false ``exec`` only leaves a step with Claude.
 
+``is_look_call`` is the wider rule for the look lane; ``technical_op`` is unchanged.
+
 The Bash command is classified in memory and never stored: the ledger keeps tool NAMES and
 this class only.
 """
@@ -216,3 +218,200 @@ def step_tool_class(calls: Iterable[tuple[Any, Any]]) -> str | None:
     if not found:
         return None
     return next(c for c in PRECEDENCE if c in found)
+
+
+_GIT_LOOK_REFUSED = (("--output", 4), ("--ext-diff", 5), ("--textconv", 7), ("--open-files-in-pager", 6))
+_SWEEP_ROOTS = frozenset({"", "~", "$HOME", "/Users", "/home", "/private", "/var", "/usr", "/opt", "/System", "/Library", "/tmp"})
+_LOOK_PROGRAM = re.compile(r"(?:/(?:usr/(?:local/)?)?s?bin/)?[A-Za-z0-9._+-]+")
+_AWK_VALUE = r'(?:\$[0-9]+|\$NF|NF|NR|"[^"\\]*")'
+_AWK_PATTERN = (
+    r'(?:/[^/\\]*/'
+    r'|NR\s*(?:==|!=|>=|<=|>|<)\s*[0-9]+(?:\s*&&\s*NR\s*(?:==|!=|>=|<=|>|<)\s*[0-9]+)?'
+    r'|\$[0-9]+\s*(?:==|!=)\s*(?:"[^"\\]*"|[0-9]+)'
+    r'|\$[0-9]+\s*~\s*/[^/\\]*/)'
+)
+_AWK_PRINT = rf"\{{\s*print(?:\s+{_AWK_VALUE}(?:\s*,?\s*{_AWK_VALUE})*)?\s*;?\s*\}}"
+_AWK_PROGRAM = re.compile(rf"\s*(?:{_AWK_PATTERN}\s*(?:{_AWK_PRINT})?|{_AWK_PRINT})\s*")
+
+
+def _look_parts(command: Any) -> list[str] | None:
+    """Mirror the census structural checks without changing classify_bash."""
+    if not isinstance(command, str) or not command.strip():
+        return None
+    if re.search(r"\\\r?\n", command):
+        return None
+    masked = _mask_quoted(command)
+    if masked is None:
+        return None
+    for m in reversed(list(_SAFE_REDIRECT.finditer(masked))):
+        a, b = m.span()
+        masked = masked[:a] + " " * (b - a) + masked[b:]
+        command = command[:a] + " " * (b - a) + command[b:]
+    if any(tok in masked for tok in (">", "`", "$(", "<(")):
+        return None
+    if re.search(r"(?<![&|])&(?![&>])", masked):
+        return None
+    parts, start = [], 0
+    for m in _SPLIT.finditer(masked):
+        parts.append(command[start:m.start()])
+        start = m.end()
+    parts.append(command[start:])
+    return None if any(not p.strip() for p in parts) else parts
+
+
+def _look_segment(segment: str) -> bool:
+    words = shlex.split(segment, posix=True)
+    env_prefix = False
+    while words and _ENV_ASSIGN.match(words[0]):
+        words, env_prefix = words[1:], True
+    if not words:
+        return False
+    # The reader rules below go by the program's name, so the word must really name a system
+    # program: /tmp/cat, */cat, ~/bin/cat and $HOME/bin/cat would run whatever is there.
+    if not _LOOK_PROGRAM.fullmatch(words[0]):
+        return False
+    cmd, args = words[0].rsplit("/", 1)[-1], words[1:]
+    if env_prefix:
+        return False   # PATH=, LD_PRELOAD=, DYLD_INSERT_LIBRARIES= and PAGER= each change what runs
+    if cmd == "git":
+        if args and args[0].startswith("-") and args[0] != "-C":
+            return False   # --git-dir and friends point git at another repository's config and hooks
+        for a in args:
+            name = a.split("=", 1)[0]
+            # git accepts unique abbreviations of long options, so --outp=x is --output=x.
+            if any(full.startswith(name) and len(name) >= least for full, least in _GIT_LOOK_REFUSED):
+                return False
+            if "grep" in args and a.startswith("-") and not a.startswith("--") and "O" in a:
+                return False   # git grep -iOprog runs prog on the matches
+    # Reads that sweep a whole disk or home directory: one background find held a task for 525 s.
+    if cmd in {"find", "du", "rg", "grep", "tree", "ls", "ag"} and any(a.rstrip("/") in _SWEEP_ROOTS for a in args):
+        return False
+    if cmd in {"rg", "grep"} and any(a.startswith(("--pre", "--hostname-bin")) for a in args):
+        return False
+    if cmd == "file" and any(
+        a.startswith(("--compile", "--magic-file"))
+        or (a.startswith("-") and not a.startswith("--") and any(c in a[1:] for c in "Cm"))
+        for a in args
+    ):
+        return False
+    if _segment_is_read_only(segment):
+        return True
+    if cmd == "sed":
+        # Fail closed on opaque script files and scripts outside this simple grammar.
+        if "-n" not in args or any(
+            a.startswith(("-i", "--in-place", "-f", "--file")) for a in args
+        ):
+            return False
+        scripts, operands = [], []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in ("-n", "-E", "-r"):
+                i += 1
+                continue
+            if a == "-e":
+                i += 1
+                if i >= len(args):
+                    return False
+                scripts.append(args[i])
+            elif a.startswith("-"):
+                return False
+            else:
+                operands.append(a)
+            i += 1
+        if not scripts and operands:
+            scripts = operands[:1]
+        address = r"(?:[0-9]+|\$|/[^/\\]*/)"
+        simple = rf"\s*(?:{address}(?:,{address})?)?\s*[p=]\s*"
+        return bool(scripts) and all(
+            not any(t in script for t in ("w ", "e ", "/e"))
+            and all(re.fullmatch(simple, part) for part in script.split(";"))
+            for script in scripts
+        )
+    if cmd == "awk":
+        # A whitelist on the program the shell will pass, not a blacklist on the raw text: quote
+        # concatenation (sys'"tem"') and indirect calls get past any list of words.
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            if args[i] == "-F":
+                i += 2
+            elif args[i].startswith("-F") and len(args[i]) > 2:
+                i += 1
+            else:
+                return False
+        return i < len(args) and bool(_AWK_PROGRAM.fullmatch(args[i]))
+    if cmd == "sort":
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg in ("-k", "-t"):
+                i += 1
+                if i >= len(args) or args[i].startswith("-"):
+                    return False
+            elif arg.startswith(("-k", "-t")):
+                pass
+            elif arg in ("--reverse", "--numeric-sort", "--unique"):
+                pass
+            elif arg.startswith("-") and not re.fullmatch(r"-[bdfghinrsuzV]+", arg):
+                return False
+            i += 1
+        return True
+    if cmd == "date":
+        # BSD date sets the clock from a bare positional argument, so only -u and +format pass.
+        return all(a == "-u" or a.startswith("+") for a in args)
+    if cmd == "jq":
+        return not any(
+            (a.startswith("-") and not a.startswith("--") and "f" in a[1:])
+            or a.startswith(("--from-file", "--rawfile", "--slurpfile"))
+            for a in args
+        )
+    if cmd == "uniq":
+        return sum(not a.startswith("-") or a == "-" for a in args) <= 1
+    if cmd in {"cut", "tr", "nl", "column", "comm", "cmp", "basename", "dirname",
+               "realpath", "stat", "file", "du", "df", "which", "pwd", "ps", "pgrep",
+               "uptime", "whoami", "uname", "echo", "printf", "sleep", "true", "cd"}:
+        return True
+    if cmd == "git":
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            if args[i] == "-C":
+                i += 2
+            elif args[i] == "--no-pager" or args[i].startswith("--git-dir="):
+                i += 1
+            else:
+                return False
+        if i >= len(args):
+            return False
+        sub, rest = args[i], args[i + 1:]
+        if any(a.startswith(_GIT_RUNS_PROGRAM) or a == "--output" or
+               a.startswith("--output=") for a in rest):
+            return False
+        if sub == "cat-file":
+            return len(rest) == 2 and rest[0] in ("-p", "-t", "-s")
+        # git grep -O/--open-files-in-pager runs a program on the matches.
+        if sub == "grep" and any(a == "-O" or a.startswith(("-O", "--open-files-in-pager")) for a in rest):
+            return False
+        return sub in {"grep", "rev-parse", "ls-files", "describe", "shortlog",
+                       "merge-base", "for-each-ref"}
+    if cmd == "gh":
+        allowed = {"pr": {"view", "list", "checks", "diff", "status"},
+                   "run": {"view", "list"}, "issue": {"view", "list"},
+                   "repo": {"view"}, "release": {"view", "list"}}
+        return (len(args) >= 2 and args[1] in allowed.get(args[0], set())
+                and not any(a in ("--web", "-w") or a.startswith("--web=") for a in args))
+    if cmd == "ollama":
+        return bool(args) and args[0] in {"list", "ps", "show"}
+    return False
+
+
+def is_look_call(name: Any, tool_input: Any) -> bool:
+    """Whether one call meets the wider look rule; malformed inputs fail closed."""
+    if not isinstance(tool_input, dict):
+        return False
+    try:
+        if not is_bash(name):
+            return classify_tool(name, tool_input) == TECHNICAL_OP
+        parts = _look_parts(tool_input.get("command"))
+        return parts is not None and all(_look_segment(part) for part in parts)
+    except Exception:
+        return False

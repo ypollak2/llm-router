@@ -71,6 +71,7 @@ from llm_router.proxy.backend_health import (
 )
 from llm_router.proxy.backends import (
     BACKENDS,
+    TRIMS,
     DEFAULT_HEDGE_S,
     DEFAULT_KEEP_ALIVE,
     HedgeTimeout,
@@ -207,6 +208,7 @@ class ProxyConfig:
     # ``--local-gate on`` (proxy.local_gate): a continuation is served locally only on a lane
     # that local_eligibility.json marks eligible. Off (default) = byte-identical to before.
     local_gate: bool = False
+    local_look: bool = False
 
     def __post_init__(self) -> None:
         if self.num_ctx is None and self.model:
@@ -236,6 +238,7 @@ class ProxyConfig:
             serve=local_mode.parse_serve_mode(os.environ.get("LLM_ROUTER_PROXY_LOCAL_AGENT_MODE", "off")),
             shadow=local_shadow.parse_on_off(os.environ.get("LLM_ROUTER_PROXY_LOCAL_SHADOW", "off")),
             local_gate=local_gate.parse_gate(os.environ.get("LLM_ROUTER_PROXY_LOCAL_GATE", "off")),
+            local_look=local_gate.parse_gate(os.environ.get("LLM_ROUTER_PROXY_LOCAL_LOOK", "off")),
         )
 
 
@@ -299,6 +302,16 @@ def refusal_message(text: str, model: str | None) -> dict:
             "usage": {"input_tokens": 0, "output_tokens": 0}}
 
 
+# In the look lane a long run of local reads mostly adds reads Claude would not have made: with
+# runs up to 8, 38 of 84 local steps replaced a Claude call; with runs up to 2, 35 of 39 did
+# (20 tasks, one model, coord/local-levers/RESULT-D4-20261105.md).
+LOOK_MAX_CONSECUTIVE = 2
+
+
+def _guard_limit(cfg: "ProxyConfig") -> int:
+    return min(cfg.loop_max_consecutive, LOOK_MAX_CONSECUTIVE) if cfg.local_look else cfg.loop_max_consecutive
+
+
 def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None,
               haiku_guard_run=None, local_gate_deps=None):
     """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
@@ -317,7 +330,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     upstream = validate_upstream(cfg.upstream)
     trims = resolve_trims(cfg.trim)
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
-    guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
+    guard = LoopGuard(_guard_limit(cfg), cfg.loop_repeat_window)
     # Stops sending steps to a crashed local backend (proxy.backend_health).
     health = BackendHealth(cfg.backend_fail_n, cfg.backend_cooldown_s, clock=health_clock)
     # Claude-tier rewrite (opt-in). A bad policy file fails here, at startup,
@@ -343,6 +356,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         lm_breaker = la_capability.BreakerCache(fn=breaker_fn)
     if cfg.shadow and (lm is not None or not (cfg.model or "").startswith("ollama/")):
         raise ValueError("--shadow on needs --model ollama/<tag> and --serve off (shadow never serves)")
+    if cfg.local_look and (not cfg.local_gate or "continuation" not in cfg.steps
+                           or cfg.local_agent is not None or cfg.serve == local_mode.SERVE_LOCAL_AGENT):
+        raise ValueError("--local-look on needs --local-gate on and --steps continuation; "
+                         "cannot combine with --local-agent or --serve local-agent")
     lane_gate = None
     if cfg.local_gate:
         if lm is not None:
@@ -352,7 +369,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             deps.breaker = lambda lever, task_type, model: breaker_fn(lever, task_type)
         if local_gate_deps is None:
             deps.backend_open = lambda model: health.is_open(model)
-        lane_gate = local_gate.LaneGate(cfg.steps, cfg.step_budget_s, deps)
+        lane_gate = local_gate.LaneGate(cfg.steps, cfg.step_budget_s, deps, look=cfg.local_look)
 
     def _ollama_url() -> str:
         from llm_router.config import get_config, validate_ollama_url
@@ -430,7 +447,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         """Seconds left of the step budget that started at ``t0`` (never negative)."""
         return max(0.0, t0 + cfg.step_budget_s - time.monotonic())
 
+    backend_in_flight = 0
+
     async def try_serve(body: dict, row: dict) -> dict | None:
+        nonlocal backend_in_flight
         t0 = time.monotonic()
         session_id = row.get("session_id")
         exhausted = guard.exhausted(session_id)
@@ -496,8 +516,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row.update(decision=ledger.DECISION_FORWARDED, reason=gate.reason)
                 row["added_latency_s"] = round(time.monotonic() - t0, 3)
                 return None
+        look = gate_decision is not None and gate_decision.lane == local_gate.LANE_LOOK
+        if look and backend_in_flight:
+            guard.reset(session_id)
+            row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_BUSY)
+            row.update(decision=ledger.DECISION_FORWARDED, reason=local_gate.R_LOCAL_BUSY,
+                       added_latency_s=round(time.monotonic() - t0, 3))
+            return None
         message, err, reason = None, None, None
+        look_reason = None
         backend_t0, backend_outcome = None, None
+        backend_in_flight += 1
         try:
             backend = make_backend(choice["model"])
             admitted, health_info = await health.admit(choice["model"], backend)
@@ -526,7 +555,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 # never a hang. An error still reaches the counted-fallback handler below.
                 trim_t0 = time.perf_counter()
                 send = await asyncio.wait_for(asyncio.to_thread(
-                    apply_trims, src, trims, target_window=getattr(backend, "num_ctx", None)),
+                    apply_trims, src, [TRIMS["look"]] if look else trims, target_window=getattr(backend, "num_ctx", None)),
                     timeout=_budget_left(t0))
                 _add_phase(row, "trim", (time.perf_counter() - trim_t0) * 1000.0)
             # Repo knowledge for the local model (proxy.okf_context): the trimmed
@@ -536,24 +565,27 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # Bounded: repo_facts can run several git calls; a slow attach must
             # not eat the step budget. On timeout the step goes ahead without it
             # (the worker thread finishes on its own and its result is dropped).
-            okf_t0 = time.perf_counter()
-            # Within the step deadline: when the budget, not the attach's own 2 s cap, is
-            # what cuts it short, the step is out of time; that is not an attach failure
-            # and is not counted as one (status "budget", no failopen).
-            okf_cap = min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0))
-            try:
-                send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
-                    okf_context.attach, send, body,
-                    ceiling_tokens=cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS),
-                    timeout=okf_cap)
-            except asyncio.TimeoutError as exc:
-                if okf_cap < OKF_ATTACH_TIMEOUT_S:
-                    row["okf"] = {"status": "budget"}
-                else:
-                    failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
-                    row["okf"] = {"status": "timeout"}
-            # P0.9: context building, not the decision; reported beside it (S6).
-            _add_phase(row, "okf_attach", (time.perf_counter() - okf_t0) * 1000.0)
+            if look:
+                row["okf"] = {"status": "skipped_look"}
+            else:
+                okf_t0 = time.perf_counter()
+                # Within the step deadline: when the budget, not the attach's own 2 s cap, is
+                # what cuts it short, the step is out of time; that is not an attach failure
+                # and is not counted as one (status "budget", no failopen).
+                okf_cap = min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0))
+                try:
+                    send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
+                        okf_context.attach, send, body,
+                        ceiling_tokens=cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS),
+                        timeout=okf_cap)
+                except asyncio.TimeoutError as exc:
+                    if okf_cap < OKF_ATTACH_TIMEOUT_S:
+                        row["okf"] = {"status": "budget"}
+                    else:
+                        failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
+                        row["okf"] = {"status": "timeout"}
+                # P0.9: context building, not the decision; reported beside it (S6).
+                _add_phase(row, "okf_attach", (time.perf_counter() - okf_t0) * 1000.0)
             backend_t0 = time.monotonic()
             # One deadline for the whole step (t0 + step_budget_s, as the edit protocol
             # below): the trim and the okf attach above spend from it, they do not add to it.
@@ -569,43 +601,48 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # check below reuses ``err`` and the edit protocol adds its own calls.
             backend_outcome = (err, reason, time.monotonic() - backend_t0)
             if not err and message is not None:
-                # The hard rule: an edit from the raw tool-call loop is never
-                # served; it goes to the validated edit protocol or to Claude.
-                verdict = la_capability.check_reply(
-                    message, body, edit_mode=cfg.local_agent.edit_mode if local_agent else "claude",
-                    raw_edit_checked=lm is not None)
-                if local_agent is not None:
-                    row["local_agent"] = dict(row.get("local_agent") or {}, reply=verdict.as_row())
-                if lm is not None:
-                    row["local_mode_reply"] = verdict.as_row()
-                if gate_decision is not None and message is not None and la_capability._edit_calls(message):
-                    # The local gate never serves an edit-shaped reply, protocol or not.
-                    message, err, reason = None, "edit-shaped reply; the local gate serves none", "edit_to_claude"
-                elif verdict.route == la_capability.ROUTE_CLAUDE:
-                    message, err, reason = None, verdict.detail or verdict.reason, verdict.reason
-                elif verdict.route == la_capability.ROUTE_EDIT and lm is not None:
-                    # P3: the validated edit protocol; if it cannot produce a
-                    # validated edit, the model's own raw edit is served and
-                    # checked after it is applied.
-                    from llm_router.local_agent.proxy_step import generator_for
+                if look:
+                    message, look_reason = local_gate.look_check(message)
+                    if look_reason is None:
+                        row["served_via"] = "look"
+                else:
+                    # The hard rule: an edit from the raw tool-call loop is never
+                    # served; it goes to the validated edit protocol or to Claude.
+                    verdict = la_capability.check_reply(
+                        message, body, edit_mode=cfg.local_agent.edit_mode if local_agent else "claude",
+                        raw_edit_checked=lm is not None)
+                    if local_agent is not None:
+                        row["local_agent"] = dict(row.get("local_agent") or {}, reply=verdict.as_row())
+                    if lm is not None:
+                        row["local_mode_reply"] = verdict.as_row()
+                    if gate_decision is not None and message is not None and la_capability._edit_calls(message):
+                        # The local gate never serves an edit-shaped reply, protocol or not.
+                        message, err, reason = None, "edit-shaped reply; the local gate serves none", "edit_to_claude"
+                    elif verdict.route == la_capability.ROUTE_CLAUDE:
+                        message, err, reason = None, verdict.detail or verdict.reason, verdict.reason
+                    elif verdict.route == la_capability.ROUTE_EDIT and lm is not None:
+                        # P3: the validated edit protocol; if it cannot produce a
+                        # validated edit, the model's own raw edit is served and
+                        # checked after it is applied.
+                        from llm_router.local_agent.proxy_step import generator_for
 
-                    edited, edit_err, row["edit_protocol"] = await la_capability.run_edit_protocol(
-                        verdict, message, body, generator_for(backend), t0 + cfg.step_budget_s)
-                    if edit_err:
-                        row["edit_protocol"]["fallback"] = la_capability.REASON_RAW_EDIT_CHECKED
+                        edited, edit_err, row["edit_protocol"] = await la_capability.run_edit_protocol(
+                            verdict, message, body, generator_for(backend), t0 + cfg.step_budget_s)
+                        if edit_err:
+                            row["edit_protocol"]["fallback"] = la_capability.REASON_RAW_EDIT_CHECKED
+                            row["served_via"] = la_capability.REASON_RAW_EDIT_CHECKED
+                        else:
+                            message = edited
+                            row["served_via"] = la_capability.ROUTE_EDIT
+                    elif verdict.route == la_capability.ROUTE_EDIT:
+                        message, err, row["edit_protocol"] = await local_agent.edit_step(
+                            verdict, message, body, backend, t0 + cfg.step_budget_s)
+                        if err:
+                            reason = "edit_protocol_failed"
+                        else:
+                            row["served_via"] = la_capability.ROUTE_EDIT
+                    elif lm is not None and verdict.reason == la_capability.REASON_RAW_EDIT_CHECKED:
                         row["served_via"] = la_capability.REASON_RAW_EDIT_CHECKED
-                    else:
-                        message = edited
-                        row["served_via"] = la_capability.ROUTE_EDIT
-                elif verdict.route == la_capability.ROUTE_EDIT:
-                    message, err, row["edit_protocol"] = await local_agent.edit_step(
-                        verdict, message, body, backend, t0 + cfg.step_budget_s)
-                    if err:
-                        reason = "edit_protocol_failed"
-                    else:
-                        row["served_via"] = la_capability.ROUTE_EDIT
-                elif lm is not None and verdict.reason == la_capability.REASON_RAW_EDIT_CHECKED:
-                    row["served_via"] = la_capability.REASON_RAW_EDIT_CHECKED
         except HedgeTimeout as exc:
             err, reason = str(exc), "hedge_timeout"
         except ContextOverflow as exc:
@@ -617,6 +654,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             err, reason = f"exceeded step budget {cfg.step_budget_s}s", "budget_exceeded"
         except Exception as exc:  # noqa: BLE001 - any backend failure is a counted fallback
             err, reason = f"{type(exc).__name__}: {exc}", "backend_error"
+        finally:
+            backend_in_flight -= 1
         if backend_t0 is not None:
             tripped = health.record(choice["model"], *(backend_outcome
                                                        or (err, reason, time.monotonic() - backend_t0)))
@@ -624,6 +663,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row["backend_health"] = dict(row.get("backend_health") or {}, **tripped)
         elapsed = round(time.monotonic() - t0, 3)
         row["route_latency_s"] = elapsed
+        if look_reason is not None and not err:
+            guard.reset(session_id)
+            row["local_gate"] = dict(row["local_gate"], reason=look_reason)
+            row.update(decision=ledger.DECISION_FORWARDED, reason=look_reason,
+                       added_latency_s=elapsed, route_latency_s=elapsed)
+            return None
         if err or message is None:
             if gate_decision is not None:
                 row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_FAILED)
@@ -1505,6 +1550,9 @@ def cmd_proxy(argv: list[str]) -> int:
                          "a copy in parallel; only agreement, latency and reason codes are logged "
                          "(proxy_local_shadow.jsonl). Needs --model ollama/<tag> and --serve off "
                          "(also LLM_ROUTER_PROXY_LOCAL_SHADOW)")
+    ap.add_argument("--local-look", default=str(env.local_look and "on" or "off"),
+                    help="off (default) or on: enable the read-only look lane; needs --local-gate on "
+                         "and --steps continuation (also LLM_ROUTER_PROXY_LOCAL_LOOK)")
     ap.add_argument("--local-gate", default=str(env.local_gate and "on" or "off"),
                     help="off (default; byte-identical to before) or on: a continuation is served by a local "
                          "model only when its lane (tech_op, qa, code) is eligible in local_eligibility.json "
@@ -1529,6 +1577,11 @@ def cmd_proxy(argv: list[str]) -> int:
         sys.stderr.write(f"llm-router proxy: --local-gate: {exc}\n")
         return 2
     try:
+        look_on = local_gate.parse_gate(a.local_look)
+    except ValueError as exc:
+        sys.stderr.write(f"llm-router proxy: --local-look: {exc}\n")
+        return 2
+    try:
         shadow_on = local_shadow.parse_on_off(a.shadow)
     except ValueError as exc:
         sys.stderr.write(f"llm-router proxy: --shadow: {exc}\n")
@@ -1549,7 +1602,7 @@ def cmd_proxy(argv: list[str]) -> int:
         cfg = ProxyConfig(steps=parse_steps(a.steps), step_budget_s=a.step_budget_s, model=a.model,
                           trim=a.trim, num_ctx=a.num_ctx, upstream=env.upstream,
                           ledger_path=Path(a.ledger) if a.ledger else None,
-                          serve=serve, shadow=shadow_on, shadow_budget_s=a.shadow_budget_s, local_gate=gate_on,
+                          serve=serve, shadow=shadow_on, shadow_budget_s=a.shadow_budget_s, local_gate=gate_on, local_look=look_on,
                           hedge_s=parse_hedge(a.hedge_s) if a.hedge_s is not None else env.hedge_s,
                           keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
                           ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
@@ -1557,6 +1610,8 @@ def cmd_proxy(argv: list[str]) -> int:
                           tier_policy=a.tier_policy,
                           local_agent=(LocalAgentConfig.from_env() if a.local_agent else env.local_agent),
                           backend_fail_n=a.backend_fail_n, backend_cooldown_s=a.backend_cooldown_s)
+        if cfg.local_look and (cfg.local_agent is not None or cfg.serve == local_mode.SERVE_LOCAL_AGENT):
+            raise ValueError("--local-look on cannot combine with --local-agent or --serve local-agent")
     except (ValueError, OSError) as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
         return 2

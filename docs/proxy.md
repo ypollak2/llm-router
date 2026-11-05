@@ -148,6 +148,7 @@ client tools are never routed.
 | `--backend-fail-n` | `LLM_ROUTER_PROXY_BACKEND_FAIL_N` | `3` (consecutive empty or sub-second invalid replies before local serving pauses; a crash signature pauses at once; `0` disables) |
 | `--backend-cooldown-s` | `LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S` | `60` (pause before a one-token probe checks the backend) |
 | `--local-gate` | `LLM_ROUTER_PROXY_LOCAL_GATE` | `off`. `on`: a continuation is served locally only on a lane that `local_eligibility.json` marks eligible (section below). Needs `--steps continuation`; not with `--serve local-agent`. |
+| `--local-look` | `LLM_ROUTER_PROXY_LOCAL_LOOK` | `off`. `on`: serve read-only look continuations; needs `--local-gate on` and eligible lane `look`, tier `simple`. |
 
 The model, the trims (`proxy/backends.py: TRIMS`) and the backends
 (`BACKENDS`) are plug points. A measured speed lever can be added as a named trim
@@ -201,6 +202,23 @@ Gate off is byte-identical to before: no file read, no ledger key.
   continuation --local-gate on --tiers conversation --tier-policy ~/.llm-router/claude_tiers.yaml`
   or `LLM_ROUTER_PROXY_STEPS=continuation LLM_ROUTER_PROXY_LOCAL_GATE=on`, then restart the
   proxy service. Keep the Opus pin and do not combine with `--serve local-agent`.
+
+### Look lane (`--local-look`, default off)
+
+Serves read-only inspection tool calls on continuation steps. Requires
+`--local-gate on` and an eligible entry for lane `look`, tier `simple`, in
+`local_eligibility.json`. The offered tools are limited to read-only tools plus
+`hand_to_claude`; the prompt uses the look-specific instructions and skips OKF attachment.
+Replies requesting `hand_to_claude` forward the original request with reason
+`local_handoff`; edits, writing Bash commands, and other non-look replies forward
+with `not_a_look`. A look step arriving while backend work is in flight forwards
+with `local_busy` instead of queuing. These are normal forwarding outcomes;
+backend errors and timeouts retain the existing fallback behavior.
+
+In this lane at most 2 local steps run in a row, whatever `--loop-max-consecutive` says; a local try
+happens only right after a read-only step; a local Read without a range gets a line limit; a whole-file
+`cat` and a read that sweeps a whole disk or home directory go to Claude. This lane is experimental:
+it has not shown a saving in cost or time, so it stays off by default.
 
 ### Optional: a dedicated tuned Ollama server (not auto-configured)
 

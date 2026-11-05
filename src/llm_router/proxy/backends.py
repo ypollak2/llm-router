@@ -207,6 +207,21 @@ def _pack_messages(turns: list, window: int, shell: dict) -> tuple[str, list]:
     return pack.system, recent + tail
 
 
+LOOK_SYSTEM = (
+    "You are choosing the single next step of a coding task. If the next step is to read "
+    "or search files, code or git history, call one read-only tool with exact arguments. "
+    "Use Bash only for commands that read. If the next step would change anything, run "
+    "a program, or the work looks finished, call hand_to_claude and do nothing else. "
+    "Never repeat a call you can see in the history. Do not write prose."
+)
+LOOK_TOOLS = ("Read", "Grep", "Glob", "LS", "Bash")
+HAND_TO_CLAUDE_TOOL = {
+    "name": "hand_to_claude",
+    "description": "Hand the next step back to Claude.",
+    "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+
+
 def _trim_fast(body: dict, target_window: int | None = None) -> dict:
     """Condensed system prompt and the step class's tool subset; history now
     comes from the one context pack (PLAN v16 P1.1 door 3)."""
@@ -225,9 +240,28 @@ def _trim_fast(body: dict, target_window: int | None = None) -> dict:
     return out
 
 
+def _trim_look(body: dict, target_window: int | None = None) -> dict:
+    """Condensed system prompt and the step class's tool subset; history now
+    comes from the one context pack (PLAN v16 P1.1 door 3)."""
+    out = dict(body)
+    out["system"] = LOOK_SYSTEM
+    wanted = LOOK_TOOLS
+    by_name = {t.get("name"): t for t in body.get("tools") or [] if isinstance(t, dict)}
+    out["tools"] = [by_name[n] for n in wanted if n in by_name] + [copy.deepcopy(HAND_TO_CLAUDE_TOOL)]
+    turns = non_system(body.get("messages") or [])
+    if turns:
+        window = target_window if isinstance(target_window, int) and target_window > 0 else local_models.num_ctx(None)
+        system_layers, messages = _pack_messages(turns, window, out)
+        out["messages"] = messages
+        if system_layers:
+            out["system"] = system_layers + "\n\n" + LOOK_SYSTEM
+    return out
+
+
 TRIMS: dict[str, Trim] = {
     "none": lambda body: body,
     "fast": _trim_fast,
+    "look": _trim_look,
     # The first spike's setting (6/6 golden tasks, 0/19 validation failures,
     # but a 61 s median per routed call): descriptions cut to 2,000 chars.
     "tool-desc-2000": _trim_tool_descriptions(2000),
@@ -257,7 +291,7 @@ def resolve_trims(spec: str | None) -> list[Trim]:
 def apply_trims(body: dict, trims: list[Trim], *, target_window: int | None = None) -> dict:
     out = copy.deepcopy(body)
     for trim in trims:
-        out = trim(out, target_window=target_window) if trim is _trim_fast else trim(out)
+        out = trim(out, target_window=target_window) if trim is _trim_fast or trim is _trim_look else trim(out)
     return out
 
 
@@ -271,12 +305,17 @@ class Backend(Protocol):
 
 NUM_PREDICT_EASY = 200  # after Read / Bash / no tool: pick the obvious next action
 NUM_PREDICT_HARD = 700  # anything else (e.g. after an Edit)
+NUM_PREDICT_LOOK = 600  # a look-lane reply, see num_predict_for
 DEFAULT_HEDGE_S = 8.0
 # N20: bounded; an explicit --keep-alive -1 is still honoured (server.parse_keep_alive).
 DEFAULT_KEEP_ALIVE: int | str = 600
 
 
 def num_predict_for(body: dict) -> int:
+    # A look reply is one tool call, but a command with long paths can pass 200 tokens: at the
+    # easy cap 36 of 142 replayed replies were cut off before the call could be parsed (D5).
+    if isinstance(body.get("system"), str) and body["system"].endswith(LOOK_SYSTEM):
+        return NUM_PREDICT_LOOK
     prev = prev_tools(body)
     return NUM_PREDICT_EASY if (not prev or prev[0] in ("Read", "Bash")) else NUM_PREDICT_HARD
 
