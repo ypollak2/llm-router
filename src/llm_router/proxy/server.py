@@ -346,8 +346,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         lm_breaker = la_capability.BreakerCache(fn=breaker_fn)
     if cfg.shadow and (lm is not None or not (cfg.model or "").startswith("ollama/")):
         raise ValueError("--shadow on needs --model ollama/<tag> and --serve off (shadow never serves)")
-    if cfg.local_look and (not cfg.local_gate or "continuation" not in cfg.steps):
-        raise ValueError("--local-look on needs --local-gate on and --steps continuation")
+    if cfg.local_look and (not cfg.local_gate or "continuation" not in cfg.steps
+                           or cfg.local_agent is not None or cfg.serve == local_mode.SERVE_LOCAL_AGENT):
+        raise ValueError("--local-look on needs --local-gate on and --steps continuation; "
+                         "cannot combine with --local-agent or --serve local-agent")
     lane_gate = None
     if cfg.local_gate:
         if lm is not None:
@@ -1598,6 +1600,8 @@ def cmd_proxy(argv: list[str]) -> int:
                           tier_policy=a.tier_policy,
                           local_agent=(LocalAgentConfig.from_env() if a.local_agent else env.local_agent),
                           backend_fail_n=a.backend_fail_n, backend_cooldown_s=a.backend_cooldown_s)
+        if cfg.local_look and (cfg.local_agent is not None or cfg.serve == local_mode.SERVE_LOCAL_AGENT):
+            raise ValueError("--local-look on cannot combine with --local-agent or --serve local-agent")
     except (ValueError, OSError) as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
         return 2

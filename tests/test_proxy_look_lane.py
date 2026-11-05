@@ -115,6 +115,25 @@ def test_environment(monkeypatch, value, expected):
     assert ENV_REGISTRY["LLM_ROUTER_PROXY_LOCAL_LOOK"] == ENV_REGISTRY["LLM_ROUTER_PROXY_LOCAL_GATE"]
 
 
+@pytest.mark.parametrize("mode", ["compaction", "serve"])
+def test_look_refuses_local_agent(env, mode):
+    config = ({"local_agent": ps.LocalAgentConfig()} if mode == "compaction"
+              else {"serve": ps.local_mode.SERVE_LOCAL_AGENT, "model": "ollama/test"})
+    with pytest.raises(ValueError, match="--local-look.*local-agent"):
+        env.app(Backend(), local_look=True, **config)
+
+
+@pytest.mark.parametrize("flags", [["--local-agent"], ["--serve", "local-agent"]])
+def test_cli_look_refuses_local_agent(monkeypatch, capsys, flags):
+    monkeypatch.setattr(ProxyConfig, "from_env", classmethod(lambda cls: ProxyConfig()))
+    monkeypatch.setattr(ps, "_local_agent_preflight", lambda cfg: pytest.fail("must refuse before preflight"))
+    assert ps.cmd_proxy(["--local-look", "on", "--local-gate", "on",
+                         "--steps", "continuation", *flags]) == 2
+    error = capsys.readouterr().err
+    assert "--local-look on cannot combine" in error
+    assert "Traceback" not in error
+
+
 
 
 

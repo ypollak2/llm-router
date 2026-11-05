@@ -224,6 +224,8 @@ def _look_parts(command: Any) -> list[str] | None:
     """Mirror the census structural checks without changing classify_bash."""
     if not isinstance(command, str) or not command.strip():
         return None
+    if re.search(r"\\\r?\n", command):
+        return None
     masked = _mask_quoted(command)
     if masked is None:
         return None
@@ -244,19 +246,32 @@ def _look_parts(command: Any) -> list[str] | None:
 
 
 def _look_segment(segment: str) -> bool:
-    if _segment_is_read_only(segment):
-        return True
     words = shlex.split(segment, posix=True)
-    if not words or _ENV_ASSIGN.match(words[0]):
+    env_prefix = False
+    while words and _ENV_ASSIGN.match(words[0]):
+        words, env_prefix = words[1:], True
+    if not words:
         return False
     cmd, args = words[0].rsplit("/", 1)[-1], words[1:]
+    if env_prefix and cmd not in _ENV_SAFE:
+        return False
+    if cmd in {"rg", "grep"} and any(a.startswith(("--pre", "--hostname-bin")) for a in args):
+        return False
+    if cmd == "file" and any(
+        a.startswith(("--compile", "--magic-file"))
+        or (a.startswith("-") and not a.startswith("--") and any(c in a[1:] for c in "Cm"))
+        for a in args
+    ):
+        return False
+    if _segment_is_read_only(segment):
+        return True
     if cmd == "sed":
         # Fail closed on opaque script files and scripts outside this simple grammar.
         if "-n" not in args or any(
             a.startswith(("-i", "--in-place", "-f", "--file")) for a in args
         ):
             return False
-        scripts = []
+        scripts, operands = [], []
         i = 0
         while i < len(args):
             a = args[i]
@@ -268,29 +283,54 @@ def _look_segment(segment: str) -> bool:
                 if i >= len(args):
                     return False
                 scripts.append(args[i])
-            elif a.startswith("-e"):
-                scripts.append(a[2:])
             elif a.startswith("-"):
                 return False
             else:
-                if not scripts:
-                    scripts.append(a)
-                break
+                operands.append(a)
             i += 1
+        if not scripts and operands:
+            scripts = operands[:1]
         address = r"(?:[0-9]+|\$|/[^/\\]*/)"
-        simple = rf"\s*(?:{address}(?:,{address})?)?\s*!?\s*[pPdDnNqQ=l]\s*"
+        simple = rf"\s*(?:{address}(?:,{address})?)?\s*[p=]\s*"
         return bool(scripts) and all(
             not any(t in script for t in ("w ", "e ", "/e"))
             and all(re.fullmatch(simple, part) for part in script.split(";"))
             for script in scripts
         )
     if cmd == "awk":
-        return not any(t in segment for t in ("system", "getline", "|", ">")) and not any(
-            a.startswith("-f") or a == "--file" or a.startswith("--file=") for a in args
-        )
-    if cmd in {"sort", "date", "jq"}:
+        if any(t in segment for t in ("system", "getline", "|", ">")):
+            return False
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            arg = args[i]
+            if arg in ("-F", "-v"):
+                i += 1
+                if i >= len(args) or args[i].startswith("-"):
+                    return False
+                if arg == "-v" and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=[^\\`$\r\n]*", args[i]):
+                    return False
+            elif not (arg.startswith("-F") and len(arg) > 2):
+                return False
+            i += 1
+        return i < len(args)
+    if cmd == "sort":
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg in ("-k", "-t"):
+                i += 1
+                if i >= len(args) or args[i].startswith("-"):
+                    return False
+            elif arg.startswith(("-k", "-t")):
+                pass
+            elif arg in ("--reverse", "--numeric-sort", "--unique"):
+                pass
+            elif arg.startswith("-") and not re.fullmatch(r"-[bdfghinrsuzV]+", arg):
+                return False
+            i += 1
+        return True
+    if cmd in {"date", "jq"}:
         short, long = {
-            "sort": ("o", ("--output",)),
             "date": ("s", ("--set",)),
             "jq": ("f", ("--from-file", "--rawfile", "--slurpfile")),
         }[cmd]
@@ -335,8 +375,6 @@ def _look_segment(segment: str) -> bool:
                 and not any(a in ("--web", "-w") or a.startswith("--web=") for a in args))
     if cmd == "ollama":
         return bool(args) and args[0] in {"list", "ps", "show"}
-    if cmd == "export":
-        return bool(args) and all(_ENV_ASSIGN.match(a) for a in args)
     return False
 
 
@@ -345,10 +383,8 @@ def is_look_call(name: Any, tool_input: Any) -> bool:
     if not isinstance(tool_input, dict):
         return False
     try:
-        if classify_tool(name, tool_input) == TECHNICAL_OP:
-            return True
         if not is_bash(name):
-            return False
+            return classify_tool(name, tool_input) == TECHNICAL_OP
         parts = _look_parts(tool_input.get("command"))
         return parts is not None and all(_look_segment(part) for part in parts)
     except Exception:

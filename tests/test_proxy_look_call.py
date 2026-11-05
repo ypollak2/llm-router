@@ -7,7 +7,7 @@ from llm_router.proxy.tool_classes import classify_bash, is_look_call
     "sed -n '1,20p' f", 'grep -n "a|b" f | head -5',
     "git -C /x log --oneline -3", "cd /x && git grep foo",
     "gh pr view 12 --json state", "awk '{print $1}' f", "sort f | uniq -c",
-    "export A=1 && rg x src", "cat f 2>/dev/null",
+    "cat f 2>/dev/null", "sed -n '5p;10p' f",
     "sed -n -e '/foo/p' f", "sort -r f", "uniq f", "date -u", "jq '.x' f",
     "git rev-parse HEAD", "git ls-files", "git describe", "git shortlog",
     "git merge-base HEAD main", "git for-each-ref", "git cat-file -p HEAD",
@@ -73,3 +73,29 @@ def test_census_sed_unchanged():
 @pytest.mark.parametrize("command", ["git grep -O vim x", "git grep -Ovim x", "git grep --open-files-in-pager=vim x"])
 def test_git_grep_that_runs_a_pager_is_not_a_look(command):
     assert not is_look_call("Bash", {"command": command})
+
+
+@pytest.mark.parametrize("command", [
+    "rg --pr\\\ne=/tmp/p x .", "rg --pr\\\r\ne=/tmp/p x .",
+    "sed -n -e 1p /dev/null -e 'w /tmp/x'",
+    "sed -n '1p' f --posix", "sed -n '1p' f -i", "sed -n '1p' f -f script",
+    "sed -n '1d' f", "sed -n '1q' f", "sed -n '1!p' f", "sed -n -e1p f",
+    "sort --out=x", "sort -o x", "sort --compress-program=x", "sort -T x",
+    "sort -S 1b", "sort --files0-from=x",
+    "export A=1 && rg x src", "export RIPGREP_CONFIG_PATH=/tmp/c && rg x .",
+] + [f"awk {flag} script f" for flag in ("-f", "-E", "-i", "-l", "-e", "--anything")]
+  + [f"{cmd} {flag}{value} x ." for cmd in ("rg", "grep")
+     for flag in ("--pre", "--pre-glob", "--hostname-bin") for value in ("=x", " x")]
+  + [f"file {flag}" for flag in ("-C", "--compile", "-m x", "-mx", "--magic-file x", "--magic-file=x")])
+def test_review_unsafe_look_commands(command):
+    assert is_look_call("Bash", {"command": command}) is False
+
+
+@pytest.mark.parametrize("command", [
+    "sed -n '$=' f", "sed -n -E -e '/foo/,20p' f -e '5p;10p'",
+    "sort -bdfghinrsuzV f", "sort -k1,2 -t, f", "sort -k 1 -t , f",
+    "sort --reverse --numeric-sort --unique f",
+    "awk -F: '{print $1}' f", "awk -F : -v name=value '{print name}' f",
+])
+def test_review_safe_look_commands(command):
+    assert is_look_call("Bash", {"command": command}) is True
