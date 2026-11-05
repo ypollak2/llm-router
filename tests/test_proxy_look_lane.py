@@ -42,7 +42,7 @@ def call(name, inp=None):
 
 
 def test_read_drops_text():
-    read = call("Read", {"file_path": "/work/a.py"})
+    read = call("Read", {"file_path": "/work/a.py", "limit": 40})
     message = {"role": "assistant", "content": [{"type": "text", "text": "Reading"}, read],
                "stop_reason": "end_turn"}
     before = copy.deepcopy(message)
@@ -142,7 +142,7 @@ def look_env(env):
 
 
 def exec_request():
-    return _req_after("Bash", {"command": "pytest -q"})
+    return _req_after("Bash", {"command": "sed -n '1,5p' a.py"})
 
 
 async def test_look_flag_off_preserves_exec_forwarding(env):
@@ -268,3 +268,26 @@ def test_look_lane_caps_a_run_of_local_steps_and_off_leaves_the_setting_alone():
     assert ps._guard_limit(ProxyConfig(local_look=True, local_gate=True, loop_max_consecutive=8)) == 2
     assert ps._guard_limit(ProxyConfig(local_look=True, local_gate=True, loop_max_consecutive=1)) == 1
     assert ps._guard_limit(ProxyConfig(local_look=False, loop_max_consecutive=8)) == 8
+
+
+def test_a_local_read_is_bounded_and_a_whole_file_cat_is_not_served():
+    read = {"type": "tool_use", "id": "t", "name": "Read", "input": {"file_path": "a.py"}}
+    out, why = gate.look_check({"content": [read]})
+    assert why is None and out["content"][0]["input"]["limit"] == gate.LOOK_READ_LINES
+    ranged = dict(read, input={"file_path": "a.py", "limit": 50})
+    assert gate.look_check({"content": [ranged]})[0]["content"][0]["input"]["limit"] == 50
+    for command, served in (("cat a.py", False), ("cd x && cat a.py", False), ("cat a.py | head -5", True), ("head -5 a.py", True)):
+        call = {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": command}}
+        assert (gate.look_check({"content": [call]})[1] is None) is served
+
+
+def test_a_look_is_tried_only_right_after_a_look():
+    def body(*calls):
+        return {"messages": [{"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"t{i}", "name": n, "input": v} for i, (n, v) in enumerate(calls)]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t0", "content": "x"}]}]}
+    assert gate._after_a_look(body(("Read", {"file_path": "a"})))
+    assert gate._after_a_look(body(("Bash", {"command": "sed -n '1,5p' a"})))
+    assert not gate._after_a_look(body(("Bash", {"command": "pytest"})))
+    assert not gate._after_a_look(body(("Read", {"file_path": "a"}), ("Edit", {})))
+    assert not gate._after_a_look({"messages": []})

@@ -210,6 +210,39 @@ def lane_of(row: dict, choice: dict | None, look: bool = False) -> tuple[str, st
     return R_LANE_UNMAPPED
 
 
+LOOK_READ_LINES = 200
+
+
+def _after_a_look(body: dict) -> bool:
+    """The step answers read-only calls. After commands a local try was served 26 of 121 times and
+    cost about 3 s each time it failed (15 larger tasks, coord/local-levers/RESULT-D4-20261105.md)."""
+    from llm_router.proxy import steps, tool_classes
+
+    try:
+        calls = steps._prev_tool_uses(body)
+        return bool(calls) and all(tool_classes.is_look_call(b.get("name"), b.get("input")) for b in calls)
+    except Exception:
+        return False
+
+
+def _whole_file_cat(call: dict) -> bool:
+    from llm_router.proxy import tool_classes
+
+    if not tool_classes.is_bash(call.get("name")):
+        return False
+    command = str((call.get("input") or {}).get("command") or "")
+    parts = tool_classes._look_parts(command) or []
+    return "|" not in command and any(p.strip().startswith("cat ") for p in parts)
+
+
+def _bounded(call: dict) -> dict:
+    """A local Read takes at most LOOK_READ_LINES lines unless it asked for a range: whole-file reads
+    doubled what Claude had to write to its cache (488,225 tokens against 234,249, same run)."""
+    if str(call.get("name")).lower() == "read" and not (call.get("input") or {}).get("limit"):
+        return dict(call, input=dict(call.get("input") or {}, limit=LOOK_READ_LINES))
+    return call
+
+
 def look_check(message: dict) -> tuple[dict | None, str | None]:
     """Accept read-only tool calls, dropping prose; malformed replies fail closed."""
     from llm_router.proxy import tool_classes
@@ -225,7 +258,9 @@ def look_check(message: dict) -> tuple[dict | None, str | None]:
             return None, R_NOT_A_LOOK
         if not calls or any(not tool_classes.is_look_call(b.get("name"), b.get("input")) for b in calls):
             return None, R_NOT_A_LOOK
-        return dict(message, content=calls, stop_reason="tool_use"), None
+        if any(_whole_file_cat(b) for b in calls):
+            return None, R_NOT_A_LOOK
+        return dict(message, content=[_bounded(b) for b in calls], stop_reason="tool_use"), None
     except Exception:
         return None, R_NOT_A_LOOK
 
@@ -455,7 +490,7 @@ class LaneGate:
 
     async def _decide(self, body: dict, row: dict, choice: dict | None, needs: Any) -> LaneDecision:
         d = self.deps
-        mapped = lane_of(row, choice, look=self.look)
+        mapped = lane_of(row, choice, look=self.look and _after_a_look(body))
         if isinstance(mapped, str):
             return LaneDecision(False, None, mapped)
         lane, tier = mapped
