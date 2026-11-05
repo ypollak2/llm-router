@@ -24,6 +24,8 @@ beside ``--check``, and an environment prefix (``VAR=x cmd``) on anything but a 
 The list is conservative on purpose: a false ``technical_op`` would let a local model take a
 step that changes the user's files; a false ``exec`` only leaves a step with Claude.
 
+``is_look_call`` is the wider rule for the look lane; ``technical_op`` is unchanged.
+
 The Bash command is classified in memory and never stored: the ledger keeps tool NAMES and
 this class only.
 """
@@ -216,3 +218,138 @@ def step_tool_class(calls: Iterable[tuple[Any, Any]]) -> str | None:
     if not found:
         return None
     return next(c for c in PRECEDENCE if c in found)
+
+
+def _look_parts(command: Any) -> list[str] | None:
+    """Mirror the census structural checks without changing classify_bash."""
+    if not isinstance(command, str) or not command.strip():
+        return None
+    masked = _mask_quoted(command)
+    if masked is None:
+        return None
+    for m in reversed(list(_SAFE_REDIRECT.finditer(masked))):
+        a, b = m.span()
+        masked = masked[:a] + " " * (b - a) + masked[b:]
+        command = command[:a] + " " * (b - a) + command[b:]
+    if any(tok in masked for tok in (">", "`", "$(", "<(")):
+        return None
+    if re.search(r"(?<![&|])&(?![&>])", masked):
+        return None
+    parts, start = [], 0
+    for m in _SPLIT.finditer(masked):
+        parts.append(command[start:m.start()])
+        start = m.end()
+    parts.append(command[start:])
+    return None if any(not p.strip() for p in parts) else parts
+
+
+def _look_segment(segment: str) -> bool:
+    if _segment_is_read_only(segment):
+        return True
+    words = shlex.split(segment, posix=True)
+    if not words or _ENV_ASSIGN.match(words[0]):
+        return False
+    cmd, args = words[0].rsplit("/", 1)[-1], words[1:]
+    if cmd == "sed":
+        # Fail closed on opaque script files and scripts outside this simple grammar.
+        if "-n" not in args or any(
+            a.startswith(("-i", "--in-place", "-f", "--file")) for a in args
+        ):
+            return False
+        scripts = []
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in ("-n", "-E", "-r"):
+                i += 1
+                continue
+            if a == "-e":
+                i += 1
+                if i >= len(args):
+                    return False
+                scripts.append(args[i])
+            elif a.startswith("-e"):
+                scripts.append(a[2:])
+            elif a.startswith("-"):
+                return False
+            else:
+                if not scripts:
+                    scripts.append(a)
+                break
+            i += 1
+        address = r"(?:[0-9]+|\$|/[^/\\]*/)"
+        simple = rf"\s*(?:{address}(?:,{address})?)?\s*!?\s*[pPdDnNqQ=l]\s*"
+        return bool(scripts) and all(
+            not any(t in script for t in ("w ", "e ", "/e"))
+            and all(re.fullmatch(simple, part) for part in script.split(";"))
+            for script in scripts
+        )
+    if cmd == "awk":
+        return not any(t in segment for t in ("system", "getline", "|", ">")) and not any(
+            a.startswith("-f") or a == "--file" or a.startswith("--file=") for a in args
+        )
+    if cmd in {"sort", "date", "jq"}:
+        short, long = {
+            "sort": ("o", ("--output",)),
+            "date": ("s", ("--set",)),
+            "jq": ("f", ("--from-file", "--rawfile", "--slurpfile")),
+        }[cmd]
+        return not any(
+            (a.startswith("-") and not a.startswith("--") and short in a[1:])
+            or any(a == flag or a.startswith(flag + "=") for flag in long)
+            for a in args
+        )
+    if cmd == "uniq":
+        return sum(not a.startswith("-") or a == "-" for a in args) <= 1
+    if cmd in {"cut", "tr", "nl", "column", "comm", "cmp", "basename", "dirname",
+               "realpath", "stat", "file", "du", "df", "which", "pwd", "ps", "pgrep",
+               "uptime", "whoami", "uname", "echo", "printf", "sleep", "true", "cd"}:
+        return True
+    if cmd == "git":
+        i = 0
+        while i < len(args) and args[i].startswith("-"):
+            if args[i] == "-C":
+                i += 2
+            elif args[i] == "--no-pager" or args[i].startswith("--git-dir="):
+                i += 1
+            else:
+                return False
+        if i >= len(args):
+            return False
+        sub, rest = args[i], args[i + 1:]
+        if any(a.startswith(_GIT_RUNS_PROGRAM) or a == "--output" or
+               a.startswith("--output=") for a in rest):
+            return False
+        if sub == "cat-file":
+            return len(rest) == 2 and rest[0] in ("-p", "-t", "-s")
+        # git grep -O/--open-files-in-pager runs a program on the matches.
+        if sub == "grep" and any(a == "-O" or a.startswith(("-O", "--open-files-in-pager")) for a in rest):
+            return False
+        return sub in {"grep", "rev-parse", "ls-files", "describe", "shortlog",
+                       "merge-base", "for-each-ref"}
+    if cmd == "gh":
+        allowed = {"pr": {"view", "list", "checks", "diff", "status"},
+                   "run": {"view", "list"}, "issue": {"view", "list"},
+                   "repo": {"view"}, "release": {"view", "list"}}
+        return (len(args) >= 2 and args[1] in allowed.get(args[0], set())
+                and not any(a in ("--web", "-w") or a.startswith("--web=") for a in args))
+    if cmd == "ollama":
+        return bool(args) and args[0] in {"list", "ps", "show"}
+    if cmd == "export":
+        return bool(args) and all(_ENV_ASSIGN.match(a) for a in args)
+    return False
+
+
+def is_look_call(name: Any, tool_input: Any) -> bool:
+    """Whether one call meets the wider look rule; malformed inputs fail closed."""
+    if not isinstance(tool_input, dict):
+        return False
+    try:
+        if classify_tool(name, tool_input) == TECHNICAL_OP:
+            return True
+        if not is_bash(name):
+            return False
+        parts = _look_parts(tool_input.get("command"))
+        return parts is not None and all(_look_segment(part) for part in parts)
+    except Exception:
+        return False
