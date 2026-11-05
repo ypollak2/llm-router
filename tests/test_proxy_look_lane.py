@@ -1,11 +1,19 @@
-"""Pure checks for the opt-in look lane; no backend calls."""
+# ruff: noqa: F401, F811  (pytest fixture env is imported from test_proxy_local_gate and used by name)
+"""The opt-in look lane: pure checks, then the proxy app with the local-gate test harness."""
+import asyncio
 import copy
+import json
 
 import pytest
 
 from llm_router.env_registry import ENV_REGISTRY
 from llm_router.proxy import backends, local_gate as gate
+from llm_router.proxy import server as ps
 from llm_router.proxy.server import ProxyConfig
+from tests.test_proxy_local_gate import (
+    env, Backend, BARE, _elig, _lane, _req_after, _first_call,
+    _ollama, _call, _post,
+)
 
 
 @pytest.mark.parametrize("previous", ["exec", "technical_op", "edit", None])
@@ -108,15 +116,6 @@ def test_environment(monkeypatch, value, expected):
 
 
 
-# Reuse the local-gate app, eligibility, and fake transport harness.
-import asyncio
-import json
-
-from tests.test_proxy_local_gate import (
-    env, Backend, BARE, MODEL, _elig, _lane, _req_after, _first_call,
-    _ollama, _call, _post,
-)
-from llm_router.proxy import server as ps
 
 
 def look_env(env):
