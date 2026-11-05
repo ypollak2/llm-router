@@ -220,6 +220,18 @@ def step_tool_class(calls: Iterable[tuple[Any, Any]]) -> str | None:
     return next(c for c in PRECEDENCE if c in found)
 
 
+_LOOK_PROGRAM = re.compile(r"(?:/(?:usr/(?:local/)?)?s?bin/)?[A-Za-z0-9._+-]+")
+_AWK_VALUE = r'(?:\$[0-9]+|\$NF|NF|NR|"[^"\\]*")'
+_AWK_PATTERN = (
+    r'(?:/[^/\\]*/'
+    r'|NR\s*(?:==|!=|>=|<=|>|<)\s*[0-9]+(?:\s*&&\s*NR\s*(?:==|!=|>=|<=|>|<)\s*[0-9]+)?'
+    r'|\$[0-9]+\s*(?:==|!=)\s*(?:"[^"\\]*"|[0-9]+)'
+    r'|\$[0-9]+\s*~\s*/[^/\\]*/)'
+)
+_AWK_PRINT = rf"\{{\s*print(?:\s+{_AWK_VALUE}(?:\s*,?\s*{_AWK_VALUE})*)?\s*;?\s*\}}"
+_AWK_PROGRAM = re.compile(rf"\s*(?:{_AWK_PATTERN}\s*(?:{_AWK_PRINT})?|{_AWK_PRINT})\s*")
+
+
 def _look_parts(command: Any) -> list[str] | None:
     """Mirror the census structural checks without changing classify_bash."""
     if not isinstance(command, str) or not command.strip():
@@ -252,9 +264,15 @@ def _look_segment(segment: str) -> bool:
         words, env_prefix = words[1:], True
     if not words:
         return False
+    # The reader rules below go by the program's name, so the word must really name a system
+    # program: /tmp/cat, */cat, ~/bin/cat and $HOME/bin/cat would run whatever is there.
+    if not _LOOK_PROGRAM.fullmatch(words[0]):
+        return False
     cmd, args = words[0].rsplit("/", 1)[-1], words[1:]
     if env_prefix and cmd not in _ENV_SAFE:
         return False
+    if cmd == "git" and args and args[0].startswith("-") and args[0] != "-C":
+        return False   # --git-dir and friends point git at another repository's config and hooks
     if cmd in {"rg", "grep"} and any(a.startswith(("--pre", "--hostname-bin")) for a in args):
         return False
     if cmd == "file" and any(
@@ -298,21 +316,17 @@ def _look_segment(segment: str) -> bool:
             for script in scripts
         )
     if cmd == "awk":
-        if any(t in segment for t in ("system", "getline", "|", ">")):
-            return False
+        # A whitelist on the program the shell will pass, not a blacklist on the raw text: quote
+        # concatenation (sys'"tem"') and indirect calls get past any list of words.
         i = 0
         while i < len(args) and args[i].startswith("-"):
-            arg = args[i]
-            if arg in ("-F", "-v"):
+            if args[i] == "-F":
+                i += 2
+            elif args[i].startswith("-F") and len(args[i]) > 2:
                 i += 1
-                if i >= len(args) or args[i].startswith("-"):
-                    return False
-                if arg == "-v" and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=[^\\`$\r\n]*", args[i]):
-                    return False
-            elif not (arg.startswith("-F") and len(arg) > 2):
+            else:
                 return False
-            i += 1
-        return i < len(args)
+        return i < len(args) and bool(_AWK_PROGRAM.fullmatch(args[i]))
     if cmd == "sort":
         i = 0
         while i < len(args):
@@ -329,14 +343,13 @@ def _look_segment(segment: str) -> bool:
                 return False
             i += 1
         return True
-    if cmd in {"date", "jq"}:
-        short, long = {
-            "date": ("s", ("--set",)),
-            "jq": ("f", ("--from-file", "--rawfile", "--slurpfile")),
-        }[cmd]
+    if cmd == "date":
+        # BSD date sets the clock from a bare positional argument, so only -u and +format pass.
+        return all(a == "-u" or a.startswith("+") for a in args)
+    if cmd == "jq":
         return not any(
-            (a.startswith("-") and not a.startswith("--") and short in a[1:])
-            or any(a == flag or a.startswith(flag + "=") for flag in long)
+            (a.startswith("-") and not a.startswith("--") and "f" in a[1:])
+            or a.startswith(("--from-file", "--rawfile", "--slurpfile"))
             for a in args
         )
     if cmd == "uniq":

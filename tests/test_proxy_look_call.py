@@ -95,7 +95,25 @@ def test_review_unsafe_look_commands(command):
     "sed -n '$=' f", "sed -n -E -e '/foo/,20p' f -e '5p;10p'",
     "sort -bdfghinrsuzV f", "sort -k1,2 -t, f", "sort -k 1 -t , f",
     "sort --reverse --numeric-sort --unique f",
-    "awk -F: '{print $1}' f", "awk -F : -v name=value '{print name}' f",
+    "awk -F: '{print $1}' f", "awk -F : '{print $1}' f",
 ])
 def test_review_safe_look_commands(command):
     assert is_look_call("Bash", {"command": command}) is True
+
+
+@pytest.mark.parametrize("command", [
+    "git --git-dir=x log", "git --work-tree=x status",
+    """awk 'BEGIN {sys'"tem"'("touch /tmp/x")}'""", "/tmp/cat f", "*/cat f", "~/bin/cat f", "$HOME/bin/cat f",
+    "./cat f", "bin/cat f", "date 110512002026", "date -s 1", "date -f x", "awk -v a=1 '{print $1}' f",
+    "awk 'BEGIN{f=\"sys\" \"tem\"; @f(\"x\")}'", "awk '{print $1 > \"f\"}' g", "awk 'function f(){}{print}'", "awk",
+])
+def test_second_review_inputs_are_not_looks(command):
+    assert not is_look_call("Bash", {"command": command})
+
+
+@pytest.mark.parametrize("command", [
+    "/bin/cat f", "/usr/bin/grep x f", "date", "date -u", "date -u +%FT%TZ", "date +%s", "awk '{print}' f",
+    "awk -F: '{print $1, $3}' f", "awk '/foo/ {print $2}' f", "awk 'NR>=2 && NR<=5' f", "awk '$1 == \"x\" {print NF}' f",
+])
+def test_second_review_readers_stay_looks(command):
+    assert is_look_call("Bash", {"command": command})
