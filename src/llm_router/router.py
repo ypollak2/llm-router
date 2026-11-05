@@ -3213,6 +3213,13 @@ async def _dispatch_model_loop(
     _escalate_on_quality = os.environ.get(
         "LLM_ROUTER_ESCALATE_ON_QUALITY", "1"
     ).strip().lower() in ("1", "true", "yes", "on")
+    # A text job (`llm_text_job`, the only caller that passes TEXT_JOB_REASON) is judged by its own acceptance check,
+    # `text_jobs.check_output`, which runs on the answer once this loop returns it. `score_response` rates a plain
+    # one-line commit message 0.30, under the threshold below, so the answer that check would accept was thrown away
+    # as `low_quality` and a pricier model was called. Such an answer is not scored, escalated or recorded: three
+    # recorded 0.30 scores would also make `should_skip_model` drop the local model for this task and complexity.
+    from llm_router.eligibility_routing import TEXT_JOB_REASON as _TEXT_JOB_REASON
+    _own_acceptance_check = eligibility_exempt_reason == _TEXT_JOB_REASON
     try:
         _escalate_threshold = float(os.environ.get("LLM_ROUTER_ESCALATE_THRESHOLD", "0.4"))
     except ValueError:
@@ -3454,6 +3461,7 @@ async def _dispatch_model_loop(
             )
             if (
                 model not in (model_override, pinned_model)
+                and not _own_acceptance_check  # judged by its own check, not by the scores of other calls
                 and should_skip_model(model, task_type.value, c.value)
             ):
                 log.info("Skipping low-quality model for %s/%s: %s", task_type.value, c.value, model)
@@ -3810,7 +3818,13 @@ async def _dispatch_model_loop(
             # chain — exactly like a failed gate above. Always record the score so
             # `should_skip_model` keeps learning, even when we don't escalate
             # (last model in chain, media task, or feature disabled).
-            if _escalate_on_quality and task_type not in MEDIA_TASK_TYPES and not response.tool_calls:
+            # A text job (`_own_acceptance_check`) is neither scored nor recorded: see its definition.
+            if (
+                _escalate_on_quality
+                and not _own_acceptance_check
+                and task_type not in MEDIA_TASK_TYPES
+                and not response.tool_calls
+            ):
                 try:
                     from llm_router.quality_feedback import record_quality, score_response
                     _qs = score_response(response.content, task_type.value, model, c.value)
@@ -5159,11 +5173,16 @@ async def route_and_call(
         # Guard: compaction_mode/threshold may be MagicMock in test mocks
         compaction_mode = getattr(config, "compaction_mode", "structural")
         compaction_threshold = getattr(config, "compaction_threshold", 4000)
+        # TJCHAIN-3: a text job's input is already fitted to the lane by its own builder (gitinput.condense keeps every
+        # changed file named) and the lane was qualified on whole inputs. Compaction kept the first 20 and last 10 lines,
+        # so the model wrote about a change it could not see. It is not cut a second time.
+        from llm_router.eligibility_routing import TEXT_JOB_REASON as _TEXT_JOB_REASON
         if (
             isinstance(compaction_mode, str)
             and compaction_mode != "off"
             and isinstance(compaction_threshold, int)
             and task_type not in MEDIA_TASK_TYPES
+            and eligibility_exempt_reason != _TEXT_JOB_REASON
         ):
             prompt, compaction_result = await compact_structural(
                 prompt, compaction_threshold,

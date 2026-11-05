@@ -1,7 +1,8 @@
 """LC-12b / D-277: flag unset = the passed local model ALONE, driven through llm_text_job -> route_and_call.
 
 Only the provider call layer (``router._call_text``), the chain builder and, where a test needs a step to remove
-the local model, the capability filter's verdict are replaced. Tmp homes, fake digests, no network, no model.
+the local model, the capability filter's verdict are replaced; the TJCHAIN tests at the end put the real chain
+builder back. Tmp homes, fake digests, no network, no model.
 """
 # ruff: noqa: F811  (the `world` fixture is imported from test_lc12 and used as an argument)
 from __future__ import annotations
@@ -273,3 +274,236 @@ def test_enable_with_an_empty_ollama_inventory_says_ollama_is_down(tmp_path, mon
     d.inventory = lambda: []
     assert run(["enable", "commit_message", "--model", "some-ollama:1b"], d) == 0
     assert LCC.OLLAMA_DOWN_NOTE in sink.text and LCC.RECONNECT_NOTE not in sink.text
+
+
+# ---- TJCHAIN-1 / TJCHAIN-2: the chain of a text job does not follow its input; its answer goes to its own check ----
+# docs/BUGS.md TJCHAIN-1: route_and_call derived the tier from the prompt (a prompt over 2000 characters read as
+# complex, the PREMIUM chain, which injects no local model), so the pass-only lane was refused for every such job.
+# ``e2e`` stubs the chain builder with one fixed list, which hides that. ``real_chain`` puts the real builder back, with
+# the passed model as the one configured local model, so the tier the router derives decides the chain.
+# docs/BUGS.md TJCHAIN-2: the generic quality score (0.30 for a one-line commit message) threw away a local answer
+# the job's own check accepts, and called a pricier model.
+
+_REAL_BUILD_CHAIN = router._build_and_filter_chain  # taken at import: ``e2e`` replaces the attribute for each test
+SIZES = [300, 2000, 40000]  # 40000 is llm_text_job's input cap (text_jobs.MAX_INPUT_CHARS)
+
+
+@pytest.fixture
+def real_chain(e2e, monkeypatch):
+    from llm_router.config import get_config
+    cfg = get_config()
+    monkeypatch.setattr(cfg, "ollama_budget_models", BARE)
+    monkeypatch.setattr(cfg, "ollama_base_url", "http://127.0.0.1:11434")  # explicit URL: nothing probes the daemon
+    monkeypatch.setattr("llm_router.discover.ollama_can_generate", lambda m: True)
+    monkeypatch.setattr(router, "_build_and_filter_chain", _REAL_BUILD_CHAIN)
+    return e2e
+
+
+@pytest.fixture
+def low_score(monkeypatch):
+    """Every answer scores 0.30 (under the 0.4 threshold) and check_output is wrapped to count its calls."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from llm_router import quality_feedback, text_jobs
+    monkeypatch.setenv("LLM_ROUTER_ESCALATE_ON_QUALITY", "1")
+    monkeypatch.setenv("LLM_ROUTER_ESCALATE_THRESHOLD", "0.4")
+    score = Mock(return_value=SimpleNamespace(score=0.3, reasons=["short"]))
+    check = Mock(wraps=text_jobs.check_output)
+    monkeypatch.setattr(quality_feedback, "score_response", score)
+    monkeypatch.setattr(text_jobs, "check_output", check)
+    return SimpleNamespace(score=score, check=check)
+
+
+def _wide_pass(world, limit=94464):
+    """A passed, enabled lane whose recorded scope admits ``limit`` characters (94464 is the live lane's scope)."""
+    from tests.test_lc8_routing import PROV, lane_file
+    passed(world)
+    lane_file(world.home, prov={**PROV, "scope": {"max_prompt_chars": limit}})
+    er.reset_cache()
+
+
+def _job_of(size):
+    """Run llm_text_job on a diff of exactly ``size`` characters; return the structured sink it fills."""
+    import asyncio
+
+    from tests.test_lc12 import DIFF
+    sink: dict = {}
+    asyncio.run(T._llm_text_job(JOB, DIFF + "+" + "x" * (size - len(DIFF) - 1), None, None, sink))
+    _drain()
+    return sink
+
+
+@pytest.mark.parametrize("flag", [None, "1"], ids=["flag-unset", "flag-1"])
+@pytest.mark.parametrize("size", SIZES)
+def test_text_job_chain_leads_with_the_passed_model_at_any_input_size(real_chain, monkeypatch, size, flag):
+    """TJCHAIN-1. Flag unset: served by the passed model alone, not refused. Flag 1: the passed model heads the chain."""
+    _wide_pass(real_chain)
+    monkeypatch.setenv("LLM_ROUTER_ESCALATE_ON_QUALITY", "0")  # TJCHAIN-2 has its own tests; this asks about the chain
+    if flag:
+        monkeypatch.setenv(FLAG, flag)
+    out = _job_of(size)
+    assert out["status"] == "accepted", out
+    assert out["model"] == LOCAL
+    assert real_chain.state["tried"] == [LOCAL]
+
+
+@pytest.mark.parametrize("flag", [None, "1"], ids=["flag-unset", "flag-1"])
+def test_text_job_chain_ignores_the_engines_verdict_on_the_wording(real_chain, monkeypatch, flag):
+    """TJCHAIN-1. Under LLM_ROUTER_ENGINE_MODE=decide the engine classifies the prompt's words. It is stubbed to call
+    every prompt deep reasoning (the REASONING chain holds no local model); a text job's chain must not follow."""
+    from types import SimpleNamespace
+
+    from llm_router import engine_door
+    _wide_pass(real_chain)
+    monkeypatch.setenv("LLM_ROUTER_ESCALATE_ON_QUALITY", "0")
+    monkeypatch.setattr(engine_door, "decision", lambda *a, **k: SimpleNamespace(complexity="deep_reasoning"))
+    if flag:
+        monkeypatch.setenv(FLAG, flag)
+    out = _job_of(300)
+    assert out["status"] == "accepted", out
+    assert real_chain.state["tried"] == [LOCAL]
+
+
+@pytest.mark.parametrize(("size", "status"), [(3000, "accepted"), (3001, "fallback")])
+def test_input_over_the_lane_scope_is_handed_back_and_calls_no_model(real_chain, size, status):
+    """The lane's scope.max_prompt_chars still bounds a job: at the limit it runs, one character over it does not."""
+    _wide_pass(real_chain, limit=3000)
+    out = _job_of(size)
+    assert out["status"] == status
+    assert real_chain.state["tried"] == ([LOCAL] if status == "accepted" else [])
+
+
+def test_router_refuses_an_input_over_the_lane_scope_even_when_the_entry_check_passes(real_chain, monkeypatch):
+    """Defense in depth: with llm_text_job's own gate forced open, the router's chain step still refuses the job before
+    any model call. The chain now holds cloud entries at every size, and none of them may serve a pass-only job."""
+    _wide_pass(real_chain, limit=1000)
+    monkeypatch.setattr(er, "passed_lane_available", lambda *a, **k: True)
+    out = _job_of(2000)
+    assert (out["status"], out["fallback"], out["attempts"]) == ("fallback", "lane_refused", 0)
+    assert real_chain.state["tried"] == []
+
+
+def test_text_job_with_no_passed_lane_is_handed_back_and_calls_no_model(real_chain):
+    out = _job_of(2000)
+    assert (out["status"], out["fallback"], out["attempts"]) == ("fallback", "no_lane", 0)
+    assert real_chain.state["tried"] == []
+
+
+def test_router_refuses_a_text_job_with_no_passed_lane_even_when_the_entry_check_passes(real_chain, monkeypatch):
+    monkeypatch.setattr(er, "passed_lane_available", lambda *a, **k: True)
+    out = _job_of(2000)
+    assert (out["status"], out["fallback"], out["attempts"]) == ("fallback", "lane_refused", 0)
+    assert real_chain.state["tried"] == []
+
+
+def test_router_refuses_when_the_passed_model_is_not_a_configured_local_model(real_chain, monkeypatch):
+    """The real chain is then cloud entries only; a pass-only job is not served from them."""
+    from llm_router.config import get_config
+    _wide_pass(real_chain)
+    monkeypatch.setattr(get_config(), "ollama_budget_models", "")
+    out = _job_of(2000)
+    assert (out["status"], out["fallback"], out["attempts"]) == ("fallback", "lane_refused", 0)
+    assert real_chain.state["tried"] == []
+
+
+def test_low_scoring_text_job_answer_is_not_escalated_and_reaches_its_own_check(e2e, monkeypatch, low_score):
+    """TJCHAIN-2. Flag 1, the full chain, so an escalation has somewhere to go; the local answer scores 0.30."""
+    from llm_router import quality_feedback
+    monkeypatch.setenv(FLAG, "1")
+    _wide_pass(e2e)
+    out = _job_of(2000)
+    assert out["status"] == "accepted" and out["model"] == LOCAL
+    assert e2e.state["tried"] == [LOCAL]  # not sent on to CLOUD[0]
+    assert low_score.check.call_count == 1  # the job's own check saw the answer
+    assert low_score.check.call_args.args[0] == JOB and low_score.check.call_args.args[2] == GOOD
+    assert not low_score.score.called  # nothing scored it, so nothing was recorded for the quality breaker either
+    assert quality_feedback.get_quality_stats(LOCAL, "generate", "moderate") is None
+
+
+@pytest.mark.parametrize("exempt", [None, "validated_edit"], ids=["no-exemption", "another-exempt-reason"])
+def test_the_same_score_on_any_other_call_still_escalates_once_and_is_recorded(e2e, low_score, exempt):
+    """TJCHAIN-2 is scoped to the text-job reason: another call with the same 0.30 keeps the escalation, unchanged."""
+    import asyncio
+
+    from llm_router import quality_feedback
+    asyncio.run(router.route_and_call(TaskType.GENERATE, "detail " * 300, complexity_hint="moderate",
+                                      eligibility_exempt_reason=exempt))
+    _drain()
+    tried = e2e.state["tried"]
+    assert len(tried) == 2 and tried[0] != tried[1]  # the first answer was thrown away, once
+    assert low_score.score.called and not low_score.check.called
+    assert quality_feedback.get_quality_stats(tried[0], "generate", "moderate") == pytest.approx((0.3, 1))
+
+
+@pytest.mark.parametrize("flag", [None, "1"], ids=["flag-unset", "flag-1"])
+def test_repeated_text_jobs_never_get_the_local_model_quality_skipped(e2e, monkeypatch, flag):
+    """TJCHAIN-2. A 0.30 recorded for each job made should_skip_model drop the local model from the fourth job on (three
+    recorded calls under 0.4); flag unset, the pass-only chain is that model alone, so a long-lived server handed back
+    every later job."""
+    from llm_router import quality_feedback
+    if flag:
+        monkeypatch.setenv(FLAG, flag)
+    _wide_pass(e2e)
+    for size in (2000, 2100, 2200, 2300):  # four different prompts: an identical one is answered from the cache
+        assert _job_of(size)["status"] == "accepted"
+    assert e2e.state["tried"] == [LOCAL] * 4
+    assert not quality_feedback.should_skip_model(LOCAL, "generate", "moderate")
+
+
+def _prompts_seen(world, monkeypatch):
+    """Record the prompt text of every model call the e2e world makes."""
+    seen: list[str] = []
+    inner = router._call_text
+
+    async def spy(model, *a, **k):
+        seen.append(repr(a) + repr(k))
+        return await inner(model, *a, **k)
+
+    monkeypatch.setattr(router, "_call_text", spy)
+    return seen
+
+
+@pytest.mark.parametrize("size", [16100, 39000])
+def test_text_job_prompt_reaches_the_model_whole(e2e, monkeypatch, size):
+    """TJCHAIN-3. Compaction kept the first 20 and last 10 lines of the fenced diff; the model wrote about what it could
+    not see. The tail of the middle of the diff must reach the model."""
+    from tests.test_lc12 import DIFF
+    _wide_pass(e2e)
+    seen = _prompts_seen(e2e, monkeypatch)
+    filler = "".join(f"+line {i} MARK{i}\n" for i in range(size // 16))
+    sink: dict = {}
+    import asyncio
+    text = DIFF + filler
+    asyncio.run(T._llm_text_job(JOB, text[:size], None, None, sink))
+    _drain()
+    assert sink["status"] == "accepted", sink
+    middle = f"MARK{size // 32}"
+    assert any(middle in s for s in seen), "the middle of the input never reached the model"
+
+
+def test_any_other_large_prompt_is_still_compacted(e2e, monkeypatch):
+    """TJCHAIN-3 changes text jobs only."""
+    import asyncio
+    seen = _prompts_seen(e2e, monkeypatch)
+    from unittest.mock import AsyncMock, Mock
+    compact = AsyncMock(side_effect=lambda p, t: (p, Mock(tokens_saved_estimate=0)))
+    monkeypatch.setattr(router, "compact_structural", compact)
+    asyncio.run(router.route_and_call(TaskType.GENERATE, "x" * 20000, temperature=0.2))
+    _drain()
+    assert compact.await_count == 1
+    assert seen
+
+
+def test_low_scores_of_other_calls_do_not_hand_back_a_text_job(e2e, monkeypatch):
+    """TJCHAIN-2. A text job has one key with llm_generate (generate, moderate). Three low llm_generate scores must not
+    make the local model skip for a text job; the same key still skips for a normal route."""
+    from llm_router import quality_feedback
+    _wide_pass(e2e)
+    for _ in range(3):
+        quality_feedback.record_quality(LOCAL, "generate", "moderate", 0.3)
+    assert quality_feedback.should_skip_model(LOCAL, "generate", "moderate")
+    out = _job_of(2000)
+    assert out["status"] == "accepted", out
+    assert e2e.state["tried"] == [LOCAL]
+

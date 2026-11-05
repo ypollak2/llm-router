@@ -1247,6 +1247,10 @@ async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | Non
                     prompt,
                     system_prompt=system_prompt,
                     temperature=0.2,
+                    # A fixed tier. Without it route_and_call derives one from the prompt (its length, or its wording
+                    # under LLM_ROUTER_ENGINE_MODE=decide): a prompt over 2000 characters reads as complex, the PREMIUM
+                    # chain, which injects no local model, so the passed lane was refused for every job of that size.
+                    complexity_hint="moderate",
                     ctx=ctx,
                     route_directive_id=_read_hook_route_directive(),
                     eligibility_exempt_reason=eligibility_routing.TEXT_JOB_REASON,  # F112 / D-242
