@@ -1,0 +1,1 @@
+`llm_text_job` now hands back digit-heavy pass-only jobs whose whole-prompt estimate exceeds the selected local model's context budget, before any model call; ordinary text still runs and an unreadable window leaves the existing guards in charge. Regression tests: `tests/test_lc12c.py::test_dense_text_job_guard`, `test_ordinary_text_job_same_length_reaches_model`.

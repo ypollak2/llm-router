@@ -5556,6 +5556,14 @@ async def route_and_call(
                 raise _er.PassedModelNotInChain(
                     f"the passed local model is not in the final {task_type.value} chain")
             models_to_try = [_pass_model]
+            from llm_router.proxy.local_mode import estimate_prompt_tokens
+            try:
+                _job_window = _er._route_time_ctx(_pass_model)
+            except Exception:  # noqa: BLE001 -- unknown window leaves the existing guards in charge
+                _job_window = None
+            if _job_window and estimate_prompt_tokens({"system": system_prompt, "prompt": prompt}) > 0.9 * (_job_window - 256):
+                await _release_reservation_if_held()
+                raise _er.PassedModelNotInChain("digit-aware whole-prompt estimate exceeds the local context budget")
 
         # LC-12h / D-28 A: the secret door, after every chain transform (none can add a cloud entry back). A prompt
         # with a secret goes to loopback, non-cloud local models only, or nowhere; the dispatch below is then private
