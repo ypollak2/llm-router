@@ -15,6 +15,7 @@ import litellm
 import pytest
 
 from llm_router import router
+from llm_router.mcp_door import AttemptCapExceeded
 from llm_router.router import route_and_call
 from llm_router.types import LLMResponse, RoutingProfile, TaskType
 
@@ -164,6 +165,42 @@ def test_only_local_timeouts_are_recorded():
     assert router._local_timeout_at == {}
     router._note_local_timeout(CODER, TimeoutError())
     assert set(router._local_timeout_at) == {CODER}
+
+
+@pytest.mark.asyncio
+async def test_attempt_cap_demotes_local_without_provider_failure(temp_db, mock_env):
+    calls: list[str] = []
+    with patch.object(router.get_tracker(), "record_failure") as failure:
+        await _route(calls, {CODER: AttemptCapExceeded(CODER, 45)})
+        assert calls == [CODER, GENERAL]
+        failure.assert_not_called()
+
+    calls.clear()
+    await _route(calls, {GENERAL: AttemptCapExceeded(GENERAL, 45)}, chain=[CODER, GENERAL])
+    assert calls == [GENERAL, CODER]
+
+
+@pytest.mark.asyncio
+async def test_attempt_cap_does_not_demote_cloud(temp_db, mock_env):
+    calls: list[str] = []
+    chain = [REMOTE, CODER, GENERAL]
+    await _route(calls, {REMOTE: AttemptCapExceeded(REMOTE, 45)}, chain=chain)
+    assert calls == [REMOTE, CODER]
+    assert router._local_timeout_at == {}
+    calls.clear()
+    await _route(calls, {}, chain=chain)
+    assert calls == [REMOTE]
+
+
+@pytest.mark.asyncio
+async def test_attempt_cap_cooldown_zero_disables_demotion(temp_db, mock_env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_TIMEOUT_COOLDOWN_S", "0")
+    calls: list[str] = []
+    await _route(calls, {CODER: AttemptCapExceeded(CODER, 45)})
+    assert calls == [CODER, GENERAL]
+    calls.clear()
+    await _route(calls, {}, chain=[CODER, GENERAL])
+    assert calls == [CODER]
 
 
 def test_order_is_kept_when_every_model_is_cooling():
