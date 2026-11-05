@@ -1853,8 +1853,8 @@ def _local_in_timeout_cooldown(model: str) -> bool:
 
 
 # PHANTOM-LOCAL-1: Ollama answers 404 ``model 'x' not found`` for a model that is not installed. Live
-# 2026-11-02..03 (routing_quality.jsonl): 9 of 87 local attempts were that answer for
-# ``ollama/qwen3.8:latest``, every one the FIRST attempt of its route, and the next model answered. Two
+# 7 days to 2026-11-04T11:00Z (routing_quality.jsonl): 9 of 94 local attempts were that answer for
+# ``ollama/qwen3.8:latest``, 7 as the FIRST attempt of their route and 2 as the fourth. Two
 # costs: the attempt itself, and ``tracker.record_failure("ollama")``, which counts the 404 against the
 # whole provider (two phantoms in a chain bench every installed model behind them). A model Ollama said
 # does not exist is dropped from later chains for a while, like a timeout is (LOCAL-TIMEOUT-1) but not

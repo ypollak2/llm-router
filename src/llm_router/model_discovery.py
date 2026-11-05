@@ -64,7 +64,10 @@ def _cache_path() -> Path:
 
 
 def _ollama_url() -> str:
-    return os.environ.get("OLLAMA_HOST", "").strip() or "http://127.0.0.1:11434"
+    # The daemon the calls go to (LLM_ROUTER_OLLAMA_URL), else Ollama's own variable: an operator's model list is checked
+    # against this answer (PHANTOM-LOCAL-1), and asking another daemon would drop models the serving one has.
+    return (os.environ.get("LLM_ROUTER_OLLAMA_URL", "").strip()
+            or os.environ.get("OLLAMA_HOST", "").strip() or "http://127.0.0.1:11434")
 
 
 def _ttl_hours() -> float:

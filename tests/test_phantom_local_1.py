@@ -318,3 +318,17 @@ def test_drop_missing_local_keeps_order_and_remembers_the_cause():
     assert router._drop_missing_local([REAL]) == [REAL]
     router._local_missing_at[GHOST] = time.monotonic() - (router._LOCAL_MISSING_TTL_S + 1)
     assert router._drop_missing_local([GHOST, REAL]) == [GHOST, REAL]
+
+
+def test_the_list_is_checked_against_the_daemon_that_serves(monkeypatch):
+    """Review of PHANTOM-LOCAL-1: the probe asked OLLAMA_HOST or the default while the hook called LLM_ROUTER_OLLAMA_URL, so
+    an operator's model on the serving daemon was dropped."""
+    from llm_router import model_discovery as md
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:9")
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_URL", "http://127.0.0.1:11999")
+    assert md._ollama_url() == "http://127.0.0.1:11999"
+    monkeypatch.delenv("LLM_ROUTER_OLLAMA_URL")
+    assert md._ollama_url() == "http://127.0.0.1:9"
+    monkeypatch.delenv("OLLAMA_HOST")
+    assert md._ollama_url() == "http://127.0.0.1:11434"
+
