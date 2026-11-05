@@ -23,7 +23,7 @@ def test_lane_off_and_on(previous):
     assert gate.lane_of(row, None) == old
     assert gate.lane_of(row, None, look=False) == old
     assert gate.lane_of(row, None, look=True) == (
-        ("look", "simple") if previous is not None else gate.R_LANE_UNMAPPED
+        ("look", "simple") if previous not in (None, "edit") else gate.R_LANE_UNMAPPED
     )
 
 

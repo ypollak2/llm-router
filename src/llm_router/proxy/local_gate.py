@@ -191,7 +191,9 @@ def lane_of(row: dict, choice: dict | None, look: bool = False) -> tuple[str, st
     if row.get("step_class") != "continuation":
         return R_NOT_CONTINUATION
     prev = row.get("prev_tool_class")
-    if look and prev is not None:
+    # After an edit the next step is almost never a read: 2 of 30 tries, 51 s of local time wasted
+    # in the end-to-end test (coord/local-levers/RESULT-D4). Those go straight to Claude.
+    if look and prev is not None and prev != "edit":
         return LANE_LOOK, "simple"
     if prev == "technical_op":
         return LANE_TECH_OP, "simple"

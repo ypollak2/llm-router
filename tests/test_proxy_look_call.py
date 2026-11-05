@@ -102,7 +102,8 @@ def test_review_safe_look_commands(command):
 
 
 @pytest.mark.parametrize("command", [
-    "git --git-dir=x log", "git --work-tree=x status",
+    "git --git-dir=x log", "git --work-tree=x status", "find / -name x", "find ~ -name x", "find $HOME -type f",
+    "du -sh /Users", "rg foo /", "grep -r foo ~/", "ls -R /",
     """awk 'BEGIN {sys'"tem"'("touch /tmp/x")}'""", "/tmp/cat f", "*/cat f", "~/bin/cat f", "$HOME/bin/cat f",
     "./cat f", "bin/cat f", "date 110512002026", "date -s 1", "date -f x", "awk -v a=1 '{print $1}' f",
     "awk 'BEGIN{f=\"sys\" \"tem\"; @f(\"x\")}'", "awk '{print $1 > \"f\"}' g", "awk 'function f(){}{print}'", "awk",

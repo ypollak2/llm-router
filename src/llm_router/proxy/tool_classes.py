@@ -220,6 +220,7 @@ def step_tool_class(calls: Iterable[tuple[Any, Any]]) -> str | None:
     return next(c for c in PRECEDENCE if c in found)
 
 
+_SWEEP_ROOTS = frozenset({"", "~", "$HOME", "/Users", "/home", "/private", "/var", "/usr", "/opt", "/System", "/Library", "/tmp"})
 _LOOK_PROGRAM = re.compile(r"(?:/(?:usr/(?:local/)?)?s?bin/)?[A-Za-z0-9._+-]+")
 _AWK_VALUE = r'(?:\$[0-9]+|\$NF|NF|NR|"[^"\\]*")'
 _AWK_PATTERN = (
@@ -273,6 +274,9 @@ def _look_segment(segment: str) -> bool:
         return False
     if cmd == "git" and args and args[0].startswith("-") and args[0] != "-C":
         return False   # --git-dir and friends point git at another repository's config and hooks
+    # Reads that sweep a whole disk or home directory: one background find held a task for 525 s.
+    if cmd in {"find", "du", "rg", "grep", "tree", "ls", "ag"} and any(a.rstrip("/") in _SWEEP_ROOTS for a in args):
+        return False
     if cmd in {"rg", "grep"} and any(a.startswith(("--pre", "--hostname-bin")) for a in args):
         return False
     if cmd == "file" and any(
