@@ -11,7 +11,8 @@ status: fixed in `fix/text-job-chain-any-size`
 - **Cause.** `route_and_call` ran `compact_structural` (`src/llm_router/compaction.py`) on every prompt over the
   threshold in `src/llm_router/config.py`, text jobs included. It keeps the first 20 and last 10 lines of a fenced block.
   The lane was qualified on whole inputs, and `src/llm_router/text_job_bind/gitinput.py` already fits the hook's input to
-  `INPUT_BUDGET_CHARS` so that no second blind cut happens.
+  `INPUT_BUDGET_CHARS` in characters so that no second blind cut happens.
 - **Fix.** A text job (`eligibility_exempt_reason == TEXT_JOB_REASON`) is not compacted. Every other route keeps it.
+- **Dense-input guard.** The pass-only chain checks the digit-aware whole-prompt estimate against the selected model's context budget before calling it; `tests/test_lc12c.py::test_dense_text_job_guard` covers refusal and an unreadable window.
 - **Test.** `tests/test_lc12c.py`: `test_text_job_prompt_reaches_the_model_whole`,
   `test_any_other_large_prompt_is_still_compacted`.

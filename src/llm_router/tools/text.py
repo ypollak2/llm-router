@@ -1309,7 +1309,7 @@ async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | Non
                          if isinstance(exc, eligibility_routing.LiveCheckRefused)
                          else f"the input does not fit the passed local model for {job}, and switching to an "
                               "unpassed model is refused" if overflow
-                         else f"the passed local model is not in the router's chain for {job}" if refused
+                         else f"the passed local model is not in the router's chain for {job}: {exc}" if refused
                          else f"local-only routing did not complete ({type(exc).__name__})")
                 return (
                     f"Local text jobs are disabled for this call: {cause}; no cloud model was called "

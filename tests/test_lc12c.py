@@ -51,6 +51,7 @@ def e2e(world, tmp_path, mock_env, temp_db, monkeypatch):
     from unittest.mock import AsyncMock
     monkeypatch.setattr("llm_router.cost.get_daily_spend", AsyncMock(return_value=0.0))
     monkeypatch.setattr("llm_router.cost.get_monthly_spend", AsyncMock(return_value=0.0))
+    world.monkeypatch = monkeypatch
     world.state = state
     return world
 
@@ -319,7 +320,10 @@ def _wide_pass(world, limit=94464):
     """A passed, enabled lane whose recorded scope admits ``limit`` characters (94464 is the live lane's scope)."""
     from tests.test_lc8_routing import PROV, lane_file
     passed(world)
-    lane_file(world.home, prov={**PROV, "scope": {"max_prompt_chars": limit}})
+    from llm_router.local_check import runtimes as rt
+    world.monkeypatch.setattr(er, "_route_time_ctx", lambda m: 32768)
+    settings = rt.settings_hash(temperature=rt.TEMPERATURE, ctx=32768, max_tokens=rt.MAX_TOKENS, think=False)
+    lane_file(world.home, prov={**PROV, "settings_hash": settings, "scope": {"max_prompt_chars": limit}})
     er.reset_cache()
 
 
@@ -451,6 +455,39 @@ def test_repeated_text_jobs_never_get_the_local_model_quality_skipped(e2e, monke
     assert not quality_feedback.should_skip_model(LOCAL, "generate", "moderate")
 
 
+@pytest.mark.parametrize("window", [32768, None], ids=["known-window", "unreadable-window"])
+def test_dense_text_job_guard(e2e, monkeypatch, window):
+    import asyncio
+
+    from tests.test_lc12 import DIFF
+    _wide_pass(e2e)
+    if window is None:
+        # Isolate this guard from the existing unknown-window eligibility refusals.
+        monkeypatch.setattr(er, "passed_lane_available", lambda *a, **k: True)
+        monkeypatch.setattr(er, "passed_model_leads", lambda models, *a, **k: models[0] == LOCAL)
+        monkeypatch.setattr(er, "prefer_passed", lambda models, *a, **k: [LOCAL, *[m for m in models if m != LOCAL]])
+        monkeypatch.setattr(er, "live_check_refusal", lambda *a, **k: None)
+        monkeypatch.setattr(er, "_route_time_ctx", lambda m: None)
+    text = (DIFF + "+" + "1234567890" * 4000)[:39000]
+    sink: dict = {}
+    out = asyncio.run(T._llm_text_job(JOB, text, None, None, sink))
+    _drain()
+    if window is None:
+        assert sink["status"] == "accepted", sink
+        assert e2e.state["tried"] == [LOCAL]
+    else:
+        assert (sink["status"], sink["attempts"]) == ("fallback", 0), sink
+        assert e2e.state["tried"] == []
+        assert "digit-aware" in out and "no cloud model was called" in out
+
+
+def test_ordinary_text_job_same_length_reaches_model(e2e):
+    _wide_pass(e2e)
+    sink = _job_of(39000)
+    assert (sink["status"], sink["attempts"]) == ("accepted", 1), sink
+    assert e2e.state["tried"] == [LOCAL]
+
+
 def _prompts_seen(world, monkeypatch):
     """Record the prompt text of every model call the e2e world makes."""
     seen: list[str] = []
@@ -506,4 +543,3 @@ def test_low_scores_of_other_calls_do_not_hand_back_a_text_job(e2e, monkeypatch)
     out = _job_of(2000)
     assert out["status"] == "accepted", out
     assert e2e.state["tried"] == [LOCAL]
-
