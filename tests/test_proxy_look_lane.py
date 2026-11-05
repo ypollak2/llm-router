@@ -256,3 +256,9 @@ async def test_look_first_turn_still_forwarded(env):
     row = env.rows()[0]
     assert row["decision"] == "forwarded" and row["reason"] == "not_eligible"
     assert backend.calls == []
+
+
+def test_a_look_reply_gets_more_output_room_than_an_easy_step():
+    body = backends._trim_look({"system": "x", "messages": [], "tools": []})
+    assert backends.num_predict_for(body) == backends.NUM_PREDICT_LOOK
+    assert backends.num_predict_for({"system": "other", "messages": []}) == backends.NUM_PREDICT_EASY

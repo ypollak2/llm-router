@@ -305,12 +305,17 @@ class Backend(Protocol):
 
 NUM_PREDICT_EASY = 200  # after Read / Bash / no tool: pick the obvious next action
 NUM_PREDICT_HARD = 700  # anything else (e.g. after an Edit)
+NUM_PREDICT_LOOK = 600  # a look-lane reply, see num_predict_for
 DEFAULT_HEDGE_S = 8.0
 # N20: bounded; an explicit --keep-alive -1 is still honoured (server.parse_keep_alive).
 DEFAULT_KEEP_ALIVE: int | str = 600
 
 
 def num_predict_for(body: dict) -> int:
+    # A look reply is one tool call, but a command with long paths can pass 200 tokens: at the
+    # easy cap 36 of 142 replayed replies were cut off before the call could be parsed (D5).
+    if isinstance(body.get("system"), str) and body["system"].endswith(LOOK_SYSTEM):
+        return NUM_PREDICT_LOOK
     prev = prev_tools(body)
     return NUM_PREDICT_EASY if (not prev or prev[0] in ("Read", "Bash")) else NUM_PREDICT_HARD
 
