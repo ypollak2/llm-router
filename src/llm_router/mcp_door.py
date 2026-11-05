@@ -22,9 +22,9 @@ waiting at ~120 s. The routed doors (``DEADLINE_TOOLS``: every MCP tool that cal
 (45 s by default, below ``request_timeout``'s 120 s), so one hung local model still leaves
 room for the next candidate. Cloud attempts are not capped (D-154: extended-thinking and
 research calls legitimately take 45-120 s); they run until the overall deadline. A cap
-expiry raises ``AttemptCapExceeded``, which is not a timeout to the router: it does not
-start the LOCAL-TIMEOUT-1 cooldown or count as a provider failure, so routing does not
-change. When the deadline itself expires the door returns
+expiry raises ``AttemptCapExceeded``, which does not count as a provider failure.
+The router records local caps for the LOCAL-TIMEOUT-1 model-order cooldown without
+benching the provider. When the deadline itself expires the door returns
 ``llm-router error: deadline <N>s exceeded; tried: <models>; ...``.
 
 C. A stale server (BIND W2). The MCP server lives as long as the Claude Code session, so a
@@ -75,9 +75,9 @@ DEADLINE_TOOLS = frozenset({
 class AttemptCapExceeded(Exception):
     """A local attempt gave no answer within its share of the MCP deadline.
 
-    Deliberately NOT a ``TimeoutError`` and without "timeout" in its name: the router's
-    LOCAL-TIMEOUT-1 cooldown (``router._is_timeout_error``) must not fire for a cap the door
-    imposed, and the router records it as ``fallback_reason="deadline_cap"``."""
+    Deliberately NOT a ``TimeoutError``: a door-imposed cap is not a provider fault.
+    The router explicitly records local caps for the model-order cooldown while
+    preserving ``fallback_reason="deadline_cap"`` and excluding provider failures."""
 
     def __init__(self, model: str, cap_s: float) -> None:
         super().__init__(f"deadline_cap: {model} gave no answer within the {cap_s:g}s "

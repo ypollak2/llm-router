@@ -1818,7 +1818,7 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 # ollama/qwen3-coder:30b led the code chain and timed out at 120 s on 21 of the 21
 # routes that tried it; the loaded qwen3.8 answered right after it. Every route paid
 # the full timeout because nothing remembered the one before. A local model that just
-# timed out now goes to the back of the chain for a cooldown. It is moved, not dropped,
+# timed out or hit the MCP attempt cap now goes to the back for a cooldown. It is moved, not dropped,
 # and it leads again when the cooldown ends. The state is per process (the MCP server
 # lives as long as the session).
 _LOCAL_TIMEOUT_COOLDOWN_DEFAULT_S = 600.0
@@ -1840,8 +1840,8 @@ def _is_timeout_error(exc: BaseException) -> bool:
     return isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower()
 
 
-def _note_local_timeout(model: str, exc: BaseException) -> None:
-    if model.startswith("ollama/") and _is_timeout_error(exc):
+def _note_local_timeout(model: str, exc: BaseException | None = None) -> None:
+    if model.startswith("ollama/") and (exc is None or _is_timeout_error(exc)):
         _local_timeout_at[model] = time.monotonic()
 
 
@@ -4151,9 +4151,10 @@ async def _dispatch_model_loop(
             is_auth = not is_rate_limit and not is_content_filter and _is_auth_error(e)
             from llm_router.mcp_door import AttemptCapExceeded as _AttemptCapExceeded
             if isinstance(e, _AttemptCapExceeded):
-                # D-154: the MCP door's per-attempt cap, not a provider fault: no health
-                # failure, no LOCAL-TIMEOUT-1 cooldown (not a TimeoutError), so routing
-                # stays as it was; recorded under its own reason.
+                # D-141/D-154: a door-imposed cap is not a provider fault. Keep its
+                # own reason and no health failure; only the local model's order
+                # changes via LOCAL-TIMEOUT-1, leaving other Ollama models available.
+                _note_local_timeout(model)
                 await _notify(ctx, "warning", f"{model} hit the MCP deadline cap — trying next...")
                 route_log.warning(
                     "routing_fallback",

@@ -1,0 +1,1 @@
+A local model that hits the MCP per-attempt cap now moves behind other candidates during the local timeout cooldown, so later routes can try another model first; the cap keeps its existing reporting and does not count as a provider failure or bench Ollama.
