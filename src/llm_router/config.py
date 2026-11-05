@@ -870,10 +870,12 @@ class RouterConfig(BaseSettings):
 
         os.environ.setdefault("OLLAMA_API_BASE", effective_url)
         from llm_router.discover import ollama_can_generate
-        return [
-            f"ollama/{m.strip()}" for m in self.ollama_budget_models.split(",")
-            if m.strip() and ollama_can_generate(m.strip())
-        ]
+        from llm_router.model_discovery import installed_only
+
+        # PHANTOM-LOCAL-1: these names are the operator's, not an inventory. A name Ollama's own
+        # list does not carry is dropped here (``ollama_can_generate`` fails open on the 404).
+        budget = [m.strip() for m in self.ollama_budget_models.split(",") if m.strip()]
+        return [f"ollama/{m}" for m in installed_only(budget) if ollama_can_generate(m)]
 
     def all_openai_compat_models(self) -> list[str]:
         """Return model IDs for the configured OpenAI-compatible local server.

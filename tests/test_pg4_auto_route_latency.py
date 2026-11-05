@@ -297,6 +297,8 @@ def test_nowait_missing_cache_is_empty_and_still_refreshes(md):
 def test_nowait_fresh_cache_and_env_override_spawn_nothing(md, tmp_path, monkeypatch):
     _write_cache(tmp_path / "discovery.json", ["fresh:7b"], age_s=60)
     assert md.available_ollama_models_nowait() == ["fresh:7b"]
+    # PHANTOM-LOCAL-1: an operator list is believed only for names the (fresh) cache carries.
+    _write_cache(tmp_path / "discovery.json", ["fresh:7b", "a:1", "b:2"], age_s=60)
     monkeypatch.setenv("OLLAMA_MODELS", "a:1,b:2")
     assert md.available_ollama_models_nowait() == ["a:1", "b:2"]
     assert md.spawned == []

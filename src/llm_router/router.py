@@ -421,6 +421,28 @@ def _note_dropped(before: list[str], after: list[str], reason: str) -> None:
     skip_causes.note_many([m for m in before if m not in kept], reason)
 
 
+def _drop_uninstalled_local(chain: list[str]) -> list[str]:
+    """The installed-model filter the static path gets inside ``profiles.get_model_chain``.
+
+    PHANTOM-LOCAL-1: the session-start dynamic table is a copy of ``ROUTING_TABLE`` filtered by
+    PROVIDER only, built once and kept for the life of the server, so an ``ollama/*`` entry it
+    carried (``ollama/@local`` resolved when the table was built) was tried first on every route
+    after Ollama stopped having that model. STALE-OLLAMA-1 recorded "the dynamic table still does
+    no installed-model filtering" and left it; this is that filter. Fail-open, recorded.
+    """
+    if not any(m.startswith("ollama/") for m in chain):
+        return chain
+    try:
+        from llm_router.discover import filter_ollama_by_installed
+
+        return filter_ollama_by_installed(chain)
+    except Exception as exc:  # noqa: BLE001 - an unfiltered chain beats no chain
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-ROUTER-DYNAMIC-OLLAMA-FILTER", exc)
+        return chain
+
+
 async def _build_and_filter_chain(
     task_type: TaskType,
     profile: RoutingProfile,
@@ -535,7 +557,7 @@ async def _build_and_filter_chain(
         from llm_router.dynamic_routing import get_dynamic_model_chain
         dynamic_chain = get_dynamic_model_chain(profile, task_type)
         if dynamic_chain is not None:
-            models_to_try = dynamic_chain
+            models_to_try = _drop_uninstalled_local(dynamic_chain)
             _chain_key = (profile.value, task_type.value)
             if not dynamic_chain and _chain_key not in _EMPTY_DYNAMIC_CHAIN_WARNED:
                 # F25 / D-170 (3): an empty table entry is taken as the whole chain (the static
@@ -1828,6 +1850,53 @@ def _local_in_timeout_cooldown(model: str) -> bool:
     t = _local_timeout_at.get(model)
     cooldown = _local_timeout_cooldown_s()
     return t is not None and cooldown > 0 and time.monotonic() - t < cooldown
+
+
+# PHANTOM-LOCAL-1: Ollama answers 404 ``model 'x' not found`` for a model that is not installed. Live
+# 7 days to 2026-11-04T11:00Z (routing_quality.jsonl): 9 of 94 local attempts were that answer for
+# ``ollama/qwen3.8:latest``, 7 as the FIRST attempt of their route and 2 as the fourth. Two
+# costs: the attempt itself, and ``tracker.record_failure("ollama")``, which counts the 404 against the
+# whole provider (two phantoms in a chain bench every installed model behind them). A model Ollama said
+# does not exist is dropped from later chains for a while, like a timeout is (LOCAL-TIMEOUT-1) but not
+# kept at the back: it cannot answer. Same per-process state and 600 s lifetime; it is tried again after
+# that, so a model pulled meanwhile comes back without a restart.
+_LOCAL_MISSING_TTL_S = 600.0
+_local_missing_at: dict[str, float] = {}  # model -> time.monotonic() of Ollama's last "not found"
+
+
+_MODEL_NOT_FOUND_RE = re.compile(r"model '[^']*' not found", re.IGNORECASE)
+
+
+def _is_model_not_found(exc: BaseException) -> bool:
+    """litellm.NotFoundError carrying Ollama's ``model '<x>' not found`` (a 404 on the model, not the route)."""
+    return type(exc).__name__ == "NotFoundError" and bool(_MODEL_NOT_FOUND_RE.search(str(exc)))
+
+
+def _note_local_missing(model: str, exc: BaseException) -> bool:
+    """Remember that Ollama does not have *model*; True when *exc* said so."""
+    if model.startswith("ollama/") and _is_model_not_found(exc):
+        _local_missing_at[model] = time.monotonic()
+        return True
+    return False
+
+
+def _drop_missing_local(models: list[str]) -> list[str]:
+    """*models* without the local models Ollama said it does not have within ``_LOCAL_MISSING_TTL_S``.
+
+    Never empties the chain: when every entry is missing the chain is returned as it came, so the
+    error the caller sees is Ollama's own.
+    """
+    if not _local_missing_at:
+        return models
+    now = time.monotonic()
+    missing = {m for m, t in _local_missing_at.items() if now - t < _LOCAL_MISSING_TTL_S}
+    gone = [m for m in models if m in missing]
+    if not gone or len(gone) == len(models):
+        return models
+    log.info("Dropping %s for this route: Ollama said not installed within the last %.0fs",
+             gone, _LOCAL_MISSING_TTL_S)
+    skip_causes.note_many(gone, skip_causes.UNAVAILABLE)
+    return [m for m in models if m not in missing]
 
 
 def _quota_score_chain(
@@ -3277,7 +3346,7 @@ async def _dispatch_model_loop(
     # N22: set when a local model times out in THIS call (see the skip at the top of the loop).
     _local_timed_out_in_call = False
     _chain_as_built = list(models_to_try)  # LOCAL-TIMEOUT-1: the emergency check compares against this
-    models_to_try = _demote_timed_out_local(models_to_try, exempt=pinned_model)
+    models_to_try = _demote_timed_out_local(_drop_missing_local(models_to_try), exempt=pinned_model)
     for attempt, model in enumerate(models_to_try, start=1):
         provider = provider_from_model(model)
         model_name = model.split("/", 1)[1] if "/" in model else model
@@ -4066,6 +4135,7 @@ async def _dispatch_model_loop(
                 last_error = e
                 break
             _note_local_timeout(model, e)  # LOCAL-TIMEOUT-1
+            _model_missing = _note_local_missing(model, e)  # PHANTOM-LOCAL-1
             if model.startswith("ollama/") and _is_timeout_error(e):
                 _local_timed_out_in_call = True  # N22
             # A reported reset time ("try again at 06:39", Retry-After: 7200,
@@ -4133,7 +4203,10 @@ async def _dispatch_model_loop(
                     error_type=type(e).__name__,
                     fallback_reason="provider_error",
                 )
-                tracker.record_failure(provider)
+                if not _model_missing:
+                    # One model Ollama does not have says nothing about Ollama: counting it benched
+                    # every installed model behind it (PHANTOM-LOCAL-1).
+                    tracker.record_failure(provider)
             # CHZ-AUD-A-01: record the FAILED provider attempt in the execution
             # ledger. Provider errors (rate-limit/auth/outage/generic) were
             # invisible to the ledger — only accepted/rejected attempts emitted —
@@ -4229,7 +4302,7 @@ async def _dispatch_model_loop(
             from llm_router import capability_filter as _cf
             emergency_chain = _cf.filter_chain(emergency_chain, capability_needs)
         if emergency_chain and emergency_chain != _chain_as_built:
-            emergency_chain = _demote_timed_out_local(emergency_chain)  # LOCAL-TIMEOUT-1
+            emergency_chain = _demote_timed_out_local(_drop_missing_local(emergency_chain))  # LOCAL-TIMEOUT-1
             for attempt, model in enumerate(emergency_chain, start=len(models_to_try) + 1):
                 provider = provider_from_model(model)
                 model_name = model.split("/", 1)[1] if "/" in model else model
@@ -4375,6 +4448,7 @@ async def _dispatch_model_loop(
 
                 except Exception as e:
                     _note_local_timeout(model, e)  # LOCAL-TIMEOUT-1: same as the primary loop
+                    _note_local_missing(model, e)  # PHANTOM-LOCAL-1: same as the primary loop
                     chain_attempts.append(model)
                     log.warning(
                         "Emergency fallback model %s failed: %s", model, e
