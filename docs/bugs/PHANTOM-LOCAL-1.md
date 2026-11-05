@@ -48,3 +48,4 @@ status: fixed in `fix/local-chain-installed-models`
   does not bench `ollama`, tried again after the lifetime, chain never emptied, only Ollama's own 404 counts).
   `tests/test_pg4_auto_route_latency.py::test_nowait_fresh_cache_and_env_override_spawn_nothing` now gives its env
   list names the cache carries: its old expectation (an env list wins over a cache that does not list it) is the bug.
+- **Review fix.** Discovery probed `OLLAMA_HOST` or the default while the hook calls `LLM_ROUTER_OLLAMA_URL`, so with Ollama up an operator's model on the serving daemon was dropped: `tests/test_zero_claude_scenarios.py` failed locally and passed on CI, where nothing answers the probe. `model_discovery._ollama_url` now asks the serving daemon first.
