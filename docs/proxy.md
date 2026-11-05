@@ -215,6 +215,11 @@ with `not_a_look`. A look step arriving while backend work is in flight forwards
 with `local_busy` instead of queuing. These are normal forwarding outcomes;
 backend errors and timeouts retain the existing fallback behavior.
 
+In this lane at most 2 local steps run in a row, whatever `--loop-max-consecutive` says; no local
+try follows an edit; a read that sweeps a whole disk or home directory goes to Claude. Measured on
+20 small edit tasks, one model, one run per arm: Claude calls 83 against 118, tasks passed 16
+against 17, total time 1.64x, Claude cost about 15-18% higher. Larger tasks are not measured here.
+
 ### Optional: a dedicated tuned Ollama server (not auto-configured)
 
 The spike's numbers came from a hand-run server. Ollama.app discards these

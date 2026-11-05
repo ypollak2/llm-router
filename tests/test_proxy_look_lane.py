@@ -262,3 +262,9 @@ def test_a_look_reply_gets_more_output_room_than_an_easy_step():
     body = backends._trim_look({"system": "x", "messages": [], "tools": []})
     assert backends.num_predict_for(body) == backends.NUM_PREDICT_LOOK
     assert backends.num_predict_for({"system": "other", "messages": []}) == backends.NUM_PREDICT_EASY
+
+
+def test_look_lane_caps_a_run_of_local_steps_and_off_leaves_the_setting_alone():
+    assert ps._guard_limit(ProxyConfig(local_look=True, local_gate=True, loop_max_consecutive=8)) == 2
+    assert ps._guard_limit(ProxyConfig(local_look=True, local_gate=True, loop_max_consecutive=1)) == 1
+    assert ps._guard_limit(ProxyConfig(local_look=False, loop_max_consecutive=8)) == 8

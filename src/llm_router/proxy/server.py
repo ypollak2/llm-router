@@ -302,6 +302,16 @@ def refusal_message(text: str, model: str | None) -> dict:
             "usage": {"input_tokens": 0, "output_tokens": 0}}
 
 
+# In the look lane a long run of local reads mostly adds reads Claude would not have made: with
+# runs up to 8, 38 of 84 local steps replaced a Claude call; with runs up to 2, 35 of 39 did
+# (20 tasks, one model, coord/local-levers/RESULT-D4-20261105.md).
+LOOK_MAX_CONSECUTIVE = 2
+
+
+def _guard_limit(cfg: "ProxyConfig") -> int:
+    return min(cfg.loop_max_consecutive, LOOK_MAX_CONSECUTIVE) if cfg.local_look else cfg.loop_max_consecutive
+
+
 def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None,
               haiku_guard_run=None, local_gate_deps=None):
     """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
@@ -320,7 +330,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     upstream = validate_upstream(cfg.upstream)
     trims = resolve_trims(cfg.trim)
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
-    guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
+    guard = LoopGuard(_guard_limit(cfg), cfg.loop_repeat_window)
     # Stops sending steps to a crashed local backend (proxy.backend_health).
     health = BackendHealth(cfg.backend_fail_n, cfg.backend_cooldown_s, clock=health_clock)
     # Claude-tier rewrite (opt-in). A bad policy file fails here, at startup,
