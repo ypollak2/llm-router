@@ -13,7 +13,7 @@ from llm_router.proxy.tool_classes import classify_bash, is_look_call
     "git merge-base HEAD main", "git for-each-ref", "git cat-file -p HEAD",
     "git cat-file -t HEAD", "git cat-file -s HEAD", "gh run list",
     "gh issue view 1", "gh repo view", "gh release list", "ollama list",
-    "ollama ps", "ollama show local", "A=1 cat f", "echo 'a|b'",
+    "ollama ps", "ollama show local", "echo 'a|b'",
 ] + [cmd for cmd in (
     "cut", "tr", "nl", "column", "comm", "cmp", "basename", "dirname",
     "realpath", "stat", "file", "du", "df", "which", "pwd", "ps", "pgrep",
@@ -117,4 +117,18 @@ def test_second_review_inputs_are_not_looks(command):
     "awk -F: '{print $1, $3}' f", "awk '/foo/ {print $2}' f", "awk 'NR>=2 && NR<=5' f", "awk '$1 == \"x\" {print NF}' f",
 ])
 def test_second_review_readers_stay_looks(command):
+    assert is_look_call("Bash", {"command": command})
+
+
+@pytest.mark.parametrize("command", [
+    "PATH=/tmp cat f", "LD_PRELOAD=x cat f", "DYLD_INSERT_LIBRARIES=x cat f", "PAGER=x git log", "A=1 cat f",
+    "git grep -iOtouch x", "git grep -iO'touch /tmp/x' y", "git log --outp=x", "git diff --ou=x", "git show --output=x",
+    "git log --ext", "git log --textc", "git grep --open=x y",
+])
+def test_third_review_inputs_are_not_looks(command):
+    assert not is_look_call("Bash", {"command": command})
+
+
+@pytest.mark.parametrize("command", ["git log --oneline -3", "git diff --stat", "git grep -in foo", "git log --format=%h"])
+def test_third_review_readers_stay_looks(command):
     assert is_look_call("Bash", {"command": command})

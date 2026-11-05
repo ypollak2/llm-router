@@ -220,6 +220,7 @@ def step_tool_class(calls: Iterable[tuple[Any, Any]]) -> str | None:
     return next(c for c in PRECEDENCE if c in found)
 
 
+_GIT_LOOK_REFUSED = (("--output", 4), ("--ext-diff", 5), ("--textconv", 7), ("--open-files-in-pager", 6))
 _SWEEP_ROOTS = frozenset({"", "~", "$HOME", "/Users", "/home", "/private", "/var", "/usr", "/opt", "/System", "/Library", "/tmp"})
 _LOOK_PROGRAM = re.compile(r"(?:/(?:usr/(?:local/)?)?s?bin/)?[A-Za-z0-9._+-]+")
 _AWK_VALUE = r'(?:\$[0-9]+|\$NF|NF|NR|"[^"\\]*")'
@@ -270,10 +271,18 @@ def _look_segment(segment: str) -> bool:
     if not _LOOK_PROGRAM.fullmatch(words[0]):
         return False
     cmd, args = words[0].rsplit("/", 1)[-1], words[1:]
-    if env_prefix and cmd not in _ENV_SAFE:
-        return False
-    if cmd == "git" and args and args[0].startswith("-") and args[0] != "-C":
-        return False   # --git-dir and friends point git at another repository's config and hooks
+    if env_prefix:
+        return False   # PATH=, LD_PRELOAD=, DYLD_INSERT_LIBRARIES= and PAGER= each change what runs
+    if cmd == "git":
+        if args and args[0].startswith("-") and args[0] != "-C":
+            return False   # --git-dir and friends point git at another repository's config and hooks
+        for a in args:
+            name = a.split("=", 1)[0]
+            # git accepts unique abbreviations of long options, so --outp=x is --output=x.
+            if any(full.startswith(name) and len(name) >= least for full, least in _GIT_LOOK_REFUSED):
+                return False
+            if "grep" in args and a.startswith("-") and not a.startswith("--") and "O" in a:
+                return False   # git grep -iOprog runs prog on the matches
     # Reads that sweep a whole disk or home directory: one background find held a task for 525 s.
     if cmd in {"find", "du", "rg", "grep", "tree", "ls", "ag"} and any(a.rstrip("/") in _SWEEP_ROOTS for a in args):
         return False
