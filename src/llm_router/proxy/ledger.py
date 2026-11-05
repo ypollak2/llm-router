@@ -51,6 +51,7 @@ Row fields:
   decision        served | forwarded | fallback
   reason          why not served: routing_off | not_eligible | policy_kept |
                   budget_exceeded | backend_error | validation |
+                  local_handoff | not_a_look | local_busy |
                   backend_unhealthy (skipped, no attempt: see backend_health) |
                   edit_to_claude (an Edit/Write reply from the raw tool-call
                   loop, never served) and, with ``--local-agent``,

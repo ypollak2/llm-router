@@ -24,6 +24,9 @@ and harness steps stay on Claude). By the class of the tools the step answers:
   web, with policy task_type code, complexity simple|moderate                   -> code / <tier>
   edit, exec, agent, other, none     -> forwarded (``lane_unmapped``)
 
+With look enabled, continuations with a non-None previous tool class map to
+look / simple, using the proxy_local/look breaker and read-only reply checks.
+
 The qa and code mappings are an assumption (nothing in P2.0 defines which proxy
 continuation is a "qa" step); they are the narrowest reading that keeps every step that
 may write or run code with Claude. The code lane is wired, but an edit-shaped reply is
@@ -45,6 +48,9 @@ CHECKS, first failure forwards (reason code in ``row["local_gate"]["reason"]``):
   no_local_model                     local_agent ``can_serve_locally`` says Claude
   backend_unhealthy                  BackendHealth open or the Ollama watchdog says hung
   pack_over_window                   the irreducible tokens do not fit the model's window
+  local_handoff                      look reply requests Claude
+  not_a_look                         malformed or non-read-only look reply
+  local_busy                         local look backend is busy
   gate_error                         the gate itself raised (the step is forwarded)
   served_local                       every check passed; the step goes to the local model
 
@@ -74,6 +80,7 @@ ELIGIBILITY_NAME = "local_eligibility.json"
 UNITS_NAME = "proxy_local_units.jsonl"
 
 LANE_TECH_OP, LANE_QA, LANE_CODE = "tech_op", "qa", "code"
+LANE_LOOK = "look"
 TIERS = ("simple", "moderate")
 
 from llm_router.quality_breaker import LEVER_PROXY_LOCAL, LEVER_TECHOP_LOCAL as LEVER_TECHOP  # noqa: E402
@@ -93,9 +100,12 @@ R_SERVED = "served_local"
 R_LOCAL_FAILED = "local_failed"
 R_NEEDS_UNKNOWN = "needs_unknown"
 R_LOCAL_REPEAT = "local_repeat"
+R_LOCAL_HANDOFF = "local_handoff"
+R_NOT_A_LOOK = "not_a_look"
+R_LOCAL_BUSY = "local_busy"
 REASONS = (R_NOT_CONTINUATION, R_LANE_UNMAPPED, R_UNREADABLE, R_INELIGIBLE, R_BREAKER, R_PROMOTE,
            R_CAPABILITY, R_NO_MODEL, R_UNHEALTHY, R_PACK, R_ERROR, R_SERVED, R_LOCAL_FAILED,
-           R_NEEDS_UNKNOWN, R_LOCAL_REPEAT)
+           R_NEEDS_UNKNOWN, R_LOCAL_REPEAT, R_LOCAL_HANDOFF, R_NOT_A_LOOK, R_LOCAL_BUSY)
 
 _QA_TASKS = frozenset({"query", "research", "analyze"})
 _REREAD_WINDOW = 2          # tool calls after a served step that can count as a re-read
@@ -176,11 +186,13 @@ def eligible_model(data: dict, lane: str, tier: str) -> str | None:
 
 # ── step -> lane ─────────────────────────────────────────────────────────────
 
-def lane_of(row: dict, choice: dict | None) -> tuple[str, str] | str:
+def lane_of(row: dict, choice: dict | None, look: bool = False) -> tuple[str, str] | str:
     """``(lane, tier)``, or the reason code the step has no lane."""
     if row.get("step_class") != "continuation":
         return R_NOT_CONTINUATION
     prev = row.get("prev_tool_class")
+    if look and prev is not None:
+        return LANE_LOOK, "simple"
     if prev == "technical_op":
         return LANE_TECH_OP, "simple"
     if prev != "web" or not choice:
@@ -194,6 +206,26 @@ def lane_of(row: dict, choice: dict | None) -> tuple[str, str] | str:
     if task == "code":
         return LANE_CODE, tier
     return R_LANE_UNMAPPED
+
+
+def look_check(message: dict) -> tuple[dict | None, str | None]:
+    """Accept read-only tool calls, dropping prose; malformed replies fail closed."""
+    from llm_router.proxy import tool_classes
+
+    try:
+        if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+            return None, R_NOT_A_LOOK
+        content = message["content"]
+        calls = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+        if any(b.get("name") == "hand_to_claude" for b in calls):
+            return None, R_LOCAL_HANDOFF
+        if any(not isinstance(b, dict) or not isinstance(b.get("type"), str) for b in content):
+            return None, R_NOT_A_LOOK
+        if not calls or any(not tool_classes.is_look_call(b.get("name"), b.get("input")) for b in calls):
+            return None, R_NOT_A_LOOK
+        return dict(message, content=calls, stop_reason="tool_use"), None
+    except Exception:
+        return None, R_NOT_A_LOOK
 
 
 def breaker_class(lane: str) -> tuple[str, str]:
@@ -389,8 +421,9 @@ class LaneGate:
     """One per proxy app. ``decide`` is the whole gate; ``observe`` / ``note_served`` feed the breaker."""
 
     def __init__(self, steps: Any, step_budget_s: float, deps: GateDeps | None = None,
-                 feed: FailureFeed | None = None) -> None:
+                 feed: FailureFeed | None = None, *, look: bool = False) -> None:
         self.steps = steps
+        self.look = look
         self.step_budget_s = step_budget_s
         self.feed = feed or FailureFeed()
         self.deps = deps or GateDeps()
@@ -420,7 +453,7 @@ class LaneGate:
 
     async def _decide(self, body: dict, row: dict, choice: dict | None, needs: Any) -> LaneDecision:
         d = self.deps
-        mapped = lane_of(row, choice)
+        mapped = lane_of(row, choice, look=self.look)
         if isinstance(mapped, str):
             return LaneDecision(False, None, mapped)
         lane, tier = mapped
