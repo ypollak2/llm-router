@@ -1132,6 +1132,25 @@ def test_apply_copies_with_different_files_earn_nothing_in_any_order(tmp_path, o
     b = _apply_records(credit=json.dumps({"program": 3, "local": 1, "files": ["/repo/b.py"]}), edit_turn=1)
     records = _replay_in_one_transcript(*((a, b) if order == "a_first" else (b, a)))
     units = _apply_main_and_sub(tmp_path, records, [])
-    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(0, 0)]
+    assert [(u["program_replaced"], u["local_replaced"], u["signal"], u["outcome"]) for u in units] == [
+        (0, 0, "apply_conflict", ns.OUTCOME_UNKNOWN)]   # same label in both orders (round 5)
     same = _apply_main_and_sub(tmp_path, _replay_in_one_transcript(a, a), [])
     assert [(u["program_replaced"], u["local_replaced"]) for u in same] == [(3, 1)]   # identical copies: control
+
+
+@pytest.mark.parametrize("first, second", [("/repo/a.py", "/repo/b.py"), ("/repo/b.py", "/repo/a.py")])
+def test_apply_conflict_label_outranks_redo_in_any_order(tmp_path, first, second):
+    """Round 5: two results for one id back to back, then Edit(a.py) inside the first window. Whichever result
+    comes first, the call is a conflict (0/0, apply_conflict), never labelled by read order."""
+    sid, ts = SID_MAIN, 1_800_000_000
+
+    def result(path):
+        return "APPLIED_AND_PASSED\n[llm_apply credit] " + json.dumps({"program": 3, "local": 1, "files": [path]})
+    edit = _assistant(sid, ts + 4, text="fix", tool_uses=[_tool_use("e1", "Edit", {"file_path": "/repo/a.py"})])
+    edit["message"]["id"] = "after-1"
+    records = [_assistant(sid, ts, tool_uses=[_tool_use("apply1", "mcp__llm_router__llm_apply")]),
+               _user(sid, "", ts + 1, [_tool_result("apply1", result(first))]),
+               _user(sid, "", ts + 2, [_tool_result("apply1", result(second))]),
+               edit]
+    units = _apply_main_and_sub(tmp_path, records, [])
+    assert [(u["program_replaced"], u["local_replaced"], u["signal"]) for u in units] == [(0, 0, "apply_conflict")]

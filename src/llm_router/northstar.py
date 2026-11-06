@@ -1610,9 +1610,11 @@ def build_sessions(days: int | None, root: Path | None = None,
 
     def _set_apply(unit: Unit, call: dict) -> None:
         unit.program_replaced, unit.local_replaced = apply_credit.counts(call)
-        unit.outcome = (OUTCOME_REDO if call.get("redo")
+        # A conflict (one tool id, two different results) outranks a redo: neither copy is trusted, and the
+        # label must not depend on which copy was read first.
+        unit.outcome = (OUTCOME_UNKNOWN if call.get("conflict") else OUTCOME_REDO if call.get("redo")
                         else OUTCOME_USED if unit.program_replaced or unit.local_replaced else OUTCOME_UNKNOWN)
-        unit.signal = ("claude_finished" if call.get("redo") else "apply_conflict" if call.get("conflict")
+        unit.signal = ("apply_conflict" if call.get("conflict") else "claude_finished" if call.get("redo")
                        else "apply_credit" if "credit" in call else None)
 
     def _add_assistant(su: SessionUnits, target_sid: str, obj: dict, records: list[dict], kind: str,
