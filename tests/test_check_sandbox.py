@@ -606,3 +606,19 @@ def test_repo_bin_symlink_does_not_erase_provenance(tmp_path, monkeypatch):
     # Same layout without a repository ROOT (PATH-trusted) still validates pyvenv home.
     with pytest.raises(sandbox.SandboxUnavailable, match="non-runtime dir"):
         sandbox._runtime_dirs(root / ".venv/bin/python3")
+
+
+def test_dotdot_executable_path_refused(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    with pytest.raises(sandbox.SandboxUnavailable, match=r"contains '\.\.'"):
+        sandbox._runtime_dirs(str(root / ".." / "elsewhere" / "runner"), root)
+
+
+def test_homebrew_formula_prefix_is_a_runtime(tmp_path):
+    formula = tmp_path / "Cellar/python@3.12/3.12.7"
+    stdlib = formula / "Frameworks/Python.framework/Versions/3.12/lib/python3.12"
+    stdlib.mkdir(parents=True)
+    assert not sandbox._is_runtime_prefix(formula)
+    (stdlib / "os.py").write_text("")
+    assert sandbox._is_runtime_prefix(formula)

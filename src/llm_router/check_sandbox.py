@@ -76,6 +76,8 @@ def _repo_owned(original, root):
 def _is_runtime_prefix(prefix):
     """True when an existing directory is shaped like a Python or Node install."""
     return ((prefix / "pyvenv.cfg").is_file() or any(prefix.glob("lib/python3*/os.py"))
+            # Homebrew formula prefix: stdlib lives in the nested framework.
+            or any(prefix.glob("Frameworks/Python.framework/Versions/*/lib/python3*/os.py"))
             or (prefix / "bin/node").is_file() or (prefix / "lib/node_modules").is_dir())
 
 
@@ -124,6 +126,9 @@ def _runtime_dirs(executable, root=None):
     outside ROOT must be an existing Python/Node installation.
     """
     root = Path(_path(root)) if root is not None else None
+    if ".." in Path(executable).parts:
+        # abspath() would collapse it and hide that the path started inside ROOT.
+        raise SandboxUnavailable("executable path contains '..'")
     original = Path(os.path.abspath(executable))
     resolved = Path(_path(original))
     untrusted = _repo_owned(original, root) or _inside(resolved, root)
