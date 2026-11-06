@@ -1394,6 +1394,19 @@ async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | Non
     return "\n".join(lines)
 
 
+async def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
+    """Beta: send all edits and a check in one call after reading the code.
+
+    No model calls. JSON old/new pairs or fenced FILE/FIND/REPLACE, NEW FILE,
+    APPEND TO blocks. All-or-nothing validation, paths confined to cwd (git work
+    tree), argv-only known test/lint runner, 60 s cap. Off by default; enable
+    LLM_ROUTER_APPLY=on. No further edits on rejection or check failure.
+    """
+    from llm_router.apply_tool import llm_apply as apply_batch
+
+    return await asyncio.to_thread(apply_batch, edits, check, cwd)
+
+
 def register(mcp, should_register=None) -> None:
     """Register text LLM tools with the MCPServer instance."""
     gate = should_register or (lambda _: True)
@@ -1411,6 +1424,8 @@ def register(mcp, should_register=None) -> None:
         mcp.tool()(llm_code)
     if gate("llm_edit"):
         mcp.tool()(llm_edit)
+    if gate("llm_apply"):
+        mcp.tool()(llm_apply)
     # Advertised when the flag is on, or when it is unset and an Ollama lane is switched on
     # (D-272/D-274): a default install pays no tool-schema tokens for it, and the slim tier
     # sets / doc tool counts are unchanged. Registered at server start, so a pass made later

@@ -98,6 +98,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # correct answer is worth, in dollars. 0 makes the bandit rank purely by
     # cheapness, which is what the old unbounded ratio effectively did.
     "LLM_ROUTER_ANSWER_VALUE_USD": ("llm_router", "telemetry.py", 1),
+    # Program-only batch editing beta; off by default, read on each call.
+    "LLM_ROUTER_APPLY": ("llm_router", "apply_tool.py", 1),
     # T-15: explicit override for the HOST config dir (~/.claude). Distinct from
     # LLM_ROUTER_HOME, which covers llm-router's own state.
     "LLM_ROUTER_CLAUDE_DIR": ("llm_router", "install_hooks.py", 1),

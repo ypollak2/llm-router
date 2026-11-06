@@ -201,7 +201,7 @@ llm-router install --host vscode  # or --host cursor
 ```
 
 **Features:**
-- ✅ All 70 MCP tools available (llm_route, llm_query, llm_code, etc.)
+- ✅ All 71 MCP tools available (llm_route, llm_query, llm_code, etc.)
 - ✅ Manual invocation of routing tools
 - ⚠️ No automatic hook-based routing
 - ⚠️ No session tracking (unless you invoke tools)
