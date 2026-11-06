@@ -290,7 +290,9 @@ harmless switches per runner (pytest `-q -v -x -s -l`, `--tb=short|line|no`,
 `-k`/`-m`/`--maxfail` with plain values; go test `-v -short -race -run -count`;
 ruff `check format --check --diff --fix`; npm/pnpm test take none) plus paths
 that resolve inside cwd. Anything else (config files, plugins, `@argfiles`,
-`--pyargs`, compiler flags) is not run; run that check yourself.
+`--pyargs`, compiler flags) is not run; run that check yourself. Runners still
+find their own config the usual way (repo, parent folders, `~/.npmrc`,
+`~/.config/mypy`, Go and Cargo caches), exactly as when you run them yourself.
 The child environment contains only PATH, HOME, USER, LOGNAME, LANG, LC_*, TERM,
 TMPDIR, VIRTUAL_ENV, PYTHONDONTWRITEBYTECODE, CI, and NO_COLOR.
 Remaining process group members are killed after parent exit or timeout, and
