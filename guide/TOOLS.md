@@ -283,7 +283,7 @@ Concurrent modification by another process of the same user is out of scope
 is checked inside cwd; relocation rejects with `path moved outside cwd during write`
 and rolls back the batch. Backups are retained if any restoration fails.
 
-The check requires a trusted repository and runs its own test code unsandboxed. Executables must be allowlisted bare names found on the
+The check executes repository code. Executables must be allowlisted bare names found on the
 inherited PATH, or `.venv/bin/python`, `venv/bin/python`, `.venv/bin/pytest`,
 `venv/bin/pytest` resolving inside cwd. Arguments are an allowlist: a few
 harmless switches per runner (pytest `-q -v -x -s -l`, `--tb=short|line|no`,
@@ -297,7 +297,53 @@ The child environment contains only PATH, HOME, USER, LOGNAME, LANG, LC_*, TERM,
 TMPDIR, VIRTUAL_ENV, PYTHONDONTWRITEBYTECODE, CI, and NO_COLOR.
 Remaining process group members are killed after parent exit or timeout, and
 survivors make the check fail. A descendant calling `setsid()` can escape the
-group kill. A sandbox PR follows.
+group kill, while retaining sandbox restrictions.
+**Sandbox.** `LLM_ROUTER_APPLY_SANDBOX=auto` (default) contains only the check
+and its descendants when available, and explicitly reports an unsandboxed fallback.
+`require` refuses the check when containment is unavailable; `off` disables it.
+`auto` preserves today's behaviour for Claude-only edits; the local-repair PR will force `require_sandbox=True`, which overrides `off`. macOS uses sandbox-exec:
+network denied (including Ollama), writes limited to cwd, private per-run TMPDIR,
+and `/dev/null`, `/dev/zero`, `/dev/dtracehelper`, `/dev/urandom`, `/dev/random`
+(no tty devices); home data reads limited to cwd and executable-derived
+runtime directories, discovered from paths and metadata without execution.
+Runtime grants must be real directories and cannot equal or contain the user's
+home or be `/`, `/Users`, or `/home`. Its `(allow default)` base is a known limit needed for pytest
+on current macOS: reads outside the user's home remain allowed. The short
+Mach lookup and executable denylists are best-effort broker restrictions.
+**Linux.** Bubblewrap (`bwrap`) is required, with isolated namespaces (including
+network), read-only system/runtime mounts, writable cwd and private temporary
+storage. It refuses sockets in cwd and scans at most 50,000 entries without
+following symlinks.
+
+Ubuntu 23.10+/24.04 restricts unprivileged user namespaces through AppArmor.
+Install bubblewrap and the following profile (for `/usr/bin/bwrap`), then load it:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y bubblewrap
+sudo tee /etc/apparmor.d/bwrap > /dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
+
+Without this profile, stock Ubuntu 24.04 with
+`kernel.apparmor_restrict_unprivileged_userns=1` can fail the real bwrap probe
+with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. The probe
+treats that as `SandboxUnavailable`: `require` refuses to run the check;
+`auto` runs it unsandboxed and reports the probe error (Claude-only edits).
+Install and load the profile above to enable containment; do not disable the
+system-wide AppArmor restriction.
+
+Neither backend contains edit application or host-side Git, guarantees resource
+limits, nor fixes the macOS `setsid()` escape from process-group teardown.
+Executable installations must be trusted; this is not a VM boundary.
+
 After rejection or a failed check, make remaining changes with your edit tools.
 
 ---

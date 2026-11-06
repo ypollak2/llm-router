@@ -99,6 +99,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # cheapness, which is what the old unbounded ratio effectively did.
     "LLM_ROUTER_ANSWER_VALUE_USD": ("llm_router", "telemetry.py", 1),
     # Program-only batch editing beta; off by default, read on each call.
+    # auto preserves today's behaviour for Claude-only edits; the local-repair PR will force require_sandbox=True.
+    "LLM_ROUTER_APPLY_SANDBOX": ("llm_router", "apply_tool.py", 1),
     "LLM_ROUTER_APPLY": ("llm_router", "apply_tool.py", 1),
     # T-15: explicit override for the HOST config dir (~/.claude). Distinct from
     # LLM_ROUTER_HOME, which covers llm-router's own state.
@@ -588,6 +590,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "APPDATA": ("platform", "commands/doctor.py", 4),
     "CDPATH": ("platform", "write_policy.py", 1),
     "NO_COLOR": ("platform", "commands/budget.py", 16),
+    "HOME": ("platform", "check_sandbox.py", 1),
     "PATH": ("platform", "statusline_tick.py", 1),
     "XDG_CONFIG_HOME": ("platform", "install_hooks.py", 1),
     # ── read only via pydantic RouterConfig (field name == env name, case-insensitive);

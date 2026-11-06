@@ -245,40 +245,39 @@ def test_allowlist_refuses(repo, monkeypatch, command):
     assert argv is None and reason.startswith("Check not run:"), (argv, reason)
 
 
-def pid_dead(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    return False
-
-
 @pytest.mark.parametrize("parent_exits", [False, True])
 def test_kills_started_descendant(repo, monkeypatch, parent_exits):
-    ready = repo / "child.pid"
-    child = f"import os, time; from pathlib import Path; Path({str(ready)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    ready = repo / "child.ready"
+    heartbeat = repo / "child.heartbeat"
+    child = ("import time; from pathlib import Path\n"
+             f"heartbeat = Path({str(heartbeat)!r})\n"
+             "heartbeat.touch()\n"
+             f"Path({str(ready)!r}).write_text('ready')\n"
+             "deadline = time.monotonic() + 60\n"
+             "while time.monotonic() < deadline:\n"
+             "    heartbeat.touch()\n"
+             "    time.sleep(0.1)\n")
     runner(repo, monkeypatch, f"import subprocess, sys, time\nfrom pathlib import Path\nsubprocess.Popen([sys.executable, '-c', {child!r}])\ndeadline = time.monotonic() + 10\nwhile not Path({str(ready)!r}).exists():\n    if time.monotonic() > deadline: raise RuntimeError('child never ready')\n    time.sleep(0.01)\n" + ("" if parent_exits else "time.sleep(60)\n"))
     monkeypatch.setattr(apply, "_CHECK_TIMEOUT", 12.0 if parent_exits else 5.0)
     result = call(repo, check="pytest")
     assert ready.exists(), result
-    pid = int(ready.read_text())
-    try:
+    if parent_exits and "sandboxed (Linux bubblewrap)" in result:
+        # bwrap's PID namespace dies with its init, taking the child with it:
+        # nothing survives to report, which is the stronger outcome.
+        assert result.startswith("APPLIED_AND_PASSED"), result
+    else:
         assert result.startswith("APPLIED_CHECK_FAILED"), result
         assert "still alive" in result and "process group killed" in result
-        deadline = time.monotonic() + 10
-        while not pid_dead(pid) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert pid_dead(pid)
         assert rows()[0]["check_rc"] == -9
-    finally:
-        if not pid_dead(pid):
-            os.kill(pid, 9)
+    modified = heartbeat.stat().st_mtime_ns
+    time.sleep(0.5)
+    assert heartbeat.stat().st_mtime_ns == modified
 
 
 def test_ledger_schema(repo):
     call(repo)
     row = rows()[0]
-    assert set(row) == {"ts", "status", "n_blocks", "n_files", "check_ran", "check_rc", "duration_s", "source"}
+    assert set(row) == {"ts", "status", "n_blocks", "n_files", "check_ran", "check_rc", "sandboxed", "duration_s", "source"}
     assert row["status"] == "APPLIED_NOT_CHECKED" and row["source"] == "program"
     assert row["n_files"] == row["n_blocks"] == 1
     assert row["ts"].endswith("+00:00") and row["duration_s"] >= 0
@@ -515,7 +514,7 @@ def test_attached_runner_overrides_not_run(repo, monkeypatch, command):
 def test_harmless_grouped_switches_still_run(repo, monkeypatch, command):
     runner(repo, monkeypatch, "")
     seen = []
-    monkeypatch.setattr(apply, "_run_check", lambda argv, root: (seen.append(argv), (0, "ok"))[1])
+    monkeypatch.setattr(apply, "_run_check", lambda argv, root: (seen.append(argv), (0, "ok", False))[1])
     result = call(repo, check=command)
     assert seen, result
     assert result.startswith("APPLIED_AND_PASSED")

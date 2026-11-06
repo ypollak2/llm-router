@@ -1,10 +1,10 @@
 """Model-free, opt-in batch edits and a bounded argv-only check.
 
-Requires a trusted repository and trusted PATH executables; checks are unsandboxed.
+Requires trusted PATH executables; check containment is configurable.
 Concurrent modification by another process of the same user is out of scope:
 that user can already write the repository. Post-write path checks still reject
 relocation outside cwd. A descendant calling setsid() can escape group cleanup;
-a sandbox PR follows.
+sandbox restrictions remain inherited by those descendants.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
+from llm_router import check_sandbox
 from llm_router.edit import EditInstruction, check_syntax
 from llm_router.paths import llm_router_home, private_opener
 
@@ -357,14 +358,41 @@ def _check_argv(command: str, root: Path | None = None) -> tuple[list[str] | Non
     return argv, ""
 
 
-def _run_check(argv: list[str], root: Path) -> tuple[int, str]:
+def _run_check(argv: list[str], root: Path, *, require_sandbox: bool = False) -> tuple[int, str, bool]:
+    mode = os.environ.get("LLM_ROUTER_APPLY_SANDBOX", "auto").strip().lower()
+    if mode not in {"auto", "require", "off"}:
+        raise check_sandbox.SandboxUnavailable(f"invalid LLM_ROUTER_APPLY_SANDBOX: {mode}")
+    sandboxed = False
+    cleanup = None
+    reason = "disabled by LLM_ROUTER_APPLY_SANDBOX=off"
+    if require_sandbox or mode != "off":
+        try:
+            argv, cleanup = check_sandbox.wrap(argv, root)
+            sandboxed = True
+        except check_sandbox.SandboxUnavailable as exc:
+            if require_sandbox or mode == "require":
+                raise
+            reason = str(exc)
+    label = (f"check: sandboxed ({check_sandbox.backend_name()})" if sandboxed
+             else f"check: NOT sandboxed ({reason})")
+    try:
+        rc, tail = _execute_check(argv, root)
+        return rc, label + "\n" + tail, sandboxed
+    except OSError as exc:
+        if sandboxed:
+            raise check_sandbox.SandboxUnavailable(f"sandbox failed to start: {exc}") from exc
+        raise
+    finally:
+        if cleanup is not None:
+            cleanup()
+
+
+def _execute_check(argv: list[str], root: Path) -> tuple[int, str]:
     # A temporary file avoids retaining unbounded runner output in memory.
-    allowed_env = {"PATH", "HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR",
-                   "VIRTUAL_ENV", "PYTHONDONTWRITEBYTECODE", "CI", "NO_COLOR"}
-    env = {k: v for k, v in os.environ.items() if k in allowed_env or k.startswith("LC_")}
+    env = check_sandbox.environment()
     with tempfile.TemporaryFile() as output:
         process = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL,
-                                   stdout=output, stderr=subprocess.STDOUT, start_new_session=True, env=env)
+                                   stdout=output, stderr=subprocess.STDOUT, start_new_session=True, env=env, close_fds=True)
         timed_out = False
         try:
             process.wait(timeout=_CHECK_TIMEOUT)
@@ -403,6 +431,7 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
     status = "REJECTED"
     n_blocks = n_files = 0
     check_ran = False
+    sandboxed = False
     check_rc = None
     details: list[str] = []
     enabled = os.environ.get("LLM_ROUTER_APPLY", "").strip().lower() in {"on", "1", "true", "yes"}
@@ -446,17 +475,21 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
                         details.append(reason)
                     else:
                         try:
-                            check_rc, tail = _run_check(argv, root)
+                            check_rc, tail, sandboxed = _run_check(argv, root)
                             check_ran = True
                             status = "APPLIED_AND_PASSED" if check_rc == 0 else "APPLIED_CHECK_FAILED"
-                            details.append(f"Check rc={check_rc}\n{tail}")
+                            label, _, output = tail.partition("\n")
+                            details.append(label)
+                            details.append(f"Check rc={check_rc}\n{output}")
+                        except check_sandbox.SandboxUnavailable as exc:
+                            details.append(f"check: NOT sandboxed ({exc}); Check not run: sandbox required or unavailable.")
                         except OSError as exc:
                             details.append(f"Check not run: {exc}")
     except Exception as exc:
         details.append(str(exc))
     finally:
         row = dict(ts=datetime.now(timezone.utc).isoformat(), status=status, n_blocks=n_blocks,
-                   n_files=n_files, check_ran=check_ran, check_rc=check_rc,
+                   n_files=n_files, check_ran=check_ran, check_rc=check_rc, sandboxed=sandboxed,
                    duration_s=round(time.monotonic() - started, 6), source="program")
         if ledger is not None:
             try:
