@@ -223,10 +223,26 @@ def test_disallowed_check_does_not_run(repo, monkeypatch, command):
     assert not rows()[0]["check_ran"]
 
 
-@pytest.mark.parametrize("command", ["pytest -q", "python -m pytest -q", "python3 -m pytest", "ruff check .", "mypy src", "npm test -- --run", "pnpm test", "go test ./pkg", "cargo test", "pytest -q tests/test_x.py -k name"])
+@pytest.mark.parametrize("command", ["pytest -q", "python -m pytest -q", "python3 -m pytest", "ruff check .", "mypy src", "pnpm test", "go test ./pkg", "go test -run TestX -count=1 ./...", "cargo test", "pytest -q tests/test_x.py -k name", "pytest -qx tests/test_x.py::test_a", "pytest --tb=short -m 'not slow'"])
 def test_allowlist(repo, monkeypatch, command):
+    for path in ("src", "pkg", "tests"):
+        (repo / path).mkdir(exist_ok=True)
+    (repo / "tests/test_x.py").write_text("def test_a():\n    pass\n")
     monkeypatch.setattr(apply.shutil, "which", lambda name: "/trusted/bin/" + name)
     assert apply._check_argv(command, repo)[0] is not None
+
+
+# Round-4 review bypasses: each made a runner read config/plugins/files from outside the repo.
+@pytest.mark.parametrize("command", ["pytest @/tmp/evil.args", "pytest @args.txt", "python -m pytest --pyargs requests",
+    "pytest --inifile=external.ini", "mypy @/tmp/evil.args", "go test -modfile=x.mod", "go test '-gcflags=all=-importcfg /tmp/e'",
+    "npm test -- --run", "pytest -k -pevil", "pytest missing_dir", "pytest link_out", "ruff check --config x.toml"])
+def test_allowlist_refuses(repo, monkeypatch, command):
+    (repo / "external.ini").write_text("[pytest]\n")
+    (repo / "args.txt").write_text("-p evil\n")
+    (repo / "link_out").symlink_to("/tmp")
+    monkeypatch.setattr(apply.shutil, "which", lambda name: "/trusted/bin/" + name)
+    argv, reason = apply._check_argv(command, repo)
+    assert argv is None and reason.startswith("Check not run:"), (argv, reason)
 
 
 def pid_dead(pid):

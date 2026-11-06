@@ -285,9 +285,12 @@ and rolls back the batch. Backups are retained if any restoration fails.
 
 The check requires a trusted repository and runs its own test code unsandboxed. Executables must be allowlisted bare names found on the
 inherited PATH, or `.venv/bin/python`, `venv/bin/python`, `.venv/bin/pytest`,
-`venv/bin/pytest` resolving inside cwd. Arguments with absolute paths, `..`, or
-runner configuration/location flags (including attached forms) are refused;
-values and positional arguments starting with `~` are also refused.
+`venv/bin/pytest` resolving inside cwd. Arguments are an allowlist: a few
+harmless switches per runner (pytest `-q -v -x -s -l`, `--tb=short|line|no`,
+`-k`/`-m`/`--maxfail` with plain values; go test `-v -short -race -run -count`;
+ruff `check format --check --diff --fix`; npm/pnpm test take none) plus paths
+that resolve inside cwd. Anything else (config files, plugins, `@argfiles`,
+`--pyargs`, compiler flags) is not run; run that check yourself.
 The child environment contains only PATH, HOME, USER, LOGNAME, LANG, LC_*, TERM,
 TMPDIR, VIRTUAL_ENV, PYTHONDONTWRITEBYTECODE, CI, and NO_COLOR.
 Remaining process group members are killed after parent exit or timeout, and

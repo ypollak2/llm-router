@@ -302,31 +302,55 @@ def _check_argv(command: str, root: Path | None = None) -> tuple[list[str] | Non
     allowed = name in {"pytest", "ruff", "mypy"}
     allowed |= name in {"python", "python3"} and argv[1:3] == ["-m", "pytest"]
     allowed |= argv[:2] in [["npm", "test"], ["pnpm", "test"], ["go", "test"], ["cargo", "test"]]
-    forbidden = ("-p", "-c", "-C", "-o", "--override-ini", "--rootdir",
-                 "--confcutdir", "--config", "--config-file", "--prefix",
-                 "--manifest-path", "--import-mode", "--script-shell", "-exec",
-                 "--exec", "-toolexec", "--toolexec", "--basetemp")
+    # Allowlist, not denylist: three review rounds each found new ways to make a
+    # runner read config, plugins or files from outside the repo (-qc, @argfile,
+    # --pyargs, -modfile, -gcflags). Only these switches and in-repo paths pass.
+    if name in {"pytest", "python", "python3"}:
+        lead, switches, valued = 0 if name == "pytest" else 2, {
+            "-q", "-qq", "-v", "-vv", "-x", "-s", "-l", "--lf", "--ff", "--sw",
+            "--tb=short", "--tb=line", "--tb=no", "--no-header"}, {"-k", "-m", "--maxfail"}
+    elif name == "ruff":
+        lead, switches, valued = 0, {"check", "format", "--check", "--diff", "--fix", "-q", "--quiet"}, set()
+    elif name == "mypy":
+        lead, switches, valued = 0, {"--strict", "--no-incremental"}, set()
+    elif argv[:2] == ["go", "test"]:
+        lead, switches, valued = 1, {"-v", "-short", "-race"}, {"-run", "-count"}
+    elif argv[:2] == ["cargo", "test"]:
+        lead, switches, valued = 1, {"-q", "--quiet"}, set()
+    else:  # npm test / pnpm test: no extra arguments
+        lead, switches, valued = 1, set(), set()
 
-    # Go spells long flags with one dash (-run, -count); every other runner treats
-    # "-qc x" as grouped short flags, so a group may only hold harmless switches.
-    grouped_ok = set("qvxsl")
+    def inside(arg):
+        if arg.startswith(("-", "@", "~")) or os.path.isabs(arg) or ".." in Path(arg).parts:
+            return False
+        node = arg.split("::", 1)[0]  # pytest node ids: path::test
+        if go_style and node in {"./...", "."}:
+            return True
+        target = (root / node).resolve()
+        return target.is_relative_to(root) and target.exists()
+
     go_style = argv[:2] == ["go", "test"]
-
-    def unsafe(arg):
-        option = arg.split("=", 1)[0]
-        if option.startswith(forbidden):
-            return True
-        if (not go_style and arg.startswith("-") and not arg.startswith("--")
-                and len(arg) > 2 and not set(arg[1:]) <= grouped_ok):
-            return True
-        values = arg.split("=")
-        if arg.startswith("-") and not arg.startswith("--") and len(arg) > 2:
-            values.append(arg[2:])
-        return any(os.path.isabs(value) or ".." in value or value.startswith("~")
-                   for value in values)
-
-    if any(unsafe(arg) for arg in argv[1:]):
-        return None, "Check not run: forbidden runner argument."
+    lead_runner_is_pytest = name in {"pytest", "python", "python3"}
+    rest = argv[1 + lead:]
+    index = 0
+    while index < len(rest):
+        arg = rest[index]
+        option, _, value = arg.partition("=")
+        harmless_group = (lead_runner_is_pytest and arg.startswith("-") and not arg.startswith("--")
+                          and len(arg) > 1 and set(arg[1:]) <= set("qvxsl"))
+        if arg in switches or harmless_group:
+            index += 1
+            continue
+        if option in valued:
+            text = value if value else (rest[index + 1] if index + 1 < len(rest) else None)
+            if text is None or text.startswith(("-", "@")) or not all(
+                    char.isalnum() or char in " _.:[]()|^$*+?-" for char in text):
+                return None, f"Check not run: argument not allowed: {arg}"
+            index += 1 if value else 2
+            continue
+        if not inside(arg):
+            return None, f"Check not run: argument not allowed: {arg}"
+        index += 1
     if not allowed or not executable:
         return None, "Check not run: command is not a known test/lint runner or trusted executable."
     argv[0] = executable
