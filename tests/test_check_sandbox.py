@@ -622,3 +622,28 @@ def test_homebrew_formula_prefix_is_a_runtime(tmp_path):
     assert not sandbox._is_runtime_prefix(formula)
     (stdlib / "os.py").write_text("")
     assert sandbox._is_runtime_prefix(formula)
+
+
+def test_symlink_hops_cover_uv_minor_version_link(tmp_path):
+    store = tmp_path / "uv/python"
+    real = store / "cpython-3.12.16-linux"
+    (real / "bin").mkdir(parents=True)
+    (real / "bin/python3.12").write_bytes(b"binary")
+    (store / "cpython-3.12-linux").symlink_to(real)
+    venv = tmp_path / "proj/.venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/python").symlink_to(store / "cpython-3.12-linux/bin/python3.12")
+    (venv / "pyvenv.cfg").write_text(f"home = {store / 'cpython-3.12-linux/bin'}\n")
+    links = {link for path in sandbox._exec_paths(venv / "bin/python") for link, _ in sandbox._symlink_hops(path)}
+    assert str(venv / "bin/python") in links
+    assert str(store / "cpython-3.12-linux") in links
+    # Positive control: a plain file has no hops of its own.
+    assert not any(link.startswith(str(real)) for path in [real / "bin/python3.12"]
+                   for link, _ in sandbox._symlink_hops(path))
+
+
+def test_symlink_hops_refuse_loops(tmp_path):
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    with pytest.raises(sandbox.SandboxUnavailable, match="too many symlinks"):
+        sandbox._symlink_hops(tmp_path / "a/python")

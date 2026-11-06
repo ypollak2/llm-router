@@ -154,6 +154,45 @@ def _runtime_dirs(executable, root=None):
     return sorted(dirs)
 
 
+def _symlink_hops(path):
+    """Every symlink met while resolving *path*, as (link path, raw target), in resolution order."""
+    hops, pending, done = [], list(Path(os.path.abspath(path)).parts[1:]), Path("/")
+    while pending:
+        if len(hops) > 40:
+            raise SandboxUnavailable(f"too many symlinks resolving {path}")
+        current = done / pending.pop(0)
+        if current.is_symlink():
+            target = os.readlink(current)
+            hops.append((str(current), target))
+            base = Path(target) if os.path.isabs(target) else current.parent / target
+            pending = list(Path(os.path.normpath(base)).parts[1:]) + pending
+            done = Path("/")
+        else:
+            done = current
+    return hops
+
+
+def _exec_paths(executable):
+    """Paths the runtime opens by their unresolved name: the executable, its shebang
+    interpreter and any venv `home`. Linux must recreate their symlinks inside bwrap."""
+    paths = [Path(os.path.abspath(executable))]
+    try:
+        with open(paths[0], "rb") as stream:
+            first = stream.readline(4096).decode("utf-8", errors="replace").strip()
+    except OSError:
+        first = ""
+    if first.startswith("#!/") and Path(first[2:].split()[0]).name != "env":
+        paths.append(Path(first[2:].split()[0]))
+    for interpreter in list(paths):
+        config = interpreter.parent.parent / "pyvenv.cfg"
+        if config.is_file():
+            for line in config.read_text().splitlines():
+                key, sep, value = line.partition("=")
+                if sep and key.strip() == "home" and value.strip():
+                    paths.append(Path(value.strip()))
+    return paths
+
+
 def _scan_root_sockets(root):
     """Refuse host pathname sockets, bounding the walk without following links."""
     pending = [root]
@@ -248,6 +287,16 @@ def wrap(argv, root):
             for path in sorted(mounts):
                 if Path(path).exists():
                     command += ["--ro-bind", _path(path), path]
+            # Symlinks on the way to the interpreter (uv: cpython-3.12-... -> cpython-3.12.16-...)
+            # are not inside any mount; recreate them. A link grants no read access by itself.
+            visible = [Path(m) for m in (*mounts, root, scratch)]
+            made = set()
+            for exec_path in _exec_paths(argv[0]):
+                for link, target in _symlink_hops(exec_path):
+                    if link in made or any(_inside(Path(link), m) for m in visible):
+                        continue
+                    made.add(link)
+                    command += ["--symlink", target, link]
             command += ["--dev", "/dev", "--proc", "/proc", "--bind", root, root,
                         "--bind", scratch, scratch, "--chdir", root]
             for key, value in env.items():
