@@ -118,7 +118,7 @@ def test_heuristic_weak_downgrades_hard_to_soft(tmp_path):
         {
             "session_id": session_id,
             "tool_name": "Bash",
-            "tool_input": {"command": "echo hi"},
+            "tool_input": {"command": "echo hi > out.txt"},  # generative: D-396 exempts read-only Bash
         },
         home=tmp_path,
         extra_env={"LLM_ROUTER_ENFORCE": "hard"},

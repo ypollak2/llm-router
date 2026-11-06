@@ -531,8 +531,8 @@ def test_write_bash_still_blocked_for_code_tasks(tmp_path, command):
     )
 
 
-def test_readonly_bash_blocked_for_qa_tasks(tmp_path):
-    """Q&A tasks must route — even read-only Bash bypasses the cheap model."""
+def test_readonly_bash_allowed_for_qa_tasks(tmp_path):
+    """D-396: Q&A may need local context before it can be routed."""
     session_id = "sess-bash-qa"
     _write_pending(tmp_path, session_id, task_type="query", complexity="simple",
                    expected_tool="llm_query")
@@ -548,8 +548,7 @@ def test_readonly_bash_blocked_for_qa_tasks(tmp_path):
     )
 
     assert result.returncode == 0
-    out = json.loads(result.stdout)
-    assert out["decision"] == "block"
+    assert not result.stdout.strip(), result.stdout
 
 
 # ── Loop detection → auto-pivot ───────────────────────────────────────────────
@@ -730,10 +729,12 @@ def test_hard_mode_still_blocks_pure_qa(tmp_path):
         original_prompt="what is the capital of France",
     )
 
+    # D-396: read-only Bash (echo hello) is inspection and passes; a generative
+    # command still pays the hold, so routing fires where it should.
     result = _run_hook(
         ENFORCE_ROUTE_HOOK,
         {"session_id": session_id, "tool_name": "Bash",
-         "tool_input": {"command": "echo hello"}},
+         "tool_input": {"command": "echo hello > answer.txt"}},
         home=tmp_path,
         extra_env={"LLM_ROUTER_ENFORCE": "hard"},
     )

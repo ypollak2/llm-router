@@ -168,7 +168,7 @@ def test_no_text_reaches_the_ledger_or_the_log(tmp_path):
     secret = "UNIQUECANARYPROMPTTEXT77"     # one word: it must not make the probe look like a quote of the owner
     _seed(tmp_path, original_prompt=OWNER + " " + secret)
     _hook(tmp_path, "mcp__llm_router__llm", {"prompt": "Reply OK " + secret, "task": "query"})
-    _hook(tmp_path, "Bash", {"command": "echo " + secret})
+    _hook(tmp_path, "Bash", {"command": "echo " + secret + " > out.txt"})  # generative: D-396 exempts read-only Bash
     blob = (tmp_path / ".llm-router" / "hold_events.jsonl").read_text() + _log(tmp_path)
     assert secret not in blob
     # the check had something to check: both the call and the refusal were recorded

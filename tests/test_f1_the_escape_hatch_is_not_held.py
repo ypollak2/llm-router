@@ -247,10 +247,9 @@ def test_set_enforce_is_never_denied_end_to_end(tmp_path, mode: str) -> None:
 def test_the_hook_still_denies_what_it_should(tmp_path) -> None:
     """Anti-vacuity: if the hook denies nothing, the test above proves nothing.
 
-    A QA task type holds even read-only Bash by design
-    (test_readonly_bash_blocked_for_qa_tasks), so this must be denied.
+    A prose QA task still holds mutating Bash, so this must be denied.
     """
-    r = _run_hook(tmp_path, "cat src/llm_router/router.py", "research", "hard")
+    r = _run_hook(tmp_path, "cat src/llm_router/router.py > copy.txt", "research", "hard")
     assert '"deny"' in r.stdout, (
         "the hook denied nothing at all, so the exemption test above is vacuous.\n"
         f"stdout={r.stdout[:300]} stderr={r.stderr[:300]}"
