@@ -230,12 +230,10 @@ def test_session_end_paid_rows_exclude_cache(tmp_path, monkeypatch):
     assert [r["provider"] for r in free] == ["ollama"]
 
 
-def test_share_card_and_digest_exclude_cache(tmp_path):
+def test_digest_excludes_cache(tmp_path):
     import asyncio
 
-    from llm_router.commands.share import _gather_stats
-    stats = _gather_stats(str(_usage_db(tmp_path)))
-    assert (stats.total_calls, stats.paid_calls, stats.free_calls) == (2, 1, 1)
+    _usage_db(tmp_path)        # seeds tmp_path/usage.db: 1 paid + 1 free + 1 cache row
 
     from llm_router import digest
     from llm_router.cost import _get_db  # noqa: F401  (digest reads through it)

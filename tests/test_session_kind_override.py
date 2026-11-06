@@ -179,7 +179,7 @@ def test_ns_d1_resolve_the_override_through_the_scorecard(monkeypatch):
               "ts": NOW - 10} for _ in range(60)]
     units += [{"session_id": OTHER, "kind": kind0, "outcome": ns.OUTCOME_USED, "lever": None,
                "ts": NOW - 10} for _ in range(55)]
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(units))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False, **_: iter(units))
     session_kind.tag_session(SID, "/Users/someone/Projects/app", env={})
     session_kind.tag_session(OTHER, "/Users/someone/Projects/app", env={})
     assert kpi.compute_scorecard(days=7, now=NOW)["joins"]["counted"] == 115

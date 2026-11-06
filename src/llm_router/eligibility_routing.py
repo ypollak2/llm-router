@@ -651,6 +651,93 @@ def passed_lane_available(
         return False
 
 
+#: Rank of the "closest to routable" gap across the enabled models: a digest that cannot be verified is the
+#: nearest to fixing (Ollama back up, or a re-check), a settings mismatch the farthest of the three.
+_GAP_RANK = {"none": 0, "settings": 1, "stale": 2, "unverified": 3}
+
+
+def _stored_lane_gap(model: str, job: str, digests: dict[str, str], now: float, eligibility: Path | None) -> str:
+    """No usable lane came back, but a passed local-check lane may still be stored for the model: the store skips it
+    when the installed digest differs from the one that passed (``unverified``) or when it is past its 30 days
+    with no digest to check (``stale``). Anything else (nothing stored, not passed) is ``none``."""
+    from llm_router.local_check import routing as lr
+    from llm_router.resolver import eligibility_store as ES
+    try:
+        data = json.loads(Path(eligibility or ES.eligibility_path()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "none"
+    for key in lr.candidates(model):
+        entry = data.get(key) if isinstance(data, dict) else None
+        task = entry.get(ES._LOCAL_KEY) if isinstance(entry, dict) else None
+        stored = task.get(job) if isinstance(task, dict) else None
+        if not (isinstance(stored, dict) and stored.get("grade") == "passed" and stored.get("source") == "local_check"):
+            continue
+        cur, was = digests.get(key), stored.get("model_digest")
+        if isinstance(cur, str) and cur and isinstance(was, str) and was and cur != was:
+            return "unverified"
+        return "stale" if not ES.lane_is_fresh(stored, cur, now) else "none"
+    return "none"
+
+
+def _lane_gap(model: str, job: str, input_len: int, digests, ctx_for, think, eligibility, routing, now: float) -> str:
+    """Why enabled model ``model`` is not routable for ``job``: ``unverified`` | ``stale`` | ``settings`` | ``none``."""
+    from llm_router.local_check import display, routing as lr
+    from llm_router.resolver.inventory import is_ollama_cloud_model
+    if is_ollama_cloud_model(f"ollama/{model}") or not lr.is_enabled(model, job, path=routing) or display.cached_remote(model):
+        return "none"
+    e = lr.entry(model, job, path=routing)
+    lane, source, withheld = _passed_lane(model, job, digests, now, eligibility, (e or {}).get("source"))
+    if withheld == "digest_unverified":
+        return "unverified"
+    if withheld == "local_lane_stale":
+        return "stale"
+    if lane is None:
+        return _stored_lane_gap(model, job, digests, now, eligibility)
+    use_think = _route_time_think() if think is None else think
+    cause, limit = lane_settings_blocker(lane, source, (ctx_for or _route_time_ctx)(f"ollama/{model}"), use_think)
+    return "settings" if cause or limit is None or input_len > limit else "none"
+
+
+def passed_lane_diagnosis(
+    job: str, input_len: int, now: float, *, digests: dict[str, str] | None = None, ctx_for: Any = None,
+    think: bool | None = None, eligibility: Path | None = None, routing: Path | None = None,
+) -> str:
+    """Why :func:`passed_lane_available` is (or is not) True for ``job``; read-only, same guards, nothing weakened.
+
+    * ``ok``         some enabled model has a lane ``prefer_passed`` would move to the front;
+    * ``unverified`` a lane is enabled and passed but its model digest could not be verified: the inventory
+      cache is missing or stale (Ollama was not reachable for ``/api/tags`` when it was last refreshed), or the
+      installed digest no longer equals the digest that passed;
+    * ``stale``      a lane is enabled but only a pre-registered lane stands in for its stale local-check pass;
+    * ``settings``   a lane is enabled, passed and verified but the route-time settings or the input size keep it
+      from being used;
+    * ``none``       no enabled model has a passed lane for the job (never enabled or never passed), and also
+      the answer on any error (the caller then words the message as it always did).
+
+    With several enabled models the one nearest to usable wins (``unverified`` > ``stale`` > ``settings`` >
+    ``none``). Never raises.
+    """
+    try:
+        from llm_router.local_check import routing as lr
+        if _opted_out() or not isinstance(input_len, int) or input_len < 0:
+            return "none"
+        if digests is None:
+            from llm_router.local_check import display
+            digests = display.inventory()[1]
+        best = "none"
+        for model in sorted(lr._read(routing)):
+            if _routable(f"ollama/{model}", job, input_len, digests, ctx_for, think, eligibility, routing, now):
+                return "ok"
+            gap = _lane_gap(model, job, input_len, digests, ctx_for, think, eligibility, routing, now)
+            if _GAP_RANK[gap] > _GAP_RANK[best]:
+                best = gap
+        return best
+    except Exception as exc:  # noqa: BLE001 -- a diagnosis only words a message; it must never break the job
+        from llm_router import failopen
+        failopen.record("CHZ-FO-ELIGIBILITY-PASSED-DIAGNOSIS", exc)
+        return "none"
+
+
 def settings_notices(*, digests: dict[str, str] | None = None, ctx_for: Any = None, think: bool | None = None,
                      eligibility: Path | None = None, routing: Path | None = None, now: float | None = None) -> list[str]:
     """``doctor`` lines for enabled, passed lanes that route-time settings keep from being preferred. Never raises."""

@@ -178,8 +178,13 @@ def test_invalid_answers_are_parse_errors_with_no_decision(body):
     assert v.ms == 5.0
 
 
-def test_a_tie_for_the_maximum_is_invalid():
-    assert dc.parse_answer(_answer(0.45, 0.45, 0.10, choice="haiku")).source == "parse_error"
+def test_a_tie_for_the_maximum_is_a_verdict_at_the_higher_tier():
+    # CLS-TIE-1 (2026-11-04): this used to pin the opposite. The endpoint quantises, so exact ties at p_max < 0.5
+    # are common (3 of 6 replayed parse_error prompts); refusing them cost 93 of 2,417 7-day proxy rows.
+    v = dc.parse_answer(_answer(0.45, 0.45, 0.10, choice="haiku"))
+    assert (v.source, v.tier, v.confidence) == ("llm", "sonnet", 0.45)
+    # a choice outside the tied set is still not an argmax
+    assert dc.parse_answer(_answer(0.45, 0.45, 0.10, choice="opus")).source == "parse_error"
 
 
 def test_sum_tolerance_is_two_percent():

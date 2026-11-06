@@ -23,7 +23,6 @@ import os
 import threading
 import time
 import uuid
-from collections import deque
 from pathlib import Path
 from typing import Iterable
 
@@ -241,15 +240,25 @@ def doctor_lines(*, path: Path | None = None) -> list[str]:
 
 
 def _recent_outcomes(model: str, job: str, since: float | None, ledger: Path | None) -> list[str]:
-    """Outcomes of the last DEMOTE_WINDOW LOCAL attempts for (model, job) at or after ``since``.
+    """Verdicts (``"ok"`` / ``"failed"``) of the last DEMOTE_WINDOW text JOBS for (model, job) at or after ``since``.
 
-    LC-8b: read from the per-attempt local sidecar (``text_job_ledger.record_local_attempts``), not the
-    final-row ledger, so a local failure rescued by a later chain entry still counts.
+    D-367: the unit is a JOB (one ``llm_text_job`` call, its rows tied by ``jid``), not an attempt. A job is
+    ``ok`` when any of its rows is ``ok`` and ``failed`` when every try was rejected or errored. It is not
+    counted at all (neither ok nor failed) when it has an ``infra`` row and no ``ok`` row (a queueing timeout,
+    a dead connection, a cancelled or unfinished job: it did not fail on quality), or when its latest row says
+    ``more`` (further tries follow: no verdict yet). A failed model's row marked ``acc`` (another model served
+    and the call was accepted) makes the job ``ok``: a rescued failure never fails an accepted job. A row with
+    no ``jid`` (written before D-367) is its own
+    one-try job: ``ok`` is ok, ``rejected``/``error`` failed, ``infra`` ignored. Jobs are ordered by their
+    latest row. LC-8b: read from the per-attempt local sidecar (``text_job_ledger.record_local_attempts``),
+    not the final-row ledger, so a local failure rescued by a later chain entry still counts.
     """
     from llm_router import text_job_ledger as L
     target = Path(ledger or paths.state_path(L.LOCAL_ATTEMPTS_FILENAME))
     want = norm_model(model)
-    rows: deque[str] = deque(maxlen=DEMOTE_WINDOW)
+    done: list[tuple[int, str]] = []          # (row position, verdict) of old-format rows
+    groups: dict[str, dict] = {}              # jid -> state of that job's rows
+    pos = 0
     # Rotation can leave only a few rows (or no live file) in the new generation.
     for candidate in (target.with_name(target.name + ".1"), target):
         try:
@@ -272,16 +281,41 @@ def _recent_outcomes(model: str, job: str, since: float | None, ledger: Path | N
             ts = r.get("ts")
             if since is not None and isinstance(ts, (int, float)) and ts < since:
                 continue
-            rows.append(str(r.get("outcome")))
-    return list(rows)
+            pos += 1
+            outcome = str(r.get("outcome"))
+            jid = r.get("jid")
+            if not isinstance(jid, str) or not jid:
+                if outcome == L.OUTCOME_OK:
+                    done.append((pos, "ok"))
+                elif outcome != L.OUTCOME_INFRA:
+                    done.append((pos, "failed"))
+                continue
+            g = groups.setdefault(jid, {"ok": False, "infra": False, "bad": False, "more": False, "pos": pos})
+            g["pos"], g["more"] = pos, r.get("more") is True
+            if outcome == L.OUTCOME_OK or r.get("acc") is True:
+                g["ok"] = True  # `acc`: a failed model's row of a call that was accepted anyway
+            elif outcome == L.OUTCOME_INFRA:
+                g["infra"] = True
+            else:
+                g["bad"] = True
+    for g in groups.values():
+        if g["ok"]:
+            done.append((g["pos"], "ok"))
+        elif not g["infra"] and not g["more"] and g["bad"]:
+            done.append((g["pos"], "failed"))
+    done.sort(key=lambda x: x[0])
+    return [v for _p, v in done[-DEMOTE_WINDOW:]]
 
 
 def demotion_check(model: str, job: str, *, path: Path | None = None, ledger: Path | None = None) -> bool:
-    """Disable (model, job) when more than 30% of its last 20 LOCAL attempts since enabling failed.
+    """Disable (model, job) when more than 30% of its last 20 LOCAL text jobs since enabling failed.
 
-    A failed attempt is a rejection by the acceptance check or a local error/timeout that a later chain
-    entry rescued (LC-8b). Needs a full window of 20 attempts (so 7 rejected of 20 demotes, 6 does not). Only an enabled lane is
-    considered. Never re-enables. Returns True when it demoted the lane. Best-effort: never raises.
+    D-367: a JOB (one ``llm_text_job`` call) fails only when EVERY try was rejected by the acceptance check or
+    errored locally (LC-8b: including a local error that a later chain entry rescued); a job accepted on a retry
+    is ok. A job that hit infrastructure (``infra``: timeout from queueing, connection failure, server busy,
+    model not loaded, cancelled) is not counted at all; see :func:`_recent_outcomes`. Needs a full window of 20
+    jobs (so 7 failed of 20 demotes, 6 does not). Only an enabled lane is considered. Never re-enables.
+    Returns True when it demoted the lane. Best-effort: never raises.
     """
     try:
         e = entry(model, job, path=path)

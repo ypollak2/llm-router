@@ -271,7 +271,7 @@ _PHASE_NAMES = {
                     "bg_spawn",
                     "emit"},
     "agent-route": {"session_io", "budget_init", "depth", "classify", "codex_delegation",
-                    "direct_subagent", "cli_delegation", "limits", "emit"},
+                    "direct_subagent", "cli_delegation", "limits", "emit", "verdict_wait"},
 }
 
 

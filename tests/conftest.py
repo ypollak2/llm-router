@@ -261,6 +261,9 @@ def _isolate_user_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))
     for _x in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
         monkeypatch.delenv(_x, raising=False)
+    # A developer's own CODEX_HOME would send `codex_meter` (the D-373 reserve) to read their real rollouts: unset, Codex's
+    # directory is `~/.codex` under the per-test HOME above. A test that needs one sets it itself.
+    monkeypatch.delenv("CODEX_HOME", raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -1102,6 +1105,37 @@ def _no_live_agent_loop(monkeypatch):
     attribute would not travel. A test that wants the loop overrides it.
     """
     monkeypatch.setenv("LLM_ROUTER_LOCAL_AGENT_LOOP", "off")
+
+
+_REAL_CODEX_SUPPORTS_IGNORE_RULES = None
+
+
+@pytest.fixture(autouse=True)
+def _codex_exec_help_probe_is_stubbed(request):
+    """No test spawns the ``codex exec --help`` capability probe unless it asks to (BIND-8).
+
+    ``run_codex`` and the agentic Codex adapter refuse to start a CLI that does not list ``--ignore-rules``, and ask the
+    binary once per process (``codex_supports_ignore_rules``). Most tests give ``run_codex`` a fake binary path, a stand-in
+    executable or a patched ``create_subprocess_exec``; none of them is the thing under test here, and a probe of
+    ``/fake/codex`` would read as "unsupported" and refuse the run. So the answer is True for every test but one marked
+    ``real_codex_probe``, which exercises the real probe against a stand-in executable of its own. In-process only:
+    a test that runs the hook as a SUBPROCESS gets the real probe, so its stand-in ``codex`` must answer ``exec --help``
+    (``tests/_bind_support.write_codex_stub`` does).
+
+    It does NOT take ``monkeypatch``: requesting the shared fixture here made it the first requester, so its undo ran after
+    the teardown of fixtures that set up later, and tests that patch ``builtins.__import__`` or ``time.monotonic`` through
+    it broke those teardowns (tests/test_codex_config_guard_slice.py, tests/test_hook_self_timing.py). Each test sets the
+    attribute afresh at setup, from the real function captured once, so a leak cannot carry over.
+    """
+    global _REAL_CODEX_SUPPORTS_IGNORE_RULES
+    from llm_router import codex_agent
+
+    if _REAL_CODEX_SUPPORTS_IGNORE_RULES is None:
+        _REAL_CODEX_SUPPORTS_IGNORE_RULES = codex_agent.codex_supports_ignore_rules
+    real = _REAL_CODEX_SUPPORTS_IGNORE_RULES
+    codex_agent.codex_supports_ignore_rules = real if request.node.get_closest_marker("real_codex_probe") else (lambda binary: True)
+    yield
+    codex_agent.codex_supports_ignore_rules = real
 
 
 @pytest.fixture(autouse=True)

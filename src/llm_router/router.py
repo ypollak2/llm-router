@@ -260,6 +260,34 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _SUBPROCESS_ERROR_CONTENT_CAP = 200
 
 
+def _codex_caller() -> str:
+    """D-373: who the chain tells the Codex meter guard it is. A Codex-served text job is named apart from the rest of the
+    chain so ``codex_meter.jsonl`` shows which of the two was refused."""
+    try:
+        from llm_router import eligibility_routing
+
+        return "text_job" if eligibility_routing._text_job_ctx.get() else "router_chain"
+    except Exception as exc:  # the label only; an unnamed caller is guarded all the same
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-ROUTER-CODEX-CALLER", exc)
+        return "router_chain"
+
+
+def _codex_reserve_refusal() -> str | None:
+    """D-373: the refusal text when the chain may not spend the Codex Plus meter now, else None. Logged by ``codex_meter``.
+    A guard that fails refuses (the meter is unknown, and unknown is not open)."""
+    try:
+        from llm_router import codex_meter
+
+        return codex_meter.refusal(_codex_caller())
+    except Exception as exc:
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-ROUTER-CODEX-RESERVE", exc)
+        return "Codex is reserved for sub-agent delegation (D-373); the reserve guard failed"
+
+
 def _format_subprocess_chain_error(
     agent: str,
     exit_code: int,
@@ -393,6 +421,28 @@ def _note_dropped(before: list[str], after: list[str], reason: str) -> None:
     skip_causes.note_many([m for m in before if m not in kept], reason)
 
 
+def _drop_uninstalled_local(chain: list[str]) -> list[str]:
+    """The installed-model filter the static path gets inside ``profiles.get_model_chain``.
+
+    PHANTOM-LOCAL-1: the session-start dynamic table is a copy of ``ROUTING_TABLE`` filtered by
+    PROVIDER only, built once and kept for the life of the server, so an ``ollama/*`` entry it
+    carried (``ollama/@local`` resolved when the table was built) was tried first on every route
+    after Ollama stopped having that model. STALE-OLLAMA-1 recorded "the dynamic table still does
+    no installed-model filtering" and left it; this is that filter. Fail-open, recorded.
+    """
+    if not any(m.startswith("ollama/") for m in chain):
+        return chain
+    try:
+        from llm_router.discover import filter_ollama_by_installed
+
+        return filter_ollama_by_installed(chain)
+    except Exception as exc:  # noqa: BLE001 - an unfiltered chain beats no chain
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-ROUTER-DYNAMIC-OLLAMA-FILTER", exc)
+        return chain
+
+
 async def _build_and_filter_chain(
     task_type: TaskType,
     profile: RoutingProfile,
@@ -507,7 +557,7 @@ async def _build_and_filter_chain(
         from llm_router.dynamic_routing import get_dynamic_model_chain
         dynamic_chain = get_dynamic_model_chain(profile, task_type)
         if dynamic_chain is not None:
-            models_to_try = dynamic_chain
+            models_to_try = _drop_uninstalled_local(dynamic_chain)
             _chain_key = (profile.value, task_type.value)
             if not dynamic_chain and _chain_key not in _EMPTY_DYNAMIC_CHAIN_WARNED:
                 # F25 / D-170 (3): an empty table entry is taken as the whole chain (the static
@@ -1768,7 +1818,7 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 # ollama/qwen3-coder:30b led the code chain and timed out at 120 s on 21 of the 21
 # routes that tried it; the loaded qwen3.8 answered right after it. Every route paid
 # the full timeout because nothing remembered the one before. A local model that just
-# timed out now goes to the back of the chain for a cooldown. It is moved, not dropped,
+# timed out or hit the MCP attempt cap now goes to the back for a cooldown. It is moved, not dropped,
 # and it leads again when the cooldown ends. The state is per process (the MCP server
 # lives as long as the session).
 _LOCAL_TIMEOUT_COOLDOWN_DEFAULT_S = 600.0
@@ -1790,8 +1840,8 @@ def _is_timeout_error(exc: BaseException) -> bool:
     return isinstance(exc, TimeoutError) or "timeout" in type(exc).__name__.lower()
 
 
-def _note_local_timeout(model: str, exc: BaseException) -> None:
-    if model.startswith("ollama/") and _is_timeout_error(exc):
+def _note_local_timeout(model: str, exc: BaseException | None = None) -> None:
+    if model.startswith("ollama/") and (exc is None or _is_timeout_error(exc)):
         _local_timeout_at[model] = time.monotonic()
 
 
@@ -1800,6 +1850,53 @@ def _local_in_timeout_cooldown(model: str) -> bool:
     t = _local_timeout_at.get(model)
     cooldown = _local_timeout_cooldown_s()
     return t is not None and cooldown > 0 and time.monotonic() - t < cooldown
+
+
+# PHANTOM-LOCAL-1: Ollama answers 404 ``model 'x' not found`` for a model that is not installed. Live
+# 7 days to 2026-11-04T11:00Z (routing_quality.jsonl): 9 of 94 local attempts were that answer for
+# ``ollama/qwen3.8:latest``, 7 as the FIRST attempt of their route and 2 as the fourth. Two
+# costs: the attempt itself, and ``tracker.record_failure("ollama")``, which counts the 404 against the
+# whole provider (two phantoms in a chain bench every installed model behind them). A model Ollama said
+# does not exist is dropped from later chains for a while, like a timeout is (LOCAL-TIMEOUT-1) but not
+# kept at the back: it cannot answer. Same per-process state and 600 s lifetime; it is tried again after
+# that, so a model pulled meanwhile comes back without a restart.
+_LOCAL_MISSING_TTL_S = 600.0
+_local_missing_at: dict[str, float] = {}  # model -> time.monotonic() of Ollama's last "not found"
+
+
+_MODEL_NOT_FOUND_RE = re.compile(r"model '[^']*' not found", re.IGNORECASE)
+
+
+def _is_model_not_found(exc: BaseException) -> bool:
+    """litellm.NotFoundError carrying Ollama's ``model '<x>' not found`` (a 404 on the model, not the route)."""
+    return type(exc).__name__ == "NotFoundError" and bool(_MODEL_NOT_FOUND_RE.search(str(exc)))
+
+
+def _note_local_missing(model: str, exc: BaseException) -> bool:
+    """Remember that Ollama does not have *model*; True when *exc* said so."""
+    if model.startswith("ollama/") and _is_model_not_found(exc):
+        _local_missing_at[model] = time.monotonic()
+        return True
+    return False
+
+
+def _drop_missing_local(models: list[str]) -> list[str]:
+    """*models* without the local models Ollama said it does not have within ``_LOCAL_MISSING_TTL_S``.
+
+    Never empties the chain: when every entry is missing the chain is returned as it came, so the
+    error the caller sees is Ollama's own.
+    """
+    if not _local_missing_at:
+        return models
+    now = time.monotonic()
+    missing = {m for m, t in _local_missing_at.items() if now - t < _LOCAL_MISSING_TTL_S}
+    gone = [m for m in models if m in missing]
+    if not gone or len(gone) == len(models):
+        return models
+    log.info("Dropping %s for this route: Ollama said not installed within the last %.0fs",
+             gone, _LOCAL_MISSING_TTL_S)
+    skip_causes.note_many(gone, skip_causes.UNAVAILABLE)
+    return [m for m in models if m not in missing]
 
 
 def _quota_score_chain(
@@ -1997,6 +2094,7 @@ def _enrich_response(
     failed_attempt_cost: float = 0.0,
     quality_degraded: bool = False,
     quality_degraded_reason: str = "",
+    chain_errors: list | None = None,
 ) -> LLMResponse:
     """Add explainability fields to a successful LLMResponse.
 
@@ -2017,6 +2115,7 @@ def _enrich_response(
         # FIELD, not only by a log line the caller never sees.
         quality_degraded=quality_degraded,
         quality_degraded_reason=quality_degraded_reason,
+        chain_errors=[(str(m), str(e)) for m, e in (chain_errors or [])],  # W7: why earlier entries failed
     )
 
 
@@ -3183,6 +3282,13 @@ async def _dispatch_model_loop(
     _escalate_on_quality = os.environ.get(
         "LLM_ROUTER_ESCALATE_ON_QUALITY", "1"
     ).strip().lower() in ("1", "true", "yes", "on")
+    # A text job (`llm_text_job`, the only caller that passes TEXT_JOB_REASON) is judged by its own acceptance check,
+    # `text_jobs.check_output`, which runs on the answer once this loop returns it. `score_response` rates a plain
+    # one-line commit message 0.30, under the threshold below, so the answer that check would accept was thrown away
+    # as `low_quality` and a pricier model was called. Such an answer is not scored, escalated or recorded: three
+    # recorded 0.30 scores would also make `should_skip_model` drop the local model for this task and complexity.
+    from llm_router.eligibility_routing import TEXT_JOB_REASON as _TEXT_JOB_REASON
+    _own_acceptance_check = eligibility_exempt_reason == _TEXT_JOB_REASON
     try:
         _escalate_threshold = float(os.environ.get("LLM_ROUTER_ESCALATE_THRESHOLD", "0.4"))
     except ValueError:
@@ -3240,7 +3346,7 @@ async def _dispatch_model_loop(
     # N22: set when a local model times out in THIS call (see the skip at the top of the loop).
     _local_timed_out_in_call = False
     _chain_as_built = list(models_to_try)  # LOCAL-TIMEOUT-1: the emergency check compares against this
-    models_to_try = _demote_timed_out_local(models_to_try, exempt=pinned_model)
+    models_to_try = _demote_timed_out_local(_drop_missing_local(models_to_try), exempt=pinned_model)
     for attempt, model in enumerate(models_to_try, start=1):
         provider = provider_from_model(model)
         model_name = model.split("/", 1)[1] if "/" in model else model
@@ -3424,6 +3530,7 @@ async def _dispatch_model_loop(
             )
             if (
                 model not in (model_override, pinned_model)
+                and not _own_acceptance_check  # judged by its own check, not by the scores of other calls
                 and should_skip_model(model, task_type.value, c.value)
             ):
                 log.info("Skipping low-quality model for %s/%s: %s", task_type.value, c.value, model)
@@ -3503,6 +3610,24 @@ async def _dispatch_model_loop(
             skip_causes.note(model, skip_causes.BUDGET)
             continue
 
+        # D-373: the Plus meter is reserved for agent-route. Asked BEFORE anything is built or reserved for this entry (the
+        # context pack, the token reservation, the heartbeat), and answered as a policy skip, not a provider fault: no
+        # health failure (two would open the breaker on Codex for 30 s), no attempt_failed row, and the walk goes on to the
+        # next entry. ``run_codex`` asks again as the backstop for every other caller.
+        if provider == "codex" and task_type not in MEDIA_TASK_TYPES:
+            _reserved = _codex_reserve_refusal()
+            if _reserved is not None:
+                route_log.info(
+                    "routing_policy_skip",
+                    correlation_id=correlation_id,
+                    model=model,
+                    provider=provider,
+                    fallback_reason="codex_meter_reserved",
+                )
+                chain_errors.append((model, "skipped:codex_meter_reserved"))
+                skip_causes.note(model, skip_causes.POLICY, detail="codex_meter_reserved")
+                continue
+
         # Show provider context for QUOTA_BALANCED
         provider_context = f" [{provider.upper()}]" if profile == RoutingProfile.QUOTA_BALANCED else ""
         await _notify(ctx, "info", f"⏳ {model_name}{provider_context} working...")
@@ -3577,6 +3702,7 @@ async def _dispatch_model_loop(
                         # session's project scope is for OKF retrieval only
                         # here, not for moving where the Codex subprocess runs.
                         context_root=_codex_scope_root,
+                        caller=_codex_caller(),  # D-373: the Plus meter is reserved for agent-route
                     )
                     if not codex_result.success:
                         # The chain error below keeps only the first 200 chars;
@@ -3761,7 +3887,13 @@ async def _dispatch_model_loop(
             # chain — exactly like a failed gate above. Always record the score so
             # `should_skip_model` keeps learning, even when we don't escalate
             # (last model in chain, media task, or feature disabled).
-            if _escalate_on_quality and task_type not in MEDIA_TASK_TYPES and not response.tool_calls:
+            # A text job (`_own_acceptance_check`) is neither scored nor recorded: see its definition.
+            if (
+                _escalate_on_quality
+                and not _own_acceptance_check
+                and task_type not in MEDIA_TASK_TYPES
+                and not response.tool_calls
+            ):
                 try:
                     from llm_router.quality_feedback import record_quality, score_response
                     _qs = score_response(response.content, task_type.value, model, c.value)
@@ -3980,6 +4112,7 @@ async def _dispatch_model_loop(
                 response, classification_data, effective_complexity,
                 task_type, chain_attempts,
                 failed_attempt_cost=_failed_attempt_cost,  # RED1-8-01
+                chain_errors=chain_errors,
             )
 
         except Exception as e:
@@ -4002,6 +4135,7 @@ async def _dispatch_model_loop(
                 last_error = e
                 break
             _note_local_timeout(model, e)  # LOCAL-TIMEOUT-1
+            _model_missing = _note_local_missing(model, e)  # PHANTOM-LOCAL-1
             if model.startswith("ollama/") and _is_timeout_error(e):
                 _local_timed_out_in_call = True  # N22
             # A reported reset time ("try again at 06:39", Retry-After: 7200,
@@ -4017,9 +4151,10 @@ async def _dispatch_model_loop(
             is_auth = not is_rate_limit and not is_content_filter and _is_auth_error(e)
             from llm_router.mcp_door import AttemptCapExceeded as _AttemptCapExceeded
             if isinstance(e, _AttemptCapExceeded):
-                # D-154: the MCP door's per-attempt cap, not a provider fault: no health
-                # failure, no LOCAL-TIMEOUT-1 cooldown (not a TimeoutError), so routing
-                # stays as it was; recorded under its own reason.
+                # D-141/D-154: a door-imposed cap is not a provider fault. Keep its
+                # own reason and no health failure; only the local model's order
+                # changes via LOCAL-TIMEOUT-1, leaving other Ollama models available.
+                _note_local_timeout(model)
                 await _notify(ctx, "warning", f"{model} hit the MCP deadline cap — trying next...")
                 route_log.warning(
                     "routing_fallback",
@@ -4069,7 +4204,10 @@ async def _dispatch_model_loop(
                     error_type=type(e).__name__,
                     fallback_reason="provider_error",
                 )
-                tracker.record_failure(provider)
+                if not _model_missing:
+                    # One model Ollama does not have says nothing about Ollama: counting it benched
+                    # every installed model behind it (PHANTOM-LOCAL-1).
+                    tracker.record_failure(provider)
             # CHZ-AUD-A-01: record the FAILED provider attempt in the execution
             # ledger. Provider errors (rate-limit/auth/outage/generic) were
             # invisible to the ledger — only accepted/rejected attempts emitted —
@@ -4165,7 +4303,7 @@ async def _dispatch_model_loop(
             from llm_router import capability_filter as _cf
             emergency_chain = _cf.filter_chain(emergency_chain, capability_needs)
         if emergency_chain and emergency_chain != _chain_as_built:
-            emergency_chain = _demote_timed_out_local(emergency_chain)  # LOCAL-TIMEOUT-1
+            emergency_chain = _demote_timed_out_local(_drop_missing_local(emergency_chain))  # LOCAL-TIMEOUT-1
             for attempt, model in enumerate(emergency_chain, start=len(models_to_try) + 1):
                 provider = provider_from_model(model)
                 model_name = model.split("/", 1)[1] if "/" in model else model
@@ -4306,10 +4444,12 @@ async def _dispatch_model_loop(
                         response, classification_data, effective_complexity,
                         task_type, chain_attempts,
                         failed_attempt_cost=_failed_attempt_cost,  # RED1-8-01
+                        chain_errors=chain_errors,
                     )
 
                 except Exception as e:
                     _note_local_timeout(model, e)  # LOCAL-TIMEOUT-1: same as the primary loop
+                    _note_local_missing(model, e)  # PHANTOM-LOCAL-1: same as the primary loop
                     chain_attempts.append(model)
                     log.warning(
                         "Emergency fallback model %s failed: %s", model, e
@@ -4481,6 +4621,7 @@ async def _dispatch_model_loop(
                 "every candidate was rejected by a dispatch gate; "
                 "the best rejected answer was served"
             ),
+            chain_errors=chain_errors,
         )
 
     _emit_ledger_terminal(correlation_id, "failed", route_succeeded=False)
@@ -5107,11 +5248,16 @@ async def route_and_call(
         # Guard: compaction_mode/threshold may be MagicMock in test mocks
         compaction_mode = getattr(config, "compaction_mode", "structural")
         compaction_threshold = getattr(config, "compaction_threshold", 4000)
+        # TJCHAIN-3: a text job's input is already fitted to the lane by its own builder (gitinput.condense keeps every
+        # changed file named) and the lane was qualified on whole inputs. Compaction kept the first 20 and last 10 lines,
+        # so the model wrote about a change it could not see. It is not cut a second time.
+        from llm_router.eligibility_routing import TEXT_JOB_REASON as _TEXT_JOB_REASON
         if (
             isinstance(compaction_mode, str)
             and compaction_mode != "off"
             and isinstance(compaction_threshold, int)
             and task_type not in MEDIA_TASK_TYPES
+            and eligibility_exempt_reason != _TEXT_JOB_REASON
         ):
             prompt, compaction_result = await compact_structural(
                 prompt, compaction_threshold,
@@ -5411,6 +5557,14 @@ async def route_and_call(
                 raise _er.PassedModelNotInChain(
                     f"the passed local model is not in the final {task_type.value} chain")
             models_to_try = [_pass_model]
+            from llm_router.proxy.local_mode import estimate_prompt_tokens
+            try:
+                _job_window = _er._route_time_ctx(_pass_model)
+            except Exception:  # noqa: BLE001 -- unknown window leaves the existing guards in charge
+                _job_window = None
+            if _job_window and estimate_prompt_tokens({"system": system_prompt, "prompt": prompt}) > 0.9 * (_job_window - 256):
+                await _release_reservation_if_held()
+                raise _er.PassedModelNotInChain("digit-aware whole-prompt estimate exceeds the local context budget")
 
         # LC-12h / D-28 A: the secret door, after every chain transform (none can add a cloud entry back). A prompt
         # with a secret goes to loopback, non-cloud local models only, or nowhere; the dispatch below is then private

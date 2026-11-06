@@ -199,7 +199,7 @@ the proxy env when one is set.
 | `local_classifier.py` (`_post`, eval harness only) | classifier input | fixed |
 | `hooks/tool_intercept.py` (`describe_image`) | image bytes | fixed |
 | `proxy/server.py` (local-model backend on the shared httpx client; warm-up `httpx.post`) | prompt text | open |
-| `context_summary.py`, `model_discovery.py`, `discover.py`, `ollama_watchdog.py`, `warm.py`, `local_context_guard.py`, `quickstart.py`, `seats.py`, `commands/doctor.py`, `commands/verify.py`, `commands/pi.py`, `resolver/inventory.py`, `resource_map.py`, `runtime_offer.py`, `service_manager.py`, `model_pull.py`, `discovery_rescan.py`, `local_platforms.py` (`/api/tags`, `/api/ps`, `/api/show`, `/api/version`, pulls) | model names and health only, no user text | open |
+| `context_summary.py`, `model_discovery.py`, `discover.py`, `ollama_watchdog.py`, `warm.py`, `local_context_guard.py`, `quickstart.py`, `seats.py`, `commands/doctor.py`, `commands/verify.py`, `commands/pi.py`, `resolver/inventory.py`, `resource_map.py`, `runtime_offer.py`, `service_manager.py`, `model_pull.py`, `discovery_rescan.py`, `door_verdict.py` (the residency probe `/api/ps` only; its prompt-bearing verdict call goes through `local_classifier.py`), `local_platforms.py` (`/api/tags`, `/api/ps`, `/api/show`, `/api/version`, pulls) | model names and health only, no user text | open |
 Details and measurements: [docs/local-check-routing.md](docs/local-check-routing.md) ("HTTP proxy environment").
 
 **Encryption Status:**
@@ -280,9 +280,18 @@ rm ~/.env  # If used
 - ✅ Hooks are subject to deadlock detection before installation
 - ⚠️ Hooks **can** block core tools (Read, Edit, Bash, Write). PreToolUse enforcement
   does this routinely in `smart` and `hard` modes — it is the mechanism those modes are
-  built on, not an edge case. What is guaranteed is **no permanent lockout**: every block
-  carries an escape valve (call any `llm_*` tool), and repeated attempts auto-pivot to
-  release the lock. True deadlock, in the CS sense, is what is prevented — not blocking.
+  built on, not an edge case. What is guaranteed in `smart` and `hard` is **no permanent
+  lockout**: a block is released by routing the user's request through a routing door
+  (`llm`, `llm_route`, `llm_act`, ...; a trivial or unrelated `llm_*` call does not release
+  it), by the user starting the prompt with `claude:`, and, with no model call at all, by
+  repeated attempts, which auto-pivot. `strict` is the documented exception: it turns the
+  auto-pivots off on purpose, so a strict hold ends only when the user's request is routed,
+  when the user starts the prompt with `claude:`, when the user sends the next prompt, or
+  when its one-hour routing window runs out, and a `strict` session can stall. The router's
+  own CLI (`llm-router set-enforce off`) is never held in any mode, so the user can always
+  leave `strict` without editing a file. True deadlock, in the CS sense, is what is
+  prevented in the default modes — not blocking (docs/proxy.md, "When a prompt holds a
+  tool").
 - ✅ Hooks are local (don't phone home)
 
 **Risks:**
@@ -782,7 +791,43 @@ model has just written (`write_file s.py`, then `python3 s.py`; pinned in
 **Out of scope.** Work delegated to an external agent CLI (`codex exec`, from
 `src/llm_router/agentic/adapters.py` and `src/llm_router/codex_agent.py`) runs
 under that CLI's own sandbox (`--sandbox workspace-write`, or Codex's exec default),
-not under `write_policy`.
+not under `write_policy`. The Claude Code `agent-route.py` hook's delegated Codex runs (owner decision D-357,
+"write in repo") are the one case this repo configures. What they guarantee: every command the model runs stays
+inside the sandbox. Codex is started with `--ignore-user-config` and `--ignore-rules`, so no `config.toml` and no
+execpolicy `.rules` file, user or project, is loaded. Without `--ignore-rules` a user rule such as
+`prefix_rule(pattern=["curl"], decision="allow")` makes Codex run a matching command outside the sandbox, with network,
+in either mode (the owner's rules allow `curl`, `git push`, `gh pr merge` and `gh run`); `tests/test_bind_codex_sandbox_live.py`
+reproduces it on the real binary, with a stub model and a canary listener on loopback, and fails if it comes back
+(docs/bugs/BIND-6.md; it is marked `requires_codex`, so CI runs the argv pins instead). Both modes also remove Codex's
+hosted `web_search` tool (`-c web_search="disabled"`): the model provider runs it outside the local sandbox, it is offered by
+default, and `network_access=false` does not touch it (docs/bugs/BIND-9.md; the live test reads the tool list a stub model is
+sent). The sandbox is chosen from the session's directory, the hook payload's `cwd`. Inside a git work
+tree (`git -C <cwd> rev-parse --show-toplevel` succeeds) the run gets `--sandbox workspace-write` with the network off
+(`sandbox_workspace_write.network_access=false`) and that work tree's top level as its only writable root: `/tmp` and
+`$TMPDIR` are excluded (`exclude_slash_tmp`, `exclude_tmpdir_env_var`) and the child's `TMPDIR` is a per-run directory in
+the work tree (`.llm-router-codex-tmp/<run-id>`, ignored by git, removed after the run). Observed on codex-cli 0.161.0,
+`.git` is read-only inside that root, so commit, worktree and PR steps end in blocked reports. Anywhere else it gets
+`--sandbox read-only`, also with no network, and a reply that reports blocked work is not delivered. The top level is
+never `$HOME`, the account's own home directory, a directory above either, or `/`: a session rooted at the home
+directory, outside any repository, or in a repository that contains the home directory runs read-only, and a session
+rooted at `/` is not delegated to Codex at all (`codex_unsafe_cwd`). git is asked without `GIT_DIR`, `GIT_WORK_TREE` and
+`GIT_COMMON_DIR` (set, `GIT_DIR` makes any directory a work tree), and a top level that is not the nearest directory at
+or above the session directory with a `.git` entry (a repository's own `core.worktree` can point elsewhere, or at an
+ancestor) counts as no repository (docs/bugs/BIND-7.md). `danger-full-access` cannot
+be requested through `run_codex`. **Every other `codex exec` passes `--ignore-rules` as well** (docs/bugs/BIND-8.md): the
+router chain, the MCP tool `llm_codex`, the session broker, the model evaluator, calibration, the agentic adapter (which
+also passes `--ignore-user-config`) and `scripts/bench_backend_quality.py`. The argv of each is pinned, and a test walks the
+source for any new `codex exec` (`tests/test_bind_codex_ignore_rules_everywhere.py`). **One exception:** `scripts/cls_send_lib.py`,
+the frozen CLS-DEV study script (D-345, sha-pinned), keeps its original argv; it is not a routing path and its scripts are not to be run. The router paths do not start a Codex
+CLI whose `exec --help` does not list the flag, asked once per binary: the call fails with `reason_code` `no_ignore_rules`,
+one WARNING and one `CHZ-FO-CODEX-NO-IGNORE-RULES` fail-open row, and routing falls back; a probe that cannot answer counts
+as "no". The benchmark script relies on the CLI rejecting an unknown flag. Without the flag, a user rule makes the router chain's
+and the MCP tool's `curl` leave Codex's default (read-only) sandbox with network; with it, it does not
+(`tests/test_bind_codex_sandbox_live.py`, `requires_codex`). **Not covered:** those pure-LLM callers run in Codex's own
+default sandbox and keep its hosted `web_search` tool; the agentic adapter's `workspace-write` run keeps Codex's defaults
+for `/tmp` and passes no `sandbox_workspace_write.*` flags (the D-357 hardening above is agent-route's); the benchmark
+script does not pass `--ignore-user-config`. Verified on the macOS seatbelt with codex-cli 0.161.0; other Codex versions and the Linux
+sandboxes are untested. Tests: `tests/test_bind_agent_route_handoff.py`, `tests/test_bind_codex_run_tmpdir.py`.
 
 `tests/test_security_docs_match_the_code.py` reads the tables in this section and
 runs every row through the real lane executors. `tests/test_write_policy_one_policy.py`

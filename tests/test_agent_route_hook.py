@@ -1136,37 +1136,26 @@ class TestCodexSubagentDelegation:
 
 
 class TestAgentRouteEndToEnd:
-    """In-process (not subprocess) test proving main() actually reaches the
-    NS3 Codex branch and returns its output as the subagent's block reason
-    with the NS1 attribution marker — the wiring, not just the gating logic."""
+    """The real hook script as a subprocess (not in-process, and with nothing on the delegation path replaced):
+    proves main() actually reaches the NS3 Codex branch and returns its output as the subagent's block reason with
+    the NS1 attribution marker -- the wiring, not just the gating logic.
 
-    def test_main_uses_codex_result_as_subagent_output(self, tmp_path, monkeypatch, capsys):
-        mod = _load_hook_module()
-        (tmp_path / ".llm-router").mkdir(parents=True, exist_ok=True)
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / ".llm-router"))
-        monkeypatch.setenv("LLM_ROUTER_AGENT_ROUTE_CODEX", "on")
-        monkeypatch.setenv("LLM_ROUTER_SUBAGENT_DIRECT", "off")
-        monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    This used to replace ``_try_codex_subagent_delegation`` with a lambda, so ``_log_cli_savings`` never ran in the
+    test, and the stdout line it prints (``[debug] Tracked: ...``, in front of the JSON) voided 317 of 317 real
+    handoffs unseen (docs/BUGS.md BIND-1). A stub ``codex`` executable (``CODEX_PATH``) stands in for the CLI instead.
+    """
 
-        monkeypatch.setattr(
-            mod, "_try_codex_subagent_delegation",
-            lambda *a, **k: "codex says: fixed at line 42",
-        )
+    def test_main_uses_codex_result_as_subagent_output(self, tmp_path):
+        from tests._bind_support import (
+            AGENT_ROUTE, agent_payload, decision_of, hook_env, run_hook, write_codex_stub)
 
-        payload = json.dumps({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Agent",
-            "tool_input": {
-                "prompt": "analyze this bug and explain the root cause",
-                "subagent_type": "general-purpose",
-            },
-        })
-        monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+        stub = write_codex_stub(tmp_path / "bin", answer="codex says: fixed at line 42")
+        env = hook_env(tmp_path, CODEX_PATH=str(stub), LLM_ROUTER_AGENT_ROUTE_CODEX="on",
+                       LLM_ROUTER_SUBAGENT_DIRECT="off")
+        proc = run_hook(AGENT_ROUTE, agent_payload("analyze this bug and explain the root cause"), env,
+                        cwd=tmp_path)
 
-        mod.main()
-
-        out = json.loads(capsys.readouterr().out)
+        out = decision_of(proc)  # raises unless stdout is exactly one JSON object
         assert out["decision"] == "block"
         assert "codex says: fixed at line 42" in out["reason"]
         assert "agent_route_codex" in out["reason"]
@@ -1230,8 +1219,8 @@ class TestDefaultAgentCallPassesThroughCleanly:
         mod = _load_hook_module()
         prompt = "implement a fix for the off-by-one bug"
         assert mod._classify_task_type(prompt) == "code"
-        # Savings DB logging is not under test (and writes to stdout via structlog).
-        monkeypatch.setattr(mod, "_log_cli_savings", lambda *a, **k: None)
+        # _log_cli_savings is NOT replaced: it logs to stdout through structlog's default sink, and replacing it
+        # here is what hid the line that voided every real handoff (docs/BUGS.md BIND-1). main() keeps stdout clean.
         seen = self._run_main_in_process(mod, monkeypatch, tmp_path, prompt)
         out = json.loads(capsys.readouterr().out)
         assert seen == [prompt]  # went to (stubbed) Codex, nothing else

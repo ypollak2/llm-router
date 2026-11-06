@@ -401,12 +401,12 @@ def test_kpi_shows_proxy_shadow_as_its_own_line_and_never_moves_ns_d1_d2(monkeyp
     rows = ([{"session_id": "s-org", "kind": attempted, "outcome": ns.OUTCOME_USED, "lever": None, "ts": now}] * 20
             + [{"session_id": "s-org", "kind": "claude_only", "outcome": ns.OUTCOME_NOT_ROUTED, "lever": None,
                 "ts": now}] * 60)
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False, **_: iter(rows))
 
     without = kpi.compute_scorecard(days=7, now=1_800_000_000.0)
     text_without = kpi.render_scorecard(without)
     assert without["proxy_local_shadow"]["n"] == 0 and "local shadow (proxy)" not in text_without
-    assert without["kpis"]["NS"]["value"] == "0.0% (n=80)"      # strict-used (M0.2)
+    assert without["kpis"]["NS"]["value"] == "blind: strict 0/80 (no verifier verdict reaches NS)"   # D-364
     assert without["kpis_diag"]["NS_heuristic"]["value"] == "25.0% (n=80)"
 
     _write_records(local_shadow.shadow_path())

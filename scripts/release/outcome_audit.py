@@ -26,6 +26,26 @@ Every ATTEMPTED routed unit gets exactly one of::
     unused     the routed content was produced and never incorporated
     unknown    no terminal event, or one too ambiguous to call
 
+A unit that was never meant to carry content gets ``not_applicable`` and is
+OUTSIDE the denominator (``attempted``): a fixed-reply probe ("Reply OK", the
+call a hold's escape-valve text invites) and a router status/admin view. The
+allowlist is ``NOT_APPLICABLE_SIGNALS``; ``outcome_gate.py`` rejects any other
+signal on such a row, because shrinking the denominator raises the used rate.
+The summary carries the rate with the not-applicable units included, so the
+exclusion can always be undone by a reader.
+
+AUDIT_VERSION
+-------------
+The scoring rules below are versioned (``AUDIT_VERSION``). A number from one
+version is NOT comparable with a number from another: v2 (2026-11-03) pairs
+Codex units by tool_use_id, reads sub-agent transcripts, honours
+``session_kind_overrides.json``, scores MCP answers on their body (not the JSON
+envelope), counts tool inputs and ``llm_local_task`` file effects as use,
+labels probes ``not_applicable``, dedupes replayed rows and follows background
+stubs. 15.4.0's recorded 0.229% (2/873) is a v1 number and its transcripts are
+purged, so it cannot be re-scored with v2. ``outcome_gate.py`` records the
+version and refuses a cross-version comparison unless told how to treat it.
+
 THE RULE: no ``used`` or ``corrected`` without a CONTENT-BEARING terminal
 event: the host's reply, the host's own Edit call, or a served proxy turn's
 executed tool call, compared against the routed content itself. A dispatch
@@ -51,25 +71,44 @@ draft / direct  DIRECT SUCCESS invocations in ``auto-route-debug.log``.
     -> redone; a reply that does not carry the draft -> ``unused``
     (a draft the host never relayed is NOT used; 8 of 9 northstar ``used``
     direct units on 2026-09-29 were exactly this).
-routed_mcp  every ``mcp__llm_router__*`` tool_use. Tool result error ->
-    unused; result shingles in the host's following output >= 60% -> used,
-    5-60% -> unknown (ambiguous; judge-eligible: in the hand check one such
-    overlap was the host quoting the result to critique it, another the host
-    adopting part of it), < 5% -> unused; a ``claude:`` re-ask -> redone. An
-    ``llm_edit`` call with no ledger row is judged like routed_edit from the
-    files named in its result.
+routed_mcp  every ``mcp__llm_router__*`` tool_use, once per tool_use id (a
+    resumed or replayed session repeats history). A fixed-reply probe or a
+    status/admin view -> not_applicable. Tool result error -> unused. The
+    answer BODY (JSON envelope, header and footer removed) is compared with
+    the host's following output, which is its text plus the content it wrote
+    plus the inputs of every non-router, non-read tool (a commit message
+    relayed into ``git commit`` is use): body shingles >= 60% -> used, 5-60% ->
+    unknown (ambiguous; judge-eligible: in the hand check one such overlap was
+    the host quoting the result to critique it, another the host adopting part
+    of it), < 5% -> unused; a ``claude:`` re-ask -> redone. Shingle size follows
+    the body: 8 words from 20 words up, 4 from 8, the whole body for 3-7, and
+    under 3 words nothing can be attributed (unknown). ``llm_local_task`` writes
+    files itself, so its text is not compared: a tool that wrote files and a
+    later host ``git commit|add`` naming its workdir -> used; no effect ->
+    unused. A call moved to the background (``moved to the background as task
+    X``) is followed to its ``<task-notification>``; with none in the
+    transcript the unit is unknown. An ``llm_edit`` call with no ledger row is
+    judged like routed_edit from the files named in its result.
 routed_edit  one per ``edit_outcomes.jsonl`` row (per file, northstar's
     grain). The ``**With:**`` blocks of the ``llm_edit`` tool result are
     compared with the host's own later Edit/Write calls on that file: exact
     -> used, >= 50% of 4-word shingles -> corrected, a different edit ->
     redone, no edit -> unused. Git survival (edit_survival.py) only sets the
     confidence; it never makes or unmakes a label.
-agent_route_codex  ``north_star_units.jsonl`` rows. ``codex_failed`` ->
-    unused. ``delegated`` is only a dispatch record: the parent's Agent
-    tool_result decides. If it is Claude's own agent (the PreToolUse block
-    was not honoured) -> redone; if it carries the Codex output and the
-    parent's output carries >= 60% of it with no re-spawn -> used; a
-    re-spawn -> redone; otherwise unknown.
+agent_route_codex  ``north_star_units.jsonl`` rows. ``codex_failed`` and
+    ``codex_blocked`` -> unused. ``delegated`` is only a dispatch record: the
+    Agent tool_result decides. The row is paired with its Agent call by
+    ``tool_use_id`` when the ledger has one, otherwise by the PreToolUse:Agent
+    hook run that followed the row (317 of 317 on the 16.0.0 window; the old
+    "latest unclaimed Agent call within 900 s" mis-paired 31%), and the
+    call is looked up in the session AND its ``subagents/*.jsonl`` transcripts
+    (a nested spawn lives there). If a Claude sub-agent was launched for that
+    id (an "Async agent launched" result, a toolUseResult agentId, or a
+    ``subagents/*.meta.json`` naming the id) -> redone; if the result carries
+    the Codex text, no sub-agent ran and the parent's output carries >= 60% of
+    it with no re-spawn -> used; a re-spawn -> redone; otherwise unknown. BOUND
+    (the binding metric, reported apart from ``used``) = the result carries
+    the Codex text AND no Claude sub-agent was launched for that id.
 proxy  served ``proxy_calls.jsonl`` turns in organic transcripts: every tool
     call got a non-error result -> used; error/rejected/re-ask -> redone.
 delegate / bounded_operational  ``routing_quality.jsonl`` rows. They carry
@@ -78,7 +117,10 @@ delegate / bounded_operational  ``routing_quality.jsonl`` rows. They carry
 
 SCOPE: organic sessions only: entrypoint ``cli``, workspace not a benchmark
 sandbox (``/tmp``, ``/var/folders``), not a worktree, not ``~/.rsi``, not a
-synthetic session id. A unit is in the window by ITS OWN timestamp.
+synthetic session id, and not named non-organic by the owner's
+``session_kind_overrides.json`` (``{sid: {"kind": ..., "reason": ...}}``; the
+override wins, as it does for every other reader). A unit is in the window by
+ITS OWN timestamp.
 
 OUTPUT: ``outcome_audit_<release>.jsonl``, one row per unit, exactly
 ``{unit_id, kind, label, signal, confidence, human_reviewed}``, and
@@ -116,7 +158,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+#: The scoring rules' version. A used rate is only comparable within one version
+#: (see the module docstring). Bump it with any change that can move a label.
+AUDIT_VERSION = 2
+AUDIT_CHANGES = (
+    "codex units paired by tool_use_id (ledger) or the PreToolUse:Agent hook run; sub-agent transcripts read",
+    "session_kind_overrides.json honoured",
+    "routed_mcp scored on the answer body, with tool inputs counted as host output",
+    "llm_local_task judged by file effects; probes and status views are not_applicable",
+    "replayed tool_use ids deduped; background stubs followed to their task notification",
+)
 LABELS = ("used", "corrected", "redone", "unused", "unknown")
+NOT_APPLICABLE = "not_applicable"
+ALL_LABELS = LABELS + (NOT_APPLICABLE,)
 KINDS = ("draft", "direct", "routed_mcp", "routed_edit", "agent_route_codex",
          "proxy", "delegate", "bounded_operational")
 ROW_KEYS = ("unit_id", "kind", "label", "signal", "confidence", "human_reviewed")
@@ -132,6 +186,8 @@ CONTENT_BEARING_SIGNALS = frozenset({
     "edit_applied_verbatim",        # host's Edit new_string == llm_edit's With block
     "edit_applied_modified",        # host's Edit shares >=50% of the With block
     "codex_output_incorporated",    # parent reply carries the Codex output
+    "local_task_effect_kept",       # llm_local_task wrote files; the host then committed its workdir
+    "local_task_effect_amended",    # ... after editing one of the files the tool wrote
     "proxy_tool_result_ok",         # served turn's tool calls all executed OK
     "proxy_text_not_reasked",       # served text turn, next human turn not a re-ask
     "human_review",                 # a person read the transcript
@@ -154,12 +210,27 @@ AMBIGUOUS_SIGNALS = frozenset({
     "draft_partial_overlap_ambiguous",
 })
 
+# The ONLY signals allowed on a not_applicable row (outcome_gate.py checks). A
+# unit leaves the denominator only for one of these reasons, each a statement
+# about the CALL, never about its outcome:
+NOT_APPLICABLE_SIGNALS = frozenset({
+    "probe_fixed_reply",    # the prompt asks for a fixed reply ("Reply OK"): nothing to relay
+    "hold_release_probe",   # the same, issued in the turn after a "Routing directive BLOCKED" hold
+    "status_view",          # llm_router_status / _admin / _session: a view, not an answer
+})
+
 USED_THRESHOLD = 0.60
 PARTIAL_THRESHOLD = 0.20
 AMBIGUOUS_FLOOR = 0.05
 EDIT_PARTIAL_THRESHOLD = 0.50
-AGENT_MATCH_WINDOW_S = 900.0
-RESPAWN_WINDOW_S = 1800.0
+AGENT_MATCH_WINDOW_S = 330.0  # last-resort pairing only; the PreToolUse hook's own timeout is 320 s
+HOOK_JOIN_BEFORE_S = 2.0      # the hook writes its ledger row BEFORE it emits, so the run's
+HOOK_JOIN_AFTER_S = 20.0      # attachment follows the row (16.0.0 window: median 0.39 s, max 5.5 s)
+LOCAL_TASK_KEEP_WINDOW_S = 6 * 3600.0
+#: How long after a delivered Codex result (the ledger row's time) the same prompt asked again counts as a re-issue
+#: (the escape hatch in the wrapper text). The router remembers a delivered prompt for 3600 s
+#: (``llm_router.codex_handoff.DELIVERED_TTL_S`` in BIND W1, PR #818).
+RESPAWN_WINDOW_S = 3600.0
 EDIT_JOIN_WINDOW_S = 300.0
 DRAFT_ATTACH_WINDOW_S = 600.0
 JUDGE_ACTIVE_AGREEMENT = 0.80
@@ -168,6 +239,25 @@ JUDGE_MIN_N = 40
 RELAY_MARKERS = ("🎯 LLM Router routed", "🎯 llm_router →")
 _REASK_RE = re.compile(r"^\s*(?:claude|native|opus)\s*:\s*", re.IGNORECASE)
 _CODEX_MARKER = "delegated to Codex"
+#: A delivered Codex result is the BIND W1 wrapper (src/llm_router/hooks/agent-route.py ``_result_message``), which
+#: names its source twice: "This sub-agent task was run by Codex CLI (...) instead of a Claude sub-agent" and the
+#: fence label "BEGIN UNTRUSTED SUB-AGENT RESULT from Codex CLI (...)". A result carries Codex text only if BOTH
+#: phrases are in it (lower-cased match). ``tests/test_bind_audit.py`` checks every phrase against the real wrapper
+#: whenever the hook has it, so a change of wording there fails a test here.
+CODEX_RESULT_MARKERS = ("was run by codex cli", "untrusted sub-agent result from codex cli")
+#: The 16.0.0 hook's header ("Subagent task was delegated to Codex CLI ..."), found only in void rows.
+LEGACY_CODEX_MARKERS = ("subagent task was delegated to codex",)
+ROUTER_TOOL_PREFIX = "mcp__llm_router__"
+#: router tools that return a view of the router, not an answer to relay
+NON_CONTENT_TOOLS = frozenset({"llm_router_status", "llm_router_admin", "llm_router_session",
+                               "llm_router_agent_start_session"})
+#: tools whose inputs are not output the host sends onward
+_PASSIVE_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "ToolSearch", "TaskOutput", "TaskStop",
+                            "WebSearch", "WebFetch"})
+HOLD_MARKER = "Routing directive BLOCKED"
+#: A routed answer shorter than this cannot be attributed to a later reply by wording: 3 to 7 word bodies matched a
+#: different unit's host text by chance in 13 of 157 draws (8.3%, BIND-R PR #816 review; 0 of 177 for 8 to 19 words).
+MIN_ATTRIBUTABLE_WORDS = 8
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 _AGENT_TOOLS = ("Agent", "Task")
 _SANDBOX_CWD = re.compile(r"^/(private/)?(tmp|var/folders)/")
@@ -216,6 +306,15 @@ def wilson(k: int, n: int, z: float = 1.959964) -> tuple[float, float] | None:
     return max(0.0, centre - half), min(1.0, centre + half)
 
 
+def parse_utc(text: str) -> float:
+    """Epoch seconds of an ISO time that names its zone ("...Z" or "+00:00"). A time with no zone
+    would be read as the machine's local time, so it is refused, not guessed."""
+    dt = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        raise ValueError(f"{text!r} has no time zone; give UTC, for example 2026-11-03T09:50:20Z")
+    return dt.timestamp()
+
+
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -259,6 +358,256 @@ def extract_draft(attachment_text: str) -> str:
     if start is None:
         return attachment_text
     return "\n".join(lines[start:end])
+
+
+# ── MCP result helpers (pure) ────────────────────────────────────────────────
+
+def _unwrap(result_text: str) -> str:
+    try:  # the MCP result is often a JSON envelope {"result": "..."} (or a bare JSON string)
+        obj = json.loads(result_text)
+        if isinstance(obj, dict) and isinstance(obj.get("result"), str):
+            return obj["result"]
+        if isinstance(obj, str):
+            return obj
+    except ValueError:
+        pass
+    return result_text
+
+
+# The router wraps an answer: "> 🤖 **model** · N tokens · $x · Nms", sometimes a
+# route line or a "_validation: ..._" line, then the answer, then a footer after
+# "─────" (llm) or "---\n🔀" (llm_route). Scoring the wrapper scores the router's
+# own words; 9 of 113 verbatim relays reached "used" before this was removed.
+_HDR_LINE = re.compile(r"^(?:> 🤖 \*\*|> \*\*Total cost|_validation: |\[[A-Z]\] \w+ \(\d+%\))")
+_FOOTER_SEPS = ("\n─────\n", "\n---\n🔀")
+
+
+def answer_body(result_text: str | None) -> str:
+    """The answer the router returned, without its JSON envelope, header or footer."""
+    lines = _unwrap(result_text or "").replace("\r\n", "\n").split("\n")
+    i = 0
+    while i < len(lines) and (not lines[i].strip() or _HDR_LINE.match(lines[i])):
+        i += 1
+    body = "\n".join(lines[i:])
+    cut = len(body)
+    for sep in _FOOTER_SEPS:
+        k = body.rfind(sep)
+        if k != -1:
+            cut = min(cut, k)
+    return body[:cut].strip()
+
+
+_PROBE_START = re.compile(r"^\s*reply\b", re.IGNORECASE)
+_PROBE_END = re.compile(r"\breply\s+(?:with\s+)?[\"']?ok[\"']?[.!]?\s*$", re.IGNORECASE)
+
+
+def is_probe_prompt(prompt: str | None) -> bool:
+    """A prompt that asks for a fixed reply ("Reply OK", "Reply with the single word:
+    ready"): there is nothing to relay. Hold-release calls are of this shape (the
+    hold's text says "call ANY llm_* tool"). A question mark makes it a real
+    question asked in reply-with-one-word form, and a prompt of several lines
+    carries context, which a probe never does (0 of the 82 has a newline; median
+    11 characters, longest 129). Reproduces R2's 82 ack/ping rows on the 16.0.0
+    window (BIND-R2 section 2) and none of its 76 non-probe ones."""
+    p = (prompt or "").strip()
+    if not p or "?" in p or "\n" in p:
+        return False
+    if _PROBE_START.match(p):
+        return len(p) < 150
+    return bool(_PROBE_END.search(p)) and len(p) < 200
+
+
+def shingle_size(n_words: int) -> int:
+    """8 words from 20 words up, 4 from 8. (Below 8 words nothing is attributed: MIN_ATTRIBUTABLE_WORDS.)"""
+    return n_words if n_words < MIN_ATTRIBUTABLE_WORDS else (4 if n_words < 20 else 8)
+
+
+def body_reuse(body: str, host: str | None) -> tuple[float | None, int]:
+    """(share of the body's shingles found in `host`, words in the body). None when
+    the body is too short to attribute to anything (under MIN_ATTRIBUTABLE_WORDS words)."""
+    words = len(_WORD_RE.findall((body or "").lower()))
+    if words < MIN_ATTRIBUTABLE_WORDS:
+        return None, words
+    return reuse_fraction(body, host, shingle_size(words)), words
+
+
+def _walk_strings(x, out: list[str]) -> None:
+    if isinstance(x, str):
+        out.append(x)
+    elif isinstance(x, dict):
+        for v in x.values():
+            _walk_strings(v, out)
+    elif isinstance(x, list):
+        for v in x:
+            _walk_strings(v, out)
+
+
+def input_strings(tool_use: dict) -> list[str]:
+    """Strings the host sent onward in a tool call: a Bash command, a sub-agent
+    prompt, a message. The router's own tools and read-only tools are left out."""
+    name = tool_use.get("name") or ""
+    if name.startswith(ROUTER_TOOL_PREFIX) or name in _PASSIVE_TOOLS:
+        return []
+    out: list[str] = []
+    _walk_strings(tool_use.get("input"), out)
+    return out
+
+
+_STUB_RE = re.compile(r"moved to the background as task (\w+)")
+_NOTIF_ID = re.compile(r"<task-id>\s*(\w+)\s*</task-id>")
+_NOTIF_STATUS = re.compile(r"<status>\s*(\w+)\s*</status>")
+_NOTIF_RESULT = re.compile(r"<result>\s*(.*?)\s*</result>", re.S)
+
+
+def parse_notification(text: str) -> tuple[str, str, str] | None:
+    """(task id, status, result) of a ``<task-notification>`` user message."""
+    if "<task-notification>" not in text:
+        return None
+    tid, st, res = _NOTIF_ID.search(text), _NOTIF_STATUS.search(text), _NOTIF_RESULT.search(text)
+    if not tid:
+        return None
+    return tid.group(1), (st.group(1) if st else ""), (res.group(1) if res else "")
+
+
+def parse_local_task(result_text: str | None) -> dict | None:
+    try:
+        obj = json.loads(_unwrap(result_text or ""))
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+_GIT_SEG = re.compile(r"\bgit\b((?:\s+(?:-[cC]\s+\S+|--[\w-]+(?:=\S+)?|-\w+))*)\s+(add|commit|checkout|restore)\b([^\n;&|]*)")
+_ARG_END = re.compile(r"[\"'`$<(]")  # a message, a heredoc or a substitution ends the part of a command that matters
+
+
+def _git_segments(cmd: str) -> list[tuple[str, list[str]]]:
+    """(subcommand, argument words) of each git add/commit/checkout/restore in a shell command, in order."""
+    out = []
+    for m in _GIT_SEG.finditer(cmd):
+        raw = m.group(3)
+        cut = _ARG_END.search(raw)
+        out.append((m.group(2), (raw[:cut.start()] if cut else raw).split()))
+    return out
+
+
+def _names_dir(cmd: str, wd: str) -> bool:
+    """The command names this directory as a path, not as the prefix of a sibling (/w/wt-a in /w/wt-ab)."""
+    return bool(re.search(r"(?<![\w.~/-])" + re.escape(wd) + r"(?![\w.-])", cmd))
+
+
+def _covers(pathspec: str, wanted: set[str]) -> bool:
+    p = pathspec.strip("'\"").lstrip("./")
+    if not p:
+        return True  # "." : everything under the directory
+    return p in wanted or any(f.startswith(p.rstrip("/") + "/") for f in wanted)
+
+
+def local_task_follow_up(actions: list[tuple[str, str]], workdir: str, changed: list[str]) -> str | None:
+    """What the host did with the workdir an ``llm_local_task`` wrote into. `actions` are the
+    host's later Bash commands ("bash", cmd) and file edits ("edit", path), in order.
+    "kept": a ``git commit`` that stages what the tool changed (``-a``, ``add -A`` with no
+    pathspec or one covering a changed file, or an ``add`` of a changed file) in a command that
+    names the workdir as a path. "amended": the host edited a changed file before that commit.
+    "undone": a ``git checkout|restore`` of a changed file (or ``.``) came first. None: neither.
+    A commit that stages something else in the same directory, or names a sibling directory, is
+    not kept. (``git stash`` is not an undo: ordinary baseline checks use it.)"""
+    wd = (workdir or "").rstrip("/")
+    if not wd:
+        return None
+    wanted = {c.lstrip("./") for c in changed}
+    amended = covered = False
+    for kind, val in actions:
+        if kind == "edit":
+            amended = amended or (val.startswith(wd + "/") and val[len(wd) + 1:] in wanted)
+            continue
+        if not _names_dir(val, wd):
+            continue
+        for sub, args in _git_segments(val):
+            flags = [a for a in args if a.startswith("-") and a != "--"]
+            paths = [a for a in args if not a.startswith("-")]
+            short = "".join(f[1:] for f in flags if not f.startswith("--"))
+            if sub in ("checkout", "restore"):
+                if wanted and any(_covers(p, wanted) for p in paths):
+                    return "undone"
+            elif sub == "add":
+                everything = not paths and ("A" in short or "u" in short or "--all" in flags or "--update" in flags)
+                covered = covered or everything or (bool(wanted) and any(_covers(p, wanted) for p in paths))
+            elif sub == "commit" and (covered or "a" in short or "--all" in flags):
+                return "amended" if amended else "kept"
+    return None
+
+
+_FENCE = re.compile(r"-----\s*BEGIN UNTRUSTED[^\n]*-----\n(.*?)\n-----\s*END UNTRUSTED", re.S)
+
+
+def codex_body(result_text: str | None) -> str:
+    """The Codex text in a delivered result, without the router's wrapper: the fenced block
+    of the BIND W1 wrapper, else the 16.0.0 hook's header paragraph and the harness prefix."""
+    t = (result_text or "").strip()
+    fenced = _FENCE.search(t)
+    if fenced:
+        return fenced.group(1).strip()
+    if t.startswith("PreToolUse:"):
+        t = t.split(":", 2)[2].strip() if t.count(":") >= 2 else t
+    if t.lower().startswith("[llm_router]") and "\n\n" in t:
+        head, rest = t.split("\n\n", 1)
+        if any(m in head.lower() for m in LEGACY_CODEX_MARKERS):
+            t = rest
+    return t
+
+
+def same_prompt(a: object, b: object) -> bool:
+    """The router's own re-issue rule (BIND W1, ``llm_router.codex_handoff.prompt_fingerprint``: sha256 of the
+    stripped prompt): the two prompts are equal once stripped. A task asked again in other words is a different
+    prompt, so it is not a re-issue; the router answers it as a new task. Empty prompts never match."""
+    return isinstance(a, str) and isinstance(b, str) and bool(a.strip()) and a.strip() == b.strip()
+
+
+def carries_codex_text(result_text: str | None, hook_reason: str | None = None) -> bool:
+    """The Agent tool_result holds the Codex answer: BOTH phrases of the BIND W1 wrapper, or the
+    16.0.0 hook's header, or the hook's own reason text (when the transcript recorded it) found
+    in the result. A phrase alone (a sub-agent report that mentions "Codex CLI") is not enough."""
+    t = result_text or ""
+    low = t.lower()
+    if all(m in low for m in CODEX_RESULT_MARKERS) or any(m in low for m in LEGACY_CODEX_MARKERS):
+        return True
+    return bool(hook_reason) and reuse_fraction(hook_reason, t) >= USED_THRESHOLD
+
+
+def looks_launched(result_text: str | None) -> bool:
+    return (result_text or "").lstrip().startswith("Async agent launched")
+
+
+_AGENT_ID_IN_TEXT = re.compile(r"agentId:\s*([A-Za-z0-9]+)")
+
+
+def agent_id_in_text(result_text: str | None) -> str | None:
+    """The launched sub-agent's id as the harness prints it ("agentId: a1a8...")."""
+    m = _AGENT_ID_IN_TEXT.search(result_text or "")
+    return m.group(1) if m else None
+
+
+_BLOCK_ENV = re.compile(r"read[- ]only|sandbox", re.IGNORECASE)
+_BLOCK_REFUSAL = re.compile(r"\bblocked\b|\bcannot\b|\bcan'?t\b|\bunable to\b|not performed|\bcould not\b|\bcouldn'?t\b",
+                            re.IGNORECASE)
+
+
+def is_blocked_answer(text: str | None) -> bool:
+    """A SCREEN, not a label: the text names a read-only/sandbox limit AND says it
+    could not do the work. On the 317 void 16.0.0 replies 291 (91.8%, measured 2026-11-03)
+    match; BIND-R1's own keyword screen gave 269 (85%) and its hand read found 8 of 9
+    blocked. D-358 gates the share on a hand check of 20 bound units; this only picks
+    candidates."""
+    t = text or ""
+    return bool(_BLOCK_ENV.search(t)) and bool(_BLOCK_REFUSAL.search(t))
+
+
+def is_hold_result(text: str | None) -> bool:
+    """A PreToolUse deny from the router's enforcement hold. Anchored on the
+    harness prefix so a file that merely quotes the hook's wording does not count."""
+    t = (text or "").lstrip()
+    return t.startswith("PreToolUse:") and HOLD_MARKER in t[:400]
 
 
 # ── labelling rules (pure; one per kind) ─────────────────────────────────────
@@ -305,7 +654,13 @@ def label_routed_mcp(result_text: str | None, is_error: bool, host_text: str | N
         return "redone", "explicit_reask", "high"
     if not host_did_work and not (host_text or "").strip():
         return "unknown", "no_host_reply", "low"
-    frac = reuse_fraction(result_text, host_text)
+    body = answer_body(result_text)
+    frac, words = body_reuse(body, host_text)
+    if words == 0:
+        return "unused", "tool_result_empty", "medium"
+    if frac is None:
+        # Under 8 words ("Hash.", "No, it does not"): any host text would "contain" it. Not attributable.
+        return "unknown", "body_too_short_to_attribute", "low"
     if frac >= USED_THRESHOLD:
         return "used", "tool_result_reused", "medium"
     if frac >= AMBIGUOUS_FLOOR:
@@ -316,20 +671,53 @@ def label_routed_mcp(result_text: str | None, is_error: bool, host_text: str | N
     return "unused", "tool_result_not_reused", "medium"
 
 
+def label_local_task(result: dict | None, follow_up: str | None) -> Label:
+    """``llm_local_task`` writes its edit itself (``apply_writes``) and returns a JSON
+    status, so there is no text to compare: the evidence is the file effect and what
+    the host then did with the workdir (`follow_up`, from ``local_task_follow_up``)."""
+    if result is None:
+        return "unknown", "tool_result_unreadable", "low"
+    status = result.get("status")
+    changed = result.get("changed_files") or []
+    if status in ("blocked", "failed") or result.get("error"):
+        return "unused", "local_task_failed", "high"
+    if not result.get("writes_applied"):
+        return "unused", "local_task_not_applied", "high"
+    if status == "incomplete" and not changed:
+        return "unused", "local_task_no_effect", "high"
+    if follow_up == "undone":
+        return "unused", "local_task_effect_undone", "medium"
+    if follow_up == "kept":
+        return "used", "local_task_effect_kept", "medium"
+    if follow_up == "amended":
+        return "corrected", "local_task_effect_amended", "medium"
+    return "unknown", "local_task_effect_unconfirmed", "low"
+
+
 def label_codex(outcome: str | None, tool_result_text: str | None,
-                parent_text: str | None, respawned: bool) -> Label:
+                parent_text: str | None, respawned: bool,
+                launched: bool | None = None, carries: bool | None = None) -> Label:
     if outcome == "codex_failed":
         return "unused", "codex_failed", "high"
+    if outcome == "codex_blocked":
+        # Codex ran and its answer said it could not do the work; the hook did not bind it.
+        return "unused", "codex_blocked", "high"
     if outcome != "delegated":
         return "unknown", "codex_outcome_unrecognised", "low"
     if tool_result_text is None:
         return "unknown", "no_agent_call_found", "low"
-    if _CODEX_MARKER not in tool_result_text:
+    if carries is None:
+        carries = carries_codex_text(tool_result_text)
+    if launched is None:  # text-only callers: no Codex text means Claude's own agent ran
+        launched = looks_launched(tool_result_text) or not carries
+    if launched:
         # The PreToolUse block was not honoured: Claude's own agent ran.
         return "redone", "claude_subagent_ran", "high"
+    if not carries:
+        return "unknown", "codex_text_not_in_result", "low"
     if respawned:
         return "redone", "respawned_after_codex", "medium"
-    if reuse_fraction(tool_result_text, parent_text) >= USED_THRESHOLD:
+    if reuse_fraction(codex_body(tool_result_text), parent_text) >= USED_THRESHOLD:
         return "used", "codex_output_incorporated", "medium"
     return "unknown", "codex_output_not_visibly_incorporated", "low"
 
@@ -375,12 +763,41 @@ def label_delegate(row: dict) -> Label:
 
 # ── organic scope ────────────────────────────────────────────────────────────
 
-def is_organic(meta: dict) -> bool:
+SESSION_KINDS = ("organic", "research", "harness", "headless")  # src/llm_router/session_kind.py
+OVERRIDES_FILENAME = "session_kind_overrides.json"
+
+
+def read_session_overrides(path: Path) -> dict[str, str]:
+    """{session_id: kind} from the owner's override file. Like the product's reader, a
+    missing, unreadable or malformed file or entry is "no override", and only a valid
+    kind counts. The audit never writes it."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    if isinstance(data, dict):
+        for sid, entry in data.items():
+            kind = entry.get("kind") if isinstance(entry, dict) else None
+            if isinstance(sid, str) and kind in SESSION_KINDS:
+                out[sid] = kind
+    return out
+
+
+def is_organic(meta: dict, override_kind: str | None = None) -> bool:
+    """Organic scope. The owner's override comes first (precedence "override, then
+    the rules", as for every other reader): a non-organic kind excludes the
+    session; "organic" lifts the classification rules (cwd, worktree, sandbox) but
+    not the structural ones (a human-less sdk entrypoint, a synthetic test id)."""
     sid = meta.get("session_id") or ""
+    if override_kind is not None and override_kind != "organic":
+        return False
     if meta.get("entrypoint") != "cli":
         return False
     if _SOURCES.is_synthetic_session(sid):
         return False
+    if override_kind == "organic":
+        return True
     proj = meta.get("project_dir") or ""
     cwd = meta.get("cwd") or ""
     if _SOURCES._SANDBOX_PROJECT.match(proj) or _SANDBOX_CWD.match(cwd):
@@ -456,6 +873,8 @@ class Session:
     meta: dict
     human_idx: list[int] = field(default_factory=list)   # any human turn (re-ask detection)
     prompt_idx: list[int] = field(default_factory=list)  # counted organic prompts
+    hold_idx: list[tuple[int, str]] = field(default_factory=list)  # (record, tool_use_id) of router holds
+    first_ts: float = 0.0
 
     def human_text(self, i: int) -> str | None:
         rec = self.records[i]
@@ -474,10 +893,13 @@ class Session:
                 return j
         return None
 
-    def reply_after(self, i: int) -> tuple[str, list[dict], int]:
+    def reply_after(self, i: int, inputs: bool = False) -> tuple[str, list[dict], int]:
         """Host output after record i, up to the next human turn: its text
         plus the content it wrote with Edit/Write (routed content written into
-        a file is used content too), and its tool_uses."""
+        a file is used content too), and its tool_uses. With `inputs`, also the
+        strings it sent onward in other tools' inputs (a Bash command, a
+        sub-agent prompt, a message): a routed commit message relayed into
+        ``git commit`` is used content."""
         stop = self.next_human(i)
         stop = len(self.records) if stop is None else stop
         texts, uses = [], []
@@ -490,7 +912,15 @@ class Session:
                     uses.append(tu)
                     if tu.get("name") in _EDIT_TOOLS:
                         texts.extend(_written_content(tu))
+                    if inputs:
+                        texts.extend(input_strings(tu))
         return "\n".join(texts), uses, stop
+
+    def hold_in_turn(self, i: int) -> bool:
+        """A router hold (a deny with the BLOCKED directive) landed in the human turn
+        that contains record i, before it: a call made now is made to clear the hold."""
+        prev = max((j for j in self.human_idx if j < i), default=0)
+        return any(prev <= k < i for k, _tid in self.hold_idx)
 
     def next_human_text(self, i: int) -> str | None:
         j = self.next_human(i)
@@ -523,10 +953,36 @@ def _read_jsonl(path: Path) -> list[dict]:
     return out
 
 
-def load_sessions(projects_dir: Path, cutoff: float) -> tuple[dict[str, Session], int]:
+def index_session(s: Session) -> Session:
+    """Fill the turn indexes (human turns, counted prompts, router holds) and the start time."""
+    s.human_idx.clear()
+    s.prompt_idx.clear()
+    s.hold_idx.clear()
+    held: set[str] = set()
+    for i, rec in enumerate(s.records):
+        if not s.first_ts:
+            s.first_ts = _ts(rec) or 0.0
+        text = s.human_text(i)
+        if text is not None:
+            s.human_idx.append(i)
+            if _SOURCES.classify_drop(text, s.sid) is None:
+                s.prompt_idx.append(i)
+        for b in _tool_results(rec):
+            tid = b.get("tool_use_id")
+            # the same deny can be recorded twice; count the tool_use once
+            if tid and tid not in held and is_hold_result(_result_text(b)):
+                held.add(tid)
+                s.hold_idx.append((i, tid))
+    return s
+
+
+def load_sessions(projects_dir: Path, cutoff: float, overrides: dict[str, str] | None = None,
+                  skipped: list[str] | None = None) -> tuple[dict[str, Session], int]:
     """Organic sessions with any activity after `cutoff`, and how many files
     were read. A file last modified before the cutoff cannot hold a unit in
-    the window, so it is skipped; units are then windowed by their own ts."""
+    the window, so it is skipped; units are then windowed by their own ts.
+    `overrides` is the owner's {session_id: kind}: a session it names as
+    non-organic is not read, and its id is appended to `skipped`."""
     sessions: dict[str, Session] = {}
     n_files = 0
     for p in sorted(glob.glob(str(projects_dir / "*" / "*.jsonl"))):
@@ -536,22 +992,19 @@ def load_sessions(projects_dir: Path, cutoff: float) -> tuple[dict[str, Session]
                 continue
         except OSError:
             continue
+        kind = (overrides or {}).get(path.stem)
+        if kind is not None and kind != "organic":
+            if skipped is not None:
+                skipped.append(path.stem)  # the override wins; the file is not even read
+            continue
         n_files += 1
         records = _read_jsonl(path)
-        meta = {"session_id": path.stem, "project_dir": path.parent.name,
+        meta = {"session_id": path.stem, "project_dir": path.parent.name, "path": str(path),
                 "entrypoint": next((r["entrypoint"] for r in records if r.get("entrypoint")), None),
                 "cwd": next((r["cwd"] for r in records if r.get("cwd")), "")}
-        if not is_organic(meta):
+        if not is_organic(meta, kind):
             continue
-        s = Session(path.stem, records, meta)
-        for i in range(len(records)):
-            text = s.human_text(i)
-            if text is None:
-                continue
-            s.human_idx.append(i)
-            if _SOURCES.classify_drop(text, s.sid) is None:
-                s.prompt_idx.append(i)
-        sessions[s.sid] = s
+        sessions[path.stem] = index_session(Session(path.stem, records, meta))
     return sessions, n_files
 
 
@@ -608,6 +1061,7 @@ class Unit:
     evidence: dict = field(default_factory=dict)  # in-memory only, never written
     human_reviewed: bool = False
     unit_id: str = ""
+    extra: dict = field(default_factory=dict)  # in-memory facts for the summary/report (ids, binding); never text
 
     def row(self) -> dict:
         return {"unit_id": self.unit_id, "kind": self.kind, "label": self.label,
@@ -659,8 +1113,79 @@ def _draft_units(sessions, recs, verdicts, lo, hi) -> list[Unit]:
     return units
 
 
-def _mcp_and_edit_units(sessions, edit_rows, lo, hi) -> list[Unit]:
+def _find_notification(s: Session, start: int, task_id: str) -> tuple[int, str, bool] | None:
+    """The ``<task-notification>`` that delivered a backgrounded MCP call's real result:
+    (record index, result text, failed)."""
+    for j in range(start, len(s.records)):
+        rec = s.records[j]
+        if rec.get("type") != "user":
+            continue
+        c = _content(rec)
+        text = c if isinstance(c, str) else _text_blocks(rec)
+        got = parse_notification(text) if text else None
+        if got and got[0] == task_id:
+            return j, got[2], got[1] != "completed"
+    return None
+
+
+def _host_actions_after(s: Session, start: int, deadline: float) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for rec in s.records[start + 1:]:
+        if rec.get("type") != "assistant":
+            continue
+        t = _ts(rec)
+        if t is not None and t > deadline:
+            break
+        for tu in _tool_uses(rec):
+            if tu.get("name") == "Bash":
+                out.append(("bash", (tu.get("input") or {}).get("command") or ""))
+            elif tu.get("name") in _EDIT_TOOLS:
+                out.append(("edit", (tu.get("input") or {}).get("file_path") or ""))
+    return out
+
+
+def _mcp_call_unit(s: Session, i: int, ts: float, tu: dict, ri: int | None, rb: dict | None) -> Unit:
+    """One router tool call that is not llm_edit -> one unit."""
+    name = (tu.get("name") or "")[len(ROUTER_TOOL_PREFIX):]
+    inp = tu.get("input") or {}
+    extra = {"tool": name, "tool_use_id": tu.get("id")}
+
+    def unit(label: str, signal: str, conf: str, **evidence) -> Unit:
+        return Unit("routed_mcp", s.sid, ts, label, signal, conf, evidence=evidence, extra=extra)
+
+    if name in NON_CONTENT_TOOLS:
+        return unit(NOT_APPLICABLE, "status_view", "high")
+    prompt = inp.get("prompt") if isinstance(inp.get("prompt"), str) else ""
+    if is_probe_prompt(prompt):
+        extra["probe"] = True
+        return unit(NOT_APPLICABLE, "hold_release_probe" if s.hold_in_turn(i) else "probe_fixed_reply", "high")
+    if rb is None or ri is None:
+        return unit(*label_routed_mcp(None, False, None, False, None))
+    text, is_err, at = _result_text(rb), bool(rb.get("is_error")), ri
+    stub = None if is_err else _STUB_RE.search(text)
+    if stub:  # moved to the background after 120 s: the real result arrives as a task notification
+        extra["background"] = True
+        note = _find_notification(s, ri, stub.group(1))
+        if note is None:
+            return unit("unknown", "background_result_missing", "low")
+        at, text, is_err = note
+    if name == "llm_local_task":
+        if is_err:
+            return unit("unused", "tool_result_error", "high")
+        res = parse_local_task(text)
+        follow = local_task_follow_up(_host_actions_after(s, at, ts + LOCAL_TASK_KEEP_WINDOW_S),
+                                      inp.get("workdir") or "", (res or {}).get("changed_files") or [])
+        return unit(*label_local_task(res, follow))
+    host, uses, _stop = s.reply_after(at, inputs=True)
+    did_work = bool(host.strip()) or any(u.get("name") in _EDIT_TOOLS for u in uses)
+    label = label_routed_mcp(text, is_err, host, did_work, s.next_human_text(at))
+    return unit(*label, routed=answer_body(text), host=host)
+
+
+def _mcp_and_edit_units(sessions, edit_rows, lo, hi, stats: dict | None = None) -> list[Unit]:
     units: list[Unit] = []
+    stats = stats if stats is not None else {}
+    seen: set[str] = set()  # tool_use ids already turned into a unit
     edit_rows_by_sid: dict[str, list[dict]] = {}
     orphans = []
     for r in edit_rows:
@@ -670,7 +1195,9 @@ def _mcp_and_edit_units(sessions, edit_rows, lo, hi) -> list[Unit]:
             edit_rows_by_sid.setdefault(r["session_id"], []).append(r)
         else:
             orphans.append(r)
-    for s in sessions.values():
+    # Oldest session first: a resumed or forked session replays its parent's history
+    # (same tool_use ids, same timestamps); the unit belongs to the session it happened in.
+    for s in sorted(sessions.values(), key=lambda x: (x.first_ts, x.sid)):
         results: dict[str, tuple[int, dict]] = {}
         for i, rec in enumerate(s.records):
             for b in _tool_results(rec):
@@ -683,22 +1210,18 @@ def _mcp_and_edit_units(sessions, edit_rows, lo, hi) -> list[Unit]:
             ts = _ts(rec)
             for tu in _tool_uses(rec):
                 name = tu.get("name") or ""
-                if not name.startswith("mcp__llm_router__") or ts is None or not (lo <= ts <= hi):
+                if not name.startswith(ROUTER_TOOL_PREFIX) or ts is None or not (lo <= ts <= hi):
                     continue
+                if tu.get("id") in seen:
+                    stats["replayed_tool_uses"] = stats.get("replayed_tool_uses", 0) + 1
+                    continue
+                if tu.get("id"):
+                    seen.add(tu["id"])
                 ri, rb = results.get(tu.get("id"), (None, None))
                 if name == "mcp__llm_router__llm_edit":
                     edit_calls.append((ts, tu, ri, rb))
                     continue
-                if rb is None:
-                    label = label_routed_mcp(None, False, None, False, None)
-                    host = ""
-                else:
-                    host, uses, _stop = s.reply_after(ri)
-                    did_work = bool(host.strip()) or any(u.get("name") in _EDIT_TOOLS for u in uses)
-                    label = label_routed_mcp(_result_text(rb), bool(rb.get("is_error")), host,
-                                             did_work, s.next_human_text(ri))
-                units.append(Unit("routed_mcp", s.sid, ts, *label,
-                                  evidence={"routed": _result_text(rb) if rb else "", "host": host}))
+                units.append(_mcp_call_unit(s, i, ts, tu, ri, rb))
         rows = list(edit_rows_by_sid.get(s.sid, []))
         for r in orphans:  # FALLBACK JOIN: session-less rows matched by ts + file
             if any(c_ts <= r["ts"] <= c_ts + EDIT_JOIN_WINDOW_S
@@ -737,16 +1260,6 @@ def _mcp_and_edit_units(sessions, edit_rows, lo, hi) -> list[Unit]:
 
 _WITH_BLOCK = re.compile(r"\*\*With:\*\*\s*\n```[^\n]*\n(.*?)\n```", re.S)
 _EDIT_HEADER = re.compile(r"^### Edit \d+: (.+)$", re.M)
-
-
-def _unwrap(result_text: str) -> str:
-    try:  # the MCP result is often a JSON envelope {"result": "..."}
-        obj = json.loads(result_text)
-        if isinstance(obj, dict) and isinstance(obj.get("result"), str):
-            return obj["result"]
-    except ValueError:
-        pass
-    return result_text
 
 
 def _edit_files_in(result_text: str) -> list[str]:
@@ -794,44 +1307,244 @@ def _edit_unit(s: Session, row: dict, call) -> Unit:
     return Unit("routed_edit", s.sid, float(row["ts"]), label, signal, conf)
 
 
+@dataclass
+class _AgentCall:
+    """One Agent/Task tool_use, in the session transcript or a sub-agent's."""
+    tid: str
+    ts: float
+    inp: dict
+    src_path: str | None              # None: the session's own transcript
+    result_idx: int | None = None
+    result_text: str | None = None
+    result_is_error: bool = False
+    tur: object = None                # the result record's toolUseResult
+    tool_denial_kind: str | None = None  # the result record's toolDenialKind
+
+
+@dataclass
+class _SessionAgents:
+    calls: dict[str, _AgentCall] = field(default_factory=dict)
+    hooks: list[tuple[float, str, str]] = field(default_factory=list)  # (ts, tool_use_id, stdout)
+    launched: dict[str, str] = field(default_factory=dict)             # tool_use_id -> agent id (meta.json)
+
+
+_AGENT_NEEDLES = ("PreToolUse:Agent", '"Agent"', '"Task"', "tool_result")
+
+
+def _scan_agent_records(records, src_path: str | None, agents: _SessionAgents) -> None:
+    for i, rec in enumerate(records):
+        t = _ts(rec) or 0.0
+        att = rec.get("attachment")
+        if isinstance(att, dict) and att.get("hookName") == "PreToolUse:Agent" and att.get("toolUseID"):
+            agents.hooks.append((t, att["toolUseID"], att.get("stdout") or ""))
+        if rec.get("type") == "assistant":
+            for tu in _tool_uses(rec):
+                if tu.get("name") in _AGENT_TOOLS and tu.get("id"):
+                    agents.calls[tu["id"]] = _AgentCall(tu["id"], t, tu.get("input") or {}, src_path)
+        elif rec.get("type") == "user":
+            for b in _tool_results(rec):
+                call = agents.calls.get(b.get("tool_use_id"))
+                if call is not None and call.src_path == src_path:
+                    call.result_idx, call.result_text = i, _result_text(b)
+                    call.result_is_error, call.tur = bool(b.get("is_error")), rec.get("toolUseResult")
+                    call.tool_denial_kind = rec.get("toolDenialKind")
+
+
+def _read_jsonl_matching(path: Path, needles: tuple[str, ...]):
+    """Records whose line mentions a needle: a sub-agent transcript is mostly tool
+    output nobody here needs, and the six sessions that hold Codex units carry 1.4 GB of it."""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if not any(n in line for n in needles):
+                    continue
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict):
+                    yield obj
+    except OSError:
+        return
+
+
+def subagent_dir(s: Session) -> Path | None:
+    p = s.meta.get("path")
+    return Path(p).with_suffix("") / "subagents" if p else None
+
+
+def _index_agents(s: Session) -> _SessionAgents:
+    """Every Agent call of the session AND of its sub-agents (a nested spawn lives only in
+    a ``subagents/agent-*.jsonl``), the PreToolUse:Agent hook runs, and which tool_use ids
+    a sub-agent's ``.meta.json`` says it was launched for."""
+    agents = _SessionAgents()
+    _scan_agent_records(s.records, None, agents)
+    d = subagent_dir(s)
+    if d is not None and d.is_dir():
+        for f in sorted(d.glob("agent-*.jsonl")):
+            _scan_agent_records(_read_jsonl_matching(f, _AGENT_NEEDLES), str(f), agents)
+        for f in sorted(d.glob("agent-*.meta.json")):
+            try:
+                meta = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(meta, dict) and meta.get("toolUseId"):
+                agents.launched[meta["toolUseId"]] = f.name[len("agent-"):-len(".meta.json")]
+    return agents
+
+
+def hook_json(stdout: str | None) -> dict | None:
+    """The JSON object a PreToolUse hook printed (its stdout may open with a stray log line)."""
+    out = stdout or ""
+    k = out.find("{")
+    while k != -1:
+        try:
+            obj = json.loads(out[k:])
+        except ValueError:
+            k = out.find("{", k + 1)
+            continue
+        return obj if isinstance(obj, dict) else None
+    return None
+
+
+def is_deny_shape(obj: dict | None) -> bool:
+    """The current deny contract: ``hookSpecificOutput.permissionDecision == "deny"``. The top-level
+    ``decision``/``reason`` pair alone is the deprecated shape and was ignored on 317 of 317 handoffs."""
+    spec = obj.get("hookSpecificOutput") if isinstance(obj, dict) else None
+    return isinstance(spec, dict) and spec.get("permissionDecision") == "deny"
+
+
+def hook_reason(stdout: str | None) -> str | None:
+    """The reason text a PreToolUse hook emitted (the legacy ``reason`` or the
+    ``permissionDecisionReason``); stdout may open with a stray log line."""
+    obj = hook_json(stdout)
+    if obj is None:
+        return None
+    r = obj.get("reason")
+    if not isinstance(r, str):
+        r = (obj.get("hookSpecificOutput") or {}).get("permissionDecisionReason")
+    return r if isinstance(r, str) else None
+
+
+def _pair_codex_row(row: dict, agents: _SessionAgents, claimed: set[str]) -> tuple[_AgentCall | None, str]:
+    """The Agent call a ledger row belongs to, and how it was found. By tool_use_id when the
+    ledger has one. Otherwise by the PreToolUse:Agent hook run that FOLLOWED the row (the hook
+    writes the row, then the harness records the run: median 0.39 s, max 5.5 s over 317 rows;
+    all 317 pairs agree with the ledger's subagent_type and with the sub-agent's
+    ``.meta.json``). Last resort: the latest unclaimed call before the row."""
+    tid = row.get("tool_use_id")
+    if isinstance(tid, str) and tid:
+        claimed.add(tid)
+        return agents.calls.get(tid), "tool_use_id"
+    ts = float(row["ts"])
+    want = row.get("subagent_type")
+    best: tuple[tuple[bool, float], _AgentCall] | None = None
+    for h_ts, h_tid, _out in agents.hooks:
+        call = agents.calls.get(h_tid)
+        if call is None or h_tid in claimed or not (ts - HOOK_JOIN_BEFORE_S <= h_ts <= ts + HOOK_JOIN_AFTER_S):
+            continue
+        key = (bool(want) and (call.inp.get("subagent_type") or "general-purpose") != want, abs(h_ts - ts))
+        if best is None or key < best[0]:
+            best = (key, call)
+    if best is not None:
+        claimed.add(best[1].tid)
+        return best[1], "hook_run"
+    match = None
+    for call in agents.calls.values():
+        if call.tid in claimed or call.ts > ts + 2 or ts - call.ts > AGENT_MATCH_WINDOW_S:
+            continue
+        if match is None or call.ts > match.ts:
+            match = call
+    if match is not None:
+        claimed.add(match.tid)
+        return match, "call_time_window"
+    return None, "none"
+
+
+def claude_subagent_launched(call: _AgentCall, agents: _SessionAgents) -> bool:
+    """A Claude sub-agent ran for this Agent call: the harness said so in the result, in
+    toolUseResult, or in a sub-agent ``.meta.json`` that names the call."""
+    if looks_launched(call.result_text) or call.tid in agents.launched:
+        return True
+    tur = call.tur
+    return isinstance(tur, dict) and bool(tur.get("agentId") or tur.get("status") in ("async_launched", "completed"))
+
+
+def _agent_reply_text(call: _AgentCall, s: Session) -> str:
+    """What the caller of the Agent tool did next (text, edits and tool inputs)."""
+    if call.result_idx is None:
+        return ""
+    if call.src_path is None:
+        return s.reply_after(call.result_idx, inputs=True)[0]
+    sub = index_session(Session(s.sid, _read_jsonl(Path(call.src_path)), {}))
+    i = next((k for k, rec in enumerate(sub.records)
+              if any(b.get("tool_use_id") == call.tid for b in _tool_results(rec))), None)
+    return sub.reply_after(i, inputs=True)[0] if i is not None else ""
+
+
 def _codex_units(sessions, ns_rows, lo, hi) -> list[Unit]:
     units = []
     claimed: set[str] = set()
+    cache: dict[str, _SessionAgents] = {}
     for r in sorted(ns_rows, key=lambda x: x.get("ts") or 0):
-        if r.get("lever") != "agent_route_codex" or r.get("outcome") not in ("delegated", "codex_failed"):
+        outcome = r.get("outcome")
+        if r.get("lever") != "agent_route_codex" or outcome not in ("delegated", "codex_failed", "codex_blocked"):
             continue
         ts = r.get("ts")
         s = sessions.get(r.get("session_id") or "")
         if s is None or not isinstance(ts, (int, float)) or not (lo <= ts <= hi):
             continue
-        agent_calls = []  # (ts, idx, tool_use)
-        for i, rec in enumerate(s.records):
-            if rec.get("type") != "assistant":
-                continue
-            for tu in _tool_uses(rec):
-                if tu.get("name") in _AGENT_TOOLS:
-                    agent_calls.append((_ts(rec) or 0.0, i, tu))
-        match = None
-        for c_ts, i, tu in agent_calls:
-            if tu.get("id") in claimed or c_ts > ts + 2 or ts - c_ts > AGENT_MATCH_WINDOW_S:
-                continue
-            if match is None or c_ts > match[0]:
-                match = (c_ts, i, tu)
-        result_text, parent_text, respawned = None, None, False
-        if match is not None and r.get("outcome") == "delegated":
-            claimed.add(match[2].get("id"))
-            for j, rec in enumerate(s.records):
-                for b in _tool_results(rec):
-                    if b.get("tool_use_id") == match[2].get("id"):
-                        result_text = _result_text(b)
-                        parent_text, _u, _ = s.reply_after(j)
-            prompt = (match[2].get("input") or {}).get("prompt") or ""
-            respawned = any(c_ts > match[0] and c_ts - match[0] <= RESPAWN_WINDOW_S
-                            and reuse_fraction(prompt, (tu.get("input") or {}).get("prompt"), n=4) >= 0.5
-                            for c_ts, _i, tu in agent_calls)
-        label = label_codex(r.get("outcome"), result_text, parent_text, respawned)
-        units.append(Unit("agent_route_codex", s.sid, float(ts), *label,
-                          evidence={"routed": result_text or "", "host": parent_text or ""}))
+        extra: dict = {"outcome": outcome, "tool_use_id": r.get("tool_use_id"),
+                       "subagent_type": r.get("subagent_type")}
+        if outcome != "delegated":
+            units.append(Unit("agent_route_codex", s.sid, float(ts), *label_codex(outcome, None, None, False),
+                              extra=extra))
+            continue
+        agents = cache.get(s.sid)
+        if agents is None:
+            agents = cache[s.sid] = _index_agents(s)
+        call, how = _pair_codex_row(r, agents, claimed)
+        extra.update(pairing=how, call_found=call is not None, tool_use_id=call.tid if call else extra["tool_use_id"],
+                     nested=bool(call and call.src_path), launched=False, marker=False, deny_shape=False,
+                     delivered=False, bound=False, respawned=False)
+        if call is None:
+            units.append(Unit("agent_route_codex", s.sid, float(ts), *label_codex("delegated", None, None, False),
+                              extra=extra))
+            continue
+        launched = claude_subagent_launched(call, agents)
+        stdout = next((out for _t, tid, out in agents.hooks if tid == call.tid), None)
+        marker = call.result_text is not None and carries_codex_text(call.result_text, hook_reason(stdout))
+        # The deny SHAPE. When the transcript kept the hook's own stdout it must hold the current contract
+        # (hookSpecificOutput.permissionDecision == "deny"); an honoured deny leaves no hook attachment, and
+        # then the harness's rendering is the evidence: an error result that opens "PreToolUse:Agent hook error"
+        # or whose record has toolDenialKind == "permission-rule". Other denial kinds are not hook evidence.
+        hj = hook_json(stdout) if stdout else None
+        rendered = bool(call.result_is_error) and (
+            (call.result_text or "").lstrip().startswith("PreToolUse:Agent hook error")
+            or call.tool_denial_kind == "permission-rule")
+        shape = is_deny_shape(hj) if hj is not None else rendered
+        delivered = marker and shape and not launched
+        # The same prompt asked again after a delivered result is the escape hatch (codex_reissue): the work was
+        # redone by Claude, so the handoff did not bind. Only an identical prompt counts: it is the router's own rule.
+        respawned = delivered and any(
+            o.src_path == call.src_path and call.ts < o.ts <= float(ts) + RESPAWN_WINDOW_S
+            and same_prompt(call.inp.get("prompt"), o.inp.get("prompt"))
+            for o in agents.calls.values())
+        bound = delivered and not respawned
+        parent = _agent_reply_text(call, s) if bound else ""
+        if call.result_text is None:
+            label = (("redone", "claude_subagent_ran", "high") if launched
+                     else ("unknown", "agent_result_missing", "low"))
+        else:
+            label = label_codex("delegated", call.result_text, parent, respawned, launched, marker and shape)
+        tur = call.tur if isinstance(call.tur, dict) else {}
+        extra.update(launched=launched, marker=marker, deny_shape=shape, delivered=delivered, respawned=respawned,
+                     bound=bound, call_subagent_type=call.inp.get("subagent_type") or "general-purpose",
+                     agent_id=agents.launched.get(call.tid) or tur.get("agentId") or agent_id_in_text(call.result_text),
+                     resolved_model=tur.get("resolvedModel"),
+                     blocked_screen=is_blocked_answer(codex_body(call.result_text)) if bound else None)
+        units.append(Unit("agent_route_codex", s.sid, float(ts), *label, extra=extra,
+                          evidence={"routed": call.result_text or "", "host": parent}))
     return units
 
 
@@ -880,14 +1593,62 @@ def default_artifact_dir() -> Path:
     return ROOT / "release-artifacts" / "outcome-audit"
 
 
-def _collect(days: int, projects_dir: Path, state_dir: Path, now: float | None):
+def binding_stats(units: list[Unit], reissue_rows: int = 0) -> dict:
+    """The Codex binding facts (D-358), from the units' in-memory ``extra``. The denominator is every
+    unit the router DELEGATED (it emitted a deny carrying a Codex result). Of those: ``delivered`` = the
+    deny reached Claude as the sub-agent's result (a deny shape, the Codex wrapper, no Claude sub-agent
+    launched); ``bound`` = delivered and not followed by a re-issue of the same task (the escape hatch,
+    ``codex_reissue``), which means Claude redid the work. Everything else is counted in its own bucket, and the
+    runs that never delivered (``codex_blocked``, ``codex_failed``) are counted beside them, so nothing is hidden."""
+    d = [u for u in units if u.kind == "agent_route_codex" and u.extra.get("outcome") == "delegated"]
+    bound = [u for u in d if u.extra.get("bound")]
+    codex = [u for u in units if u.kind == "agent_route_codex"]
+    blocked = sum(u.extra.get("outcome") == "codex_blocked" for u in codex)
+    failed = sum(u.extra.get("outcome") == "codex_failed" for u in codex)
+    by_pairing: dict[str, int] = {}
+    for u in d:
+        by_pairing[u.extra.get("pairing", "none")] = by_pairing.get(u.extra.get("pairing", "none"), 0) + 1
+
+    def found_not_launched(u: Unit) -> bool:
+        return bool(u.extra.get("call_found")) and not u.extra.get("launched")
+
+    return {
+        "metric": "delegated units whose deny reached Claude as the sub-agent's result (deny shape, Codex wrapper) "
+                  "with no Claude sub-agent launched for that tool_use_id and no re-issue of the task afterwards",
+        "delegated": len(d),
+        "delivered": sum(bool(u.extra.get("delivered")) for u in d),
+        "bound": len(bound),
+        "void_claude_subagent_ran": sum(bool(u.extra.get("launched")) for u in d),
+        "respawned_after_delivery": sum(bool(u.extra.get("respawned")) for u in d),
+        "no_agent_call_found": sum(not u.extra.get("call_found") for u in d),
+        "paired_in_sub_agent_transcript": sum(bool(u.extra.get("nested")) for u in d),
+        "delivered_without_deny_shape": sum(found_not_launched(u) and bool(u.extra.get("marker"))
+                                            and not u.extra.get("deny_shape") for u in d),
+        "result_without_codex_marker": sum(found_not_launched(u) and not u.extra.get("marker") for u in d),
+        "blocked_screen_among_bound": sum(bool(u.extra.get("blocked_screen")) for u in bound),
+        "codex_runs": len(d) + blocked + failed,
+        "codex_blocked": blocked,
+        "codex_failed": failed,
+        "codex_reissue_rows": reissue_rows,
+        "pairing": dict(sorted(by_pairing.items())),
+    }
+
+
+def _collect(days: int, projects_dir: Path, state_dir: Path, now: float | None, lo: float | None = None,
+             overrides: dict[str, str] | None = None):
+    """Every unit in [lo, now] with the facts the summary needs. `overrides` replaces the
+    owner's session_kind_overrides.json (None: read it; {}: none), for a validation run."""
     hi = now if now is not None else time.time()
-    lo = hi - days * 86400
-    sessions, n_files = load_sessions(projects_dir, lo)
+    lo = lo if lo is not None else hi - days * 86400
+    if overrides is None:
+        overrides = read_session_overrides(state_dir / OVERRIDES_FILENAME)
+    skipped: list[str] = []
+    sessions, n_files = load_sessions(projects_dir, lo, overrides, skipped)
     recs, verdicts = parse_debug_log(state_dir / "auto-route-debug.log")
+    stats: dict = {}
     units: list[Unit] = []
     units += _draft_units(sessions, recs, verdicts, lo, hi)
-    units += _mcp_and_edit_units(sessions, _read_jsonl(state_dir / "edit_outcomes.jsonl"), lo, hi)
+    units += _mcp_and_edit_units(sessions, _read_jsonl(state_dir / "edit_outcomes.jsonl"), lo, hi, stats)
     ns_rows = _read_jsonl(state_dir / "north_star_units.jsonl")
     units += _codex_units(sessions, ns_rows, lo, hi)
     units += _proxy_units(sessions, _read_jsonl(state_dir / "proxy_calls.jsonl"), lo, hi)
@@ -924,9 +1685,18 @@ def _collect(days: int, projects_dir: Path, state_dir: Path, now: float | None):
                     if lo <= (_ts(s.records[i]) or 0) <= hi)
     active_sessions = {u.session_id for u in units} | {
         s.sid for s in sessions.values() for i in s.prompt_idx if lo <= (_ts(s.records[i]) or 0) <= hi}
+    n_holds = sum(1 for s in sessions.values() for i, _tid in s.hold_idx if lo <= (_ts(s.records[i]) or 0) <= hi)
+    reissue_ts = sorted(float(r["ts"]) for r in ns_rows
+                        if r.get("lever") == "agent_route_codex" and r.get("outcome") == "codex_reissue"
+                        and r.get("session_id") in sessions and isinstance(r.get("ts"), (int, float)) and lo <= r["ts"] <= hi)
     ctx = {"lo": lo, "hi": hi, "days": days, "n_files_read": n_files, "n_prompts": n_prompts,
            "n_sessions": len(active_sessions), "unscoped": unscoped, "excluded": excluded,
-           "sessions": sessions}
+           "sessions": sessions, "overrides": {"file": OVERRIDES_FILENAME,
+                                               "n_entries": len(overrides), "excluded_sessions": sorted(skipped)},
+           "dedup": {"replayed_tool_uses": stats.get("replayed_tool_uses", 0)},
+           "holds": {"n": n_holds, "n_prompts": n_prompts,
+                     "per_100_prompts": round(100 * n_holds / n_prompts, 3) if n_prompts else None},
+           "codex_reissue_ts": reissue_ts, "binding": binding_stats(units, len(reissue_ts))}
     return units, ctx
 
 
@@ -984,11 +1754,13 @@ def summarize(rows: list[dict], ctx: dict, release: str, judge: dict,
     by_kind = {}
     for kind in KINDS:
         ks = [r for r in rows if r["kind"] == kind]
-        labels = {lab: sum(r["label"] == lab for r in ks) for lab in LABELS}
-        by_kind[kind] = {"n": len(ks), "labels": labels,
-                         "used": _rate(labels["used"], len(ks)),
-                         "used_or_corrected": _rate(labels["used"] + labels["corrected"], len(ks))}
-    n = len(rows)
+        labels = {lab: sum(r["label"] == lab for r in ks) for lab in ALL_LABELS}
+        attempted = len(ks) - labels[NOT_APPLICABLE]
+        by_kind[kind] = {"n": attempted, "n_total": len(ks), "labels": labels,
+                         "used": _rate(labels["used"], attempted),
+                         "used_or_corrected": _rate(labels["used"] + labels["corrected"], attempted)}
+    na = [r for r in rows if r["label"] == NOT_APPLICABLE]
+    n = len(rows) - len(na)  # attempted: a not_applicable unit is outside the denominator
     used = sum(r["label"] == "used" for r in rows)
     corrected = sum(r["label"] == "corrected" for r in rows)
     excluded = ctx["excluded"]
@@ -996,23 +1768,39 @@ def summarize(rows: list[dict], ctx: dict, release: str, judge: dict,
         excluded[name]["counted_as_used"] = sum(
             1 for r in rows if r["label"] in ("used", "corrected") and r["signal"] in sigs)
     head = _rate(used, n)
+    na_signals: dict[str, int] = {}
+    for r in na:
+        na_signals[r["signal"]] = na_signals.get(r["signal"], 0) + 1
     return {
         "release": release,
+        "audit_version": AUDIT_VERSION,
+        "audit_changes": list(AUDIT_CHANGES),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "window_days": ctx["days"],
         "window": [_iso(ctx["lo"]), _iso(ctx["hi"])],
         "scope": {"entrypoint": "cli", "excludes": ["/tmp", "/var/folders", "worktree", "~/.rsi",
-                                                    "synthetic session ids", "sdk-cli sub-agent sessions"],
-                  "n_sessions": ctx["n_sessions"], "n_files_read": ctx["n_files_read"]},
-        "headline": {"metric": "used / attempted routed units (organic, window by unit ts)",
+                                                    "synthetic session ids", "sdk-cli sub-agent sessions",
+                                                    "sessions the owner's session_kind_overrides.json names non-organic"],
+                  "n_sessions": ctx["n_sessions"], "n_files_read": ctx["n_files_read"],
+                  "session_kind_overrides": ctx["overrides"]},
+        "headline": {"metric": "used / attempted routed units (organic, window by unit ts; "
+                               "not_applicable units are outside the denominator)",
                      "used": used, "attempted": n, "rate": head["rate"], "ci95": head["ci95"],
-                     "too_few_to_tell": head["too_few_to_tell"]},
+                     "too_few_to_tell": head["too_few_to_tell"], "not_applicable": len(na)},
+        "not_applicable": {"n": len(na), "by_signal": dict(sorted(na_signals.items())),
+                           "used_rate_if_included": (used / len(rows)) if rows else None,
+                           "note": "excluded from attempted; the rate with them counted as attempted is "
+                                   "given so the exclusion can be undone by a reader"},
         "used_or_corrected": _rate(used + corrected, n),
         "prompts": {"metric": "organic prompts followed by >=1 used unit before the next prompt",
                     **_rate(prompts_with_used, ctx["n_prompts"])},
-        "labels": {lab: sum(r["label"] == lab for r in rows) for lab in LABELS},
+        "labels": {lab: sum(r["label"] == lab for r in rows) for lab in ALL_LABELS},
         "human_reviewed": sum(bool(r["human_reviewed"]) for r in rows),
         "by_kind": by_kind,
+        "binding": ctx["binding"],
+        "holds": {"metric": "router holds (Routing directive BLOCKED denies) per 100 organic prompts",
+                  **ctx["holds"]},
+        "dedup": ctx["dedup"],
         "unscoped": ctx["unscoped"],
         "excluded_inflated_sources": excluded,
         "judge": judge,
@@ -1041,7 +1829,7 @@ def _prompts_with_used(units: list[Unit], sessions) -> int:
 def _apply_human_labels(units: list[Unit], path: Path | None) -> None:
     if path is None:
         return
-    reviews = {r["unit_id"]: r for r in _read_jsonl(path) if r.get("unit_id") and r.get("label") in LABELS}
+    reviews = {r["unit_id"]: r for r in _read_jsonl(path) if r.get("unit_id") and r.get("label") in ALL_LABELS}
     for u in units:
         r = reviews.get(u.unit_id)
         if r is not None:
@@ -1148,6 +1936,11 @@ def run_audit(days: int = 30, projects_dir: Path | None = None, state_dir: Path 
               judge_calibration: dict | None = None) -> tuple[list[dict], dict]:
     units, ctx = _collect(days, projects_dir or default_projects_dir(),
                           state_dir or default_state_dir(), now)
+    return _finish(units, ctx, release, human_labels, judge_model, judge_calibration)
+
+
+def _finish(units: list[Unit], ctx: dict, release: str, human_labels: Path | None = None,
+            judge_model: str | None = None, judge_calibration: dict | None = None) -> tuple[list[dict], dict]:
     _apply_human_labels(units, human_labels)
     judge = _apply_judge(units, judge_model, judge_calibration)
     rows = [u.row() for u in units]
@@ -1180,15 +1973,26 @@ def _fmt(r: dict) -> str:
 
 def print_summary(summary: dict) -> None:
     h = summary["headline"]
-    print(f"outcome audit {summary['release']}: {summary['window_days']}d, "
+    print(f"outcome audit {summary['release']} (audit v{summary['audit_version']}): {summary['window_days']}d, "
           f"{summary['scope']['n_sessions']} organic sessions")
     print(f"  used (headline): {_fmt({'k': h['used'], 'n': h['attempted'], 'rate': h['rate'], 'ci95': h['ci95'], 'too_few_to_tell': h['too_few_to_tell']})}")
+    print(f"  not_applicable (outside the denominator): {h['not_applicable']} {summary['not_applicable']['by_signal']}")
     print(f"  used or corrected: {_fmt(summary['used_or_corrected'])}")
     print(f"  prompts with a used unit: {_fmt(summary['prompts'])}")
     print(f"  labels: {summary['labels']}")
     for kind, k in summary["by_kind"].items():
-        if k["n"]:
+        if k["n_total"]:
             print(f"  {kind:<20} n={k['n']:<5} used {_fmt(k['used'])}  labels={k['labels']}")
+    b = summary["binding"]
+    print(f"  codex binding: {b['bound']}/{b['delegated']} delegated units bound "
+          f"(void {b['void_claude_subagent_ran']}, re-issued {b['respawned_after_delivery']}, "
+          f"unpaired {b['no_agent_call_found']}, no Codex wrapper {b['result_without_codex_marker']}, "
+          f"no deny shape {b['delivered_without_deny_shape']}, pairing {b['pairing']})")
+    print(f"  codex runs that delivered nothing: blocked {b['codex_blocked']}, failed {b['codex_failed']} "
+          f"(of {b['codex_runs']} runs); codex_reissue ledger rows {b['codex_reissue_rows']}")
+    print(f"  holds: {summary['holds']['n']} in {summary['holds']['n_prompts']} prompts; "
+          f"replayed tool_uses deduped: {summary['dedup']['replayed_tool_uses']}; "
+          f"sessions excluded by override: {len(summary['scope']['session_kind_overrides']['excluded_sessions'])}")
     for name, v in summary["excluded_inflated_sources"].items():
         print(f"  excluded {name}: n={v['n']} counted_as_used={v['counted_as_used']}")
     for kind, v in summary["unscoped"].items():
@@ -1198,6 +2002,8 @@ def print_summary(summary: dict) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=30)
+    ap.add_argument("--until", default=None, metavar="ISO_UTC",
+                    help="end of the window (default: now); fixes the window to reproduce an earlier run")
     ap.add_argument("--release", default=None, help="release label (default: pyproject version)")
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--projects-dir", type=Path, default=None)
@@ -1215,12 +2021,17 @@ def main(argv: list[str] | None = None) -> int:
     if out_dir.resolve().is_relative_to(state.resolve()):
         print(f"refusing to write into the state dir {state}", file=sys.stderr)
         return 2
+    try:
+        until = parse_utc(args.until) if args.until else None
+    except ValueError as exc:
+        print(f"--until: {exc}", file=sys.stderr)
+        return 2
     calibration = None
     if args.judge and args.calibrate_judge:
-        units, _ctx = _collect(args.days, args.projects_dir or default_projects_dir(), state, None)
+        units, _ctx = _collect(args.days, args.projects_dir or default_projects_dir(), state, until)
         calibration = calibrate_judge(args.judge, args.calibrate_judge, units)
         print(f"judge calibration: {json.dumps(calibration)}")
-    rows, summary = run_audit(args.days, args.projects_dir, state, None, release,
+    rows, summary = run_audit(args.days, args.projects_dir, state, until, release,
                               args.human_labels, args.judge, calibration)
     jsonl, summ = write_artifacts(rows, summary, out_dir, release)
     print_summary(summary)

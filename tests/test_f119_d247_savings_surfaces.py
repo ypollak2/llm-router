@@ -192,43 +192,6 @@ def test_status_bar_money_part_two_segments_never_merged():
     assert _plain(sb._money_part(lv, "D", _window())) == "D:n/a"       # nothing known: n/a, not $0
 
 
-# ── share card ──────────────────────────────────────────────────────────────────
-
-def test_share_card_is_labelled_est_and_unknown_is_na():
-    from llm_router.commands.share import SavingsStats, render_svg
-
-    known = SavingsStats(total_calls=3, paid_calls=1, free_calls=2, total_saved=5.0, savings_pct=40, known=True)
-    assert known.saved_text == "est. $5.00" and "est." in known.pct_text
-    assert "est. $5.00" in render_svg(known)
-    neg = SavingsStats(total_saved=-1.0, known=True)
-    assert neg.saved_text == "est. -$1.00"
-    unknown = SavingsStats()                                           # unreadable ledger
-    svg = render_svg(unknown)
-    assert "est. n/a" in svg and "$0.00" not in svg and "0% cheaper" not in svg
-
-
-def test_share_gather_skips_paid_rows_without_cost(tmp_path):
-    import sqlite3
-
-    from llm_router.commands.share import _gather_stats
-
-    db = tmp_path / "usage.db"
-    con = sqlite3.connect(db)
-    con.execute("CREATE TABLE usage (provider TEXT, model TEXT, input_tokens INT, output_tokens INT, "
-                "cost_usd REAL, success INT, is_simulated INT)")
-    con.executemany("INSERT INTO usage VALUES (?,?,?,?,?,1,0)", [
-        ("openai", "m", 1_000_000, 0, None), ("openai", "m", 1_000_000, 0, 1.0)])
-    con.commit()
-    con.close()
-    st = _gather_stats(str(db))
-    assert st.known and st.paid_calls == 2
-    from llm_router.commands.share import SONNET_IN
-
-    # Only the costed row counts: its baseline (1M Sonnet input tokens) minus the $1.00 paid. The
-    # unknown-cost row is not credited a full baseline as if it had cost nothing.
-    assert st.total_saved == pytest.approx(SONNET_IN - 1.0, abs=0.01)
-
-
 # ── retrospective / snapshot / replay / cyber-grid / clawcode / tui ─────────────
 
 def test_retrospective_saved_is_est_or_na():
@@ -310,7 +273,7 @@ def test_status_bar_known_empty_window_is_a_real_zero_not_a_crash():
     empty = _window(verified_usd=0.0, verified_n=0, unverified_usd=0.0, unverified_n=0,
                     saved_usd=0.0, saved_n=0)
     text = _plain(sb._money_part(lv, "D", empty))
-    assert text == "D:~$0.00 est n=0 ·today"
+    assert text == "D:~$0.00 est n=0 calls ·today"
     assert "n/a" not in text
 
 
@@ -331,7 +294,7 @@ def test_status_bar_known_unknown_matrix():
     assert "~$5.00 est n=4" in both_known and "$2.00 ver n=2" in both_known
     _no_merge(both_known)
     both_empty = part(verified_usd=0.0, verified_n=0, unverified_usd=0.0, unverified_n=0)
-    assert both_empty == "D:~$0.00 est n=0 ·today"
+    assert both_empty == "D:~$0.00 est n=0 calls ·today"
 
 
 def test_status_bar_hook_pair_byte_identical():
@@ -458,24 +421,6 @@ def _usage_db(tmp_path, rows):
     con.commit()
     con.close()
     return str(db)
-
-
-def test_share_free_row_counted_once_not_twice(tmp_path):
-    """F121 bug: a free row was added at `total_saved += base` AND at loop level."""
-    from llm_router.commands.share import SONNET_IN, _gather_stats
-
-    stats = _gather_stats(_usage_db(tmp_path, [("ollama", "qwen", 1_000_000, 0, 0.0)]))
-    assert stats.total_saved == pytest.approx(SONNET_IN)
-    assert stats.free_calls == 1
-
-
-def test_share_subscription_and_paid_rows_each_counted_once(tmp_path):
-    from llm_router.commands.share import SONNET_IN, _gather_stats
-
-    stats = _gather_stats(_usage_db(tmp_path, [("subscription", "m", 1_000_000, 0, 0.0),
-                                               ("openai", "gpt", 1_000_000, 0, 1.0),
-                                               ("openai", "gpt", 1_000_000, 0, None)]))
-    assert stats.total_saved == pytest.approx(SONNET_IN + (SONNET_IN - 1.0))   # unknown-cost row: out
 
 
 def test_metrics_omit_savings_when_ledger_unreadable(monkeypatch):

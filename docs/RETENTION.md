@@ -15,6 +15,15 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Failure | A failed prune is recorded with `failopen` code `F107-HISTORY-PRUNE`; the file is left as it was. |
 | Reads | `quota_rate` reads only the tail of the file it needs (backward scan in 256 KiB blocks). |
 
+## `session_routing/` (the status line's session routing numbers)
+
+| Item | Value |
+|---|---|
+| Files | `session_routing/<session>.json` (scan state: per transcript file a byte offset, a 16-hex head digest, the message ids with a model slot, and the MCP `tool_use` ids; plus the proxy ledger offset and the ids it served), `session_routing/<session>.result.json` (the last figure: counts and flags only), `session_routing/codex_counts.json` (model responses of finished Codex runs, keyed by run identity: session, `ts`, thread and tool call of the delegation row). No prompt text and no answer text: ids, models, counts. |
+| Writer | `session_routing.compute`, called only from `statusline_snapshot.build`, which only the detached refresher runs. Never the per-tick renderer, never a hook. Files are 0600, replaced atomically. |
+| Kept | The newest 20 sessions (index and result each, `session_routing.KEEP_INDEXES`); `codex_counts.json` at most 5,000 entries, oldest dropped. A deleted file is rebuilt by the next refresh: a scan is resumable by byte offset and spends at most `session_routing.BUDGET_S` seconds per run, and while it has not reached the end of the transcripts the line reads `routed n/a (counting transcripts, session)`. |
+| Failure | A failed write is recorded with `failopen` codes `CHZ-FO-ROUTING-WRITE` / `CHZ-FO-ROUTING-PRUNE`; the figure is still returned, the next run is just slower. |
+
 ## `active_days.jsonl` (P3.7, S7, D-26 option A)
 
 | Item | Value |
@@ -122,13 +131,25 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | File mode | Files are created 0600, including the new live file after rotation. |
 | Concurrency | Append takes no lock: one `O_APPEND` write. Rotation uses a non-blocking lock on the sidecar `text_job_fail_closed.jsonl.lock` (empty, created on the first rotation and kept); a writer that cannot take it skips rotation. |
 
+## `hold_events.jsonl` (BIND W2)
+
+| Item | Value |
+|---|---|
+| Rows | `ts`, `event` (`prompt`, `hold`, `exempt`, `blocked`, `probe`, `door_call`, `released`), `session_id`, and per event: `words`, `task`, `complexity`, `mode`, `reason`, `tool`, `violation`, `kind`, `call_words`, `how`, `held`, `forwarded`, `ack`, and, on the `enforce-route` events, `tool_use_id` (the host's id of the tool call, which joins a row to the transcript). Counts, ids, codes and yes/no verdicts only: never a prompt, command or tool argument. The writer drops any other key, and a dict or list value. |
+| Writers | `auto-route.py` (`prompt`, `hold`, `exempt`) and `enforce-route.py` (`blocked`, `probe`, `door_call`, `released`), through `hold_ledger.record`. `door_call` is one row per routing-door call the hook sees, held or not (it is how a fixed-reply probe outside any hold is counted); the hook exits before it in `off`, `shadow` and `advise`. A failed write is recorded with `failopen` code `CHZ-FO-HOLD-LEDGER-WRITE` and never changes the hook's answer. There is no off switch. |
+| Kept | Two generations of 2 MiB via `capped_log` (`hold_ledger._MAX_BYTES`): `<name>` and `<name>.1` (older). The oldest generation is dropped on rotation; a generation can exceed the cap by one row. |
+| Why 2 MiB | A row is 100 to 231 bytes (n=7, one synthetic row of each event with the longest realistic values: a 36-character session id, a 30-character `tool_use_id`, the tool names `NotebookEdit` and `llm_local_task`; the length of `json.dumps(row, separators=(",", ":")) + "\n"`, computed 2026-11-03: 101, 154, 157, 206, 217, 221, 231), so 9,000 to 20,000 rows per generation. One `prompt` row per prompt, one row per hold decision and one per routing-door call: weeks of a busy machine. |
+| Reads | `hold_ledger.summarize` (the `blocked_holds` counter in `llm-router doctor`, and `python -m llm_router.hold_ledger --days 30 [--organic]`): `blocked_per_100_prompts`, `holds_per_100_prompts`, `probes_per_100_prompts`, `ack_probes`, and the breakdowns. The session kind of each row is read at summary time from `llm_router.session_kind.kind_of` (the owner's override file, then the session's tag), so the rows themselves carry no kind; `--organic` counts organic sessions only, a session that was never tagged is the `untagged` bucket and is not organic, and `by_kind` is always printed. No `prompt` row in the window reads as unknown (`null`), never 0. |
+| File mode | Files are created 0600, including the new live file after rotation. |
+| Concurrency | Append takes no lock: one `O_APPEND` write. Rotation uses a non-blocking lock on the sidecar `hold_events.jsonl.lock`; a writer that cannot take it skips rotation. |
+
 ## File modes of every state file (W0-4, PRD S7)
 
 | Item | Value |
 |---|---|
 | Rule | Files written through `state_files` (including the database creators `cost`, `budget`, `provider_budget`, `receipt_store`, `quota_tracker` and `onboard`, which go through `connect_sqlite`/`connect_aiosqlite`) are 0600 regardless of umask, and directories they create are 0700. Legacy writers listed in the ratchet baseline are being migrated; until each one is, the repair below tightens what it leaves behind. SQLite `-wal`, `-shm` and `-journal` files take the mode of the main database file, which is created at 0600 first (`state_files.connect_sqlite`, `connect_aiosqlite`). This is not a claim that S7 is closed. |
 | Helper | `llm_router.state_files`: `open_private`, `private_dir`, `ensure_private_file`, `connect_sqlite(create=...)`, `connect_aiosqlite`. A new writer under the state directory uses these, not a bare `open(..., "a")`. Hooks run standalone and carry a stdlib-only `_priv_open` with the same 0600 creation. `tests/test_w04_state_file_modes.py::test_raw_state_writes_ratchet` is an AST scan (all `open()`/`Path.open()` write modes, `os.open` unless its mode is the literal `0o600` or its flags provably lack `O_CREAT`, `write_text`/`write_bytes`, `sqlite3`/`aiosqlite.connect`, including `from os import open as o` aliases) over every file of `src/`, the top-level `hooks/` directory and `scripts/`, with no filter on what the file mentions. It freezes the legacy raw writers per file in `tests/w04_raw_write_baseline.json`; the count may only go down. The count includes writes that are not state (a build artifact, a user's project file), so it is a ceiling on the S7 surface, not a list of leaks. A call counts as routed only when `opener=` is `private_opener`/`paths.private_opener` (or the hooks' local `_private_opener`), or it sits inside a hook helper named `_priv_*`; `opener=<lambda>`, `opener=None` and any other opener count as raw. `tests/test_w04c_readers_create_nothing.py` pins the read-only callers. |
-| Older files | `state_files.harden_state` runs on EVERY `llm-router doctor`, MCP server start and proxy start (measured with `scripts/time_harden_state.py` on 3,000 synthetic files in 30 directories, Apple-silicon macOS 26.5, Python 3.11, 2026-10-25: first pass that fixes every file 0.035 to 0.044 s (2 runs), a pass with nothing to change 0.008 s (median of 5)). It tightens files to 0600 and directories to 0700; `doctor` repairs once at its start and again after its own checks, so the files it creates (`seats.json`, the state directory) are private on the first run too; a file a legacy writer created wide is repaired on the next start, and a failed chmod is retried. It records counts only (no names, no content). Symlinks are skipped, never followed, a symlinked state root is refused, and nothing outside the state directory is changed. The old `.modes_migrated_v1` marker is no longer read. |
+| Older files | `state_files.harden_state` runs on EVERY `llm-router doctor`, MCP server start and proxy start (measured with `scripts/time_harden_state.py` on 3,000 synthetic files in 30 directories, Apple-silicon macOS 26.5, Python 3.11, 2026-10-25: first pass that fixes every file 0.035 to 0.044 s (2 runs), a pass with nothing to change 0.008 s (median of 5)). It tightens files to 0600 and directories to 0700; `doctor` repairs once at its start and again after its own checks, so the files it creates (`seats.json`, the state directory) are private on the first run too; a file a legacy writer created wide is repaired on the next start, and a failed chmod is retried. It records counts only (no names, no content). The proxy runs it on a background thread (`harden_state_in_background`) so the walk, which visits every inode under the state directory, never delays the port; the MCP server and `doctor` still run it inline. Symlinks are skipped, never followed, a symlinked state root is refused, and nothing outside the state directory is changed. The old `.modes_migrated_v1` marker is no longer read. |
 | Read-only opens | `connect_sqlite(path, create=False)` and `connect_aiosqlite(path, create=False)` raise `sqlite3.OperationalError` on a missing database and create nothing, so a read never makes a file or a directory (doctor, sidecar, retrospective, attribution, receipts, budget, and, since W0-4c, `demo`, `last`, `replay`, `share`, `verify`, `gain`, `invoice`, `dashboard_data`, the TUI, `quota_savings` and the premium status panel use it). |
 | Not covered | Writers listed in the baseline (they create files at the umask default until routed), directories that hooks create with `mkdir` (the next `harden_state` makes them 0700), a user-chosen shared team database (`team_sync.import_rows`), a foreign LiteLLM database that is only read (`integrations/litellm_budget.py`), and files other tools place under the state directory. |
 
@@ -141,3 +162,31 @@ copies do not outlive their TTL). This file lists the history files that have a 
 | Kept | Forever, and for as long as `routing_decisions`: that table has no TTL or pruning in `usage.db`, and snapshots are written once per distinct inventory (their count and size are not measured here). A snapshot is never deleted while any `routing_decisions.inventory_sig` may reference it. If a prune of `routing_decisions` is ever added, it must keep every snapshot a surviving row names. |
 | Reader | `decision_stamp.resolve_inventory(sig)`: the inventory at decision time, or None. |
 | Failure | A failed write is recorded with `failopen` code `W01-SNAPSHOT`; the routing row is still written (its signature then does not resolve). |
+
+## `codex_meter.jsonl` (D-373, R2)
+
+| Item | Value |
+|---|---|
+| Rows | `ts`, `kind` and the fields of that kind. `refused`: `caller`, `source` (`meter`, `meter_stale`, `counters`, `unknown`), `reason` (percentages and counts, about 200 characters), `reserve_pct`, `weekly_used_pct`, `meter_age_s`. `bench_cleared`: `provider`, `source` (`meter`, `canary`), the two percentages. `canary_claimed`: `bench_remaining_s`. `canary_released`. No prompt text, no model output, no path. |
+| Writers | `codex_meter.refusal` (every refused Codex call), `codex_bench` (a bench lifted by the meter or by a canary, a canary taken or handed back). |
+| Kept | At most 512 KiB (`codex_meter._EVENT_LOG_MAX_BYTES`) in two generations (`codex_meter.jsonl` and `.1`, `capped_log`); older rows are dropped by the rotation. Files 0600. |
+| Reads | Nothing in the router reads it; it is the audit trail for the reserve (`llm-router` does not summarise it yet). |
+| Failure | A failed append is recorded with `failopen` code `CHZ-FO-CODEX-METER-LOG`. |
+
+## `agent_route_local.jsonl` (D-372)
+
+| Item | Value |
+|---|---|
+| Rows | One per sub-agent task Codex declined for lack of capacity: `ts`, `outcome` (`local_candidate`, `local_ineligible`), `reason_code`, `blockers` (rule names), `prompt_chars`, `files_named`, `declined_by` (the Codex outcome), `subagent_type`, `task_type`, `complexity`, `session_id`, `session_kind`, `tool_use_id`. **Prompt text is never stored**, only its length and the number of file paths it names. |
+| Writer | `agent_route_local.record`, called from `hooks/agent-route.py` (`_note_local_candidate`). Not the North Star ledger. |
+| Kept | At most 512 KiB (`agent_route_local._LOG_MAX_BYTES`) in two generations (`capped_log`). Files 0600. |
+| Reads | Nothing in the router; it measures whether a local runner is worth building (`src/llm_router/agent_route_local.py`). |
+| Failure | A failed append is recorded with `failopen` code `CHZ-FO-AGENT-ROUTE-LOCAL-LOG`. |
+
+## `codex_canary.json` (R2)
+
+| Item | Value |
+|---|---|
+| Content | One object, `{"last": <epoch>}`: when the last canary through a long Codex bench was taken. No other field. |
+| Writer | `codex_bench.claim_canary` / `release_canary`, under `codex_canary.json.lock`, by atomic replace; 0600. |
+| Kept | Always exactly one value; overwritten by the next claim. Deleting the file allows a canary at once. |

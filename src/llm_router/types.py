@@ -575,6 +575,11 @@ class LLMResponse:
     toolcall_blocks_removed: int = 0
     # D-152: fences holding only a tool call are kept (they are content) but counted here.
     toolcall_fenced_seen: int = 0
+    # W7 / S7. WHY each earlier chain entry failed before this response was served: ``(model, "<ErrorType>: <message>")``
+    # in attempt order, the router's own ``chain_errors`` (entries it skipped or gate-rejected read "gate_failed: ...").
+    # ``chain_attempts`` names the models; this says what happened to them, so a caller can tell a rescued timeout from
+    # a rescued bad answer. Empty when nothing failed first. Additive: appended last so positional use is unchanged.
+    chain_errors: list[tuple[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         """Format a compact one-line summary for logging and CLI display.

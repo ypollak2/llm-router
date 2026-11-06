@@ -93,7 +93,7 @@ MATRIX: dict[tuple[str, str, str], tuple[int, str, str]] = {
     ("tools/text.py", "llm_reason", "route_and_call"): (1, ROUTER, "MCP"),
     ("tools/text.py", "llm_code", "route_and_call"): (1, ROUTER, "MCP"),
     ("tools/text.py", "llm_edit", "route_and_call"): (1, ROUTER, "MCP llm_edit (exempt only from eligibility)"),
-    ("tools/text.py", "llm_text_job", "route_and_call"): (1, ROUTER, "MCP text job; also pass-only local"),
+    ("tools/text.py", "_llm_text_job", "route_and_call"): (1, ROUTER, "MCP text job; also pass-only local"),
     ("tui/cli.py", "_run_classic_mode", "route_and_call"): (1, ROUTER, "TUI classic mode"),
     # ---- gateway / SDK doors reach the router through these (route_payload_async) or their own chain cut
     ("gateway.py", "_route", "route_payload_async"): (1, ROUTER, "gateway /route; chat, responses, messages, ollama"),
@@ -261,6 +261,7 @@ SINK_FILES: dict[str, tuple[int, str, str]] = {
     'digest.py': (1, 'probe', 'outbound text is a scrubbed alert / savings digest / team report built from counters, not prompt text'),
     'discover.py': (3, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'discovery_rescan.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'door_verdict.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'frameworks/openai_agents.py': (1, 'router door', 'an adapter whose client points at the llm-router gateway (a router door)'),
     'gemini_cli_agent.py': (1, 'primitive', 'the CLI runner itself; every caller has its own row'),
     'gemini_cli_quota.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),

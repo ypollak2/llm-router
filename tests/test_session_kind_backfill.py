@@ -468,7 +468,7 @@ def _mixed(sid):
 
 
 def _stream(monkeypatch, rows):
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False, **_: iter(rows))
 
 
 def _write_proxy_ledger(rows):
@@ -499,9 +499,10 @@ def test_kpi_ns_d1_d2_resolve_via_the_sidecar_and_state_the_backfilled_count(mon
     card = kpi.compute_scorecard(days=7, now=NOW)
     k = card["kpis"]
     assert card["kpis_diag"]["NS_heuristic"]["value"] == "30.0% (n=100, 100 backfilled)"   # heuristic, M0.2 diag
-    assert k["NS"]["value"] == "0.0% (n=100, 100 backfilled)"
+    # D-364: no verifier verdict among these units, so the strict NS and D2 are blind; 0/n and the backfilled count stay on the line
+    assert k["NS"]["value"] == "blind: strict 0/100 (no verifier verdict reaches NS, 100 backfilled)"
     assert k["D1"]["value"] == "60.0% (n=100, 100 backfilled)"
-    assert k["D2"]["value"] == "0.0% (n=60, 60 backfilled)"    # D2's n is attempted units only; strict (M0.2)
+    assert k["D2"]["value"] == "blind: strict 0/60 (no verifier verdict reaches NS, 60 backfilled)"    # D2's n is attempted units only
     assert (k["NS"]["backfilled"], k["D1"]["backfilled"], k["D2"]["backfilled"]) == (100, 100, 60)
 
 
@@ -511,7 +512,7 @@ def test_backfilled_is_a_share_of_n_not_all_or_nothing(monkeypatch):
     _stream(monkeypatch, _mixed("s-live") + _mixed("s-backfilled"))
     _write_sidecar("s-backfilled")
     k = kpi.compute_scorecard(days=7, now=NOW)
-    assert k["kpis"]["NS"]["value"] == "0.0% (n=200, 100 backfilled)"
+    assert k["kpis"]["NS"]["value"] == "blind: strict 0/200 (no verifier verdict reaches NS, 100 backfilled)"
     assert k["joins"]["joined_by_source"] == {"tag": 100, "backfill": 100}
 
 
@@ -555,7 +556,7 @@ def test_no_backfilled_note_when_nothing_is_backfilled(monkeypatch):
     _write_proxy_ledger([{"ts": NOW, "session_id": "s-ledger", "session_kind": "organic"}] * 3)
     _stream(monkeypatch, _mixed("s-ledger"))
     k = kpi.compute_scorecard(days=7, now=NOW)["kpis"]
-    assert k["NS"]["value"] == "0.0% (n=100)"   # the pre-backfill format, unchanged (strict-used, M0.2)
+    assert k["NS"]["value"] == "blind: strict 0/100 (no verifier verdict reaches NS)"   # no backfilled note when none is backfilled
     assert k["NS"]["backfilled"] == 0
 
 
@@ -589,7 +590,7 @@ def test_deleting_the_sidecar_restores_identical_kpi_output(monkeypatch):
     never_had_one = kpi.compute_scorecard(days=7, now=NOW)
     _write_sidecar("s-gone")
     with_sidecar = kpi.compute_scorecard(days=7, now=NOW)
-    assert with_sidecar["kpis"]["NS"]["value"] == "0.0% (n=100, 100 backfilled)"
+    assert with_sidecar["kpis"]["NS"]["value"] == "blind: strict 0/100 (no verifier verdict reaches NS, 100 backfilled)"
     assert with_sidecar != never_had_one
     skb.sidecar_path().unlink()
     assert kpi.compute_scorecard(days=7, now=NOW) == never_had_one
@@ -603,7 +604,7 @@ def test_corrupt_sidecar_does_not_break_the_scorecard(monkeypatch):
     with skb.sidecar_path().open("a", encoding="utf-8") as fh:
         fh.write("this line is not json\n")
     k = kpi.compute_scorecard(days=7, now=NOW)["kpis"]
-    assert k["NS"]["value"] == "0.0% (n=100, 100 backfilled)"
+    assert k["NS"]["value"] == "blind: strict 0/100 (no verifier verdict reaches NS, 100 backfilled)"
 
 
 def test_health_still_works_with_a_sidecar(monkeypatch):
@@ -611,7 +612,8 @@ def test_health_still_works_with_a_sidecar(monkeypatch):
     _write_sidecar("s-health")
     data = kpi.compute_scorecard(days=7, now=NOW)
     health = kpi.compute_health(data)
-    assert health["kpis"]["NS"]["state"] == kpi.STATE_MEASURED
+    assert health["kpis"]["NS"]["state"] == kpi.STATE_BLIND       # D-364: no verifier verdict, so NS is blind
+    assert health["kpis"]["D1"]["state"] == kpi.STATE_MEASURED    # a rate with a number behind it is unaffected
     assert "backfilled" in kpi.render_scorecard(data)
 
 
@@ -727,7 +729,7 @@ def test_kpi_asks_northstar_for_the_backfill_explicitly(monkeypatch):
     default back on (the Stop-line regression) cannot be what keeps kpi working."""
     asked: dict = {}
 
-    def fake_units(days=30, session_id=None, root=None, backfill=False):
+    def fake_units(days=30, session_id=None, root=None, backfill=False, **_):
         asked["backfill"] = backfill
         return iter([])
 
@@ -769,13 +771,13 @@ def test_production_stamped_units_count_their_own_source_not_the_index(monkeypat
     session, so the ``backfilled`` count can only come from the unit's own stamp."""
     rows = (_stamped_rows("s-bf", "organic", "backfill", 40) + _stamped_rows("s-tag", "organic", "tag", 30)
             + _stamped_rows("s-st", "organic", "stamp", 20) + _stamped_rows("s-px", "organic", "proxy_ledger", 10))
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False, **_: iter(rows))
     assert not skb.sidecar_path().exists()
     k = kpi.compute_scorecard(days=7, now=NOW)
     assert k["joins"]["joined_by_source"] == {"backfill": 40, "tag": 30, "stamp": 20, "proxy_ledger": 10}
     assert k["kpis"]["NS"]["backfilled"] == 40
     assert k["kpis"]["NS"]["n"] == 100
-    assert "n=100, 40 backfilled" in k["kpis"]["NS"]["value"]
+    assert "strict 0/100 (no verifier verdict reaches NS, 40 backfilled)" in k["kpis"]["NS"]["value"]
 
 
 def test_production_stamp_of_none_is_not_rescued_by_the_index(monkeypatch):
@@ -783,7 +785,7 @@ def test_production_stamp_of_none_is_not_rescued_by_the_index(monkeypatch):
     could have resolved the session: the stamp is the one source of truth on this branch."""
     _write_sidecar("s-none", kind="organic")
     rows = _stamped_rows("s-none", None, None)
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False, **_: iter(rows))
     k = kpi.compute_scorecard(days=7, now=NOW)
     assert k["kpis"]["NS"]["value"].startswith("not measurable: ")
     assert k["joins"]["joined"] == 0 and k["joins"]["untagged"] == 100
@@ -791,7 +793,7 @@ def test_production_stamp_of_none_is_not_rescued_by_the_index(monkeypatch):
 
 def test_production_stamp_of_a_non_organic_kind_is_excluded(monkeypatch):
     rows = _stamped_rows("s-res", "research", "backfill")
-    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False: iter(rows))
+    monkeypatch.setattr(ns, "units", lambda days=30, session_id=None, root=None, backfill=False, **_: iter(rows))
     k = kpi.compute_scorecard(days=7, now=NOW)
     assert k["kpis"]["NS"]["value"].startswith("not measurable: ")
     assert k["joins"]["joined_by_kind"] == {"research": 100}

@@ -1,0 +1,43 @@
+---
+id: CLS-HOOK-1
+status: fixed in `w10/local-classifier-decides` (deploy: install the hooks; `LLM_ROUTER_LOCAL_CLASSIFIER=shadow` then logs a verdict per prompt and spawn, `on` lets it decide)
+---
+## CLS-HOOK-1. The local classifier never ran on a user prompt or an Agent spawn, and nothing read its verdict
+
+- **Symptom (owner 2026-11-04: "looks like it doesn't really work right now").** `~/.llm-router/classifier_shadow.jsonl`
+  (copy taken 2026-11-04T08:03Z; 7 days = 2026-10-28T08:03Z to 2026-11-03T16:34Z, n=2,417 rows; ~/.rsi/research/primary-plan/v16/coord/CLASSIFIER-DIAG-20261104.md) holds proxy turn-first
+  requests only. In the same window the hooks saw 214 `UserPromptSubmit` runs, 81 real prompts and 49 Agent spawns
+  (ROUTING-RESEARCH-20261103, organic sessions) and called no classifier for any of them. The last proxy row, in
+  `classifier_shadow.jsonl` and `proxy_calls.jsonl`, is 2026-11-03T16:34Z; `~/.claude/settings.json` has no
+  `ANTHROPIC_BASE_URL`, so sessions started since reach no proxy at all. The verdict's `local_eligible` was `None` on
+  1,755 of 1,755 verdicts: this backend (nimble:9b on `/v1/systemone`) answers one question, the cheapest adequate
+  Claude tier, so it could never say "local".
+- **Cause.** The only caller was the proxy's shadow seam (`proxy/llm_shadow.ShadowScheduler`, `cls_applied` False on every
+  row). `hooks/auto-route.py` classified with regex rules plus `engine.shadow` (no model) and `hooks/agent-route.py`
+  with regex tables plus `_is_codex_suitable`. Readers of the log (`kpi`, `shadow_eval`, `classifier_health`,
+  `daily_offload`, `decision_ledger`) only report.
+- **Fix.** `llm_router.door_verdict`: the hook-side client. `auto-route.py` starts one verdict per routed prompt (after
+  zero-Claude edit, the sidecar, a user prefix, the strict-ack bypass and the MCP shortcut) and joins it at the
+  quiet decision; `agent-route.py` starts one per routed spawn and joins it before the Codex attempt (Explore,
+  allowlisted and retrieval-only spawns take no routing decision and get none). `LLM_ROUTER_LOCAL_CLASSIFIER`: `off`
+  (zero calls), `shadow` (a text-free row in `door_verdicts.jsonl`, written by a detached worker, nothing changes and no other lane's model is
+  evicted: CLS-EVICT-1; the default when the decision model is configured), `on` (the verdict decides). The tier is used as a difficulty signal:
+  opus with p_max >= 0.6 picks `claude` (the prompt hint is quieted, or the spawn makes no Codex attempt, unit
+  `unsuitable` / `reason_code=verdict_claude`); haiku with p_max >= 0.7 picks `local` where a local lane can do the job
+  (a passed quality batch, or a commit-message / PR-description prompt with the local text-job switch on, or the caller
+  says it has one: `preferred_door(..., local_lane=...)` is the seam for a sub-agent fallback); sonnet, or haiku with no
+  lane, picks `codex` (a prompt hint gains `llm(prompt="codex: ...")` when Codex is usable; a spawn goes through the
+  existing NS3 gates). No verdict means today's behaviour. A verdict opens no door the existing gates keep shut.
+  Shares below are of the PROXY's turn-first rows, not of hook traffic (the hooks logged nothing before this change):
+  `classifier_shadow.jsonl` copy, 7 days 2026-10-28T08:03Z to 2026-11-03T16:34Z, n=1,755 verdicts. At the default
+  thresholds a verdict of that kind would have reached: claude door (opus >= 0.6) 72 (4.1%); local door (haiku >= 0.7)
+  120 (6.8%) before the lane test, which fails today for Q&A and code, so those 120 fall to the Codex door; codex door for
+  a PROMPT (sonnet >= 0.5, 937 = 53.4%, plus those haiku >= 0.7 with no lane, 120 = 6.8%) 1,057 (60.2%), and only when
+  Codex is usable (binary, not benched, meter reserve and window admit); the rest, 626 (35.7%), keep the default `mcp`
+  door (haiku < 0.7, sonnet < 0.5, opus < 0.6). For an Agent spawn every non-claude verdict is the `codex` door and the
+  existing NS3 gates decide.
+- **Test.** `tests/test_door_verdict.py` (a real HTTP server speaking the Ollama wire format) and
+  `tests/test_door_verdict_hooks.py` (real hook subprocesses, a real executable standing in for `codex`):
+  `test_shadow_logs_one_verdict_for_the_prompt_and_changes_nothing`,
+  `test_on_quiets_the_hint_for_a_confident_opus_verdict`, `test_spawn_on_keeps_a_confident_opus_spawn_on_claude`,
+  `test_spawn_on_with_a_down_model_delegates_as_before`, `test_off_is_todays_hook_and_makes_no_call`.

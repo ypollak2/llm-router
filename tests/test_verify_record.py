@@ -172,8 +172,9 @@ def test_kpi_numbers_are_byte_identical_with_and_without_verify_records(tmp_path
     bulk = [_codex_row(1_800_000_200.0 + i, "delegated" if i % 3 else "codex_failed") for i in range(60)]
     p, proj = _setup(tmp_path, bulk)
     base = _scorecard()
-    for k in ("NS", "D1", "D2"):  # a real percentage, not "too few to tell"
-        assert "%" in base["kpis"][k]["value"], base["kpis"][k]
+    assert "%" in base["kpis"]["D1"]["value"], base["kpis"]["D1"]    # a real percentage, not "too few to tell"
+    for k in ("NS", "D2"):  # D-364: no verdict reaches the strict numerator (the seam is off): blind, 0/n kept
+        assert base["kpis"][k]["value"].startswith("blind: strict 0/"), base["kpis"][k]
     base_text = kpi.render_scorecard(base)
     assert base["kpis"]["D2"]["value"] and base["verify_shadow"] == ZERO_SHADOW
 

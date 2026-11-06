@@ -436,16 +436,42 @@ def get_provider_reset_until(provider: str, now: float | None = None) -> float |
     return all_provider_resets(now).get(provider)
 
 
+def provider_reset_entries(now: float | None = None) -> dict[str, dict[str, float]]:
+    """Providers currently blocked -> ``{"until": epoch, "set_at": epoch}`` (``set_at`` is when the bench was recorded; an
+    entry written before that field existed has none and reads as 0). Fails open to ``{}``."""
+    now = time.time() if now is None else now
+    try:
+        path = _state_file()
+        if not path.exists():
+            return {}
+        out: dict[str, dict[str, float]] = {}
+        for name, entry in _load(path).items():
+            until = entry.get("until") if isinstance(entry, dict) else None
+            if isinstance(until, (int, float)) and now < until <= now + MAX_SKIP_SECONDS:
+                set_at = entry.get("set_at")
+                out[str(name)] = {"until": float(until),
+                                  "set_at": float(set_at) if isinstance(set_at, (int, float)) else 0.0}
+        return out
+    except Exception as exc:  # noqa: BLE001 -- corrupt/unreadable state => not blocked
+        failopen.record("CHZ-FO-PROVIDER-RESET-READ", exc)
+        return {}
+
+
 def is_provider_reset_blocked(provider: str, now: float | None = None) -> bool:
     return get_provider_reset_until(provider, now) is not None
 
 
-def clear_provider_reset(provider: str | None = None, now: float | None = None) -> list[str]:
-    """Manually lift a bench: one provider, or every provider when ``None``.
+def clear_provider_reset(provider: str | None = None, now: float | None = None, *,
+                         source: str = "owner", if_set_before: float | None = None) -> list[str]:
+    """Lift a bench: one provider, or every provider when ``None``.
 
     Returns the names that were cleared. Never raises (fails open to ``[]``).
-    Each cleared bench is logged as an owner unban (KPI G4); ``now`` is the time
-    that is logged.
+    Each cleared bench is logged as an unban (KPI G4); ``now`` is the time
+    that is logged. ``source`` is ``owner`` for the CLI, ``meter`` or ``canary``
+    when ``codex_bench`` lifts a bench the evidence contradicts.
+
+    ``if_set_before`` clears an entry only if it was recorded before that epoch, decided UNDER the lock against the entry as it is
+    then: a router that lifts a bench on evidence from time T must not lift one that another process recorded after T.
     """
     try:
         path = _state_file()
@@ -459,6 +485,12 @@ def clear_provider_reset(provider: str | None = None, now: float | None = None) 
             names = [str(n) for n in providers] if provider is None else (
                 [provider] if provider in providers else []
             )
+            if if_set_before is not None:
+                def _older(entry: object) -> bool:
+                    set_at = entry.get("set_at") if isinstance(entry, dict) else None
+                    return not isinstance(set_at, (int, float)) or set_at < if_set_before
+
+                names = [n for n in names if _older(providers.get(n))]
             held = {n: providers.get(n) for n in names}
             for n in names:
                 providers.pop(n, None)
@@ -471,7 +503,7 @@ def clear_provider_reset(provider: str | None = None, now: float | None = None) 
         for n in names:
             entry = held.get(n)
             provider_bench_log.log_unban(
-                n, entry.get("until") if isinstance(entry, dict) else None, now
+                n, entry.get("until") if isinstance(entry, dict) else None, now, source=source
             )
         return names
     except Exception as exc:  # noqa: BLE001 -- must never break the caller

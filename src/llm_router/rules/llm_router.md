@@ -1,4 +1,4 @@
-<!-- llm_router-rules-version: 11 -->
+<!-- llm_router-rules-version: 12 -->
 # LLM Router — Global Routing Rules
 
 > Installed by llm_router. These rules help you route each task to the cheapest capable
@@ -59,8 +59,66 @@ does not decide for you: if the result comes back unapplied (validation failed a
 3 tries) or the task genuinely needs exploration across many unknown files, do the
 edit yourself — this is guidance, not enforcement.
 
+<!-- llm_router-text-job-bind:begin commit -->
+<!-- llm_router-text-job-bind:begin pr -->
+## Commit messages and PR bodies → do not write them: use the placeholder
+<!-- llm_router-text-job-bind:end -->
+<!-- llm_router-text-job-bind:begin no-pr -->
+## Commit messages → do not write them: use the placeholder
+<!-- llm_router-text-job-bind:end -->
+
+A PreToolUse hook (`llm_router-text-job-bind.py`, listed by `llm-router verify`) writes the text from the
+real diff with the local model, checks it, and puts it in your command.
+You do not write that text and you do not copy it. Write exactly:
+
+```
+git commit -m "${LLM_TEXT:?}"
+<!-- llm_router-text-job-bind:begin pr -->
+gh pr create --title "<short title>" --body "${LLM_TEXT:?}"
+<!-- llm_router-text-job-bind:end -->
+```
+
+- Keep the double quotes. If the hook did not replace the placeholder the command does not run: Claude Code
+  refuses it ("A variable in braces in this command can't be checked before it runs") or the shell aborts it
+  (`LLM_TEXT: parameter not set`), so the placeholder is never committed or posted. Either message means the
+  hook is not active here: write the text yourself.
+- **Stage in its own command first** (`git add <paths>`), then run the commit alone. A `git add` (or any
+  command that changes files) before it on the same line is refused: the text is built from the repository
+  as it is when the hook runs.
+<!-- llm_router-text-job-bind:begin pr -->
+  For a PR, commit and push first.
+<!-- llm_router-text-job-bind:end -->
+  `cd <dir> && git commit ...` and `git -C <dir> commit ...` are fine.
+- Anything else you write in the same command stays. Put attribution lines in a second `-m "Co-Authored-By: ..."`.
+<!-- llm_router-text-job-bind:begin pr -->
+  In a PR body, put them on new lines after the placeholder inside the quotes (a real line break, not a
+  typed `\n`).
+<!-- llm_router-text-job-bind:end -->
+- Not supported with the placeholder: `--amend`, paths after the message, `-F`, heredocs and `$(...)` in the
+  message.
+<!-- llm_router-text-job-bind:begin pr -->
+  For a PR also: `--fill` and `--web`.
+<!-- llm_router-text-job-bind:end -->
+- A denied command is not a failure: the reason says why (the local job did not pass its checks, did not
+  finish in time, or the shape is unsupported) and nothing was run. Write the text yourself and run the
+  command again without the placeholder.
+<!-- llm_router-text-job-bind:begin no-pr -->
+- Pull request bodies have no placeholder here: write them yourself, as you would without this hook.
+<!-- llm_router-text-job-bind:end -->
+<!-- llm_router-text-job-bind:end -->
+
 ## Self-contained text jobs → `llm_text_job` (on by default for a passed local model)
 
+<!-- llm_router-text-job-bind:begin commit -->
+<!-- llm_router-text-job-bind:begin pr -->
+(Commit messages and PR bodies in a git/gh command use the placeholder above, which is this same job,
+bound. This section is for a summary of long output and for hosts where that hook is not installed.)
+<!-- llm_router-text-job-bind:end -->
+<!-- llm_router-text-job-bind:begin no-pr -->
+(Commit messages in a git command use the placeholder above, which is this same job, bound. This section
+is for PR descriptions, a summary of long output, and for hosts where that hook is not installed.)
+<!-- llm_router-text-job-bind:end -->
+<!-- llm_router-text-job-bind:end -->
 Writing a commit message from a diff, a PR description from commits/diff, or a summary
 of long test/log output is a job whose ENTIRE input is already in hand — there is
 nothing for a local model to guess, which is the usual failure mode this file warns

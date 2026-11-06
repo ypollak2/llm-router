@@ -161,7 +161,11 @@ def test_a_code_prompt_still_routes_and_still_holds_edits_under_smart(monkeypatc
 
 
 def test_qa_routing_env_restores_the_previous_behaviour(monkeypatch, tmp_path):
-    out, decisions, _, _ = _run_prompt(monkeypatch, tmp_path, QA_PROMPT, "smart",
+    # BIND W2 (docs/bugs/BIND-HOLD-1.md): QA_PROMPT is exactly ten words, and in smart mode a
+    # prompt of ten words or fewer writes no hold. The switch is shown on a longer question.
+    prompt = QA_PROMPT + " Include one short example of the cache size parameter."
+    assert len(prompt.split()) > 10
+    out, decisions, _, _ = _run_prompt(monkeypatch, tmp_path, prompt, "smart",
                                        LLM_ROUTER_QA_ROUTING="on")
     assert decisions[0]["task_type"] in QA_TYPES
     assert "HARD ENFORCEMENT" in _context(out)

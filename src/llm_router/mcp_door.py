@@ -22,10 +22,26 @@ waiting at ~120 s. The routed doors (``DEADLINE_TOOLS``: every MCP tool that cal
 (45 s by default, below ``request_timeout``'s 120 s), so one hung local model still leaves
 room for the next candidate. Cloud attempts are not capped (D-154: extended-thinking and
 research calls legitimately take 45-120 s); they run until the overall deadline. A cap
-expiry raises ``AttemptCapExceeded``, which is not a timeout to the router: it does not
-start the LOCAL-TIMEOUT-1 cooldown or count as a provider failure, so routing does not
-change. When the deadline itself expires the door returns
+expiry raises ``AttemptCapExceeded``, which does not count as a provider failure.
+The router records local caps for the LOCAL-TIMEOUT-1 model-order cooldown without
+benching the provider. When the deadline itself expires the door returns
 ``llm-router error: deadline <N>s exceeded; tried: <models>; ...``.
+
+C. A stale server (BIND W2). The MCP server lives as long as the Claude Code session, so a
+deploy (an upgrade, a pull into an editable install) replaces the package on disk under a
+process that loaded the old modules at start. A lazy import then pulls a NEW module into
+an OLD process and the tool crashes. In the audit window 5 of the 16 MCP errors were this:
+a bare ``Error executing tool`` until the owner reconnected the server. ``snapshot_start``
+records a fingerprint of the package at server start (see ``server.py``); when a tool
+crashes, ``run_door`` compares it with the package on disk, and if it changed the result
+says so and names the fix (``/mcp``), with the original error under it.
+
+D. A busy local queue (BIND W2). After a deadline expired with only local (``ollama/``)
+models tried, the next calls would each wait the full deadline again (5 x 90 s = 7.5 min
+in the audit window, at least 3 of the 5 made under a hold). For ``BUSY_WINDOW_S``
+after such an expiry, a call that is still on local models only ``BUSY_PROBE_S`` after it
+started is given up at once, with a message that says why. A call that has reached a
+cloud model is never cut.
 
 Light on purpose: stdlib only at import; ``mcp`` is imported inside ``run_door``.
 """
@@ -34,8 +50,10 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import time
 import traceback
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any, Awaitable
 
 #: Default overall deadline for a routed MCP call, seconds. Below the MCP client's ~120 s.
@@ -57,9 +75,9 @@ DEADLINE_TOOLS = frozenset({
 class AttemptCapExceeded(Exception):
     """A local attempt gave no answer within its share of the MCP deadline.
 
-    Deliberately NOT a ``TimeoutError`` and without "timeout" in its name: the router's
-    LOCAL-TIMEOUT-1 cooldown (``router._is_timeout_error``) must not fire for a cap the door
-    imposed, and the router records it as ``fallback_reason="deadline_cap"``."""
+    Deliberately NOT a ``TimeoutError``: a door-imposed cap is not a provider fault.
+    The router explicitly records local caps for the model-order cooldown while
+    preserving ``fallback_reason="deadline_cap"`` and excluding provider failures."""
 
     def __init__(self, model: str, cap_s: float) -> None:
         super().__init__(f"deadline_cap: {model} gave no answer within the {cap_s:g}s "
@@ -73,14 +91,131 @@ _MAX_MESSAGE_CHARS = 2000
 class _CallState:
     """One MCP tool call: its deadline and the router's attempt lists (shared by reference)."""
 
-    __slots__ = ("deadline_s", "traces")
+    __slots__ = ("deadline_s", "traces", "gave_up_early")
 
     def __init__(self, deadline_s: float) -> None:
         self.deadline_s = deadline_s
         self.traces: list[list[str]] = []
+        self.gave_up_early = False
 
 
 _STATE: ContextVar[_CallState | None] = ContextVar("llm_router_mcp_door", default=None)
+
+
+# ── C. a stale server ────────────────────────────────────────────────────────
+
+#: The package as it was when this server process started: ``fp`` is
+#: :func:`code_fingerprint`, ``at`` the wall-clock time. None until ``snapshot_start``.
+_START: dict[str, Any] = {"fp": None, "at": None}
+
+
+def _py_files(root: Path) -> tuple[int, int]:
+    """(count, newest mtime in ns) of the ``.py`` files under *root*."""
+    count = newest = 0
+    stack = [str(root)]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name != "__pycache__":
+                            stack.append(entry.path)
+                    elif entry.name.endswith(".py"):
+                        count += 1
+                        newest = max(newest, entry.stat().st_mtime_ns)
+        except OSError:
+            continue
+    return count, newest
+
+
+def code_fingerprint(root: Path | None = None) -> tuple[str, int, int]:
+    """``(distribution version on disk, python files, newest mtime ns)`` of the package.
+
+    The version is read from the installed metadata on every call (an upgrade changes it);
+    the file count and newest mtime catch an editable install that moved without one."""
+    import llm_router
+
+    try:
+        from importlib.metadata import version
+
+        installed = version("llm-routing")
+    except Exception:  # noqa: BLE001 -- no metadata (a source checkout): the files still tell
+        installed = "unknown"
+    count, newest = _py_files(root or Path(llm_router.__file__).resolve().parent)
+    return installed, count, newest
+
+
+def snapshot_start() -> None:
+    """Record the package fingerprint of this server process; the first call wins."""
+    if _START["fp"] is None:
+        try:
+            _START["fp"], _START["at"] = code_fingerprint(), time.time()
+        except Exception as exc:  # noqa: BLE001 -- no snapshot means no stale claim, never an error
+            _record("CHZ-FO-MCP-SNAPSHOT", exc, "snapshot_start")
+
+
+def stale_reason() -> str | None:
+    """Why this server's code is out of date, or None (unchanged, or never snapshotted).
+
+    Unknown is not stale: without a start snapshot nothing is claimed."""
+    start = _START["fp"]
+    if start is None:
+        return None
+    try:
+        now = code_fingerprint()
+    except Exception:  # noqa: BLE001 -- cannot read the package: claim nothing
+        return None
+    if now == start:
+        return None
+    started = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(_START["at"] or 0))
+    if now[0] != start[0]:
+        what = f"version {start[0]} -> {now[0]}"
+    elif now[1] != start[1]:
+        what = f"{now[1] - start[1]:+d} python file(s)"
+    else:
+        what = "files changed on disk"
+    return f"started {started}; the package has changed since ({what})"
+
+
+def stale_text(reason: str, exc: BaseException, tried: list[str]) -> str:
+    """The result a stale server returns for a crashed tool: the fix first, the error under it."""
+    return (
+        f"llm-router error: this MCP server is running code from before the last update "
+        f"({reason}), which can make a tool crash like this. Reconnect it with /mcp "
+        f"(or restart Claude Code) and retry.\n"
+        + error_text(exc, tried).replace("llm-router error:", "original error:", 1)
+    )
+
+
+# ── D. a busy local queue ────────────────────────────────────────────────────
+
+#: How long after a local-only deadline expiry a still-local call is given up early.
+BUSY_WINDOW_S = 300.0
+#: In that window, a call still on local models this long after it started is given up.
+BUSY_PROBE_S = 20.0
+_BUSY: dict[str, float] = {"until": 0.0, "waited": 0.0}
+
+
+def _all_local(tried: list[str]) -> bool:
+    return bool(tried) and all(str(m).startswith("ollama/") for m in tried)
+
+
+def busy_window_open() -> bool:
+    return time.monotonic() < _BUSY["until"]
+
+
+def reset_busy() -> None:
+    """Close the busy window (test seam, and a process that learned Ollama is free)."""
+    _BUSY["until"] = 0.0
+    _BUSY["waited"] = 0.0
+
+
+def busy_text(limit: float, probe: float, tried: list[str]) -> str:
+    return (
+        f"llm-router error: local models are busy: still waiting on {', '.join(tried)} after "
+        f"{probe:g}s, and the last call waited {_BUSY['waited']:g}s for them; gave up early "
+        f"(limit {limit:g}s). Retry in a minute, use tier=fast, or handle it yourself."
+    )
 
 
 def deadline_s() -> float:
@@ -227,25 +362,52 @@ async def run_door(name: str, call: Awaitable[Any]) -> Any:
     limit = deadline_s() if name in DEADLINE_TOOLS else 0.0
     state = _CallState(limit)
     token = _STATE.set(state)
+    watchdog = None
+    started = time.monotonic()
     try:
         if limit <= 0:
             return await call
         timer = asyncio.timeout(limit)
         try:
             async with timer:
+                if busy_window_open() and BUSY_PROBE_S < limit:
+                    loop = asyncio.get_running_loop()
+
+                    def _give_up_early() -> None:
+                        # D: a still-local call in the busy window is given up at once; one
+                        # that has reached a cloud model is left to its deadline.
+                        if _all_local(_tried(state)):
+                            state.gave_up_early = True
+                            timer.reschedule(loop.time())
+
+                    watchdog = loop.call_later(BUSY_PROBE_S, _give_up_early)
                 return await call
         except TimeoutError:
             if not timer.expired():
                 raise
+            tried = _tried(state)
+            if state.gave_up_early:
+                _record("CHZ-FO-MCP-LOCAL-BUSY", None,
+                        f"tool={name} probe_s={BUSY_PROBE_S:g} attempts={len(tried)}")
+                return _result(busy_text(limit, BUSY_PROBE_S, tried))
+            if _all_local(tried):  # D: remember it, so the next local calls do not each wait it out
+                _BUSY["until"] = time.monotonic() + BUSY_WINDOW_S
+                _BUSY["waited"] = round(time.monotonic() - started, 1)
             _record("CHZ-FO-MCP-DEADLINE", None,
-                    f"tool={name} deadline_s={limit:g} attempts={len(_tried(state))}")
-            return _result(deadline_text(limit, _tried(state)))
+                    f"tool={name} deadline_s={limit:g} attempts={len(tried)}")
+            return _result(deadline_text(limit, tried))
     except ToolError as exc:  # UnexpectedToolError (mcp >= 2.2) is a ToolError too
         crash = _tool_crash(exc)
         if crash is None:
             raise
         _record("CHZ-FO-MCP-TOOL-ERROR", crash, f"tool={name}")
         _debug_traceback(name, crash)
+        stale = stale_reason()  # C: a crash in a server older than its package says so
+        if stale:
+            _record("CHZ-FO-MCP-STALE-SERVER", crash, f"tool={name}")
+            return _result(stale_text(stale, crash, _tried(state)))
         return _result(error_text(crash, _tried(state)))
     finally:
+        if watchdog is not None:
+            watchdog.cancel()
         _STATE.reset(token)

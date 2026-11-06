@@ -79,6 +79,8 @@ savings comes from the 15.2.0 correction (`CHANGELOG.md:45`, `CHANGELOG.md:83-88
 | Verified quota saved, with its n | Reported to each user | $0.11 verified (n=7) vs $483.14 unverified (n=46,099), maintainer ledger 2026-09-24 (`CHANGELOG.md:86-88`) |
 | Quality of routed answers vs Claude on the same tasks | Guardrail: must not drop | RouterArena and `docs/BACKEND-QUALITY.md` |
 
+**Reading the first row (owner decision D-364, 2026-11-03).** No rule in this file or in [KPIS.md](KPIS.md) changes. The status line and `llm-router kpi` keep NS strict (served by a non-Claude model AND confirmed by a verifier's passing test) and, while no verifier is connected, print it as `blind` with its 0-over-n beside it, not as a measured-looking zero. Two separate lines show progress beside it: calls answered outside Claude, and Claude calls on Sonnet or Haiku, over the same 7 days and organic population, one call being one API message (sub-agents included; `src/llm_router/commands/kpi.py`). They are not part of NS. *Organic* is what `llm-router kpi` counts as organic: on 2026-11-03 that was 4 sessions, and one of them held about 97% of the units (n=8,083 organic units, 7 d; `kpi --json` `joins.counted_sessions` and `joins.largest_session_share`, the review's copy, `~/.rsi/research/primary-plan/v16/coord/rv-PR821-20261103.md`), so both lines mostly describe that session's configuration.
+
 ## Where the repo currently disagrees with this file
 
 These are open items for the audit, not settled facts.

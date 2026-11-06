@@ -82,7 +82,10 @@ _slt_finish() {
 # it for llm_router_statusline_tick.py: ONE short line (llm-router, mode, North
 # Star with n, Claude 5h / weekly / Sonnet quota from usage.json, Codex window,
 # a slow-hooks warning) read from cache files only; it never fetches, never
-# waits on its background refresh, and prints "n/a" (never 0) for unknown.
+# waits on its background refresh, and prints "n/a" (never 0) for unknown. A
+# North Star with no verifier verdict behind it reads "NS strict 0/n (blind)",
+# and one more row carries its two progress lines (off-Claude, <Opus) when the
+# cache has them (W8, owner decision D-364).
 # The real environment wins; otherwise the same key in the router's own .env
 # (${LLM_ROUTER_HOME:-~/.llm-router}/.env, the file the hooks already load) is
 # honoured, so the switch needs no edit to ~/.claude/settings.json.
@@ -327,13 +330,15 @@ _seg_int() {
 s_v="" s_written="" s_usage="" s_session_pct="" s_weekly_pct="" s_usage_stale="" s_reset=""
 s_ctx_human="" s_ctx_pct="" s_money="" s_mix_local="" s_mix_paid="" s_proxy_down=""
 s_mix_sub="" s_mix_unc="" s_mix_n="" s_mix_win="" s_money_n="" s_money_win=""
-s_money_m="" s_money_m_n="" s_snap="" s_snap_at=""
+s_mix_claude="" s_mix_other="" s_mix_cover=""
+s_money_m="" s_money_m_n="" s_snap="" s_snap_at="" s_route=""
 s_health="" s_last="" s_last_stale="" s_last_tok=""
 _seg_load() {
     s_v="" s_written="" s_usage="" s_session_pct="" s_weekly_pct="" s_usage_stale="" s_reset=""
     s_ctx_human="" s_ctx_pct="" s_money="" s_mix_local="" s_mix_paid="" s_proxy_down=""
     s_mix_sub="" s_mix_unc="" s_mix_n="" s_mix_win="" s_money_n="" s_money_win=""
-    s_money_m="" s_money_m_n="" s_snap="" s_snap_at=""
+    s_mix_claude="" s_mix_other="" s_mix_cover=""
+    s_money_m="" s_money_m_n="" s_snap="" s_snap_at="" s_route=""
     s_health="" s_last="" s_last_stale="" s_last_tok=""
     [ -r "$_seg_file" ] || return 1
     local k v
@@ -350,9 +355,12 @@ _seg_load() {
             last_tok) s_last_tok="$v" ;;
             mix_sub) s_mix_sub="$v" ;;           mix_unc) s_mix_unc="$v" ;;
             mix_n) s_mix_n="$v" ;;               mix_win) s_mix_win="$v" ;;
+            mix_claude) s_mix_claude="$v" ;;     mix_other) s_mix_other="$v" ;;
+            mix_cover) s_mix_cover="$v" ;;
             money_n) s_money_n="$v" ;;           money_win) s_money_win="$v" ;;
             money_m) s_money_m="$v" ;;           money_m_n) s_money_m_n="$v" ;;
             snap_line) s_snap="$v" ;;            snap_at) s_snap_at="$v" ;;
+            route_line) s_route="$v" ;;
         esac
     done < "$_seg_file"
     # Every value used in arithmetic or a numeric test must be digits only: the file
@@ -366,6 +374,9 @@ _seg_load() {
     _seg_int "$s_mix_sub" 9;     s_mix_sub="$_n"
     _seg_int "$s_mix_unc" 9;     s_mix_unc="$_n"
     _seg_int "$s_mix_n" 9;       s_mix_n="$_n"
+    _seg_int "$s_mix_claude" 9;  s_mix_claude="$_n"
+    _seg_int "$s_mix_other" 9;   s_mix_other="$_n"
+    _seg_int "$s_mix_cover" 9;   s_mix_cover="$_n"
     _seg_int "$s_money_n" 9;     s_money_n="$_n"
     _seg_int "$s_money_m_n" 9;   s_money_m_n="$_n"
     _seg_int "$s_snap_at" 10;    s_snap_at="$_n"
@@ -377,8 +388,11 @@ _seg_load() {
     LC_ALL=C
     s_snap="${s_snap//[$'\001'-$'\037'$'\177']/}"
     s_snap="${s_snap//$'\302'[$'\200'-$'\237']/}"
+    s_route="${s_route//[$'\001'-$'\037'$'\177']/}"
+    s_route="${s_route//$'\302'[$'\200'-$'\237']/}"
     if [ -n "$_lc_set" ]; then LC_ALL="$_lc_was"; else unset LC_ALL; fi
     s_snap="${s_snap:0:400}"
+    s_route="${s_route:0:300}"
     # A window label is printed, so only the ledger's own names pass (data, never code).
     case "$s_mix_win" in session|session~) ;; *) s_mix_win="" ;; esac
     case "$s_money_win" in today|session|24h|7d|month|lifetime) ;; *) s_money_win="" ;; esac
@@ -472,23 +486,49 @@ fi
 # P3.4-B2 (D-218): the figure is printed with its window and n, or not at all.
 # P35-2 (D-220): the estimate and the verified part are two segments, each with its own n; they are
 # never one summed figure.
+# W8 (D-364): n is CALLS, and says so ("n=36 calls"): a call the router recorded in several tables is
+# counted once (ledger_view.money_window), so the n is no longer rows summed over overlapping tables.
 if [ -n "$s_money" ] && [ -n "$s_money_n" ] && [ -n "$s_money_win" ]; then
-    parts+=("💰 ${_GREEN}${s_money}${_RESET}${_DIM}·${s_money_win} n=${s_money_n}${_RESET}")
+    parts+=("💰 ${_GREEN}${s_money}${_RESET}${_DIM}·${s_money_win} n=${s_money_n} calls${_RESET}")
 fi
 if [ -n "$s_money_m" ] && [ -n "$s_money_m_n" ] && [ -n "$s_money_win" ]; then
-    parts+=("💵 ${_GREEN}${s_money_m}${_RESET}${_DIM}·${s_money_win} n=${s_money_m_n}${_RESET}")
+    parts+=("💵 ${_GREEN}${s_money_m}${_RESET}${_DIM}·${s_money_win} n=${s_money_m_n} calls${_RESET}")
 fi
 
-# ⚖ route mix -- this SESSION's executed calls by class (L local / S subscription / P paid,
-# U unclassified only when non-zero), from one ledger_view window_summary computed by the
-# refresher (P3.4-B2, D-218). Printed with its window and n; absent keys print nothing.
-# Green only when local carries the majority.
+# ⚖ route mix -- this SESSION's executed calls by class (L local / S the Claude seat / C every other
+# seat, Codex among them / P paid, U unclassified only when non-zero), from one ledger_view window_summary
+# computed by the refresher (P3.4-B2, D-218). W8 (D-364): S and C are split so the seat the router wants
+# to spend LESS of (Claude) and the one it wants to spend MORE of (Codex) never share a bucket; a cache
+# without the split (an older refresher) prints the old L/S/P line, S then being every seat.
+# Printed with its window and n LABELLED "session ledger rows N", and against the session's calls when the
+# NS refresher has counted them ("of ~6,900 (0.4%)": the ledger sees only the calls routed through it).
+# Absent keys print nothing. Green only when local carries the majority.
+_commas() {                                     # $1 = digits only; sets $_cm ("1234567" -> "1,234,567"), no process
+    local s="$1" out=""
+    while [ "${#s}" -gt 3 ]; do out=",${s: -3}${out}"; s="${s:0:${#s}-3}"; done
+    _cm="${s}${out}"
+}
 if [ -n "$s_mix_local" ] && [ -n "$s_mix_sub" ] && [ -n "$s_mix_paid" ] \
    && [ -n "$s_mix_n" ] && [ -n "$s_mix_win" ]; then
     if [ "$s_mix_local" -ge $((s_mix_sub + s_mix_paid)) ]; then _mixc="$_GREEN"; else _mixc="$_YELLOW"; fi
     _mixu=""
     [ -n "$s_mix_unc" ] && [ "$s_mix_unc" -gt 0 ] && _mixu="·${s_mix_unc}U"
-    parts+=("⚖ ${_mixc}${s_mix_local}L/${s_mix_sub}S/${s_mix_paid}P${_mixu}·${s_mix_win}${_RESET} ${_DIM}n=${s_mix_n}${_RESET}")
+    if [ -n "$s_mix_claude" ] && [ -n "$s_mix_other" ]; then
+        _mixb="${s_mix_local}L/${s_mix_claude}S/${s_mix_other}C/${s_mix_paid}P"
+    else
+        _mixb="${s_mix_local}L/${s_mix_sub}S/${s_mix_paid}P"
+    fi
+    _mixn="ledger rows ${s_mix_n}"
+    if [ -n "$s_mix_cover" ] && [ "$s_mix_cover" -ge "$s_mix_n" ] && [ "$s_mix_cover" -gt 0 ]; then
+        # the session's calls, rounded to the hundred above 1,000 ("~6,900"); the share in tenths of a percent
+        _cv="$s_mix_cover"
+        [ "$_cv" -ge 1000 ] && _cv=$(( (_cv + 50) / 100 * 100 ))
+        _commas "$_cv"; _cvt="$_cm"
+        _p10=$(( (s_mix_n * 1000 + s_mix_cover / 2) / s_mix_cover ))
+        if [ "$_p10" -lt 1 ]; then _pt="<0.1%"; else _pt="$(( _p10 / 10 )).$(( _p10 % 10 ))%"; fi
+        _mixn="${_mixn} of ~${_cvt} (${_pt})"
+    fi
+    parts+=("⚖ ${_mixc}${_mixb}${_mixu}·${s_mix_win}${_RESET} ${_DIM}${_mixn}${_RESET}")
 fi
 
 # ── 🛡 Enforce mode ──────────────────────────────────────────────────────────
@@ -527,9 +567,9 @@ if [ -n "$s_last" ]; then
     [ "$s_last_stale" = "1" ] && stale_marker="${_DIM}°${_RESET}"
     tok_seg=""
     [ -n "$s_last_tok" ] && tok_seg=" ${_DIM}${s_last_tok}${_RESET}"
-    # n and window of the route count come from the ledger (the mix's session call).
+    # n and window of the route count come from the ledger (the mix's session call): labelled rows (W8).
     if [ -n "$s_mix_n" ] && [ -n "$s_mix_win" ]; then
-        led_seg=" ${_DIM}(n=${s_mix_n} ${s_mix_win})${_RESET}"
+        led_seg=" ${_DIM}(n=${s_mix_n} ledger rows, ${s_mix_win})${_RESET}"
     else
         led_seg=" ${_DIM}(n/a)${_RESET}"
     fi
@@ -564,13 +604,25 @@ printf '%s\n' "$result"
 # Five fields, each with its n and window, pre-rendered by statusline_snapshot (the refresher above
 # wrote it into the kv file): this prints it and computes nothing. Past 15 minutes (900 s) of data
 # age, or with no stamp, the row reads n/a. No process: builtins only.
+_snap_age=999999
+[ -n "$s_snap_at" ] && [ "$_now" -gt 0 ] && _snap_age=$(( _now - s_snap_at ))
 if [ -n "$s_snap" ]; then
-    _snap_age=999999
-    [ -n "$s_snap_at" ] && [ "$_now" -gt 0 ] && _snap_age=$(( _now - s_snap_at ))
     if [ "$_snap_age" -ge 0 ] && [ "$_snap_age" -le 900 ]; then
         printf '%s\n' "${_DIM}${s_snap}${_RESET}"
     else
         printf '%s\n' "${_DIM}n/a${_RESET}"
+    fi
+fi
+
+# ── Third row: the session routing row (this PR) ─────────────────────────────
+# "routed X% (n/N calls, session) · local OK Y% (a/b, session)", pre-rendered by the refresher next to the
+# snapshot (statusline_snapshot.routing_line) and cleaned above like the snapshot line. It is gated by the
+# snapshot's own data time: past 15 minutes (900 s) or with no stamp it reads n/a, never a stale share.
+if [ -n "$s_route" ]; then
+    if [ "$_snap_age" -ge 0 ] && [ "$_snap_age" -le 900 ]; then
+        printf '%s\n' "${_DIM}${s_route}${_RESET}"
+    else
+        printf '%s\n' "${_DIM}routed n/a (session) · local OK n/a (session)${_RESET}"
     fi
 fi
 

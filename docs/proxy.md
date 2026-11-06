@@ -378,6 +378,60 @@ canary mode; until it exists it behaves as `shadow`.
   proxy keeps prompt text. A turn with a secret pattern in it is skipped, router banners are cut out, and the
   labeller deletes entries after 7 days or once labelled. The ledger and the shadow records stay hash-only.
 
+## Classifier in the hooks: one verdict per prompt and per Agent spawn (`LLM_ROUTER_LOCAL_CLASSIFIER=shadow|on`)
+
+The proxy seam above only sees sessions that route through the proxy, and nothing read its verdict. The hooks now
+ask the same decision model themselves (`llm_router/door_verdict.py`), so a session without `ANTHROPIC_BASE_URL`
+still gets a verdict (`docs/bugs/CLS-HOOK-1.md`). Same switch, same model (`LLM_ROUTER_CLASSIFIER_BACKEND=systemone`,
+`LLM_ROUTER_DECISION_MODEL`), read by each hook per run:
+
+- `off`: zero Ollama calls. `shadow`: one text-free row per routed prompt (`auto-route.py`) and per routed Agent spawn
+  (`agent-route.py`) in `door_verdicts.jsonl`; nothing changes. `on`: the verdict decides, below. Unset means `shadow`
+  when the decision model is configured (backend `systemone` and `LLM_ROUTER_DECISION_MODEL`), else `off`: a machine
+  without it makes no call, and the chat backend's general model is never picked up by guesswork.
+- `shadow` never evicts another lane's model (`docs/bugs/CLS-EVICT-1.md`). Ollama here keeps one big model resident, so a
+  log-only verdict that loaded the decision model would push out the local text-job lane's model and make the next
+  commit message pay a cold load. In `shadow` the call is made only when the decision model is already resident or no
+  model is (one `/api/ps`); otherwise the row says `skipped_slot_busy` (or `skipped_slot_unknown` when `/api/ps` fails)
+  and no request is sent. Session start loads the decision model only in `on`.
+- Privacy. The classifier refuses a non-loopback Ollama (`refused_remote`, in the proxy path too) unless
+  `LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE=1`, and a prompt that holds a secret (`local_privacy.scan_secrets`, the door the
+  Agent hook's Codex path uses) is classified by no model (`withheld_secret`); both hooks go through `door_verdict.start`,
+  which runs that door first.
+- A prompt is never stalled (`docs/bugs/CLS-STALL-1.md`). `shadow` waits for nothing: a detached worker
+  (`python -m llm_router.door_verdict --worker`, the text on its stdin) makes the call and writes the row. `on` joins a
+  verdict made in a thread beside the hook's own work, at most `LLM_ROUTER_DOOR_VERDICT_PROMPT_BUDGET_MS` (2,000) from the
+  moment `start` was entered (the residency probe is inside it), and a prompt that finds the model not resident does
+  not wait for the load at all: the worker loads it and makes the verdict, this prompt keeps today's behaviour, the next
+  one decides. A hook that exits before its decision point logs `abandoned` without waiting. An Agent spawn waits under
+  `LLM_ROUTER_DOOR_VERDICT_BUDGET_MS` (8,000; its hook already runs for seconds). No detached child allowed
+  (`LLM_ROUTER_NO_DETACHED_SPAWN`) or the breaker open means the verdict is made in the hook's own thread.
+- Two failures in a row open a 60 s breaker; one slow call does not. In `on`, session start loads the decision model
+  (`LLM_ROUTER_CLASSIFIER_PRELOAD=off` restores the edit-model and generic warm-ups; a 22 GB model loaded by them evicts
+  the decision model).
+- What `on` decides. The model answers one question, the cheapest adequate Claude tier with a probability each, used as
+  a difficulty signal. `preferred_door(verdict, kind=..., local_lane=...)` is the seam a hook or a sub-agent fallback calls.
+
+  | Verdict (p_max >= its threshold) | Prompt door | Agent-spawn door |
+  |---|---|---|
+  | opus (`LLM_ROUTER_DOOR_OPUS_MIN_CONF`, 0.6) | `claude`: hint quieted (the passive `OBSERVATION [local-verdict]` line, no tool, no model) | `claude`: no Codex attempt, unit `unsuitable` / `verdict_claude` |
+  | haiku (`..._HAIKU_MIN_CONF`, 0.7) and a local lane exists | `local`: the hint gains a line naming the lane (`llm_text_job` for a passed commit-message or PR-description job, else `llm(prompt="local: ...")`) | `local`: reported to the caller (`_door_dec.door`); nothing in this tree runs a local sub-agent yet |
+  | sonnet (`..._SONNET_MIN_CONF`, 0.5), or haiku with no lane | `codex` when Codex is usable (binary present, not benched, the Plus meter reserve D-373 allows the router chain, the 5 h window admits): the hint gains `llm(prompt="codex: ...")`; else `mcp`, the hint as today | `codex`: the existing NS3 gates decide, unchanged |
+  | no verdict | today's behaviour | today's behaviour |
+
+  A local lane exists only on evidence: a fresh passed quality batch (`lane_quality.jsonl`) for the hook kind's doors and
+  the task group, or the local text-job routing switch for a detected commit-message / PR-description prompt, or the
+  caller says so. None exists for Q&A or code today, so `local` is rare. A verdict opens no door the existing gates keep
+  shut; Sonnet and Haiku are not counted as a non-Claude door.
+- A row: `ts`, `hook_kind`, `mode`, `session_id`, `tool_use_id` (join to `north_star_units.jsonl`), `text_sha`, `chars`,
+  `source`, `resident`, `ms`, `tier`, `confidence`, `door`, `reason`, `lane`, `applied`, `outcome` (`hint_quieted`,
+  `hint_prefers_codex`, `hint_prefers_local`, `no_hint_shown`, `codex_skipped`, `no_change`, `background_shadow`,
+  `background_cold`, `background_result` for a worker's verdict row, `exit_before_decision`).
+  `python scripts/door_verdict_report.py --days 7` prints coverage (inline and from workers), latency, cold share, the
+  door mix and the outcomes with their n.
+- `python scripts/door_verdict_check.py` (at most 30 model calls) and `python scripts/door_verdict_hook_cost.py` (20
+  calls) measure the verdict and what it adds to a prompt of the real hook, with the load average printed beside the result.
+
 ## Metrics
 
 Each call writes one row to `~/.llm-router/proxy_calls.jsonl` with shape,
@@ -1097,3 +1151,27 @@ A prompt that starts with `local:`, `claude:`, `opus:`, `sonnet:`, `haiku:` or `
 At the proxy, `local:` forces that one step only, together with the tool-loop calls that follow it (they still carry the same newest prompt). It does not change the conversation's pin: the next prompt without a prefix is routed as if the prefix had never been used. A conversation pinned to Claude stays on Claude. A conversation whose first prompt was `local:` and was served locally is pinned local, as it would be without the prefix. After a refused `local:` first prompt nothing is stored, so the next prompt without a prefix goes to Claude. A conversation whose start this proxy did not see goes to Claude.
 
 P2.7-a is conditional-partial: 6/6 at the hook, 4/6 at the proxy. Unknown prefixes (`gpt:`) are ignored. Text whose first line begins with `Claude:`, `Local:`, `Opus:` and so on (a pasted dialogue, for example) is read as a prefix: put some text before it, or rephrase.
+
+## When a prompt holds a tool, and what releases the hold (BIND W2)
+
+In `smart` and `hard` enforcement the prompt hook writes a hold (the pending route) for a prompt it routes, and the PreToolUse hook refuses Bash, Edit, Write and the like until the hold is released. Both hooks read their rules from `llm_router.hold_policy`.
+
+**What never holds.** In `smart` mode (the default, and the one the audit measured): a prompt of ten words or fewer, and the "This session is being continued from a previous conversation" summary Claude Code injects after a compaction. The route hint stays as advice ("nothing held"); no hold is written. `hard` and `strict` are the explicit opt-in to hold everything and keep every hold (the modes that never block, `suggest`, `soft`, `advise`, `shadow` and `off`, have no hold to take away), so a short executable ask there still gets the `llm_act` redirect; a trivial call does not release it, so in `hard` it costs a retry (the trap valve below), not a toll, and `strict` has no retry valve (below). A user-forced `local:` or `codex:` prompt keeps its hold in every mode, because it is an explicit request to route.
+
+Evidence for the ten-word line (own replication with the loaders of `scripts/release/outcome_audit.py`, the 30-day window ending 2026-11-03T09:50:20Z, 23 organic sessions, 652 counted prompts): 40 unique `Routing directive BLOCKED` tool results; the prompt before each had 3 words (9 times), 4 (3), 5 (4), 6 (8), 7 (2), 9 (1), 10 (2), then nothing at 11, 12 or 13 words, then 14, 18, 24, 33, 55, 55, 59 words and four compaction summaries (1,863 to 2,294 words). Of 95 probe calls that BIND-R2 (the v16 coordinator's read of the 158 `routed_mcp` units, same window) labelled throwaway, 70 followed a prompt of ten words or fewer and none followed one of 11 or 12; 9 followed a compaction summary. Ten is the largest value before the gap. These counts come from one machine and two coordinator sessions that made 83% of the MCP calls; they are not a measure of ordinary use.
+
+**What releases a hold.** A routing door (`llm`, `llm_route`, `llm_act`, `llm_edit`, `llm_local_task`, `llm_text_job` and the legacy task names) whose input carries the owner's request. For an owner prompt with three or more content words: the call restates at least half of them (and three of them), or is mostly made of them (three fifths of the call's content words, at least four shared) as a quoted excerpt of a long prompt is. For a shorter one ("push to main"): the call restates all of its content words (at most two), or is exactly its words, so "Reply OK" releases it no more than it releases a long prompt. Only a pending file with no recorded prompt (an older hook, another writer) releases on any routing door, as before: there is nothing to compare, and nothing is held forever. Without any model call, in `smart` and `hard`, a hold is also released by the second block of one tool in one turn, three blocks of one tool in two minutes, or a fourth violation.
+
+**What does not.** A trivial or unrelated `llm_*` call ("Reply OK", a status view, a question about something else). It runs, the hold stays, and the call is recorded as a probe. The block text used to say that any `llm_*` call clears the lock; in the audit window 76 of the 141 unused MCP units were such probes and none of 133 router calls forwarded the owner's prompt. This holds in `smart`, `hard` and `strict` alike, for a prompt of any length.
+
+**A sub-agent is not denied.** A hold is written for the owner's prompt in the main thread. Outside `strict`, a sub-agent's tool call (the hook payload has `agent_id`) is never refused by it: the call counts towards the trap, loop and count releases exactly as before, so the main thread's hold is released at the same moment, and the call passes (`ALLOWED(subagent)` in `enforcement.log`).
+
+**`strict` has no free valve.** `strict` turns the trap, loop and count releases off (and the read-only Bash exception and the local-command exemptions), so retrying a blocked tool never releases the hold and a probe leaves it. A strict hold ends when a routing door carries the owner's request, when the user starts the prompt with `claude:`, when the user's next prompt replaces it, or when its routing window (`_PENDING_TTL` in `hooks/enforce-route.py`, one hour) runs out. The one mechanism that works without any of these is the router's own CLI: its admin subcommands (`llm-router set-enforce off`) are never held in any mode, because an escape hatch behind the thing it escapes is not one (`hooks/enforce-route.py`, F-1). The downgrades that decide a prompt is not held at all (an uncertain classification, an edit-shaped prompt, a task that needs local files) still apply in strict; they are not releases of a hold. A strict session can therefore stall behind a request that routing cannot help with; that is the price of the mode, and the block text says so instead of listing valves that are off (SECURITY.md, Hook Security).
+
+**`soft` and `suggest` keep the old release.** They hold nothing, so there is no toll to prevent, and any `llm_*` call still clears the pending file there. Leaving it behind would log one more `VIOLATION` line on the next tool call, which would change those modes' telemetry for no gain. No probe is recorded in them; the door call itself still is (below).
+
+**The user's bypass.** Start the prompt with `claude:` (table above): the hook answers natively, writes no hold and drops the previous turn's. This works in every mode, `strict` included. `LLM_ROUTER_ENFORCE=off` or `llm-router set-enforce off` turns enforcement off.
+
+**The counter.** `hold_events.jsonl` (docs/RETENTION.md) holds one text-free row per prompt, hold, exemption, BLOCKED tool call, routing-door call, probe and release (the `enforce-route` rows carry the host's `tool_use_id`, which joins a row to the transcript). `python -m llm_router.hold_ledger --days 30 --organic` prints the numbers over organic sessions, the population D-358 is stated on: `blocked_per_100_prompts` (the bar is under 1), `holds_per_100_prompts`, `probes_per_100_prompts` and `ack_probes`. `holds_per_100_prompts` counts holds written, not tool calls refused, so it is a different quantity from the bar. The `prompt` row is written for every human prompt the hook sees, slash commands and `!` shell entries included (background-task notifications and sub-agent reports are not), so compare its count once against the audit's own prompt count after deploy. `by_kind` is always printed, so the organic rate is visible with or without the flag; a session that was never tagged is its own `untagged` bucket and is not counted as organic. A coordinator who filters for itself reads `session_id` and the kind from `llm_router.session_kind.kind_of` (the owner's override file first, then the session's tag), the way the summary does.
+
+**"0 Reply OK probes".** `ack_probes` counts `door_call` rows that are fixed-reply probes (`hold_policy.is_ack_probe`: a reply verb and at most two words of answer, in 12 words or fewer) and did not carry the owner's prompt, held or not. The `probe` rows exist only while a hold is in force, because the hook cannot see a hold that was never written; a probe a ROUTE hint provokes with nothing held is in the `door_call` rows only. The shape test is a heuristic and can miss a probe phrased another way, so the transcript audit stays the check. `llm-router doctor` shows the `blocked_holds` counter (organic sessions, last 7 days; unknown, never 0, when no organic prompt was recorded).

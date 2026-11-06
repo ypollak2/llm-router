@@ -5,7 +5,7 @@ the calling agent's tool-error channel.
 Fixes (keep blocking, remove the drift):
   §2.8.1 — read-only Bash (ls, cat, git status) and the LS tool are never
            generative, so hard mode must allow them (smart already did). Only
-           strict, opt-in, still blocks them.
+           strict, opt-in, still blocks them. D-396: Q&A tasks included.
   §2.8.3 — the block reason must not coerce the agent ("Return its output
            without modification", "Do NOT generate your own solution").
 
@@ -20,6 +20,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 ENFORCE_HOOK = ROOT / "src" / "llm_router" / "hooks" / "enforce-route.py"
@@ -125,3 +127,27 @@ def test_block_message_is_not_instruction_injection(tmp_path):
         )
     # It should still explain WHY (neutral, factual) and offer the escape valve.
     assert "routing" in reason.lower()
+
+
+@pytest.mark.parametrize("mode", ["hard", "smart", "suggest"])
+@pytest.mark.parametrize("task,complexity", [("query", "simple"), ("research", "moderate")])
+@pytest.mark.parametrize("command", ["git status", "rg tasks README.md | head -20", "sed -n '1,40p' README.md"])
+def test_qa_inspection_never_pays_a_hold(tmp_path, mode, task, complexity, command):
+    _write_pending(tmp_path, "qa", task_type=task, complexity=complexity,
+                   original_prompt="Explain the difference between a mutex and a semaphore with examples please")
+    r = _run(tmp_path, "qa", "Bash", mode, {"command": command})
+    assert r.returncode == 0 and not r.stdout.strip(), r.stderr
+    root = tmp_path / ".llm-router"
+    assert (root / "pending_route_qa.json").exists(), "inspection does not satisfy routing"
+    rows = root / "hold_events.jsonl"
+    assert not rows.exists() or not any(json.loads(x)["event"] == "blocked" for x in rows.read_text().splitlines())
+
+
+@pytest.mark.parametrize("command", ["rg tasks README.md > result.txt", "cat README.md; python change.py"])
+def test_qa_mutating_or_unknown_bash_keeps_the_hold(tmp_path, command):
+    _write_pending(tmp_path, "prose", task_type="query", complexity="simple",
+                   original_prompt="Explain the difference between a mutex and a semaphore with examples please")
+    r = _run(tmp_path, "prose", "Bash", "hard", {"command": command})
+    assert r.returncode == 0 and _blocked(r), r.stderr
+    assert "MANDATORY ROUTE" in json.loads(r.stdout)["reason"]
+

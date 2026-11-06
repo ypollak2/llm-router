@@ -26,6 +26,11 @@ STOP_HOOK = ROOT / "src" / "llm_router" / "hooks" / "stop-enforce.py"
 HONORS = 5
 OVERRIDES = 4
 
+# BIND W2: a routing-door call releases a hold only when it carries the owner's request, so
+# the honoring call carries it. (It used to be sent with an empty input, which the hold
+# could not tell from a "Reply OK" probe.)
+OWNER_PROMPT = "what is a monad"
+
 
 def _seed_pending(home: Path, sid: str, *, route_id: str | None = None) -> None:
     now = time.time()
@@ -34,7 +39,7 @@ def _seed_pending(home: Path, sid: str, *, route_id: str | None = None) -> None:
         "complexity": "simple",
         "method": "heuristic",
         "expected_tool": "llm_query",
-        "original_prompt": "what is a monad",
+        "original_prompt": OWNER_PROMPT,
         "issued_at": now,
         "expires_at": now + 3600,
         "turn_id": int(now),
@@ -92,7 +97,7 @@ def test_realization_telemetry_complete(tmp_path):
         sid = f"honor-{i}"
         _seed_pending(home, sid)
         _run(ENFORCE_HOOK, {"session_id": sid, "tool_name": "mcp__llm_router__llm_query",
-                             "tool_input": {}}, env)
+                             "tool_input": {"prompt": OWNER_PROMPT}}, env)
 
     # Override: plain-text turn (pending survives to Stop) → verified_overridden.
     for i in range(OVERRIDES):
@@ -159,7 +164,7 @@ def test_adoption_method_gates_realized_savings_end_to_end(tmp_path, monkeypatch
     ), path=ledger)
     _seed_pending(home, honor_sid, route_id=honor_rid)
     _run(ENFORCE_HOOK, {"session_id": honor_sid, "tool_name": "mcp__llm_router__llm_query",
-                         "tool_input": {}}, env)
+                         "tool_input": {"prompt": OWNER_PROMPT}}, env)
 
     # Override session: same shape, but the route gets bypassed via stop-enforce.py.
     override_sid, override_rid = "gate-override", "route-gate-override"

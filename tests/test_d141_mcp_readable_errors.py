@@ -429,8 +429,9 @@ async def test_a_hung_attempt_falls_through_to_a_fast_candidate_inside_the_deadl
     assert _text(result) == "FAST-CANARY", _text(result)
     assert len(calls) == 2 and "slow-local" in calls[0] and "fast-local" in calls[1], calls
     assert elapsed < 8.0 + 3.0, elapsed
-    # D-154: the cap is not a provider fault -- no LOCAL-TIMEOUT-1 cooldown, no health failure
-    assert cooldown == {}, cooldown
+    # D-154: the cap is not a provider fault: no health failure. It does start the LOCAL-TIMEOUT-1 order cooldown:
+    # without it 14 consecutive MCP calls each spent 45 s on one stuck model (2026-10-17, usage.db execution_events).
+    assert list(cooldown) == ["ollama/slow-local"], cooldown
     assert all(c.args[:1] != ("ollama",) for c in tracker.record_failure.call_args_list), \
         tracker.record_failure.call_args_list
 

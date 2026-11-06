@@ -1,6 +1,6 @@
 # LLM Router Tools Reference
 
-Complete documentation of all 70 MCP tools provided by llm-router for Claude Code, Cursor, VS Code, Codex, and other AI development environments.
+Complete documentation of all 71 MCP tools provided by llm-router for Claude Code, Cursor, VS Code, Codex, and other AI development environments.
 
 > **Default install note**: by default (`LLM_ROUTER_SLIM=consolidated`), only 12 front-door
 > tools are registered — `llm(task=..., tier=...)`, `llm_act`, `llm_route`, `llm_router_status`,
@@ -256,6 +256,115 @@ Bulk code edits with smart diff generation.
 3. You apply mechanically with Edit tool
 4. Cost savings vs manual edits not measured — see
    [audit/CRITICAL_2026-09-24_local_models_do_no_work.md](../audit/CRITICAL_2026-09-24_local_models_do_no_work.md)
+
+---
+
+### `llm_apply` — beta, off by default
+
+Apply all edits and run a check in one call. Enable with
+`LLM_ROUTER_APPLY=on` and `LLM_ROUTER_SLIM=off`; this beta is excluded from
+core, routing, and the default consolidated surface.
+
+Parameters: `edits` (JSON array of `{file, old_string, new_string}` or fenced
+FILE/FIND/REPLACE, NEW FILE, APPEND TO blocks), `check` (optional argv command),
+`cwd` (optional, defaults to process cwd inside a git work tree).
+
+The entire batch validates before writing: exact-once replacements compose in
+order, only syntax of Python/JSON/YAML is checked, and resolved paths stay inside cwd.
+NEW FILE refuses overwrites. Known test/lint runners run without a shell with a
+60 s cap; other commands are left for you to run. The reply includes status,
+line counts and the check result. Enabled calls open the program ledger for append
+before applying anything; an open failure rejects the call without edits with
+`ledger not writable: <reason>`. A final append failure is reported in the reply.
+Disabled calls change nothing, including the ledger.
+
+Concurrent modification by another process of the same user is out of scope
+(that user can already write the repository). After each write the file's realpath
+is checked inside cwd; relocation rejects with `path moved outside cwd during write`
+and rolls back the batch. Backups are retained if any restoration fails.
+
+The check executes repository code. Executables must be allowlisted bare names found on the
+inherited PATH, or `.venv/bin/python`, `venv/bin/python`, `.venv/bin/pytest`,
+`venv/bin/pytest` resolving inside cwd. Arguments are an allowlist: a few
+harmless switches per runner (pytest `-q -v -x -s -l`, `--tb=short|line|no`,
+`-k`/`-m`/`--maxfail` with plain values; go test `-v -short -race -run -count`;
+ruff `check format --check --diff --fix`; npm/pnpm test take none) plus paths
+that resolve inside cwd. Anything else (config files, plugins, `@argfiles`,
+`--pyargs`, compiler flags) is not run; run that check yourself. Runners still
+find their own config the usual way (repo, parent folders, `~/.npmrc`,
+`~/.config/mypy`, Go and Cargo caches), exactly as when you run them yourself.
+The child environment contains only PATH, HOME, USER, LOGNAME, LANG, LC_*, TERM,
+TMPDIR, VIRTUAL_ENV, PYTHONDONTWRITEBYTECODE, CI, and NO_COLOR.
+Remaining process group members are killed after parent exit or timeout, and
+survivors make the check fail. A descendant calling `setsid()` can escape the
+group kill, while retaining sandbox restrictions.
+**Sandbox.** `LLM_ROUTER_APPLY_SANDBOX=auto` (default) contains only the check
+and its descendants when available, and explicitly reports an unsandboxed fallback.
+`require` refuses the check when containment is unavailable; `off` disables it.
+`auto` preserves today's behaviour for Claude-only edits; local repair forces `require_sandbox=True`, which overrides `off`. macOS uses sandbox-exec:
+network denied (including Ollama), writes limited to cwd, private per-run TMPDIR,
+and `/dev/null`, `/dev/zero`, `/dev/dtracehelper`, `/dev/urandom`, `/dev/random`
+(no tty devices); home data reads limited to cwd and executable-derived
+runtime directories, discovered from paths and metadata without execution.
+Runtime grants must be real directories and cannot equal or contain the user's
+home or be `/`, `/Users`, or `/home`. Its `(allow default)` base is a known limit needed for pytest
+on current macOS: reads outside the user's home remain allowed. The short
+Mach lookup and executable denylists are best-effort broker restrictions.
+**Linux.** Bubblewrap (`bwrap`) is required, with isolated namespaces (including
+network), read-only system/runtime mounts, writable cwd and private temporary
+storage. It refuses sockets in cwd and scans at most 50,000 entries without
+following symlinks.
+
+Ubuntu 23.10+/24.04 restricts unprivileged user namespaces through AppArmor.
+Install bubblewrap and the following profile (for `/usr/bin/bwrap`), then load it:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y bubblewrap
+sudo tee /etc/apparmor.d/bwrap > /dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
+
+Without this profile, stock Ubuntu 24.04 with
+`kernel.apparmor_restrict_unprivileged_userns=1` can fail the real bwrap probe
+with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. The probe
+treats that as `SandboxUnavailable`: `require` refuses to run the check;
+`auto` runs it unsandboxed and reports the probe error (Claude-only edits).
+Install and load the profile above to enable containment; do not disable the
+system-wide AppArmor restriction.
+
+Neither backend contains edit application or host-side Git, guarantees resource
+limits, nor fixes the macOS `setsid()` escape from process-group teardown.
+Executable installations must be trusted; this is not a VM boundary.
+
+**Local repair.** When the beta is enabled, `LLM_ROUTER_APPLY_REPAIR` defaults
+on; `off`, `0`, `false`, or `no` disables it. `LLM_ROUTER_APPLY_REPAIR_S` defaults
+to 60 seconds, clamped to 10–120. One bounded local text-edit generation round
+may follow a validation rejection (all batch files must already exist inside cwd)
+or `APPLIED_CHECK_FAILED`. It requires an allowlisted check, an available local
+model (cache-only discovery), and a successful sandbox probe before generation.
+The model receives only the batch files and returns old/new pairs; edits to other
+files are refused. Repair edits use the same batch validation and write rules.
+The model runs on the host; the verification check always requires the sandbox,
+even with `LLM_ROUTER_APPLY_SANDBOX=off`.
+
+A passing repair returns `REPAIRED_BY_LOCAL_AND_PASSED`, identifies the local
+model and repaired line counts, and asks Claude to review the diff. Failed repair
+restores the exact pre-repair contents (retaining Claude's applied batch on check
+failure) and keeps `REJECTED` or `APPLIED_CHECK_FAILED` with the handoff.
+Restoration failures report `ROLLBACK INCOMPLETE`. Other statuses remain
+`APPLIED_NOT_CHECKED` and `APPLIED_AND_PASSED`.
+The ledger adds `repair_attempted`, `repair_passed`, `repair_model`, `repair_s`
+(elapsed seconds), and a short `repair_reason`, without prompts or file contents.
+Its source is `local` only after a passing repair, otherwise `program`.
+After rejection or a failed check, make remaining changes with your edit tools.
 
 ---
 

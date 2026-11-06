@@ -9,6 +9,20 @@ the file is older than a minute. The expensive work lives here:
                         (``commands.kpi.compute_scorecard``, 7 days, organic):
                         ``pct`` only when the KPI is measurable, ``n`` always
                         when the KPI counted something; ``None`` = unknown.
+                        A BLIND NS (no verifier verdict reaches the strict
+                        numerator, D-364) carries ``blind: true`` and ``k``, its
+                        0 of ``n``, and no ``pct``: the tick prints it as
+                        ``NS strict 0/n (blind)``, never as 0.0%.
+* ``call_mix``          the two progress lines beside NS, from the SAME scorecard
+                        pass (same 7 days, same organic population):
+                        ``outside_claude`` and ``below_opus`` as ``{k, n}``, with
+                        their ``window`` and ``population``. With ``routing_detail``
+                        (W9) ``outside_claude`` counts a delegated Codex run as its model
+                        responses and drops discarded runs (``codex_turns: true``, so the
+                        row is labelled ``routed (incl. Codex turns and binds)``, not ``off-Claude``:
+                        ``llm-router kpi`` keeps one call per run), ``flagged_codex_runs``
+                        counts runs estimated as one response, and ``local_ok`` is the
+                        local attempts that were used over all local attempts.
 * ``claude_weekly_pct`` ``usage.json``'s ``weekly_pct``; ``None`` when the
                         snapshot is a fallback (``is_fallback``: invented 50s),
                         unreadable, or older than :data:`QUOTA_STALE_S`. The
@@ -34,6 +48,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import time
 from pathlib import Path
@@ -96,6 +111,17 @@ def _codex(now: float) -> dict | None:
     return {"used": s.used, "budget": s.budget, "resets_at": s.resets_at}
 
 
+_SAFE_ID = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+
+def _window_label(card: dict) -> str | None:
+    """``7d`` for the scorecard's window (whole days only; anything else is unknown, not guessed)."""
+    days = card.get("window_days")
+    if isinstance(days, bool) or not isinstance(days, (int, float)) or days != int(days) or days <= 0:
+        return None
+    return f"{int(days)}d"
+
+
 def _ns(card: dict) -> dict | None:
     r = card["kpis"]["NS"]
     n = r.get("n")
@@ -104,7 +130,43 @@ def _ns(card: dict) -> dict | None:
     pct = None
     if r.get("measurable") and isinstance(r.get("denominator"), int) and r["denominator"] > 0:
         pct = round(100.0 * r["numerator"] / r["denominator"], 1)
-    return {"pct": pct, "n": n}
+    out: dict[str, Any] = {"pct": pct, "n": n}
+    window = _window_label(card)
+    if window:
+        out["window"] = window                          # the tick prints it beside n: no bare n
+    if r.get("blind") is True and isinstance(r.get("numerator"), int):
+        out.update(blind=True, k=r["numerator"])        # D-364: 0 of n, and no verdict behind it
+    return out
+
+
+def _call_mix(card: dict) -> dict | None:
+    """The two progress lines from the scorecard's ``call_mix`` (same pass, window and population as NS).
+    ``None`` when no call was counted: an unknown, not two zeros."""
+    cm = card.get("call_mix")
+    if not isinstance(cm, dict):
+        return None
+    out: dict[str, Any] = {"window": _window_label(card), "population": cm.get("population")}
+    for key in ("outside_claude", "below_opus"):
+        fig = cm.get(key)
+        k, n = (fig.get("k"), fig.get("n")) if isinstance(fig, dict) else (None, None)
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (k, n)) or not 0 <= k <= n:
+            return None
+        out[key] = {"k": k, "n": n}
+    sessions = cm.get("sessions")
+    if isinstance(sessions, dict):                       # calls per session: the full layout prints its ledger rows against it
+        out["sessions"] = {sid: n for sid, n in sessions.items()
+                           if isinstance(sid, str) and _SAFE_ID.fullmatch(sid)
+                           and isinstance(n, int) and not isinstance(n, bool) and n > 0}
+    if cm.get("detail_unavailable") is True:
+        out["detail_unavailable"] = True                          # routed share is unknown; an independently measured local_ok may still be present
+    codex, local = cm.get("codex"), cm.get("local_ok")
+    if isinstance(codex, dict) and isinstance(codex.get("flagged_runs"), int) and not isinstance(codex["flagged_runs"], bool):
+        out["codex_turns"] = True                                 # Codex runs count as their model responses: the row's label says so
+        out["flagged_codex_runs"] = codex["flagged_runs"]         # delegated runs counted as one response (no rollout): "n runs est."
+    if isinstance(local, dict) and all(isinstance(local.get(v), int) and not isinstance(local.get(v), bool) for v in ("k", "n")) \
+            and 0 <= local["k"] <= local["n"]:
+        out["local_ok"] = {"k": local["k"], "n": local["n"]}      # n = 0 is a measured "no attempts", printed as such
+    return out if out["outside_claude"]["n"] > 0 else None
 
 
 def _hooks_slow(card: dict) -> dict | None:
@@ -154,7 +216,7 @@ def build(now: float | None = None) -> dict[str, Any]:
         "mode": _part("CHZ-FO-STATUSLINE-MODE", _mode),
         "claude_weekly_pct": _part("CHZ-FO-STATUSLINE-QUOTA", lambda: _quota(now_ts)),
         "codex": _part("CHZ-FO-STATUSLINE-CODEX", lambda: _codex(now_ts)),
-        "ns": None, "hooks_slow": None,
+        "ns": None, "call_mix": None, "hooks_slow": None,
         # LC-7: "local ok" / "local n/p" or None. Read from local_eligibility.json + the discovery cache; no HTTP.
         "local_check": _part("CHZ-FO-STATUSLINE-LOCALCHECK", _local_check),
     }
@@ -162,11 +224,12 @@ def build(now: float | None = None) -> dict[str, Any]:
     def _card() -> dict:
         from llm_router.commands.kpi import compute_scorecard
 
-        return compute_scorecard(days=7, now=now_ts)
+        return compute_scorecard(days=7, now=now_ts, call_mix_sessions=True, routing_detail=True)
 
     card = _part("CHZ-FO-STATUSLINE-KPI", _card)
     if card is not None:
         out["ns"] = _part("CHZ-FO-STATUSLINE-NS", lambda: _ns(card))
+        out["call_mix"] = _part("CHZ-FO-STATUSLINE-CALLMIX", lambda: _call_mix(card))
         out["hooks_slow"] = _part("CHZ-FO-STATUSLINE-HOOKS", lambda: _hooks_slow(card))
     return out
 
@@ -282,7 +345,7 @@ def cmd_statusline(args: list[str]) -> int:
     from llm_router import statusline_tick as tick
 
     home = tick.router_home()
-    print(tick.render(tick.read_cache(home), now=time.time(),
-                      env_mode=os.environ.get("LLM_ROUTER_ENFORCE"),
-                      usage=tick.read_usage(home), usage_ttl_s=tick.usage_ttl()))
+    print("\n".join(tick.render_rows(tick.read_cache(home), now=time.time(),
+                                     env_mode=os.environ.get("LLM_ROUTER_ENFORCE"),
+                                     usage=tick.read_usage(home), usage_ttl_s=tick.usage_ttl())))
     return 0

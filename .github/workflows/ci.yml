@@ -323,6 +323,58 @@ jobs:
           kill $PYTEST_PID 2>/dev/null || true
           exit $result
 
+  linux-sandbox:
+    name: linux-sandbox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+        continue-on-error: true
+        id: uv-setup
+      - name: Retry uv setup
+        if: steps.uv-setup.outcome == 'failure'
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Install bubblewrap and AppArmor profile
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo tee /etc/apparmor.d/bwrap > /dev/null <<'EOF'
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+            include if exists <local/bwrap>
+          }
+          EOF
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap
+      - name: Run sandbox and apply tests
+        # Deselect macOS-only checks; every selected sandbox test must run.
+        # A controlling terminal supplies the /dev/tty positive control.
+        run: |
+          script -q -e -c "uv run pytest tests/test_check_sandbox.py tests/test_apply_tool.py -k 'not test_macos_' -rs --junitxml=linux-sandbox-junit.xml" /dev/null
+      - name: Fail if any sandbox test was skipped
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse("linux-sandbox-junit.xml").getroot()
+          cases = [case for case in root.iter("testcase")
+                   if case.get("classname", "").endswith("test_check_sandbox")]
+          assert cases, "No sandbox test results found"
+          skipped = [case.get("name") for case in cases if case.find("skipped") is not None]
+          assert not skipped, f"Sandbox tests skipped: {skipped}"
+          PY
+
   test-windows-claude-creds:
     # P1.8-c / D-90: only this module to keep cost low; not a required check.
     runs-on: windows-latest

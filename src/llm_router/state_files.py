@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import threading
 from pathlib import Path
 
 from llm_router import paths
@@ -184,3 +185,19 @@ def harden_state(root: str | os.PathLike | None = None) -> dict[str, int] | None
         return harden_tree(base)
     except Exception:  # noqa: BLE001 -- housekeeping must never break a caller
         return None
+
+
+def harden_state_in_background(root: str | os.PathLike | None = None) -> threading.Thread:
+    """Start :func:`harden_state` on a daemon thread and return it; the caller does not wait.
+
+    For a long-running server whose port must open first. The walk visits every inode under the
+    state directory, not only its top-level files, so its cost grows with the whole tree (the
+    proxy's start measurement is in ``changelog.d/PROXY-START-HARDEN.fixed.md``). The repair is
+    unchanged and still runs on every start; it finishes after the server is listening instead
+    of before. The root is resolved HERE, in the caller's thread, so a later change of
+    ``LLM_ROUTER_HOME`` (a test worker) cannot redirect the walk. Never raises
+    (``harden_state`` does not)."""
+    base = Path(root) if root is not None else paths.llm_router_home()
+    t = threading.Thread(target=harden_state, args=(base,), name="harden-state", daemon=True)
+    t.start()
+    return t

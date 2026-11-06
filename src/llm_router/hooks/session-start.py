@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 43
+# llm_router-hook-version: 45
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1843,6 +1843,17 @@ def _warm_ollama_bg() -> None:
         pass
 
 
+def _warm_classifier_bg() -> str:
+    """W10: load the decision model that gives every prompt and Agent spawn its routing verdict. Runs in this
+    hook's detached child, so a blocking load (2 s idle, 6.7 s measured while another model was resident) costs
+    the session nothing. Returns the model name, or "" when the classifier is off, unconfigured or did not load."""
+    try:
+        from llm_router import door_verdict
+    except Exception:  # noqa: BLE001 -- a package without the module keeps the old warm-ups
+        return ""
+    return door_verdict.warm() or ""
+
+
 def _warm_edit_model_bg() -> str | None:
     """Plan 3.7: load the zero-Claude edit model with the SAME model/num_ctx/keep_alive
     the edit call sends, so the first edit of the session finds it resident.
@@ -2307,14 +2318,50 @@ def _run_background_session_work(cwd: str, session_id: str = "") -> None:
     _step(_maybe_refresh_benchmarks_bg)
     _step(_maybe_reindex_okf_bg, cwd)
     _step(_maybe_refresh_semantic_bg, cwd)
-    _step(_warm_edit_model_bg)
-    _step(_warm_ollama_bg)
+    # W10: with the classifier on, the decision model is the one to keep resident (it gives every prompt its
+    # verdict). Ollama evicts to fit memory and the two other warm-up models (22 GB) do not fit beside it, so only
+    # one of the three runs: docs/bugs/CLS-COLD-1.md. Opt out: LLM_ROUTER_CLASSIFIER_PRELOAD=off.
+    if not _step(_warm_classifier_bg):
+        _step(_warm_edit_model_bg)
+        _step(_warm_ollama_bg)
     _step(_drain_judge_queue_bg)
     _step(_ollama_watchdog_bg)
     _step(_maybe_update_pull_routing_rules)
 
 
+# -- stdout is the host's JSON channel: library logging goes to stderr (docs/BUGS.md BIND-1) --------
+# structlog's default sink is STDOUT. A log line in front of (or after) this hook's JSON makes Claude Code read
+# the whole output as plain text and drop the decision or context it carried; agent-route.py lost 317 of 317
+# Codex handoffs that way. configure_logging_lazily() points structlog at stdlib logging (stderr) the moment it
+# is first imported, as auto-route.py does. The fallback covers a host without the llm_router package.
+def _init_hook_logging() -> None:
+    # LiteLLM keeps its own handler, which writes every record below WARNING to sys.stdout (looked up when the record
+    # is emitted) and takes its level, DEBUG by default, from LITELLM_LOG when it is imported. ERROR keeps it off the
+    # decision channel, and the hook FORCES it: an explicit LITELLM_LOG=DEBUG in the user's environment used to win
+    # here, put LiteLLM's records in front of this hook's JSON, and the host dropped the whole output
+    # (docs/bugs/BIND-10.md). The variable is set before the import, and the loggers on their own in case LiteLLM is
+    # already imported. Only the script entry changes the process: a test that calls main() must not.
+    if __name__ == "__main__":
+        import logging as _ll_logging
+        import os as _ll_os
+
+        _ll_os.environ.update(LITELLM_LOG="ERROR")
+        for _ll_name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
+            _ll_logging.getLogger(_ll_name).setLevel(_ll_logging.ERROR)
+    try:
+        from llm_router.logging import configure_logging_lazily
+
+        configure_logging_lazily()
+    except Exception:  # noqa: BLE001 -- logging setup must never abort the hook
+        import logging as _logging
+
+        _root = _logging.getLogger()
+        if not _root.handlers:
+            _root.addHandler(_logging.StreamHandler(sys.stderr))
+
+
 def main() -> None:
+    _init_hook_logging()
     _hl_mark_main()
     try:
         _hook_input = json.load(sys.stdin)

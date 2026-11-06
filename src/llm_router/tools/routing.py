@@ -902,7 +902,7 @@ async def llm_select_agent(
     if primary == "claude_code":
         invocation = f'claude --model {primary_model} -p "{prompt[:60]}..."'
     else:
-        invocation = f'codex exec --model {primary_model} "{prompt[:60]}..."'
+        invocation = f'codex exec --ignore-rules --model {primary_model} "{prompt[:60]}..."'
 
     return (
         f"**Session-level routing recommendation** (profile={profile})\n\n"

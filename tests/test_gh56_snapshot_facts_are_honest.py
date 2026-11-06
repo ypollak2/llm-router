@@ -55,7 +55,7 @@ def test_accuracy_is_not_asserted_as_perfect_from_nothing():
 
 
 def test_zero_counts_are_still_present_for_existing_readers():
-    """The keys must not vanish — snapshot.py and share.py read them directly."""
+    """The keys must not vanish — snapshot.py reads them directly."""
     facts = analyze_facts([], [])
     for key in ("total_calls", "total_cost", "total_saved", "duration_min"):
         assert key in facts, f"{key} disappeared; existing readers would KeyError"

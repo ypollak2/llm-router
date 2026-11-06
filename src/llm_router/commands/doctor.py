@@ -95,6 +95,24 @@ def _subagent_start_gap(settings_path: Path) -> str | None:
     return None
 
 
+def _text_job_bind_rules_line(issues: list[str]) -> str | None:
+    """The doctor line for a mismatch between the installed rules and the text-job-bind registration.
+
+    The dangerous direction (rules teach the placeholder, hook missing) is a failure and an issue; the
+    reverse (hook registered, rules do not teach it) is informational and is not an issue. None when the
+    two agree. Read-only.
+    """
+    from llm_router.install_hooks import text_job_bind_rules_gap
+
+    gap = text_job_bind_rules_gap()
+    if gap is None:
+        return None
+    if gap.level == "danger":
+        issues.append("Installed rules teach the text-job placeholder but the text-job-bind hook is not usable")
+        return _fail(gap.message, fix=gap.fix)
+    return f"  {_dim('i')} {gap.message} (fix: {_dim(gap.fix)})"
+
+
 def _hook_version_num(path: Path) -> int:
     """Read the version number embedded in a hook file header."""
     _re = re.compile(r"#\s*llm_router-hook-version:\s*(\d+)")
@@ -1185,6 +1203,9 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     rules_dst = _RULES_DST / "llm_router.md"
     if rules_dst.exists():
         print(_ok("llm_router.md"))
+        _bind_line = _text_job_bind_rules_line(issues)
+        if _bind_line:
+            print(_bind_line)
     else:
         print(_fail("llm_router.md — not installed", fix="llm-router install"))
         issues.append("Routing rules not installed")

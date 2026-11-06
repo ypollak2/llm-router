@@ -150,8 +150,97 @@ def test_harden_refuses_symlinked_root_and_absent_root(home, tmp_path):
 
 
 def test_server_main_and_proxy_start_call_harden_state():
-    for rel in ("server.py", "proxy/server.py"):
-        assert "state_files.harden_state()" in (SRC / rel).read_text(), rel
+    # The MCP server repairs before it serves; the proxy repairs on a thread so its port opens first
+    # (PROXY-START-HARDEN). Both still repair on EVERY start.
+    assert "state_files.harden_state()" in (SRC / "server.py").read_text()
+    assert "state_files.harden_state_in_background()" in (SRC / "proxy" / "server.py").read_text()
+    assert "state_files.harden_state()" not in (SRC / "proxy" / "server.py").read_text(), \
+        "a synchronous walk of the whole state dir is back on the proxy's path to listening"
+
+
+def test_harden_state_in_background_returns_before_the_walk_finishes(home, monkeypatch):
+    import threading
+
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    seen = {}
+
+    def slow_walk(root=None):
+        seen["root"] = root
+        started.set()
+        seen["released_in_time"] = release.wait(10)
+        finished.set()
+
+    monkeypatch.setattr(state_files, "harden_state", slow_walk)
+    thread = state_files.harden_state_in_background()
+    assert started.wait(10), "the walk never started"
+    assert not finished.is_set(), "the caller waited for the walk"
+    assert thread.daemon and thread.is_alive()
+    release.set()
+    thread.join(10)
+    assert finished.is_set() and seen["released_in_time"]
+    assert seen["root"] == home, "the root must be the one resolved in the caller"
+
+
+def test_harden_state_in_background_binds_the_root_at_call_time(home, tmp_path, monkeypatch):
+    import threading
+
+    gate, roots = threading.Event(), []
+
+    def walk(root=None):
+        gate.wait(10)
+        roots.append(root)
+
+    monkeypatch.setattr(state_files, "harden_state", walk)
+    thread = state_files.harden_state_in_background()
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "somewhere-else"))  # what a test teardown does
+    gate.set()
+    thread.join(10)
+    assert roots == [home]
+
+
+def test_harden_state_in_background_repairs_like_the_synchronous_call(home):
+    home.mkdir(mode=0o700)
+    (home / "sub").mkdir(mode=0o755)
+    wide = home / "sub" / "proxy_calls.jsonl"
+    wide.write_text("{}\n")
+    wide.chmod(0o666)
+    state_files.harden_state_in_background().join(10)
+    assert stat.S_IMODE(wide.stat().st_mode) == 0o600
+    assert stat.S_IMODE((home / "sub").stat().st_mode) == 0o700
+
+
+def test_proxy_start_reaches_uvicorn_while_the_state_walk_is_still_running(home, monkeypatch, capsys):
+    """The port must not wait for the walk: a walk held open must not stop cmd_proxy reaching uvicorn.run."""
+    import threading
+
+    import uvicorn
+
+    from llm_router.proxy import server as ps
+
+    started, release, done = threading.Event(), threading.Event(), threading.Event()
+
+    def held_walk(root=None):
+        started.set()
+        release.wait(10)
+        done.set()
+
+    reached = {}
+
+    def fake_run(*a, **k):
+        reached["walk_started"] = started.wait(10)
+        reached["walk_done_at_listen"] = done.is_set()
+
+    home.mkdir(mode=0o700)
+    monkeypatch.setenv("LLM_ROUTER_MAP_REDISCOVERY", "off")  # no Ollama probe thread in a unit test
+    monkeypatch.setattr(state_files, "harden_state", held_walk)
+    monkeypatch.setattr(uvicorn, "run", fake_run)
+    try:
+        rc = ps.cmd_proxy(["--port", "18000", "--no-warm-up", "--steps", "off"])
+    finally:
+        release.set()
+    assert rc == 0
+    assert reached == {"walk_started": True, "walk_done_at_listen": False}, reached
+    assert done.wait(10), "the held walk never finished after release"
 
 
 def test_doctor_runs_hardening_every_time(home):

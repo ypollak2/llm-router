@@ -64,7 +64,10 @@ def _cache_path() -> Path:
 
 
 def _ollama_url() -> str:
-    return os.environ.get("OLLAMA_HOST", "").strip() or "http://127.0.0.1:11434"
+    # The daemon the calls go to (LLM_ROUTER_OLLAMA_URL), else Ollama's own variable: an operator's model list is checked
+    # against this answer (PHANTOM-LOCAL-1), and asking another daemon would drop models the serving one has.
+    return (os.environ.get("LLM_ROUTER_OLLAMA_URL", "").strip()
+            or os.environ.get("OLLAMA_HOST", "").strip() or "http://127.0.0.1:11434")
 
 
 def _ttl_hours() -> float:
@@ -175,20 +178,14 @@ def _write_cache(models: list[str]) -> None:
         pass
 
 
-def available_ollama_models(*, allow_probe: bool = True) -> list[str]:
-    """Ollama models usable right now, cheapest source first.
-
-    env override → fresh cache → live probe (refreshing the cache) → stale cache
-    → empty.
+def _discovered(*, allow_probe: bool) -> list[str]:
+    """What Ollama reports installed: fresh cache → live probe (refreshing it) → stale cache → [].
 
     A stale cache beats nothing: if Ollama is momentarily unreachable, yesterday's
     model list is a better guess than an empty chain. But it is only reached
     AFTER a probe has been tried, so a model pulled today is picked up today.
+    ``[]`` means UNKNOWN (Ollama down and no cache), never "nothing is installed".
     """
-    from_env = _from_env()
-    if from_env:
-        return from_env
-
     cached, age = _read_cache()
     if cached and age <= _ttl_hours():
         return cached
@@ -200,6 +197,84 @@ def available_ollama_models(*, allow_probe: bool = True) -> list[str]:
             return live
 
     return cached          # stale, or [] when there is no cache at all
+
+
+def _fresh_installed(*, allow_probe: bool) -> list[str]:
+    """The installed models when they are KNOWN: a fresh cache, else a live probe (refreshing it).
+
+    ``[]`` = unknown. A stale cache is not used here: it would call a model pulled since it was
+    written "not installed", and a false drop is worse than a late one.
+    """
+    cached, age = _read_cache()
+    if cached and age <= _ttl_hours():
+        return cached
+    live = probe_ollama() if allow_probe else []
+    if live:
+        _write_cache(live)
+    return live
+
+
+#: Names already reported by ``installed_only``: one WARNING per name per process, because the
+#: callers run on every route (``policy.local_epoch`` re-resolves ``ollama/@local`` every 2 s).
+_not_installed_warned: set[str] = set()
+
+
+def installed_only(names: "list[str]", *, allow_probe: bool = False) -> list[str]:
+    """``names`` minus every model Ollama's own list does not carry (PHANTOM-LOCAL-1).
+
+    ``LLM_ROUTER_OLLAMA_MODEL``, ``OLLAMA_BUDGET_MODELS`` and ``OLLAMA_MODELS`` are an operator's
+    wishes, not an inventory: a model removed with ``ollama rm`` or never pulled stays in a
+    process environment (an MCP server's ``env`` block in ``~/.claude.json``) for as long as
+    nobody edits it. Those names went straight into ``local_model()`` and from there into every
+    chain that resolves ``ollama/@local``, so each local route spent its first attempt on a model
+    Ollama answered 404 for.
+
+    When the installed list is unknown (Ollama down, no cache, and no probe allowed) the names are
+    returned as given: there is nothing to check them against, and the caller's own reachability
+    gate reports the real failure. ``[]`` is returned only when the list is known and carries
+    none of ``names``; callers then fall back to discovery. Each dropped name is logged once.
+    """
+    names = list(names)
+    if not names:
+        return names
+    known = _fresh_installed(allow_probe=allow_probe)
+    if not known:
+        return names
+    kept = [n for n in names if any(_same_model(n, k) for k in known)]
+    for n in names:
+        if n not in kept and n not in _not_installed_warned:
+            _not_installed_warned.add(n)
+            import logging
+
+            logging.getLogger("llm_router.model_discovery").warning(
+                "%r is named in the environment but Ollama does not report it installed; "
+                "ignoring it for routing (installed: %s)", n, ", ".join(known))
+    return kept
+
+
+def _from_env_verified(*, allow_probe: bool) -> list[str]:
+    """``_from_env()``, with an operator LIST checked against Ollama's own (PHANTOM-LOCAL-1).
+
+    ``LLM_ROUTER_OLLAMA_MODEL`` is one explicit choice and wins as written (``local_model()``
+    reports a wrong one). ``OLLAMA_BUDGET_MODELS`` / ``OLLAMA_MODELS`` are lists nobody re-reads
+    after ``ollama rm``: a name Ollama does not report installed is dropped. ``[]`` = none usable.
+    """
+    if os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "").strip():
+        return _from_env()
+    return installed_only(_from_env(), allow_probe=allow_probe)
+
+
+def available_ollama_models(*, allow_probe: bool = True) -> list[str]:
+    """Ollama models usable right now, cheapest source first.
+
+    env override (only names Ollama reports installed) → fresh cache → live probe (refreshing
+    the cache) → stale cache → empty.
+    """
+    from_env = _from_env_verified(allow_probe=allow_probe)
+    if from_env:
+        return from_env
+    # No env choice, or every name in the operator's list is missing from Ollama: use what is installed.
+    return _discovered(allow_probe=allow_probe)
 
 # ── Hook path: never wait on the network ─────────────────────────────────────
 #
@@ -264,11 +339,11 @@ def _spawn_probe_child(module: str = "llm_router.model_discovery") -> bool:
 def available_ollama_models_nowait(*, refresh: bool = True) -> list[str]:
     """``available_ollama_models`` without the synchronous probe.
 
-    env override -> fresh cache -> stale cache -> []. When the cache is stale or
-    missing and ``refresh`` is true, a throttled detached child refreshes it for the
-    next caller.
+    env override (only names a fresh cache reports installed) -> fresh cache -> stale cache
+    -> []. When the cache is stale or missing and ``refresh`` is true, a throttled detached
+    child refreshes it for the next caller.
     """
-    from_env = _from_env()
+    from_env = _from_env_verified(allow_probe=False)
     if from_env:
         return from_env
     cached, age = _read_cache()
@@ -614,16 +689,10 @@ def _inventory(*, allow_probe: bool) -> list[str]:
     """
     listed = _from_env_inventory()
     if listed:
-        return listed
-    cached, age = _read_cache()
-    if cached and age <= _ttl_hours():
-        return cached
-    if allow_probe:
-        live = probe_ollama()
-        if live:
-            _write_cache(live)
-            return live
-    return cached
+        verified = installed_only(listed, allow_probe=allow_probe)   # PHANTOM-LOCAL-1
+        if verified:
+            return verified
+    return _discovered(allow_probe=allow_probe)
 
 
 def _from_env_inventory() -> list[str]:
@@ -667,6 +736,7 @@ def local_model(installed: "list[str] | tuple[str, ...] | None" = None, *,
     """
     global last_skip_reason
     last_skip_reason = None
+    read_here = installed is None
     if installed is None:
         try:
             installed = _inventory(allow_probe=allow_probe)
@@ -678,11 +748,20 @@ def local_model(installed: "list[str] | tuple[str, ...] | None" = None, *,
         hit = next((m for m in installed if _same_model(m, want)), None)
         if hit:
             return hit
+        if read_here:
+            # The inventory may be a narrowed OLLAMA_BUDGET_MODELS list; the setting is installed
+            # when Ollama itself says so (PHANTOM-LOCAL-1: it was called "not installed" because
+            # it was not in that list, and the first listed name, a missing one, won).
+            hit = next((m for m in _fresh_installed(allow_probe=allow_probe) if _same_model(m, want)), None)
+            if hit:
+                return hit
         if not installed:
             return want                                      # nothing to check it against
         last_skip_reason = f"LLM_ROUTER_OLLAMA_MODEL={want!r} is not installed (installed: {installed or 'none'})"
-        import logging
-        logging.getLogger("llm_router.model_discovery").warning("%s; using discovery order", last_skip_reason)
+        if last_skip_reason not in _not_installed_warned:    # per process: callers run on every route
+            _not_installed_warned.add(last_skip_reason)
+            import logging
+            logging.getLogger("llm_router.model_discovery").warning("%s; using discovery order", last_skip_reason)
     return installed[0] if installed else None
 
 

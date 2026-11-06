@@ -44,7 +44,7 @@ timeout, 60 s by default): the invocation used all the time the host gives it.
 The PRD latency bar a hook is judged against is ``HOOK_BUDGETS_MS``.
 
 ROUTER-ADDED TIME (PLAN v16 P0.9). A row whose run named a model phase
-(``MODEL_PHASES``: ``draft_chain``, ``zce_model``, ``codex_delegation``, ``cold_wait``) also carries
+(``MODEL_PHASES``: ``draft_chain``, ``zce_model``, ``codex_delegation``, ``text_job``, ``cold_wait``) also carries
 ``router_added_ms`` = ``elapsed_ms`` minus the model time, with a ``cold_wait``
 reported inside another model phase subtracted once. ``set_session(id)`` adds
 ``session_id`` so a reader can count sessions. ``host`` names the CLI that ran the
@@ -130,7 +130,8 @@ _DEFAULT_MAX_BYTES = 4 * 1024 * 1024
 #: minus the time spent waiting on a model (``MODEL_PHASES``), because a local
 #: draft that runs for 12 s is the answer, not overhead the router added.
 #:
-#: * every synchronous hook: 300 ms ("+300 ms sync p95");
+#: * every other synchronous hook: 300 ms ("+300 ms sync p95"); ``auto-route`` has 750 ms (D-217) and ``text-job-bind``
+#:   has 1,500 ms (D-370), each its own budget;
 #: * ``session-start``: 2,000 ms ("session-start 2 s");
 #: * ``statusline``: 100 ms ("statusline 100 ms"). Not a hook: the statusline
 #:   shell command records a sampled timing row through ``record-raw`` (see
@@ -154,6 +155,14 @@ HOOK_BUDGETS_MS: dict[str, int] = {
     "bash-compress": 300,
     "session-start": 2_000,
     "session-end": 300,
+    # W7 (D-360), budget D-370 (owner 2026-11-04): 1,500 ms router-added, not the PRD's 300. The hook runs once per git commit or
+    # gh pr create (the `if` filter keeps it off every other Bash call), and a successful job imports the router and the model
+    # libraries before it calls the model: measured with a stub model, router-added p50 1,154 ms / p95 1,187 ms at load ~4
+    # (builder, n=20) and p50 1,680 ms / p95 2,514 ms at load 5 to 8 (review, n=60). The local model's own wait is the
+    # ``text_job`` model phase and the wait for the machine-wide job slot is ``text_job_queue``; neither counts. A job the
+    # router would hand back anyway is denied before the import (p50 96 ms, n=20, stub model, 2026-11-04). Other hooks keep their
+    # existing budgets.
+    "text-job-bind": 1_500,
     "codex-stop": 300,  # P35-3 (D-228): the house Stop-hook budget; stat + one JSON read, no llm_router import
     "statusline": 100,
 }
@@ -169,21 +178,24 @@ DEFAULT_BUDGET_MS = 300
 #: * ``auto-route`` -- 60 s, the ``timeout`` registered in settings.json. The
 #:   hook budgets itself to 55 s so it exits with an answer rather than being
 #:   killed holding one.
-#: * the rest register no timeout, so the host default applies (60 s,
-#:   MEASUREMENT.md).
+#: * the rest register no timeout, so the host default applies. The host documents 600 s for a command
+#:   hook (30 s on UserPromptSubmit); ``DEFAULT_TIMEOUT_MS`` below is still the older 60 s that
+#:   MEASUREMENT.md measured under; the value was not changed with this comment (see ``timeout_ms``).
 HOOK_TIMEOUTS_MS: dict[str, int] = {
     "agent-route": 320_000,
+    "text-job-bind": 130_000,  # install_hooks._HOOK_TIMEOUTS; a test pins the two together
 }
 
-#: The host's default hook timeout (MEASUREMENT.md).
+#: The default the KPI assumes for a hook with no registered timeout (MEASUREMENT.md measured under 60 s; the
+#: host's documented default for a command hook is 600 s). Left at 60 s: changing it changes the KPI.
 DEFAULT_TIMEOUT_MS = 60_000
 
 #: Phases that are time spent waiting on a model, not time the router added:
 #: ``draft_chain`` (the whole DIRECT draft chain), ``zce_model`` (the
-#: zero-Claude edit's model call) and ``cold_wait`` (Ollama's own model-load
-#: time). ``cold_wait`` is usually reported from INSIDE one of the other two;
+#: zero-Claude edit's model call), ``text_job`` (the text-job-bind hook's wait on the local
+#: model), ``text_job_queue`` (its wait for the machine-wide job slot: another job's model time) and ``cold_wait`` (Ollama's own model-load time). ``cold_wait`` is usually reported from INSIDE one of the other two;
 #: the recorder knows when it is (``_model_depth``) and subtracts it once.
-MODEL_PHASES: tuple[str, ...] = ("draft_chain", "zce_model", "codex_delegation", "cold_wait")
+MODEL_PHASES: tuple[str, ...] = ("draft_chain", "zce_model", "codex_delegation", "text_job", "text_job_queue", "cold_wait")
 
 #: Hooks whose row ALWAYS carries ``router_added_ms`` (elapsed minus ``MODEL_PHASES``,
 #: the same definition ``agent-route`` writes), also when no model phase ran. Their
@@ -447,6 +459,24 @@ def router_added_ms(row: dict) -> float | None:
     if not outer and "cold_wait" in phases:
         outer = {"cold_wait": phases["cold_wait"]}
     return max(0.0, float(elapsed) - model_ms(outer))
+
+
+def finish_now(open_phases: dict[str, float] | None = None) -> None:
+    """Write this invocation's row now. For a hook that is about to leave through ``os._exit`` (which skips the
+    ``atexit`` handler that normally writes it). Writes at most once; the caller decides what a failure means.
+
+    ``open_phases`` books time for phases whose ``with`` block is still open in a thread that will never leave it
+    (the model call the deadline guard gave up on). They are added as plain phase time: going through
+    :func:`add_phase` would count them as nested inside the open block and subtract them twice."""
+    global _pending, _model_depth
+    try:
+        if _pending is not None:
+            for name, ms in (open_phases or {}).items():
+                _phases[name] = _phases.get(name, 0.0) + float(ms)
+        _model_depth = 0
+        _finish()
+    finally:
+        _pending = None
 
 
 def _finish() -> None:

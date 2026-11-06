@@ -477,12 +477,6 @@ SURFACES: tuple[Surface, ...] = (
             "breakdown still reads savings_stats (the only table carrying it) "
             "but is now provenance-filtered the same way, and the ledger total "
             "is shown BESIDE the canonical figure, never instead of it", ledger_view=True),
-    Surface("cli_share", "commands/share.py:render_svg", False,
-            "SONNET baseline BY DESIGN — the card's framing is 'cheaper than "
-            "always-Sonnet', so canonicalising the baseline would change what "
-            "it claims, not just what it computes. Now provenance-filtered "
-            "(a published number must not carry the project's own benchmark "
-            "rows) and every dollar figure states its baseline"),
     Surface("cli_gain", "commands/gain.py:compute_savings", False,
             "raw SQL over routing_decisions; no filter; hardcoded per-model "
             "multiplier table as a fourth baseline methodology"),

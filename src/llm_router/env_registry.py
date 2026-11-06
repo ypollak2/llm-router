@@ -84,6 +84,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # ~17 a ChatGPT Plus account managed before its usage limit). 0 blocks all
     # Codex delegation (kill switch); it does not remove the cap.
     "LLM_ROUTER_CODEX_WINDOW_BUDGET": ("llm_router", "codex_window.py", 1),
+    # 2026-11-04 (D-373): weekly Plus-meter percentage (default 60) at or above which every Codex caller except
+    # agent-route refuses; "off" disables the reserve. Read in codex_meter.py.
+    "LLM_ROUTER_CODEX_RESERVE_PCT": ("llm_router", "codex_meter.py", 1),
+    # 2026-11-04 (R2): "off" stops the router lifting a Codex bench itself (fresh-meter headroom, one canary per 3 h).
+    "LLM_ROUTER_CODEX_BENCH_PROBE": ("llm_router", "codex_bench.py", 1),
     # 2026-09-28: opt-in override that keeps agent-route active (Codex/DIRECT
     # routing) in a headless (CLAUDE_CODE_ENTRYPOINT=sdk-*) session. Default
     # off — see the headless-guard note in hooks/agent-route.py.
@@ -93,6 +98,12 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # correct answer is worth, in dollars. 0 makes the bandit rank purely by
     # cheapness, which is what the old unbounded ratio effectively did.
     "LLM_ROUTER_ANSWER_VALUE_USD": ("llm_router", "telemetry.py", 1),
+    # Batch editing beta; off by default, read on each call.
+    # Local repair always requires a sandboxed check.
+    "LLM_ROUTER_APPLY_REPAIR": ("llm_router", "apply_tool.py", 1),
+    "LLM_ROUTER_APPLY_REPAIR_S": ("llm_router", "apply_tool.py", 1),
+    "LLM_ROUTER_APPLY_SANDBOX": ("llm_router", "apply_tool.py", 1),
+    "LLM_ROUTER_APPLY": ("llm_router", "apply_tool.py", 1),
     # T-15: explicit override for the HOST config dir (~/.claude). Distinct from
     # LLM_ROUTER_HOME, which covers llm-router's own state.
     "LLM_ROUTER_CLAUDE_DIR": ("llm_router", "install_hooks.py", 1),
@@ -143,6 +154,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_LOCAL_TEXT_JOBS": ("llm_router", "tools/text.py", 1),
     # PLAN v16 P1.3: opt-in trim / bigger-window before ContextOverflow. Off by default (D-47).
     "LLM_ROUTER_PACK_OVERFLOW": ("llm_router", "pack_overflow.py", 1),
+    # W7 (D-360): what a bound commit message holds besides the subject: model | files (default) | none.
+    "LLM_ROUTER_TEXT_JOB_BODY": ("llm_router", "text_job_bind/engine.py", 1),
     "LLM_ROUTER_CONFIDENCE_THRESHOLD": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_CONTEXT_OPTIMIZER": ("llm_router", "context.py", 1),
     "LLM_ROUTER_COST_PROFILE": ("llm_router", "repo_config.py", 1),
@@ -470,6 +483,13 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # F106 / D-235: 1 = ignore measured failed lanes in local_eligibility.json (pre-F106 chain).
     "LLM_ROUTER_IGNORE_ELIGIBILITY": ("llm_router", "eligibility_routing.py", 1),
     # Local Ollama classifier (one v6 verdict per human turn): off|shadow|on, default off.
+    "LLM_ROUTER_DOOR_VERDICT_BUDGET_MS": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_DOOR_OPUS_MIN_CONF": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_DOOR_HAIKU_MIN_CONF": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_DOOR_SONNET_MIN_CONF": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_DOOR_VERDICT_PROMPT_BUDGET_MS": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_CLASSIFIER_PRELOAD": ("llm_router", "door_verdict.py", 1),
+    "LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE": ("llm_router", "local_privacy.py", 1),
     "LLM_ROUTER_LOCAL_CLASSIFIER": ("llm_router", "local_classifier.py", 1),
     "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS": ("llm_router", "local_classifier.py", 1),
     # The classifier's own Ollama alias (M1.4): other callers load qwen3.5 at a different
@@ -527,6 +547,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "VAULT_TOKEN": ("provider_credential", "org_policy.py", 1),
     # ── external_tool  (24) ──
     "CLAUDE_CODE_PATH": ("external_tool", "claude_agent.py", 1),
+    # Codex's own state directory; codex_meter.py reads the rollouts under it (read-only) for the Plus meter.
+    "CODEX_HOME": ("external_tool", "codex_meter.py", 1),
     # P0.13: the project root llm_act may write in, when the MCP client sends no roots.
     "CLAUDE_PROJECT_DIR": ("external_tool", "tools/agentic.py", 1),
     "CLAUDE_CODE_SESSION_ID": ("external_tool", "hooks/agent-depth-release.py", 3),
@@ -570,6 +592,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "APPDATA": ("platform", "commands/doctor.py", 4),
     "CDPATH": ("platform", "write_policy.py", 1),
     "NO_COLOR": ("platform", "commands/budget.py", 16),
+    "HOME": ("platform", "check_sandbox.py", 1),
     "PATH": ("platform", "statusline_tick.py", 1),
     "XDG_CONFIG_HOME": ("platform", "install_hooks.py", 1),
     # ── read only via pydantic RouterConfig (field name == env name, case-insensitive);

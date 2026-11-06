@@ -101,7 +101,6 @@ NON_NETWORK = {
     "platform.openai.com": "OpenAI signup and documentation links shown to the user",
     "platform.stability.ai": "Stability key signup link printed by setup",
     "replicate.com": "Replicate key signup link printed by setup",
-    "twitter.com": "Tweet intent URL printed for the user to open",
     "www.apple.com": "plist DTD URI",
     "www.perplexity.ai": "Perplexity key signup link printed by setup",
     "www.w3.org": "SVG XML namespace",

@@ -3,10 +3,25 @@
 # Prevents common issues before releasing new versions
 #
 # Usage: bash scripts/release/pre-release-verify.sh [--skip-quality "<reason>"] [--skip-outcome "<reason>"]
+#                                                    [--outcome-cross-version rebaseline|compare]
 #
 # --skip-outcome is forwarded to step 13 (the outcome audit gate). It only
 # excuses "nothing / too few units to audit" on this machine; an inflated
 # source in the headline fails the release regardless.
+#
+# --outcome-cross-version rebaseline|compare is forwarded to step 13 as
+# `outcome_gate.py --cross-version ...`, for ONE run. The outcome audit's scoring
+# changed (audit v2) and a used rate scored by one audit version is not comparable
+# with one scored by another, so a gate run whose only earlier history entries are
+# of another version FAILS ("AUDIT VERSION MISMATCH") and writes nothing: without
+# this flag nothing passes silently. `rebaseline` (owner decision D-359) records
+# this run as the new version's baseline, compared with nothing; `compare`
+# compares the numbers anyway and records the run as CROSS-VERSION. Once a
+# baseline of the new version is in docs/measurements/outcome_audit_history.json
+# later releases are compared like for like and need no flag. Commit the updated
+# history with the release. The baseline is sticky: a re-run for the release that
+# holds it needs no flag, is compared with the recorded baseline and never replaces
+# it; replacing it is a deliberate, manual `outcome_gate.py --force-baseline "<reason>"`.
 #
 # --skip-quality is forwarded to step 12 (the answer-quality bench). It is
 # NOT a way to skip step 11 (the classifier regression gate) -- that one runs
@@ -25,6 +40,7 @@ NC='\033[0m' # No Color
 
 SKIP_QUALITY_REASON=""
 SKIP_OUTCOME_REASON=""
+OUTCOME_CROSS_VERSION=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --skip-quality)
@@ -41,6 +57,17 @@ while [[ $# -gt 0 ]]; do
                 echo -e "${RED}--skip-outcome requires a reason${NC}"
                 exit 1
             fi
+            shift 2
+            ;;
+        --outcome-cross-version)
+            OUTCOME_CROSS_VERSION="${2:-}"
+            case "$OUTCOME_CROSS_VERSION" in
+                rebaseline|compare) ;;
+                *)
+                    echo -e "${RED}--outcome-cross-version takes rebaseline or compare${NC}"
+                    exit 1
+                    ;;
+            esac
             shift 2
             ;;
         *)
@@ -257,7 +284,9 @@ echo ""
 # writes release-artifacts/outcome-audit/ (git-ignored, no prompt text). The
 # gate fails on any inflated source in the headline (door_call, dispatch
 # flags, flat agentic credits) or a used rate below the previous release's
-# recorded value. Release-time only: nothing under src/ imports either script.
+# recorded value of the SAME audit version; a change of version needs
+# --outcome-cross-version (see the header). Release-time only: nothing under
+# src/ imports either script.
 echo "1️⃣3️⃣ Running the outcome audit and its gate..."
 if ! uv run python scripts/release/outcome_audit.py --days 30; then
     echo -e "${RED}❌ Outcome audit could not run${NC}"
@@ -266,6 +295,9 @@ fi
 OUTCOME_ARGS=()
 if [[ -n "$SKIP_OUTCOME_REASON" ]]; then
     OUTCOME_ARGS+=(--skip-outcome "$SKIP_OUTCOME_REASON")
+fi
+if [[ -n "$OUTCOME_CROSS_VERSION" ]]; then
+    OUTCOME_ARGS+=(--cross-version "$OUTCOME_CROSS_VERSION")
 fi
 if ! uv run python scripts/release/outcome_gate.py "${OUTCOME_ARGS[@]}"; then
     echo -e "${RED}❌ Outcome gate failed${NC}"

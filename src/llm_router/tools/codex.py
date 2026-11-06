@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from llm_router.codex_agent import is_codex_available, run_codex
+from llm_router.codex_agent import codex_unsupported_binary, is_codex_available, run_codex
 from llm_router.toolcall_text import neutralise_text
 
 
@@ -25,6 +25,12 @@ async def llm_codex(
         model: OpenAI model to use (default: gpt-5.5 — Codex CLI's current default).
     """
     if not is_codex_available():
+        unsupported = codex_unsupported_binary()
+        if unsupported:  # present but too old: say so, "not found" would send the user looking for an install (BIND-8)
+            return (
+                f"Codex CLI at {unsupported} does not list --ignore-rules in `exec --help`, so it is not started: a user "
+                "execpolicy rule could run a command outside its sandbox. Update the Codex CLI."
+            )
         return (
             "Codex CLI not found.\n"
             "Install from: https://openai.com/codex\n"
@@ -39,7 +45,7 @@ async def llm_codex(
         # Returned, not raised: an uncaught exception reaches the model as a bare "Error executing tool".
         return str(refusal)
 
-    result = await run_codex(prompt, model=model)
+    result = await run_codex(prompt, model=model, caller="llm_codex")
 
     # Log to usage table so dashboard includes direct llm_codex calls
     try:

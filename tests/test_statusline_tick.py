@@ -434,15 +434,22 @@ def test_both_prints_full_line_then_fast_line(tmp_path):
     # "segments pending"; the build lands later, at a time no test controls. Build
     # the cache first so the `both` render and the full render below read the same
     # one (docs/bugs/SLT-FLAKE-1.md).
+    # The refresher must run THIS checkout's package, not whichever llm-router is installed on the machine (an older
+    # one writes no `route_line`): the interpreter cache names the test's own python, which imports the repo.
+    state = tmp_path / ".llm-router"
+    state.mkdir(exist_ok=True)
+    (state / ".statusline_python").write_text(f"{sys.executable}\n{int(time.time())}\nfull\n")
     _run(_env(tmp_path, "true", fast=False))
     assert wait_for_cache(tmp_path), "the detached build never wrote the segment cache"
     out, _ = _both(tmp_path)
     lines = out.splitlines()
-    # P35-2: the full layout is two rows now (the line, then the snapshot row), then the fast line.
-    assert len(lines) == 3, out
+    # P35-2: the full layout is two rows (the line, then the snapshot row); W9 adds the session routing row; then the
+    # fast line (it has no stdin here, so it prints no session row of its own and the row never doubles).
+    assert len(lines) == 4, out
     assert not lines[0].startswith("llm-router · "), lines[0]
     assert lines[1].startswith("router: "), lines[1]
-    assert lines[2].startswith("llm-router · "), lines[2]
+    assert lines[2].startswith("routed "), lines[2]
+    assert lines[3].startswith("llm-router · "), lines[3]
     assert "segments pending" not in lines[0], lines[0]
     full, _ = _run(_env(tmp_path, "true", fast=False))
     assert lines[0] == full.splitlines()[0]
@@ -587,3 +594,24 @@ def test_tick_output_is_identical_with_and_without_the_cached_interpreter(tmp_pa
     (state / ".statusline_python").write_text(f"{shim}\n0\nfull\n")
     with_cached, _ = _run(_env(tmp_path, "true"))
     assert with_cached == without and without.startswith("llm-router · ")
+
+
+@pytest.mark.parametrize("program,local", [(5, 0), (0, 2), (5, 2), (0, 0)])
+def test_session_routing_apply_segment(program, local):
+    routing = {"v": 1, "computed_at": 1000, "complete": True, "non_claude": 10, "total": 100,
+               "local": {"ok": 2, "attempts": 4}}
+    baseline = tick.render_session_routing(routing, now=1000)
+    routing.update(apply_program_replaced=program, apply_local_replaced=local)
+    result = tick.render_session_routing(routing, now=1000)
+    assert result == baseline + (f" · apply: program {program} / local {local}" if program or local else "")
+
+
+def test_apply_ledger_triggers_refresh(tmp_path):
+    stamp = time.time()
+    ledger = tmp_path / "apply_ledger.jsonl"
+    assert not tick.ledger_changed_since(str(tmp_path), stamp)
+    ledger.write_text('{}\n')
+    os.utime(ledger, (stamp - 1, stamp - 1))
+    assert not tick.ledger_changed_since(str(tmp_path), stamp)
+    os.utime(ledger, (stamp + 1, stamp + 1))
+    assert tick.ledger_changed_since(str(tmp_path), stamp)

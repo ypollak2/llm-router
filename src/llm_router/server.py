@@ -60,6 +60,12 @@ from llm_router.tools.setup import _mask_key, llm_setup  # noqa: F401
 configure_logging()
 log = get_logger("llm_router.server")
 
+# BIND W2: remember what the package looked like when this server started, so a tool that
+# crashes after a deploy says "reconnect with /mcp" instead of a bare error (mcp_door.py, C).
+from llm_router import mcp_door as _mcp_door  # noqa: E402
+
+_mcp_door.snapshot_start()
+
 
 @asynccontextmanager
 async def _lifespan(_server):
