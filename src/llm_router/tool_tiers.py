@@ -1,8 +1,7 @@
 """Tool slim mode — tiered tool registration for token budget management.
 
-Registering all 70 tools injects ~14,700 tokens (measured 2026-09-24) into every Claude session,
-degrading routing accuracy past 20–30K context tokens. Slim mode solves
-this by registering only the tools appropriate for the active tier.
+The full surface contains 71 tools. Slim mode registers only the tools appropriate
+for the active tier to reduce the per-session tool-schema token budget.
 
 Three tiers (controlled via LLM_ROUTER_SLIM env var):
   off      — all tools registered (default, backward-compatible)
@@ -27,6 +26,8 @@ from typing import Callable
 #
 # This module remains the documented home for the *gate*; the sets are re-exported
 # so existing imports (`from llm_router.tool_tiers import CORE_TOOLS`) keep working.
+# llm_apply is an opt-in beta: deliberately absent from all slim tier sets,
+# including the default consolidated surface; available with slim=off only.
 # Do NOT redefine them here — one definition, one direction of dependency.
 from llm_router.tool_surface import (  # noqa: F401  (re-export)
     CONSOLIDATED_TOOLS,

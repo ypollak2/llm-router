@@ -166,7 +166,7 @@ llm-router setup           # Configure advanced options
 ### Read More
 - [Host Support Matrix](HOST_SUPPORT_MATRIX.md) — Which host is best for you
 - [SECURITY.md](../SECURITY.md) — What we do with your prompts
-- [MCP Tools Reference](TOOLS.md) — 70 tools available
+- [MCP Tools Reference](TOOLS.md) — 71 tools available
 
 ---
 

@@ -1,6 +1,6 @@
 # LLM Router Tools Reference
 
-Complete documentation of all 70 MCP tools provided by llm-router for Claude Code, Cursor, VS Code, Codex, and other AI development environments.
+Complete documentation of all 71 MCP tools provided by llm-router for Claude Code, Cursor, VS Code, Codex, and other AI development environments.
 
 > **Default install note**: by default (`LLM_ROUTER_SLIM=consolidated`), only 12 front-door
 > tools are registered — `llm(task=..., tier=...)`, `llm_act`, `llm_route`, `llm_router_status`,
@@ -256,6 +256,49 @@ Bulk code edits with smart diff generation.
 3. You apply mechanically with Edit tool
 4. Cost savings vs manual edits not measured — see
    [audit/CRITICAL_2026-09-24_local_models_do_no_work.md](../audit/CRITICAL_2026-09-24_local_models_do_no_work.md)
+
+---
+
+### `llm_apply` — beta, off by default
+
+Apply all edits and run a check in one model-free call. Enable with
+`LLM_ROUTER_APPLY=on` and `LLM_ROUTER_SLIM=off`; this beta is excluded from
+core, routing, and the default consolidated surface.
+
+Parameters: `edits` (JSON array of `{file, old_string, new_string}` or fenced
+FILE/FIND/REPLACE, NEW FILE, APPEND TO blocks), `check` (optional argv command),
+`cwd` (optional, defaults to process cwd inside a git work tree).
+
+The entire batch validates before writing: exact-once replacements compose in
+order, only syntax of Python/JSON/YAML is checked, and resolved paths stay inside cwd.
+NEW FILE refuses overwrites. Known test/lint runners run without a shell with a
+60 s cap; other commands are left for you to run. The reply includes status,
+line counts and the check result. Enabled calls open the program ledger for append
+before applying anything; an open failure rejects the call without edits with
+`ledger not writable: <reason>`. A final append failure is reported in the reply.
+Disabled calls change nothing, including the ledger.
+
+Concurrent modification by another process of the same user is out of scope
+(that user can already write the repository). After each write the file's realpath
+is checked inside cwd; relocation rejects with `path moved outside cwd during write`
+and rolls back the batch. Backups are retained if any restoration fails.
+
+The check requires a trusted repository and runs its own test code unsandboxed. Executables must be allowlisted bare names found on the
+inherited PATH, or `.venv/bin/python`, `venv/bin/python`, `.venv/bin/pytest`,
+`venv/bin/pytest` resolving inside cwd. Arguments are an allowlist: a few
+harmless switches per runner (pytest `-q -v -x -s -l`, `--tb=short|line|no`,
+`-k`/`-m`/`--maxfail` with plain values; go test `-v -short -race -run -count`;
+ruff `check format --check --diff --fix`; npm/pnpm test take none) plus paths
+that resolve inside cwd. Anything else (config files, plugins, `@argfiles`,
+`--pyargs`, compiler flags) is not run; run that check yourself. Runners still
+find their own config the usual way (repo, parent folders, `~/.npmrc`,
+`~/.config/mypy`, Go and Cargo caches), exactly as when you run them yourself.
+The child environment contains only PATH, HOME, USER, LOGNAME, LANG, LC_*, TERM,
+TMPDIR, VIRTUAL_ENV, PYTHONDONTWRITEBYTECODE, CI, and NO_COLOR.
+Remaining process group members are killed after parent exit or timeout, and
+survivors make the check fail. A descendant calling `setsid()` can escape the
+group kill. A sandbox PR follows.
+After rejection or a failed check, make remaining changes with your edit tools.
 
 ---
 
