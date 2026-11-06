@@ -647,3 +647,18 @@ def test_symlink_hops_refuse_loops(tmp_path):
     (tmp_path / "b").symlink_to(tmp_path / "a")
     with pytest.raises(sandbox.SandboxUnavailable, match="too many symlinks"):
         sandbox._symlink_hops(tmp_path / "a/python")
+
+
+def test_symlink_hops_follow_link_before_dotdot(tmp_path):
+    deep = tmp_path / "other/deep"
+    deep.mkdir(parents=True)
+    runtime = tmp_path / "other/runtime/bin"
+    runtime.mkdir(parents=True)
+    (runtime / "python").write_bytes(b"binary")
+    (tmp_path / "store").mkdir()
+    (tmp_path / "store/alias").symlink_to(deep)
+    (tmp_path / "entry").symlink_to(tmp_path / "store/alias/../runtime/bin/python")
+    links = [link for link, _ in sandbox._symlink_hops(tmp_path / "entry")]
+    assert str(tmp_path / "store/alias") in links
+    # Positive control: the resolution lands where the OS resolves it.
+    assert (tmp_path / "entry").resolve() == (runtime / "python").resolve()

@@ -160,13 +160,22 @@ def _symlink_hops(path):
     while pending:
         if len(hops) > 40:
             raise SandboxUnavailable(f"too many symlinks resolving {path}")
-        current = done / pending.pop(0)
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            # `..` applies to the resolved prefix, after any symlink before it was followed.
+            done = done.parent
+            continue
+        current = done / part
         if current.is_symlink():
             target = os.readlink(current)
             hops.append((str(current), target))
-            base = Path(target) if os.path.isabs(target) else current.parent / target
-            pending = list(Path(os.path.normpath(base)).parts[1:]) + pending
-            done = Path("/")
+            if os.path.isabs(target):
+                done, rest = Path("/"), Path(target).parts[1:]
+            else:
+                rest = Path(target).parts
+            pending = list(rest) + pending
         else:
             done = current
     return hops
