@@ -314,6 +314,8 @@ def test_runtime_discovery_never_executes(tmp_path, monkeypatch):
     interpreter = venv / "bin/python"
     interpreter.write_text("#!/" + str(base / "bin/python").lstrip("/") + "\n")
     (base / "bin/python").write_bytes(b"binary")
+    (base / "lib/python3.12").mkdir(parents=True)
+    (base / "lib/python3.12/os.py").write_text("")
     (venv / "pyvenv.cfg").write_text(f"home = {base / 'bin'}\n")
     interpreter.chmod(0o755)
     def forbidden(*args, **kwargs):
@@ -331,6 +333,8 @@ def test_python_symlink_venv_and_base_prefix(tmp_path):
     (venv / "bin").mkdir(parents=True)
     interpreter = base / "bin/python3"
     interpreter.write_bytes(b"binary")
+    (base / "lib/python3.12").mkdir(parents=True)
+    (base / "lib/python3.12/os.py").write_text("")
     link = venv / "bin/python"
     link.symlink_to(interpreter)
     (venv / "pyvenv.cfg").write_text(f"home = {base / 'bin'}\n")
@@ -582,3 +586,23 @@ def test_repo_symlinked_executable_cannot_grant_unrelated_dir(tmp_path, monkeypa
     (root / ".venv/bin/pytest").unlink()
     (root / ".venv/bin/pytest").symlink_to(base / "bin/python3")
     assert str((base / "bin").resolve()) in sandbox._runtime_dirs(root / ".venv/bin/pytest", root)
+
+
+def test_repo_bin_symlink_does_not_erase_provenance(tmp_path, monkeypatch):
+    home = tmp_path / "fakehome"
+    (home / ".ssh").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    outside_bin = tmp_path / "sysbin"
+    outside_bin.mkdir()
+    (outside_bin / "python3").write_bytes(b"binary")
+    (outside_bin / "python3").chmod(0o755)
+    root = tmp_path / "repo"
+    (root / ".venv").mkdir(parents=True)
+    (root / ".venv/bin").symlink_to(outside_bin)
+    (root / ".venv/pyvenv.cfg").write_text(f"home = {home / '.ssh/bin'}\n")
+    assert sandbox._repo_owned(Path(os.path.abspath(root / ".venv/bin/python3")), Path(sandbox._path(root)))
+    with pytest.raises(sandbox.SandboxUnavailable, match="non-runtime dir"):
+        sandbox._runtime_dirs(root / ".venv/bin/python3", root)
+    # Same layout without a repository ROOT (PATH-trusted) still validates pyvenv home.
+    with pytest.raises(sandbox.SandboxUnavailable, match="non-runtime dir"):
+        sandbox._runtime_dirs(root / ".venv/bin/python3")

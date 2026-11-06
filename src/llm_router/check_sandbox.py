@@ -58,6 +58,21 @@ def _inside(path, root):
     return root is not None and (path == root or root in path.parents)
 
 
+_SYSTEM_DIRS = ("/usr", "/bin", "/etc", "/lib", "/lib32", "/lib64")
+
+
+def _repo_owned(original, root):
+    """True when any lexical ancestor of the path is, or resolves into, ROOT.
+
+    Resolving the whole path first would erase provenance: a repository can make
+    `.venv/bin` a symlink to `/usr/bin` and still own `.venv/pyvenv.cfg`.
+    """
+    if root is None:
+        return False
+    return any(_inside(anc, root) or _inside(Path(_path(anc)), root)
+               for anc in (original, *original.parents))
+
+
 def _is_runtime_prefix(prefix):
     """True when an existing directory is shaped like a Python or Node install."""
     return ((prefix / "pyvenv.cfg").is_file() or any(prefix.glob("lib/python3*/os.py"))
@@ -71,15 +86,22 @@ def _grant(path, root, untrusted, prefix=None):
     so any of them can name an arbitrary existing directory (for example ~/.ssh).
     """
     path = Path(_path(path))
-    if untrusted and not _inside(path, root):
+    # System dirs are visible regardless: outside HOME on macOS, mounted wholesale on Linux.
+    system = any(_inside(path, Path(d)) for d in _SYSTEM_DIRS)
+    if untrusted and not system and not _inside(path, root):
         prefix = Path(_path(prefix if prefix is not None else path))
         if not _is_runtime_prefix(prefix):
             raise SandboxUnavailable(f"repository names a non-runtime dir: {path}")
     return _runtime_grant(path)
 
 
-def _interpreter_dirs(interpreter, root=None, untrusted=False):
-    """Inspect installation metadata without ever executing the interpreter."""
+def _interpreter_dirs(interpreter, root=None):
+    """Inspect installation metadata without ever executing the interpreter.
+
+    pyvenv.cfg text and interpreter paths are always validated as real installs,
+    whoever supplied them.
+    """
+    untrusted = True
     original = Path(os.path.abspath(interpreter))
     resolved = Path(_path(original))
     for candidate in (original, resolved):
@@ -104,10 +126,10 @@ def _runtime_dirs(executable, root=None):
     root = Path(_path(root)) if root is not None else None
     original = Path(os.path.abspath(executable))
     resolved = Path(_path(original))
-    untrusted = _inside(Path(_path(original.parent)), root) or _inside(resolved, root)
+    untrusted = _repo_owned(original, root) or _inside(resolved, root)
     dirs = {_grant(resolved.parent, root, untrusted, prefix=resolved.parent.parent)}
     if original.name.startswith("python"):
-        dirs.update(_interpreter_dirs(original, root, untrusted))
+        dirs.update(_interpreter_dirs(original, root))
     with resolved.open("rb") as stream:
         first = stream.readline(4096).decode("utf-8", errors="replace").strip()
     if first.startswith("#!/"):
@@ -119,9 +141,9 @@ def _runtime_dirs(executable, root=None):
                          if (parent / "bin/node").is_file()), None)
             if node is None:
                 raise SandboxUnavailable("node interpreter unavailable in executable prefix")
-            dirs.update(_interpreter_dirs(node, root, untrusted))
+            dirs.update(_interpreter_dirs(node, root))
         else:
-            dirs.update(_interpreter_dirs(parts[0], root, untrusted))
+            dirs.update(_interpreter_dirs(parts[0], root))
     if original.name in {"npm", "pnpm", "node"}:
         dirs.add(_grant(resolved.parent.parent, root, untrusted))
     return sorted(dirs)
