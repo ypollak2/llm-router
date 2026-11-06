@@ -1057,3 +1057,41 @@ def test_apply_closed_windows_leave_the_open_list():
     for obj in _apply_records()[:3]:   # the call, its result, one following message: still open
         apply_credit.observe(fresh, obj)
     assert fresh["open"] == ["apply1"]                                       # positive control
+
+
+@pytest.mark.parametrize("partial_in", ["main", "sub"])
+def test_apply_partial_replay_cannot_erase_the_credit(tmp_path, partial_in):
+    """A copy holding only the tool_use (no result yet) must not win over the complete call, in either order."""
+    full = _apply_records()
+    partial = full[:1]
+    main, sub = (partial, full) if partial_in == "main" else (full, partial)
+    units = _apply_main_and_sub(tmp_path, main, sub)
+    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(3, 1)]
+
+
+@pytest.mark.parametrize("order", ["main_first", "sub_first"])
+def test_apply_disagreeing_copies_take_the_smaller_credit(tmp_path, order):
+    big = _apply_records(credit=json.dumps({"program": 9, "local": 0, "files": ["/repo/a.py"]}))
+    small = _apply_records()   # program 3, local 1
+    main, sub = (big, small) if order == "main_first" else (small, big)
+    units = _apply_main_and_sub(tmp_path, main, sub)
+    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(3, 0)]
+
+
+def test_apply_state_cached_without_open_list_still_judges_redo():
+    from llm_router import apply_credit
+    records = _apply_records(edit_turn=1)
+    state: dict = {}
+    for obj in records[:2]:                      # call + result, as a round-1 scan would have cached them
+        apply_credit.observe(state, obj)
+    state.pop("open")
+    for obj in records[2:]:
+        apply_credit.observe(state, obj)
+    assert apply_credit.counts(state["calls"]["apply1"]) == (0, 0)
+    control: dict = {}
+    for obj in _apply_records()[:2]:
+        apply_credit.observe(control, obj)
+    control.pop("open")
+    for obj in _apply_records()[2:]:
+        apply_credit.observe(control, obj)
+    assert apply_credit.counts(control["calls"]["apply1"]) == (3, 1)   # positive control
