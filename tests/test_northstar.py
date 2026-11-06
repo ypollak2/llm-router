@@ -1070,12 +1070,12 @@ def test_apply_partial_replay_cannot_erase_the_credit(tmp_path, partial_in):
 
 
 @pytest.mark.parametrize("order", ["main_first", "sub_first"])
-def test_apply_disagreeing_copies_take_the_smaller_credit(tmp_path, order):
+def test_apply_disagreeing_copies_earn_nothing(tmp_path, order):
     big = _apply_records(credit=json.dumps({"program": 9, "local": 0, "files": ["/repo/a.py"]}))
     small = _apply_records()   # program 3, local 1
     main, sub = (big, small) if order == "main_first" else (small, big)
     units = _apply_main_and_sub(tmp_path, main, sub)
-    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(3, 0)]
+    assert [(u["program_replaced"], u["local_replaced"], u["signal"]) for u in units] == [(0, 0, "apply_conflict")]
 
 
 def test_apply_state_cached_without_open_list_still_judges_redo():
@@ -1107,12 +1107,12 @@ def _replay_in_one_transcript(first, second):
 
 
 @pytest.mark.parametrize("order", ["small_first", "big_first"])
-def test_apply_same_transcript_replay_takes_the_smaller_credit(tmp_path, order):
+def test_apply_same_transcript_disagreeing_replay_earns_nothing(tmp_path, order):
     big = _apply_records(credit=json.dumps({"program": 9, "local": 0, "files": ["/repo/a.py"]}))
     small = _apply_records()
     records = _replay_in_one_transcript(*((small, big) if order == "small_first" else (big, small)))
     units = _apply_main_and_sub(tmp_path, records, [])
-    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(3, 0)]
+    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(0, 0)]
 
 
 @pytest.mark.parametrize("order", ["clean_first", "redo_first"])
@@ -1123,3 +1123,15 @@ def test_apply_same_transcript_replay_redo_wins(tmp_path, order):
     assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(0, 0)]
     control = _apply_main_and_sub(tmp_path, _replay_in_one_transcript(clean, clean), [])
     assert [(u["program_replaced"], u["local_replaced"]) for u in control] == [(3, 1)]
+
+
+@pytest.mark.parametrize("order", ["a_first", "b_first"])
+def test_apply_copies_with_different_files_earn_nothing_in_any_order(tmp_path, order):
+    """Round-4 case: copy A credits a.py, copy B credits b.py then edits a.py. Disagreeing copies are a conflict."""
+    a = _apply_records()
+    b = _apply_records(credit=json.dumps({"program": 3, "local": 1, "files": ["/repo/b.py"]}), edit_turn=1)
+    records = _replay_in_one_transcript(*((a, b) if order == "a_first" else (b, a)))
+    units = _apply_main_and_sub(tmp_path, records, [])
+    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(0, 0)]
+    same = _apply_main_and_sub(tmp_path, _replay_in_one_transcript(a, a), [])
+    assert [(u["program_replaced"], u["local_replaced"]) for u in same] == [(3, 1)]   # identical copies: control

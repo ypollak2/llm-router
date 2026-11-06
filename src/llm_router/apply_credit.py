@@ -87,10 +87,9 @@ def observe(state: dict, obj: dict) -> None:
                 continue
             credit["files"] = sorted({_norm(p) for p in credit["files"]})
             if "credit" in call:   # a replayed result in the same transcript: same rule as merge() across files
-                folded = {cid: dict(call)}
-                merge(folded, {cid: {"credit": credit}})
-                call["credit"] = folded[cid]["credit"]
-                if call.get("redo"):
+                if call["credit"] != credit:
+                    call["conflict"] = True
+                if call.get("redo") or call.get("conflict"):
                     continue
                 call["turns"] = []   # the replay's own next three messages are judged too
             else:
@@ -101,7 +100,8 @@ def observe(state: dict, obj: dict) -> None:
 
 def merge(into: dict, calls: dict) -> None:
     """Fold one transcript's calls into ``into`` by tool_use id. A call replayed in several
-    transcripts (resume, sub-agent copy) counts once, and a redo seen in ANY copy zeroes it."""
+    transcripts (resume, sub-agent copy) counts once; a redo seen in ANY copy, or copies whose credit
+    lines differ (one tool id cannot have two results), zero it whatever the read order."""
     for cid, call in calls.items():
         have = into.get(cid)
         if have is None:
@@ -110,16 +110,16 @@ def merge(into: dict, calls: dict) -> None:
         if "credit" in call:
             if "credit" not in have:
                 have.update(credit=call["credit"], turns=list(call.get("turns", [])))
-            elif have["credit"] != call["credit"]:   # copies disagree: the smaller credit, whatever the read order
-                a, b = have["credit"], call["credit"]
-                have["credit"] = {"program": min(a["program"], b["program"]), "local": min(a["local"], b["local"]),
-                                  "files": sorted(set(a["files"]) | set(b["files"]))}
+            elif have["credit"] != call["credit"]:   # one tool id, two different results: trust neither
+                have["conflict"] = True
+        if call.get("conflict"):
+            have["conflict"] = True
         if call.get("redo"):
             have["redo"] = True
 
 
 def counts(call: dict) -> tuple[int, int]:
-    credit = call.get("credit", {}) if not call.get("redo") else {}
+    credit = call.get("credit", {}) if not (call.get("redo") or call.get("conflict")) else {}
     return credit.get("program", 0), credit.get("local", 0)
 
 

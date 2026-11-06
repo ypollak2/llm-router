@@ -1612,7 +1612,8 @@ def build_sessions(days: int | None, root: Path | None = None,
         unit.program_replaced, unit.local_replaced = apply_credit.counts(call)
         unit.outcome = (OUTCOME_REDO if call.get("redo")
                         else OUTCOME_USED if unit.program_replaced or unit.local_replaced else OUTCOME_UNKNOWN)
-        unit.signal = "claude_finished" if call.get("redo") else "apply_credit" if "credit" in call else None
+        unit.signal = ("claude_finished" if call.get("redo") else "apply_conflict" if call.get("conflict")
+                       else "apply_credit" if "credit" in call else None)
 
     def _add_assistant(su: SessionUnits, target_sid: str, obj: dict, records: list[dict], kind: str,
                        edit_call_units: list[Unit], file_mcp_units: list[Unit], apply_calls: dict) -> None:
