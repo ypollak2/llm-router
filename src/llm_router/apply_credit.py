@@ -74,18 +74,29 @@ def observe(state: dict, obj: dict) -> None:
         for b in content:
             if not isinstance(b, dict) or b.get("type") != "tool_result":
                 continue
-            call = state.setdefault("calls", {}).get(b.get("tool_use_id"))
-            if call is None or "credit" in call:
+            cid = b.get("tool_use_id")
+            call = state.setdefault("calls", {}).get(cid)
+            if call is None:
                 continue
             raw = b.get("content")
             text = raw if isinstance(raw, str) else "\n".join(
                 p["text"] for p in (raw if isinstance(raw, list) else [])
                 if isinstance(p, dict) and isinstance(p.get("text"), str))
             credit = _credit(text)
-            if credit is not None:
-                credit["files"] = sorted({_norm(p) for p in credit["files"]})
+            if credit is None:
+                continue
+            credit["files"] = sorted({_norm(p) for p in credit["files"]})
+            if "credit" in call:   # a replayed result in the same transcript: same rule as merge() across files
+                folded = {cid: dict(call)}
+                merge(folded, {cid: {"credit": credit}})
+                call["credit"] = folded[cid]["credit"]
+                if call.get("redo"):
+                    continue
+                call["turns"] = []   # the replay's own next three messages are judged too
+            else:
                 call.update(credit=credit, turns=[], redo=False)
-                state.setdefault("open", []).append(b.get("tool_use_id"))
+            if cid not in state.setdefault("open", []):
+                state["open"].append(cid)
 
 
 def merge(into: dict, calls: dict) -> None:

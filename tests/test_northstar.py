@@ -1095,3 +1095,31 @@ def test_apply_state_cached_without_open_list_still_judges_redo():
     for obj in _apply_records()[2:]:
         apply_credit.observe(control, obj)
     assert apply_credit.counts(control["calls"]["apply1"]) == (3, 1)   # positive control
+
+
+def _replay_in_one_transcript(first, second):
+    """Both copies in one transcript, the second with distinct follow-up message ids."""
+    out = json.loads(json.dumps(second))
+    for obj in out:
+        if obj.get("type") == "assistant" and obj["message"].get("id", "").startswith("after-"):
+            obj["message"]["id"] += "-replay"
+    return first + out
+
+
+@pytest.mark.parametrize("order", ["small_first", "big_first"])
+def test_apply_same_transcript_replay_takes_the_smaller_credit(tmp_path, order):
+    big = _apply_records(credit=json.dumps({"program": 9, "local": 0, "files": ["/repo/a.py"]}))
+    small = _apply_records()
+    records = _replay_in_one_transcript(*((small, big) if order == "small_first" else (big, small)))
+    units = _apply_main_and_sub(tmp_path, records, [])
+    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(3, 0)]
+
+
+@pytest.mark.parametrize("order", ["clean_first", "redo_first"])
+def test_apply_same_transcript_replay_redo_wins(tmp_path, order):
+    clean, redone = _apply_records(), _apply_records(edit_turn=1)
+    records = _replay_in_one_transcript(*((clean, redone) if order == "clean_first" else (redone, clean)))
+    units = _apply_main_and_sub(tmp_path, records, [])
+    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(0, 0)]
+    control = _apply_main_and_sub(tmp_path, _replay_in_one_transcript(clean, clean), [])
+    assert [(u["program_replaced"], u["local_replaced"]) for u in control] == [(3, 1)]
