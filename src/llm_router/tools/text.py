@@ -1397,10 +1397,12 @@ async def _llm_text_job(job: str, input_text: str, ctx: Context, hint: str | Non
 async def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
     """Beta: send all edits and a check in one call after reading the code.
 
-    No model calls. JSON old/new pairs or fenced FILE/FIND/REPLACE, NEW FILE,
+    JSON old/new pairs or fenced FILE/FIND/REPLACE, NEW FILE,
     APPEND TO blocks. All-or-nothing validation, paths confined to cwd (git work
     tree), argv-only known test/lint runner, 60 s cap. Off by default; enable
-    LLM_ROUTER_APPLY=on. No further edits on rejection or check failure.
+    LLM_ROUTER_APPLY=on. One bounded local text repair may follow validation or
+    check failure; requires a sandboxed check and Claude review. Disable with
+    LLM_ROUTER_APPLY_REPAIR=off.
     """
     from llm_router.apply_tool import llm_apply as apply_batch
 

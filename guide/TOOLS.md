@@ -261,7 +261,7 @@ Bulk code edits with smart diff generation.
 
 ### `llm_apply` — beta, off by default
 
-Apply all edits and run a check in one model-free call. Enable with
+Apply all edits and run a check in one call. Enable with
 `LLM_ROUTER_APPLY=on` and `LLM_ROUTER_SLIM=off`; this beta is excluded from
 core, routing, and the default consolidated surface.
 
@@ -301,7 +301,7 @@ group kill, while retaining sandbox restrictions.
 **Sandbox.** `LLM_ROUTER_APPLY_SANDBOX=auto` (default) contains only the check
 and its descendants when available, and explicitly reports an unsandboxed fallback.
 `require` refuses the check when containment is unavailable; `off` disables it.
-`auto` preserves today's behaviour for Claude-only edits; the local-repair PR will force `require_sandbox=True`, which overrides `off`. macOS uses sandbox-exec:
+`auto` preserves today's behaviour for Claude-only edits; local repair forces `require_sandbox=True`, which overrides `off`. macOS uses sandbox-exec:
 network denied (including Ollama), writes limited to cwd, private per-run TMPDIR,
 and `/dev/null`, `/dev/zero`, `/dev/dtracehelper`, `/dev/urandom`, `/dev/random`
 (no tty devices); home data reads limited to cwd and executable-derived
@@ -344,6 +344,26 @@ Neither backend contains edit application or host-side Git, guarantees resource
 limits, nor fixes the macOS `setsid()` escape from process-group teardown.
 Executable installations must be trusted; this is not a VM boundary.
 
+**Local repair.** When the beta is enabled, `LLM_ROUTER_APPLY_REPAIR` defaults
+on; `off`, `0`, `false`, or `no` disables it. `LLM_ROUTER_APPLY_REPAIR_S` defaults
+to 60 seconds, clamped to 10–120. One bounded local text-edit generation round
+may follow a validation rejection (all batch files must already exist inside cwd)
+or `APPLIED_CHECK_FAILED`. It requires an allowlisted check, an available local
+model (cache-only discovery), and a successful sandbox probe before generation.
+The model receives only the batch files and returns old/new pairs; edits to other
+files are refused. Repair edits use the same batch validation and write rules.
+The model runs on the host; the verification check always requires the sandbox,
+even with `LLM_ROUTER_APPLY_SANDBOX=off`.
+
+A passing repair returns `REPAIRED_BY_LOCAL_AND_PASSED`, identifies the local
+model and repaired line counts, and asks Claude to review the diff. Failed repair
+restores the exact pre-repair contents (retaining Claude's applied batch on check
+failure) and keeps `REJECTED` or `APPLIED_CHECK_FAILED` with the handoff.
+Restoration failures report `ROLLBACK INCOMPLETE`. Other statuses remain
+`APPLIED_NOT_CHECKED` and `APPLIED_AND_PASSED`.
+The ledger adds `repair_attempted`, `repair_passed`, `repair_model`, `repair_s`
+(elapsed seconds), and a short `repair_reason`, without prompts or file contents.
+Its source is `local` only after a passing repair, otherwise `program`.
 After rejection or a failed check, make remaining changes with your edit tools.
 
 ---

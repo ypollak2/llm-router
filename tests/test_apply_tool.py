@@ -19,6 +19,8 @@ def no_dependency_bytecode(monkeypatch):
     # The supplied interpreter lives in protected real state; lazy imports must
     # not try to cache third-party bytecode there.
     monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    from llm_router import zero_claude_edit
+    monkeypatch.setattr(zero_claude_edit, "edit_model", lambda **kwargs: None)
 
 
 @pytest.fixture
@@ -33,6 +35,9 @@ def repo(tmp_path, monkeypatch):
     subprocess.run(["git", "init", "-q", str(work)], check=True)
     (work / "a.py").write_text("value = 1\n")
     return work
+
+
+REAL_RUN_CHECK = apply._run_check
 
 
 def edit(file="a.py", old="value = 1", new="value = 2"):
@@ -277,7 +282,9 @@ def test_kills_started_descendant(repo, monkeypatch, parent_exits):
 def test_ledger_schema(repo):
     call(repo)
     row = rows()[0]
-    assert set(row) == {"ts", "status", "n_blocks", "n_files", "check_ran", "check_rc", "sandboxed", "duration_s", "source"}
+    assert set(row) == {"ts", "status", "n_blocks", "n_files", "check_ran", "check_rc", "sandboxed", "duration_s", "source",
+                        "repair_attempted", "repair_passed", "repair_model", "repair_s", "repair_reason",
+                        "repair_check_rc", "repair_sandboxed"}
     assert row["status"] == "APPLIED_NOT_CHECKED" and row["source"] == "program"
     assert row["n_files"] == row["n_blocks"] == 1
     assert row["ts"].endswith("+00:00") and row["duration_s"] >= 0
@@ -583,3 +590,296 @@ def test_ledger_open_failure_rejects_before_any_writes(repo, monkeypatch):
     assert result.startswith("REJECTED")
     assert "ledger not writable: injected append open denial" in result
     assert (repo / "a.py").read_text() == "value = 1\n"
+
+
+@pytest.fixture
+def repair_setup(repo, monkeypatch):
+    from llm_router import zero_claude_edit as local
+    events = []
+    runner(repo, monkeypatch, "")
+
+    def model(*, allow_probe):
+        assert allow_probe is False
+        return "test-local"
+
+    def wrap(argv, root):
+        events.append("probe")
+        return argv, lambda: events.append("cleanup")
+
+    def generate(task, contents, model, *, deadline_s):
+        assert events == ["probe", "cleanup"]
+        assert model == "test-local" and deadline_s > time.monotonic()
+        assert "a.py" in contents
+        assert ("apply the intent of these edits" in task and "Rejection reasons:" in task) or (
+            "make this check pass with minimal edits" in task and "a.py: +1/-1 lines" in task
+            and "Check command: pytest" in task and "failed" in task)
+        events.append("generate")
+        return {"a.py": "value = 3\n"}, [apply.EditInstruction("a.py", contents["a.py"].strip(), "value = 3")], None
+
+    def check(argv, root, *, require_sandbox=False):
+        events.append("repair-check" if require_sandbox else "initial-check")
+        if not require_sandbox:
+            events.clear()  # Generation must be after probe cleanup.
+            return 7, "check: initial\nfailed", False
+        assert (root / "a.py").read_bytes() == b"value = 3\n"
+        return 0, "check: sandboxed\npassed", True
+
+    monkeypatch.delenv("LLM_ROUTER_APPLY_REPAIR", raising=False)
+    monkeypatch.setattr(local, "edit_model", model)
+    monkeypatch.setattr(local, "generate_edits", generate)
+    monkeypatch.setattr(apply.check_sandbox, "wrap", wrap)
+    monkeypatch.setattr(apply, "_run_check", check)
+    return local, events
+
+
+def assert_repair_row(attempted, passed, reason):
+    row = rows()[-1]
+    assert row["repair_attempted"] is attempted
+    assert row["repair_passed"] is passed
+    assert row["repair_reason"] == reason
+    assert row["source"] == ("local" if passed else "program")
+    assert (row["repair_s"] is not None) is attempted
+    assert "value =" not in json.dumps(row)
+    return row
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_local_repair_passes(repo, repair_setup, rejected):
+    result = call(repo, [edit(old="missing")] if rejected else None, "pytest")
+    assert result.startswith("REPAIRED_BY_LOCAL_AND_PASSED"), result
+    assert "local model test-local" in result and "Claude should review the diff" in result
+    assert "a.py: +1/-1 lines" in result and HANDOFF not in result
+    assert (repo / "a.py").read_bytes() == b"value = 3\n"
+    row = assert_repair_row(True, True, "passed")
+    assert row["repair_model"] == "test-local" and row["sandboxed"] and row["check_rc"] == 0
+
+
+@pytest.mark.parametrize("failure", ["check", "sandbox", "no edits", "outside", "syntax", "timeout", "exception"])
+@pytest.mark.parametrize("rejected", [False, True])
+def test_failed_local_repair_restores(repo, monkeypatch, repair_setup, failure, rejected):
+    local, events = repair_setup
+    if failure in {"check", "sandbox"}:
+        def check(argv, root, *, require_sandbox=False):
+            if require_sandbox and failure == "sandbox":
+                raise apply.check_sandbox.SandboxUnavailable("lost backend")
+            return 7, "check: test\nfailed", require_sandbox
+        monkeypatch.setattr(apply, "_run_check", check)
+    else:
+        def generate(task, contents, model, *, deadline_s):
+            if failure == "exception":
+                raise TimeoutError("model timeout")
+            if failure == "no edits":
+                return None, [], "empty"
+            if failure == "timeout":
+                monkeypatch.setattr(apply.time, "monotonic", lambda: deadline_s + 1)
+            target = "b.py" if failure == "outside" else "a.py"
+            new = "value = (" if failure == "syntax" else "value = 3"
+            return {}, [apply.EditInstruction(target, contents["a.py"].strip(), new)], None
+        monkeypatch.setattr(local, "generate_edits", generate)
+    (repo / "b.py").write_text("value = 99\n")
+    result = call(repo, [edit(old="missing")] if rejected else None, "pytest")
+    assert result.startswith("REJECTED" if rejected else "APPLIED_CHECK_FAILED"), result
+    assert "local repair: failed (" in result and result.endswith(HANDOFF)
+    assert (repo / "a.py").read_bytes() == (b"value = 1\n" if rejected else b"value = 2\n")
+    assert (repo / "b.py").read_bytes() == b"value = 99\n"
+    row = rows()[-1]
+    assert_repair_row(True, False, row["repair_reason"])
+
+
+@pytest.mark.parametrize("gate", ["off", "0", "false", "no", "no model", "sandbox", "no check", "bad check", "disabled"])
+def test_local_repair_gates(repo, monkeypatch, repair_setup, gate):
+    local, events = repair_setup
+    monkeypatch.setattr(local, "generate_edits", lambda *a, **kw: pytest.fail("generation despite gate"))
+    check = "pytest"
+    if gate in {"off", "0", "false", "no"}:
+        monkeypatch.setenv("LLM_ROUTER_APPLY_REPAIR", gate)
+    elif gate == "no model":
+        monkeypatch.setattr(local, "edit_model", lambda **kw: None)
+    elif gate == "sandbox":
+        def unavailable(*args):
+            raise apply.check_sandbox.SandboxUnavailable("missing backend")
+        monkeypatch.setattr(apply.check_sandbox, "wrap", unavailable)
+    elif gate == "disabled":
+        monkeypatch.setenv("LLM_ROUTER_APPLY", "off")
+    else:
+        check = "" if gate == "no check" else "bash -c nope"
+    result = call(repo, [edit(old="missing")], check)
+    assert result.startswith("REJECTED") and result.endswith(HANDOFF)
+    assert (repo / "a.py").read_text() == "value = 1\n"
+    if gate != "disabled":
+        reason = ("disabled" if gate in {"off", "0", "false", "no"} else
+                  "no local model" if gate == "no model" else
+                  "sandbox unavailable" if gate == "sandbox" else "no allowlisted check")
+        assert_repair_row(False, False, reason)
+    if gate == "sandbox":
+        assert "sandbox unavailable: missing backend" in result
+
+
+@pytest.mark.parametrize("seconds,expected", [("1", 10), ("999", 120), ("42.5", 42.5), ("bad", 60), ("inf", 120), ("-inf", 10)])
+def test_repair_seconds_clamp(monkeypatch, seconds, expected):
+    monkeypatch.setenv("LLM_ROUTER_APPLY_REPAIR_S", seconds)
+    assert apply._repair_seconds() == expected
+
+
+def test_repair_seconds_default(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_APPLY_REPAIR_S", raising=False)
+    assert apply._repair_seconds() == 60
+
+
+@pytest.mark.parametrize("file", ["missing.py", "../outside.py"])
+def test_rejected_batch_requires_existing_contained_files(repo, monkeypatch, repair_setup, file):
+    local, _ = repair_setup
+    (repo.parent / "outside.py").write_text("value = 1\n")
+    monkeypatch.setattr(local, "generate_edits", lambda *a, **kw: pytest.fail("unsafe repair"))
+    result = call(repo, [edit(file=file)], "pytest")
+    assert result.startswith("REJECTED")
+    assert_repair_row(False, False, None)
+
+
+def test_local_repair_requires_sandbox_even_when_off(repo, monkeypatch, repair_setup):
+    monkeypatch.setenv("LLM_ROUTER_APPLY_SANDBOX", "off")
+    result = call(repo, check="pytest")
+    assert result.startswith("REPAIRED_BY_LOCAL_AND_PASSED"), result
+    assert "repair-check" in repair_setup[1]
+
+
+def test_local_repair_restore_failure_reported(repo, monkeypatch, repair_setup):
+    write = apply._write_batch
+    calls = 0
+
+    def write_batch(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("injected restore failure")
+        return write(*args)
+
+    monkeypatch.setattr(apply, "_write_batch", write_batch)
+    monkeypatch.setattr(apply, "_run_check", lambda *a, **kw: (7, "check: failed", True))
+    result = call(repo, check="pytest")
+    assert result.startswith("APPLIED_CHECK_FAILED") and result.endswith(HANDOFF)
+    assert "ROLLBACK INCOMPLETE: injected restore failure" in result
+    assert_repair_row(True, False, "check still failed")
+
+
+def test_local_repair_restores_exact_crlf_bytes(repo, monkeypatch, repair_setup):
+    (repo / "a.py").write_bytes(b"value = 1\r\n")
+    monkeypatch.setattr(apply, "_run_check", lambda *a, **kw: (7, "check: failed", True))
+    result = call(repo, check="pytest")
+    assert result.startswith("APPLIED_CHECK_FAILED") and result.endswith(HANDOFF)
+    assert (repo / "a.py").read_bytes() == b"value = 2\r\n"
+
+
+def test_local_repair_refuses_entire_out_of_batch_response(repo, monkeypatch, repair_setup):
+    local, _ = repair_setup
+    outside = repo.parent / "outside.py"
+    outside.write_text("value = 99\n")
+    monkeypatch.setattr(local, "generate_edits", lambda *a, **kw: ({}, [
+        apply.EditInstruction("a.py", "value = 2", "value = 3"),
+        apply.EditInstruction("../outside.py", "value = 99", "value = 3"),
+    ], None))
+    result = call(repo, check="pytest")
+    assert result.startswith("APPLIED_CHECK_FAILED")
+    assert (repo / "a.py").read_text() == "value = 2\n"
+    assert outside.read_text() == "value = 99\n"
+    assert_repair_row(True, False, "file outside repair batch")
+
+
+def test_restore_survives_non_utf8_left_by_failed_check(repo, monkeypatch, repair_setup):
+    def check(argv, root, *, require_sandbox=False):
+        if require_sandbox:
+            (root / "a.py").write_bytes(b"\xff\xfe broken")
+        return 7, "check: test\nfailed", require_sandbox
+
+    monkeypatch.setattr(apply, "_run_check", check)
+    result = call(repo, check="pytest")
+    assert result.startswith("APPLIED_CHECK_FAILED") and "ROLLBACK INCOMPLETE" not in result, result
+    assert (repo / "a.py").read_bytes() == b"value = 2\n"
+
+
+def _plain_generate(monkeypatch, local):
+    monkeypatch.setattr(local, "generate_edits", lambda task, contents, model, *, deadline_s: (
+        {"a.py": "value = 3\n"}, [apply.EditInstruction("a.py", contents["a.py"].strip(), "value = 3")], None))
+
+
+def test_ledger_keeps_original_check_after_failed_repair(repo, monkeypatch, repair_setup):
+    _plain_generate(monkeypatch, repair_setup[0])
+    monkeypatch.setattr(apply, "_run_check",
+                        lambda argv, root, *, require_sandbox=False: (9 if require_sandbox else 7, "check: x\nfailed", require_sandbox))
+    result = call(repo, check="pytest")
+    assert result.startswith("APPLIED_CHECK_FAILED")
+    row = rows()[-1]
+    assert (row["check_rc"], row["sandboxed"]) == (7, False)
+    assert (row["repair_check_rc"], row["repair_sandboxed"]) == (9, True)
+    # Positive control: a passing repair reports the repaired state's check.
+    monkeypatch.setattr(apply, "_run_check",
+                        lambda argv, root, *, require_sandbox=False: (0 if require_sandbox else 7, "check: x\nok", require_sandbox))
+    (repo / "a.py").write_text("value = 1\n")
+    assert call(repo, check="pytest").startswith("REPAIRED_BY_LOCAL_AND_PASSED")
+    row = rows()[-1]
+    assert (row["check_rc"], row["sandboxed"], row["repair_check_rc"]) == (0, True, 0)
+
+
+def test_rejected_batch_task_carries_validated_fields_only(repo, monkeypatch, repair_setup):
+    local, _ = repair_setup
+    seen = []
+    real = local.generate_edits
+    monkeypatch.setattr(local, "generate_edits", lambda task, *a, **kw: (seen.append(task), real(task, *a, **kw))[1])
+    result = call(repo, [{**edit(old="missing"), "private_note": "SECRET-TOKEN"}], "pytest")
+    assert result.startswith("REPAIRED_BY_LOCAL_AND_PASSED"), result
+    assert len(seen) == 1 and "SECRET-TOKEN" not in seen[0]
+    assert "FIND:\nmissing" in seen[0] and "REPLACE:\nvalue = 2" in seen[0]
+
+
+def _real_check_setup(monkeypatch, wrap_results):
+    """Restore the real _run_check; mock only the sandbox wrapper and the process run."""
+    monkeypatch.setattr(apply, "_run_check", REAL_RUN_CHECK)
+    wraps, runs = [], []
+
+    def wrap(argv, root):
+        outcome = wrap_results[len(wraps)]
+        wraps.append(argv)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return ["sandboxed", *argv], lambda: None
+
+    def execute(argv, root):
+        runs.append(argv)
+        passed = (root / "a.py").read_text() == "value = 3\n"
+        return (0, "ok") if passed else (7, "failed")
+
+    monkeypatch.setattr(apply.check_sandbox, "wrap", wrap)
+    monkeypatch.setattr(apply, "_execute_check", execute)
+    return wraps, runs
+
+
+def test_repair_check_is_sandboxed_by_the_real_run_check_even_when_off(repo, monkeypatch, repair_setup):
+    _plain_generate(monkeypatch, repair_setup[0])
+    monkeypatch.setenv("LLM_ROUTER_APPLY_SANDBOX", "off")
+    wraps, runs = _real_check_setup(monkeypatch, [None, None])
+    result = call(repo, check="pytest")
+    assert result.startswith("REPAIRED_BY_LOCAL_AND_PASSED"), result
+    # Initial check unwrapped (mode off); probe + repair re-run wrapped.
+    assert len(wraps) == 2 and runs[0][0] != "sandboxed" and runs[1][0] == "sandboxed"
+    assert rows()[-1]["sandboxed"] is True
+
+
+def test_backend_lost_after_probe_restores_and_runs_nothing(repo, monkeypatch, repair_setup):
+    _plain_generate(monkeypatch, repair_setup[0])
+    monkeypatch.setenv("LLM_ROUTER_APPLY_SANDBOX", "off")
+    lost = apply.check_sandbox.SandboxUnavailable("backend lost")
+    wraps, runs = _real_check_setup(monkeypatch, [None, lost])
+    result = call(repo, check="pytest")
+    assert result.startswith("APPLIED_CHECK_FAILED") and result.endswith(HANDOFF), result
+    assert "sandbox unavailable at re-run" in result
+    assert len(runs) == 1  # only the initial check ran; local edits never ran unsandboxed
+    assert (repo / "a.py").read_text() == "value = 2\n"
+
+
+def test_successful_overwrite_records_no_cleanup_failopen(repo, monkeypatch):
+    codes = []
+    monkeypatch.setattr(apply, "_failopen", lambda code, exc: codes.append(code))
+    assert call(repo).startswith("APPLIED")
+    assert (repo / "a.py").read_text() == "value = 2\n"
+    assert "CHZ-FO-APPLY-TEMP-CLEANUP" not in codes
+    assert not [p for p in repo.iterdir() if p.name.startswith(".llm-apply-")]
