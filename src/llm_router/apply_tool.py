@@ -187,7 +187,7 @@ def _write_batch(root, originals, changed, identities) -> None:
         handle = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=fd)
         try:
             with os.fdopen(handle, "wb") as stream:
-                stream.write(content.encode("utf-8"))
+                stream.write(content if isinstance(content, bytes) else content.encode("utf-8"))
                 if identities[path] is not None:
                     os.fchmod(stream.fileno(), stat.S_IMODE(os.stat(path.name, dir_fd=fd).st_mode))
         except BaseException:
@@ -438,7 +438,7 @@ def _diff_summary(root, originals, changed):
     return lines
 
 
-def _local_repair(root, argv, files, task, details, repair, outcome):
+def _local_repair(root, argv, files, task, details, repair):
     """One host-side edit generation round; every post-edit check requires containment."""
     if os.environ.get("LLM_ROUTER_APPLY_REPAIR", "on").strip().lower() in {"off", "0", "false", "no"}:
         repair["repair_reason"] = "disabled"
@@ -470,8 +470,8 @@ def _local_repair(root, argv, files, task, details, repair, outcome):
         for path in files:
             if not path.resolve().is_relative_to(root) or not path.is_file():
                 raise ValueError("repair file is no longer inside cwd or existing")
-            snapshot[path] = path.read_bytes().decode("utf-8")
-        contents = {str(path.relative_to(root)): content for path, content in snapshot.items()}
+            snapshot[path] = path.read_bytes()
+        contents = {str(path.relative_to(root)): content.decode("utf-8") for path, content in snapshot.items()}
         deadline = started + _repair_seconds()
         proposed, instructions, failure = zero_claude_edit.generate_edits(
             task, contents, model, deadline_s=deadline)
@@ -489,7 +489,7 @@ def _local_repair(root, argv, files, task, details, repair, outcome):
                 _write_batch(root, originals, changed, identities)
                 wrote = True
                 rc, tail, sandboxed = _run_check(argv, root, require_sandbox=True)
-                outcome.update(check_ran=True, check_rc=rc, sandboxed=sandboxed)
+                repair.update(repair_check_rc=rc, repair_sandboxed=sandboxed)
                 details.append(f"Local repair check rc={rc}\n{tail}")
                 if rc == 0:
                     repair["repair_passed"] = True
@@ -513,7 +513,8 @@ def _local_repair(root, argv, files, task, details, repair, outcome):
                         raise OSError(f"{path}: path moved before restore")
                     info = path.stat() if path.exists() else None
                     identities[path] = (info.st_dev, info.st_ino) if info else None
-                    current[path] = path.read_bytes().decode("utf-8") if info else None
+                    # Bytes: the failed check may have left content that is not UTF-8.
+                    current[path] = path.read_bytes() if info else None
                     restore[path] = content
                 _write_batch(root, current, restore, identities)
             except Exception as exc:
@@ -542,7 +543,7 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
     details: list[str] = []
     enabled = os.environ.get("LLM_ROUTER_APPLY", "").strip().lower() in {"on", "1", "true", "yes"}
     repair = dict(repair_attempted=False, repair_passed=False, repair_model=None,
-                  repair_s=None, repair_reason=None)
+                  repair_s=None, repair_reason=None, repair_check_rc=None, repair_sandboxed=None)
     ledger = None
     try:
         if enabled:
@@ -600,14 +601,12 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
                     candidates = [(root / edit.file).resolve() for _, edit in blocks]
                     if all(path.is_relative_to(root) and path.is_file() for path in candidates):
                         repair_files = list(dict.fromkeys(candidates))
-                        task = "apply the intent of these edits\n" + edits + "\nRejection reasons:\n" + "\n".join(reasons)
+                        # Validated fields only: never forward the raw request (extra keys, text outside blocks).
+                        shown = "\n\n".join(f"{kind} FILE: {e.file}\nFIND:\n{e.old_string}\nREPLACE:\n{e.new_string}"
+                                             for kind, e in blocks)
+                        task = "apply the intent of these edits\n" + shown + "\nRejection reasons:\n" + "\n".join(reasons)
                 if repair_files is not None:
-                    outcome = {}
-                    repaired = _local_repair(root, argv, repair_files, task, details, repair, outcome)
-                    if outcome:
-                        check_ran = outcome["check_ran"]
-                        check_rc = outcome["check_rc"]
-                        sandboxed = outcome["sandboxed"]
+                    repaired = _local_repair(root, argv, repair_files, task, details, repair)
                     if repaired is not None:
                         repaired_files, check_rc, sandboxed = repaired
                         n_files = max(n_files, repaired_files)

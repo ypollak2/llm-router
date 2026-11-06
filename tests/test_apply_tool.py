@@ -37,6 +37,9 @@ def repo(tmp_path, monkeypatch):
     return work
 
 
+REAL_RUN_CHECK = apply._run_check
+
+
 def edit(file="a.py", old="value = 1", new="value = 2"):
     return dict(file=file, old_string=old, new_string=new)
 
@@ -280,7 +283,8 @@ def test_ledger_schema(repo):
     call(repo)
     row = rows()[0]
     assert set(row) == {"ts", "status", "n_blocks", "n_files", "check_ran", "check_rc", "sandboxed", "duration_s", "source",
-                        "repair_attempted", "repair_passed", "repair_model", "repair_s", "repair_reason"}
+                        "repair_attempted", "repair_passed", "repair_model", "repair_s", "repair_reason",
+                        "repair_check_rc", "repair_sandboxed"}
     assert row["status"] == "APPLIED_NOT_CHECKED" and row["source"] == "program"
     assert row["n_files"] == row["n_blocks"] == 1
     assert row["ts"].endswith("+00:00") and row["duration_s"] >= 0
@@ -779,3 +783,95 @@ def test_local_repair_refuses_entire_out_of_batch_response(repo, monkeypatch, re
     assert (repo / "a.py").read_text() == "value = 2\n"
     assert outside.read_text() == "value = 99\n"
     assert_repair_row(True, False, "file outside repair batch")
+
+
+def test_restore_survives_non_utf8_left_by_failed_check(repo, monkeypatch, repair_setup):
+    def check(argv, root, *, require_sandbox=False):
+        if require_sandbox:
+            (root / "a.py").write_bytes(b"\xff\xfe broken")
+        return 7, "check: test\nfailed", require_sandbox
+
+    monkeypatch.setattr(apply, "_run_check", check)
+    result = call(repo, check="pytest")
+    assert result.startswith("APPLIED_CHECK_FAILED") and "ROLLBACK INCOMPLETE" not in result, result
+    assert (repo / "a.py").read_bytes() == b"value = 2\n"
+
+
+def _plain_generate(monkeypatch, local):
+    monkeypatch.setattr(local, "generate_edits", lambda task, contents, model, *, deadline_s: (
+        {"a.py": "value = 3\n"}, [apply.EditInstruction("a.py", contents["a.py"].strip(), "value = 3")], None))
+
+
+def test_ledger_keeps_original_check_after_failed_repair(repo, monkeypatch, repair_setup):
+    _plain_generate(monkeypatch, repair_setup[0])
+    monkeypatch.setattr(apply, "_run_check",
+                        lambda argv, root, *, require_sandbox=False: (9 if require_sandbox else 7, "check: x\nfailed", require_sandbox))
+    result = call(repo, check="pytest")
+    assert result.startswith("APPLIED_CHECK_FAILED")
+    row = rows()[-1]
+    assert (row["check_rc"], row["sandboxed"]) == (7, False)
+    assert (row["repair_check_rc"], row["repair_sandboxed"]) == (9, True)
+    # Positive control: a passing repair reports the repaired state's check.
+    monkeypatch.setattr(apply, "_run_check",
+                        lambda argv, root, *, require_sandbox=False: (0 if require_sandbox else 7, "check: x\nok", require_sandbox))
+    (repo / "a.py").write_text("value = 1\n")
+    assert call(repo, check="pytest").startswith("REPAIRED_BY_LOCAL_AND_PASSED")
+    row = rows()[-1]
+    assert (row["check_rc"], row["sandboxed"], row["repair_check_rc"]) == (0, True, 0)
+
+
+def test_rejected_batch_task_carries_validated_fields_only(repo, monkeypatch, repair_setup):
+    local, _ = repair_setup
+    seen = []
+    real = local.generate_edits
+    monkeypatch.setattr(local, "generate_edits", lambda task, *a, **kw: (seen.append(task), real(task, *a, **kw))[1])
+    result = call(repo, [{**edit(old="missing"), "private_note": "SECRET-TOKEN"}], "pytest")
+    assert result.startswith("REPAIRED_BY_LOCAL_AND_PASSED"), result
+    assert len(seen) == 1 and "SECRET-TOKEN" not in seen[0]
+    assert "FIND:\nmissing" in seen[0] and "REPLACE:\nvalue = 2" in seen[0]
+
+
+def _real_check_setup(monkeypatch, wrap_results):
+    """Restore the real _run_check; mock only the sandbox wrapper and the process run."""
+    monkeypatch.setattr(apply, "_run_check", REAL_RUN_CHECK)
+    wraps, runs = [], []
+
+    def wrap(argv, root):
+        outcome = wrap_results[len(wraps)]
+        wraps.append(argv)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return ["sandboxed", *argv], lambda: None
+
+    def execute(argv, root):
+        runs.append(argv)
+        passed = (root / "a.py").read_text() == "value = 3\n"
+        return (0, "ok") if passed else (7, "failed")
+
+    monkeypatch.setattr(apply.check_sandbox, "wrap", wrap)
+    monkeypatch.setattr(apply, "_execute_check", execute)
+    return wraps, runs
+
+
+def test_repair_check_is_sandboxed_by_the_real_run_check_even_when_off(repo, monkeypatch, repair_setup):
+    _plain_generate(monkeypatch, repair_setup[0])
+    monkeypatch.setenv("LLM_ROUTER_APPLY_SANDBOX", "off")
+    wraps, runs = _real_check_setup(monkeypatch, [None, None])
+    result = call(repo, check="pytest")
+    assert result.startswith("REPAIRED_BY_LOCAL_AND_PASSED"), result
+    # Initial check unwrapped (mode off); probe + repair re-run wrapped.
+    assert len(wraps) == 2 and runs[0][0] != "sandboxed" and runs[1][0] == "sandboxed"
+    assert rows()[-1]["sandboxed"] is True
+
+
+def test_backend_lost_after_probe_restores_and_runs_nothing(repo, monkeypatch, repair_setup):
+    _plain_generate(monkeypatch, repair_setup[0])
+    monkeypatch.setenv("LLM_ROUTER_APPLY_SANDBOX", "off")
+    lost = apply.check_sandbox.SandboxUnavailable("backend lost")
+    wraps, runs = _real_check_setup(monkeypatch, [None, lost])
+    result = call(repo, check="pytest")
+    assert result.startswith("APPLIED_CHECK_FAILED") and result.endswith(HANDOFF), result
+    assert "sandbox unavailable at re-run" in result
+    assert len(runs) == 1  # only the initial check ran; local edits never ran unsandboxed
+    assert (repo / "a.py").read_text() == "value = 2\n"
+
