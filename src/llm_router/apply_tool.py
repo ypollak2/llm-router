@@ -1,4 +1,4 @@
-"""Model-free, opt-in batch edits and a bounded argv-only check.
+"""Opt-in batch edits with bounded local repair and a bounded argv-only check.
 
 Requires trusted PATH executables; check containment is configurable.
 Concurrent modification by another process of the same user is out of scope:
@@ -419,13 +419,119 @@ def _execute_check(argv: list[str], root: Path) -> tuple[int, str]:
     return (-9 if timed_out or survivors else process.returncode), tail
 
 
+def _repair_seconds() -> float:
+    try:
+        seconds = float(os.environ.get("LLM_ROUTER_APPLY_REPAIR_S", "60"))
+    except ValueError:
+        seconds = 60.0
+    # This also bounds infinities and NaN.
+    return max(10.0, min(120.0, seconds))
+
+
+def _diff_summary(root, originals, changed):
+    lines = []
+    for path, content in changed.items():
+        diff = list(difflib.ndiff((originals[path] or "").splitlines(keepends=True), content.splitlines(keepends=True)))
+        plus = sum(line.startswith("+ ") for line in diff)
+        minus = sum(line.startswith("- ") for line in diff)
+        lines.append(f"{path.relative_to(root)}: +{plus}/-{minus} lines")
+    return lines
+
+
+def _local_repair(root, argv, files, task, details, repair, outcome):
+    """One host-side edit generation round; every post-edit check requires containment."""
+    if os.environ.get("LLM_ROUTER_APPLY_REPAIR", "on").strip().lower() in {"off", "0", "false", "no"}:
+        repair["repair_reason"] = "disabled"
+        return None
+    if argv is None:
+        repair["repair_reason"] = "no allowlisted check"
+        return None
+    from llm_router import zero_claude_edit
+
+    model = zero_claude_edit.edit_model(allow_probe=False)
+    if not model:
+        repair["repair_reason"] = "no local model"
+        return None
+    repair["repair_model"] = model
+    try:
+        _, cleanup = check_sandbox.wrap(argv, root)
+        cleanup()
+    except check_sandbox.SandboxUnavailable as exc:
+        repair["repair_reason"] = "sandbox unavailable"
+        details.append(f"local repair: failed (sandbox unavailable: {exc})")
+        return None
+
+    started = time.monotonic()
+    repair["repair_attempted"] = True
+    snapshot = {}
+    wrote = False
+    reason = "no valid edits"
+    try:
+        for path in files:
+            if not path.resolve().is_relative_to(root) or not path.is_file():
+                raise ValueError("repair file is no longer inside cwd or existing")
+            snapshot[path] = path.read_bytes().decode("utf-8")
+        contents = {str(path.relative_to(root)): content for path, content in snapshot.items()}
+        deadline = started + _repair_seconds()
+        proposed, instructions, failure = zero_claude_edit.generate_edits(
+            task, contents, model, deadline_s=deadline)
+        if time.monotonic() > deadline:
+            reason = "timed out"
+        elif proposed is None or failure or not instructions:
+            reason = "no valid edits"
+        elif any(edit.file not in contents for edit in instructions):
+            reason = "file outside repair batch"
+        else:
+            originals, changed, reasons, identities = _validate(root, [("replace", edit) for edit in instructions])
+            if reasons:
+                reason = "validation rejected"
+            else:
+                _write_batch(root, originals, changed, identities)
+                wrote = True
+                rc, tail, sandboxed = _run_check(argv, root, require_sandbox=True)
+                outcome.update(check_ran=True, check_rc=rc, sandboxed=sandboxed)
+                details.append(f"Local repair check rc={rc}\n{tail}")
+                if rc == 0:
+                    repair["repair_passed"] = True
+                    repair["repair_reason"] = "passed"
+                    details.extend(_diff_summary(root, originals, changed))
+                    details.append(f"Edits came from local model {model}; Claude should review the diff.")
+                    return len(changed), rc, sandboxed
+                reason = "check still failed"
+    except check_sandbox.SandboxUnavailable as exc:
+        reason = "sandbox unavailable at re-run"
+        details.append(f"local repair sandbox: {exc}")
+    except Exception as exc:
+        reason = "repair error"
+        details.append(f"local repair error: {exc}")
+    finally:
+        if wrote and not repair["repair_passed"]:
+            try:
+                current, restore, identities = {}, {}, {}
+                for path, content in snapshot.items():
+                    if path.resolve() != path or not path.is_relative_to(root):
+                        raise OSError(f"{path}: path moved before restore")
+                    info = path.stat() if path.exists() else None
+                    identities[path] = (info.st_dev, info.st_ino) if info else None
+                    current[path] = path.read_bytes().decode("utf-8") if info else None
+                    restore[path] = content
+                _write_batch(root, current, restore, identities)
+            except Exception as exc:
+                details.append(f"ROLLBACK INCOMPLETE: {exc}")
+        repair["repair_s"] = round(time.monotonic() - started, 6)
+    repair["repair_reason"] = reason
+    details.append(f"local repair: failed ({reason})")
+    return None
+
+
 def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
-    """Apply a complete batch without a model, then run an allowlisted check.
+    """Apply a complete batch, check it, and optionally try bounded local repair.
 
     Beta, off by default: set LLM_ROUTER_APPLY=on. Several edits and a check
     become one call after you have read the code. Accepts JSON old/new pairs or
     FILE/FIND/REPLACE, NEW FILE, APPEND TO fenced blocks. Every path must stay
-    inside cwd (a git work tree). No local repair or shell execution.
+    inside cwd (a git work tree). Local text-only repair requires a sandboxed
+    check and Claude review; disable with LLM_ROUTER_APPLY_REPAIR=off. No shell execution.
     """
     started = time.monotonic()
     status = "REJECTED"
@@ -435,6 +541,8 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
     check_rc = None
     details: list[str] = []
     enabled = os.environ.get("LLM_ROUTER_APPLY", "").strip().lower() in {"on", "1", "true", "yes"}
+    repair = dict(repair_attempted=False, repair_passed=False, repair_model=None,
+                  repair_s=None, repair_reason=None)
     ledger = None
     try:
         if enabled:
@@ -453,7 +561,9 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
             if repo.returncode or repo.stdout.strip() != "true":
                 details.append("cwd must be inside a git work tree.")
             else:
+                argv = None
                 blocks, reasons = _parse(edits)
+                parse_failed = bool(reasons)
                 n_blocks = len(blocks)
                 if not blocks:
                     reasons.append("no edit instructions to apply")
@@ -461,18 +571,15 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
                 reasons.extend(validation)
                 if reasons:
                     details.extend(reasons)
+                    argv, _ = _check_argv(check, root)
                 else:
                     _write_batch(root, originals, changed, identities)
                     n_files = len(changed)
                     status = "APPLIED_NOT_CHECKED"
-                    for path, content in changed.items():
-                        diff = list(difflib.ndiff((originals[path] or "").splitlines(keepends=True), content.splitlines(keepends=True)))
-                        plus = sum(line.startswith("+ ") for line in diff)
-                        minus = sum(line.startswith("- ") for line in diff)
-                        details.append(f"{path.relative_to(root)}: +{plus}/-{minus} lines")
-                    argv, reason = _check_argv(check, root)
+                    details.extend(_diff_summary(root, originals, changed))
+                    argv, check_reason = _check_argv(check, root)
                     if argv is None:
-                        details.append(reason)
+                        details.append(check_reason)
                     else:
                         try:
                             check_rc, tail, sandboxed = _run_check(argv, root)
@@ -485,12 +592,34 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
                             details.append(f"check: NOT sandboxed ({exc}); Check not run: sandbox required or unavailable.")
                         except OSError as exc:
                             details.append(f"Check not run: {exc}")
+                repair_files = None
+                if status == "APPLIED_CHECK_FAILED":
+                    repair_files = list(changed)
+                    task = "make this check pass with minimal edits\n" + "\n".join(details) + f"\nCheck command: {check}"
+                elif validation and not parse_failed and blocks:
+                    candidates = [(root / edit.file).resolve() for _, edit in blocks]
+                    if all(path.is_relative_to(root) and path.is_file() for path in candidates):
+                        repair_files = list(dict.fromkeys(candidates))
+                        task = "apply the intent of these edits\n" + edits + "\nRejection reasons:\n" + "\n".join(reasons)
+                if repair_files is not None:
+                    outcome = {}
+                    repaired = _local_repair(root, argv, repair_files, task, details, repair, outcome)
+                    if outcome:
+                        check_ran = outcome["check_ran"]
+                        check_rc = outcome["check_rc"]
+                        sandboxed = outcome["sandboxed"]
+                    if repaired is not None:
+                        repaired_files, check_rc, sandboxed = repaired
+                        n_files = max(n_files, repaired_files)
+                        check_ran = True
+                        status = "REPAIRED_BY_LOCAL_AND_PASSED"
     except Exception as exc:
         details.append(str(exc))
     finally:
         row = dict(ts=datetime.now(timezone.utc).isoformat(), status=status, n_blocks=n_blocks,
                    n_files=n_files, check_ran=check_ran, check_rc=check_rc, sandboxed=sandboxed,
-                   duration_s=round(time.monotonic() - started, 6), source="program")
+                   duration_s=round(time.monotonic() - started, 6),
+                   source="local" if repair["repair_passed"] else "program", **repair)
         if ledger is not None:
             try:
                 with ledger:
