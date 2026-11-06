@@ -151,6 +151,7 @@ def test_agentic_file_edits_never_pay_a_hold(tmp_path, mode, task, tool):
                    original_prompt="Carry out the requested changes and report the result")
     r = _run(tmp_path, "edit", tool, mode, {"file_path": "/x", "content": "y"})
     assert r.returncode == 0 and not r.stdout.strip(), r.stderr
+    assert (tmp_path / ".llm-router" / "pending_route_edit.json").exists(), "an edit does not satisfy routing"
 
 
 @pytest.mark.parametrize("command", ["rg tasks README.md > result.txt", "cat README.md; python change.py"])

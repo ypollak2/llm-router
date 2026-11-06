@@ -2163,6 +2163,8 @@ def _main() -> None:
     if not _strict and task_type in {"delegate", "coordination"} and tool_name in {
         "Edit", "Write", "MultiEdit", "NotebookEdit",
     }:
+        _log_violation(session_id, tool_name, expected_tool,
+                       outcome="ALLOWED(agentic_edit)")
         sys.exit(0)
 
     # In hard/strict mode, block remaining GENERATIVE native tools (Bash/Edit/
