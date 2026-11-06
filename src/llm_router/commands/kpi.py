@@ -373,6 +373,8 @@ def _ns_d1_d2(days: int, allowed: frozenset[str], index,
     # backfill=True: this KPI is the one reader that resolves a unit's kind from the
     # backfill sidecar. northstar.units() leaves it off for every hot-path caller.
     for u in (_ns_units(days, win) if units is None else units):
+        if u.get("kind") == ns.UNIT_ROUTED_APPLY:
+            continue
         if win is not None and not win.covers(u.get("ts")):
             continue
         window += 1
@@ -460,7 +462,8 @@ def _ns_units(days: int, win: "_Window | None", tool_sessions: dict[str, str] | 
     from llm_router import northstar as ns
 
     return list(ns.units(days=_wall_days(days, win), backfill=True, subagents=True,
-                         verify_records=ns.NS_ATTACH_VERIFY_RECORDS, tool_sessions=tool_sessions))
+                         verify_records=ns.NS_ATTACH_VERIFY_RECORDS, tool_sessions=tool_sessions,
+                         include_apply=True))
 
 
 def _blind(result: dict) -> dict:
@@ -574,7 +577,7 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
     outside = unclassified = 0
     by_session: dict[str, int] = {}                     # calls per session: the status line prints a session's n against it
     for u in units:
-        if u.get("kind") == ns.UNIT_USER_PROMPT:
+        if u.get("kind") in (ns.UNIT_USER_PROMPT, ns.UNIT_ROUTED_APPLY):
             continue
         if win is not None and not win.covers(u.get("ts")):
             continue
@@ -2866,6 +2869,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     until_ts = None if win is None else win.until
     tool_sessions: dict[str, str] | None = {} if routing_detail else None   # filled by the same pass
     unit_list = _ns_units(days, win, tool_sessions)  # one pass: NS/D1/D2, the call mix and verify_shadow
+    apply_units = [u for u in unit_list if u.get("kind") == "routed_apply"
+                   and (win is None or win.covers(u.get("ts")))]
     ns_r, d1_r, d2_r, joins = _ns_d1_d2(days, allowed, index, win, unit_list)
     kpis_diag = joins.pop("diag")
     extras = None
@@ -2908,6 +2913,8 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     card = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts)),
         "generated_ts": now_ts,
+        "apply_program_replaced": sum(u.get("program_replaced", 0) or 0 for u in apply_units),
+        "apply_local_replaced": sum(u.get("local_replaced", 0) or 0 for u in apply_units),
         "window_days": days,
         "include_research": include_research,
         "joins": joins,
@@ -3078,6 +3085,9 @@ def render_scorecard(data: dict) -> str:
             v = data["verify_shadow"]
             lines.append(f"      verify (shadow): {v['verified']} verified, {v['weak']} weak, "
                          f"{v['fail']} failed, {v['unavailable']} unavailable (informational; not in NS/D1/D2)")
+    program, local = data.get("apply_program_replaced", 0), data.get("apply_local_replaced", 0)
+    if program > 0 or local > 0:
+        lines.append(f"llm_apply replaced Claude calls: program {program}, local {local}")
     lines += _call_mix_render_lines(data)
     if (data.get("ledger") or {}).get("line"):
         lines.append(f"  {data['ledger']['line']}")

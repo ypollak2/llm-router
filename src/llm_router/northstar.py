@@ -23,7 +23,9 @@ and the aggregate view read it, so they cannot disagree with each other.
 COUNTING RULES — read this before changing a number here
 ────────────────────────────────────────────────────────────────────────────
 
-A **unit** is one of eight kinds. All eight sum to the denominator.
+Model-call and prompt units sum to the denominator. The informational
+``routed_apply`` kind (lever ``llm_apply``) carries separate program/local
+replacement credits and is excluded from denominators and attempted routing.
 
   user_prompt     One human-authored prompt in a Claude Code transcript
                   (``~/.claude/projects/<proj>/<session>.jsonl``, ``type ==
@@ -66,7 +68,8 @@ A **unit** is one of eight kinds. All eight sum to the denominator.
 
   routed_mcp      One per ``tool_use`` block anywhere in an assistant turn
                   (main or folded sidechain) whose tool name starts with
-                  ``mcp__llm_router__``. This is a call Claude explicitly
+                  ``mcp__llm_router__``, except ``llm_apply`` (an informational
+                  ``routed_apply`` unit). This is a call Claude explicitly
                   routed to a non-Claude backend through the MCP surface. Its
                   ``model`` is the router row that answered it: the
                   ``routing_decisions`` row whose ``tool_use_id`` is this
@@ -375,6 +378,10 @@ UNIT_USER_PROMPT = "user_prompt"
 UNIT_CLAUDE_MAIN = "claude_main_call"
 UNIT_SIDECHAIN = "sidechain_call"
 UNIT_ROUTED_MCP = "routed_mcp"
+# L7 (D-386): informational kind for llm_apply program/local credits. Like local_shadow it is NOT in
+# ALL_KINDS / ATTEMPTED_KINDS and ``units()`` yields it only with ``include_apply=True``: about fifteen
+# modules consume ``units()`` without filtering by kind, so a default row would change their denominators.
+UNIT_ROUTED_APPLY = "routed_apply"
 UNIT_DRAFT = "draft"
 UNIT_DIRECT = "direct"
 UNIT_ROUTED_EDIT = "routed_edit"
@@ -398,6 +405,7 @@ _LEVER_OF_KIND = {
     UNIT_CLAUDE_MAIN: "none",
     UNIT_SIDECHAIN: "agent_route",
     UNIT_ROUTED_MCP: "mcp_llm",
+    UNIT_ROUTED_APPLY: "llm_apply",
     UNIT_DRAFT: "drafts",
     UNIT_DIRECT: "direct",
     UNIT_ROUTED_EDIT: "llm_edit",
@@ -485,6 +493,9 @@ class Unit:
     # (M3) attaches one, so no unit counts as strict-used before then.
     verify: dict | None = None
 
+    program_replaced: int | None = None
+    local_replaced: int | None = None
+
     def to_dict(self) -> dict:
         out = {
             "unit_id": unit_id(self.session_id, self.kind, self.ts),
@@ -500,6 +511,8 @@ class Unit:
             "session_kind": self.session_kind,
             "session_kind_source": self.session_kind_source,
         }
+        if self.kind == UNIT_ROUTED_APPLY:
+            out.update(program_replaced=self.program_replaced or 0, local_replaced=self.local_replaced or 0)
         if self.verify is not None:  # the key appears only when set: other output is unchanged
             out["verify"] = self.verify
         return out
@@ -1592,8 +1605,10 @@ def build_sessions(days: int | None, root: Path | None = None,
                 turn.model = served.get("model") or "proxy-served"
             su.units.append(turn)
 
+    from llm_router import apply_credit
+
     def _add_assistant(su: SessionUnits, target_sid: str, obj: dict, records: list[dict], kind: str,
-                       edit_call_units: list[Unit], file_mcp_units: list[Unit]) -> None:
+                       edit_call_units: list[Unit], file_mcp_units: list[Unit], apply_calls: dict) -> None:
         message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
         msg_id = message.get("id") if isinstance(message.get("id"), str) else ""
         model = message.get("model") if isinstance(message.get("model"), str) else None
@@ -1605,6 +1620,16 @@ def build_sessions(days: int | None, root: Path | None = None,
             if tool_sessions is not None and isinstance(tu.get("id"), str):
                 tool_sessions[tu["id"]] = target_sid
             tool_input = tu.get("input") if isinstance(tu.get("input"), dict) else {}
+            if name == apply_credit.TOOL_NAME:
+                call = apply_calls.get(tu.get("id"), {})
+                program, local = apply_credit.counts(call)
+                su.units.append(Unit(
+                    kind=UNIT_ROUTED_APPLY, session_id=target_sid, ts=_ts_of(obj),
+                    program_replaced=program, local_replaced=local,
+                    outcome=OUTCOME_REDO if call.get("redo") else OUTCOME_USED if program or local else OUTCOME_UNKNOWN,
+                    signal="claude_finished" if call.get("redo") else "apply_credit" if "credit" in call else None,
+                ))
+                continue
             mcp_unit = Unit(
                 kind=UNIT_ROUTED_MCP, session_id=target_sid, ts=_ts_of(obj),
                 outcome=OUTCOME_UNKNOWN, model=_mcp_model(tu.get("id")),
@@ -1650,11 +1675,12 @@ def build_sessions(days: int | None, root: Path | None = None,
                     _count_message(su, target_sid, msg_id, model, ts, UNIT_SIDECHAIN, None)
                 continue  # no MCP call in it, so there is nothing for the folds below to add
             records = list(_iter_jsonl(path))
+            apply_calls = apply_credit.transcript(records)
             edit_call_units: list[Unit] = []
             file_mcp_units: list[Unit] = []
             for obj in records:
                 if obj.get("type") == "assistant":   # a sub-agent's user records are its brief and tool results
-                    _add_assistant(su, target_sid, obj, records, UNIT_SIDECHAIN, edit_call_units, file_mcp_units)
+                    _add_assistant(su, target_sid, obj, records, UNIT_SIDECHAIN, edit_call_units, file_mcp_units, apply_calls)
             sub_edit_calls.setdefault(target_sid, []).extend(edit_call_units)
             _judge_routed_mcp(su, records, file_mcp_units)
             index[str(path)] = {"sig": list(sig), **_subagent_extract(records)}
@@ -1675,6 +1701,7 @@ def build_sessions(days: int | None, root: Path | None = None,
         if is_child:
             su.folded_children.append(sid)
 
+        apply_calls = apply_credit.transcript(records)
         assistant_turns = [o for o in records if o.get("type") == "assistant"]
         skip_first_user = is_child  # dispatch prompt is not a human user_prompt
 
@@ -1695,7 +1722,7 @@ def build_sessions(days: int | None, root: Path | None = None,
                 su.units.append(Unit(kind=UNIT_USER_PROMPT, session_id=target_sid, ts=_ts_of(obj)))
             elif obj.get("type") == "assistant":
                 kind = UNIT_SIDECHAIN if is_child else UNIT_CLAUDE_MAIN
-                _add_assistant(su, target_sid, obj, records, kind, edit_call_units, file_mcp_units)
+                _add_assistant(su, target_sid, obj, records, kind, edit_call_units, file_mcp_units, apply_calls)
 
         _judge_routed_mcp(su, records, file_mcp_units)
 
@@ -1754,7 +1781,8 @@ def _judge_routed_mcp(su: SessionUnits, records: list[dict], units: list[Unit] |
         if obj.get("type") != "assistant":
             continue
         for tu in _assistant_tool_uses(obj):
-            if (tu.get("name") or "").startswith("mcp__llm_router__") and tu.get("id"):
+            name = tu.get("name") or ""
+            if name.startswith("mcp__llm_router__") and name != "mcp__llm_router__llm_apply" and tu.get("id"):
                 tool_use_ids.add(tu["id"])
 
     result_text_by_use_id: dict[str, str] = {}
@@ -1779,7 +1807,7 @@ def _judge_routed_mcp(su: SessionUnits, records: list[dict], units: list[Unit] |
             continue
         for tu in _assistant_tool_uses(obj):
             name = tu.get("name") or ""
-            if not name.startswith("mcp__llm_router__"):
+            if not name.startswith("mcp__llm_router__") or name == "mcp__llm_router__llm_apply":
                 continue
             if idx >= len(routed_units):
                 break
@@ -1812,8 +1840,9 @@ def _judge_routed_mcp(su: SessionUnits, records: list[dict], units: list[Unit] |
 def units(days: int | None = 30, session_id: str | None = None,
           root: Path | None = None, *, backfill: bool = False,
           verify_records: bool = False, subagents: bool = False,
-          tool_sessions: dict[str, str] | None = None) -> Iterator[dict]:
-    """One dict per classified unit. See the module docstring for the shape.
+          tool_sessions: dict[str, str] | None = None, include_apply: bool = False) -> Iterator[dict]:
+    """One dict per classified unit. ``include_apply=True`` also yields the informational
+    ``routed_apply`` units (llm_apply credits); every other caller never sees them. See the module docstring for the shape.
     ``backfill=True`` lets ``session_kind`` resolve from the backfill sidecar as a
     last resort (``session_kind_source == "backfill"``); see ``build_sessions``.
     ``verify_records=True`` attaches the ledger's verify records as ``verify`` (SHADOW,
@@ -1828,6 +1857,8 @@ def units(days: int | None = 30, session_id: str | None = None,
         su = sessions[sid]
         ordered = sorted(su.units, key=lambda u: (u.ts is None, u.ts if u.ts is not None else 0.0))
         for u in ordered:
+            if u.kind == UNIT_ROUTED_APPLY and not include_apply:
+                continue
             d = u.to_dict()
             if d["unit_id"] in verify:
                 d["verify"] = dict(verify[d["unit_id"]])

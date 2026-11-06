@@ -196,7 +196,7 @@ def _load_result(session_id: str) -> dict | None:
 
 def _progress(index: dict) -> tuple:
     """What a scan moves: the byte offsets of the files and of the proxy ledger, and the set of files."""
-    return (tuple(sorted((k, e.get("offset", 0)) for k, e in index["files"].items())),
+    return (tuple(sorted((k, e.get("offset", 0), "apply" in e) for k, e in index["files"].items())),
             index["proxy"].get("offset", 0), len(index["models"]))
 
 
@@ -235,10 +235,12 @@ def _scan_file(path: Path, entry: dict | None, models: list[str], deadline: floa
         size = path.stat().st_size
     except OSError:
         return entry or {"offset": 0, "head": "", "msgs": {}, "mcp": []}, True
+    from llm_router import apply_credit
+
     head = _head(path)
     seen = entry.get("offset") if entry else None
-    if not entry or entry.get("head") != head or not isinstance(seen, int) or size < seen:
-        entry = {"offset": 0, "head": head, "msgs": {}, "mcp": []}
+    if not entry or "apply" not in entry or entry.get("head") != head or not isinstance(seen, int) or size < seen:
+        entry = {"offset": 0, "head": head, "msgs": {}, "mcp": [], "apply": {}}
     msgs: dict[str, int] = entry["msgs"]
     mcp: list[str] = entry["mcp"]
     n = 0
@@ -252,12 +254,14 @@ def _scan_file(path: Path, entry: dict | None, models: list[str], deadline: floa
                 if not line.endswith(b"\n"):
                     break                                   # a partial last line: read whole next time
                 entry["offset"] += len(line)
-                if b'"type":"assistant"' not in line:
-                    continue
+                if b'"type":"assistant"' not in line and apply_credit.PREFIX.encode() not in line:
+                    continue                                # only assistant turns and llm_apply results matter
                 try:
                     obj = json.loads(line)
                 except ValueError:
                     continue
+                if isinstance(obj, dict):
+                    apply_credit.observe(entry["apply"], obj)
                 message = obj.get("message") if isinstance(obj, dict) and obj.get("type") == "assistant" else None
                 if not isinstance(message, dict):
                     continue
@@ -338,6 +342,9 @@ def transcript_figures(session_id: str, *, budget_s: float = BUDGET_S, root: Pat
             break
     if finished:
         finished = _scan_proxy(session_id, index["proxy"], deadline)
+    from llm_router import apply_credit
+
+    apply_calls: dict[str, dict] = {}
     seen: dict[str, str | None] = {}
     mcp_ids: list[str] = []
     for p in files:
@@ -347,6 +354,7 @@ def transcript_figures(session_id: str, *, budget_s: float = BUDGET_S, root: Pat
         for mid, slot in e["msgs"].items():
             seen.setdefault(mid, models[slot] if 0 <= slot < len(models) else None)
         mcp_ids.extend(e["mcp"])
+        apply_calls.update(e.get("apply", {}).get("calls", {}))
     served = set(index["proxy"].get("served") or ())
     claude = proxy = other = unclassified = 0
     for mid, model in seen.items():
@@ -360,6 +368,8 @@ def transcript_figures(session_id: str, *, budget_s: float = BUDGET_S, root: Pat
             other += 1
     out = {
         "complete": finished, "claude": claude, "proxy_served": proxy, "other_model": other,
+        "apply_program_replaced": sum(apply_credit.counts(c)[0] for c in apply_calls.values()),
+        "apply_local_replaced": sum(apply_credit.counts(c)[1] for c in apply_calls.values()),
         "unclassified": unclassified, "mcp_tool_use_ids": list(dict.fromkeys(mcp_ids)),
         "files": {"main": sum(1 for p in files if "subagents" not in p.parts),
                   "subagents": sum(1 for p in files if "subagents" in p.parts and "workflows" not in p.parts),
@@ -829,7 +839,8 @@ def compute(session_id: str, now: float | None = None, *, budget_s: float = BUDG
     now = time.time() if now is None else now
     prior = _load_result(session_id)
     stamp = prior.get("computed_at") if prior else None
-    if prior and prior.get("complete") and isinstance(stamp, (int, float)) and 0 <= now - stamp < FRESH_S:
+    if (prior and "apply_program_replaced" in prior and prior.get("complete")
+            and isinstance(stamp, (int, float)) and 0 <= now - stamp < FRESH_S):
         return prior
     t = _part("CHZ-FO-ROUTING-TRANSCRIPT", lambda: transcript_figures(session_id, budget_s=budget_s, root=root))
     mcp_ids = t["mcp_tool_use_ids"] if t else []
@@ -852,6 +863,8 @@ def compute(session_id: str, now: float | None = None, *, budget_s: float = BUDG
     result = {
         "v": SCHEMA, "session_id": session_id, "computed_at": now, "complete": complete,
         "claude": claude, "non_claude": non_claude,
+        "apply_program_replaced": t.get("apply_program_replaced", 0) if t else None,
+        "apply_local_replaced": t.get("apply_local_replaced", 0) if t else None,
         "total": None if non_claude is None or claude is None else claude + non_claude,
         "unclassified": t["unclassified"] if t else None,
         "by_source": None if not known else {

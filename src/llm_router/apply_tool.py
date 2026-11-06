@@ -495,6 +495,7 @@ def _local_repair(root, argv, files, task, details, repair):
                 repair.update(repair_check_rc=rc, repair_sandboxed=sandboxed)
                 details.append(f"Local repair check rc={rc}\n{tail}")
                 if rc == 0:
+                    repair["repair_files"] = sorted(map(str, changed))
                     repair["repair_passed"] = True
                     repair["repair_reason"] = "passed"
                     details.extend(_diff_summary(root, originals, changed))
@@ -540,6 +541,8 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
     started = time.monotonic()
     status = "REJECTED"
     n_blocks = n_files = 0
+    changed_files: set[str] = set()
+    repair_trigger = None
     check_ran = False
     sandboxed = False
     check_rc = None
@@ -578,6 +581,7 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
                     argv, _ = _check_argv(check, root)
                 else:
                     _write_batch(root, originals, changed, identities)
+                    changed_files.update(map(str, changed))
                     n_files = len(changed)
                     status = "APPLIED_NOT_CHECKED"
                     details.extend(_diff_summary(root, originals, changed))
@@ -598,11 +602,13 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
                             details.append(f"Check not run: {exc}")
                 repair_files = None
                 if status == "APPLIED_CHECK_FAILED":
+                    repair_trigger = "B"
                     repair_files = list(changed)
                     task = "make this check pass with minimal edits\n" + "\n".join(details) + f"\nCheck command: {check}"
                 elif validation and not parse_failed and blocks:
                     candidates = [(root / edit.file).resolve() for _, edit in blocks]
                     if all(path.is_relative_to(root) and path.is_file() for path in candidates):
+                        repair_trigger = "A"
                         repair_files = list(dict.fromkeys(candidates))
                         # Validated fields only: never forward the raw request (extra keys, text outside blocks).
                         shown = "\n\n".join(f"{kind} FILE: {e.file}\nFIND:\n{e.old_string}\nREPLACE:\n{e.new_string}"
@@ -618,7 +624,13 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
     except Exception as exc:
         details.append(str(exc))
     finally:
-        row = dict(ts=datetime.now(timezone.utc).isoformat(), status=status, n_blocks=n_blocks,
+        changed_files.update(repair.pop("repair_files", []))
+        program_replaced = (n_blocks + 1 if status == "APPLIED_AND_PASSED" or (
+            status == "REPAIRED_BY_LOCAL_AND_PASSED" and repair_trigger == "B") else 0)
+        local_replaced = int(status == "REPAIRED_BY_LOCAL_AND_PASSED")
+        credit = dict(program=program_replaced, local=local_replaced, files=sorted(changed_files))
+        row = dict(program_replaced=program_replaced, local_replaced=local_replaced,
+                   files=credit["files"], repair_trigger=repair_trigger, ts=datetime.now(timezone.utc).isoformat(), status=status, n_blocks=n_blocks,
                    n_files=n_files, check_ran=check_ran, check_rc=check_rc, sandboxed=sandboxed,
                    duration_s=round(time.monotonic() - started, 6),
                    source="local" if repair["repair_passed"] else "program", **repair)
@@ -632,4 +644,6 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
         details.append("Check rc=not run")
     if status in {"REJECTED", "APPLIED_CHECK_FAILED"}:
         details.append(_HANDOFF)
+    if enabled:
+        details.insert(0, "[llm_apply credit] " + json.dumps(credit))
     return "\n".join([status, *details])

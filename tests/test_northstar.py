@@ -885,3 +885,114 @@ def test_days_window_keeps_only_in_window_units_of_a_mixed_file(tmp_path):
     assert [u["signal"] for u in codex] == ["agent_route_codex_delegated"]
     for u in rows:
         assert datetime.fromisoformat(u["ts"]).timestamp() >= cutoff
+
+
+def _apply_records(credit=True, edit_turn=None, edit_file="/repo/a.py", edit_tool="Edit"):
+    sid, ts = SID_MAIN, 1_800_000_000
+    result = "APPLIED_AND_PASSED"
+    if credit is not False:
+        result += "\n[llm_apply credit] " + (json.dumps({"program": 3, "local": 1, "files": ["/repo/a.py"]})
+                                             if credit is True else credit)
+    records = [_assistant(sid, ts, tool_uses=[_tool_use("apply1", "mcp__llm_router__llm_apply")]),
+               _user(sid, "", ts + 1, [_tool_result("apply1", result)])]
+    for turn in range(1, 5):
+        uses = [_tool_use(f"edit{turn}", edit_tool,
+                          {"notebook_path" if edit_tool == "NotebookEdit" else "file_path": edit_file})] if turn == edit_turn else []
+        obj = _assistant(sid, ts + 2 * turn, text="Continuing the work", tool_uses=uses)
+        obj["message"]["id"] = f"after-{turn}"
+        records.append(obj)
+        # Split content blocks with the same message.id must not use up the three turns.
+        duplicate = _assistant(sid, ts + 2 * turn + 0.1, text="another block")
+        duplicate["message"]["id"] = f"after-{turn}"
+        records.append(duplicate)
+    return records
+
+
+def _apply_units(tmp_path, records, subagent=False, include_apply=True):
+    project = _project(tmp_path)
+    _write_jsonl(project / f"{SID_MAIN}.jsonl", [] if subagent else records)
+    if subagent:
+        _write_jsonl(project / SID_MAIN / "subagents" / "agent-credit.jsonl", records)
+    return list(ns.units(days=None, root=project.parent, subagents=subagent, include_apply=include_apply))
+
+
+@pytest.mark.parametrize("subagent", [False, True])
+def test_apply_unit_is_separate_and_credits_parse(tmp_path, subagent):
+    units = _apply_units(tmp_path, _apply_records(), subagent)
+    apply, = [u for u in units if u["kind"] == ns.UNIT_ROUTED_APPLY]
+    assert apply["lever"] == "llm_apply" and apply["outcome"] == ns.OUTCOME_USED
+    assert (apply["program_replaced"], apply["local_replaced"]) == (3, 1)
+    assert not any(u["kind"] == ns.UNIT_ROUTED_MCP for u in units)
+    assert all("program_replaced" not in u for u in units if u is not apply)
+    assert ns.UNIT_ROUTED_APPLY not in ns.ALL_KINDS and ns.UNIT_ROUTED_APPLY not in ns.ATTEMPTED_KINDS
+
+
+@pytest.mark.parametrize("subagent", [False, True])
+def test_default_units_never_yield_apply_units(tmp_path, subagent):
+    """Unfiltered consumers of units() (breaker, report, offload share) must not see program steps."""
+    hidden = _apply_units(tmp_path, _apply_records(), subagent, include_apply=False)
+    shown = _apply_units(tmp_path, _apply_records(), subagent)
+    assert not any(u["kind"] == ns.UNIT_ROUTED_APPLY for u in hidden)
+    assert [u for u in shown if u["kind"] != ns.UNIT_ROUTED_APPLY] == hidden   # nothing else changes
+    assert sum(u["kind"] == ns.UNIT_ROUTED_APPLY for u in shown) == 1          # positive control
+
+
+@pytest.mark.parametrize("subagent", [False, True])
+@pytest.mark.parametrize("tool", ["Edit", "Write", "MultiEdit", "NotebookEdit"])
+@pytest.mark.parametrize("turn", [1, 2, 3])
+def test_apply_claude_finished_exclusion_with_positive_controls(tmp_path, subagent, tool, turn):
+    def judge(records):
+        return next(u for u in _apply_units(tmp_path, records, subagent) if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    excluded = judge(_apply_records(edit_turn=turn, edit_tool=tool))
+    assert (excluded["program_replaced"], excluded["local_replaced"], excluded["outcome"]) == (0, 0, ns.OUTCOME_REDO)
+    assert excluded["signal"] == "claude_finished"
+    for records in (_apply_records(edit_turn=turn, edit_file="/repo/other.py", edit_tool=tool),
+                    _apply_records(edit_turn=4, edit_tool=tool)):
+        kept = judge(records)
+        assert (kept["program_replaced"], kept["local_replaced"], kept["outcome"]) == (3, 1, ns.OUTCOME_USED)
+
+
+@pytest.mark.parametrize("credit", [False, "{bad json}", '{"program": true, "local": 1, "files": []}'])
+def test_apply_missing_or_invalid_credit_is_unknown(tmp_path, credit):
+    unit = next(u for u in _apply_units(tmp_path, _apply_records(credit)) if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert (unit["program_replaced"], unit["local_replaced"], unit["outcome"]) == (0, 0, ns.OUTCOME_UNKNOWN)
+    control = next(u for u in _apply_units(tmp_path, _apply_records()) if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert control["program_replaced"] == 3
+
+
+@pytest.mark.parametrize("subagent", [False, True])
+def test_apply_does_not_shift_following_mcp_reuse(tmp_path, subagent):
+    records = _apply_records()[:2]
+    text = "The amber lantern casts a warm glow across the quiet garden path at dusk."
+    ts = 1_800_000_010
+    records += [_assistant(SID_MAIN, ts, tool_uses=[_tool_use("model1", "mcp__llm_router__llm")]),
+                _user(SID_MAIN, "", ts + 1, [_tool_result("model1", text)]),
+                _assistant(SID_MAIN, ts + 2, text=text)]
+    units = _apply_units(tmp_path, records, subagent)
+    routed, = [u for u in units if u["kind"] == ns.UNIT_ROUTED_MCP]
+    assert routed["outcome"] == ns.OUTCOME_USED and routed["signal"] == "tool_result_reused"
+    apply, = [u for u in units if u["kind"] == ns.UNIT_ROUTED_APPLY]
+    assert apply["program_replaced"] == 3 and apply["signal"] == "apply_credit"
+
+
+def test_apply_exclusion_counts_only_distinct_message_ids(tmp_path):
+    records = _apply_records(edit_turn=3)
+    # Records without message ids cannot consume slots in the distinct-id window.
+    records[2:2] = [_assistant(SID_MAIN, 1_800_000_001.5, text="legacy record without id") for _ in range(4)]
+    excluded = next(u for u in _apply_units(tmp_path, records) if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert (excluded["program_replaced"], excluded["local_replaced"], excluded["outcome"]) == (0, 0, ns.OUTCOME_REDO)
+    control = next(u for u in _apply_units(tmp_path, _apply_records(edit_turn=4)) if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert (control["program_replaced"], control["local_replaced"]) == (3, 1)
+
+
+def test_apply_units_leave_northstar_report_denominator_unchanged(tmp_path):
+    records = _apply_records()
+    _apply_units(tmp_path, records)
+    before = ns.report(days=None, root=_project(tmp_path).parent)
+    # Remove just the apply tool_use, retaining the same assistant calls.
+    records[0]["message"]["content"] = []
+    _apply_units(tmp_path, records)
+    after = ns.report(days=None, root=_project(tmp_path).parent)
+    before.pop("generated_at")
+    after.pop("generated_at")
+    assert before == after
