@@ -875,3 +875,11 @@ def test_backend_lost_after_probe_restores_and_runs_nothing(repo, monkeypatch, r
     assert len(runs) == 1  # only the initial check ran; local edits never ran unsandboxed
     assert (repo / "a.py").read_text() == "value = 2\n"
 
+
+def test_successful_overwrite_records_no_cleanup_failopen(repo, monkeypatch):
+    codes = []
+    monkeypatch.setattr(apply, "_failopen", lambda code, exc: codes.append(code))
+    assert call(repo).startswith("APPLIED")
+    assert (repo / "a.py").read_text() == "value = 2\n"
+    assert "CHZ-FO-APPLY-TEMP-CLEANUP" not in codes
+    assert not [p for p in repo.iterdir() if p.name.startswith(".llm-apply-")]

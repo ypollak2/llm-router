@@ -155,6 +155,7 @@ def _write_batch(root, originals, changed, identities) -> None:
     staged, backups = {}, {}
     parents = {root: os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)}
     written, directories = [], []
+    consumed = set()  # staged temps that os.replace moved into place
     incomplete = False
 
     def parent_fd(path):
@@ -219,6 +220,7 @@ def _write_batch(root, originals, changed, identities) -> None:
                     raise OSError(f"{path}: file changed since validation")
                 _before_replace(path)
                 os.replace(temporary_path.name, path.name, src_dir_fd=fd, dst_dir_fd=fd)
+                consumed.add(path)
             written.append(path)
             try:
                 resolved = path.resolve(strict=True)
@@ -260,7 +262,8 @@ def _write_batch(root, originals, changed, identities) -> None:
                           + ", ".join(map(str, backups.values()))) from exc
         raise
     finally:
-        for temporary_path in (*staged.values(), *(() if incomplete else backups.values())):
+        leftovers = [t for path, t in staged.items() if path not in consumed]
+        for temporary_path in (*leftovers, *(() if incomplete else backups.values())):
             try:
                 os.unlink(temporary_path.name, dir_fd=parents[temporary_path.parent])
             except OSError as exc:
