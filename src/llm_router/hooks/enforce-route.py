@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 26
+# llm_router-hook-version: 27
 """PreToolUse[*] hook — enforce routing compliance.
 
 When auto-route.py issues a ⚡ MANDATORY ROUTE directive, it writes a
@@ -17,8 +17,8 @@ This hook fires before every tool call and:
      (Supports MCP server routing, e.g. mcp__obsidian__create_note)
   4. If the tool is NOT in the task-specific blocklist → allow unconditionally.
      This covers: ToolSearch, all mcp__* tools, Agent (schema load), etc.
-     For code tasks: Read/Glob/Grep/LS are also allowed (needed for editing).
-     For Q&A tasks: Read/Glob/Grep/LS are blocked (Claude shouldn't self-answer).
+     Read/Glob/Grep/LS and read-only Bash are allowed for local context
+     (read-only Bash: strict excepted, D-396).
   5. Detect coding sessions early: Mark as "coding" on first Read/Glob/Grep/LS/Edit/Write
      → Downgrade enforcement to soft for rest of session (allows legitimate investigation).
   6. Track violations and auto-pivot: Counter increments on each blocked tool call.
@@ -2145,39 +2145,18 @@ def _main() -> None:
         _hold_event("released", session_id, tool_use_id=_tuid, how="expected_server", task=task_type)
         sys.exit(0)
 
-    # ── v13: Strict routing-first enforcement ────────────────────────────────
-    # ALL native tools (Read/Glob/Grep/Edit/Write/Bash) are blocked until
-    # an llm_* tool is called. This prevents the model from bypassing routing
-    # by jumping straight to file operations on action-oriented prompts.
-    #
-    # Previous behavior (preserved as Option 1 fallback):
-    #   Read/Glob/Grep/LS were unconditionally allowed.
-    #   Edit/Write/MultiEdit marked session as "coding" and cleared routing.
-    #   This let the model bypass routing entirely for file-editing prompts.
-    #
-    # ToolSearch and mcp__* tools are still allowed (handled earlier via
-    # _block_tools_for check). Only native file/shell tools are blocked.
-
-    # Audit §2.8.1/§2.8.2: never block genuinely NON-GENERATIVE operations, in
-    # any blocking mode. Read-only Bash (ls, cat, git status) and the LS
-    # directory listing produce nothing a routed model could generate, so
-    # blocking them is pure drift — and it is what let one misclassification
-    # lock every subsequent tool in the audit (the ls-then-Write chain). These
-    # pass independently of the pending directive, so a stuck lock can never
-    # trap inspection work. (Q&A read tools are now allowed unconditionally via
-    # the empty _QA_ONLY_BLOCK_TOOLS — INV-ROUTE-001/002 — so this escape is only
-    # still needed for read-only Bash on non-Q&A tasks; strict opts out of it.)
-    if not _strict and task_type not in _QA_TASK_TYPES:
-        if tool_name == "LS":
+    # D-396: inspection gathers context that no routed completion can fetch,
+    # for Q&A tasks too (every blocked call in the 11-03..11-06 ledger was
+    # released by the retry trap). Strict keeps its no-Bash-exception rule.
+    # This does not satisfy or clear the pending route for the prose answer.
+    if tool_name in {"Read", "Glob", "Grep", "LS"}:
+        sys.exit(0)
+    if tool_name == "Bash" and not _strict:
+        command = hook_input.get("tool_input", {}).get("command", "")
+        if _is_readonly_bash(command):
             _log_violation(session_id, tool_name, expected_tool,
-                           outcome="ALLOWED(nongenerative)")
+                           outcome="ALLOWED(readonly_bash)")
             sys.exit(0)
-        if tool_name == "Bash":
-            _ng_cmd = hook_input.get("tool_input", {}).get("command", "")
-            if _is_readonly_bash(_ng_cmd):
-                _log_violation(session_id, tool_name, expected_tool,
-                               outcome="ALLOWED(readonly_bash)")
-                sys.exit(0)
 
     # In hard/strict mode, block remaining GENERATIVE native tools (Bash/Edit/
     # Write) until routing is satisfied. Read-only tools are NOT blocked
@@ -2196,19 +2175,6 @@ def _main() -> None:
         if tool_name in {"Edit", "Write", "MultiEdit"}:
             # Write tools are blocked until routing is satisfied (all task types)
             pass  # Fall through to violation handling
-        elif tool_name in {"Read", "Glob", "Grep", "LS"}:
-            sys.exit(0)  # Allow read-only context-gathering for ALL task types
-        elif tool_name == "Bash" and task_type not in _QA_TASK_TYPES:
-            # Code/non-Q&A tasks: allow read-only Bash (find, ls, git log, gh pr view, ...).
-            # Investigation often needs shell; routing intent is preserved because
-            # writes (rm, git push, npm install, etc.) still hit the violation path.
-            # Strict mode disables this exception — every Bash counts as a bypass.
-            bash_command = hook_input.get("tool_input", {}).get("command", "")
-            if not _strict and _is_readonly_bash(bash_command):
-                _log_violation(session_id, tool_name, expected_tool,
-                               outcome="ALLOWED(readonly_bash)")
-                sys.exit(0)
-            # else: fall through to violation handling (write/unknown Bash)
         elif tool_name not in _block_tools_for(task_type):
             sys.exit(0)  # Allow non-blocked tools
         # else: fall through to violation handling
