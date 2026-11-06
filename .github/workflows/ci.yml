@@ -361,7 +361,7 @@ jobs:
         # Deselect macOS-only checks; every selected sandbox test must run.
         # A controlling terminal supplies the /dev/tty positive control.
         run: |
-          script -q -e -c "uv run pytest tests/test_check_sandbox.py tests/test_apply_tool.py -k 'not test_macos_' -rs --junitxml=linux-sandbox-junit.xml" /dev/null
+          script -q -e -c "uv run pytest tests/test_check_sandbox.py tests/test_apply_tool.py tests/test_local_setup.py -k 'not test_macos_' -rs --junitxml=linux-sandbox-junit.xml" /dev/null
       - name: Fail if any sandbox test was skipped
         if: always()
         run: |
@@ -369,8 +369,10 @@ jobs:
           import xml.etree.ElementTree as ET
           root = ET.parse("linux-sandbox-junit.xml").getroot()
           cases = [case for case in root.iter("testcase")
-                   if case.get("classname", "").endswith("test_check_sandbox")]
+                   if case.get("classname", "").endswith("test_check_sandbox")
+                   or case.get("name") == "test_machine_check_real_sandbox"]
           assert cases, "No sandbox test results found"
+          assert any(case.get("name") == "test_machine_check_real_sandbox" for case in cases), "No machine-check sandbox result"
           skipped = [case.get("name") for case in cases if case.find("skipped") is not None]
           assert not skipped, f"Sandbox tests skipped: {skipped}"
           PY

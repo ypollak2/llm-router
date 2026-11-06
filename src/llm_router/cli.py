@@ -37,6 +37,7 @@ Usage:
     llm-router map [--json]           — the one resource map: seats, local models, keys, quota, priority
     llm-router mode [advise|route]    — routing authority: route (default) or advise (the proxy forwards the model you asked for and only logs its proposal)
     llm-router calibrate [--models M] [--allow-paid] — measure per-model capability (local-only by default)
+    llm-router local setup [--model M] [--status] — check this machine for local repair (never pulls a model)
     llm-router local-check [run|status|explain|enable <lane>|disable <lane>] [--dry-run] [--no-judge] [--yes] [--model M] — measure YOUR local model on a public benchmark (plan screen first; --dry-run makes no model call)
     llm-router eligibility record --prereg DIR [--apply] — record a pre-registered text-job verdict (dry run unless --apply)
     llm-router resolve --tier T [--needs tools,vision] — what the resolver would pick (inspection only)
@@ -915,6 +916,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "explain-dashboard",
         "judge",
         "run",
+        "local",
         "local-check",
     }
 )
@@ -925,7 +927,7 @@ _HELP_FLAGS = ("-h", "--help")
 # position (argparse, or an explicit check over all args).
 _OWN_HELP_ANYWHERE = frozenset({
     "audit", "calibrate", "cp", "dev-refresh", "discover", "eligibility", "gc", "install", "inventory", "invoice",
-    "judge", "kpi", "last", "learn", "local-check", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
+    "judge", "kpi", "last", "learn", "local", "local-check", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
     "proxy", "redo-label", "redo-sample", "redo-score",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
     "statusline", "team-sync", "test-delta", "verify", "welcome", "why",
@@ -1172,6 +1174,9 @@ def main() -> None:
         # Short per-model capability probes; local-only unless --allow-paid.
         from llm_router.commands.calibrate import cmd_calibrate
         sys.exit(cmd_calibrate(args[1:]))
+    elif args and args[0] == "local":
+        from llm_router.commands.local_setup import cmd_local
+        sys.exit(cmd_local(args[1:]))
     elif args and args[0] == "local-check":
         # Measure the user's own local model on the bundled public benchmark (LC-6).
         from llm_router.commands.local_check import cmd_local_check

@@ -321,9 +321,13 @@ def effective_text_job_lane(model: str, job: str, current_digest: str | None, no
 
 def record_competence(
     model: str, task_type: str, lanes: Mapping[str, Mapping[str, Any]],
-    *, path: Path | None = None,
+    *, path: Path | None = None, strict: bool = False,
 ) -> bool:
     """Merge validated competence lanes, preserving fitness and unrelated entries.
+
+    With ``strict=True``, only a missing file starts an empty store; other read
+    or parse errors raise inside the lock before any replacement. The default
+    retains recovery from unreadable or malformed stores for existing callers.
 
     ``text_job`` (F124) is keyed by job (``eligibility.TEXT_JOBS``) instead of tier, and its
     lane is graded ``passed``/``failed`` by ``eligibility.grade_text_job`` (D-241) with the
@@ -332,11 +336,17 @@ def record_competence(
     touch the pre-registered ``text_job`` lanes; a lane written without ``attempts`` gets the
     previous lane's count plus one (1 if none).
     """
-    if task_type not in ("qa", "tech_op", "code", "text_job", _LOCAL_KEY):
+    if task_type not in ("qa", "tech_op", "code", "text_job", _LOCAL_KEY, "apply_repair"):
         raise ValueError("invalid task_type")
     if not isinstance(lanes, Mapping):
         raise ValueError("lanes must be a mapping")
     for tier, lane in lanes.items():
+        if task_type == "apply_repair":
+            from llm_router.local_setup import validate_record
+            if tier != "machine":
+                raise ValueError("invalid apply_repair lane")
+            validate_record(model, lane)
+            continue
         if task_type in ("text_job", _LOCAL_KEY):
             _check_text_job_lane(tier, lane)
             if task_type == _LOCAL_KEY and lane.get("source") != "local_check":
@@ -366,9 +376,15 @@ def record_competence(
             raise OSError("eligibility lock unavailable")
         try:
             data = json.loads(target.read_text())
+        except FileNotFoundError:
+            data = {}
         except (OSError, ValueError):
+            if strict:
+                raise
             data = {}
         if not isinstance(data, dict):
+            if strict:
+                raise ValueError("eligibility store must be a JSON object")
             data = {}
         entry = data.get(model)
         entry = entry if isinstance(entry, dict) else {}

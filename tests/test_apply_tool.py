@@ -596,6 +596,13 @@ def test_ledger_open_failure_rejects_before_any_writes(repo, monkeypatch):
 @pytest.fixture
 def repair_setup(repo, monkeypatch):
     from llm_router import zero_claude_edit as local
+    from llm_router import local_setup
+    from llm_router.resolver import eligibility_store
+    monkeypatch.setattr(local_setup, "inventory", lambda: [{"name": "test-local", "digest": "test-digest"}])
+    eligibility_store.record_competence("test-local", "apply_repair", {"machine": {
+        "model": "test-local", "endpoint": local_setup.repair_endpoint(), "digest": "sha256:test-digest", "limit_s": 120,
+        "n": 3, "passed_n": 3, "max_s": 1, "ts": 1, "sandbox": True, "platform": "test",
+    }})
     events = []
     runner(repo, monkeypatch, "")
 
@@ -607,7 +614,8 @@ def repair_setup(repo, monkeypatch):
         events.append("probe")
         return argv, lambda: events.append("cleanup")
 
-    def generate(task, contents, model, *, deadline_s):
+    def generate(task, contents, model, *, deadline_s, allow_model_swap):
+        assert allow_model_swap is False
         assert events == ["probe", "cleanup"]
         assert model == "test-local" and deadline_s > time.monotonic()
         assert "a.py" in contents
@@ -666,7 +674,7 @@ def test_failed_local_repair_restores(repo, monkeypatch, repair_setup, failure, 
             return 7, "check: test\nfailed", require_sandbox
         monkeypatch.setattr(apply, "_run_check", check)
     else:
-        def generate(task, contents, model, *, deadline_s):
+        def generate(task, contents, model, *, deadline_s, allow_model_swap):
             if failure == "exception":
                 raise TimeoutError("model timeout")
             if failure == "no edits":
@@ -799,7 +807,7 @@ def test_restore_survives_non_utf8_left_by_failed_check(repo, monkeypatch, repai
 
 
 def _plain_generate(monkeypatch, local):
-    monkeypatch.setattr(local, "generate_edits", lambda task, contents, model, *, deadline_s: (
+    monkeypatch.setattr(local, "generate_edits", lambda task, contents, model, *, deadline_s, allow_model_swap: (
         {"a.py": "value = 3\n"}, [apply.EditInstruction("a.py", contents["a.py"].strip(), "value = 3")], None))
 
 

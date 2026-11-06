@@ -296,8 +296,11 @@ def call_ollama(
     prompt: str, model: str, timeout: int = 4,
     history: list[dict] | None = None, system_prompt: str | None = None,
     format: dict | None = None, keep_alive: int | str | None = None,
+    *, allow_model_swap: bool = True,
 ) -> str | None:
     """Call Ollama's /api/chat endpoint. Returns response text or None.
+
+    ``allow_model_swap=False`` keeps repair on its machine-qualified model.
 
     ``keep_alive``: sent as Ollama's top-level ``keep_alive`` when not None
     (-1 = never unload). Opt-in rather than a default so a caller that talks to
@@ -326,7 +329,8 @@ def call_ollama(
         from llm_router.local_context_guard import ContextOverflow, check_overflow
         from llm_router.pack_overflow import PayloadPack
         pack = PayloadPack(payload, num_ctx=_local_num_ctx(model), base_url=ollama_url,
-                           model=model, site="hooks.direct_executor.call_ollama")
+                           model=model, site="hooks.direct_executor.call_ollama",
+                           allow_model_swap=allow_model_swap)
         payload = pack.trim_to()
         # A bigger-window swap changes the model; later code (truncation check) must see it.
         model = pack.model
@@ -409,7 +413,8 @@ def call_ollama(
             # The retry gets what is left of this call's budget, not a fresh one.
             remaining = max(1, int(deadline - time.monotonic()))
             return call_ollama(prompt, model, remaining, history=history,
-                               system_prompt=system_prompt, keep_alive=keep_alive)
+                               system_prompt=system_prompt, keep_alive=keep_alive,
+                               allow_model_swap=allow_model_swap)
         if not parts:
             _call_failure("ollama", model, _failure_reason(exc, timeout))
             return None, {}

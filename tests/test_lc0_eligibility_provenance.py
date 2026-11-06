@@ -46,6 +46,29 @@ def test_backcompat_prereg_and_other_entries(tmp_path):
     assert after[MODEL] == data[MODEL] and after["qwen3.8:fx"] == data["qwen3.8:fx"]
 
 
+@pytest.mark.parametrize("failure", ["permission", "json", "non_object"])
+def test_existing_local_check_writer_keeps_non_strict_recovery(tmp_path, monkeypatch, failure):
+    from pathlib import Path
+
+    target, _ = _owner_style_file(tmp_path)
+    real_read = Path.read_text
+
+    def read(path, *args, **kwargs):
+        if path == target:
+            if failure == "permission":
+                raise PermissionError("injected denial")
+            return "{broken" if failure == "json" else "[]"
+        return real_read(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", read)
+        assert store.record_local_check(MODEL, {"commit_message": PASS}, PROV,
+                                        path=target) == {"commit_message": WRITTEN}
+    after = json.loads(target.read_text())
+    assert set(after) == {MODEL}
+    assert after[MODEL]["text_job_local"]["commit_message"]["grade"] == "passed"
+
+
 def test_local_check_record_roundtrip_and_perms(tmp_path):
     t = tmp_path / "e.json"
     rep_ = store.record_local_check(MODEL, {"commit_message": PASS, "pr_description": PASS},
