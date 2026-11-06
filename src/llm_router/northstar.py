@@ -1606,6 +1606,7 @@ def build_sessions(days: int | None, root: Path | None = None,
             su.units.append(turn)
 
     from llm_router import apply_credit
+    apply_units_by_id: dict[str, Unit] = {}   # one unit per llm_apply tool_use id across every transcript
 
     def _add_assistant(su: SessionUnits, target_sid: str, obj: dict, records: list[dict], kind: str,
                        edit_call_units: list[Unit], file_mcp_units: list[Unit], apply_calls: dict) -> None:
@@ -1623,12 +1624,20 @@ def build_sessions(days: int | None, root: Path | None = None,
             if name == apply_credit.TOOL_NAME:
                 call = apply_calls.get(tu.get("id"), {})
                 program, local = apply_credit.counts(call)
+                seen = apply_units_by_id.get(tu.get("id")) if isinstance(tu.get("id"), str) else None
+                if seen is not None:   # a replayed record: never a second credit, and a redo in any copy wins
+                    if call.get("redo"):
+                        seen.program_replaced = seen.local_replaced = 0
+                        seen.outcome, seen.signal = OUTCOME_REDO, "claude_finished"
+                    continue
                 su.units.append(Unit(
                     kind=UNIT_ROUTED_APPLY, session_id=target_sid, ts=_ts_of(obj),
                     program_replaced=program, local_replaced=local,
                     outcome=OUTCOME_REDO if call.get("redo") else OUTCOME_USED if program or local else OUTCOME_UNKNOWN,
                     signal="claude_finished" if call.get("redo") else "apply_credit" if "credit" in call else None,
                 ))
+                if isinstance(tu.get("id"), str):
+                    apply_units_by_id[tu["id"]] = su.units[-1]
                 continue
             mcp_unit = Unit(
                 kind=UNIT_ROUTED_MCP, session_id=target_sid, ts=_ts_of(obj),

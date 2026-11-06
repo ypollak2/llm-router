@@ -6,10 +6,16 @@ has its own state: a sibling agent's edits cannot erase this call's credit.
 from __future__ import annotations
 
 import json
+import os
 
 TOOL_NAME = "mcp__llm_router__llm_apply"
 PREFIX = "[llm_apply credit] "
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+
+def _norm(path: str) -> str:
+    """One spelling per file: ``/repo/./a.py``, ``/repo//a.py`` and symlinked prefixes compare equal."""
+    return os.path.realpath(path)
 
 
 def _credit(text: str) -> dict | None:
@@ -40,17 +46,25 @@ def observe(state: dict, obj: dict) -> None:
         mid = message.get("id")
         edits = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"
                  and b.get("name") in EDIT_TOOLS]
-        for call in state.setdefault("calls", {}).values():
-            if "credit" not in call or not isinstance(mid, str) or not mid:
-                continue
+        calls = state.setdefault("calls", {})
+        still_open = []
+        for cid in state.get("open", []):           # only calls whose 3-message window is still open
+            call = calls[cid]
             turns = call["turns"]
-            if mid not in turns and len(turns) < 3:
-                turns.append(mid)
-            if mid in turns:
-                for edit in edits:
-                    args = edit.get("input")
-                    if isinstance(args, dict) and (args.get("file_path") or args.get("notebook_path")) in call["credit"]["files"]:
-                        call["redo"] = True
+            if isinstance(mid, str) and mid:
+                if mid not in turns and len(turns) < 3:
+                    turns.append(mid)
+                if mid in turns:
+                    for edit in edits:
+                        args = edit.get("input")
+                        target = args.get("file_path") or args.get("notebook_path") if isinstance(args, dict) else None
+                        if isinstance(target, str) and _norm(target) in call["credit"]["files"]:
+                            call["redo"] = True
+                elif len(turns) >= 3:
+                    continue                          # a 4th message: the window is closed for good
+            if not call.get("redo"):
+                still_open.append(cid)
+        state["open"] = still_open
         for b in content:
             if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == TOOL_NAME and b.get("id"):
                 state["calls"].setdefault(b["id"], {})
@@ -67,7 +81,23 @@ def observe(state: dict, obj: dict) -> None:
                 if isinstance(p, dict) and isinstance(p.get("text"), str))
             credit = _credit(text)
             if credit is not None:
+                credit["files"] = sorted({_norm(p) for p in credit["files"]})
                 call.update(credit=credit, turns=[], redo=False)
+                state.setdefault("open", []).append(b.get("tool_use_id"))
+
+
+def merge(into: dict, calls: dict) -> None:
+    """Fold one transcript's calls into ``into`` by tool_use id. A call replayed in several
+    transcripts (resume, sub-agent copy) counts once, and a redo seen in ANY copy zeroes it."""
+    for cid, call in calls.items():
+        have = into.get(cid)
+        if have is None:
+            into[cid] = dict(call)
+            continue
+        if "credit" not in have and "credit" in call:
+            have.update(credit=call["credit"], turns=list(call.get("turns", [])))
+        if call.get("redo"):
+            have["redo"] = True
 
 
 def counts(call: dict) -> tuple[int, int]:

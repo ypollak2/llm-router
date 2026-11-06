@@ -354,7 +354,7 @@ def transcript_figures(session_id: str, *, budget_s: float = BUDGET_S, root: Pat
         for mid, slot in e["msgs"].items():
             seen.setdefault(mid, models[slot] if 0 <= slot < len(models) else None)
         mcp_ids.extend(e["mcp"])
-        apply_calls.update(e.get("apply", {}).get("calls", {}))
+        apply_credit.merge(apply_calls, e.get("apply", {}).get("calls", {}))
     served = set(index["proxy"].get("served") or ())
     claude = proxy = other = unclassified = 0
     for mid, model in seen.items():

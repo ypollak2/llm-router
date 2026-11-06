@@ -1232,3 +1232,14 @@ def test_apply_counts_migrate_pre_credit_session_cache(env):
     migrated = sr.compute(SID, NOW + 1)
     assert (migrated["apply_program_replaced"], migrated["apply_local_replaced"]) == (3, 1)
     assert "apply" in sr._load_index(SID)["files"][str(path)]
+
+
+@pytest.mark.parametrize("sub_id, expected", [("apply1", (0, 0)), ("apply2", (3, 1))])
+def test_apply_session_replay_cannot_restore_a_redone_call(env, sub_id, expected):
+    """A sub-agent copy of a call that Claude redid in the main transcript must not bring its credit back;
+    a different call in the sub-agent (control) keeps its own credit."""
+    _home, projects, _codex = env
+    _write(projects / "-p" / f"{SID}.jsonl", *_apply_lines(), _edit_line("follow-1", "/repo/a.py"))
+    _write(projects / "-p" / SID / "subagents" / "agent-copy.jsonl", *_apply_lines(sub_id))
+    r = sr.compute(SID, NOW)
+    assert (r["apply_program_replaced"], r["apply_local_replaced"]) == expected

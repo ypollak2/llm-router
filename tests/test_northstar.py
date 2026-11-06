@@ -996,3 +996,64 @@ def test_apply_units_leave_northstar_report_denominator_unchanged(tmp_path):
     before.pop("generated_at")
     after.pop("generated_at")
     assert before == after
+
+
+@pytest.mark.parametrize("spelling", ["/repo/./a.py", "/repo//a.py", "/repo/sub/../a.py"])
+def test_apply_exclusion_survives_path_spelling(tmp_path, spelling):
+    redo = next(u for u in _apply_units(tmp_path, _apply_records(edit_turn=1, edit_file=spelling))
+                if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert (redo["program_replaced"], redo["local_replaced"], redo["outcome"]) == (0, 0, ns.OUTCOME_REDO)
+    control = next(u for u in _apply_units(tmp_path, _apply_records(edit_turn=1, edit_file="/repo/./b.py"))
+                   if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert (control["program_replaced"], control["local_replaced"]) == (3, 1)
+
+
+def _apply_main_and_sub(tmp_path, main, sub):
+    project = _project(tmp_path)
+    _write_jsonl(project / f"{SID_MAIN}.jsonl", main)
+    _write_jsonl(project / SID_MAIN / "subagents" / "agent-credit.jsonl", sub)
+    return [u for u in ns.units(days=None, root=project.parent, subagents=True, include_apply=True)
+            if u["kind"] == ns.UNIT_ROUTED_APPLY]
+
+
+def _renamed(records, new_id):
+    out = json.loads(json.dumps(records).replace('"apply1"', json.dumps(new_id)))
+    for obj in out:   # distinct assistant message ids so the copy is a different call, not a replay
+        if obj.get("type") == "assistant" and obj["message"].get("id"):
+            obj["message"]["id"] = obj["message"]["id"] + "-" + new_id
+    return out
+
+
+def test_apply_replayed_record_counts_once(tmp_path):
+    same = _apply_records()
+    twice = _apply_main_and_sub(tmp_path, same + same, [])
+    assert len(twice) == 1 and twice[0]["program_replaced"] == 3            # repeated in one transcript
+    copied = _apply_main_and_sub(tmp_path, same, same)
+    assert sum(u["program_replaced"] for u in copied) == 3 and len(copied) == 1   # main + sub-agent copy
+    distinct = _apply_main_and_sub(tmp_path, same, _renamed(same, "apply2"))
+    assert sum(u["program_replaced"] for u in distinct) == 6                   # positive control
+
+
+@pytest.mark.parametrize("redo_in", ["main", "sub"])
+def test_apply_redo_in_any_copy_zeroes_the_call(tmp_path, redo_in):
+    clean, redone = _apply_records(), _apply_records(edit_turn=1)
+    main, sub = (redone, clean) if redo_in == "main" else (clean, redone)
+    units = _apply_main_and_sub(tmp_path, main, sub)
+    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(0, 0)]
+    control = _apply_main_and_sub(tmp_path, clean, clean)
+    assert [(u["program_replaced"], u["local_replaced"]) for u in control] == [(3, 1)]
+
+
+def test_apply_closed_windows_leave_the_open_list():
+    """Scan cost: a call whose three-message window has closed is never revisited."""
+    from llm_router import apply_credit
+    state: dict = {}
+    for i in range(200):
+        for obj in _renamed(_apply_records(), f"apply-{i}"):
+            apply_credit.observe(state, obj)
+    assert len(state["calls"]) == 200 and state["open"] == []
+    assert sum(apply_credit.counts(c)[0] for c in state["calls"].values()) == 600   # credits kept
+    fresh: dict = {}
+    for obj in _apply_records()[:3]:   # the call, its result, one following message: still open
+        apply_credit.observe(fresh, obj)
+    assert fresh["open"] == ["apply1"]                                       # positive control
