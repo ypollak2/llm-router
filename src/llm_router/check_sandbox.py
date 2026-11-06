@@ -54,29 +54,60 @@ def _runtime_grant(path):
     return str(path)
 
 
-def _interpreter_dirs(interpreter):
+def _inside(path, root):
+    return root is not None and (path == root or root in path.parents)
+
+
+def _is_runtime_prefix(prefix):
+    """True when an existing directory is shaped like a Python or Node install."""
+    return ((prefix / "pyvenv.cfg").is_file() or any(prefix.glob("lib/python3*/os.py"))
+            or (prefix / "bin/node").is_file() or (prefix / "lib/node_modules").is_dir())
+
+
+def _grant(path, root, untrusted, prefix=None):
+    """Grant a runtime dir; repository-derived grants outside ROOT must be real installs.
+
+    A repository controls its own symlink targets, shebang lines and pyvenv.cfg text,
+    so any of them can name an arbitrary existing directory (for example ~/.ssh).
+    """
+    path = Path(_path(path))
+    if untrusted and not _inside(path, root):
+        prefix = Path(_path(prefix if prefix is not None else path))
+        if not _is_runtime_prefix(prefix):
+            raise SandboxUnavailable(f"repository names a non-runtime dir: {path}")
+    return _runtime_grant(path)
+
+
+def _interpreter_dirs(interpreter, root=None, untrusted=False):
     """Inspect installation metadata without ever executing the interpreter."""
     original = Path(os.path.abspath(interpreter))
     resolved = Path(_path(original))
     for candidate in (original, resolved):
-        root = candidate.parent.parent
-        config = root / "pyvenv.cfg"
+        venv = candidate.parent.parent
+        config = venv / "pyvenv.cfg"
         if config.is_file():
             for line in config.read_text().splitlines():
                 key, sep, value = line.partition("=")
                 if sep and key.strip() == "home" and value.strip():
-                    return {_runtime_grant(root), _runtime_grant(Path(value.strip()).parent)}
+                    return {_grant(venv, root, untrusted),
+                            _grant(Path(value.strip()).parent, root, untrusted)}
             raise SandboxUnavailable(f"Python venv home missing: {config}")
-    return {_runtime_grant(resolved.parent.parent)}
+    return {_grant(resolved.parent.parent, root, untrusted)}
 
 
-def _runtime_dirs(executable):
-    """Derive directory access from executable/shebang metadata only."""
+def _runtime_dirs(executable, root=None):
+    """Derive directory access from executable/shebang metadata only.
+
+    An executable inside ROOT is repository-controlled: every grant it implies
+    outside ROOT must be an existing Python/Node installation.
+    """
+    root = Path(_path(root)) if root is not None else None
     original = Path(os.path.abspath(executable))
     resolved = Path(_path(original))
-    dirs = {_runtime_grant(resolved.parent)}
+    untrusted = _inside(Path(_path(original.parent)), root) or _inside(resolved, root)
+    dirs = {_grant(resolved.parent, root, untrusted, prefix=resolved.parent.parent)}
     if original.name.startswith("python"):
-        dirs.update(_interpreter_dirs(original))
+        dirs.update(_interpreter_dirs(original, root, untrusted))
     with resolved.open("rb") as stream:
         first = stream.readline(4096).decode("utf-8", errors="replace").strip()
     if first.startswith("#!/"):
@@ -88,11 +119,11 @@ def _runtime_dirs(executable):
                          if (parent / "bin/node").is_file()), None)
             if node is None:
                 raise SandboxUnavailable("node interpreter unavailable in executable prefix")
-            dirs.update(_interpreter_dirs(node))
+            dirs.update(_interpreter_dirs(node, root, untrusted))
         else:
-            dirs.update(_interpreter_dirs(parts[0]))
+            dirs.update(_interpreter_dirs(parts[0], root, untrusted))
     if original.name in {"npm", "pnpm", "node"}:
-        dirs.add(_runtime_grant(resolved.parent.parent))
+        dirs.add(_grant(resolved.parent.parent, root, untrusted))
     return sorted(dirs)
 
 
@@ -160,7 +191,7 @@ def wrap(argv, root):
     try:
         if system == "Linux":
             _scan_root_sockets(root)
-        runtimes = _runtime_dirs(argv[0])
+        runtimes = _runtime_dirs(argv[0], root)
         reason = _probe(system, backend)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise SandboxUnavailable(str(exc)) from exc

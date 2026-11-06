@@ -528,3 +528,57 @@ def test_linux_apparmor_probe_failure_policy(tmp_path, monkeypatch, mode):
             assert "NOT sandboxed" in text and error in text
     finally:
         sandbox._probe.cache_clear()
+
+
+def _fake_install(prefix):
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "lib/python3.12").mkdir(parents=True)
+    (prefix / "lib/python3.12/os.py").write_text("")
+    (prefix / "bin/python3").write_bytes(b"binary")
+    (prefix / "bin/python3").chmod(0o755)
+    return prefix
+
+
+def _repo_venv(root, home_value, base):
+    (root / ".venv/bin").mkdir(parents=True)
+    interpreter = root / ".venv/bin/python"
+    interpreter.write_text(f"#!{base / 'bin/python3'}\n")
+    interpreter.chmod(0o755)
+    (root / ".venv/pyvenv.cfg").write_text(f"home = {home_value}\n")
+    return interpreter
+
+
+def test_repo_pyvenv_home_cannot_grant_unrelated_home_subtree(tmp_path, monkeypatch):
+    home = tmp_path / "fakehome"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh/id_rsa").write_text("secret")
+    monkeypatch.setenv("HOME", str(home))
+    base = _fake_install(tmp_path / "install")
+    root = tmp_path / "repo"
+    interpreter = _repo_venv(root, home / ".ssh/bin", base)
+    with pytest.raises(sandbox.SandboxUnavailable, match="non-runtime dir"):
+        sandbox._runtime_dirs(interpreter, root)
+    # Positive control: the same repo pointing at a real-looking install is granted.
+    (root / ".venv/pyvenv.cfg").write_text(f"home = {base / 'bin'}\n")
+    grants = sandbox._runtime_dirs(interpreter, root)
+    assert str(base.resolve()) in grants
+    assert not any(str((home / ".ssh").resolve()) in g for g in grants)
+
+
+def test_repo_symlinked_executable_cannot_grant_unrelated_dir(tmp_path, monkeypatch):
+    home = tmp_path / "fakehome"
+    (home / ".ssh").mkdir(parents=True)
+    tool = home / ".ssh/tool"
+    tool.write_bytes(b"binary")
+    tool.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    root = tmp_path / "repo"
+    (root / ".venv/bin").mkdir(parents=True)
+    (root / ".venv/bin/pytest").symlink_to(tool)
+    with pytest.raises(sandbox.SandboxUnavailable, match="non-runtime dir"):
+        sandbox._runtime_dirs(root / ".venv/bin/pytest", root)
+    # Positive control: a symlink into a real-looking install is granted.
+    base = _fake_install(tmp_path / "install")
+    (root / ".venv/bin/pytest").unlink()
+    (root / ".venv/bin/pytest").symlink_to(base / "bin/python3")
+    assert str((base / "bin").resolve()) in sandbox._runtime_dirs(root / ".venv/bin/pytest", root)
