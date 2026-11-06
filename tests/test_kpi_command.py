@@ -666,3 +666,37 @@ def test_d5_measured_headline_drops_gate_wording_when_haiku_never_predicted(monk
     _bench(tmp_path, monkeypatch, {"generated_at": "2026-10-01T00:00:00Z",
                                    "d5": {**d5, "predicted_tier_counts": {"haiku": 5, "sonnet": 95, "opus": 50}}})
     assert "(within <=10% gate)" in _kpis()["D5"]["value"]
+
+
+def test_apply_credits_on_default_scorecard_leave_metrics_unchanged(monkeypatch, sessions):
+    sid = sessions["organic"]
+    base = [_unit(sid, ns.UNIT_CLAUDE_MAIN), _unit(sid, ns.UNIT_ROUTED_MCP)]
+    _units(monkeypatch, base)
+    before = kpi.compute_scorecard()
+    assert before["apply_program_replaced"] == before["apply_local_replaced"] == 0
+    assert "llm_apply replaced Claude calls:" not in kpi.render_scorecard(before)
+    _units(monkeypatch, base + [dict(_unit(sid, ns.UNIT_ROUTED_APPLY), program_replaced=4, local_replaced=1)])
+    after = kpi.compute_scorecard()
+    assert (after["apply_program_replaced"], after["apply_local_replaced"]) == (4, 1)
+    assert "llm_apply replaced Claude calls: program 4, local 1" in kpi.render_scorecard(after)
+    assert all(after["kpis"][key] == before["kpis"][key] for key in ("NS", "D1", "D2"))
+    assert after["call_mix"] == before["call_mix"]
+    assert json.loads(json.dumps(after))["apply_local_replaced"] == 1
+
+
+@pytest.mark.parametrize("program,local", [(2, 0), (0, 1), (0, 0)])
+def test_apply_scorecard_render_each_counter(monkeypatch, program, local):
+    card = kpi.compute_scorecard()
+    card.update(apply_program_replaced=program, apply_local_replaced=local)
+    text = kpi.render_scorecard(card)
+    assert ("llm_apply replaced Claude calls:" in text) == bool(program or local)
+    if program or local:
+        assert f"llm_apply replaced Claude calls: program {program}, local {local}" in text
+
+
+def test_apply_scorecard_absolute_window(monkeypatch):
+    _units(monkeypatch, [dict(_unit("s", ns.UNIT_ROUTED_APPLY), ts=t,
+                              program_replaced=p, local_replaced=local)
+                         for t, p, local in [(100, 50, 20), (200, 3, 0), (300, 0, 1), (400, 80, 10)]])
+    card = kpi.compute_scorecard(since=150, until=350)
+    assert (card["apply_program_replaced"], card["apply_local_replaced"]) == (3, 1)

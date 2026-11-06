@@ -594,3 +594,24 @@ def test_tick_output_is_identical_with_and_without_the_cached_interpreter(tmp_pa
     (state / ".statusline_python").write_text(f"{shim}\n0\nfull\n")
     with_cached, _ = _run(_env(tmp_path, "true"))
     assert with_cached == without and without.startswith("llm-router · ")
+
+
+@pytest.mark.parametrize("program,local", [(5, 0), (0, 2), (5, 2), (0, 0)])
+def test_session_routing_apply_segment(program, local):
+    routing = {"v": 1, "computed_at": 1000, "complete": True, "non_claude": 10, "total": 100,
+               "local": {"ok": 2, "attempts": 4}}
+    baseline = tick.render_session_routing(routing, now=1000)
+    routing.update(apply_program_replaced=program, apply_local_replaced=local)
+    result = tick.render_session_routing(routing, now=1000)
+    assert result == baseline + (f" · apply: program {program} / local {local}" if program or local else "")
+
+
+def test_apply_ledger_triggers_refresh(tmp_path):
+    stamp = time.time()
+    ledger = tmp_path / "apply_ledger.jsonl"
+    assert not tick.ledger_changed_since(str(tmp_path), stamp)
+    ledger.write_text('{}\n')
+    os.utime(ledger, (stamp - 1, stamp - 1))
+    assert not tick.ledger_changed_since(str(tmp_path), stamp)
+    os.utime(ledger, (stamp + 1, stamp + 1))
+    assert tick.ledger_changed_since(str(tmp_path), stamp)

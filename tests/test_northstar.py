@@ -885,3 +885,272 @@ def test_days_window_keeps_only_in_window_units_of_a_mixed_file(tmp_path):
     assert [u["signal"] for u in codex] == ["agent_route_codex_delegated"]
     for u in rows:
         assert datetime.fromisoformat(u["ts"]).timestamp() >= cutoff
+
+
+def _apply_records(credit=True, edit_turn=None, edit_file="/repo/a.py", edit_tool="Edit"):
+    sid, ts = SID_MAIN, 1_800_000_000
+    result = "APPLIED_AND_PASSED"
+    if credit is not False:
+        result += "\n[llm_apply credit] " + (json.dumps({"program": 3, "local": 1, "files": ["/repo/a.py"]})
+                                             if credit is True else credit)
+    records = [_assistant(sid, ts, tool_uses=[_tool_use("apply1", "mcp__llm_router__llm_apply")]),
+               _user(sid, "", ts + 1, [_tool_result("apply1", result)])]
+    for turn in range(1, 5):
+        uses = [_tool_use(f"edit{turn}", edit_tool,
+                          {"notebook_path" if edit_tool == "NotebookEdit" else "file_path": edit_file})] if turn == edit_turn else []
+        obj = _assistant(sid, ts + 2 * turn, text="Continuing the work", tool_uses=uses)
+        obj["message"]["id"] = f"after-{turn}"
+        records.append(obj)
+        # Split content blocks with the same message.id must not use up the three turns.
+        duplicate = _assistant(sid, ts + 2 * turn + 0.1, text="another block")
+        duplicate["message"]["id"] = f"after-{turn}"
+        records.append(duplicate)
+    return records
+
+
+def _apply_units(tmp_path, records, subagent=False, include_apply=True):
+    project = _project(tmp_path)
+    _write_jsonl(project / f"{SID_MAIN}.jsonl", [] if subagent else records)
+    if subagent:
+        _write_jsonl(project / SID_MAIN / "subagents" / "agent-credit.jsonl", records)
+    return list(ns.units(days=None, root=project.parent, subagents=subagent, include_apply=include_apply))
+
+
+@pytest.mark.parametrize("subagent", [False, True])
+def test_apply_unit_is_separate_and_credits_parse(tmp_path, subagent):
+    units = _apply_units(tmp_path, _apply_records(), subagent)
+    apply, = [u for u in units if u["kind"] == ns.UNIT_ROUTED_APPLY]
+    assert apply["lever"] == "llm_apply" and apply["outcome"] == ns.OUTCOME_USED
+    assert (apply["program_replaced"], apply["local_replaced"]) == (3, 1)
+    assert not any(u["kind"] == ns.UNIT_ROUTED_MCP for u in units)
+    assert all("program_replaced" not in u for u in units if u is not apply)
+    assert ns.UNIT_ROUTED_APPLY not in ns.ALL_KINDS and ns.UNIT_ROUTED_APPLY not in ns.ATTEMPTED_KINDS
+
+
+@pytest.mark.parametrize("subagent", [False, True])
+def test_default_units_never_yield_apply_units(tmp_path, subagent):
+    """Unfiltered consumers of units() (breaker, report, offload share) must not see program steps."""
+    hidden = _apply_units(tmp_path, _apply_records(), subagent, include_apply=False)
+    shown = _apply_units(tmp_path, _apply_records(), subagent)
+    assert not any(u["kind"] == ns.UNIT_ROUTED_APPLY for u in hidden)
+    assert [u for u in shown if u["kind"] != ns.UNIT_ROUTED_APPLY] == hidden   # nothing else changes
+    assert sum(u["kind"] == ns.UNIT_ROUTED_APPLY for u in shown) == 1          # positive control
+
+
+@pytest.mark.parametrize("subagent", [False, True])
+@pytest.mark.parametrize("tool", ["Edit", "Write", "MultiEdit", "NotebookEdit"])
+@pytest.mark.parametrize("turn", [1, 2, 3])
+def test_apply_claude_finished_exclusion_with_positive_controls(tmp_path, subagent, tool, turn):
+    def judge(records):
+        return next(u for u in _apply_units(tmp_path, records, subagent) if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    excluded = judge(_apply_records(edit_turn=turn, edit_tool=tool))
+    assert (excluded["program_replaced"], excluded["local_replaced"], excluded["outcome"]) == (0, 0, ns.OUTCOME_REDO)
+    assert excluded["signal"] == "claude_finished"
+    for records in (_apply_records(edit_turn=turn, edit_file="/repo/other.py", edit_tool=tool),
+                    _apply_records(edit_turn=4, edit_tool=tool)):
+        kept = judge(records)
+        assert (kept["program_replaced"], kept["local_replaced"], kept["outcome"]) == (3, 1, ns.OUTCOME_USED)
+
+
+@pytest.mark.parametrize("credit", [False, "{bad json}", '{"program": true, "local": 1, "files": []}'])
+def test_apply_missing_or_invalid_credit_is_unknown(tmp_path, credit):
+    unit = next(u for u in _apply_units(tmp_path, _apply_records(credit)) if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert (unit["program_replaced"], unit["local_replaced"], unit["outcome"]) == (0, 0, ns.OUTCOME_UNKNOWN)
+    control = next(u for u in _apply_units(tmp_path, _apply_records()) if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert control["program_replaced"] == 3
+
+
+@pytest.mark.parametrize("subagent", [False, True])
+def test_apply_does_not_shift_following_mcp_reuse(tmp_path, subagent):
+    records = _apply_records()[:2]
+    text = "The amber lantern casts a warm glow across the quiet garden path at dusk."
+    ts = 1_800_000_010
+    records += [_assistant(SID_MAIN, ts, tool_uses=[_tool_use("model1", "mcp__llm_router__llm")]),
+                _user(SID_MAIN, "", ts + 1, [_tool_result("model1", text)]),
+                _assistant(SID_MAIN, ts + 2, text=text)]
+    units = _apply_units(tmp_path, records, subagent)
+    routed, = [u for u in units if u["kind"] == ns.UNIT_ROUTED_MCP]
+    assert routed["outcome"] == ns.OUTCOME_USED and routed["signal"] == "tool_result_reused"
+    apply, = [u for u in units if u["kind"] == ns.UNIT_ROUTED_APPLY]
+    assert apply["program_replaced"] == 3 and apply["signal"] == "apply_credit"
+
+
+def test_apply_exclusion_counts_only_distinct_message_ids(tmp_path):
+    records = _apply_records(edit_turn=3)
+    # Records without message ids cannot consume slots in the distinct-id window.
+    records[2:2] = [_assistant(SID_MAIN, 1_800_000_001.5, text="legacy record without id") for _ in range(4)]
+    excluded = next(u for u in _apply_units(tmp_path, records) if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert (excluded["program_replaced"], excluded["local_replaced"], excluded["outcome"]) == (0, 0, ns.OUTCOME_REDO)
+    control = next(u for u in _apply_units(tmp_path, _apply_records(edit_turn=4)) if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert (control["program_replaced"], control["local_replaced"]) == (3, 1)
+
+
+def test_apply_units_leave_northstar_report_denominator_unchanged(tmp_path):
+    records = _apply_records()
+    _apply_units(tmp_path, records)
+    before = ns.report(days=None, root=_project(tmp_path).parent)
+    # Remove just the apply tool_use, retaining the same assistant calls.
+    records[0]["message"]["content"] = []
+    _apply_units(tmp_path, records)
+    after = ns.report(days=None, root=_project(tmp_path).parent)
+    before.pop("generated_at")
+    after.pop("generated_at")
+    assert before == after
+
+
+@pytest.mark.parametrize("spelling", ["/repo/./a.py", "/repo//a.py", "/repo/sub/../a.py"])
+def test_apply_exclusion_survives_path_spelling(tmp_path, spelling):
+    redo = next(u for u in _apply_units(tmp_path, _apply_records(edit_turn=1, edit_file=spelling))
+                if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert (redo["program_replaced"], redo["local_replaced"], redo["outcome"]) == (0, 0, ns.OUTCOME_REDO)
+    control = next(u for u in _apply_units(tmp_path, _apply_records(edit_turn=1, edit_file="/repo/./b.py"))
+                   if u["kind"] == ns.UNIT_ROUTED_APPLY)
+    assert (control["program_replaced"], control["local_replaced"]) == (3, 1)
+
+
+def _apply_main_and_sub(tmp_path, main, sub):
+    project = _project(tmp_path)
+    _write_jsonl(project / f"{SID_MAIN}.jsonl", main)
+    _write_jsonl(project / SID_MAIN / "subagents" / "agent-credit.jsonl", sub)
+    return [u for u in ns.units(days=None, root=project.parent, subagents=True, include_apply=True)
+            if u["kind"] == ns.UNIT_ROUTED_APPLY]
+
+
+def _renamed(records, new_id):
+    out = json.loads(json.dumps(records).replace('"apply1"', json.dumps(new_id)))
+    for obj in out:   # distinct assistant message ids so the copy is a different call, not a replay
+        if obj.get("type") == "assistant" and obj["message"].get("id"):
+            obj["message"]["id"] = obj["message"]["id"] + "-" + new_id
+    return out
+
+
+def test_apply_replayed_record_counts_once(tmp_path):
+    same = _apply_records()
+    twice = _apply_main_and_sub(tmp_path, same + same, [])
+    assert len(twice) == 1 and twice[0]["program_replaced"] == 3            # repeated in one transcript
+    copied = _apply_main_and_sub(tmp_path, same, same)
+    assert sum(u["program_replaced"] for u in copied) == 3 and len(copied) == 1   # main + sub-agent copy
+    distinct = _apply_main_and_sub(tmp_path, same, _renamed(same, "apply2"))
+    assert sum(u["program_replaced"] for u in distinct) == 6                   # positive control
+
+
+@pytest.mark.parametrize("redo_in", ["main", "sub"])
+def test_apply_redo_in_any_copy_zeroes_the_call(tmp_path, redo_in):
+    clean, redone = _apply_records(), _apply_records(edit_turn=1)
+    main, sub = (redone, clean) if redo_in == "main" else (clean, redone)
+    units = _apply_main_and_sub(tmp_path, main, sub)
+    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(0, 0)]
+    control = _apply_main_and_sub(tmp_path, clean, clean)
+    assert [(u["program_replaced"], u["local_replaced"]) for u in control] == [(3, 1)]
+
+
+def test_apply_closed_windows_leave_the_open_list():
+    """Scan cost: a call whose three-message window has closed is never revisited."""
+    from llm_router import apply_credit
+    state: dict = {}
+    for i in range(200):
+        for obj in _renamed(_apply_records(), f"apply-{i}"):
+            apply_credit.observe(state, obj)
+    assert len(state["calls"]) == 200 and state["open"] == []
+    assert sum(apply_credit.counts(c)[0] for c in state["calls"].values()) == 600   # credits kept
+    fresh: dict = {}
+    for obj in _apply_records()[:3]:   # the call, its result, one following message: still open
+        apply_credit.observe(fresh, obj)
+    assert fresh["open"] == ["apply1"]                                       # positive control
+
+
+@pytest.mark.parametrize("partial_in", ["main", "sub"])
+def test_apply_partial_replay_cannot_erase_the_credit(tmp_path, partial_in):
+    """A copy holding only the tool_use (no result yet) must not win over the complete call, in either order."""
+    full = _apply_records()
+    partial = full[:1]
+    main, sub = (partial, full) if partial_in == "main" else (full, partial)
+    units = _apply_main_and_sub(tmp_path, main, sub)
+    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(3, 1)]
+
+
+@pytest.mark.parametrize("order", ["main_first", "sub_first"])
+def test_apply_disagreeing_copies_earn_nothing(tmp_path, order):
+    big = _apply_records(credit=json.dumps({"program": 9, "local": 0, "files": ["/repo/a.py"]}))
+    small = _apply_records()   # program 3, local 1
+    main, sub = (big, small) if order == "main_first" else (small, big)
+    units = _apply_main_and_sub(tmp_path, main, sub)
+    assert [(u["program_replaced"], u["local_replaced"], u["signal"]) for u in units] == [(0, 0, "apply_conflict")]
+
+
+def test_apply_state_cached_without_open_list_still_judges_redo():
+    from llm_router import apply_credit
+    records = _apply_records(edit_turn=1)
+    state: dict = {}
+    for obj in records[:2]:                      # call + result, as a round-1 scan would have cached them
+        apply_credit.observe(state, obj)
+    state.pop("open")
+    for obj in records[2:]:
+        apply_credit.observe(state, obj)
+    assert apply_credit.counts(state["calls"]["apply1"]) == (0, 0)
+    control: dict = {}
+    for obj in _apply_records()[:2]:
+        apply_credit.observe(control, obj)
+    control.pop("open")
+    for obj in _apply_records()[2:]:
+        apply_credit.observe(control, obj)
+    assert apply_credit.counts(control["calls"]["apply1"]) == (3, 1)   # positive control
+
+
+def _replay_in_one_transcript(first, second):
+    """Both copies in one transcript, the second with distinct follow-up message ids."""
+    out = json.loads(json.dumps(second))
+    for obj in out:
+        if obj.get("type") == "assistant" and obj["message"].get("id", "").startswith("after-"):
+            obj["message"]["id"] += "-replay"
+    return first + out
+
+
+@pytest.mark.parametrize("order", ["small_first", "big_first"])
+def test_apply_same_transcript_disagreeing_replay_earns_nothing(tmp_path, order):
+    big = _apply_records(credit=json.dumps({"program": 9, "local": 0, "files": ["/repo/a.py"]}))
+    small = _apply_records()
+    records = _replay_in_one_transcript(*((small, big) if order == "small_first" else (big, small)))
+    units = _apply_main_and_sub(tmp_path, records, [])
+    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(0, 0)]
+
+
+@pytest.mark.parametrize("order", ["clean_first", "redo_first"])
+def test_apply_same_transcript_replay_redo_wins(tmp_path, order):
+    clean, redone = _apply_records(), _apply_records(edit_turn=1)
+    records = _replay_in_one_transcript(*((clean, redone) if order == "clean_first" else (redone, clean)))
+    units = _apply_main_and_sub(tmp_path, records, [])
+    assert [(u["program_replaced"], u["local_replaced"]) for u in units] == [(0, 0)]
+    control = _apply_main_and_sub(tmp_path, _replay_in_one_transcript(clean, clean), [])
+    assert [(u["program_replaced"], u["local_replaced"]) for u in control] == [(3, 1)]
+
+
+@pytest.mark.parametrize("order", ["a_first", "b_first"])
+def test_apply_copies_with_different_files_earn_nothing_in_any_order(tmp_path, order):
+    """Round-4 case: copy A credits a.py, copy B credits b.py then edits a.py. Disagreeing copies are a conflict."""
+    a = _apply_records()
+    b = _apply_records(credit=json.dumps({"program": 3, "local": 1, "files": ["/repo/b.py"]}), edit_turn=1)
+    records = _replay_in_one_transcript(*((a, b) if order == "a_first" else (b, a)))
+    units = _apply_main_and_sub(tmp_path, records, [])
+    assert [(u["program_replaced"], u["local_replaced"], u["signal"], u["outcome"]) for u in units] == [
+        (0, 0, "apply_conflict", ns.OUTCOME_UNKNOWN)]   # same label in both orders (round 5)
+    same = _apply_main_and_sub(tmp_path, _replay_in_one_transcript(a, a), [])
+    assert [(u["program_replaced"], u["local_replaced"]) for u in same] == [(3, 1)]   # identical copies: control
+
+
+@pytest.mark.parametrize("first, second", [("/repo/a.py", "/repo/b.py"), ("/repo/b.py", "/repo/a.py")])
+def test_apply_conflict_label_outranks_redo_in_any_order(tmp_path, first, second):
+    """Round 5: two results for one id back to back, then Edit(a.py) inside the first window. Whichever result
+    comes first, the call is a conflict (0/0, apply_conflict), never labelled by read order."""
+    sid, ts = SID_MAIN, 1_800_000_000
+
+    def result(path):
+        return "APPLIED_AND_PASSED\n[llm_apply credit] " + json.dumps({"program": 3, "local": 1, "files": [path]})
+    edit = _assistant(sid, ts + 4, text="fix", tool_uses=[_tool_use("e1", "Edit", {"file_path": "/repo/a.py"})])
+    edit["message"]["id"] = "after-1"
+    records = [_assistant(sid, ts, tool_uses=[_tool_use("apply1", "mcp__llm_router__llm_apply")]),
+               _user(sid, "", ts + 1, [_tool_result("apply1", result(first))]),
+               _user(sid, "", ts + 2, [_tool_result("apply1", result(second))]),
+               edit]
+    units = _apply_main_and_sub(tmp_path, records, [])
+    assert [(u["program_replaced"], u["local_replaced"], u["signal"]) for u in units] == [(0, 0, "apply_conflict")]

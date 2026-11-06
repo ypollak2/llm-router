@@ -378,7 +378,10 @@ def render_session_routing(routing: dict | None, *, now: float) -> str:
         routed = f"routed {_mix_pct(k, n)} ({k}/{n} calls, session{_runs_est(flagged)})"
     local = _local_ok_segment({"k": (r.get("local") or {}).get("ok"), "n": (r.get("local") or {}).get("attempts")}
                               if isinstance(r.get("local"), dict) else None, "session") or "local OK n/a (session)"
-    return _fit(f"{routed} · {local}")
+    program = _whole(r.get("apply_program_replaced")) or 0
+    apply_local = _whole(r.get("apply_local_replaced")) or 0
+    apply = f" · apply: program {program} / local {apply_local}" if program or apply_local else ""
+    return _fit(f"{routed} · {local}{apply}")
 
 
 def render_progress(cache: dict | None, *, now: float) -> str | None:
@@ -491,8 +494,8 @@ def _spawn_detached(argv: list[str]) -> int | None:
 def ledger_changed_since(home: str, stamp: float) -> bool:
     """True when a ledger was written after ``stamp`` (P35-2): two ``stat`` calls, no read. The first
     that exists decides for the database (``usage.db-wal`` takes every write until a checkpoint, so it
-    is the live mtime; ``usage.db`` when there is no WAL), then ``proxy_calls.jsonl``."""
-    for names in (("usage.db-wal", "usage.db"), ("proxy_calls.jsonl",)):
+    is the live mtime; ``usage.db`` when there is no WAL), then the proxy and apply ledgers."""
+    for names in (("usage.db-wal", "usage.db"), ("proxy_calls.jsonl",), ("apply_ledger.jsonl",)):
         for name in names:
             try:
                 mtime = os.path.getmtime(os.path.join(home, name))

@@ -1155,3 +1155,91 @@ def test_strict_codex_reader_partial_read_error(env, monkeypatch):
         northstar._read_north_star_ledger()
     with pytest.raises(sr.LedgerUnreadable):
         sr._ns_rows(None)
+
+
+def _apply_lines(tool_id="apply1"):
+    return [json.dumps({"type": "assistant", "message": {"id": f"call-{tool_id}", "model": "claude-opus-5-5", "content": [
+        {"type": "tool_use", "id": tool_id, "name": "mcp__llm_router__llm_apply", "input": {}}]}},
+        separators=(",", ":")) + "\n",
+        json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tool_id,
+            "content": "APPLIED_AND_PASSED\n[llm_apply credit] " + json.dumps(
+                {"program": 3, "local": 1, "files": ["/repo/a.py"]})}]}}, separators=(",", ":")) + "\n"]
+
+
+def _edit_line(mid, path):
+    return json.dumps({"type": "assistant", "message": {"id": mid, "model": "claude-opus-5-5", "content": [
+        {"type": "tool_use", "id": "edit1", "name": "Edit", "input": {"file_path": path}}]}},
+        separators=(",", ":")) + "\n"  # compact like real transcripts: the scan pre-filters on '"type":"assistant"'
+
+
+def test_apply_session_counts_reach_snapshot_and_routing_row(env):
+    home, projects, _codex = env
+    _routing_db(home)
+    _write(projects / "-p" / f"{SID}.jsonl", *_apply_lines())
+    _write(projects / "-p" / SID / "subagents" / "agent-apply.jsonl", *_apply_lines("sub-apply"))
+    data = snap.refresh(host="claude_code", session_id=SID, now=NOW)
+    r = data["routing"]
+    assert (r["apply_program_replaced"], r["apply_local_replaced"]) == (6, 2)
+    assert r["claude"] == r["total"] == 2 and r["non_claude"] == 0
+    assert data["routing_line"].endswith(" · apply: program 6 / local 2")
+    assert snap.read("claude_code", SID)["routing"] == r
+
+
+@pytest.mark.parametrize("turn", [1, 2, 3])
+def test_apply_session_incremental_exclusion_and_controls(env, turn):
+    _home, projects, _codex = env
+    path = _write(projects / "-p" / f"{SID}.jsonl", *_apply_lines())
+    initial = sr.compute(SID, NOW)
+    assert (initial["apply_program_replaced"], initial["apply_local_replaced"]) == (3, 1)
+    for i in range(1, turn):
+        _write(path, _assistant(f"follow-{i}"), _assistant(f"follow-{i}"))
+    # Another file in this turn retains both credits.
+    _write(path, _edit_line(f"follow-{turn}", "/repo/other.py"))
+    control = sr.compute(SID, NOW + sr.FRESH_S + 1)
+    assert (control["apply_program_replaced"], control["apply_local_replaced"]) == (3, 1)
+    # A later content block of the same id still belongs to the same assistant message.
+    _write(path, _edit_line(f"follow-{turn}", "/repo/a.py"))
+    excluded = sr.compute(SID, NOW + 2 * (sr.FRESH_S + 1))
+    assert (excluded["apply_program_replaced"], excluded["apply_local_replaced"]) == (0, 0)
+    assert " · apply:" not in tick.render_session_routing(excluded, now=NOW + 2 * (sr.FRESH_S + 1))
+
+
+def test_apply_session_turn_four_retains_credit(env):
+    _home, projects, _codex = env
+    path = _write(projects / "-p" / f"{SID}.jsonl", *_apply_lines(),
+                  *[_assistant(f"after-{i}") for i in range(1, 4)], _edit_line("after-4", "/repo/a.py"))
+    result = sr.compute(SID, NOW)
+    assert (result["apply_program_replaced"], result["apply_local_replaced"]) == (3, 1)
+    # Positive exclusion control in a separate call in the same transcript.
+    _write(path, *_apply_lines("apply2"), _edit_line("after-second", "/repo/a.py"))
+    result = sr.compute(SID, NOW + sr.FRESH_S + 1)
+    assert (result["apply_program_replaced"], result["apply_local_replaced"]) == (3, 1)
+
+
+def test_apply_counts_migrate_pre_credit_session_cache(env):
+    home, projects, _codex = env
+    _routing_db(home)
+    path = _write(projects / "-p" / f"{SID}.jsonl", *_apply_lines())
+    initial = sr.compute(SID, NOW)
+    assert initial["apply_program_replaced"] == 3
+    index = sr._load_index(SID)
+    del index["files"][str(path)]["apply"]
+    sr._save_index(SID, index)
+    for key in ("apply_program_replaced", "apply_local_replaced"):
+        del initial[key]
+    sr._atomic_json(sr.result_path(SID), initial)
+    # Even a fresh old-version result must not conceal the newly counted credits.
+    migrated = sr.compute(SID, NOW + 1)
+    assert (migrated["apply_program_replaced"], migrated["apply_local_replaced"]) == (3, 1)
+    assert "apply" in sr._load_index(SID)["files"][str(path)]
+
+
+@pytest.mark.parametrize("sub_id, expected", [("apply1", (0, 0)), ("apply2", (3, 1))])
+def test_apply_session_replay_cannot_restore_a_redone_call(env, sub_id, expected):
+    """A sub-agent copy of a call that Claude redid in the main transcript must not bring its credit back;
+    a different call in the sub-agent (control) keeps its own credit."""
+    _home, projects, _codex = env
+    _write(projects / "-p" / f"{SID}.jsonl", *_apply_lines(), _edit_line("follow-1", "/repo/a.py"))
+    _write(projects / "-p" / SID / "subagents" / "agent-copy.jsonl", *_apply_lines(sub_id))
+    r = sr.compute(SID, NOW)
+    assert (r["apply_program_replaced"], r["apply_local_replaced"]) == expected

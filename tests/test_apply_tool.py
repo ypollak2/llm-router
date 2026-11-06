@@ -127,6 +127,7 @@ def test_off_switch_read_per_call(repo, monkeypatch, flag):
         monkeypatch.setenv("LLM_ROUTER_APPLY", flag)
     result = call(repo)
     assert result.startswith("REJECTED\n")
+    assert "[llm_apply credit]" not in result
     assert "disabled" in result and "LLM_ROUTER_APPLY=on" in result
     assert result.endswith(HANDOFF)
     assert (repo / "a.py").read_text() == "value = 1\n"
@@ -284,7 +285,7 @@ def test_ledger_schema(repo):
     row = rows()[0]
     assert set(row) == {"ts", "status", "n_blocks", "n_files", "check_ran", "check_rc", "sandboxed", "duration_s", "source",
                         "repair_attempted", "repair_passed", "repair_model", "repair_s", "repair_reason",
-                        "repair_check_rc", "repair_sandboxed"}
+                        "repair_check_rc", "repair_sandboxed", "program_replaced", "local_replaced", "files", "repair_trigger"}
     assert row["status"] == "APPLIED_NOT_CHECKED" and row["source"] == "program"
     assert row["n_files"] == row["n_blocks"] == 1
     assert row["ts"].endswith("+00:00") and row["duration_s"] >= 0
@@ -883,3 +884,44 @@ def test_successful_overwrite_records_no_cleanup_failopen(repo, monkeypatch):
     assert (repo / "a.py").read_text() == "value = 2\n"
     assert "CHZ-FO-APPLY-TEMP-CLEANUP" not in codes
     assert not [p for p in repo.iterdir() if p.name.startswith(".llm-apply-")]
+
+
+@pytest.mark.parametrize("status,trigger,program,local", [
+    ("APPLIED_AND_PASSED", None, 3, 0),
+    ("REPAIRED_BY_LOCAL_AND_PASSED", "B", 3, 1),
+    ("REPAIRED_BY_LOCAL_AND_PASSED", "A", 0, 1),
+    ("REJECTED", "A", 0, 0),
+    ("APPLIED_NOT_CHECKED", None, 0, 0),
+    ("APPLIED_CHECK_FAILED", "B", 0, 0),
+])
+def test_credit_matrix(repo, monkeypatch, repair_setup, status, trigger, program, local):
+    edits = [edit(), edit(old="value = 2", new="value = 4")]
+    if trigger == "A":
+        edits[0] = edit(old="missing")
+    check = "" if status == "APPLIED_NOT_CHECKED" else "pytest"
+    if status == "APPLIED_AND_PASSED":
+        monkeypatch.setattr(apply, "_run_check", lambda *a, **k: (0, "check: test\npassed", False))
+    elif status in {"REJECTED", "APPLIED_CHECK_FAILED"}:
+        # Failed repair earns nothing, whether or not the program applied the batch.
+        monkeypatch.setattr(repair_setup[0], "generate_edits", lambda *a, **k: (None, [], "failed"))
+    result = call(repo, edits, check)
+    lines = result.splitlines()
+    assert lines[0] == status
+    assert lines[1].startswith("[llm_apply credit] ")
+    credit = json.loads(lines[1][len("[llm_apply credit] "):])
+    expected_files = [] if status == "REJECTED" else [str((repo / "a.py").resolve())]
+    assert credit == {"program": program, "local": local, "files": expected_files}
+    assert list(credit) == ["program", "local", "files"]
+    row = rows()[-1]
+    assert (row["program_replaced"], row["local_replaced"], row["files"]) == (program, local, expected_files)
+    assert row["repair_trigger"] == trigger
+
+
+def test_credit_files_are_sorted_actual_changes(repo, monkeypatch):
+    (repo / "z.py").write_text("value = 1\n")
+    (repo / "unchanged.py").write_text("value = 1\n")
+    runner(repo, monkeypatch, "")
+    monkeypatch.setattr(apply, "_run_check", lambda *a, **k: (0, "check: test\npassed", False))
+    result = call(repo, [edit("z.py"), edit(), edit("unchanged.py", new="value = 1")], "pytest")
+    credit = json.loads(result.splitlines()[1].split("] ", 1)[1])
+    assert credit == {"program": 4, "local": 0, "files": sorted(str((repo / f).resolve()) for f in ("z.py", "a.py"))}
