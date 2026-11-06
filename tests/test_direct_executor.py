@@ -28,6 +28,29 @@ from llm_router.hooks.direct_executor import (
 pytestmark = pytest.mark.usefixtures("open_url_via_urlopen")
 
 
+@pytest.mark.parametrize("allow_model_swap", [False, True])
+def test_format_rejection_retry_preserves_model_swap_flag(monkeypatch, allow_model_swap):
+    import urllib.error
+    from llm_router.hooks import direct_executor as executor
+    from llm_router import local_context_guard as guard
+
+    original = executor.call_ollama
+    monkeypatch.setattr(executor, "_local_num_ctx", lambda model: None)
+    monkeypatch.setattr(guard, "check_overflow", lambda *a, **kw: None)
+    monkeypatch.setenv("LLM_ROUTER_PACK_OVERFLOW", "off")
+
+    def reject(req, timeout):
+        raise urllib.error.HTTPError(req.full_url, 400, "format rejected", {}, None)
+
+    monkeypatch.setattr(executor, "_ollama_open", reject)
+    with patch.object(executor, "call_ollama", return_value=("retried", {})) as retry:
+        assert original("prompt", "model", format={"type": "object"},
+                        allow_model_swap=allow_model_swap) == ("retried", {})
+    retry.assert_called_once()
+    assert retry.call_args.kwargs["allow_model_swap"] is allow_model_swap
+    assert retry.call_args.kwargs.get("format") is None
+
+
 # ── Quality Gate ─────────────────────────────────────────────────────────────
 
 class TestQualityGate:

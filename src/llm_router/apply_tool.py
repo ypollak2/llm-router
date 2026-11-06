@@ -456,6 +456,23 @@ def _local_repair(root, argv, files, task, details, repair):
         repair["repair_reason"] = "no local model"
         return None
     repair["repair_model"] = model
+    from llm_router.local_setup import GATE_REASON, repair_endpoint, repair_qualified
+    from llm_router.local_check.runtimes import RuntimeError_
+    try:
+        repair_endpoint()
+    except RuntimeError_ as exc:
+        repair["repair_reason"] = str(exc)
+        return None
+    if not repair_qualified(model, _repair_seconds()):
+        repair["repair_reason"] = GATE_REASON
+        return None
+    return _repair_once(root, argv, files, task, details, repair, model)
+
+
+def _repair_once(root, argv, files, task, details, repair, model):
+    """Shared machine-check/live path: generate, validate, apply, sandbox-check, restore."""
+    from llm_router import zero_claude_edit
+
     try:
         _, cleanup = check_sandbox.wrap(argv, root)
         cleanup()
@@ -477,7 +494,7 @@ def _local_repair(root, argv, files, task, details, repair):
         contents = {str(path.relative_to(root)): content.decode("utf-8") for path, content in snapshot.items()}
         deadline = started + _repair_seconds()
         proposed, instructions, failure = zero_claude_edit.generate_edits(
-            task, contents, model, deadline_s=deadline)
+            task, contents, model, deadline_s=deadline, allow_model_swap=False)
         if time.monotonic() > deadline:
             reason = "timed out"
         elif proposed is None or failure or not instructions:

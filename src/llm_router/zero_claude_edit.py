@@ -451,11 +451,14 @@ def generate_edits(
     file_contents: dict[str, str],
     model: str,
     deadline_s: float,
+    *, allow_model_swap: bool = True,
 ) -> tuple[dict[str, str] | None, list, str | None]:
     """Retry loop: ask *model* for edit instructions, validate, retry with
     feedback on rejection — same shape as ``tools/text.py``'s ``llm_edit``,
     run synchronously (the hook has no event loop) via
     ``direct_executor.call_ollama``, which already sends ``think: false``.
+
+    ``allow_model_swap=False`` keeps every repair attempt on the qualified model.
 
     Returns ``(new_contents, instructions, failure_reason)``. On success
     ``new_contents`` is the full ``path -> text`` map with edits applied and
@@ -486,6 +489,7 @@ def generate_edits(
             response, _usage = call_ollama(
                 prompt, model, int(round(call_timeout)), system_prompt=_EDIT_SYSTEM_PROMPT,
                 format=EDIT_PAIRS_SCHEMA, keep_alive=edit_keep_alive(),
+                **({"allow_model_swap": False} if not allow_model_swap else {}),
             )
         if not response:
             history.append(f"attempt {attempt}: model returned no response")
