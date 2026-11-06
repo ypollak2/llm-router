@@ -82,9 +82,10 @@ def test_hard_coordination_bash_still_held(tmp_path):
 
 @pytest.mark.parametrize("prompt", QA_PROMPTS)
 def test_smart_qa_bash_still_held(tmp_path, prompt):
-    """Negative control: a genuine Q&A prompt keeps its Bash hold in smart mode."""
+    """Negative control: a genuine Q&A prompt keeps its hold on generative Bash in
+    smart mode (D-396: read-only inspection such as `cat README.md` passes)."""
     _pending(tmp_path, "q1", "query", prompt, complexity="simple")
-    assert _held(_bash(tmp_path, "q1", "smart", "cat README.md"))
+    assert _held(_bash(tmp_path, "q1", "smart", "cat README.md > answer.txt"))
 
 
 def test_smart_network_bash_stays_route_eligible(tmp_path):

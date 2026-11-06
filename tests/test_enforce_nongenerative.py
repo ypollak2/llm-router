@@ -19,9 +19,9 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
-from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ENFORCE_HOOK = ROOT / "src" / "llm_router" / "hooks" / "enforce-route.py"
@@ -143,17 +143,6 @@ def test_qa_inspection_never_pays_a_hold(tmp_path, mode, task, complexity, comma
     assert not rows.exists() or not any(json.loads(x)["event"] == "blocked" for x in rows.read_text().splitlines())
 
 
-@pytest.mark.parametrize("mode", ["hard", "smart"])
-@pytest.mark.parametrize("task", ["delegate", "coordination"])
-@pytest.mark.parametrize("tool", ["Edit", "Write"])
-def test_agentic_file_edits_never_pay_a_hold(tmp_path, mode, task, tool):
-    _write_pending(tmp_path, "edit", task_type=task, expected_tool="llm_delegate",
-                   original_prompt="Carry out the requested changes and report the result")
-    r = _run(tmp_path, "edit", tool, mode, {"file_path": "/x", "content": "y"})
-    assert r.returncode == 0 and not r.stdout.strip(), r.stderr
-    assert (tmp_path / ".llm-router" / "pending_route_edit.json").exists(), "an edit does not satisfy routing"
-
-
 @pytest.mark.parametrize("command", ["rg tasks README.md > result.txt", "cat README.md; python change.py"])
 def test_qa_mutating_or_unknown_bash_keeps_the_hold(tmp_path, command):
     _write_pending(tmp_path, "prose", task_type="query", complexity="simple",
@@ -162,9 +151,3 @@ def test_qa_mutating_or_unknown_bash_keeps_the_hold(tmp_path, command):
     assert r.returncode == 0 and _blocked(r), r.stderr
     assert "MANDATORY ROUTE" in json.loads(r.stdout)["reason"]
 
-
-def test_strict_still_holds_agentic_file_edits(tmp_path):
-    _write_pending(tmp_path, "se", task_type="delegate", expected_tool="llm_delegate",
-                   original_prompt="Carry out the requested changes and report the result")
-    r = _run(tmp_path, "se", "Edit", "strict", {"file_path": "/x", "old_string": "a", "new_string": "b"})
-    assert _blocked(r), "strict keeps every hold"

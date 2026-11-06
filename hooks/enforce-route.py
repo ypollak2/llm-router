@@ -17,8 +17,8 @@ This hook fires before every tool call and:
      (Supports MCP server routing, e.g. mcp__obsidian__create_note)
   4. If the tool is NOT in the task-specific blocklist → allow unconditionally.
      This covers: ToolSearch, all mcp__* tools, Agent (schema load), etc.
-     Read/Glob/Grep/LS and read-only Bash are allowed for local context, and
-     delegate/coordination file edits are allowed (strict excepted, D-396).
+     Read/Glob/Grep/LS and read-only Bash are allowed for local context
+     (read-only Bash: strict excepted, D-396).
   5. Detect coding sessions early: Mark as "coding" on first Read/Glob/Grep/LS/Edit/Write
      → Downgrade enforcement to soft for rest of session (allows legitimate investigation).
   6. Track violations and auto-pivot: Counter increments on each blocked tool call.
@@ -2157,15 +2157,6 @@ def _main() -> None:
             _log_violation(session_id, tool_name, expected_tool,
                            outcome="ALLOWED(readonly_bash)")
             sys.exit(0)
-
-    # The classifier (or execution redirect above) already identified agentic
-    # work. Do not make native file edits pay a routing toll to do that work.
-    if not _strict and task_type in {"delegate", "coordination"} and tool_name in {
-        "Edit", "Write", "MultiEdit", "NotebookEdit",
-    }:
-        _log_violation(session_id, tool_name, expected_tool,
-                       outcome="ALLOWED(agentic_edit)")
-        sys.exit(0)
 
     # In hard/strict mode, block remaining GENERATIVE native tools (Bash/Edit/
     # Write) until routing is satisfied. Read-only tools are NOT blocked
