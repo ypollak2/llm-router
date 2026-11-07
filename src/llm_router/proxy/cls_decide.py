@@ -4,6 +4,12 @@ RECORD ONLY. Nothing here changes how a call is served: ``cls_applied`` stays fa
 ``local_step`` is entered exactly as before, the conversation pin (``server.py``
 ``local_step``) is untouched. A2 will turn the recorded verdict into a per-turn veto.
 
+A2 items left alone here on purpose (review rv17c S3): in ``local_step`` a non-local
+decision with no pin stores ``PIN_CLAUDE`` for the whole conversation, and a failed
+local step stores it too. Both contradict "a veto never sets the conversation pin" and
+"each turn goes local unless vetoed"; A2 must change them (or state the second as a
+residual) together with the ``started_elsewhere`` test.
+
 What a row gets (all additive, text-free; hashes, counters and reason codes only):
 
 * ``supported`` / ``unsupported_reason``: :func:`supported` (one predicate, computed
