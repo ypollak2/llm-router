@@ -1,0 +1,1 @@
+Numbers-provenance check: git-ignored paths are matched NUL-separated (`git check-ignore -z`), so an ignored file with a non-ASCII or newline name is skipped exactly; when git is missing or the root is not a git work tree, the scan says on stderr that ignored files are scanned too; the ignore test skips where git is not installed (review SHOULDs on #851).

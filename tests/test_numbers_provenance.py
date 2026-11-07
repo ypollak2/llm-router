@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -174,6 +175,10 @@ def test_this_changelog_fragment_passes_on_its_own():
     assert not any(np_.analyse_unit(u) for _, u in np_.split_units(frag.read_text()))
 
 
+needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+
+
+@needs_git
 def test_git_ignored_generated_doc_is_not_scanned(tree):
     """PRV RC6 2026-11-07: the suite writes docs/SCENARIO_REPORT.md (git-ignored); the real-repo scan
     then flagged its 35 numbers. A file git ignores is generated, not a published claim."""
@@ -183,3 +188,28 @@ def test_git_ignored_generated_doc_is_not_scanned(tree):
     assert run(tree).returncode == 0
     (tree / "docs" / "tracked.md").write_text("Fresh claim: 90% better.\n")
     assert run(tree).returncode == 1                      # a non-ignored file is still scanned
+
+
+@needs_git
+def test_git_ignored_non_ascii_name_matches_exactly(tree):
+    """Review of #851: without -z, git C-quotes non-ASCII names, so an ignored file was scanned anyway."""
+    subprocess.run(["git", "init", "-q", str(tree)], check=True)
+    (tree / ".gitignore").write_text("/docs/*-generated.md\n")
+    (tree / "docs" / "caf\u00e9-generated.md").write_text("Fresh claim: 90% better.\n")
+    assert run(tree).returncode == 0
+
+
+def test_non_git_root_notes_on_stderr_and_still_scans(tree):
+    """Outside a git work tree nothing is ignored (fail-safe) and the scan says so on stderr."""
+    (tree / "docs" / "generated.md").write_text("Fresh claim: 90% better.\n")
+    r = run(tree)
+    assert r.returncode == 1
+    assert "git-ignored files are scanned too" in r.stderr
+
+
+def test_git_missing_notes_on_stderr(monkeypatch, capsys, tmp_path):
+    def no_git(*a, **k):
+        raise FileNotFoundError("git")
+    monkeypatch.setattr(np_.subprocess, "run", no_git)
+    assert np_.git_ignored(tmp_path, ["docs/a.md"]) == set()
+    assert "git check-ignore unavailable (FileNotFoundError)" in capsys.readouterr().err
