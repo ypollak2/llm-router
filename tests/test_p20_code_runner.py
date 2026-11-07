@@ -1013,11 +1013,20 @@ def test_agent_tree_is_dead_before_run_returns_and_bystander_lives(tmp_path, bys
     assert bystander.poll() is None  # an unrelated process is never signalled
 
 
+def _untracked_orphan(monkeypatch):
+    """The orphan tests need an orphan the tracker never linked to the agent. Under load (PRV RC6
+    2026-11-07, machine load about 5) a snapshot can catch the grandchild before the middle child
+    exits; the tracker then records it as the agent's and kills it (correct), so nothing survives and
+    the refuse path is not reached. Turning tracking off makes that orphan deterministic."""
+    monkeypatch.setattr(h, "track_agent_tree", lambda known, table, leader: None)
+
+
 @pytest.mark.parametrize("stdio", ["inherited", "devnull"])
 def test_detached_orphan_makes_the_run_refuse_not_hang(tmp_path, monkeypatch, stdio):
     """F117 round 2: a double-forked setsid orphan is not provably the agent's, so it is not
     killed; because it still holds the work dir the run refuses (and never hangs on its pipes)."""
     monkeypatch.setattr(r, "DRAIN_SECONDS", 1.0)
+    _untracked_orphan(monkeypatch)
     extra = ("null",) if stdio == "devnull" else ()
     try:  # returning at all proves it did not hang on the survivor's pipes
         with pytest.raises(h.AgentSurvived, match="agent process survived"):
@@ -1076,6 +1085,7 @@ def test_stop_with_emulated_missing_row_of_a_live_leader(monkeypatch):
 
 def test_survivor_message_names_pids_only(tmp_path, monkeypatch):
     monkeypatch.setattr(r, "DRAIN_SECONDS", 1.0)
+    _untracked_orphan(monkeypatch)
     try:
         with pytest.raises(h.AgentSurvived, match=r"survived \(pids: \d+") as info:
             _run(tmp_path, "orphan", 30)

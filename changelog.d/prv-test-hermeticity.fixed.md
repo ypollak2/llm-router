@@ -1,0 +1,1 @@
+Pre-release verify: the numbers-provenance check skips files git ignores, so the suite's generated docs/SCENARIO_REPORT.md no longer fails the real-repo scan (PRV at RC6, 2026-11-07: 35 false findings, all in that file). The detached-orphan runner tests no longer depend on timing: under load, the process tracker could link and kill the orphan before the refusal path ran.
