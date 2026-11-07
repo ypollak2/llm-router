@@ -1,0 +1,1 @@
+S1 daily row: a separate `coordinated` population (sessions the owner reclassified as non-organic coordinator sessions in `session_kind_overrides.json`, D-407) with its own n, floors and CI, labelled "COORDINATED sessions, not organic" in `kpi --daily`; organic, release_clock and the streak are unchanged.
