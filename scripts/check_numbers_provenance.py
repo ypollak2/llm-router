@@ -49,6 +49,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -204,32 +205,48 @@ def analyse_unit(unit: str, root: Path | None = None, rel: str = ""):
     return []
 
 
+def git_ignored(root: Path, rels: list[str]) -> set[str]:
+    """Paths git ignores under `root` (generated files, e.g. the suite's docs/SCENARIO_REPORT.md, are not
+    published claims). Outside a git work tree, or if git fails, nothing is ignored."""
+    if not rels:
+        return set()
+    try:
+        done = subprocess.run(["git", "-C", str(root), "check-ignore", "--stdin"], input="\n".join(rels),
+                              capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if done.returncode not in (0, 1):  # 1 = none ignored; 128 = not a git work tree
+        return set()
+    return set(done.stdout.splitlines())
+
+
 def scan_tree(root: Path):
     findings = []
     seen = set()
-    for pattern in SCOPE_GLOBS:
-        for path in sorted(root.glob(pattern)):
-            rel = path.relative_to(root).as_posix()
-            if rel in seen or not path.is_file() or rel.startswith(EXCLUDE_PREFIXES):
-                continue
-            seen.add(rel)
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if rel.startswith("docs/") and EXEMPT_FILE_RE.search(text):
-                continue
-            occ: dict[str, int] = {}
-            for line_no, unit in split_units(text):
-                for why in analyse_unit(unit, root, rel):
-                    base = key_for(rel, unit)
-                    idx = occ[base] = occ.get(base, 0) + 1
-                    findings.append(
-                        {
-                            "key": f"{base}#{idx}",
-                            "path": rel,
-                            "line": line_no,
-                            "why": why,
-                            "text": _norm(unit)[:160],
-                        }
-                    )
+    paths = [p for pattern in SCOPE_GLOBS for p in sorted(root.glob(pattern))]
+    ignored = git_ignored(root, sorted({p.relative_to(root).as_posix() for p in paths if p.is_file()}))
+    for path in paths:
+        rel = path.relative_to(root).as_posix()
+        if rel in seen or not path.is_file() or rel.startswith(EXCLUDE_PREFIXES) or rel in ignored:
+            continue
+        seen.add(rel)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if rel.startswith("docs/") and EXEMPT_FILE_RE.search(text):
+            continue
+        occ: dict[str, int] = {}
+        for line_no, unit in split_units(text):
+            for why in analyse_unit(unit, root, rel):
+                base = key_for(rel, unit)
+                idx = occ[base] = occ.get(base, 0) + 1
+                findings.append(
+                    {
+                        "key": f"{base}#{idx}",
+                        "path": rel,
+                        "line": line_no,
+                        "why": why,
+                        "text": _norm(unit)[:160],
+                    }
+                )
     return findings, len(seen)
 
 

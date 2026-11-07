@@ -172,3 +172,14 @@ def test_this_changelog_fragment_passes_on_its_own():
     frag = ROOT / "tests" / "fixtures" / "numbers_provenance" / "UN-10.added.md"
     assert frag.exists()
     assert not any(np_.analyse_unit(u) for _, u in np_.split_units(frag.read_text()))
+
+
+def test_git_ignored_generated_doc_is_not_scanned(tree):
+    """PRV RC6 2026-11-07: the suite writes docs/SCENARIO_REPORT.md (git-ignored); the real-repo scan
+    then flagged its 35 numbers. A file git ignores is generated, not a published claim."""
+    subprocess.run(["git", "init", "-q", str(tree)], check=True)
+    (tree / ".gitignore").write_text("/docs/generated.md\n")
+    (tree / "docs" / "generated.md").write_text("Fresh claim: 90% better.\n")
+    assert run(tree).returncode == 0
+    (tree / "docs" / "tracked.md").write_text("Fresh claim: 90% better.\n")
+    assert run(tree).returncode == 1                      # a non-ignored file is still scanned
