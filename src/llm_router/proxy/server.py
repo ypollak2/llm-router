@@ -60,7 +60,7 @@ from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_key, shadow_frontier
 from llm_router import prefixes as user_prefixes
-from llm_router.proxy import haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
+from llm_router.proxy import cls_decide, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -333,6 +333,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         import llm_router.classify  # noqa: F401
     # ``--serve local-agent`` (proxy.local_mode); None means off, and then nothing
     # below that mentions ``lm`` runs.
+    turn_decisions = cls_decide.TurnDecisionStore()  # NS-A1: memory only, record only
     lm = None
     if cfg.serve == local_mode.SERVE_LOCAL_AGENT:
         if (cfg.trim or "").strip().lower() != "none" or tier_policy is not None \
@@ -1217,6 +1218,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # nothing is applied; M1 shadow and M2 canary fill them in.
             **request_fields(body, raw, parent_main),
             "cls_source": "rules", "cls_ms": None, "cls_arm": None, "cls_applied": False,
+            # NS-A1 (record only): supported-call label, human-turn key, and the per-turn
+            # classifier decision (filled below, before local_step). Additive keys.
+            **cls_decide.static_fields(body, session_id_of(body)),
         }
         example_written = False
 
@@ -1260,6 +1264,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         force_local = (ov is not None and ov.name == "local" and lm is not None
                        and local_mode.is_agent_turn(body))
         bypass_local = ov is not None and ov.is_claude
+        await cls_decide.decide_turn(
+            body, row, turn_decisions, lm_on=lm is not None, parent_main=parent_main,
+            override="claude" if bypass_local else "local" if force_local else None)
         if lm is not None and not bypass_local:
             message = await local_step(
                 stripped_body or body if force_local else body, row, force=force_local, key_body=body)
