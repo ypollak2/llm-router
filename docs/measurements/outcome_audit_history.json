@@ -11,6 +11,31 @@
       ],
       "window_days": 30,
       "recorded_at": "2026-09-29T21:14:54.618064+00:00"
+    },
+    {
+      "release": "16.0.0",
+      "audit_version": 2,
+      "used_rate": 0.03180212014134275,
+      "used": 9,
+      "attempted": 283,
+      "ci95": [
+        0.01682,
+        0.059325
+      ],
+      "window_days": 30,
+      "recorded_at": "2026-11-07T18:39:49.691114+00:00",
+      "artifact_sha256": "7d3adc693f328b11c746ff43a2fde725f03d9d724664fb42a03edf4cbd22b02b",
+      "not_applicable": 81,
+      "cross_version": {
+        "policy": "rebaseline",
+        "against": {
+          "release": "15.4.0",
+          "audit_version": 1,
+          "used_rate": 0.002290950744558992,
+          "used": 2,
+          "attempted": 873
+        }
+      }
     }
   ]
 }
