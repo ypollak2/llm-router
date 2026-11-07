@@ -43,6 +43,7 @@ STREAK_REQUIRED = 7                # D-210 (2026-10-17): 7 consecutive measured 
 BOOT_B = 2000
 TARGET = 0.60                    # == offload_share.TARGET (asserted by a test)
 SYNTH_LABEL = "synthetic (D-167)"
+COORD_LABEL = "COORDINATED sessions, not organic (D-407)"
 OLD_SCHEMA = "daily-offload/1"      # pre-D-210 rows: no release_clock block
 SYNTH_SCHEMA = "synth-live-manifest/1"
 SYNTH_MANIFEST_ENV = "LLM_ROUTER_SYNTH_MANIFEST"
@@ -331,14 +332,18 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
         k = kinds.get(sid)
         if k == sk.KIND_ORGANIC:
             return "organic"
-        return "synthetic" if k == sk.KIND_RESEARCH and sid in ids else "other"
+        if k == sk.KIND_RESEARCH and sid in ids:
+            return "synthetic"
+        # D-407: a session the owner reclassified through session_kind_overrides.json as non-organic
+        # (coordinator-agent sessions, D-335/D-399) is reported on its own line, never in organic or release_clock.
+        return "coordinated" if sk.override_of(sid) is not None else "other"
 
     def in_day(x: dict) -> bool:
         return isinstance(x.get("ts"), (int, float)) and start <= x["ts"] < until
 
     actions = [a for a in res["actions"] if in_day(a)]
     turns = [u for u in osh.turn_units(res["built"]["units"]) if in_day(u)]
-    by_pop: dict[str, tuple[list[dict], list[dict]]] = {p: ([], []) for p in ("organic", "synthetic", "other")}
+    by_pop: dict[str, tuple[list[dict], list[dict]]] = {p: ([], []) for p in ("organic", "synthetic", "coordinated", "other")}
     for a in actions:
         by_pop[pop_of(a["session_id"])][0].append(a)
     for u in turns:
@@ -365,6 +370,12 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
                                  base_cav + ["synthetic sessions (D-167): never in the organic numerator or "
                                              "denominator; counted only in release_clock (D-210)"]),
         "release_clock": rc,
+        "coordinated": _population(
+            COORD_LABEL, ds, "coordinated", *by_pop["coordinated"], res["sampled"], excluded,
+            base_cav + ["coordinated sessions (D-407): override-listed non-organic sessions; a separate line with its "
+                        "own n, never in the organic numerator or denominator and never in release_clock or the streak",
+                        "steps served by a program (llm_apply, no model) are not model actions here; they are "
+                        "counted apart from local-model steps in northstar (apply_credit, D-386)"]),
     }
     oa, ot = by_pop["other"]
     kind_counts: dict[str, int] = {}
@@ -774,9 +785,11 @@ def _run_daily(date, backfill, force, partial, manifest, as_json, inputs, now, s
         res = write_day(row, force=force, partial=partial, base=base)
         org = row["populations"]["organic"]
         rc = row["populations"]["release_clock"]
+        co = row["populations"]["coordinated"]
         stats["days_written" if res["status"] in ("written", "rev", "partial") else "days_existing"] += 1
         out.append({"date": d.isoformat(), **res, "organic_action": org["action"], "organic_turn": org["turn"],
-                    "release_clock_action": rc["action"], "release_clock_turn": rc["turn"]})
+                    "release_clock_action": rc["action"], "release_clock_turn": rc["turn"],
+                    "coordinated_action": co["action"], "coordinated_turn": co["turn"]})
     if as_json:
         print(json.dumps(out, indent=2, sort_keys=True))
     else:
@@ -788,6 +801,9 @@ def _run_daily(date, backfill, force, partial, manifest, as_json, inputs, now, s
                 line += f"  organic action {fmt(a)}  turn {fmt(t)}"
                 line += (f"  release_clock action {fmt(o['release_clock_action'])}  "
                          f"turn {fmt(o['release_clock_turn'])}")
+                if "coordinated_action" in o:
+                    line += (f"  | COORDINATED sessions, not organic (D-407): action {fmt(o['coordinated_action'])}  "
+                             f"turn {fmt(o['coordinated_turn'])}")
             print(line)
     return 0
 
