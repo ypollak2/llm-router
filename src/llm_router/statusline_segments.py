@@ -198,27 +198,91 @@ def _spawn_detached(script: str) -> None:
         os._exit(127)
 
 
-def context_segment(transcript: str, model_id: str, env: dict[str, str]) -> dict[str, str]:
+def _pos_int(v: object) -> int:
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
+
+
+def _canon_model(mid: str) -> str:
+    """``claude-opus-5-5[1m]`` / ``claude-opus-5-5-20261001`` -> ``claude-opus-5-5`` (the docs'
+    canonical modelSettings key). Aliases (``opus``) are not resolved: they match only a key spelled the same."""
+    return re.sub(r"-\d{8}$", "", re.sub(r"\[[^\]]*\]$", "", mid.strip().lower()))
+
+
+def _auto_compact_window(env: dict[str, str], model_id: str = "") -> int:
+    """The auto-compact window Claude Code would use; 0 when none is set or the file is unusable.
+
+    Precedence (model-config docs, "Set the auto-compact window"): env
+    ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``, then ``modelSettings.<canonical model>.autoCompactWindow``,
+    then the top-level ``autoCompactWindow``, both read from ``$HOME/.claude/settings.json`` only
+    (project and managed settings files are not read; ``--autocompact`` is not visible here).
+    """
+    try:
+        v = _pos_int(int(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")))
+    except ValueError:
+        v = 0
+    if v:
+        return v
+    home = env.get("HOME") or os.path.expanduser("~")
+    try:
+        with open(os.path.join(home, ".claude", "settings.json"), encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        ms = cfg.get("modelSettings")
+        want = _canon_model(model_id)
+        if want and isinstance(ms, dict):
+            for key, ent in ms.items():
+                if isinstance(ent, dict) and _canon_model(str(key)) == want and _pos_int(ent.get("autoCompactWindow")):
+                    return ent["autoCompactWindow"]
+        return _pos_int(cfg.get("autoCompactWindow"))
+    except Exception:  # noqa: BLE001 -- missing, unreadable or malformed settings: no override
+        return 0
+
+
+def effective_context_limit(model_id: str, env: dict[str, str], window: int = 0, used: int = 0) -> int:
+    """The token count at which this session compacts, i.e. the bar's 100%.
+
+    1. ``window``: Claude Code's own ``context_window.context_window_size`` from the status line
+       stdin JSON, the model's window when present.
+    2. Otherwise the explicit window: 1,000,000 for a ``[1m]``/``1m`` model id, else a valid
+       ``CC_CONTEXT_LIMIT``. A window is never guessed from a model name beyond that rule.
+    3. The auto-compact window (``_auto_compact_window``) lowers the limit when it is below the
+       window, and sets it when no explicit window is known (250k used of 300k shows 83%).
+    4. With neither, 200000.
+    5. Never pin because of a clamp: if ``used`` exceeds that limit, the larger of the known
+       window and compact values is the limit (a payload that says 200000 while the session
+       demonstrably holds more, e.g. 274,845 tokens seen on claude-opus-5-5, is wrong about it).
+    """
+    base = window if window > 0 else 0
+    if not base:
+        if "1m" in model_id:
+            base = 1_000_000
+        else:
+            try:
+                base = max(0, int(env.get("CC_CONTEXT_LIMIT", "0")))
+            except ValueError:
+                base = 0
+    compact = _auto_compact_window(env, model_id)
+    limit = (min(base, compact) if base else compact) if compact else (base or 200000)
+    if used > limit:
+        limit = max(limit, base, compact)
+    return limit
+
+
+def context_segment(transcript: str, model_id: str, env: dict[str, str], window: int = 0) -> dict[str, str]:
     """Tokens of the LAST message with a ``usage`` block, read from the tail.
 
     The old one-liner parsed the whole file on every render (cost grows with the
     session: 65 ms at 11 MB, hundreds of ms at 50 MB). The answer is the last
     qualifying line, so reading backwards from the end gives the same value; the
     window doubles from 256 KiB until a qualifying line is found or the file is
-    covered.
+    covered. The percentage is used / ``effective_context_limit`` (see there).
     """
     if not transcript or not os.path.isfile(transcript):
         return {}
     total = _last_usage_tokens(transcript)
     if not total:
         return {}
-    try:
-        limit = int(env.get("CC_CONTEXT_LIMIT", "200000"))
-    except ValueError:
-        limit = 200000
-    if "[1m]" in model_id or "1m" in model_id:
-        limit = 1_000_000
-    pct = min(100, total * 100 // limit) if limit > 0 else 0
+    limit = effective_context_limit(model_id, env, window, total)
+    pct = min(100, total * 100 // limit)
     if total >= 1_000_000:
         human = "%.1fM" % (total / 1_000_000)
     elif total >= 1_000:
@@ -611,13 +675,13 @@ def last_route_segment(state: str, now: float) -> dict[str, str]:
 
 
 def compute(state: str, transcript: str, model_id: str, env: dict[str, str] | None = None,
-            now: float | None = None, session: str = "") -> dict[str, str]:
+            now: float | None = None, session: str = "", ctx_window: int = 0) -> dict[str, str]:
     env = dict(os.environ) if env is None else env
     now = time.time() if now is None else now
     seg: dict[str, str] = {"v": str(SCHEMA)}
     parts = (
         lambda: usage_segment(state, now, env),
-        lambda: context_segment(transcript, model_id, env),
+        lambda: context_segment(transcript, model_id, env, ctx_window),
         lambda: money_segment(state, now),
         lambda: mix_segment(state, now, session),
         lambda: proxy_segment(state),
@@ -667,6 +731,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--session", default="default")
     ap.add_argument("--transcript", default="")
     ap.add_argument("--model", default="")
+    ap.add_argument("--ctx-window", default="0")  # context_window.context_window_size from the stdin JSON
     ns = ap.parse_args(argv)
     session = re.sub(r"[^A-Za-z0-9._-]", "_", ns.session) or "default"
     state = ns.state
@@ -685,7 +750,8 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(signal, "SIGALRM"):
         _arm_hard_stop(now)
     maybe_refresh_usage(state, now, dict(os.environ))
-    seg = compute(state, ns.transcript, ns.model, dict(os.environ), now, session)
+    seg = compute(state, ns.transcript, ns.model, dict(os.environ), now, session,
+                  int(ns.ctx_window) if ns.ctx_window.isdigit() else 0)
     append_history(state, now)
     try:
         seg.update({k: _clean(v) for k, v in _within(SNAP_BUDGET_S, lambda: snap_segment(
