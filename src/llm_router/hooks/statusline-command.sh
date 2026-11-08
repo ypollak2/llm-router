@@ -151,7 +151,7 @@ fi
 # a process through argv/env (CHZ-SEC-07), never through source text.
 # `read -d ''` slurps stdin with no `cat` process; it returns 1 at EOF, which is not an error here.
 IFS= read -r -d '' input || true
-session_cwd="" transcript_path="" model_id="" _sid=""
+session_cwd="" transcript_path="" model_id="" _sid="" ctx_window=""
 if [[ "$input" == *\\* ]]; then
     _parsed=$(printf '%s' "$input" | python3 -c '
 import json, sys
@@ -162,10 +162,12 @@ except Exception:
 m = d.get("model")
 mid = m.get("id", "") if isinstance(m, dict) else (m if isinstance(m, str) else "")
 sid = d.get("session_id", "")
-for v in (d.get("cwd", ""), d.get("transcript_path", ""), mid, sid):
+cw = d.get("context_window")
+cw = cw.get("context_window_size", "") if isinstance(cw, dict) else ""
+for v in (d.get("cwd", ""), d.get("transcript_path", ""), mid, sid, cw):
     print(str(v).replace("\n", "\x01"))
 ' 2>/dev/null)
-    { IFS= read -r session_cwd; IFS= read -r transcript_path; IFS= read -r model_id; IFS= read -r _sid; } <<< "$_parsed"
+    { IFS= read -r session_cwd; IFS= read -r transcript_path; IFS= read -r model_id; IFS= read -r _sid; IFS= read -r ctx_window; } <<< "$_parsed"
     transcript_path="${transcript_path//$'\x01'/$'\n'}"
 else
     # These regexes take the FIRST match anywhere in the JSON, not strictly the top-level
@@ -184,7 +186,10 @@ else
     fi
     _re='"session_id"[[:space:]]*:[[:space:]]*"([A-Za-z0-9._-]+)"'
     [[ "$input" =~ $_re ]] && _sid="${BASH_REMATCH[1]}"
+    _re='"context_window_size"[[:space:]]*:[[:space:]]*([0-9]+)'
+    [[ "$input" =~ $_re ]] && ctx_window="${BASH_REMATCH[1]}"
 fi
+[[ "$ctx_window" =~ ^[0-9]+$ ]] || ctx_window=0
 [[ "$_sid" =~ ^[A-Za-z0-9._-]+$ ]] || _sid="default"
 
 STATE_DIR="$HOME/.llm-router"
@@ -309,7 +314,7 @@ _seg_exec() {
     # "segments pending" instead of silently dropping the segments.
     if [ -f "$_seg_script" ]; then _cmd=("$_seg_py" -I "$_seg_script")
     else _cmd=("$_seg_py" -m llm_router.statusline_segments); fi
-    _cmd+=(--state "$STATE_DIR" --session "$_sid" --transcript "$transcript_path" --model "$model_id")
+    _cmd+=(--state "$STATE_DIR" --session "$_sid" --transcript "$transcript_path" --model "$model_id" --ctx-window "$ctx_window")
     "${_cmd[@]}" </dev/null >/dev/null 2>&1
 }
 _seg_run() {
