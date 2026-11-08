@@ -7,7 +7,9 @@ whose latest batch is not passing (``veto_lane``, D-441; read directly from ``la
 since ``door_verdict.local_lane_for`` cannot see the proxy door). No ``(proxy, local)`` lane
 evidence at all means ``allow``: the tier decides. The only proxy-door rows today are lane A's,
 served class ``haiku``; they are not local evidence either way. An unreadable lane file is a
-failopen (LR-FO-PROXY-CLS-DECIDE) and vetoes. A veto keeps THAT TURN on Claude: the verdict
+failopen (LR-FO-PROXY-CLS-DECIDE) and vetoes. veto_lane is dormant today: nothing writes
+(proxy, local, *) lane rows, so the tier alone decides. A failing local lane stops vetoing once
+its batch ages out of the 28-day window. A veto keeps THAT TURN on Claude: the verdict
 is stored under the turn key, so every continuation of the turn inherits it with no second
 classifier call, and the next human turn is classified again. A veto never sets the
 conversation pin (``server.py`` ``local_step``): the ``started_elsewhere`` test asks the

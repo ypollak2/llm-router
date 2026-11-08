@@ -427,3 +427,23 @@ def test_a_hung_classifier_is_bounded_then_failopen_and_serves_local(env, monkey
     assert row["cls_turn_decided"] is False and row["cls_applied"] is False
     assert row["decision"] == ledger.DECISION_SERVED and env.up.requests == []
     assert 0.25 <= wall < 1.0, wall
+
+
+def test_a_hung_classifier_at_the_real_plan_bound_is_failopen_within_2_2_s(env, monkeypatch):
+    """No timeout override: the production 2.0 s budget (LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS unset)."""
+    decision_model_on(monkeypatch)
+    monkeypatch.delenv("LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS", raising=False)
+    monkeypatch.setattr(lc, "_cool_until", 0.0)
+    monkeypatch.setattr(lc, "_resident_until", 0.0)
+    monkeypatch.setattr(lc, "_inflight", {})
+
+    async def hang(*a, **k):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(lc, "_is_loaded", hang)
+    t0 = time.perf_counter()
+    env.post(turn_body(["rename the helper"]))
+    wall = time.perf_counter() - t0
+    (row,) = env.rows()
+    assert row["cls_turn_source"] == "timeout" and row["decision"] == ledger.DECISION_SERVED
+    assert 1.9 <= wall <= 2.2, wall
