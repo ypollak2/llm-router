@@ -8,6 +8,7 @@ conversation (the stated residual); the classifier latency is measured with a sl
 No Ollama, no network: the classifier is injected, Anthropic is a mocked upstream and the serving
 model a fake backend (see tests/test_proxy_cls_decide.py, whose helpers are reused).
 """
+# ruff: noqa: F811  (fixtures are imported and used as arguments)
 
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import pytest
 
 from llm_router import lane_quality
 from llm_router import local_classifier as lc
-from llm_router.proxy import cls_decide, ledger, local_mode
+from llm_router.proxy import cls_decide, ledger
 from llm_router.proxy import server as ps
 from tests.test_proxy_cls_decide import (  # noqa: F401  (fixtures and helpers)
     ADDITIVE, SID, Env, FakeClassifier, _base_rows, _comparable, _env, _script, decision_model_on, env,

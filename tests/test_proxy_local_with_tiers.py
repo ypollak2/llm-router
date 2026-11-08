@@ -24,11 +24,11 @@ from llm_router.proxy import server as ps
 from tests.test_proxy_cls_decide import (  # noqa: F401  (fixtures and helpers)
     _STABLE_DROP, ADDITIVE, SID, FakeClassifier, _env, decision_model_on, passing_proxy_lane, turn_body,
 )
-from tests.test_proxy_local_mode import (
+from tests.test_proxy_local_mode import (  # noqa: F401  (autouse fixture and helpers)
     GOOD_RUNNER, MODEL, Backend, Breaker, _call, _first_call, _next_turn, _ollama, _overrides_readable, _pre, _runner, _served_blocks,
     _with_image,
 )
-from tests.test_proxy_tiers import OPUS, SONNET, Upstream, _raw_policy, _sse
+from tests.test_proxy_tiers import OPUS, SONNET, Upstream, _raw_policy, _sse  # noqa: F401
 
 #: Keys only a local-agent row carries (or sets differently): they are the local step's own bookkeeping.
 LOCAL_KEYS = {"serve_mode", "local_mode", "egress", "reason", "detail", "cls_applied"}
