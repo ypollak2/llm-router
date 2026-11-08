@@ -42,10 +42,24 @@ DEFAULT_COLD_GAP_S = 3600.0
 _MAX_CONVERSATIONS = 4096
 
 
+def _without_cache_control(node):
+    """Drop ``cache_control`` markers: Claude Code moves them between turns, and a marker
+    on the first turn's last block must not change the key of the next turn."""
+    if isinstance(node, dict):
+        return {k: _without_cache_control(v) for k, v in node.items() if k != "cache_control"}
+    if isinstance(node, list):
+        return [_without_cache_control(v) for v in node]
+    return node
+
+
 def conversation_key(body: dict, session_id: str | None) -> str:
+    """Session id plus a hash of the WHOLE first user message. Claude Code opens every thread
+    of a session (main and sub-agents) with the same long preamble (CLAUDE.md, memory index),
+    so a hash of a prefix of it gave all of them one key and one shared local pin
+    (2026-11-08: 97 sub-agent rows served ``pinned_claude`` off the main thread's pin)."""
     msgs = non_system(body.get("messages") or [])
-    first = msgs[0].get("content") if msgs else ""
-    digest = hashlib.sha256(json.dumps(first, sort_keys=True, default=str)[:8000].encode()).hexdigest()[:16]
+    first = _without_cache_control(msgs[0].get("content") if msgs else "")
+    digest = hashlib.sha256(json.dumps(first, sort_keys=True, default=str).encode()).hexdigest()[:16]
     return f"{session_id or '-'}:{digest}"
 
 
