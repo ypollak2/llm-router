@@ -685,3 +685,32 @@ def test_preflight_and_banner_resolve_a_missing_window_from_the_table(tmp_path):
     assert not any("--num-ctx" in p for p in pre)
     lines = local_mode.banner_lines(model=MODEL, num_ctx=None, kill_path=tmp_path / "k", killed=False)
     assert lines and "local-agent" in lines[0]
+
+
+# ── D-445: a sub-agent is not pinned by the main thread sharing its long preamble ──
+
+_LONG_PREAMBLE = "<system-reminder>shared claude.md and memory index line. " * 400  # > 8000 chars
+
+
+def _sub_first_call() -> dict:
+    """A sub-agent's first call: one user turn, the shared preamble, its own brief, no launcher tool."""
+    body = _first_call()
+    body["tools"] = [t for t in body["tools"] if t["name"] != "Agent"]
+    body["messages"] = [{"role": "user", "content": [{"type": "text", "text": _LONG_PREAMBLE},
+                                                      {"type": "text", "text": "sub-agent brief B"}]}]
+    return body
+
+
+async def test_a_pinned_main_thread_does_not_pin_a_new_subagents_first_call(env, monkeypatch):
+    monkeypatch.setenv(local_mode.EXEMPT_POLICY_ENV, "none")
+    main = _main_thread(_req())
+    main["messages"][0]["content"] = [{"type": "text", "text": _LONG_PREAMBLE}, {"type": "text", "text": "main brief"}]
+    backend = Backend(_ollama("x"), _ollama("x"))
+    app = env.app(backend)
+    await _post(app, main)  # started elsewhere: the main thread is pinned claude
+    await _post(app, json.loads(json.dumps(main)))
+    await _post(app, _sub_first_call())
+    rows = env.rows()
+    assert rows[0]["reason"] == "conversation_started_on_claude" and rows[1]["reason"] == "pinned_claude"
+    assert rows[2]["local_mode"]["pin"] is None or rows[2]["local_mode"]["pin"] == "local"
+    assert rows[2]["reason"] != "pinned_claude" and rows[2]["local_mode"]["reason"] != "pinned_claude"
