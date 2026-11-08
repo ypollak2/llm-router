@@ -694,8 +694,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         breaker_ok, breaker_detail = await lm_breaker.allows(None)
         # NS-L (D-448): a coordinator session (session_kind_overrides.json) or a sub-agent thread is never
         # served locally. ``key_body`` is the unstripped request, the one the sub-agent markers live in.
+        policy = local_mode.exempt_policy()  # D-455: LLM_ROUTER_LOCAL_EXEMPT, read per request
         exempt, overrides_problem = local_mode.exempt_reason(key_body or body, row.get("session_id"),
-                                                                parent_main_of(key_body or body))
+                                                                parent_main_of(key_body or body), policy)
         decision = local_mode.decide_local(body, local_mode.LocalSession(
             key=key, pinned=pinned, kill_switch=lm.killed(), backend_healthy=not health.is_open(cfg.model),
             breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=payload,
@@ -706,6 +707,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
+        row["local_mode"]["exempt_policy"] = policy[0]
+        if policy[3]:
+            row["local_mode"]["exempt_policy_invalid"] = policy[3]
         if overrides_problem:
             row["local_mode"]["overrides_unreadable"] = overrides_problem  # D-448: not exempt, and said so
         if force:

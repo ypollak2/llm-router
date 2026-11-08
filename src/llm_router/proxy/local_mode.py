@@ -101,6 +101,30 @@ REASON_PREFLIGHT_REFUSED = "preflight_refused"  # combined mode only: local serv
 EXEMPT_COORDINATOR = "coordinator_session"
 EXEMPT_SUBAGENT = "subagent_thread"
 
+#: D-455: which exempt classes refuse local serving. Read per request from this variable.
+EXEMPT_POLICY_ENV = "LLM_ROUTER_LOCAL_EXEMPT"
+EXEMPT_POLICY_DEFAULT = "coordinator,subagent"
+
+
+def exempt_policy(raw: str | None = None) -> tuple[str, bool, bool, str | None]:
+    """``(effective, coordinator_exempt, subagent_exempt, invalid)`` for ``raw`` (default: the env var).
+
+    Case-insensitive, whitespace tolerated. Unset or empty is the default (both exempt). A value that is
+    not ``none`` or a comma list of ``coordinator`` / ``subagent`` falls back to the default and is
+    returned in ``invalid`` so the row can record it. KPI classification does not read this."""
+    if raw is None:
+        raw = os.environ.get(EXEMPT_POLICY_ENV)
+    text = (raw or "").strip().lower()
+    if not text:
+        return EXEMPT_POLICY_DEFAULT, True, True, None
+    tokens = [t.strip() for t in text.split(",")]
+    if tokens == ["none"]:
+        return "none", False, False, None
+    if tokens and all(t in ("coordinator", "subagent") for t in tokens):
+        coord, sub = "coordinator" in tokens, "subagent" in tokens
+        return ",".join(n for n, on in (("coordinator", coord), ("subagent", sub)) if on), coord, sub, None
+    return EXEMPT_POLICY_DEFAULT, True, True, (raw or "").strip()[:80]
+
 PIN_LOCAL = "local"
 PIN_CLAUDE = "claude"
 
@@ -215,7 +239,8 @@ class LocalSession:
 
 
 def exempt_reason(body: dict, session_id: str | None,
-                  parent_main: bool | None = None) -> tuple[str | None, str | None]:
+                  parent_main: bool | None = None,
+                  policy: tuple[str, bool, bool, str | None] | None = None) -> tuple[str | None, str | None]:
     """``(detail, overrides_problem)`` for D-448. ``detail`` is ``coordinator_session`` when the
     session is listed in ``session_kind_overrides.json`` with a kind other than ``organic`` (the same
     reader the KPI code uses: ``session_kind.override_of``), else ``subagent_thread`` when the request
@@ -225,22 +250,30 @@ def exempt_reason(body: dict, session_id: str | None,
     ``overrides_problem`` is ``missing`` / ``unreadable`` when the overrides file could not be read as an
     object. That case FAILS CLOSED (coordinator decision): every session is refused with ``exempt_session``,
     detail ``missing`` or ``overrides_unreadable``, and the row records ``local_mode.overrides_unreadable``.
-    Nothing is served locally while the file cannot be read; organic sessions are unaffected while it can."""
+    Nothing is served locally while the file cannot be read; organic sessions are unaffected while it can.
+
+    D-455: ``policy`` (``exempt_policy()``, read from ``LLM_ROUTER_LOCAL_EXEMPT`` when None) switches each
+    class off. The overrides file is read, and the fail-closed rule applies, only while coordinators are
+    exempt; with ``subagent`` or ``none`` an unreadable file refuses nothing."""
     from llm_router import session_kind
     from llm_router.proxy.steps import is_main_thread, is_subagent_request
 
+    _, coord_exempt, sub_exempt, _ = policy if policy is not None else exempt_policy()
     problem = None
-    try:
-        problem = session_kind.overrides_problem()
-        kind = session_kind.override_of(session_id)
-    except Exception:  # noqa: BLE001 - never costs a call; recorded as unreadable
-        kind, problem = None, "unreadable"
-    if problem:
-        # Coordinator decision (fail closed): an overrides file that cannot be read means no session's
-        # status can be established, so NO session is served locally.
-        return (problem if problem == "missing" else "overrides_unreadable"), problem
-    if kind is not None and kind != session_kind.KIND_ORGANIC:
-        return EXEMPT_COORDINATOR, problem
+    if coord_exempt:
+        try:
+            problem = session_kind.overrides_problem()
+            kind = session_kind.override_of(session_id)
+        except Exception:  # noqa: BLE001 - never costs a call; recorded as unreadable
+            kind, problem = None, "unreadable"
+        if problem:
+            # Coordinator decision (fail closed): an overrides file that cannot be read means no session's
+            # status can be established, so NO session is served locally.
+            return (problem if problem == "missing" else "overrides_unreadable"), problem
+        if kind is not None and kind != session_kind.KIND_ORGANIC:
+            return EXEMPT_COORDINATOR, problem
+    if not sub_exempt:
+        return None, problem
     try:
         if is_subagent_request(body):
             return EXEMPT_SUBAGENT, problem
@@ -443,6 +476,7 @@ def egress_notice(reason: str, session_id: str | None) -> str:
 def banner_lines(*, model: str | None, num_ctx: int | None, kill_path: Path, killed: bool,
                  with_tiers: bool = False) -> list[str]:
     num_ctx = resolve_num_ctx(model, num_ctx)
+    effective, _, _, invalid = exempt_policy()
     lines = [
         f"llm-router proxy: SERVE MODE = local-agent (opt-in). Claude Code steps are answered by "
         f"{model} on this machine; conversations are pinned local at their first call.",
@@ -450,6 +484,9 @@ def banner_lines(*, model: str | None, num_ctx: int | None, kill_path: Path, kil
         f"stderr): media, prompt > {PROMPT_CAP_TOKENS} tokens, backend unhealthy, quality breaker open, a "
         f"failed local step, a conversation that began on Claude, or an exempt session (coordinator in "
         f"session_kind_overrides.json, or a sub-agent thread). Never a placeholder, never silent.",
+        f"  exempt policy ({EXEMPT_POLICY_ENV}): {effective}"
+        + (f" (invalid value {invalid!r}, default applied)" if invalid else "")
+        + "; a class not listed is served locally.",
         f"  kill switch: touch {kill_path} (remove to re-enable); takes effect on the next request.",
     ]
     if with_tiers:
