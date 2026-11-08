@@ -879,7 +879,9 @@ def proxy_figures(session_id: str, root: Path | None = None) -> dict | None:
         return None
     served = {r["msg_id"] for r in rows if r.get("decision") == "served"}
     ok = len(_served_and_used(served, session_id, root)) if served else 0
-    return {"attempts": len(rows), "ok": ok}
+    # one served message is one attempt however many ledger rows repeat its id (ok is already by unique id)
+    fallbacks = sum(1 for r in rows if r.get("decision") != "served")
+    return {"attempts": len(served) + fallbacks, "ok": ok}
 
 
 # ── the session figure ────────────────────────────────────────────────────────────────────────────────────

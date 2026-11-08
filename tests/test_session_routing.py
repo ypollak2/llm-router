@@ -457,7 +457,7 @@ def test_the_tick_prints_the_session_row_between_the_line_and_the_seven_day_row(
     assert len(rows) == 3
     assert rows[1].startswith("routed 1.2% (1/81 calls, session)")
     assert rows[2] == ("off-Claude 1.0% (6/600 calls, 7d, organic) · <Opus 0.0% (0/594 Claude calls, 7d, organic)"
-                       " · local accepted 90% (9/10 attempts, 7d, organic)")
+                       " · local accepted 90% (9/10 router attempts, 7d, organic)")
     assert len(tick.render_rows(cache, now=NOW)) == 2                         # no session in the JSON: no session row
 
 
@@ -484,7 +484,7 @@ def test_the_seven_day_row_is_as_before_when_the_cache_has_no_local_ok(env):
                                               "outside_claude": {"k": 6, "n": 600}, "below_opus": {"k": 0, "n": 594}}}
     assert "local accepted" not in tick.render_progress(cache, now=NOW)
     cache["call_mix"]["local_ok"] = {"k": 0, "n": 0}
-    assert tick.render_progress(cache, now=NOW).endswith("local accepted n/a (0 attempts, 7d, organic)")
+    assert tick.render_progress(cache, now=NOW).endswith("local accepted n/a (0 router attempts, 7d, organic)")
     for bad in ({"k": 3, "n": 2}, {"k": -1, "n": 2}, {"k": True, "n": 1}, {"k": "x", "n": 1}, "str", None):
         cache["call_mix"]["local_ok"] = bad
         assert "local accepted" not in tick.render_progress(cache, now=NOW)
@@ -1354,3 +1354,11 @@ def test_a_result_cached_before_the_proxy_figure_is_recomputed(env):
     first["local"] = {"attempts": 0, "ok": 0, "gate_rejected": 0}
     sr._atomic_json(sr.result_path(SID), first)
     assert sr.compute(SID, NOW + 1)["proxy_attempts"] == {"attempts": 1, "ok": 1}
+
+
+def test_a_duplicate_served_msg_id_is_one_attempt_and_at_most_one_accepted(env):
+    home = _session_with_local(env)
+    _write_proxy(home, _proxy_row("p1"))                      # the same served message written twice
+    r = sr.compute(SID, NOW + 100, budget_s=30)
+    assert r["proxy_attempts"] == {"attempts": 1, "ok": 1}
+    assert r["local"]["ok"] <= r["local"]["attempts"]

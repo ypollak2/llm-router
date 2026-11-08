@@ -290,5 +290,5 @@ def test_unreadable_codex_preserves_seven_day_local_ok(monkeypatch, sessions):
     assert data["call_mix"]["local_ok"] == {"k": 1, "n": 1}
     out = tick.render_progress(json.loads(json.dumps(data)), now=time.time())
     assert "routed (incl. Codex turns and binds) n/a (7d, organic)" in out
-    assert "local accepted 100% (1/1 attempts, 7d, organic)" in out
+    assert "local accepted 100% (1/1 router attempts, 7d, organic)" in out
     assert "<Opus 78.9% (75/95 Claude calls, 7d, organic)" in out

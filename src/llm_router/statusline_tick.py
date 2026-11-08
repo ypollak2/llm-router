@@ -49,7 +49,7 @@ row): the two numbers of the North Star goal for THIS session, read from
 
 ``local accepted n/a (0 attempts, session)`` when the session made no local attempt, never 0%. The tick only reads it
 (one small JSON file) and formats it; nothing is counted here. The 7-day row carries the same two numbers over its
-own window and population (``local accepted 88% (95/108 attempts, 7d, organic)``). When the refresher counted Codex model responses
+own window and population (``local accepted 88% (95/108 router attempts, 7d, organic)``: router and bind attempts only, no proxy attempts). When the refresher counted Codex model responses
 the 7-day figure is labelled ``routed (incl. Codex turns and binds)`` (``llm-router kpi`` keeps ``off-Claude``: one call per run)
 and names delegated runs it had to count as one (``2 Codex runs est.``).
 """
@@ -324,7 +324,7 @@ def _whole(value) -> int | None:
     return int(v) if v is not None and v >= 0 and v == int(v) else None
 
 
-def _local_ok_segment(fig, scope: str) -> str | None:
+def _local_ok_segment(fig, scope: str, unit: str = "attempts") -> str | None:
     """``local accepted 75% (3/4 attempts, session)``: local-model attempts whose answer was kept (validated and not redone;
     NOT verified: ``northstar.NS_ATTACH_VERIFY_RECORDS`` is False), over all local attempts. No attempt is
     ``local accepted n/a (0 attempts, <scope>)``, never 0%. ``None`` when the figure is not two whole numbers with
@@ -334,8 +334,8 @@ def _local_ok_segment(fig, scope: str) -> str | None:
     if k is None or n is None or k > n:
         return None
     if n == 0:
-        return f"local accepted n/a (0 attempts, {scope})"
-    return f"local accepted {100.0 * k / n:.0f}% ({k}/{n} attempts, {scope})"
+        return f"local accepted n/a (0 {unit}, {scope})"
+    return f"local accepted {100.0 * k / n:.0f}% ({k}/{n} {unit}, {scope})"
 
 
 def read_session_routing(home: str, session: str | None) -> dict | None:
@@ -414,7 +414,7 @@ def render_progress(cache: dict | None, *, now: float) -> str | None:
     segs = [first, _mix_segment("<Opus", cm.get("below_opus"), "Claude calls", window, population)]
     if any(s is None for s in segs):
         return None
-    local = _local_ok_segment(cm.get("local_ok"), f"{window}, {population}")
+    local = _local_ok_segment(cm.get("local_ok"), f"{window}, {population}", "router attempts")
     if local:
         segs.append(local)
     elif codex_turns or unavailable:                  # this refresher measured attempts and could not: unknown, not "0 attempts"
