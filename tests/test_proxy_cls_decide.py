@@ -49,7 +49,7 @@ def decision_model_on(monkeypatch):
 
 
 def passing_proxy_lane(monkeypatch):
-    """A passing quality batch for the proxy/local lane (NS-A2: without one, haiku is ``veto_lane``)."""
+    """A passing quality batch for the proxy/local lane (NS-A2, D-441: a FAILING one makes haiku ``veto_lane``; no lane allows)."""
     from llm_router import lane_quality
 
     row = {"ts": 1.0e9 + 0, "door": "proxy", "served_class": "local", "task_group": "qa",

@@ -75,13 +75,11 @@ def test_tier_haiku_with_a_passing_lane_serves_local(env, monkeypatch):
 
 
 @pytest.mark.parametrize("rows", [
-    [],
-    [audit(n=30, acceptable=20)],                       # latest batch failed
-    [audit(door="mcp")],                                # another door's evidence is not the proxy's
-    [audit(served="haiku")],                            # another served class is not local
-    [audit(n=5, acceptable=5)],                         # too few
-], ids=["no_batch", "failing_batch", "other_door", "other_class", "too_few"])
-def test_tier_haiku_without_a_passing_proxy_lane_vetoes(env, monkeypatch, rows):
+    [audit(n=30, acceptable=20)],                       # latest (proxy, local) batch failed
+    [audit(n=5, acceptable=5)],                         # a (proxy, local) lane exists, too few to pass
+    [audit(n=30, acceptable=28), {**audit(n=30, acceptable=10), "ts": time.time() - 60}],  # newer failing batch wins
+], ids=["failing_batch", "too_few", "newer_failing_batch"])
+def test_tier_haiku_with_a_failing_proxy_local_lane_vetoes(env, monkeypatch, rows):
     decision_model_on(monkeypatch)
     lane_rows(monkeypatch, rows)
     FakeClassifier(monkeypatch, tier="haiku")
@@ -91,6 +89,45 @@ def test_tier_haiku_without_a_passing_proxy_lane_vetoes(env, monkeypatch, rows):
     assert row["cls_turn_tier"] == "haiku" and row["cls_applied"] is True
     assert row["decision"] == ledger.DECISION_FORWARDED and row["local_mode"]["detail"] == "veto_lane"
     assert env.backend.calls == [] and len(env.up.requests) == 1
+
+
+@pytest.mark.parametrize("rows", [
+    [],
+    [audit(door="mcp", acceptable=1)],                  # another door's failing evidence is not the proxy's
+    [audit(served="haiku", acceptable=1)],              # lane A's own (proxy, haiku) rows: no local evidence
+    [audit(served="haiku")],                            # ... passing or failing
+    [audit(n=30, acceptable=10, served="haiku")],
+    [{"ts": time.time(), "door": "proxy", "served_class": "local", "task_group": "qa", "kind": "audit"}],  # malformed
+], ids=["no_lane", "other_door", "lane_a_haiku_failing", "lane_a_haiku_passing", "lane_a_haiku_n30", "malformed"])
+def test_tier_haiku_without_proxy_local_evidence_is_allowed(env, monkeypatch, rows):
+    decision_model_on(monkeypatch)
+    lane_rows(monkeypatch, rows)
+    FakeClassifier(monkeypatch, tier="haiku")
+    env.post(turn_body(["rename the helper"]))
+    (row,) = env.rows()
+    assert row["cls_turn_reason"] == "allow" and row["cls_applied"] is False
+    assert row["decision"] == ledger.DECISION_SERVED and env.up.requests == [] and len(env.backend.calls) == 1
+
+
+def test_a_passing_lane_alongside_lane_a_haiku_rows_is_allowed(env, monkeypatch):
+    decision_model_on(monkeypatch)
+    lane_rows(monkeypatch, [audit(), audit(served="haiku", acceptable=1)])
+    FakeClassifier(monkeypatch, tier="haiku")
+    env.post(turn_body(["rename the helper"]))
+    (row,) = env.rows()
+    assert row["cls_turn_reason"] == "allow" and row["decision"] == ledger.DECISION_SERVED
+
+
+def test_an_unreadable_lane_file_on_disk_is_a_veto_not_an_error(env, monkeypatch, tmp_path):
+    from llm_router import paths
+
+    decision_model_on(monkeypatch)
+    lane_rows(monkeypatch, [])                                           # read_rows maps unreadable to []
+    monkeypatch.setattr(paths, "state_path", lambda name: tmp_path)      # a directory: exists, read raises OSError
+    FakeClassifier(monkeypatch, tier="haiku")
+    env.post(turn_body(["rename the helper"]))
+    (row,) = env.rows()
+    assert row["cls_turn_reason"] == "veto_lane" and row["decision"] == ledger.DECISION_FORWARDED
 
 
 def test_an_unreadable_lane_file_is_a_veto_not_an_error(env, monkeypatch):
@@ -363,3 +400,30 @@ def test_classifier_latency_is_paid_once_per_human_turn_and_continuations_do_not
     assert human["cls_turn_ms"] >= delay * 1000 and human_s >= delay
     assert human["cls_turn_ms"] < delay * 1000 + 250                       # overhead beside the model: assembly + lane read
     assert cont["cls_turn_ms"] is None and cont_s < delay                  # the store read costs no model time
+
+
+# -- rv30 S4: a hung classifier through the request handler ------------------------------------
+
+
+def test_a_hung_classifier_is_bounded_then_failopen_and_serves_local(env, monkeypatch):
+    """Not the injected fake: the real classify_async runs; the residence probe hangs. The bound is
+    the classifier's own asyncio.timeout(budget); the turn then serves local as a failopen."""
+    decision_model_on(monkeypatch)
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS", "300")
+    assert lc.DEFAULT_TIMEOUT_MS == 2000                                  # the plan's production bound
+    monkeypatch.setattr(lc, "_cool_until", 0.0)
+    monkeypatch.setattr(lc, "_resident_until", 0.0)
+    monkeypatch.setattr(lc, "_inflight", {})
+
+    async def hang(*a, **k):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(lc, "_is_loaded", hang)
+    t0 = time.perf_counter()
+    env.post(turn_body(["rename the helper"]))
+    wall = time.perf_counter() - t0
+    (row,) = env.rows()
+    assert row["cls_turn_source"] == "timeout" and row["cls_turn_reason"] == "failopen:timeout"
+    assert row["cls_turn_decided"] is False and row["cls_applied"] is False
+    assert row["decision"] == ledger.DECISION_SERVED and env.up.requests == []
+    assert 0.25 <= wall < 1.0, wall

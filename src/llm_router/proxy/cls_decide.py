@@ -2,9 +2,12 @@
 per-turn veto (A2).
 
 A2: a decided verdict (source ``llm`` or ``cache``) is a veto when the tier is opus or
-sonnet (``veto_tier``) or when the tier is haiku but no passing ``proxy`` / ``local`` lane
-batch exists (``veto_lane``, read directly from ``lane_quality``; ``door_verdict.
-local_lane_for`` cannot see the proxy door). A veto keeps THAT TURN on Claude: the verdict
+sonnet (``veto_tier``) or when the tier is haiku and a ``(proxy, local)`` quality lane exists
+whose latest batch is not passing (``veto_lane``, D-441; read directly from ``lane_quality``,
+since ``door_verdict.local_lane_for`` cannot see the proxy door). No ``(proxy, local)`` lane
+evidence at all means ``allow``: the tier decides. The only proxy-door rows today are lane A's,
+served class ``haiku``; they are not local evidence either way. An unreadable lane file is a
+failopen (LR-FO-PROXY-CLS-DECIDE) and vetoes. A veto keeps THAT TURN on Claude: the verdict
 is stored under the turn key, so every continuation of the turn inherits it with no second
 classifier call, and the next human turn is classified again. A veto never sets the
 conversation pin (``server.py`` ``local_step``): the ``started_elsewhere`` test asks the
@@ -14,9 +17,10 @@ decision model set and door mode ``on``; in ``shadow`` / ``off`` there is no inl
 and so no veto (rollback: ``LLM_ROUTER_LOCAL_CLASSIFIER=shadow``, applied on the next
 request, stored vetoes included).
 
-RESIDUAL (rv17c S3, the ``lm.set_pin(key, PIN_CLAUDE)`` after a failed local step in
-``local_step``): a local step that fails validation still pins the whole conversation to
-Claude. Kept on purpose: it is the existing "one logged move, never back and forth" safety
+RESIDUAL, owner decision D-442 (rv17c S3, the ``lm.set_pin(key, PIN_CLAUDE)`` after a failed
+local step in ``local_step``, server.py ~706, deliberately unchanged): After one failed local
+step, the rest of that conversation is Claude-served; this lowers the local share. A local step
+that fails validation pins the whole conversation to Claude. Kept on purpose: it is the existing "one logged move, never back and forth" safety
 rule (a failing local model is not retried every turn; flapping would also burn Claude's
 prompt cache), it is not a classifier veto, and changing it would alter serving for runs
 with no classifier at all. Consequence: after such a failure later human turns are still
@@ -193,18 +197,44 @@ def active() -> bool:
     return door_verdict._decision_model_configured() and door_verdict.mode() == "on"
 
 
-def proxy_lane_passes() -> bool:
-    """A quality batch for the ``proxy`` door with served class ``local`` currently passes
-    (any task group: the proxy sees no task type). No evidence, or an unreadable lane file,
-    is a veto: a veto only keeps a turn on Claude, so it is the safe side."""
-    try:
-        from llm_router import lane_quality
+def proxy_lane_fails() -> bool:
+    """True when a ``(proxy, local, *)`` quality lane EXISTS and its latest batch is not passing
+    (D-441). No such lane is no evidence and is False, so the tier decides. Only
+    ``served_class == "local"`` counts: lane A writes ``("proxy", "haiku", *)`` rows, which are
+    not evidence about local serving either way.
 
-        lanes = lane_quality.sampled_lanes(lane_quality.read_rows(), time.time())
-        return any(door == "proxy" and served == "local" for (door, served, _grp) in lanes)
+    ``lane_quality`` exposes only the passing lanes (``sampled_lanes``); it has no public "failing"
+    view. "Failing" here is its own rule applied to the same rows: the latest batch of the lane
+    (audit batches inside ``WINDOW_DAYS``, shadow-pair batches only when final and valid, via
+    ``final_only``) is read by ``batch_passed``, and a False result is failing. A batch that
+    ``batch_passed`` cannot read (None) is malformed and is no evidence, as the module says. An
+    unreadable lane file, or any error, is a failopen (LR-FO-PROXY-CLS-DECIDE) and returns True
+    (veto), the safe side: a veto only keeps a turn on Claude."""
+    try:
+        from llm_router import lane_quality, paths
+
+        rows = lane_quality.read_rows()
+        if not rows:
+            # read_rows maps an unreadable file to [] (same as an absent one); tell them apart.
+            path = paths.state_path(lane_quality.FILE)
+            if path.exists():
+                path.read_text(encoding="utf-8")  # raises OSError when unreadable
+        now = time.time()
+        latest: dict = {}
+        for row in lane_quality.final_only(rows):
+            lane = lane_quality.lane_of(row)
+            ts = lane_quality._ts(row.get("ts"))
+            ok = lane_quality.batch_passed(row)
+            if lane is None or lane[0] != "proxy" or lane[1] != "local" or ts is None or ok is None or ts > now:
+                continue
+            if row.get("kind") != "shadow_pairs" and ts < now - lane_quality.WINDOW_DAYS * 86400.0:
+                continue
+            if lane not in latest or ts >= latest[lane][0]:
+                latest[lane] = (ts, ok)
+        return any(not ok for _, ok in latest.values())
     except Exception as exc:  # noqa: BLE001
         failopen.record("LR-FO-PROXY-CLS-DECIDE", exc)
-        return False
+        return True
 
 
 def veto_of(row: dict) -> str | None:
@@ -278,7 +308,7 @@ async def _decide(body, row, store, lm_on, override, parent_main, key=None) -> N
         assembled, session_id=row.get("session_id"), text_sha=key[2])
     ok = verdict.source in DECIDED_SOURCES
     reason = _tier_reason(verdict.tier) if ok else f"failopen:{verdict.source}"
-    if reason == REASON_ALLOW and not await asyncio.to_thread(proxy_lane_passes):
+    if reason == REASON_ALLOW and await asyncio.to_thread(proxy_lane_fails):
         reason = REASON_VETO_LANE
     tier = verdict.tier if ok else None
     store.put(key, dict(decision_id=did, source=verdict.source, reason=reason, decided=ok, tier=tier))
