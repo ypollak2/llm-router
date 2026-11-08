@@ -95,6 +95,7 @@ REASON_CLASSIFIER_VETO = "classifier_veto"
 #: NS-L (D-448): the session is a coordinator / non-organic session listed in
 #: ``session_kind_overrides.json`` (detail ``coordinator_session``), or the call comes from a sub-agent
 #: thread (detail ``subagent_thread``). Never served locally; the pin goes to Claude like any refusal.
+COMBINED_FIRST_TOKEN_S = 30.0  # combined mode default first-token deadline (--hedge-s overrides)
 REASON_EXEMPT_SESSION = "exempt_session"
 REASON_PREFLIGHT_REFUSED = "preflight_refused"  # combined mode only: local serving off for the process lifetime
 EXEMPT_COORDINATOR = "coordinator_session"
@@ -213,11 +214,12 @@ class LocalSession:
     exempt: str | None = None
 
 
-def exempt_reason(body: dict, session_id: str | None) -> tuple[str | None, str | None]:
+def exempt_reason(body: dict, session_id: str | None,
+                  parent_main: bool | None = None) -> tuple[str | None, str | None]:
     """``(detail, overrides_problem)`` for D-448. ``detail`` is ``coordinator_session`` when the
     session is listed in ``session_kind_overrides.json`` with a kind other than ``organic`` (the same
     reader the KPI code uses: ``session_kind.override_of``), else ``subagent_thread`` when the request
-    carries the proxy's own sub-agent evidence (``steps.is_subagent_request``: the sub-agent system-prompt
+    carries the proxy's own sub-agent evidence (``steps.is_main_thread`` is False, i.e. no Agent launcher or ``steps.is_subagent_request``: the sub-agent system-prompt
     markers Claude Code appends to every spawned agent, or a sub-agent-only tool), else None.
 
     ``overrides_problem`` is ``missing`` / ``unreadable`` when the overrides file could not be read as an
@@ -225,7 +227,7 @@ def exempt_reason(body: dict, session_id: str | None) -> tuple[str | None, str |
     detail ``missing`` or ``overrides_unreadable``, and the row records ``local_mode.overrides_unreadable``.
     Nothing is served locally while the file cannot be read; organic sessions are unaffected while it can."""
     from llm_router import session_kind
-    from llm_router.proxy.steps import is_subagent_request
+    from llm_router.proxy.steps import is_main_thread, is_subagent_request
 
     problem = None
     try:
@@ -241,6 +243,10 @@ def exempt_reason(body: dict, session_id: str | None) -> tuple[str | None, str |
         return EXEMPT_COORDINATOR, problem
     try:
         if is_subagent_request(body):
+            return EXEMPT_SUBAGENT, problem
+        # rv40: the proxy's own thread evidence (the signal behind the row's is_main_thread and
+        # turn_origin=subagent_brief) says this is not the main thread. ``None`` (unknown) is not exempt.
+        if is_main_thread(body, parent_main) is False:
             return EXEMPT_SUBAGENT, problem
     except Exception:  # noqa: BLE001
         pass

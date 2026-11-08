@@ -694,7 +694,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         breaker_ok, breaker_detail = await lm_breaker.allows(None)
         # NS-L (D-448): a coordinator session (session_kind_overrides.json) or a sub-agent thread is never
         # served locally. ``key_body`` is the unstripped request, the one the sub-agent markers live in.
-        exempt, overrides_problem = local_mode.exempt_reason(key_body or body, row.get("session_id"))
+        exempt, overrides_problem = local_mode.exempt_reason(key_body or body, row.get("session_id"),
+                                                                parent_main_of(key_body or body))
         decision = local_mode.decide_local(body, local_mode.LocalSession(
             key=key, pinned=pinned, kill_switch=lm.killed(), backend_healthy=not health.is_open(cfg.model),
             breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=payload,
@@ -1589,7 +1590,9 @@ def cmd_proxy(argv: list[str]) -> int:
         if a.trim is None:
             a.trim = "none"
         if a.hedge_s is None:
-            a.hedge_s = "off"
+            # Old mode: off. Combined mode (rv40): bounded, because a stalled runner would otherwise hold
+            # the one path that carries all Claude traffic for the whole step budget (69.5 s seen live).
+            a.hedge_s = f"{local_mode.COMBINED_FIRST_TOKEN_S:g}" if a.local_with_tiers else "off"
         if a.step_budget_s == DEFAULT_STEP_BUDGET_S:
             a.step_budget_s = local_mode.DEFAULT_STEP_BUDGET_S
     try:

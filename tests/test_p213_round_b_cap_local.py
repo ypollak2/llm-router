@@ -323,6 +323,8 @@ async def test_proxy_local_agent_pin_is_held_to_the_rules(tmp_path):
 
     body = json.loads((Path(__file__).parent / "fixtures" / "proxy" / "continuation_request.json").read_text())
     body["messages"] = body["messages"][:2]
+    body["tools"] = list(body["tools"]) + [{"name": "Agent", "description": "launch",
+                                            "input_schema": {"type": "object", "properties": {}}}]  # main thread
     reply = {"message": {"role": "assistant", "content": "",
                          "tool_calls": [{"function": {"name": "Bash", "arguments": {"command": "ls"}}}]},
              "done_reason": "stop", "prompt_eval_count": 100, "eval_count": 5}

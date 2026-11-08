@@ -29,10 +29,18 @@ def _req() -> dict:
     return json.loads(FIXTURE.read_text())
 
 
+def _main_thread(body: dict) -> dict:
+    """A real main session holds the Agent launcher; without it steps.is_main_thread reads False and rv40's
+    exemption would refuse the fixture turn as a sub-agent's."""
+    body["tools"] = list(body["tools"]) + [{"name": "Agent", "description": "launch",
+                                            "input_schema": {"type": "object", "properties": {}}}]
+    return body
+
+
 def _first_call() -> dict:
     body = _req()
     body["messages"] = body["messages"][:2]
-    return body
+    return _main_thread(body)
 
 
 def _ollama(content="", calls=None):
@@ -201,7 +209,7 @@ async def test_continuation_is_served_and_the_trim_is_none(env):
     r = await _post(app, dict(_next_turn(_first_call(), {"content": _served_blocks(first)}), stream=False))
     assert r.json()["content"] == [{"type": "text", "text": "Done."}]
     sent = backend.calls[1]
-    assert sent["system"] == _req()["system"] and [t["name"] for t in sent["tools"]] == ["Bash", "Edit", "Read", "Write"]
+    assert sent["system"] == _req()["system"] and [t["name"] for t in sent["tools"]] == ["Bash", "Edit", "Read", "Write", "Agent"]
     assert len([m for m in sent["messages"] if m["role"] != "system"]) == 3  # no history cap
 
 
@@ -218,11 +226,11 @@ async def test_side_calls_without_tools_are_forwarded_with_a_reason(env):
 async def test_a_conversation_the_proxy_did_not_see_start_is_never_taken_local(env):
     backend = Backend(_ollama("x"))
     app = env.app(backend)
-    r = await _post(app, _req())  # 3+ turns, never seen the first call
+    r = await _post(app, _main_thread(_req()))  # 3+ turns, never seen the first call
     assert r.status_code == 200 and backend.calls == [] and len(env.up.requests) == 1
     (row,) = env.rows()
     assert row["reason"] == "conversation_started_on_claude" and row["egress"] is True
-    await _post(app, _req())  # still Claude's
+    await _post(app, _main_thread(_req()))  # still Claude's
     assert backend.calls == [] and env.rows()[1]["reason"] == "pinned_claude"
 
 

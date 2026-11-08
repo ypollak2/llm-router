@@ -328,6 +328,78 @@ def test_the_exemption_also_holds_in_the_old_tiers_off_mode(tmp_path, clean_over
     assert row["reason"] == "exempt_session" and rig.backend.calls == [] and len(rig.up.requests) == 1
 
 
+def test_a_subagent_brief_turn_with_no_marker_is_refused_on_thread_evidence_alone(tmp_path, clean_overrides):
+    """rv40: a spawned agent's turn (no Agent/Task launcher among its tools, so is_main_thread is False and
+    turn_origin is subagent_brief) carried none of the system-prompt markers and was attempted locally."""
+    body = opus(turn_body(["write the helper"]))
+    body["tools"] = [t for t in body["tools"] if t.get("name") not in ("Agent", "Task")]
+    assert body["tools"]
+    rig = Rig(tmp_path)
+    rig.post(body)
+    (row,) = rig.rows()
+    assert row["is_main_thread"] is False and row["turn_origin"] == "subagent_brief"
+    assert row["reason"] == "exempt_session" and row["local_mode"]["detail"] == "subagent_thread"
+    assert rig.backend.calls == [] and len(rig.up.requests) == 1
+
+
+def test_a_main_thread_turn_still_serves_after_the_thread_rule(tmp_path, clean_overrides):
+    rig = Rig(tmp_path)
+    assert rig.post(opus(turn_body(["rename the helper"]))).status_code == 200
+    assert rig.rows()[0]["decision"] == "served" and rig.rows()[0]["is_main_thread"] is True
+
+
+class _Stalled(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        await asyncio.sleep(5)
+        yield b""
+
+
+def test_ollama_backend_gives_up_at_the_hedge_when_no_first_token_arrives(tmp_path):
+    from llm_router.proxy.backends import HedgeTimeout, OllamaBackend
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, stream=_Stalled())))
+    be = OllamaBackend(MODEL, client, base_url="http://127.0.0.1:9", num_ctx=8192, hedge_s=0.2, num_predict=50)
+
+    async def go():
+        t0 = asyncio.get_running_loop().time()
+        with pytest.raises(HedgeTimeout):
+            await be.complete(turn_body(["hi"]), 30.0)
+        return asyncio.get_running_loop().time() - t0
+
+    assert asyncio.run(go()) < 2.0
+
+
+def test_a_hedge_timeout_in_combined_mode_falls_back_to_the_tier_path_and_pins_claude(tmp_path):
+    from llm_router.proxy.backends import HedgeTimeout
+
+    class Stall:
+        calls = []
+
+        async def complete(self, body, timeout_s):
+            self.calls.append(1)
+            raise HedgeTimeout("no first token within 30.0s")
+
+    rig = Rig(tmp_path, backend=Stall())
+    r = rig.post(opus(turn_body(["rename the helper"])))
+    (row,) = rig.rows()
+    assert r.status_code == 200 and len(rig.up.requests) == 1 and row["decision"] != "served"
+    assert row["reason"] == "hedge_timeout" and row["local_mode"]["pin_change"] == "local->claude"   # D-442
+
+
+def test_combined_mode_defaults_to_a_bounded_first_token_deadline_and_old_mode_to_none(monkeypatch, tmp_path):
+    import uvicorn
+    seen = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setattr(ps, "_local_agent_preflight", lambda cfg: [])
+    real = ps.build_app
+    monkeypatch.setattr(ps, "build_app", lambda cfg, *a, **k: seen.append(cfg.hedge_s) or real(cfg, *a, **k))
+    base = ["--serve", "local-agent", "--model", MODEL, "--no-warm-up"]
+    ps.cmd_proxy(base + ["--local-with-tiers", "--tiers", "conversation", "--ledger", str(tmp_path / "a.jsonl")])
+    ps.cmd_proxy(base + ["--ledger", str(tmp_path / "b.jsonl")])
+    ps.cmd_proxy(base + ["--local-with-tiers", "--tiers", "conversation", "--hedge-s", "off",
+                         "--ledger", str(tmp_path / "c.jsonl")])
+    assert seen == [local_mode.COMBINED_FIRST_TOKEN_S, None, None]
+
+
 def test_the_old_tiers_off_mode_also_refuses_every_session_when_the_overrides_file_is_missing(tmp_path, clean_overrides):
     clean_overrides.unlink()
     rig = Rig(tmp_path, tiers=ps.TIERS_OFF, tier_policy=None, local_with_tiers=False)
