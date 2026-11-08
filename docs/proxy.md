@@ -326,9 +326,7 @@ rm ~/.llm-router/local_agent_kill       # resume: the same conversation is serve
 (a) a session listed in `session_kind_overrides.json` with a kind other than `organic` (`coordinator_session`; the
 same reader the KPI code uses, `session_kind.override_of`, re-read when the file changes) and (b) a sub-agent thread
 (`subagent_thread`; the proxy's own sub-agent evidence, `steps.is_subagent_request`). It comes right after the kill
-switch, so every call of an exempt conversation says `exempt_session`. If the overrides file is missing or
-unreadable, nobody is exempted by it (fail-closed in the sense that the status cannot be established), and each row
-records `local_mode.overrides_unreadable` (`missing` or `unreadable`); the sub-agent test does not need the file.
+switch, so every call of an exempt conversation says `exempt_session`. If the overrides file is missing, empty, malformed or not a JSON object, local serving is refused for EVERY session (fail closed): reason `exempt_session`, detail `missing` or `overrides_unreadable`, and each row records `local_mode.overrides_unreadable`. This applies to both the old tiers-off local-agent mode and the combined mode. Residual: a `fork` sub-agent shares the parent's conversation key and system prompt and is not caught; Agent-tool sub-agents are caught by `is_subagent_request`.
 
 **Combined with tiers (`--local-with-tiers`, D-447).** `--serve local-agent --local-with-tiers --tiers conversation
 [--tier-policy FILE]` serves a turn locally when `decide_local` allows it (exemption, the per-turn classifier veto and

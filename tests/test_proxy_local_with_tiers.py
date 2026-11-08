@@ -328,6 +328,16 @@ def test_the_exemption_also_holds_in_the_old_tiers_off_mode(tmp_path, clean_over
     assert row["reason"] == "exempt_session" and rig.backend.calls == [] and len(rig.up.requests) == 1
 
 
+def test_the_old_tiers_off_mode_also_refuses_every_session_when_the_overrides_file_is_missing(tmp_path, clean_overrides):
+    clean_overrides.unlink()
+    rig = Rig(tmp_path, tiers=ps.TIERS_OFF, tier_policy=None, local_with_tiers=False)
+    rig.post(turn_body(["fix the bug"]))
+    (row,) = rig.rows()
+    assert rig.backend.calls == [] and len(rig.up.requests) == 1
+    assert row["reason"] == "exempt_session" and row["local_mode"]["detail"] == "missing"
+    assert row["local_mode"]["overrides_unreadable"] == "missing"
+
+
 def test_decide_local_orders_the_exemption_after_the_kill_switch_and_before_the_pin():
     body = _first_call()
     assert local_mode.decide_local(body, local_mode.LocalSession(exempt="coordinator_session")).reason == "exempt_session"
