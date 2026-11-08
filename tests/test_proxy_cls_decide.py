@@ -1,11 +1,11 @@
-"""NS-A1: the per-turn classifier decision is RECORDED on proxy rows, and nothing else changes.
+"""NS-A1: the per-turn classifier decision is RECORDED on proxy rows (A2 enforces it: tests/test_proxy_cls_enforce.py).
 
-Record only. Rules under test: the supported-call predicate and its reasons; the human-turn
+Rules under test: the supported-call predicate and its reasons; the human-turn
 boundary (typed prompt = new key, tool continuations = same key and one classifier call, the
 same words typed again = new key); every failopen source is recorded and is not decided; override
 and restart rows say why; with the decision model unset there is no classifier call and the rows
-equal the base rows except for the additive keys; with it set the serving decisions are still
-the base ones and ``cls_applied`` is false.
+equal the base rows except for the additive keys; with it set in ``shadow`` mode the serving decisions are
+the base ones and ``cls_applied`` is false. (A2 supersedes the old "set and on is record only" rule.)
 
 No Ollama, no network: the classifier is injected (``local_classifier.classify_async``), Anthropic
 is a mocked upstream and the serving model a fake backend.
@@ -46,6 +46,18 @@ def decision_model_on(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_BACKEND", "systemone")
     monkeypatch.setenv("LLM_ROUTER_DECISION_MODEL", "nimble:9b")
     monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+
+
+def passing_proxy_lane(monkeypatch):
+    """A passing quality batch for the proxy/local lane (NS-A2: without one, haiku is ``veto_lane``)."""
+    from llm_router import lane_quality
+
+    row = {"ts": 1.0e9 + 0, "door": "proxy", "served_class": "local", "task_group": "qa",
+           "kind": "audit", "n": 30, "acceptable": 28, "source": "test"}
+    import time
+
+    row["ts"] = time.time() - 3600
+    monkeypatch.setattr(lane_quality, "read_rows", lambda path=None: [row])
 
 
 def verdict(source="llm", tier="opus") -> lc.Verdict:
@@ -174,6 +186,7 @@ def test_one_human_turn_is_classified_once_and_its_continuations_inherit(env, mo
 
 def test_a_new_typed_prompt_and_a_repeated_prompt_each_get_their_own_decision(env, monkeypatch):
     decision_model_on(monkeypatch)
+    passing_proxy_lane(monkeypatch)
     fake = FakeClassifier(monkeypatch, tier="haiku")
     env.post(turn_body(["rename the helper"], loops=0))
     env.post(turn_body(["rename the helper", "now rename the other one"], loops=0))
@@ -290,7 +303,7 @@ def _base_rows(tmp_path, monkeypatch):
         async def noop(*a, **k):
             return None
 
-        mp.setattr(cls_decide, "static_fields", lambda body, sid: {})
+        mp.setattr(cls_decide, "static_fields", lambda *a, **k: {})
         mp.setattr(cls_decide, "decide_turn", noop)
 
         async def _boom(*a, **k):
@@ -325,7 +338,7 @@ def test_decision_model_unset_makes_no_classifier_call_and_rows_equal_base_plus_
     assert {r["cls_turn_reason"] for r in new} <= {"classifier_off", "unsupported", "started_elsewhere"}
 
 
-def test_decision_model_set_is_record_only_serving_is_the_base_serving(tmp_path, monkeypatch):
+def test_decision_model_set_in_shadow_mode_serves_as_the_base_does(tmp_path, monkeypatch):
     (tmp_path / "base").mkdir()
     (tmp_path / "new").mkdir()
     base = _base_rows(tmp_path, monkeypatch)
@@ -335,14 +348,14 @@ def test_decision_model_set_is_record_only_serving_is_the_base_serving(tmp_path,
 
     monkeypatch.setattr(ps, "choose_model", _boom)
     decision_model_on(monkeypatch)
-    fake = FakeClassifier(monkeypatch, tier="opus")                         # a veto verdict: A1 must not act on it
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "shadow")             # the verdict is never taken inline
+    fake = FakeClassifier(monkeypatch, tier="opus")
     new = _script(Env(tmp_path / "new"))
-    assert fake.calls                                                       # the classifier really ran
+    assert fake.calls == []
     for b, n in zip(base, new):
         assert _comparable(n, drop_additive=True) == _comparable(b, drop_additive=False)
         assert n["decision"] == b["decision"] and n["cls_applied"] is False
-    assert any(r["cls_turn_reason"] == "veto_tier" for r in new)            # recorded, not applied
-    assert any(r["decision"] == ledger.DECISION_SERVED for r in new)        # a vetoed turn is still served locally
+    assert any(r["decision"] == ledger.DECISION_SERVED for r in new)
 
 
 def test_shadow_mode_makes_no_inline_call(env, monkeypatch):

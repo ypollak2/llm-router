@@ -668,7 +668,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # left alone: the prefix forces this one step, never the conversation.
         stored = lm.pin_of(key)
         pinned = local_mode.PIN_LOCAL if force else stored
-        started_elsewhere = not force and pinned is None and not is_first_call(body)
+        started_elsewhere = not force and pinned is None and not is_first_call(body) and not lm.seen(key)
         if started_elsewhere:
             # Never migrate a conversation already on Claude (or one this
             # process never saw the start of): its prompt cache lives there.
@@ -678,7 +678,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         breaker_ok, breaker_detail = await lm_breaker.allows(None)
         decision = local_mode.decide_local(body, local_mode.LocalSession(
             key=key, pinned=pinned, kill_switch=lm.killed(), backend_healthy=not health.is_open(cfg.model),
-            breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=payload))
+            breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=payload,
+            verdict=None if force else cls_decide.veto_of(row)))
+        vetoed = decision.reason == local_mode.REASON_CLASSIFIER_VETO
+        if vetoed:
+            row["cls_applied"] = True
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
@@ -702,7 +706,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if force:
                 return refuse_local(row, row.get("reason") or "validation")
             # A failed local step: this step goes to Claude and the conversation
-            # stays there (one logged move, never back and forth).
+            # stays there (one logged move, never back and forth). NS-A2 residual, kept on
+            # purpose: see the cls_decide module doc.
             lm.set_pin(key, local_mode.PIN_CLAUDE)
             row["local_mode"]["pin_change"] = "local->claude"
             reason = row.get("reason") or "validation"
@@ -711,7 +716,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return refuse_local(row, decision.reason)
             reason = decision.reason
             row.update(decision=ledger.DECISION_FORWARDED, reason=reason, detail=decision.detail or None)
-            if pinned is None or reason in local_mode.STRUCTURAL_REASONS:
+            if vetoed:
+                # NS-A2: a veto is this turn's, never the conversation's. No pin; remember that the
+                # conversation was seen so its next call is not `started_elsewhere`.
+                lm.mark_seen(key)
+            elif pinned is None or reason in local_mode.STRUCTURAL_REASONS:
                 lm.set_pin(key, local_mode.PIN_CLAUDE)
                 row["local_mode"]["pin_change"] = f"{pinned or 'new'}->claude"
         row["egress"] = True
@@ -1189,6 +1198,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         except Exception as exc:  # noqa: BLE001 -- prefixes must fail open
             failopen.record("LR-FO-PROXY-PREFIX", exc)
             ov = stripped_body = None
+        turn_k = cls_decide.safe_turn_key(body, session_id_of(body))  # once per call (rv25)
         row: dict = {
             "ts": time.time(), "session_id": session_id_of(body), "msg_id": None,
             "stream": bool(body.get("stream")), "requested_model": body.get("model"),
@@ -1217,10 +1227,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # classifier columns say the verdict still comes from the rules and
             # nothing is applied; M1 shadow and M2 canary fill them in.
             **request_fields(body, raw, parent_main),
-            "cls_source": "rules", "cls_ms": None, "cls_arm": None, "cls_applied": False,
+            "cls_source": "rules", "cls_ms": None, "cls_arm": None, "cls_applied": False,  # NS-A2: true on a veto
             # NS-A1 (record only): supported-call label, human-turn key, and the per-turn
             # classifier decision (filled below, before local_step). Additive keys.
-            **cls_decide.static_fields(body, session_id_of(body)),
+            **cls_decide.static_fields(body, session_id_of(body), turn_k),
         }
         example_written = False
 
@@ -1266,7 +1276,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         bypass_local = ov is not None and ov.is_claude
         await cls_decide.decide_turn(
             body, row, turn_decisions, lm_on=lm is not None, parent_main=parent_main,
-            override="claude" if bypass_local else "local" if force_local else None)
+            override="claude" if bypass_local else "local" if force_local else None, key=turn_k)
         if lm is not None and not bypass_local:
             message = await local_step(
                 stripped_body or body if force_local else body, row, force=force_local, key_body=body)

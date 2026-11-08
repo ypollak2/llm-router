@@ -85,6 +85,9 @@ REASON_PROMPT_CAP = "prompt_over_cap"
 REASON_BREAKER_OPEN = "breaker_open"
 REASON_BACKEND_UNHEALTHY = "backend_unhealthy"
 REASON_NOT_ELIGIBLE = "not_eligible"
+#: NS-A2: the per-turn classifier vetoed this turn (detail: veto_tier / veto_lane). The turn goes to
+#: Claude; the conversation pin is NOT touched.
+REASON_CLASSIFIER_VETO = "classifier_veto"
 
 PIN_LOCAL = "local"
 PIN_CLAUDE = "claude"
@@ -192,6 +195,9 @@ class LocalSession:
     breaker_closed: bool = True
     breaker_detail: str = ""
     payload: dict | None = None  # the Ollama payload, for the size check
+    #: NS-A2: the classifier's veto for THIS turn (``cls_decide.veto_of``: "veto_tier" /
+    #: "veto_lane"), or None. Per turn, never stored in the pin.
+    verdict: str | None = None
 
 
 @dataclass(frozen=True)
@@ -228,6 +234,8 @@ def decide_local(body: dict, session: LocalSession) -> LocalDecision:
         if est is not None:
             return LocalDecision(False, REASON_PROMPT_CAP, f"~{est} tokens > {PROMPT_CAP_TOKENS}", est)
         est = estimate_prompt_tokens(session.payload)
+    if session.verdict:
+        return LocalDecision(False, REASON_CLASSIFIER_VETO, session.verdict, est)
     if not session.backend_healthy:
         return LocalDecision(False, REASON_BACKEND_UNHEALTHY, est_tokens=est)
     if not session.breaker_closed:
@@ -251,6 +259,18 @@ class LocalModeState:
         self.max_pending = max_pending
         self.pins: OrderedDict[str, str] = OrderedDict()
         self.pending: OrderedDict[str, dict] = OrderedDict()
+        # NS-A2: conversations whose first turn this process saw and the classifier vetoed.
+        # A veto stores no pin, so without this the next call would read ``started_elsewhere``.
+        self.seen_keys: OrderedDict[str, bool] = OrderedDict()
+
+    def mark_seen(self, key: str) -> None:
+        self.seen_keys[key] = True
+        self.seen_keys.move_to_end(key)
+        while len(self.seen_keys) > self.max_pins:
+            self.seen_keys.popitem(last=False)
+
+    def seen(self, key: str) -> bool:
+        return key in self.seen_keys
 
     def killed(self) -> bool:
         return self.kill_path.exists()

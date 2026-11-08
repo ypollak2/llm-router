@@ -62,6 +62,7 @@ def analyse(rows: list[dict]) -> dict:
     a1 = [r for r in rows if r.get("supported") is not None]
     sup = [r for r in a1 if r.get("supported") is True]
     unsup = [r for r in a1 if r.get("supported") is False]
+    malformed = [r for r in a1 if not isinstance(r.get("supported"), bool)]   # e.g. "true": counted nowhere else
     override = [r for r in sup if r.get("cls_turn_reason") in OVERRIDE_REASONS]
     denom = [r for r in sup if r.get("cls_turn_reason") not in OVERRIDE_REASONS]
     decided = [r for r in denom if r.get("cls_turn_decided") is True]
@@ -71,8 +72,12 @@ def analyse(rows: list[dict]) -> dict:
         did = r.get("cls_decision_id")
         if did and did not in verdicts:
             verdicts[did] = r
+    no_id_decided = [r for r in decided if not r.get("cls_decision_id")]   # noted, not silently dropped
+    no_id_supported = [r for r in sup if not r.get("cls_decision_id")]
     return {
-        "rows": len(rows), "a1": a1, "sup": sup, "unsup": unsup, "override": override,
+        "rows": len(rows), "a1": a1, "sup": sup, "unsup": unsup, "malformed": malformed, "override": override,
+        "no_id_decided": no_id_decided, "no_id_supported": no_id_supported,
+        "applied": [r for r in a1 if r.get("cls_applied") is True],
         "denom": denom, "decided": decided, "verdicts": verdicts,
         "turns": {(r.get("cls_turn_idx"), r.get("cls_turn_sha")) for r in sup},
         "sources": Counter(r.get("cls_turn_source") or "none" for r in a1),
@@ -116,6 +121,9 @@ def render(session: str, path: Path, offset: int, skipped: int, rows: list[dict]
     if not a["a1"]:
         print("RESULT: no row of this session carries the A1 keys; the decided % is undefined (not a pass)")
         return 3
+    if a["malformed"]:
+        print(f"MALFORMED: {len(a['malformed'])} A1 rows have a non-bool `supported`; counted in neither "
+              "supported nor unsupported")
     print(f"turns (distinct cls_turn_idx+sha, supported rows): {len(a['turns'])}")
     print(f"supported rows: {len(a['sup'])}   unsupported rows: {len(a['unsup'])}   "
           f"override rows (excluded from the denominator): {len(a['override'])}")
@@ -124,6 +132,11 @@ def render(session: str, path: Path, offset: int, skipped: int, rows: list[dict]
     else:
         print("decided % of supported non-override rows: undefined, 0 rows in the denominator")
     print("failopen turns go local, not decided")
+    print(f"rows where a veto decided the serving (cls_applied true): {len(a['applied'])}")
+    if a["no_id_decided"]:
+        print(f"NOTE: {len(a['no_id_decided'])} decided rows carry no cls_decision_id; they are in the decided "
+              "% but not in the verdict distribution")
+    print(f"supported rows without cls_decision_id: {len(a['no_id_supported'])}")
     print()
     _table("cls_turn_source counts (all A1 rows):", a["sources"])
     print()

@@ -154,6 +154,31 @@ def test_wired_into_the_cli():
     assert "llm-router ns-check" in cli.__doc__
 
 
+def test_a_non_bool_supported_is_reported_malformed_not_silently_uncounted(tmp_path, capsys):
+    rows = _script() + [_row(supported="true", cls_turn_idx=9, cls_turn_sha="z", cls_decision_id="dZ",
+                             cls_turn_source="llm", cls_turn_reason="allow", cls_turn_decided=True)]
+    code, out = _run(capsys, "--session", SID, "--ledger", str(_write(tmp_path, rows)))
+    assert code == 0 and "MALFORMED: 1 A1 rows have a non-bool `supported`" in out.out
+    clean, out2 = _run(capsys, "--session", SID, "--ledger", str(_write(tmp_path, _script())))
+    assert "MALFORMED" not in out2.out
+
+
+def test_a_decided_row_without_a_decision_id_is_noted_not_dropped_silently(tmp_path, capsys):
+    rows = _script() + [_sup(7, "llm", "veto_tier", True, None, "opus")]
+    code, out = _run(capsys, "--session", SID, "--ledger", str(_write(tmp_path, rows)))
+    assert code == 0
+    assert "NOTE: 1 decided rows carry no cls_decision_id" in out.out
+    assert "supported rows without cls_decision_id: 1" in out.out
+
+
+def test_veto_rows_are_counted_from_cls_applied(tmp_path, capsys):
+    rows = _script() + [_row(supported=True, cls_turn_idx=8, cls_turn_sha="v", cls_decision_id="dV",
+                             cls_turn_source="llm", cls_turn_reason="veto_tier", cls_turn_decided=True,
+                             cls_applied=True)]
+    code, out = _run(capsys, "--session", SID, "--ledger", str(_write(tmp_path, rows)))
+    assert "rows where a veto decided the serving (cls_applied true): 1" in out.out
+
+
 def test_python_dash_m_is_never_a_silent_zero(tmp_path):
     """`python -m llm_router.commands.ns_check` once printed nothing and exited 0 (no __main__)."""
     import os

@@ -2570,7 +2570,10 @@ def _classifier_shadow_summary(days: float, win: "_Window | None" = None,
     ``cheap_share_llm`` are over the answered calls. ``p50_ms`` / ``p95_ms`` are over real
     model calls (``source=llm``). ``calls_per_turn`` is calls over distinct
     (session, text) turns. ``cls_applied_true`` counts ledger rows that say a verdict was
-    applied: it must be 0 while the classifier is shadow only."""
+    applied WITHOUT being a per-turn veto: it must be 0 (the shadow classifier never applies a
+    verdict). NS-A2: ``cls_applied`` is also true on a veto row (``cls_turn_decided`` and
+    ``cls_turn_reason`` veto_tier / veto_lane); those are counted apart in ``cls_vetoes_applied``
+    and are not a warning."""
     from llm_router.proxy import llm_shadow
 
     try:
@@ -2615,6 +2618,10 @@ def _classifier_shadow_summary(days: float, win: "_Window | None" = None,
     n = len(calls)
     agree = sum(1 for r in compared if merged(tier_of(r, "llm")) == tier_of(r, "rules"))
     applied = [r for r in (ledger_rows or []) if "cls_applied" in r]
+
+    def _is_veto(r: dict) -> bool:
+        return r.get("cls_turn_decided") is True and r.get("cls_turn_reason") in ("veto_tier", "veto_lane")
+
     try:
         from llm_router import shadow_eval
 
@@ -2643,7 +2650,10 @@ def _classifier_shadow_summary(days: float, win: "_Window | None" = None,
         "drop_rate": round(drops / (n + drops), 4) if (n + drops) else None,
         "calls_per_turn": round(n / len(turns), 4) if n else None,
         "excluded_non_organic": excluded,
-        "cls_applied_true": sum(1 for r in applied if r["cls_applied"] is True) if ledger_rows is not None else None,
+        "cls_applied_true": (sum(1 for r in applied if r["cls_applied"] is True and not _is_veto(r))
+                             if ledger_rows is not None else None),
+        "cls_vetoes_applied": (sum(1 for r in applied if r["cls_applied"] is True and _is_veto(r))
+                               if ledger_rows is not None else None),
         "ledger_rows": len(applied) if ledger_rows is not None else None,
     }
 
@@ -2679,6 +2689,8 @@ def _classifier_shadow_line(s: dict | None) -> str | None:
     applied = ""
     if s.get("cls_applied_true"):
         applied = f", WARNING cls_applied true on {s['cls_applied_true']} ledger rows"
+    if s.get("cls_vetoes_applied"):
+        applied += f", {s['cls_vetoes_applied']} per-turn vetoes applied (NS-A2)"
     return (f"classifier shadow (proxy): n={s['n']} calls in {s['n_sessions']} sessions{few}, agree {agree}, "
             f"cheap share {pct(s['cheap_share_llm'])}, fallback {pct(s['fallback_rate'])}, "
             f"p50 {ms(s['p50_ms'])}, p95 {ms(s['p95_ms'])}, drops {s['drops']}, {cpt} calls/turn{applied} "

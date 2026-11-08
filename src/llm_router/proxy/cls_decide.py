@@ -1,14 +1,30 @@
-"""North Star PR-A1: record the per-turn classifier decision on proxy calls.
+"""North Star PR-A1 + A2: the per-turn classifier decision, recorded (A1) and enforced as a
+per-turn veto (A2).
 
-RECORD ONLY. Nothing here changes how a call is served: ``cls_applied`` stays false,
-``local_step`` is entered exactly as before, the conversation pin (``server.py``
-``local_step``) is untouched. A2 will turn the recorded verdict into a per-turn veto.
+A2: a decided verdict (source ``llm`` or ``cache``) is a veto when the tier is opus or
+sonnet (``veto_tier``) or when the tier is haiku but no passing ``proxy`` / ``local`` lane
+batch exists (``veto_lane``, read directly from ``lane_quality``; ``door_verdict.
+local_lane_for`` cannot see the proxy door). A veto keeps THAT TURN on Claude: the verdict
+is stored under the turn key, so every continuation of the turn inherits it with no second
+classifier call, and the next human turn is classified again. A veto never sets the
+conversation pin (``server.py`` ``local_step``): the ``started_elsewhere`` test asks the
+local-mode state whether the conversation was seen (``LocalModeState.seen``), not whether a
+pin exists. Failopen sources are not decided and behave as before. Active only with the
+decision model set and door mode ``on``; in ``shadow`` / ``off`` there is no inline verdict
+and so no veto (rollback: ``LLM_ROUTER_LOCAL_CLASSIFIER=shadow``, applied on the next
+request, stored vetoes included).
 
-A2 items left alone here on purpose (review rv17c S3): in ``local_step`` a non-local
-decision with no pin stores ``PIN_CLAUDE`` for the whole conversation, and a failed
-local step stores it too. Both contradict "a veto never sets the conversation pin" and
-"each turn goes local unless vetoed"; A2 must change them (or state the second as a
-residual) together with the ``started_elsewhere`` test.
+RESIDUAL (rv17c S3, the ``lm.set_pin(key, PIN_CLAUDE)`` after a failed local step in
+``local_step``): a local step that fails validation still pins the whole conversation to
+Claude. Kept on purpose: it is the existing "one logged move, never back and forth" safety
+rule (a failing local model is not retried every turn; flapping would also burn Claude's
+prompt cache), it is not a classifier veto, and changing it would alter serving for runs
+with no classifier at all. Consequence: after such a failure later human turns are still
+classified and recorded (``allow``) but Claude serves them (``pinned_claude``); ``ns-check``
+shows decided versus served.
+
+``cls_applied`` was always false in A1. It is now true exactly on rows where a veto decided
+the serving (``decision.reason == classifier_veto``).
 
 What a row gets (all additive, text-free; hashes, counters and reason codes only):
 
@@ -60,6 +76,7 @@ S_NONE = "none"
 # -- cls_turn_reason ---------------------------------------------------------------
 REASON_ALLOW = "allow"
 REASON_VETO_TIER = "veto_tier"
+REASON_VETO_LANE = "veto_lane"
 REASON_UNSUPPORTED = "unsupported"
 REASON_NOT_LOCAL_AGENT = "not_local_agent"
 REASON_CLASSIFIER_OFF = "classifier_off"
@@ -70,6 +87,7 @@ REASON_SECRET = "withheld_secret"
 REASON_NO_TEXT = "no_text"
 REASON_ERROR = "error"
 
+VETO_REASONS = (REASON_VETO_TIER, REASON_VETO_LANE)
 HUMAN_ORIGINS = (ORIGIN_TYPED, ORIGIN_COMMAND, ORIGIN_SUBAGENT_BRIEF)
 DECIDED_SOURCES = ("llm", "cache")
 MAX_TURNS = 4096  # as the conversation pins (local_mode)
@@ -145,14 +163,25 @@ class TurnDecisionStore:
         return len(self._d)
 
 
-def static_fields(body: dict, session_id: str | None) -> dict:
+def safe_turn_key(body: dict, session_id: str | None) -> tuple[str, int, str] | None:
+    """:func:`turn_key`, or ``None`` on any error. The handler computes it once per call and
+    hands it to :func:`static_fields` and :func:`decide_turn`."""
+    try:
+        return turn_key(body, session_id)
+    except Exception as exc:  # noqa: BLE001
+        failopen.record("LR-FO-PROXY-CLS-DECIDE", exc)
+        return None
+
+
+def static_fields(body: dict, session_id: str | None, key: tuple | None = None) -> dict:
     """The fields that need no classifier: ``supported``, its reason, ``cls_turn_idx`` and
-    ``cls_turn_sha``. Pure; on any error the defaults stay (nulls), the call goes on."""
+    ``cls_turn_sha``. Pure; on any error the defaults stay (nulls), the call goes on.
+    ``key`` is the call's :func:`turn_key` when the caller already has it."""
     out = dict(TURN_FIELD_DEFAULTS)
     try:
         ok, why = supported(body)
         out["supported"], out["unsupported_reason"] = ok, why
-        _, out["cls_turn_idx"], out["cls_turn_sha"] = turn_key(body, session_id)
+        _, out["cls_turn_idx"], out["cls_turn_sha"] = key if key is not None else turn_key(body, session_id)
     except Exception as exc:  # noqa: BLE001
         failopen.record("LR-FO-PROXY-CLS-DECIDE", exc)
     return out
@@ -162,6 +191,29 @@ def active() -> bool:
     """The classifier runs inline only when the decision model is configured and the door
     mode is ``on`` (``shadow`` and ``off`` make no inline call)."""
     return door_verdict._decision_model_configured() and door_verdict.mode() == "on"
+
+
+def proxy_lane_passes() -> bool:
+    """A quality batch for the ``proxy`` door with served class ``local`` currently passes
+    (any task group: the proxy sees no task type). No evidence, or an unreadable lane file,
+    is a veto: a veto only keeps a turn on Claude, so it is the safe side."""
+    try:
+        from llm_router import lane_quality
+
+        lanes = lane_quality.sampled_lanes(lane_quality.read_rows(), time.time())
+        return any(door == "proxy" and served == "local" for (door, served, _grp) in lanes)
+    except Exception as exc:  # noqa: BLE001
+        failopen.record("LR-FO-PROXY-CLS-DECIDE", exc)
+        return False
+
+
+def veto_of(row: dict) -> str | None:
+    """The veto reason (``veto_tier`` / ``veto_lane``) that applies to this call, else
+    ``None``: a decided verdict (this turn's or inherited) while the classifier is active."""
+    reason = row.get("cls_turn_reason")
+    if row.get("cls_turn_decided") is True and reason in VETO_REASONS and active():
+        return reason
+    return None
 
 
 def _tier_reason(tier: str | None) -> str:
@@ -175,14 +227,15 @@ def _set(row: dict, *, source: str, reason: str, decided: bool = False, decision
 
 
 async def decide_turn(body: dict, row: dict, store: TurnDecisionStore, *, lm_on: bool,
-                      override: str | None = None, parent_main: bool | None = None) -> None:
-    """Fill the ``cls_*`` turn fields of ``row`` for this call. Record only: it never
-    changes ``row['decision']`` or anything ``local_step`` reads, and never raises.
+                      override: str | None = None, parent_main: bool | None = None,
+                      key: tuple | None = None) -> None:
+    """Fill the ``cls_*`` turn fields of ``row`` for this call. It never changes
+    ``row['decision']``; ``local_step`` applies a veto through :func:`veto_of`. Never raises.
 
     ``lm_on`` is whether ``--serve local-agent`` is on. ``override`` is ``"claude"`` or
     ``"local"`` for a user prefix row (owner overrides are never counted as decided)."""
     try:
-        await _decide(body, row, store, lm_on, override, parent_main)
+        await _decide(body, row, store, lm_on, override, parent_main, key)
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - recording must never cost a call
@@ -190,7 +243,7 @@ async def decide_turn(body: dict, row: dict, store: TurnDecisionStore, *, lm_on:
         _set(row, source=S_NONE, reason=REASON_ERROR)
 
 
-async def _decide(body, row, store, lm_on, override, parent_main) -> None:
+async def _decide(body, row, store, lm_on, override, parent_main, key=None) -> None:
     if not row.get("supported"):
         return _set(row, source=S_NONE, reason=REASON_UNSUPPORTED)
     if not lm_on:
@@ -199,7 +252,7 @@ async def _decide(body, row, store, lm_on, override, parent_main) -> None:
         return _set(row, source=S_NONE, reason=REASON_PREFIX_CLAUDE)
     if override == "local":
         return _set(row, source=S_NONE, reason=REASON_PREFIX_LOCAL)
-    key = turn_key(body, row.get("session_id"))
+    key = key if key is not None else turn_key(body, row.get("session_id"))
     did = decision_id(key)
     stored = store.get(key)
     if stored is not None:
@@ -225,6 +278,8 @@ async def _decide(body, row, store, lm_on, override, parent_main) -> None:
         assembled, session_id=row.get("session_id"), text_sha=key[2])
     ok = verdict.source in DECIDED_SOURCES
     reason = _tier_reason(verdict.tier) if ok else f"failopen:{verdict.source}"
+    if reason == REASON_ALLOW and not await asyncio.to_thread(proxy_lane_passes):
+        reason = REASON_VETO_LANE
     tier = verdict.tier if ok else None
     store.put(key, dict(decision_id=did, source=verdict.source, reason=reason, decided=ok, tier=tier))
     _set(row, source=verdict.source, reason=reason, decided=ok, decision=did, tier=tier)
