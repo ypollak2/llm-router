@@ -147,6 +147,7 @@ client tools are never routed.
 | `--tier-policy` | `LLM_ROUTER_PROXY_TIER_POLICY` | the bundled `proxy/claude_tiers.yaml` |
 | `--backend-fail-n` | `LLM_ROUTER_PROXY_BACKEND_FAIL_N` | `3` (consecutive empty or sub-second invalid replies before local serving pauses; a crash signature pauses at once; `0` disables) |
 | `--backend-cooldown-s` | `LLM_ROUTER_PROXY_BACKEND_COOLDOWN_S` | `60` (pause before a one-token probe checks the backend) |
+| `--local-with-tiers` | none (flag only) | off. With `--serve local-agent` and `--tiers on\|conversation`: a turn local serving may take is served locally, every other turn follows the tier path unchanged (section "Serve mode"). |
 | `--local-gate` | `LLM_ROUTER_PROXY_LOCAL_GATE` | `off`. `on`: a continuation is served locally only on a lane that `local_eligibility.json` marks eligible (section below). Needs `--steps continuation`; not with `--serve local-agent`. |
 
 The model, the trims (`proxy/backends.py: TRIMS`) and the backends
@@ -312,12 +313,36 @@ stderr saying it is being sent to Anthropic. Media and over-cap prompts are esca
 replaced by a placeholder. The startup banner states the mode and the egress rule.
 
 **Kill switch.** `touch <state>/local_agent_kill` (the path is in the banner) sends every step to Anthropic from
-the next request, no restart; remove the file to resume.
+the next request, no restart; remove the file to resume. `<state>` is `$LLM_ROUTER_HOME`, default `~/.llm-router`
+(`local_mode.kill_switch_path()`); the file is checked on every request (`LocalModeState.killed`), so it pauses live
+local serving for a D1/P4 window without a restart:
+
+```
+touch ~/.llm-router/local_agent_kill    # pause: the next step goes to Anthropic (reason kill_switch)
+rm ~/.llm-router/local_agent_kill       # resume: the same conversation is served locally again
+```
+
+**Exempt sessions (D-448).** `decide_local` refuses with reason `exempt_session` (ledger `local_mode.detail`) for
+(a) a session listed in `session_kind_overrides.json` with a kind other than `organic` (`coordinator_session`; the
+same reader the KPI code uses, `session_kind.override_of`, re-read when the file changes) and (b) a sub-agent thread
+(`subagent_thread`; the proxy's own sub-agent evidence, `steps.is_subagent_request`). It comes right after the kill
+switch, so every call of an exempt conversation says `exempt_session`. If the overrides file is missing or
+unreadable, nobody is exempted by it (fail-closed in the sense that the status cannot be established), and each row
+records `local_mode.overrides_unreadable` (`missing` or `unreadable`); the sub-agent test does not need the file.
+
+**Combined with tiers (`--local-with-tiers`, D-447).** `--serve local-agent --local-with-tiers --tiers conversation
+[--tier-policy FILE]` serves a turn locally when `decide_local` allows it (exemption, the per-turn classifier veto and
+the conversation pin all apply), exactly as above, with no trim for that request. Every other turn (vetoed,
+ineligible, exempt, kill-switched, or after a failed local step) takes the existing tier path unchanged: the same
+rewrite, ledger fields and Claude-tier handling as `--tiers conversation` alone. A Claude turn after a local turn
+carries `mixed_history: true` and keeps the one-retry-without-thinking guard. The flag is explicit so that
+`--serve local-agent` with a stray `--tiers` setting is still refused; without the flag the preflight keeps
+requiring `--tiers off`.
 
 **Preflight.** The proxy refuses to start (message on stderr, exit 2) unless: `--model ollama/<tag>` is given
 and resident with `num_ctx >= 32768` (it is loaded first if absent); the Ollama server's own
 `OLLAMA_NUM_PARALLEL` is 1 (read from its process environment, so only a loopback server can be checked) and
-no runner has `-np` other than 1; `--trim none` (the default in this mode); `--tiers off`; compaction off; the
+no runner has `-np` other than 1 (both asked of `--ollama-url`); `--trim none` (the default in this mode); `--tiers off` (or on/conversation with `--local-with-tiers`); compaction off; the
 overflow guard passes a self-test; the ledger and kill-switch directories are writable. In this mode the first-token
 hedge defaults to off and the step budget to 120 s (a conversation's first call evaluates a large prompt).
 

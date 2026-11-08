@@ -24,6 +24,10 @@ What the mode changes, each tied to the failure it fixes:
   prompt cache on the other side, and a conversation that started on Claude
   is never moved to the local model.
 
+``--local-with-tiers`` (NS-L, D-447) runs this mode together with ``--tiers``: a turn ``decide_local`` allows is
+served as above, every other turn takes the unchanged tier path. ``decide_local`` also refuses an exempt session
+(D-448): a coordinator session listed in ``session_kind_overrides.json`` or a sub-agent thread.
+
 Never silent: every step that is not served locally carries a ledger reason
 and prints an egress notice; a kill switch (a file) takes effect on the next
 request without a restart; the startup banner states the mode; an input the
@@ -88,6 +92,12 @@ REASON_NOT_ELIGIBLE = "not_eligible"
 #: NS-A2: the per-turn classifier vetoed this turn (detail: veto_tier / veto_lane). The turn goes to
 #: Claude; the conversation pin is NOT touched.
 REASON_CLASSIFIER_VETO = "classifier_veto"
+#: NS-L (D-448): the session is a coordinator / non-organic session listed in
+#: ``session_kind_overrides.json`` (detail ``coordinator_session``), or the call comes from a sub-agent
+#: thread (detail ``subagent_thread``). Never served locally; the pin goes to Claude like any refusal.
+REASON_EXEMPT_SESSION = "exempt_session"
+EXEMPT_COORDINATOR = "coordinator_session"
+EXEMPT_SUBAGENT = "subagent_thread"
 
 PIN_LOCAL = "local"
 PIN_CLAUDE = "claude"
@@ -198,6 +208,38 @@ class LocalSession:
     #: NS-A2: the classifier's veto for THIS turn (``cls_decide.veto_of``: "veto_tier" /
     #: "veto_lane"), or None. Per turn, never stored in the pin.
     verdict: str | None = None
+    #: NS-L (D-448): ``exempt_reason(...)``'s detail (coordinator_session / subagent_thread), or None.
+    exempt: str | None = None
+
+
+def exempt_reason(body: dict, session_id: str | None) -> tuple[str | None, str | None]:
+    """``(detail, overrides_problem)`` for D-448. ``detail`` is ``coordinator_session`` when the
+    session is listed in ``session_kind_overrides.json`` with a kind other than ``organic`` (the same
+    reader the KPI code uses: ``session_kind.override_of``), else ``subagent_thread`` when the request
+    carries the proxy's own sub-agent evidence (``steps.is_subagent_request``: the sub-agent system-prompt
+    markers Claude Code appends to every spawned agent, or a sub-agent-only tool), else None.
+
+    ``overrides_problem`` is ``missing`` / ``unreadable`` when the overrides file could not be read.
+    That case FAILS CLOSED in the sense the owner asked for: a session whose status cannot be
+    established is not treated as exempt (it is served like any other) and the problem is recorded in
+    the ledger row (``local_mode.overrides_unreadable``). The sub-agent test does not depend on the file."""
+    from llm_router import session_kind
+    from llm_router.proxy.steps import is_subagent_request
+
+    problem = None
+    try:
+        problem = session_kind.overrides_problem()
+        kind = session_kind.override_of(session_id)
+    except Exception:  # noqa: BLE001 - never costs a call; recorded as unreadable
+        kind, problem = None, "unreadable"
+    if kind is not None and kind != session_kind.KIND_ORGANIC:
+        return EXEMPT_COORDINATOR, problem
+    try:
+        if is_subagent_request(body):
+            return EXEMPT_SUBAGENT, problem
+    except Exception:  # noqa: BLE001
+        pass
+    return None, problem
 
 
 @dataclass(frozen=True)
@@ -219,11 +261,13 @@ class LocalDecision:
 def decide_local(body: dict, session: LocalSession) -> LocalDecision:
     """Rule stub (redesign PR 1). May this call be served locally?
 
-    Order matters: the kill switch beats everything; a conversation already on
-    Claude stays there; then the input rules (media, prompt size), then the
+    Order matters: the kill switch beats everything; an exempt session (D-448)
+    is never served; a conversation already on Claude stays there; then the input rules (media, prompt size), then the
     live state (backend, quality breaker)."""
     if session.kill_switch:
         return LocalDecision(False, REASON_KILL_SWITCH)
+    if session.exempt:
+        return LocalDecision(False, REASON_EXEMPT_SESSION, session.exempt)
     if session.pinned == PIN_CLAUDE:
         return LocalDecision(False, REASON_PINNED_CLAUDE)
     if has_media(body):
@@ -384,16 +428,21 @@ def egress_notice(reason: str, session_id: str | None) -> str:
             f"(reason: {reason}). Its prompt, files and tool output leave this machine.")
 
 
-def banner_lines(*, model: str | None, num_ctx: int | None, kill_path: Path, killed: bool) -> list[str]:
+def banner_lines(*, model: str | None, num_ctx: int | None, kill_path: Path, killed: bool,
+                 with_tiers: bool = False) -> list[str]:
     num_ctx = resolve_num_ctx(model, num_ctx)
     lines = [
         f"llm-router proxy: SERVE MODE = local-agent (opt-in). Claude Code steps are answered by "
         f"{model} on this machine; conversations are pinned local at their first call.",
         f"  egress: a step goes to Anthropic only when it is not eligible (reason in the ledger, notice on "
         f"stderr): media, prompt > {PROMPT_CAP_TOKENS} tokens, backend unhealthy, quality breaker open, a "
-        f"failed local step, or a conversation that began on Claude. Never a placeholder, never silent.",
+        f"failed local step, a conversation that began on Claude, or an exempt session (coordinator in "
+        f"session_kind_overrides.json, or a sub-agent thread). Never a placeholder, never silent.",
         f"  kill switch: touch {kill_path} (remove to re-enable); takes effect on the next request.",
     ]
+    if with_tiers:
+        lines.append("  COMBINED with --tiers (--local-with-tiers): a step that is not served locally follows the "
+                     "Claude-tier policy exactly as under --tiers alone (it may be rewritten to a cheaper Claude tier).")
     if killed:
         lines.append("  KILL SWITCH IS ENGAGED: every step is going to Anthropic until it is removed.")
     return lines
@@ -514,7 +563,7 @@ def resident_context(base_url: str, model: str, get: Callable[[str], dict]) -> t
 
 def preflight(*, model: str | None, trim: str | None, ollama_url: str, num_ctx: int | None, ledger_path: Path,
               kill_path: Path, tiers_off: bool, compaction_off: bool,
-              get: Callable[[str], dict], runner: Runner = _run) -> list[str]:
+              get: Callable[[str], dict], runner: Runner = _run, with_tiers: bool = False) -> list[str]:
     """Every reason local-agent mode must not start; empty means go. Each reason
     names what to change. ``llm-router proxy`` prints them and exits non-zero."""
     num_ctx = resolve_num_ctx(model, num_ctx)
@@ -524,8 +573,13 @@ def preflight(*, model: str | None, trim: str | None, ollama_url: str, num_ctx: 
     if (trim or "").strip().lower() != "none":
         problems.append(f"trim must be 'none' (got {trim!r}): the 'fast' trim swaps Claude Code's system "
                         f"prompt for 366 characters and keeps only 4 tools")
-    if not tiers_off:
-        problems.append("--tiers must be off in local-agent mode")
+    if with_tiers:
+        # NS-L combined mode (--local-with-tiers): the tier policy serves every turn that is not local,
+        # so tiers must be ON; this is the only place the tiers-off requirement is dropped.
+        if tiers_off:
+            problems.append("--local-with-tiers needs --tiers on or conversation (there is no tier path to fall to)")
+    elif not tiers_off:
+        problems.append("--tiers must be off in local-agent mode (or pass --local-with-tiers to combine them)")
     if not compaction_off:
         problems.append("--local-agent / LLM_ROUTER_LOCAL_AGENT compaction must be off in local-agent mode "
                         "(history compaction loses the task, probes 2026-10-04)")

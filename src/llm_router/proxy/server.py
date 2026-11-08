@@ -195,6 +195,11 @@ class ProxyConfig:
     # (proxy.local_mode). ``kill_switch`` overrides the kill-switch file path.
     serve: str = local_mode.SERVE_OFF
     kill_switch: Path | None = None
+    # ``--local-with-tiers`` (NS-L, D-447): ``--serve local-agent`` together with ``--tiers on|conversation``.
+    # A turn the local mode may serve is served locally; every other turn follows the tier path unchanged.
+    # Explicit on purpose: the old tiers-off local-agent mode keeps refusing a tiers setting that came in by
+    # accident (an env var), and nothing here has an env spelling, so the live plist names it.
+    local_with_tiers: bool = False
     # ``--shadow on`` (proxy.local_shadow): every step is served by Anthropic as
     # usual; the local model answers a copy in parallel and only a comparison
     # record is kept. ``shadow_path`` overrides the record file.
@@ -335,11 +340,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     # below that mentions ``lm`` runs.
     turn_decisions = cls_decide.TurnDecisionStore()  # NS-A1: memory only, record only
     lm = None
+    if cfg.local_with_tiers and (cfg.serve != local_mode.SERVE_LOCAL_AGENT or tier_policy is None):
+        raise ValueError("--local-with-tiers needs --serve local-agent and --tiers on|conversation")
     if cfg.serve == local_mode.SERVE_LOCAL_AGENT:
-        if (cfg.trim or "").strip().lower() != "none" or tier_policy is not None \
+        if (cfg.trim or "").strip().lower() != "none" or (tier_policy is not None and not cfg.local_with_tiers) \
                 or cfg.local_agent is not None or not (cfg.model or "").startswith("ollama/"):
-            raise ValueError("--serve local-agent needs --model ollama/<tag>, --trim none, --tiers off and "
-                             "local-agent compaction off")
+            raise ValueError("--serve local-agent needs --model ollama/<tag>, --trim none, --tiers off (or "
+                             "--local-with-tiers) and local-agent compaction off")
         lm = local_mode.LocalModeState(cfg.kill_switch)
         lm_breaker = la_capability.BreakerCache(fn=breaker_fn)
     if cfg.shadow and (lm is not None or not (cfg.model or "").startswith("ollama/")):
@@ -676,16 +683,21 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             pinned = local_mode.PIN_CLAUDE
         payload = to_ollama(body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
         breaker_ok, breaker_detail = await lm_breaker.allows(None)
+        # NS-L (D-448): a coordinator session (session_kind_overrides.json) or a sub-agent thread is never
+        # served locally. ``key_body`` is the unstripped request, the one the sub-agent markers live in.
+        exempt, overrides_problem = local_mode.exempt_reason(key_body or body, row.get("session_id"))
         decision = local_mode.decide_local(body, local_mode.LocalSession(
             key=key, pinned=pinned, kill_switch=lm.killed(), backend_healthy=not health.is_open(cfg.model),
             breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=payload,
-            verdict=None if force else cls_decide.veto_of(row)))
+            verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
         vetoed = decision.reason == local_mode.REASON_CLASSIFIER_VETO
         if vetoed:
             row["cls_applied"] = True
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
+        if overrides_problem:
+            row["local_mode"]["overrides_unreadable"] = overrides_problem  # D-448: not exempt, and said so
         if force:
             row["local_mode"]["forced"] = True
         message = None
@@ -1417,7 +1429,7 @@ llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
                  [--loop-max-consecutive N] [--loop-repeat-window N]
                  [--tiers off|on|conversation] [--tier-policy FILE.yaml] [--local-agent]
                  [--backend-fail-n N] [--backend-cooldown-s S] [--serve off|local-agent]
-                 [--local-gate off|on]
+                 [--local-with-tiers] [--local-gate off|on]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
@@ -1460,7 +1472,8 @@ def _local_agent_preflight(cfg: ProxyConfig) -> list[str]:
         model=cfg.model, trim=cfg.trim, ollama_url=url, num_ctx=cfg.num_ctx,
         ledger_path=cfg.ledger_path or ledger.ledger_path(),
         kill_path=cfg.kill_switch or local_mode.kill_switch_path(),
-        tiers_off=cfg.tiers == TIERS_OFF, compaction_off=cfg.local_agent is None, get=get)
+        tiers_off=cfg.tiers == TIERS_OFF, compaction_off=cfg.local_agent is None, get=get,
+        with_tiers=cfg.local_with_tiers)
 
 
 def cmd_proxy(argv: list[str]) -> int:
@@ -1517,6 +1530,10 @@ def cmd_proxy(argv: list[str]) -> int:
                     help="off (default; byte-identical to before) or local-agent (opt-in): Claude Code steps "
                          "answered by --model on this machine, conversations pinned local at their first call "
                          "(also LLM_ROUTER_PROXY_LOCAL_AGENT_MODE). Refuses to start unless its preflight passes")
+    ap.add_argument("--local-with-tiers", action="store_true",
+                    help="with --serve local-agent and --tiers on|conversation: a turn the local mode may serve "
+                         "is served locally, every other turn follows the tier path exactly as under --tiers "
+                         "alone. Without this flag --serve local-agent still requires --tiers off")
     ap.add_argument("--shadow", default=str(env.shadow and "on" or "off"),
                     help="off (default) or on: every step is served by Anthropic as usual while --model answers "
                          "a copy in parallel; only agreement, latency and reason codes are logged "
@@ -1553,6 +1570,9 @@ def cmd_proxy(argv: list[str]) -> int:
     if shadow_on and (serve != local_mode.SERVE_OFF or not (a.model or "").startswith("ollama/")):
         sys.stderr.write("llm-router proxy: --shadow on needs --model ollama/<tag> and --serve off\n")
         return 2
+    if a.local_with_tiers and serve != local_mode.SERVE_LOCAL_AGENT:
+        sys.stderr.write("llm-router proxy: --local-with-tiers needs --serve local-agent\n")
+        return 2
     if serve == local_mode.SERVE_LOCAL_AGENT:
         # This mode's defaults: no trim; no 8 s first-token hedge and a longer
         # budget (a conversation's first call pays 14-25 s of prompt evaluation).
@@ -1571,7 +1591,7 @@ def cmd_proxy(argv: list[str]) -> int:
                           keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
                           ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
                           loop_repeat_window=a.loop_repeat_window, tiers=parse_tiers_mode(a.tiers),
-                          tier_policy=a.tier_policy,
+                          tier_policy=a.tier_policy, local_with_tiers=a.local_with_tiers,
                           local_agent=(LocalAgentConfig.from_env() if a.local_agent else env.local_agent),
                           backend_fail_n=a.backend_fail_n, backend_cooldown_s=a.backend_cooldown_s)
     except (ValueError, OSError) as exc:
@@ -1604,6 +1624,7 @@ def cmd_proxy(argv: list[str]) -> int:
           f"loop_guard(max_consecutive={cfg.loop_max_consecutive}, repeat_window={cfg.loop_repeat_window})  "
           f"tiers={cfg.tiers + ' (' + (cfg.tier_policy or 'bundled policy') + ')' if cfg.tiers != TIERS_OFF else 'off'}  "
           f"local_agent={'on' if cfg.local_agent else 'off'}  "
+          f"{'local_with_tiers=on  ' if cfg.local_with_tiers else ''}"
           f"backend_health(fail_n={cfg.backend_fail_n}, cooldown={cfg.backend_cooldown_s:g}s)")
     print(f"  enable per session: {enable_hint(a.host, a.port)}")
     if cfg.local_gate:
@@ -1617,7 +1638,7 @@ def cmd_proxy(argv: list[str]) -> int:
     if serve == local_mode.SERVE_LOCAL_AGENT:
         kill = cfg.kill_switch or local_mode.kill_switch_path()
         for line in local_mode.banner_lines(model=cfg.model, num_ctx=cfg.num_ctx, kill_path=kill,
-                                            killed=kill.exists()):
+                                            killed=kill.exists(), with_tiers=cfg.local_with_tiers):
             print(line, flush=True)
     try:
         from llm_router.map_rediscovery import maybe_start_poller
