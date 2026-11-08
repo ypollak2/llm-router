@@ -378,6 +378,7 @@ def test_lane_evidence_is_read_once_per_human_turn_not_per_call(env, monkeypatch
 # -- latency (rv25): measured with a slow fake classifier -------------------------------------
 
 
+@pytest.mark.timing
 def test_classifier_latency_is_paid_once_per_human_turn_and_continuations_do_not_wait(env, monkeypatch):
     decision_model_on(monkeypatch)
     delay = 0.30
@@ -406,6 +407,7 @@ def test_classifier_latency_is_paid_once_per_human_turn_and_continuations_do_not
 # -- rv30 S4: a hung classifier through the request handler ------------------------------------
 
 
+@pytest.mark.timing
 def test_a_hung_classifier_is_bounded_then_failopen_and_serves_local(env, monkeypatch):
     """Not the injected fake: the real classify_async runs; the residence probe hangs. The bound is
     the classifier's own asyncio.timeout(budget); the turn then serves local as a failopen."""
@@ -430,6 +432,7 @@ def test_a_hung_classifier_is_bounded_then_failopen_and_serves_local(env, monkey
     assert 0.25 <= wall < 1.0, wall
 
 
+@pytest.mark.timing
 def test_a_hung_classifier_at_the_real_plan_bound_is_failopen_within_2_2_s(env, monkeypatch):
     """No timeout override: the production 2.0 s budget (LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS unset)."""
     decision_model_on(monkeypatch)
