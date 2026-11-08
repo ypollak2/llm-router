@@ -198,28 +198,58 @@ def _spawn_detached(script: str) -> None:
         os._exit(127)
 
 
-def _auto_compact_window(env: dict[str, str]) -> int:
-    """``autoCompactWindow`` from ``$HOME/.claude/settings.json``; 0 when absent, malformed or not a positive int."""
+def _pos_int(v: object) -> int:
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
+
+
+def _canon_model(mid: str) -> str:
+    """``claude-opus-5-5[1m]`` / ``claude-opus-5-5-20261001`` -> ``claude-opus-5-5`` (the docs'
+    canonical modelSettings key). Aliases (``opus``) are not resolved: they match only a key spelled the same."""
+    return re.sub(r"-\d{8}$", "", re.sub(r"\[[^\]]*\]$", "", mid.strip().lower()))
+
+
+def _auto_compact_window(env: dict[str, str], model_id: str = "") -> int:
+    """The auto-compact window Claude Code would use; 0 when none is set or the file is unusable.
+
+    Precedence (model-config docs, "Set the auto-compact window"): env
+    ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``, then ``modelSettings.<canonical model>.autoCompactWindow``,
+    then the top-level ``autoCompactWindow``, both read from ``$HOME/.claude/settings.json`` only
+    (project and managed settings files are not read; ``--autocompact`` is not visible here).
+    """
+    try:
+        v = _pos_int(int(env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "")))
+    except ValueError:
+        v = 0
+    if v:
+        return v
     home = env.get("HOME") or os.path.expanduser("~")
     try:
         with open(os.path.join(home, ".claude", "settings.json"), encoding="utf-8") as fh:
-            v = json.load(fh).get("autoCompactWindow")
-        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
+            cfg = json.load(fh)
+        ms = cfg.get("modelSettings")
+        want = _canon_model(model_id)
+        if want and isinstance(ms, dict):
+            for key, ent in ms.items():
+                if isinstance(ent, dict) and _canon_model(str(key)) == want and _pos_int(ent.get("autoCompactWindow")):
+                    return ent["autoCompactWindow"]
+        return _pos_int(cfg.get("autoCompactWindow"))
     except Exception:  # noqa: BLE001 -- missing, unreadable or malformed settings: no override
         return 0
 
 
-def effective_context_limit(model_id: str, env: dict[str, str], window: int = 0) -> int:
+def effective_context_limit(model_id: str, env: dict[str, str], window: int = 0, used: int = 0) -> int:
     """The token count at which this session compacts, i.e. the bar's 100%.
 
     1. ``window``: Claude Code's own ``context_window.context_window_size`` from the status line
-       stdin JSON. It is the model's window, the truth when present.
+       stdin JSON, the model's window when present.
     2. Otherwise the explicit window: 1,000,000 for a ``[1m]``/``1m`` model id, else a valid
        ``CC_CONTEXT_LIMIT``. A window is never guessed from a model name beyond that rule.
-    3. ``autoCompactWindow`` (settings.json) lowers the limit to the compaction point when it is
-       below the window, and sets it when no explicit window is known (it is then the point the
-       session will hit; 250k used of 300k shows 83%, not a pinned 100%).
+    3. The auto-compact window (``_auto_compact_window``) lowers the limit when it is below the
+       window, and sets it when no explicit window is known (250k used of 300k shows 83%).
     4. With neither, 200000.
+    5. Never pin because of a clamp: if ``used`` exceeds that limit, the larger of the known
+       window and compact values is the limit (a payload that says 200000 while the session
+       demonstrably holds more, e.g. 274,845 tokens seen on claude-opus-5-5, is wrong about it).
     """
     base = window if window > 0 else 0
     if not base:
@@ -230,10 +260,11 @@ def effective_context_limit(model_id: str, env: dict[str, str], window: int = 0)
                 base = max(0, int(env.get("CC_CONTEXT_LIMIT", "0")))
             except ValueError:
                 base = 0
-    compact = _auto_compact_window(env)
-    if compact:
-        return min(base, compact) if base else compact
-    return base or 200000
+    compact = _auto_compact_window(env, model_id)
+    limit = (min(base, compact) if base else compact) if compact else (base or 200000)
+    if used > limit:
+        limit = max(limit, base, compact)
+    return limit
 
 
 def context_segment(transcript: str, model_id: str, env: dict[str, str], window: int = 0) -> dict[str, str]:
@@ -250,7 +281,7 @@ def context_segment(transcript: str, model_id: str, env: dict[str, str], window:
     total = _last_usage_tokens(transcript)
     if not total:
         return {}
-    limit = effective_context_limit(model_id, env, window)
+    limit = effective_context_limit(model_id, env, window, total)
     pct = min(100, total * 100 // limit)
     if total >= 1_000_000:
         human = "%.1fM" % (total / 1_000_000)
