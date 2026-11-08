@@ -425,13 +425,47 @@ def test_the_old_tiers_off_mode_with_a_failing_preflight_still_refuses_to_start(
     assert rc == 2 and not started and "REFUSING to start" in capsys.readouterr().err
 
 
-def test_a_disabled_combined_app_takes_the_tier_path_and_the_row_says_preflight_refused(tmp_path):
+def test_a_disabled_combined_app_takes_the_tier_path_and_never_calls_the_classifier(tmp_path, monkeypatch):
+    decision_model_on(monkeypatch)
+    fake = FakeClassifier(monkeypatch, tier="haiku")
     rig = Rig(tmp_path, local_disabled="model not resident")
     r = rig.post(opus(turn_body(["rename the helper"])))
     (row,) = rig.rows()
     assert r.status_code == 200 and rig.backend.calls == [] and len(rig.up.requests) == 1
+    # The per-turn local/Claude classifier (cls_decide) never ran: source "none", reason not_local_agent. The one
+    # fake call is the tier path's own tier decision, identical to a tiers-only proxy (asserted below).
+    assert row["cls_turn_source"] == "none" and row["cls_turn_reason"] == "not_local_agent"
+    assert row["cls_turn_decided"] is False and row["cls_applied"] is False
+    n = len(fake.calls)
+    Rig(tmp_path / "plain", combined=False).post(opus(turn_body(["rename the helper"])))
+    assert len(fake.calls) - n == n == 1
     assert row["local_mode"]["reason"] == "preflight_refused" and row["local_mode"]["detail"] == "model not resident"
-    assert row["reason"] != "served" and row["decision"] != "served"
+    assert row["reason"] == "preflight_refused" and row["decision"] == "forwarded"
+
+
+def test_a_raising_preflight_in_combined_mode_still_builds_and_starts(monkeypatch, capsys, tmp_path):
+    import uvicorn
+    started = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: started.append(1))
+
+    def boom(cfg):
+        raise ValueError("bad url")
+    monkeypatch.setattr(ps, "_local_agent_preflight", boom)
+    rc = ps.cmd_proxy(["--serve", "local-agent", "--local-with-tiers", "--tiers", "conversation", "--model", MODEL,
+                       "--no-warm-up", "--ledger", str(tmp_path / "l.jsonl")])
+    assert rc == 0 and started
+    assert "local-agent DISABLED (tier path only): preflight error: ValueError: bad url" in capsys.readouterr().err
+
+
+def test_combined_preflight_never_loads_the_model_inline(monkeypatch, tmp_path):
+    posts = []
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: posts.append(a) or None)
+    monkeypatch.setattr(local_mode, "resident_context", lambda *a, **k: (None, "not loaded"))
+    cfg = ps.ProxyConfig(model=MODEL, trim="none", serve="local-agent", local_with_tiers=True,
+                         tiers=ps.TIERS_CONVERSATION, tier_policy=_policy_file(tmp_path),
+                         ollama_url="http://127.0.0.1:11435", ledger_path=tmp_path / "l.jsonl")
+    out = ps._local_agent_preflight(cfg)
+    assert posts == [] and out and any("resident" in r or "loaded" in r for r in out)
 
 
 def test_tiers_with_local_agent_is_still_refused_without_the_flag(tmp_path):

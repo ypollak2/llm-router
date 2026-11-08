@@ -1296,7 +1296,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                        and local_mode.is_agent_turn(body))
         bypass_local = ov is not None and ov.is_claude
         await cls_decide.decide_turn(
-            body, row, turn_decisions, lm_on=lm is not None, parent_main=parent_main,
+            body, row, turn_decisions, lm_on=lm is not None and not lm.disabled, parent_main=parent_main,
             override="claude" if bypass_local else "local" if force_local else None, key=turn_k)
         if lm is not None and not bypass_local:
             message = await local_step(
@@ -1447,9 +1447,10 @@ Opt-in, per session. Nothing is enabled until you point a session at it:
 
 
 def _local_agent_preflight(cfg: ProxyConfig) -> list[str]:
-    """Why ``--serve local-agent`` must not start (empty = go). Loads the model
-    first if it is not resident (a refusal for "not loaded" would only send the
-    operator to run the same call by hand), then checks everything on the list."""
+    """Why ``--serve local-agent`` must not start (empty = go). Old mode loads the model first if it is not
+    resident (a refusal for "not loaded" would only send the operator to run the same call by hand). Combined
+    mode (``local_with_tiers``) never loads inline: a non-resident model is a refusal, so the start is not
+    delayed by up to 300 s on the path that carries all Claude traffic. Then checks everything on the list."""
     import httpx
 
     from llm_router.config import get_config, validate_ollama_url
@@ -1466,7 +1467,7 @@ def _local_agent_preflight(cfg: ProxyConfig) -> list[str]:
 
     if cfg.model and cfg.model.startswith("ollama/"):
         ctx, _note = local_mode.resident_context(url, cfg.model, get)
-        if ctx is None:
+        if ctx is None and not cfg.local_with_tiers:
             try:
                 OllamaBackend = BACKENDS["ollama/"]
                 backend = OllamaBackend(cfg.model, httpx.AsyncClient(), base_url=url, num_ctx=cfg.num_ctx,
@@ -1607,7 +1608,12 @@ def cmd_proxy(argv: list[str]) -> int:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
         return 2
     if serve == local_mode.SERVE_LOCAL_AGENT:
-        refusals = _local_agent_preflight(cfg)
+        try:
+            refusals = _local_agent_preflight(cfg)
+        except Exception as exc:  # noqa: BLE001 - D-445: in combined mode no preflight error may stop the start
+            if not cfg.local_with_tiers:
+                raise
+            refusals = [f"preflight error: {type(exc).__name__}: {exc}"]
         if refusals and cfg.local_with_tiers:
             # D-445: the live proxy carries ALL Claude traffic; a down model must not stop it starting.
             for r in refusals:
