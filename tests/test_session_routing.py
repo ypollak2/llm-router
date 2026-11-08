@@ -160,7 +160,7 @@ def test_no_main_transcript_makes_the_claude_side_unknown_not_zero(env):
     _one_local_ok(home)
     r = sr.compute(SID, NOW, budget_s=30)
     assert r["total"] is None and r["claude"] is None and r["non_claude"] is None
-    assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local OK 100% (1/1, session)"
+    assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local accepted 100% (1/1 attempts, session)"
 
 
 def test_proxy_served_message_moves_to_the_non_claude_side(env):
@@ -361,10 +361,10 @@ def test_the_session_figure_from_every_source(env):
     # b = c1 x2, c2, c3, c9; a = c1's second and c3 (c2 was rejected by the text job, c9 by the router)
     assert r["local"] == {"attempts": 5, "ok": 2, "gate_rejected": 1}
     # 17 calls is under the 50-call floor: n/a with its k/n, exactly as the 7-day row does
-    assert tick.render_session_routing(r, now=NOW) == "routed n/a (9/17 calls, session) · local OK 40% (2/5, session)"
+    assert tick.render_session_routing(r, now=NOW) == "routed n/a (9/17 calls, session) · local accepted 40% (2/5 attempts, session)"
     r["total"] = 200                                                         # past the floor: the estimated run is named
     assert tick.render_session_routing(r, now=NOW) == \
-        "routed 4.5% (9/200 calls, session, 1 Codex run est.) · local OK 40% (2/5, session)"
+        "routed 4.5% (9/200 calls, session, 1 Codex run est.) · local accepted 40% (2/5 attempts, session)"
 
 
 def test_a_job_rejected_three_times_is_not_three_calls_and_not_three_local_successes(env):
@@ -377,7 +377,7 @@ def test_a_job_rejected_three_times_is_not_three_calls_and_not_three_local_succe
                     "outcome": "rejected", "session_id": SID}) + "\n" for i in range(3)])
     r = sr.compute(SID, NOW, budget_s=30)
     assert r["local"] == {"attempts": 3, "ok": 0, "gate_rejected": 3} and r["non_claude"] == 0
-    assert tick.render_session_routing(r, now=NOW) == "routed 0.0% (0/60 calls, session) · local OK 0% (0/3, session)"
+    assert tick.render_session_routing(r, now=NOW) == "routed 0.0% (0/60 calls, session) · local accepted 0% (0/3 attempts, session)"
 
 
 def test_the_figure_is_shown_as_a_share_from_fifty_calls(env):
@@ -386,7 +386,7 @@ def test_the_figure_is_shown_as_a_share_from_fifty_calls(env):
     _one_local_ok(home, 4)
     r = sr.compute(SID, NOW, budget_s=30)
     assert (r["non_claude"], r["total"]) == (4, 100)
-    assert tick.render_session_routing(r, now=NOW) == "routed 4.0% (4/100 calls, session) · local OK 100% (4/4, session)"
+    assert tick.render_session_routing(r, now=NOW) == "routed 4.0% (4/100 calls, session) · local accepted 100% (4/4 attempts, session)"
 
 
 def test_no_local_attempt_is_na_never_zero_percent(env):
@@ -396,7 +396,7 @@ def test_no_local_attempt_is_na_never_zero_percent(env):
     r = sr.compute(SID, NOW, budget_s=30)
     assert r["local"] == {"attempts": 0, "ok": 0, "gate_rejected": 0} and r["non_claude"] == 0
     line = tick.render_session_routing(r, now=NOW)
-    assert "local OK n/a (0 attempts, session)" in line and "0%" not in line.split("local OK")[1]
+    assert "local accepted n/a (0 attempts, session)" in line and "0%" not in line.split("local accepted")[1]
     assert line.startswith("routed 0.0% (0/60 calls, session)")              # a measured zero: n is shown beside it
 
 
@@ -406,7 +406,7 @@ def test_an_unreadable_router_database_is_unknown_not_zero(env):
     (home / "usage.db").write_text("not a database")
     r = sr.compute(SID, NOW, budget_s=30)
     assert r["non_claude"] is None and r["local"] is None and r["total"] is None
-    assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local OK n/a (session)"
+    assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local accepted n/a (session)"
 
 
 def test_a_fresh_result_is_reused_and_a_stale_one_recomputed(env):
@@ -432,7 +432,7 @@ def test_the_snapshot_carries_the_routing_figure_and_its_row(env, monkeypatch):
     _one_local_ok(home)
     data = snap.build(SID, NOW)
     assert data["routing"]["total"] == 81 and data["routing"]["non_claude"] == 1
-    assert data["routing_line"] == "routed 1.2% (1/81 calls, session) · local OK 100% (1/1, session)"
+    assert data["routing_line"] == "routed 1.2% (1/81 calls, session) · local accepted 100% (1/1 attempts, session)"
     assert "routed" not in data["line"]                                      # the five-field line is unchanged
 
 
@@ -440,7 +440,7 @@ def test_a_failed_count_is_na_in_the_snapshot_and_does_not_blank_the_other_field
     monkeypatch.setattr(sr, "compute", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     data = snap.build(SID, NOW)
     assert data["routing"] is None
-    assert data["routing_line"] == "routed n/a (session) · local OK n/a (session)"
+    assert data["routing_line"] == "routed n/a (session) · local accepted n/a (session)"
     assert data["line"].startswith("router:")
 
 
@@ -457,7 +457,7 @@ def test_the_tick_prints_the_session_row_between_the_line_and_the_seven_day_row(
     assert len(rows) == 3
     assert rows[1].startswith("routed 1.2% (1/81 calls, session)")
     assert rows[2] == ("off-Claude 1.0% (6/600 calls, 7d, organic) · <Opus 0.0% (0/594 Claude calls, 7d, organic)"
-                       " · local OK 90% (9/10, 7d, organic)")
+                       " · local accepted 90% (9/10 attempts, 7d, organic)")
     assert len(tick.render_rows(cache, now=NOW)) == 2                         # no session in the JSON: no session row
 
 
@@ -482,24 +482,24 @@ def test_the_seven_day_label_says_when_codex_turns_are_counted_and_flags_estimat
 def test_the_seven_day_row_is_as_before_when_the_cache_has_no_local_ok(env):
     cache = {"written_at": NOW, "call_mix": {"window": "7d", "population": "organic",
                                               "outside_claude": {"k": 6, "n": 600}, "below_opus": {"k": 0, "n": 594}}}
-    assert "local OK" not in tick.render_progress(cache, now=NOW)
+    assert "local accepted" not in tick.render_progress(cache, now=NOW)
     cache["call_mix"]["local_ok"] = {"k": 0, "n": 0}
-    assert tick.render_progress(cache, now=NOW).endswith("local OK n/a (0 attempts, 7d, organic)")
+    assert tick.render_progress(cache, now=NOW).endswith("local accepted n/a (0 attempts, 7d, organic)")
     for bad in ({"k": 3, "n": 2}, {"k": -1, "n": 2}, {"k": True, "n": 1}, {"k": "x", "n": 1}, "str", None):
         cache["call_mix"]["local_ok"] = bad
-        assert "local OK" not in tick.render_progress(cache, now=NOW)
+        assert "local accepted" not in tick.render_progress(cache, now=NOW)
 
 
 def test_the_session_row_never_prints_cache_text_or_a_stale_figure():
     good = {"v": 1, "computed_at": NOW, "complete": True, "non_claude": 10, "total": 100,
             "local": {"attempts": 4, "ok": 2}, "codex": {"flagged_runs": 0}}
-    assert tick.render_session_routing(good, now=NOW) == "routed 10.0% (10/100 calls, session) · local OK 50% (2/4, session)"
+    assert tick.render_session_routing(good, now=NOW) == "routed 10.0% (10/100 calls, session) · local accepted 50% (2/4 attempts, session)"
     assert tick.render_session_routing(good, now=NOW + tick.STALE_AFTER_S + 1) == \
-        "routed n/a (session) · local OK n/a (session)"
+        "routed n/a (session) · local accepted n/a (session)"
     hostile = dict(good, non_claude="\x1b[31mred", total=100, local={"attempts": "\x1b[0m", "ok": 1},
                    codex={"flagged_runs": "\x1b[1m"})
     out = tick.render_session_routing(hostile, now=NOW)
-    assert "\x1b" not in out and out == "routed n/a (session) · local OK n/a (session)"
+    assert "\x1b" not in out and out == "routed n/a (session) · local accepted n/a (session)"
     assert tick.render_session_routing(dict(good, v=2), now=NOW).startswith("routed n/a")
     # below the share floor: n/a with the same k/n, as the 7-day row
     assert tick.render_session_routing(dict(good, total=40), now=NOW).startswith("routed n/a (10/40 calls, session)")
@@ -626,7 +626,7 @@ def test_the_tick_script_prints_the_session_row_only_once_the_session_has_a_snap
     assert len(rows()) == 1                                                   # cold session: the line only
     snap.refresh(host="claude_code", session_id=SID)                          # the detached refresher's job
     got = rows()
-    assert len(got) == 2 and got[1] == "routed 1.2% (1/81 calls, session) · local OK 100% (1/1, session)"
+    assert len(got) == 2 and got[1] == "routed 1.2% (1/81 calls, session) · local accepted 100% (1/1 attempts, session)"
 
 
 # ── the full layout's third row, from a segment cache the test writes (no refresher, no installed package) ──
@@ -647,7 +647,7 @@ def _full_layout(tmp_path: Path, kv: dict[str, str], stdin_sid: str = SID) -> li
 
 def test_the_full_layout_prints_the_routing_row_under_the_snapshot_row(tmp_path):
     now = int(time.time())
-    row = "routed 0.74% (104/13976 calls, session) · local OK 40% (2/5, session)"
+    row = "routed 0.74% (104/13976 calls, session) · local accepted 40% (2/5 attempts, session)"
     lines = _full_layout(tmp_path, {"v": "1", "written": str(now), "snap_line": "router: m (r) | offload n/a",
                                     "snap_at": str(now), "route_line": row})
     assert len(lines) == 3, lines
@@ -658,7 +658,7 @@ def test_a_stale_snapshot_turns_both_rows_to_na_and_a_control_character_never_re
     now = int(time.time())
     lines = _full_layout(tmp_path, {"v": "1", "written": str(now), "snap_line": "router: m (r)",
                                     "snap_at": str(now - 3600), "route_line": "routed 1.0% (1/100 calls, session)"})
-    assert lines[1:] == ["n/a", "routed n/a (session) · local OK n/a (session)"], lines
+    assert lines[1:] == ["n/a", "routed n/a (session) · local accepted n/a (session)"], lines
     hostile = _full_layout(tmp_path, {"v": "1", "written": str(now), "snap_line": "router: m",
                                       "snap_at": str(now), "route_line": "routed \x1b[31m1.0%\x1b[0m \u009b(1/100)"})
     assert "\x1b" not in hostile[2] and "\u009b" not in hostile[2], hostile
@@ -819,7 +819,7 @@ def test_unavailable_attempt_data_is_unknown_in_the_seven_day_figure_not_zero_at
                                                             "below_opus": {"k": 0, "n": 3}, "population": "organic"}})
     assert cached["codex_turns"] is True and "local_ok" not in cached
     row = tick.render_progress({"written_at": NOW, "call_mix": cached}, now=NOW)
-    assert row.endswith("local OK n/a (7d, organic)") and "0 attempts" not in row
+    assert row.endswith("local accepted n/a (7d, organic)") and "0 attempts" not in row
 
 
 # ── text-job-bind jobs: the hook runs outside MCP, so its router rows name no session ───────────────────────
@@ -867,7 +867,7 @@ def test_an_accepted_bind_job_is_one_call_and_its_attempts_are_found_by_its_jid(
     r = sr.compute(SID, NOW, budget_s=30)
     assert (r["non_claude"], r["total"]) == (1, 61) and r["by_source"]["router_local"] == 1
     assert _local(r) == (2, 1, 1)                                             # the rejected try and the accepted one
-    assert tick.render_session_routing(r, now=NOW) == "routed 1.6% (1/61 calls, session) · local OK 50% (1/2, session)"
+    assert tick.render_session_routing(r, now=NOW) == "routed 1.6% (1/61 calls, session) · local accepted 50% (1/2 attempts, session)"
 
 
 def test_a_bind_row_without_a_jid_is_one_call_and_borrows_no_attempts(env):
@@ -957,7 +957,7 @@ def test_a_missing_bind_ledger_is_nothing_recorded_and_an_unreadable_one_is_unkn
     shutil.rmtree(home / sr.INDEX_DIR)
     r = sr.compute(SID, NOW, budget_s=30)
     assert r["non_claude"] is None and r["total"] is None and r["local"] is None
-    assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local OK n/a (session)"
+    assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local accepted n/a (session)"
 
 
 def test_an_unreadable_attempt_ledger_is_unknown_not_an_empty_one(env):
@@ -1074,14 +1074,14 @@ def test_a_missing_codex_ledger_counts_nothing_and_an_unreadable_one_makes_route
     r = sr.compute(SID, NOW, budget_s=30)                                    # no north_star_units.jsonl at all
     assert r["non_claude"] == 1 and r["codex"] == {"runs": 0, "responses": 0, "flagged_runs": 0,
                                                     "discarded_runs": 0, "discarded_responses": 0}
-    assert tick.render_session_routing(r, now=NOW) == "routed 1.6% (1/61 calls, session) · local OK 100% (1/1, session)"
+    assert tick.render_session_routing(r, now=NOW) == "routed 1.6% (1/61 calls, session) · local accepted 100% (1/1 attempts, session)"
     (home / "north_star_units.jsonl").mkdir()                                # exists, and cannot be read as a file
     shutil.rmtree(home / sr.INDEX_DIR)
     r = sr.compute(SID, NOW, budget_s=30)
     assert r["non_claude"] is None and r["total"] is None and r["codex"] is None
     # the local figure does not depend on the Codex ledger and stays
     assert r["local"] == {"attempts": 1, "ok": 1, "gate_rejected": 0}
-    assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local OK 100% (1/1, session)"
+    assert tick.render_session_routing(r, now=NOW) == "routed n/a (session) · local accepted 100% (1/1 attempts, session)"
 
 
 def test_unreadable_codex_window_preserves_local(env):
@@ -1243,3 +1243,114 @@ def test_apply_session_replay_cannot_restore_a_redone_call(env, sub_id, expected
     _write(projects / "-p" / SID / "subagents" / "agent-copy.jsonl", *_apply_lines(sub_id))
     r = sr.compute(SID, NOW)
     assert (r["apply_program_replaced"], r["apply_local_replaced"]) == expected
+
+
+# ── NS-C: the per-call proxy's local-model attempts in "local accepted" ─────────────────────────────────
+
+LOCAL_MODEL = "qwen3-coder:30b"
+
+
+def _proxy_row(msg_id=None, *, decision="served", model=LOCAL_MODEL, session=None, reason=None, route_latency_s=1.2):
+    row = {"decision": decision, "reason": reason, "session_id": session or SID, "model": model,
+           "route_latency_s": route_latency_s}
+    if msg_id:
+        row["msg_id"] = msg_id
+    return json.dumps(row) + "\n"
+
+
+def _write_proxy(home: Path, *lines: str) -> None:
+    _write(home / "proxy_calls.jsonl", *lines)
+
+
+def _session_with_local(env, next_human="thanks", *, claude_calls=0):
+    home, projects, _codex = env
+    _routing_db(home)
+    _write(projects / "-p" / f"{SID}.jsonl", _user("fix it"), _assistant("p1", LOCAL_MODEL), _user(next_human),
+           *[_assistant(f"c{i}") for i in range(claude_calls)])
+    _write_proxy(home, _proxy_row("p1"))
+    return home
+
+
+def test_a_proxy_served_reply_that_was_kept_is_one_attempt_and_one_accepted(env):
+    _session_with_local(env)
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["local"] == {"attempts": 1, "ok": 1, "gate_rejected": 0}
+    # the served message is already in the routed numerator through the transcript; it is there once, not twice
+    assert r["non_claude"] == 1 and r["by_source"]["proxy"] == 1 and r["by_source"]["router_local"] == 0
+    assert tick.render_session_routing(r, now=NOW).endswith("local accepted 100% (1/1 attempts, session)")
+
+
+def test_a_proxy_served_reply_that_claude_redid_is_an_attempt_that_was_not_accepted(env):
+    _session_with_local(env, next_human="claude: do that again")
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["proxy_attempts"] == {"attempts": 1, "ok": 0}
+    assert tick.render_session_routing(r, now=NOW).endswith("local accepted 0% (0/1 attempts, session)")
+
+
+def test_a_proxy_fallback_after_a_tried_model_is_an_attempt_that_was_not_accepted(env):
+    home, projects, _codex = env
+    _routing_db(home)
+    _write(projects / "-p" / f"{SID}.jsonl", _user(), _assistant("a1"))
+    _write_proxy(home,
+                 _proxy_row(decision="fallback", reason="backend_error"),                 # tried, failed: an attempt
+                 _proxy_row(decision="fallback", reason="loop_guard", route_latency_s=None),   # forced, never tried
+                 _proxy_row(decision="fallback", reason="policy_error", route_latency_s=None),
+                 _proxy_row(decision="forwarded", reason="policy_kept", route_latency_s=None),
+                 _proxy_row("r1", reason="local_refused"),                                 # a `local:` refusal: no model
+                 _proxy_row(decision="fallback", reason="backend_error", model=None))      # no model recorded
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["proxy_attempts"] == {"attempts": 1, "ok": 0} and r["local"]["attempts"] == 1
+    assert r["non_claude"] == 0                                                     # a fallback is Claude's call
+
+
+def test_another_sessions_proxy_rows_are_not_this_sessions_attempts(env):
+    home = _session_with_local(env)
+    other = "99999999-2222-3333-4444-555555555555"
+    _write_proxy(home, _proxy_row("x1", session=other), _proxy_row(decision="fallback", session=other))
+    assert sr.compute(SID, NOW, budget_s=30)["proxy_attempts"] == {"attempts": 1, "ok": 1}
+    assert sr.proxy_figures(other) == {"attempts": 2, "ok": 0}      # x1 is in no transcript: nothing proves it was kept
+
+
+def test_an_unreadable_proxy_ledger_is_unknown_not_zero(env):
+    home = _session_with_local(env)
+    (home / "proxy_calls.jsonl").unlink()
+    (home / "proxy_calls.jsonl").mkdir()                              # exists, cannot be read as a file
+    assert sr.proxy_figures(SID) is None
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["local"] is None
+    assert tick.render_session_routing(r, now=NOW).endswith("local accepted n/a (session)")
+    (home / "proxy_calls.jsonl").rmdir()
+    assert sr.proxy_figures(SID) == {"attempts": 0, "ok": 0}          # a ledger that does not exist holds nothing
+
+
+def test_sonnet_and_haiku_stay_on_the_claude_side_and_are_no_proxy_attempts(env):
+    home, projects, _codex = env
+    _routing_db(home)
+    _write(projects / "-p" / f"{SID}.jsonl", _user(),
+           *[_assistant(f"s{i}", "claude-sonnet-5-5") for i in range(30)],
+           *[_assistant(f"h{i}", "claude-haiku-5-5") for i in range(30)])
+    _write_proxy(home, _proxy_row("x1", model="claude-sonnet-5-5"), _proxy_row("x2", model="claude-haiku-5-5"))
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert r["non_claude"] == 0 and r["claude"] == 60 and r["local"]["attempts"] == 0
+    assert tick.render_session_routing(r, now=NOW).startswith("routed 0.0% (0/60 calls, session) · local accepted n/a (0 attempts")
+
+
+def test_a_program_step_is_not_a_served_call_and_not_in_the_local_denominator(env):
+    home, projects, _codex = env
+    _routing_db(home)
+    _write(projects / "-p" / f"{SID}.jsonl", *_apply_lines())
+    r = sr.compute(SID, NOW, budget_s=30)
+    assert (r["apply_program_replaced"], r["apply_local_replaced"]) == (3, 1)
+    assert r["non_claude"] == 0 and r["by_source"]["proxy"] == 0
+    assert r["local"]["attempts"] == 0 and r["proxy_attempts"] == {"attempts": 0, "ok": 0}
+    line = tick.render_session_routing(r, now=NOW)
+    assert "local accepted n/a (0 attempts, session)" in line and line.endswith(" · apply: program 3 / local 1")
+
+
+def test_a_result_cached_before_the_proxy_figure_is_recomputed(env):
+    _session_with_local(env)
+    first = sr.compute(SID, NOW, budget_s=30)
+    del first["proxy_attempts"]
+    first["local"] = {"attempts": 0, "ok": 0, "gate_rejected": 0}
+    sr._atomic_json(sr.result_path(SID), first)
+    assert sr.compute(SID, NOW + 1)["proxy_attempts"] == {"attempts": 1, "ok": 1}

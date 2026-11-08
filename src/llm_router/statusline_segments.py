@@ -31,8 +31,8 @@ values stripped of control characters (a value is data to print, never to run)::
                                            with the estimate, P35-2)
     snap_line  snap_at                     (the five-field snapshot line and its data time; the script
                                            prints it as a second row, "n/a" past 15 min)
-    route_line                             (the session routing row, "routed X% (n/N calls, session) · local OK
-                                           Y% (a/b, session)", pre-rendered by the refresher; the script prints
+    route_line                             (the session routing row, "routed X% (n/N calls, session) · local accepted
+                                           Y% (a/b attempts, session)", pre-rendered by the refresher; the script prints
                                            it as a third row under the same 15 min rule as snap_line)
     mix_local  mix_sub  mix_paid  mix_unc  mix_n  mix_win  ledger_as_of
                                            (this session's executed calls, from ONE

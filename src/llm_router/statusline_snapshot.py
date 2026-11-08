@@ -16,7 +16,7 @@ name is a value read from a ledger. A part that fails is recorded (``failopen``)
 
 A sixth thing rides beside the line, not in it: ``routing``, the session's two North Star numbers
 (``session_routing``: routed share of calls, local attempts that worked), and ``routing_line``, its row
-(``routed X% (n/N calls, session) · local OK Y% (a/b, session)``). The fast tick prints it from ``routing``.
+(``routed X% (n/N calls, session) · local accepted Y% (a/b attempts, session)``). The fast tick prints it from ``routing``.
 """
 from __future__ import annotations
 
@@ -295,7 +295,7 @@ def _routing_field(session_id: str, now: float) -> dict | None:
 
 
 def routing_line(routing: dict | None, now: float) -> str:
-    """The session routing row (``routed X% (n/N calls, session) · local OK Y% (a/b, session)``), pre-rendered by
+    """The session routing row (``routed X% (n/N calls, session) · local accepted Y% (a/b attempts, session)``), pre-rendered by
     the tick's own pure renderer so the full layout and the fast tick print the same words."""
     from llm_router import statusline_tick
 

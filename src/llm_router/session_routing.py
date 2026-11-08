@@ -48,9 +48,13 @@ DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
     that was handed back (rejected, fallback, timeout, error) is no call;
   - a Claude Code message served by a non-Claude model (proxy).
 
-``local OK Y% (a/b, session)``
+``local accepted Y% (a/b attempts, session)``
 
-* b = LOCAL ATTEMPTS of the session: every ``execution_events`` attempt of a local provider (Ollama, LM Studio,
+* ACCEPTED means the answer was kept: validated and not redone. It does NOT mean verified (``northstar.NS_ATTACH_VERIFY_RECORDS``
+  is False: no verifier verdict reaches this figure);
+* b = LOCAL ATTEMPTS of the session: the per-call proxy's local-model rows (:func:`_proxy_rows`: ``served``, or
+  ``fallback`` after the model was tried; used = served AND ``northstar._judge_proxy_turn`` says ``used``, so a served
+  reply that was redone or rejected is an attempt that was not accepted) PLUS every ``execution_events`` attempt of a local provider (Ollama, LM Studio,
   vLLM, llama.cpp), whatever its outcome (``attempt_completed``, ``attempt_failed``, ``attempt_rejected``), so a
   local model that errored and was rescued by the next chain entry is a failed attempt in b;
 * b also holds the local attempts of the session's text-job-bind jobs, accepted or handed back
@@ -68,7 +72,7 @@ DEFINITIONS (every one is checked by ``tests/test_session_routing.py``)
 * ``routing_decisions.success`` is NOT used anywhere here: it is "the response is usable" for the whole call
   (``router.py``), not "the local model worked", and a call rescued by a later chain entry has success 1 while
   its first local attempts failed.
-* b = 0 prints ``local OK n/a (0 attempts, session)``, never 0%.
+* b = 0 prints ``local accepted n/a (0 attempts, session)``, never 0%.
 
 A ledger that exists and cannot be read (``LedgerUnreadable``: the Codex delegation ledger, the bind ledger, the
 text-job attempt ledger, the router database) makes the figures that need it unknown, printed n/a; a ledger that does
@@ -809,7 +813,82 @@ def local_figures(attempts: list[dict]) -> dict:
             "gate_rejected": sum(1 for a in local if a["gate_rejected"])}
 
 
+# ── proxy attempts (the per-call proxy's local-model rows) ───────────────────────────────────────────────
+
+def _proxy_rows(session_id: str) -> list[dict] | None:
+    """The session's local-model ATTEMPTS in ``proxy_calls.jsonl``, or None when the ledger exists and cannot be read
+    (unknown, never "0 attempts"). An attempt is a row the proxy tried a local model for and either served
+    (``decision: served`` with no ``reason``: a ``local:`` refusal is a served row with a reason and tried no model)
+    or fell back from (``decision: fallback`` with ``route_latency_s`` set: the loop-guard cap and a policy error
+    fall back without trying a model and have none). A forwarded row is no attempt. A missing ledger holds nothing."""
+    path = paths.state_path("proxy_calls.jsonl")
+    if not path.exists():
+        return []
+    needle = session_id.encode()
+    out: list[dict] = []
+    try:
+        with open(path, "rb") as fh:
+            for line in fh:
+                if needle not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or row.get("session_id") != session_id:
+                    continue
+                model = row.get("model")
+                if not isinstance(model, str) or not model or _is_claude(model):
+                    continue
+                if row.get("decision") == "served" and not row.get("reason") and isinstance(row.get("msg_id"), str):
+                    out.append(row)
+                elif row.get("decision") == "fallback" and row.get("route_latency_s") is not None:
+                    out.append(row)
+    except OSError:
+        return None
+    return out
+
+
+def _served_and_used(msg_ids: set[str], session_id: str, root: Path | None) -> set[str]:
+    """The served message ids whose reply the session kept: found in a transcript of the session AND judged
+    ``OUTCOME_USED`` by ``northstar._judge_proxy_turn`` (not redone, not rejected, tool results answered). A message
+    that is in no transcript is not used (nothing proves it)."""
+    from llm_router import northstar
+
+    used: set[str] = set()
+    for path in session_files(session_id, root):
+        todo = msg_ids - used
+        if not todo:
+            break
+        records = list(northstar._iter_jsonl(path))
+        here = {(o.get("message") or {}).get("id") for o in records
+                if isinstance(o, dict) and o.get("type") == "assistant"}
+        for mid in todo & here:
+            if northstar._judge_proxy_turn(mid, records)[0] == northstar.OUTCOME_USED:
+                used.add(mid)
+    return used
+
+
+def proxy_figures(session_id: str, root: Path | None = None) -> dict | None:
+    """``{attempts, ok}`` of the session's proxy local-model attempts (see :func:`_proxy_rows`), or None when the
+    proxy ledger cannot be read. ``ok`` is served AND used; a fallback is an attempt that is never used. These rows
+    are not in the router's ``execution_events`` and not in the routed numerator beyond the served messages
+    ``transcript_figures`` already moved, so nothing is counted twice."""
+    rows = _proxy_rows(session_id)
+    if rows is None:
+        return None
+    served = {r["msg_id"] for r in rows if r.get("decision") == "served"}
+    ok = len(_served_and_used(served, session_id, root)) if served else 0
+    return {"attempts": len(rows), "ok": ok}
+
+
 # ── the session figure ────────────────────────────────────────────────────────────────────────────────────
+
+def _merge_local(router: dict, proxy: dict) -> dict:
+    """The router's local figures plus the proxy's attempts (the result keeps ``proxy_attempts`` apart to reconcile)."""
+    return {"attempts": router["attempts"] + proxy["attempts"], "ok": router["ok"] + proxy["ok"],
+            "gate_rejected": router["gate_rejected"]}
+
 
 def _part(code: str, fn):
     try:
@@ -840,12 +919,13 @@ def compute(session_id: str, now: float | None = None, *, budget_s: float = BUDG
     prior = _load_result(session_id)
     stamp = prior.get("computed_at") if prior else None
     if (prior and "apply_program_replaced" in prior and prior.get("complete")
-            and isinstance(stamp, (int, float)) and 0 <= now - stamp < FRESH_S):
+            and "proxy_attempts" in prior and isinstance(stamp, (int, float)) and 0 <= now - stamp < FRESH_S):
         return prior
     t = _part("CHZ-FO-ROUTING-TRANSCRIPT", lambda: transcript_figures(session_id, budget_s=budget_s, root=root))
     mcp_ids = t["mcp_tool_use_ids"] if t else []
     runs = _part("CHZ-FO-ROUTING-CODEX", lambda: codex_run_responses(_ns_rows(session_id), now))
     attempts = _part("CHZ-FO-ROUTING-ROWS", lambda: _router_attempts(session_id, mcp_ids))
+    proxy = _part("CHZ-FO-ROUTING-PROXY", lambda: proxy_figures(session_id, root))
 
     used = {"local": 0, "other": 0, "claude": 0}
     for a in attempts or ():
@@ -873,7 +953,8 @@ def compute(session_id: str, now: float | None = None, *, budget_s: float = BUDG
         "codex": None if runs is None else {
             "runs": len(delegated), "responses": codex_calls, "flagged_runs": sum(1 for r in delegated if r["flagged"]),
             "discarded_runs": len(discarded), "discarded_responses": sum(r["responses"] for r in discarded)},
-        "local": local_figures(attempts) if attempts is not None else None,
+        "local": _merge_local(local_figures(attempts), proxy) if attempts is not None and proxy is not None else None,
+        "proxy_attempts": proxy,
         "files": t["files"] if t else None,
     }
     if t is not None:

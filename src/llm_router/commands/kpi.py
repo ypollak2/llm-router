@@ -570,7 +570,7 @@ def _call_mix(units: list[dict], allowed: frozenset[str], index, win: "_Window |
     and the flagged runs it could not count; each accepted text-job-bind job (``bind_extra``: the hook's calls are
     in no unit) is one more call. ``detail_failed`` (the extras were asked for and could not be built, e.g. an unreadable
     ledger) sets ``detail_unavailable``: the figures that need them are unknown and the status line prints n/a. It also adds ``local_ok`` (``{k, n}``: local routes that succeeded
-    over local attempts, same window and population) for the second status line figure."""
+    over local attempts, same window and population) for the second status line figure. The 7-day figure counts router and text-job-bind attempts only: the per-call proxy's local-model attempts are in the session figure (``session_routing.proxy_figures``) and not in this one."""
     from llm_router import northstar as ns
 
     claude = dict.fromkeys(("opus", "sonnet", "haiku", "claude-other"), 0)
