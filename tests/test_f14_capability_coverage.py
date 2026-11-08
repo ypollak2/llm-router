@@ -633,3 +633,6 @@ def test_no_need_detected_leaves_route_and_stream_untouched_and_the_filter_is_ne
     attempted, _, _ = _stream_events(CHAIN, "what is the capital of France?", monkeypatch)
     assert attempted == CHAIN
     assert calls and not (calls[0].tools or calls[0].vision), calls
+
+
+from tests.test_proxy_local_mode import _overrides_readable  # noqa: E402,F401  (NS-L: a readable overrides file)

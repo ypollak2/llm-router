@@ -45,11 +45,11 @@ snapshot (the session JSON names the session; a cold session has no snapshot and
 row): the two numbers of the North Star goal for THIS session, read from
 ``snapshots/claude_code-<session>.json``, key ``routing`` (``llm_router.session_routing`` defines them)::
 
-    routed 0.74% (104/13976 calls, session) · local OK 75% (3/4, session)
+    routed 0.74% (104/13976 calls, session) · local accepted 75% (3/4 attempts, session)
 
-``local OK n/a (0 attempts, session)`` when the session made no local attempt, never 0%. The tick only reads it
+``local accepted n/a (0 attempts, session)`` when the session made no local attempt, never 0%. The tick only reads it
 (one small JSON file) and formats it; nothing is counted here. The 7-day row carries the same two numbers over its
-own window and population (``local OK 88% (95/108, 7d, organic)``). When the refresher counted Codex model responses
+own window and population (``local accepted 88% (95/108 router attempts, 7d, organic)``: router and bind attempts only, no proxy attempts). When the refresher counted Codex model responses
 the 7-day figure is labelled ``routed (incl. Codex turns and binds)`` (``llm-router kpi`` keeps ``off-Claude``: one call per run)
 and names delegated runs it had to count as one (``2 Codex runs est.``).
 """
@@ -324,17 +324,18 @@ def _whole(value) -> int | None:
     return int(v) if v is not None and v >= 0 and v == int(v) else None
 
 
-def _local_ok_segment(fig, scope: str) -> str | None:
-    """``local OK 75% (3/4, session)``: local-model attempts that worked, over all local attempts. No attempt is
-    ``local OK n/a (0 attempts, <scope>)``, never 0%. ``None`` when the figure is not two whole numbers with
+def _local_ok_segment(fig, scope: str, unit: str = "attempts") -> str | None:
+    """``local accepted 75% (3/4 attempts, session)``: local-model attempts whose answer was kept (validated and not redone;
+    NOT verified: ``northstar.NS_ATTACH_VERIFY_RECORDS`` is False), over all local attempts. No attempt is
+    ``local accepted n/a (0 attempts, <scope>)``, never 0%. ``None`` when the figure is not two whole numbers with
     ``k <= n`` (the segment is then not shown, or shown as n/a by the caller)."""
     k = _whole(fig.get("k")) if isinstance(fig, dict) else None
     n = _whole(fig.get("n")) if isinstance(fig, dict) else None
     if k is None or n is None or k > n:
         return None
     if n == 0:
-        return f"local OK n/a (0 attempts, {scope})"
-    return f"local OK {100.0 * k / n:.0f}% ({k}/{n}, {scope})"
+        return f"local accepted n/a (0 {unit}, {scope})"
+    return f"local accepted {100.0 * k / n:.0f}% ({k}/{n} {unit}, {scope})"
 
 
 def read_session_routing(home: str, session: str | None) -> dict | None:
@@ -353,7 +354,7 @@ def read_session_routing(home: str, session: str | None) -> dict | None:
 
 
 def render_session_routing(routing: dict | None, *, now: float) -> str:
-    """The session row: ``routed X% (n/N calls, session) · local OK Y% (a/b, session)``. Pure: no I/O.
+    """The session row: ``routed X% (n/N calls, session) · local accepted Y% (a/b attempts, session)``. Pure: no I/O.
 
     Every missing or doubtful piece is ``n/a`` with its reason, never 0: no figure yet, one older than
     :data:`STALE_AFTER_S`, a transcript scan that has not reached the end (a share from part of the transcripts
@@ -363,7 +364,7 @@ def render_session_routing(routing: dict | None, *, now: float) -> str:
     computed = _num(r.get("computed_at")) if r else None
     fresh = r is not None and computed is not None and 0 <= now - computed <= STALE_AFTER_S
     if not fresh:
-        return "routed n/a (session) · local OK n/a (session)"
+        return "routed n/a (session) · local accepted n/a (session)"
     assert r is not None
     k, n = _whole(r.get("non_claude")), _whole(r.get("total"))
     if r.get("complete") is not True:
@@ -377,7 +378,7 @@ def render_session_routing(routing: dict | None, *, now: float) -> str:
         flagged = _whole(codex.get("flagged_runs")) if isinstance(codex, dict) else None
         routed = f"routed {_mix_pct(k, n)} ({k}/{n} calls, session{_runs_est(flagged)})"
     local = _local_ok_segment({"k": (r.get("local") or {}).get("ok"), "n": (r.get("local") or {}).get("attempts")}
-                              if isinstance(r.get("local"), dict) else None, "session") or "local OK n/a (session)"
+                              if isinstance(r.get("local"), dict) else None, "session") or "local accepted n/a (session)"
     program = _whole(r.get("apply_program_replaced")) or 0
     apply_local = _whole(r.get("apply_local_replaced")) or 0
     apply = f" · apply: program {program} / local {apply_local}" if program or apply_local else ""
@@ -413,11 +414,11 @@ def render_progress(cache: dict | None, *, now: float) -> str | None:
     segs = [first, _mix_segment("<Opus", cm.get("below_opus"), "Claude calls", window, population)]
     if any(s is None for s in segs):
         return None
-    local = _local_ok_segment(cm.get("local_ok"), f"{window}, {population}")
+    local = _local_ok_segment(cm.get("local_ok"), f"{window}, {population}", "router attempts")
     if local:
         segs.append(local)
     elif codex_turns or unavailable:                  # this refresher measured attempts and could not: unknown, not "0 attempts"
-        segs.append(f"local OK n/a ({window}, {population})")
+        segs.append(f"local accepted n/a ({window}, {population})")
     # (a cache an older refresher wrote has neither flag: the row is as before)
     return _fit(" · ".join(segs))  # type: ignore[arg-type]
 

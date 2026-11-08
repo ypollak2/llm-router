@@ -241,12 +241,12 @@ def test_end_to_end_from_the_unit_stream_to_the_two_rows(monkeypatch, sessions):
     # W9: the refresher also counted Codex model responses (the label says so; `llm-router kpi` keeps "off-Claude").
     # This home has no attempt ledger, so the local figure is unknown: n/a with its window, never "0 attempts"
     assert out[1] == ("routed (incl. Codex turns and binds) 5.0% (5/100 calls, 7d, organic) · <Opus 78.9% (75/95 Claude calls, 7d,"
-                      " organic) · local OK n/a (7d, organic)")
+                      " organic) · local accepted n/a (7d, organic)")
 
 
 def test_an_unreadable_ledger_makes_the_seven_day_figures_na_not_a_count_without_the_extras(monkeypatch, sessions):
     """W9b: the Codex turns, the bind jobs and the local attempts are asked for and cannot be built (an unreadable bind
-    ledger): the routed share and local OK are n/a. The Claude-side `<Opus` figure does not need them and stays."""
+    ledger): the routed share and local accepted are n/a. The Claude-side `<Opus` figure does not need them and stays."""
     from llm_router import paths
 
     paths.state_path("text_job_binds.jsonl").mkdir()
@@ -257,7 +257,7 @@ def test_an_unreadable_ledger_makes_the_seven_day_figures_na_not_a_count_without
     assert data["call_mix"]["detail_unavailable"] is True
     out = tick.render_rows(data, now=time.time())
     assert out[1] == ("routed (incl. Codex turns and binds) n/a (7d, organic) · <Opus 78.9% (75/95 Claude calls, 7d,"
-                      " organic) · local OK n/a (7d, organic)")
+                      " organic) · local accepted n/a (7d, organic)")
     assert "off-Claude" not in out[1] and "5.0%" not in out[1]
 
 
@@ -290,5 +290,5 @@ def test_unreadable_codex_preserves_seven_day_local_ok(monkeypatch, sessions):
     assert data["call_mix"]["local_ok"] == {"k": 1, "n": 1}
     out = tick.render_progress(json.loads(json.dumps(data)), now=time.time())
     assert "routed (incl. Codex turns and binds) n/a (7d, organic)" in out
-    assert "local OK 100% (1/1, 7d, organic)" in out
+    assert "local accepted 100% (1/1 router attempts, 7d, organic)" in out
     assert "<Opus 78.9% (75/95 Claude calls, 7d, organic)" in out

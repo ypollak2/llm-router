@@ -166,6 +166,10 @@ def classify(*, cwd: str | None, entrypoint: str | None = None, override: str | 
 
 OVERRIDES_FILENAME = "session_kind_overrides.json"
 _OVERRIDES_CACHE: dict[str, tuple[tuple[int, int], dict[str, dict[str, str]]]] = {}
+#: Why the file could not be read, per path: ``missing`` / ``unreadable`` / absent when it read fine.
+#: ``overrides`` still answers ``{}`` for these (a broken file is "no overrides"); a caller that must not
+#: mistake that for "nobody is listed" (the proxy's session exemption, D-448) asks :func:`overrides_problem`.
+_OVERRIDES_PROBLEM: dict[str, str] = {}
 
 
 def overrides_path() -> Path:
@@ -182,8 +186,9 @@ def overrides() -> dict[str, dict[str, str]]:
     key = str(path)
     try:
         st = path.stat()
-    except OSError:
+    except OSError as exc:
         _OVERRIDES_CACHE.pop(key, None)
+        _OVERRIDES_PROBLEM[key] = "missing" if isinstance(exc, FileNotFoundError) else "unreadable"
         return {}
     stamp = (st.st_mtime_ns, st.st_size)
     hit = _OVERRIDES_CACHE.get(key)
@@ -194,6 +199,10 @@ def overrides() -> dict[str, dict[str, str]]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 - a broken file is "no overrides", never a crash
         raw = None
+    if isinstance(raw, dict):
+        _OVERRIDES_PROBLEM.pop(key, None)
+    else:
+        _OVERRIDES_PROBLEM[key] = "unreadable"
     if isinstance(raw, dict):
         for sid, entry in raw.items():
             if not isinstance(sid, str) or not sid or not isinstance(entry, dict):
@@ -206,6 +215,13 @@ def overrides() -> dict[str, dict[str, str]]:
             out[sid] = {"kind": kind, "reason": reason if isinstance(reason, str) else ""}
     _OVERRIDES_CACHE[key] = (stamp, out)
     return out
+
+
+def overrides_problem() -> str | None:
+    """``missing`` / ``unreadable`` when the override file could not be read as an object, else ``None``.
+    Reads through :func:`overrides` (one ``stat``), so it is as current as that."""
+    overrides()
+    return _OVERRIDES_PROBLEM.get(str(overrides_path()))
 
 
 def override_of(session_id: str | None) -> str | None:

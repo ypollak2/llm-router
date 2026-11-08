@@ -136,6 +136,24 @@ def test_cls_applied_is_counted_on_the_ledger_rows_it_is_read_from():
     assert _summary()["cls_applied_true"] is None
 
 
+def test_a_per_turn_veto_row_is_counted_apart_and_is_not_the_unexpected_applied_warning():
+    """NS-A2: cls_applied is true on a veto row; only a true that is NOT a decided veto warns."""
+    _write(_fixture())
+    veto = {"cls_turn_decided": True}
+    rows = [dict(veto, cls_applied=True, cls_turn_reason="veto_tier"),
+            dict(veto, cls_applied=True, cls_turn_reason="veto_lane"),
+            dict(veto, cls_applied=False, cls_turn_reason="allow"),
+            {"cls_applied": True, "cls_turn_decided": False, "cls_turn_reason": "veto_tier"},   # not decided
+            {"cls_applied": True}]                                                              # unexplained
+    s = _summary(ledger_rows=rows)
+    assert (s["cls_vetoes_applied"], s["cls_applied_true"], s["ledger_rows"]) == (2, 2, 5)
+    line = kpi._classifier_shadow_line(s)
+    assert "WARNING cls_applied true on 2 ledger rows" in line and "2 per-turn vetoes applied" in line
+    only_vetoes = _summary(ledger_rows=rows[:3])
+    assert only_vetoes["cls_applied_true"] == 0 and "WARNING" not in kpi._classifier_shadow_line(only_vetoes)
+    assert _summary()["cls_vetoes_applied"] is None
+
+
 def test_the_line_names_n_and_says_too_few_below_50():
     _write(_fixture())
     line = kpi._classifier_shadow_line(_summary())

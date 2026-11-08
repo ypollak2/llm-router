@@ -51,6 +51,7 @@ import os
 import sys
 import time
 from collections import OrderedDict
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -60,7 +61,7 @@ from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_key, shadow_frontier
 from llm_router import prefixes as user_prefixes
-from llm_router.proxy import haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
+from llm_router.proxy import cls_decide, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -195,6 +196,14 @@ class ProxyConfig:
     # (proxy.local_mode). ``kill_switch`` overrides the kill-switch file path.
     serve: str = local_mode.SERVE_OFF
     kill_switch: Path | None = None
+    # D-445: combined mode only. Preflight refusals; non-empty => local serving is off for the process
+    # lifetime and every turn takes the tier path (the proxy must never fail to start over the local model).
+    local_disabled: str | None = None
+    # ``--local-with-tiers`` (NS-L, D-447): ``--serve local-agent`` together with ``--tiers on|conversation``.
+    # A turn the local mode may serve is served locally; every other turn follows the tier path unchanged.
+    # Explicit on purpose: the old tiers-off local-agent mode keeps refusing a tiers setting that came in by
+    # accident (an env var), and nothing here has an env spelling, so the live plist names it.
+    local_with_tiers: bool = False
     # ``--shadow on`` (proxy.local_shadow): every step is served by Anthropic as
     # usual; the local model answers a copy in parallel and only a comparison
     # record is kept. ``shadow_path`` overrides the record file.
@@ -333,13 +342,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         import llm_router.classify  # noqa: F401
     # ``--serve local-agent`` (proxy.local_mode); None means off, and then nothing
     # below that mentions ``lm`` runs.
+    turn_decisions = cls_decide.TurnDecisionStore()  # NS-A1: memory only, record only
     lm = None
+    if cfg.local_with_tiers and (cfg.serve != local_mode.SERVE_LOCAL_AGENT or tier_policy is None):
+        raise ValueError("--local-with-tiers needs --serve local-agent and --tiers on|conversation")
     if cfg.serve == local_mode.SERVE_LOCAL_AGENT:
-        if (cfg.trim or "").strip().lower() != "none" or tier_policy is not None \
+        if (cfg.trim or "").strip().lower() != "none" or (tier_policy is not None and not cfg.local_with_tiers) \
                 or cfg.local_agent is not None or not (cfg.model or "").startswith("ollama/"):
-            raise ValueError("--serve local-agent needs --model ollama/<tag>, --trim none, --tiers off and "
-                             "local-agent compaction off")
-        lm = local_mode.LocalModeState(cfg.kill_switch)
+            raise ValueError("--serve local-agent needs --model ollama/<tag>, --trim none, --tiers off (or "
+                             "--local-with-tiers) and local-agent compaction off")
+        lm = local_mode.LocalModeState(cfg.kill_switch, disabled=cfg.local_disabled)
         lm_breaker = la_capability.BreakerCache(fn=breaker_fn)
     if cfg.shadow and (lm is not None or not (cfg.model or "").startswith("ollama/")):
         raise ValueError("--shadow on needs --model ollama/<tag> and --serve off (shadow never serves)")
@@ -659,6 +671,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         ``key_body`` is the unstripped request a forced step keys its pin on,
         so every turn of the conversation shares one key."""
         row["serve_mode"] = local_mode.SERVE_LOCAL_AGENT
+        if lm.disabled:
+            row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_PREFLIGHT_REFUSED)
+            row["local_mode"] = {"served": False, "reason": local_mode.REASON_PREFLIGHT_REFUSED,
+                                 "detail": lm.disabled}
+            return None
         if not local_mode.is_agent_turn(body):
             row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_NOT_ELIGIBLE)
             return None
@@ -667,7 +684,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # left alone: the prefix forces this one step, never the conversation.
         stored = lm.pin_of(key)
         pinned = local_mode.PIN_LOCAL if force else stored
-        started_elsewhere = not force and pinned is None and not is_first_call(body)
+        started_elsewhere = not force and pinned is None and not is_first_call(body) and not lm.seen(key)
         if started_elsewhere:
             # Never migrate a conversation already on Claude (or one this
             # process never saw the start of): its prompt cache lives there.
@@ -675,12 +692,21 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             pinned = local_mode.PIN_CLAUDE
         payload = to_ollama(body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
         breaker_ok, breaker_detail = await lm_breaker.allows(None)
+        # NS-L (D-448): a coordinator session (session_kind_overrides.json) or a sub-agent thread is never
+        # served locally. ``key_body`` is the unstripped request, the one the sub-agent markers live in.
+        exempt, overrides_problem = local_mode.exempt_reason(key_body or body, row.get("session_id"))
         decision = local_mode.decide_local(body, local_mode.LocalSession(
             key=key, pinned=pinned, kill_switch=lm.killed(), backend_healthy=not health.is_open(cfg.model),
-            breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=payload))
+            breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=payload,
+            verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
+        vetoed = decision.reason == local_mode.REASON_CLASSIFIER_VETO
+        if vetoed:
+            row["cls_applied"] = True
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
+        if overrides_problem:
+            row["local_mode"]["overrides_unreadable"] = overrides_problem  # D-448: not exempt, and said so
         if force:
             row["local_mode"]["forced"] = True
         message = None
@@ -701,7 +727,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if force:
                 return refuse_local(row, row.get("reason") or "validation")
             # A failed local step: this step goes to Claude and the conversation
-            # stays there (one logged move, never back and forth).
+            # stays there (one logged move, never back and forth). NS-A2 residual, kept on
+            # purpose: see the cls_decide module doc.
             lm.set_pin(key, local_mode.PIN_CLAUDE)
             row["local_mode"]["pin_change"] = "local->claude"
             reason = row.get("reason") or "validation"
@@ -710,7 +737,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return refuse_local(row, decision.reason)
             reason = decision.reason
             row.update(decision=ledger.DECISION_FORWARDED, reason=reason, detail=decision.detail or None)
-            if pinned is None or reason in local_mode.STRUCTURAL_REASONS:
+            if vetoed:
+                # NS-A2: a veto is this turn's, never the conversation's. No pin; remember that the
+                # conversation was seen so its next call is not `started_elsewhere`.
+                lm.mark_seen(key)
+            elif pinned is None or reason in local_mode.STRUCTURAL_REASONS:
                 lm.set_pin(key, local_mode.PIN_CLAUDE)
                 row["local_mode"]["pin_change"] = f"{pinned or 'new'}->claude"
         row["egress"] = True
@@ -1188,6 +1219,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         except Exception as exc:  # noqa: BLE001 -- prefixes must fail open
             failopen.record("LR-FO-PROXY-PREFIX", exc)
             ov = stripped_body = None
+        turn_k = cls_decide.safe_turn_key(body, session_id_of(body))  # once per call (rv25)
         row: dict = {
             "ts": time.time(), "session_id": session_id_of(body), "msg_id": None,
             "stream": bool(body.get("stream")), "requested_model": body.get("model"),
@@ -1216,7 +1248,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # classifier columns say the verdict still comes from the rules and
             # nothing is applied; M1 shadow and M2 canary fill them in.
             **request_fields(body, raw, parent_main),
-            "cls_source": "rules", "cls_ms": None, "cls_arm": None, "cls_applied": False,
+            "cls_source": "rules", "cls_ms": None, "cls_arm": None, "cls_applied": False,  # NS-A2: true on a veto
+            # NS-A1 (record only): supported-call label, human-turn key, and the per-turn
+            # classifier decision (filled below, before local_step). Additive keys.
+            **cls_decide.static_fields(body, session_id_of(body), turn_k),
         }
         example_written = False
 
@@ -1260,6 +1295,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         force_local = (ov is not None and ov.name == "local" and lm is not None
                        and local_mode.is_agent_turn(body))
         bypass_local = ov is not None and ov.is_claude
+        await cls_decide.decide_turn(
+            body, row, turn_decisions, lm_on=lm is not None and not lm.disabled, parent_main=parent_main,
+            override="claude" if bypass_local else "local" if force_local else None, key=turn_k)
         if lm is not None and not bypass_local:
             message = await local_step(
                 stripped_body or body if force_local else body, row, force=force_local, key_body=body)
@@ -1400,7 +1438,7 @@ llm-router proxy [--port N] [--steps continuation|off] [--step-budget-s S]
                  [--loop-max-consecutive N] [--loop-repeat-window N]
                  [--tiers off|on|conversation] [--tier-policy FILE.yaml] [--local-agent]
                  [--backend-fail-n N] [--backend-cooldown-s S] [--serve off|local-agent]
-                 [--local-gate off|on]
+                 [--local-with-tiers] [--local-gate off|on]
 llm-router proxy stats [--days N] [--json]
 
 Opt-in, per session. Nothing is enabled until you point a session at it:
@@ -1409,9 +1447,10 @@ Opt-in, per session. Nothing is enabled until you point a session at it:
 
 
 def _local_agent_preflight(cfg: ProxyConfig) -> list[str]:
-    """Why ``--serve local-agent`` must not start (empty = go). Loads the model
-    first if it is not resident (a refusal for "not loaded" would only send the
-    operator to run the same call by hand), then checks everything on the list."""
+    """Why ``--serve local-agent`` must not start (empty = go). Old mode loads the model first if it is not
+    resident (a refusal for "not loaded" would only send the operator to run the same call by hand). Combined
+    mode (``local_with_tiers``) never loads inline: a non-resident model is a refusal, so the start is not
+    delayed by up to 300 s on the path that carries all Claude traffic. Then checks everything on the list."""
     import httpx
 
     from llm_router.config import get_config, validate_ollama_url
@@ -1428,7 +1467,7 @@ def _local_agent_preflight(cfg: ProxyConfig) -> list[str]:
 
     if cfg.model and cfg.model.startswith("ollama/"):
         ctx, _note = local_mode.resident_context(url, cfg.model, get)
-        if ctx is None:
+        if ctx is None and not cfg.local_with_tiers:
             try:
                 OllamaBackend = BACKENDS["ollama/"]
                 backend = OllamaBackend(cfg.model, httpx.AsyncClient(), base_url=url, num_ctx=cfg.num_ctx,
@@ -1443,7 +1482,8 @@ def _local_agent_preflight(cfg: ProxyConfig) -> list[str]:
         model=cfg.model, trim=cfg.trim, ollama_url=url, num_ctx=cfg.num_ctx,
         ledger_path=cfg.ledger_path or ledger.ledger_path(),
         kill_path=cfg.kill_switch or local_mode.kill_switch_path(),
-        tiers_off=cfg.tiers == TIERS_OFF, compaction_off=cfg.local_agent is None, get=get)
+        tiers_off=cfg.tiers == TIERS_OFF, compaction_off=cfg.local_agent is None, get=get,
+        with_tiers=cfg.local_with_tiers)
 
 
 def cmd_proxy(argv: list[str]) -> int:
@@ -1500,6 +1540,10 @@ def cmd_proxy(argv: list[str]) -> int:
                     help="off (default; byte-identical to before) or local-agent (opt-in): Claude Code steps "
                          "answered by --model on this machine, conversations pinned local at their first call "
                          "(also LLM_ROUTER_PROXY_LOCAL_AGENT_MODE). Refuses to start unless its preflight passes")
+    ap.add_argument("--local-with-tiers", action="store_true",
+                    help="with --serve local-agent and --tiers on|conversation: a turn the local mode may serve "
+                         "is served locally, every other turn follows the tier path exactly as under --tiers "
+                         "alone. Without this flag --serve local-agent still requires --tiers off")
     ap.add_argument("--shadow", default=str(env.shadow and "on" or "off"),
                     help="off (default) or on: every step is served by Anthropic as usual while --model answers "
                          "a copy in parallel; only agreement, latency and reason codes are logged "
@@ -1536,6 +1580,9 @@ def cmd_proxy(argv: list[str]) -> int:
     if shadow_on and (serve != local_mode.SERVE_OFF or not (a.model or "").startswith("ollama/")):
         sys.stderr.write("llm-router proxy: --shadow on needs --model ollama/<tag> and --serve off\n")
         return 2
+    if a.local_with_tiers and serve != local_mode.SERVE_LOCAL_AGENT:
+        sys.stderr.write("llm-router proxy: --local-with-tiers needs --serve local-agent\n")
+        return 2
     if serve == local_mode.SERVE_LOCAL_AGENT:
         # This mode's defaults: no trim; no 8 s first-token hedge and a longer
         # budget (a conversation's first call pays 14-25 s of prompt evaluation).
@@ -1554,15 +1601,25 @@ def cmd_proxy(argv: list[str]) -> int:
                           keep_alive=parse_keep_alive(a.keep_alive), warm_up=not a.no_warm_up,
                           ollama_url=a.ollama_url, loop_max_consecutive=a.loop_max_consecutive,
                           loop_repeat_window=a.loop_repeat_window, tiers=parse_tiers_mode(a.tiers),
-                          tier_policy=a.tier_policy,
+                          tier_policy=a.tier_policy, local_with_tiers=a.local_with_tiers,
                           local_agent=(LocalAgentConfig.from_env() if a.local_agent else env.local_agent),
                           backend_fail_n=a.backend_fail_n, backend_cooldown_s=a.backend_cooldown_s)
     except (ValueError, OSError) as exc:
         sys.stderr.write(f"llm-router proxy: {exc}\n")
         return 2
     if serve == local_mode.SERVE_LOCAL_AGENT:
-        refusals = _local_agent_preflight(cfg)
-        if refusals:
+        try:
+            refusals = _local_agent_preflight(cfg)
+        except Exception as exc:  # noqa: BLE001 - D-445: in combined mode no preflight error may stop the start
+            if not cfg.local_with_tiers:
+                raise
+            refusals = [f"preflight error: {type(exc).__name__}: {exc}"]
+        if refusals and cfg.local_with_tiers:
+            # D-445: the live proxy carries ALL Claude traffic; a down model must not stop it starting.
+            for r in refusals:
+                sys.stderr.write(f"llm-router proxy: local-agent DISABLED (tier path only): {r}\n")
+            cfg = dataclasses.replace(cfg, local_disabled="; ".join(refusals))
+        elif refusals:
             sys.stderr.write("llm-router proxy: REFUSING to start --serve local-agent:\n")
             for r in refusals:
                 sys.stderr.write(f"  - {r}\n")
@@ -1587,6 +1644,7 @@ def cmd_proxy(argv: list[str]) -> int:
           f"loop_guard(max_consecutive={cfg.loop_max_consecutive}, repeat_window={cfg.loop_repeat_window})  "
           f"tiers={cfg.tiers + ' (' + (cfg.tier_policy or 'bundled policy') + ')' if cfg.tiers != TIERS_OFF else 'off'}  "
           f"local_agent={'on' if cfg.local_agent else 'off'}  "
+          f"{'local_with_tiers=on  ' if cfg.local_with_tiers else ''}"
           f"backend_health(fail_n={cfg.backend_fail_n}, cooldown={cfg.backend_cooldown_s:g}s)")
     print(f"  enable per session: {enable_hint(a.host, a.port)}")
     if cfg.local_gate:
@@ -1600,7 +1658,7 @@ def cmd_proxy(argv: list[str]) -> int:
     if serve == local_mode.SERVE_LOCAL_AGENT:
         kill = cfg.kill_switch or local_mode.kill_switch_path()
         for line in local_mode.banner_lines(model=cfg.model, num_ctx=cfg.num_ctx, kill_path=kill,
-                                            killed=kill.exists()):
+                                            killed=kill.exists(), with_tiers=cfg.local_with_tiers):
             print(line, flush=True)
     try:
         from llm_router.map_rediscovery import maybe_start_poller

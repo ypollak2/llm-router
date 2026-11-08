@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 52
+# llm_router-hook-version: 53
 """Stop hook — unified session summary: CC subscription delta + external routing costs.
 
 Also registered on SessionEnd, where it only archives the session context store.
@@ -1524,6 +1524,25 @@ def _query_daily_14d() -> list[tuple[str, int, int, float, int]]:
 
 
 
+def _session_routing_line() -> str | None:
+    """The session routing row the status line prints (``routed X% (n/N calls, session) · local accepted Y% (a/b
+    attempts, session)``), rendered by the status line's own renderer from the refresher's snapshot. Reads one small
+    file and computes nothing; no session id or any failure prints nothing (a Stop never waits on it)."""
+    sid = _read_session_id()
+    if not sid:
+        return None
+    try:
+        from llm_router import statusline_tick as _tick
+
+        routing = _tick.read_session_routing(_state_dir(), sid)
+        if routing is None:
+            return None
+        return _tick.render_session_routing(routing, now=time.time())
+    except Exception as _exc:  # noqa: BLE001
+        _record_failopen("CHZ-FO-STOP-SESSION-ROUTING", _exc)
+        return None
+
+
 def _format_routing_logic(session_start: float | None) -> list[str]:
     """Format routing decision method breakdown."""
     data = _query_routing_logic(session_start)
@@ -1984,6 +2003,11 @@ def _format(tools: dict[str, dict], cc_rows: list[dict], free_rows: list[dict],
     if gemini_lines:
         lines.append("")
         lines += gemini_lines
+
+    _routing_row = _session_routing_line()
+    if _routing_row:
+        lines.append("")
+        lines.append(f"  {_C_MUTED}{_routing_row}{_RESET}")
 
     if session_start is not None:
         routing_lines = _format_routing_logic(session_start)

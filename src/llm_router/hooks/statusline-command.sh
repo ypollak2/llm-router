@@ -615,14 +615,14 @@ if [ -n "$s_snap" ]; then
 fi
 
 # ── Third row: the session routing row (this PR) ─────────────────────────────
-# "routed X% (n/N calls, session) · local OK Y% (a/b, session)", pre-rendered by the refresher next to the
+# "routed X% (n/N calls, session) · local accepted Y% (a/b attempts, session)", pre-rendered by the refresher next to the
 # snapshot (statusline_snapshot.routing_line) and cleaned above like the snapshot line. It is gated by the
 # snapshot's own data time: past 15 minutes (900 s) or with no stamp it reads n/a, never a stale share.
 if [ -n "$s_route" ]; then
     if [ "$_snap_age" -ge 0 ] && [ "$_snap_age" -le 900 ]; then
         printf '%s\n' "${_DIM}${s_route}${_RESET}"
     else
-        printf '%s\n' "${_DIM}routed n/a (session) · local OK n/a (session)${_RESET}"
+        printf '%s\n' "${_DIM}routed n/a (session) · local accepted n/a (session)${_RESET}"
     fi
 fi
 

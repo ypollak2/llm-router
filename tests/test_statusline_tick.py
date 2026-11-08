@@ -606,6 +606,27 @@ def test_session_routing_apply_segment(program, local):
     assert result == baseline + (f" · apply: program {program} / local {local}" if program or local else "")
 
 
+def test_session_routing_local_label_names_accepted_and_attempts():
+    """NS-C label: `local accepted` (kept, not redone; not verified) over ATTEMPTS, with the unit in the parenthesis."""
+    routing = {"v": 1, "computed_at": 1000, "complete": True, "non_claude": 10, "total": 100,
+               "local": {"ok": 3, "attempts": 4, "gate_rejected": 0}}
+    assert tick.render_session_routing(routing, now=1000) == \
+        "routed 10.0% (10/100 calls, session) · local accepted 75% (3/4 attempts, session)"
+    routing["local"] = {"ok": 0, "attempts": 0}
+    assert "local accepted n/a (0 attempts, session)" in tick.render_session_routing(routing, now=1000)
+    routing["local"] = None                                         # a ledger that could not be read
+    assert tick.render_session_routing(routing, now=1000).endswith("local accepted n/a (session)")
+    assert "local OK" not in tick.render_session_routing(None, now=1000)
+
+
+def test_session_routing_program_steps_are_a_separate_segment_not_in_the_local_figure():
+    routing = {"v": 1, "computed_at": 1000, "complete": True, "non_claude": 10, "total": 100,
+               "local": {"ok": 3, "attempts": 4}, "apply_program_replaced": 7, "apply_local_replaced": 2}
+    line = tick.render_session_routing(routing, now=1000)
+    head, _sep, apply = line.partition(" · apply: ")
+    assert apply == "program 7 / local 2" and "(3/4 attempts, session)" in head and "10/100 calls" in head
+
+
 def test_apply_ledger_triggers_refresh(tmp_path):
     stamp = time.time()
     ledger = tmp_path / "apply_ledger.jsonl"
