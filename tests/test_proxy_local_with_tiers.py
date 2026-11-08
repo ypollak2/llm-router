@@ -409,6 +409,31 @@ def test_cmd_proxy_refuses_the_flag_without_its_partners(monkeypatch, capsys, ar
     assert rc == 2 and not started and needle in capsys.readouterr().err
 
 
+def test_combined_mode_with_a_failing_preflight_starts_and_says_local_is_disabled(monkeypatch, capsys, tmp_path):
+    rc, started = _cmd(monkeypatch, ["--serve", "local-agent", "--local-with-tiers", "--tiers", "conversation",
+                                     "--model", MODEL, "--no-warm-up", "--ledger", str(tmp_path / "l.jsonl")],
+                       preflight=["model not resident", "NUM_PARALLEL unreadable"])
+    err = capsys.readouterr().err
+    assert rc == 0 and started
+    assert "llm-router proxy: local-agent DISABLED (tier path only): model not resident" in err
+    assert "llm-router proxy: local-agent DISABLED (tier path only): NUM_PARALLEL unreadable" in err
+
+
+def test_the_old_tiers_off_mode_with_a_failing_preflight_still_refuses_to_start(monkeypatch, capsys, tmp_path):
+    rc, started = _cmd(monkeypatch, ["--serve", "local-agent", "--model", MODEL, "--no-warm-up",
+                                     "--ledger", str(tmp_path / "l.jsonl")], preflight=["model not resident"])
+    assert rc == 2 and not started and "REFUSING to start" in capsys.readouterr().err
+
+
+def test_a_disabled_combined_app_takes_the_tier_path_and_the_row_says_preflight_refused(tmp_path):
+    rig = Rig(tmp_path, local_disabled="model not resident")
+    r = rig.post(opus(turn_body(["rename the helper"])))
+    (row,) = rig.rows()
+    assert r.status_code == 200 and rig.backend.calls == [] and len(rig.up.requests) == 1
+    assert row["local_mode"]["reason"] == "preflight_refused" and row["local_mode"]["detail"] == "model not resident"
+    assert row["reason"] != "served" and row["decision"] != "served"
+
+
 def test_tiers_with_local_agent_is_still_refused_without_the_flag(tmp_path):
     with pytest.raises(ValueError, match="--serve local-agent needs"):
         Rig(tmp_path, local_with_tiers=False)

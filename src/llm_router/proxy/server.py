@@ -51,6 +51,7 @@ import os
 import sys
 import time
 from collections import OrderedDict
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -195,6 +196,9 @@ class ProxyConfig:
     # (proxy.local_mode). ``kill_switch`` overrides the kill-switch file path.
     serve: str = local_mode.SERVE_OFF
     kill_switch: Path | None = None
+    # D-445: combined mode only. Preflight refusals; non-empty => local serving is off for the process
+    # lifetime and every turn takes the tier path (the proxy must never fail to start over the local model).
+    local_disabled: str | None = None
     # ``--local-with-tiers`` (NS-L, D-447): ``--serve local-agent`` together with ``--tiers on|conversation``.
     # A turn the local mode may serve is served locally; every other turn follows the tier path unchanged.
     # Explicit on purpose: the old tiers-off local-agent mode keeps refusing a tiers setting that came in by
@@ -347,7 +351,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 or cfg.local_agent is not None or not (cfg.model or "").startswith("ollama/"):
             raise ValueError("--serve local-agent needs --model ollama/<tag>, --trim none, --tiers off (or "
                              "--local-with-tiers) and local-agent compaction off")
-        lm = local_mode.LocalModeState(cfg.kill_switch)
+        lm = local_mode.LocalModeState(cfg.kill_switch, disabled=cfg.local_disabled)
         lm_breaker = la_capability.BreakerCache(fn=breaker_fn)
     if cfg.shadow and (lm is not None or not (cfg.model or "").startswith("ollama/")):
         raise ValueError("--shadow on needs --model ollama/<tag> and --serve off (shadow never serves)")
@@ -667,6 +671,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         ``key_body`` is the unstripped request a forced step keys its pin on,
         so every turn of the conversation shares one key."""
         row["serve_mode"] = local_mode.SERVE_LOCAL_AGENT
+        if lm.disabled:
+            row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_PREFLIGHT_REFUSED)
+            row["local_mode"] = {"served": False, "reason": local_mode.REASON_PREFLIGHT_REFUSED,
+                                 "detail": lm.disabled}
+            return None
         if not local_mode.is_agent_turn(body):
             row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_NOT_ELIGIBLE)
             return None
@@ -1599,7 +1608,12 @@ def cmd_proxy(argv: list[str]) -> int:
         return 2
     if serve == local_mode.SERVE_LOCAL_AGENT:
         refusals = _local_agent_preflight(cfg)
-        if refusals:
+        if refusals and cfg.local_with_tiers:
+            # D-445: the live proxy carries ALL Claude traffic; a down model must not stop it starting.
+            for r in refusals:
+                sys.stderr.write(f"llm-router proxy: local-agent DISABLED (tier path only): {r}\n")
+            cfg = dataclasses.replace(cfg, local_disabled="; ".join(refusals))
+        elif refusals:
             sys.stderr.write("llm-router proxy: REFUSING to start --serve local-agent:\n")
             for r in refusals:
                 sys.stderr.write(f"  - {r}\n")

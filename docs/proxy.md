@@ -337,6 +337,8 @@ carries `mixed_history: true` and keeps the one-retry-without-thinking guard. Th
 `--serve local-agent` with a stray `--tiers` setting is still refused; without the flag the preflight keeps
 requiring `--tiers off`.
 
+Start-up preflight (D-445): `_local_agent_preflight` loads the model (it posts `/api/chat`) and checks the resident model and `NUM_PARALLEL`. Old tiers-off local-agent mode refuses to start (rc 2) when it fails. Combined mode degrades instead: each refusal is written to stderr as `llm-router proxy: local-agent DISABLED (tier path only): ...`, the proxy starts, local serving is off for the process lifetime, and every turn takes the tier path with ledger `local_mode.reason` `preflight_refused` (detail = the refusals). A restart re-runs the preflight. The live proxy carries all Claude Code traffic, so a down model must not stop it starting.
+
 **Preflight.** The proxy refuses to start (message on stderr, exit 2) unless: `--model ollama/<tag>` is given
 and resident with `num_ctx >= 32768` (it is loaded first if absent); the Ollama server's own
 `OLLAMA_NUM_PARALLEL` is 1 (read from its process environment, so only a loopback server can be checked) and

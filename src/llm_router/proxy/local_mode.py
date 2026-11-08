@@ -96,6 +96,7 @@ REASON_CLASSIFIER_VETO = "classifier_veto"
 #: ``session_kind_overrides.json`` (detail ``coordinator_session``), or the call comes from a sub-agent
 #: thread (detail ``subagent_thread``). Never served locally; the pin goes to Claude like any refusal.
 REASON_EXEMPT_SESSION = "exempt_session"
+REASON_PREFLIGHT_REFUSED = "preflight_refused"  # combined mode only: local serving off for the process lifetime
 EXEMPT_COORDINATOR = "coordinator_session"
 EXEMPT_SUBAGENT = "subagent_thread"
 
@@ -301,7 +302,8 @@ class LocalModeState:
     then pinned to Claude, never moved local)."""
 
     def __init__(self, kill_path: Path | None = None, *, max_pins: int = 4096,
-                 max_pending: int = 256) -> None:
+                 max_pending: int = 256, disabled: str | None = None) -> None:
+        self.disabled = disabled  # preflight refusals joined; set => every turn takes the tier path
         self.kill_path = kill_path if kill_path is not None else kill_switch_path()
         self.max_pins = max_pins
         self.max_pending = max_pending
