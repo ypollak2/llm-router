@@ -322,11 +322,13 @@ touch ~/.llm-router/local_agent_kill    # pause: the next step goes to Anthropic
 rm ~/.llm-router/local_agent_kill       # resume: the same conversation is served locally again
 ```
 
-**Exempt sessions (D-448).** `decide_local` refuses with reason `exempt_session` (ledger `local_mode.detail`) for
+**Exempt sessions (D-448).** Which of the two classes below is refused depends on `LLM_ROUTER_LOCAL_EXEMPT` (default: coordinator and sub-agent turns are both exempt; see "Exemption switch (D-455)" below). `decide_local` refuses with reason `exempt_session` (ledger `local_mode.detail`) for
 (a) a session listed in `session_kind_overrides.json` with a kind other than `organic` (`coordinator_session`; the
 same reader the KPI code uses, `session_kind.override_of`, re-read when the file changes) and (b) a sub-agent thread
 (`subagent_thread`; the proxy's own sub-agent evidence, `steps.is_subagent_request`). It comes right after the kill
 switch, so every call of an exempt conversation says `exempt_session`. If the overrides file is missing, empty, malformed or not a JSON object, local serving is refused for EVERY session (fail closed): reason `exempt_session`, detail `missing` or `overrides_unreadable`, and each row records `local_mode.overrides_unreadable`. This applies to both the old tiers-off local-agent mode and the combined mode. The thread test (rv40) also exempts any request the proxy's own `steps.is_main_thread` reads as not the main thread (the signal behind the row's `is_main_thread` and `turn_origin=subagent_brief`): no `Agent`/`Task` launcher among its tools; an unknown thread (`None`) is not exempt. Residual: a `fork` sub-agent shares the parent's conversation key and system prompt and is not caught; Agent-tool sub-agents are caught by `is_subagent_request`.
+
+**Exemption switch (D-455).** `LLM_ROUTER_LOCAL_EXEMPT`, read on every request, picks which exempt classes above refuse local serving: `coordinator,subagent` (the default, also used when unset, empty or invalid), `coordinator`, `subagent` or `none` (case-insensitive, whitespace ignored). A class not listed is served locally like an organic main thread. The overrides file is read, and the fail-closed rule applies, only while coordinators are exempt; with `subagent` or `none` an unreadable file refuses nothing. Every combined-mode row records `local_mode.exempt_policy` (the effective value; an invalid value adds `local_mode.exempt_policy_invalid`), and the start-up banner prints it. The switch changes serving only: coordinator sessions stay non-organic in every KPI read (`session_kind_overrides.json` is unchanged for that). Order is unchanged: kill switch, exempt, pin.
 
 **Combined with tiers (`--local-with-tiers`, D-447).** `--serve local-agent --local-with-tiers --tiers conversation
 [--tier-policy FILE]` serves a turn locally when `decide_local` allows it (exemption, the per-turn classifier veto and
