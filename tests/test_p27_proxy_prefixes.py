@@ -24,6 +24,7 @@ def request(text, *, tools=True):
 async def door(tmp_path, monkeypatch, *, local=False, killed=False, breaker=True,
                policy=None):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    (tmp_path / "session_kind_overrides.json").write_text("{}")  # NS-L: an unreadable file refuses every local step
     seen = []
 
     def upstream(req):
@@ -336,3 +337,4 @@ async def test_a_failed_local_first_turn_stores_no_pin(tmp_path, monkeypatch):
     _, _, row = await post(turns("local: do it", "and the rest"))
     assert row["decision"] == "forwarded" and row["reason"] == "conversation_started_on_claude"
     assert len(backend.calls) == 1 and len(seen) == 1
+

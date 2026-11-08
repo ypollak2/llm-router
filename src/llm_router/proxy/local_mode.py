@@ -219,10 +219,10 @@ def exempt_reason(body: dict, session_id: str | None) -> tuple[str | None, str |
     carries the proxy's own sub-agent evidence (``steps.is_subagent_request``: the sub-agent system-prompt
     markers Claude Code appends to every spawned agent, or a sub-agent-only tool), else None.
 
-    ``overrides_problem`` is ``missing`` / ``unreadable`` when the overrides file could not be read.
-    That case FAILS CLOSED in the sense the owner asked for: a session whose status cannot be
-    established is not treated as exempt (it is served like any other) and the problem is recorded in
-    the ledger row (``local_mode.overrides_unreadable``). The sub-agent test does not depend on the file."""
+    ``overrides_problem`` is ``missing`` / ``unreadable`` when the overrides file could not be read as an
+    object. That case FAILS CLOSED (coordinator decision): every session is refused with ``exempt_session``,
+    detail ``missing`` or ``overrides_unreadable``, and the row records ``local_mode.overrides_unreadable``.
+    Nothing is served locally while the file cannot be read; organic sessions are unaffected while it can."""
     from llm_router import session_kind
     from llm_router.proxy.steps import is_subagent_request
 
@@ -232,6 +232,10 @@ def exempt_reason(body: dict, session_id: str | None) -> tuple[str | None, str |
         kind = session_kind.override_of(session_id)
     except Exception:  # noqa: BLE001 - never costs a call; recorded as unreadable
         kind, problem = None, "unreadable"
+    if problem:
+        # Coordinator decision (fail closed): an overrides file that cannot be read means no session's
+        # status can be established, so NO session is served locally.
+        return (problem if problem == "missing" else "overrides_unreadable"), problem
     if kind is not None and kind != session_kind.KIND_ORGANIC:
         return EXEMPT_COORDINATOR, problem
     try:

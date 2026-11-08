@@ -25,7 +25,7 @@ from tests.test_proxy_cls_decide import (  # noqa: F401  (fixtures and helpers)
     _STABLE_DROP, ADDITIVE, SID, FakeClassifier, _env, decision_model_on, passing_proxy_lane, turn_body,
 )
 from tests.test_proxy_local_mode import (
-    GOOD_RUNNER, MODEL, Backend, Breaker, _call, _first_call, _next_turn, _ollama, _pre, _runner, _served_blocks,
+    GOOD_RUNNER, MODEL, Backend, Breaker, _call, _first_call, _next_turn, _ollama, _overrides_readable, _pre, _runner, _served_blocks,
     _with_image,
 )
 from tests.test_proxy_tiers import OPUS, SONNET, Upstream, _raw_policy, _sse
@@ -216,12 +216,14 @@ def write_overrides(content):
     return path
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def clean_overrides(monkeypatch):
+    """A readable, empty overrides file unless a test writes its own (or unlinks it)."""
     monkeypatch.setattr(session_kind, "_OVERRIDES_CACHE", {})
     monkeypatch.setattr(session_kind, "_OVERRIDES_PROBLEM", {})
     path = session_kind.overrides_path()
-    path.unlink(missing_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}")
     yield path
     path.unlink(missing_ok=True)
 
@@ -251,19 +253,32 @@ def test_a_session_listed_as_organic_or_not_listed_is_not_exempt(tmp_path, clean
     assert row["decision"] == ledger.DECISION_SERVED and len(rig.backend.calls) == 1 and rig.up.requests == []
 
 
-@pytest.mark.parametrize("content,problem", [
-    (None, "missing"), ("{not json", "unreadable"), ('["a list"]', "unreadable"),
+@pytest.mark.parametrize("content,detail,problem", [
+    (None, "missing", "missing"), ("{not json", "overrides_unreadable", "unreadable"),
+    ('["a list"]', "overrides_unreadable", "unreadable"), ("", "overrides_unreadable", "unreadable"),
 ])
-def test_an_unreadable_overrides_file_exempts_nobody_and_says_so_in_the_row(tmp_path, clean_overrides, content, problem):
-    """Fail closed (D-448): a session whose status cannot be established is not treated as exempt (it is served
-    like any other) and every row it produces records the problem."""
-    if content is not None:
+def test_an_unreadable_overrides_file_refuses_every_session_and_says_so_in_the_row(
+        tmp_path, clean_overrides, content, detail, problem):
+    """Fail closed (coordinator decision): when the file is missing, unreadable or malformed no session is
+    served locally; each is refused exempt_session and the row records the problem."""
+    if content is None:
+        clean_overrides.unlink()
+    else:
         write_overrides(content)
     rig = Rig(tmp_path)
     rig.post(opus(turn_body(["fix the bug"])))
     (row,) = rig.rows()
-    assert row["decision"] == ledger.DECISION_SERVED and len(rig.backend.calls) == 1
-    assert row["local_mode"]["overrides_unreadable"] == problem
+    assert rig.backend.calls == [] and len(rig.up.requests) == 1
+    assert row["reason"] == "exempt_session" and row["local_mode"]["detail"] == detail
+    assert row["local_mode"]["overrides_unreadable"] == problem and row["egress"] is True
+
+
+def test_a_readable_file_listing_only_other_sessions_allows_an_organic_session(tmp_path, clean_overrides):
+    write_overrides({"someone-else": {"kind": "research", "reason": "coordinator"}})
+    rig = Rig(tmp_path)
+    rig.post(opus(turn_body(["fix the bug"])))
+    (row,) = rig.rows()
+    assert row["decision"] == ledger.DECISION_SERVED and "overrides_unreadable" not in row["local_mode"]
 
 
 def test_the_overrides_file_is_re_read_per_turn_without_a_restart(tmp_path, clean_overrides):

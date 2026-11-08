@@ -24,7 +24,7 @@ from llm_router.proxy import cls_decide, ledger
 from llm_router.proxy import server as ps
 from llm_router.proxy.cls_decide import TURN_FIELD_DEFAULTS
 from tests.test_proxy_local_mode import (
-    MODEL, Backend, Breaker, Upstream, _call, _first_call, _ollama, _post, _with_image,
+    MODEL, Backend, Breaker, Upstream, _call, _first_call, _ollama, _overrides_readable, _post, _with_image,  # noqa: F401
 )
 
 SID = "11111111-2222-3333-4444-555555555555"

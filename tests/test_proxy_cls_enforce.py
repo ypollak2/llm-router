@@ -24,7 +24,7 @@ from tests.test_proxy_cls_decide import (  # noqa: F401  (fixtures and helpers)
     ADDITIVE, SID, Env, FakeClassifier, _base_rows, _comparable, _env, _script, decision_model_on, env,
     passing_proxy_lane, turn_body, verdict,
 )
-from tests.test_proxy_local_mode import Backend, Upstream, _ollama
+from tests.test_proxy_local_mode import Backend, Upstream, _ollama, _overrides_readable  # noqa: F401
 
 
 def lane_rows(monkeypatch, rows):

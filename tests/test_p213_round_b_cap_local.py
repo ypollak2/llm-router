@@ -445,3 +445,6 @@ async def test_proxy_tier_decision_honours_a_claude_cap(temp_db, monkeypatch):
     store("cap opus 1/day")
     await record("anthropic", f"anthropic/{opus.model}", 1, monkeypatch=monkeypatch)
     assert tiers.tier_model(opus.name) is None           # a capped model must not be served as a tier
+
+
+from tests.test_proxy_local_mode import _overrides_readable  # noqa: E402,F401  (NS-L: a readable overrides file)

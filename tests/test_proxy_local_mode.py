@@ -75,6 +75,21 @@ class Breaker:
         return type("D", (), {"allowed": self.allowed, "reason": "test breaker"})()
 
 
+@pytest.fixture(autouse=True)
+def _overrides_readable(monkeypatch):
+    """NS-L fail-closed: an unreadable session_kind_overrides.json refuses every local step, so a test that
+    serves locally starts with a readable (empty) file."""
+    from llm_router import session_kind
+
+    monkeypatch.setattr(session_kind, "_OVERRIDES_CACHE", {})
+    monkeypatch.setattr(session_kind, "_OVERRIDES_PROBLEM", {})
+    path = session_kind.overrides_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}")
+    yield
+    path.unlink(missing_ok=True)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     async def _boom(*a, **k):
