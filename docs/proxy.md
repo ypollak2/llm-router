@@ -322,7 +322,7 @@ touch ~/.llm-router/local_agent_kill    # pause: the next step goes to Anthropic
 rm ~/.llm-router/local_agent_kill       # resume: the same conversation is served locally again
 ```
 
-**Exempt sessions (D-448).** `decide_local` refuses with reason `exempt_session` (ledger `local_mode.detail`) for
+**Exempt sessions (D-448).** Which of the two classes below is refused depends on `LLM_ROUTER_LOCAL_EXEMPT` (default: coordinator and sub-agent turns are both exempt; see "Exemption switch (D-455)" below). `decide_local` refuses with reason `exempt_session` (ledger `local_mode.detail`) for
 (a) a session listed in `session_kind_overrides.json` with a kind other than `organic` (`coordinator_session`; the
 same reader the KPI code uses, `session_kind.override_of`, re-read when the file changes) and (b) a sub-agent thread
 (`subagent_thread`; the proxy's own sub-agent evidence, `steps.is_subagent_request`). It comes right after the kill

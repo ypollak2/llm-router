@@ -26,7 +26,8 @@ What the mode changes, each tied to the failure it fixes:
 
 ``--local-with-tiers`` (NS-L, D-447) runs this mode together with ``--tiers``: a turn ``decide_local`` allows is
 served as above, every other turn takes the unchanged tier path. ``decide_local`` also refuses an exempt session
-(D-448): a coordinator session listed in ``session_kind_overrides.json`` or a sub-agent thread.
+(D-448): a coordinator session listed in ``session_kind_overrides.json`` or a sub-agent thread, as far as
+``LLM_ROUTER_LOCAL_EXEMPT`` says (D-455; the default exempts both).
 
 Never silent: every step that is not served locally carries a ledger reason
 and prints an egress notice; a kill switch (a file) takes effect on the next
@@ -306,7 +307,7 @@ def decide_local(body: dict, session: LocalSession) -> LocalDecision:
     """Rule stub (redesign PR 1). May this call be served locally?
 
     Order matters: the kill switch beats everything; an exempt session (D-448)
-    is never served; a conversation already on Claude stays there; then the input rules (media, prompt size), then the
+    is not served (as far as ``LLM_ROUTER_LOCAL_EXEMPT`` exempts that class, D-455); a conversation already on Claude stays there; then the input rules (media, prompt size), then the
     live state (backend, quality breaker)."""
     if session.kill_switch:
         return LocalDecision(False, REASON_KILL_SWITCH)
@@ -483,7 +484,8 @@ def banner_lines(*, model: str | None, num_ctx: int | None, kill_path: Path, kil
         f"  egress: a step goes to Anthropic only when it is not eligible (reason in the ledger, notice on "
         f"stderr): media, prompt > {PROMPT_CAP_TOKENS} tokens, backend unhealthy, quality breaker open, a "
         f"failed local step, a conversation that began on Claude, or an exempt session (coordinator in "
-        f"session_kind_overrides.json, or a sub-agent thread). Never a placeholder, never silent.",
+        f"session_kind_overrides.json, or a sub-agent thread; which of the two is set by {EXEMPT_POLICY_ENV}, "
+        f"default both, see the line below). Never a placeholder, never silent.",
         f"  exempt policy ({EXEMPT_POLICY_ENV}): {effective}"
         + (f" (invalid value {invalid!r}, default applied)" if invalid else "")
         + "; a class not listed is served locally.",
