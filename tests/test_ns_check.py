@@ -152,3 +152,20 @@ def test_session_is_required():
 def test_wired_into_the_cli():
     assert "ns-check" in cli._OWN_HELP_ANYWHERE and "ns-check" in cli._KNOWN_SUBCOMMANDS
     assert "llm-router ns-check" in cli.__doc__
+
+
+def test_python_dash_m_is_never_a_silent_zero(tmp_path):
+    """`python -m llm_router.commands.ns_check` once printed nothing and exited 0 (no __main__)."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    src = str(Path(ns_check.__file__).resolve().parents[2])
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {**os.environ, "PYTHONPATH": src, "LLM_ROUTER_HOME": str(home), "HOME": str(home)}
+    proc = subprocess.run([sys.executable, "-m", "llm_router.commands.ns_check", "--session", SID],
+                          env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert (proc.stdout + proc.stderr).strip()

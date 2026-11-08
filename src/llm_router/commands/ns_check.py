@@ -176,3 +176,7 @@ def cmd_ns_check(args: list[str]) -> int:
               f"(snapshot offset {offset}, {len(all_rows)} rows read)", file=sys.stderr)
         return 2
     return render(ns.session, path, offset, skipped, rows, len(all_rows))
+
+
+if __name__ == "__main__":
+    sys.exit(cmd_ns_check(sys.argv[1:]))
