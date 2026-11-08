@@ -90,6 +90,7 @@ Usage:
     llm-router routing-report   — routing accuracy and share over a window
     llm-router routing-health   — reach, context, USED and latency per day, with n
     llm-router northstar        — routed-and-used share, per session (NS1)
+    llm-router ns-check --session ID — North Star mechanism check from the proxy ledger: decided %, reasons, verdicts
     llm-router kpi              — NS/O1-O2/D1-D5/G1-G4 scorecard; --health: measured/blind/stale; --daily-install/--daily-uninstall: daily row scheduler; --maintenance: daily backfill + weekly report
     llm-router redo-label --run ID --judge|--owner [--projects-dir DIR] [--seed N] [--others N] [--max-calls N] [--max-usd X] [--model-id ID] [--allow-api-key] [--force-quota] [--force-streak] [--force-unresolved] — P3.6-c: label a frozen redo draw; --judge = sealed isolated claude -p runner (6 calibration pairs per batch of 20, model check, spend cap, resumable); --owner = blind terminal UI (y/n/u/q; every screen shows the judge's label definition; warns when a complete pass is all y or all n; needs a TTY). Writes ids+labels only to labels_judge.jsonl / labels_owner.jsonl (pass to redo-score --labels); no text is stored; exit 2 run not found, 3 no TTY, 4 stopped
     llm-router redo-sample --census|--freeze|--tune|--void-tune [--run ID] [--detector v2|v3a|v3b|v3c|v3d] [--seed N] [--days D] [--allow-below-threshold] [--allow-empty-exclusion] [--include-untagged] [--exclusion-file PATH] [--allow-nondefault-projects-dir] [--reason TEXT] — P3.6-c: counts-only census of redo-detector pairs; --freeze draws the seeded validation strata into the state dir (no text is printed or stored), excluding every tune pair and recording --detector (a non-baseline --detector is refused unless its tune_log.jsonl rows at the current detector sha256 are the strict argmax of overall tune F1 in the canonical tune set: the one live tune run's first complete scoring, same labels digest, scored-pair digest and projects dir, holding a v2 row and a row for every other current-sha candidate; the row hash, log hash and tune-set digests are recorded in frozen.json); --tune draws THE disjoint TUNE set of the study into tune-ID (own seed, purpose tune, v2 strata, no supply gate; refused while a live tune run exists and, without --allow-nondefault-projects-dir, from a non-default --projects-dir); --void-tune --run ID --reason TEXT voids a tune run (recorded in later frozen.json; its rows are never compared again); --include-untagged admits untagged sessions as a disclosed stratum (default off); --exclusion-file: local M0.9 exclusion hashes (default: state dir redo_m09_excluded.txt); exit 2 run dir exists, bad exclusion file or unreadable proxy ledger (--include-untagged), 3 below threshold, 4 no transcripts, 5 empty M0.9 exclusion list
@@ -870,6 +871,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "routing-report",
         "routing-health",
         "northstar",
+        "ns-check",
         "kpi",
         "redo-label",
         "redo-sample",
@@ -925,7 +927,7 @@ _HELP_FLAGS = ("-h", "--help")
 # position (argparse, or an explicit check over all args).
 _OWN_HELP_ANYWHERE = frozenset({
     "audit", "calibrate", "cp", "dev-refresh", "discover", "eligibility", "gc", "install", "inventory", "invoice",
-    "judge", "kpi", "last", "learn", "local-check", "map", "migrate", "mod", "mode", "northstar", "pi", "policy", "prefer",
+    "judge", "kpi", "last", "learn", "local-check", "map", "migrate", "mod", "mode", "northstar", "ns-check", "pi", "policy", "prefer",
     "proxy", "redo-label", "redo-sample", "redo-score",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
     "statusline", "team-sync", "test-delta", "verify", "welcome", "why",
@@ -1102,6 +1104,10 @@ def main() -> None:
         # NS1: the North Star metric — per-session routed-and-used share.
         from llm_router.commands.northstar import cmd_northstar
         sys.exit(cmd_northstar(args[1:]))
+    elif args and args[0] == "ns-check":
+        # North Star mechanism check: reads the proxy ledger for one session.
+        from llm_router.commands.ns_check import cmd_ns_check
+        sys.exit(cmd_ns_check(args[1:]))
     elif args and args[0] == "pi":
         # Local agent profile: Pi + an Ollama model (integrations/pi/).
         from llm_router.commands.pi import cmd_pi
