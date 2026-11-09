@@ -62,6 +62,7 @@ INCOMPLETE = "incomplete"                 # budget or iterations exhausted
 FAILED_CHECK = "failed_check"             # check supplied, ran, failed
 BLOCKED = "blocked"                       # could not start: no model, bad workdir
 FAILED = "failed"                         # the loop raised
+BACKEND_ERROR = "backend_error"           # the model server failed (empty 200, no done_reason)
 
 _EXHAUSTION_MARKERS = (
     "reached maximum iterations",
@@ -429,6 +430,12 @@ def _run_task_serial(run_agent_loop, objective: str, model: str, root: Path,
                     acceptance_check=acceptance_check, files_before=len(before.get("files", ())),
                     queued_s=round(queued, 1))
         report, error = None, None
+        _agent_loop = None
+        try:
+            from llm_router.hooks import agent_loop as _agent_loop
+            _agent_loop.reset_last_end_reason()
+        except Exception:                                      # noqa: BLE001
+            _agent_loop = None
         try:
             report = _run_loop_scoped(run_agent_loop, objective, model, root,
                                       budget_s, apply_writes)
@@ -439,7 +446,11 @@ def _run_task_serial(run_agent_loop, objective: str, model: str, root: Path,
         changed, changed_note = _state_diff(before, after)
         elapsed = time.monotonic() - started
 
-        if error is not None:
+        if error is None and report is None and _agent_loop is not None \
+                and _agent_loop.last_end_reason() == _agent_loop.BACKEND_EMPTY_REPLY:
+            error = _agent_loop.BACKEND_EMPTY_MESSAGE
+            status, check_passed, check_out = BACKEND_ERROR, None, ""
+        elif error is not None:
             status, check_passed, check_out = FAILED, None, ""
         else:
             text = (report or "").lower()
@@ -516,7 +527,9 @@ async def llm_local_task(
         files are not covered, by design: hashing or stat-ing ignored trees such
         as node_modules and .venv is unbounded, and what lives there is build
         output, not the task's edits) and the model's own final ``report``. The report is the worker's
-        account of what it did and is never evidence on its own.
+        account of what it did and is never evidence on its own. Status
+        ``backend_error`` means the model server failed (an empty reply without
+        done_reason, likely GPU out of memory); ``error`` says so and there is no report.
     """
     if not model:
         try:
