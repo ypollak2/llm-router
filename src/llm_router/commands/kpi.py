@@ -2885,7 +2885,9 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
     # stamped kind (KindIndex), the first ts each G3 key appeared (_g3_completeness, _g3_late_first_seen) and the
     # first row of a tier-policy version (_o3_since_view). Every other consumer reads [window start, now] only.
     # The margin keeps the 24 h liveness windows full. Row count and every ts are unchanged.
-    slim_before = min(win.since if win is not None else now_ts - days * 86400.0, now_ts - 2 * 86400.0)
+    # days=0 (CLI `--days 0`) means "no cutoff" to several readers: nothing may be slimmed then.
+    slim_before = (None if (win is None and not days)
+                   else min(win.since if win is not None else now_ts - days * 86400.0, now_ts - 2 * 86400.0))
     all_rows = pl.read_rows(slim_before=slim_before, slim_keep=_SCORECARD_OLD_KEYS)
     index = sk.KindIndex(all_rows)
     until_ts = None if win is None else win.until

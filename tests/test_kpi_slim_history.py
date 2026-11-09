@@ -98,6 +98,8 @@ def _reference(monkeypatch, **kw) -> str:
 
 @pytest.mark.parametrize("kw", [
     {"days": 7, "now": NOW},
+    {"days": 0, "now": NOW},
+    {"days": 1, "now": NOW},
     {"days": 7, "now": NOW, "since_policy": "v-new"},
     {"days": 3, "now": NOW, "schema_since": 1.0},
     {"since": NOW - 4 * DAY, "until": NOW - 1 * DAY},
@@ -114,7 +116,8 @@ def test_scorecard_is_identical_to_the_full_read(monkeypatch, kw):
     monkeypatch.setattr(pl, "read_rows", spy)
     got = _canon(kpi.compute_scorecard(**kw))
     monkeypatch.setattr(pl, "read_rows", real)
-    assert slim_calls and slim_calls[0].get("slim_before") is not None   # the new path really ran
+    no_cutoff = kw.get("days") == 0 and "since" not in kw              # --days 0: readers take every row, nothing slimmed
+    assert slim_calls and (slim_calls[0].get("slim_before") is None) == no_cutoff   # the slim path ran iff it may
     assert got == _reference(monkeypatch, **kw)
 
 

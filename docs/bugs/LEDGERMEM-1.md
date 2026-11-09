@@ -32,7 +32,7 @@ status: fixed in `fix/statusline-ledger-memory` (deploy: nothing to restart; the
 - **Test.** `tests/test_kpi_slim_history.py::test_scorecard_is_identical_to_the_full_read` builds a synthetic
   ledger (history, boundary rows, a session stamped only in history, a G3 key that exists only in history,
   undated rows, torn lines) and compares `compute_scorecard` with the old full-read path in 5 windows.
-  Dropping `session_kind`, `tier_proposed` or `tier_policy_version` from `_SCORECARD_OLD_KEYS` turns it red.
+  Dropping `session_kind` or `tier_proposed` from `_SCORECARD_OLD_KEYS` turns it red (`tier_policy_version` is also in `G3_FIELDS`, so it stays kept unless removed from both). `--days 0` reads unslimmed (those readers treat 0 as no cutoff).
   On the real ledger, one fixed `now`: the whole card (`dump.py`, both arms, n=1 each) differed in no path
   between old and new, and none between two old runs. Also: `test_the_history_is_really_slimmed`,
   `test_read_rows_without_arguments_is_unchanged`, `test_router_tool_scan_matches_the_whole_file_check`,
