@@ -432,7 +432,7 @@ def _run_task_serial(run_agent_loop, objective: str, model: str, root: Path,
                     model=model, budget_s=budget_s, apply_writes=apply_writes,
                     acceptance_check=acceptance_check, files_before=len(before.get("files", ())),
                     queued_s=round(queued, 1))
-        report, error = None, None
+        report, error, conflict = None, None, False
         _agent_loop = None
         try:
             from llm_router.hooks import agent_loop as _agent_loop
@@ -443,7 +443,10 @@ def _run_task_serial(run_agent_loop, objective: str, model: str, root: Path,
             report = _run_loop_scoped(run_agent_loop, objective, model, root,
                                       budget_s, apply_writes)
         except Exception as exc:                               # noqa: BLE001
-            error = f"{type(exc).__name__}: {exc}"
+            if type(exc).__name__ == "LocalModelConflict":     # one-model guard refused: a backend condition
+                error, conflict = str(exc), True
+            else:
+                error = f"{type(exc).__name__}: {exc}"
 
         after = _take_state(root, like=before)
         changed, changed_note = _state_diff(before, after)
@@ -452,6 +455,13 @@ def _run_task_serial(run_agent_loop, objective: str, model: str, root: Path,
         if error is None and report is None and _agent_loop is not None \
                 and _agent_loop.last_end_reason() == _agent_loop.BACKEND_EMPTY_REPLY:
             error = _agent_loop.BACKEND_EMPTY_MESSAGE
+            status, check_passed, check_out = BACKEND_ERROR, None, ""
+        elif conflict:
+            status, check_passed, check_out = BACKEND_ERROR, None, ""
+        elif error is None and report is None and _agent_loop is not None \
+                and _agent_loop.last_end_reason() == getattr(_agent_loop, "LOCAL_MODEL_CONFLICT", None):
+            # The one-model rule refused the load: a backend condition, not a model miss.
+            error = getattr(_agent_loop._LAST, "detail", None) or "local_model_conflict"
             status, check_passed, check_out = BACKEND_ERROR, None, ""
         elif error is not None:
             status, check_passed, check_out = FAILED, None, ""

@@ -460,6 +460,7 @@ _LAST = threading.local()
 BACKEND_EMPTY_REPLY = "backend_empty_reply"
 BACKEND_EMPTY_MESSAGE = ("local backend returned an empty reply without done_reason "
                          "(likely GPU out of memory / runner in error state)")
+LOCAL_MODEL_CONFLICT = "local_model_conflict"   # refused: another big model is resident (one-model rule)
 
 
 def last_end_reason() -> str | None:
@@ -561,6 +562,7 @@ def run_agent_loop(
     except _ollama.LocalModelConflict as _exc:
         _trace.emit("loop.end", reason="local_model_conflict", error=str(_exc), tools_used=0)
         _ollama.record_refusal(_exc)
+        _LAST.reason, _LAST.detail = LOCAL_MODEL_CONFLICT, str(_exc)
         return None
     ollama_url = _url_for_model(model)  # LLM_ROUTER_LOCAL_MODEL_URL for the main model
     tools_used = 0  # How many tool calls actually executed across the whole loop.

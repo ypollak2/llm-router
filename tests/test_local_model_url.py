@@ -625,3 +625,23 @@ def test_edit_warmup_loads_the_one_model_when_nothing_else_resident(monkeypatch,
     assert warm.warm_edit_model_bg(ALLOWED) == ALLOWED
     cmd = popen_calls[0]
     assert ":11435/api/generate" in " ".join(cmd) and json.loads(cmd[cmd.index("-d") + 1])["model"] == ALLOWED
+
+
+def test_local_task_reports_one_model_refusal_as_backend_error(monkeypatch, tmp_path, one_model):
+    from llm_router.hooks import agent_loop
+    from llm_router.tools import local_task as lt
+    _ps_server(monkeypatch, [], {"11434": [{"name": "other-big:30b", "size_vram": 20_000_000_000}], "11435": []})
+    monkeypatch.setattr(lt, "_take_state", lambda root, like=None: {"kind": "none", "files": {}})
+    res = lt._run_task_serial(agent_loop.run_agent_loop, "do it", ALLOWED, tmp_path, 60.0, False, None)
+    report, error, status = res[0], res[1], res[5]
+    assert status == lt.BACKEND_ERROR
+    assert report is None
+    assert error.startswith("local_model_conflict")
+
+
+def test_agent_loop_records_conflict_end_reason(monkeypatch, tmp_path, one_model):
+    from llm_router.hooks import agent_loop
+    _ps_server(monkeypatch, [], {"11434": [{"name": "other-big:30b", "size_vram": 20_000_000_000}], "11435": []})
+    agent_loop.reset_last_end_reason()
+    assert agent_loop.run_agent_loop(prompt="p", model=ALLOWED, project_root=tmp_path, read_only=True) is None
+    assert agent_loop.last_end_reason() == agent_loop.LOCAL_MODEL_CONFLICT
