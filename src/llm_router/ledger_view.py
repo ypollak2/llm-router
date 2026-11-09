@@ -246,25 +246,26 @@ def _proxy_label(row: dict) -> str | None:
 
 
 def _proxy_rows(bounds: Bounds, proxy_path) -> list[dict]:
-    try:
-        text = _proxy_ledger_path(proxy_path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
     out: list[dict] = []
-    for line in text.splitlines():
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        ts = row.get("ts")
-        # A row without a usable timestamp cannot be placed in a window: it is out.
-        if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not bounds.covers(ts):
-            continue
-        if bounds.session_id is not None and row.get("session_id") != bounds.session_id:
-            continue
-        out.append(row)
+    try:
+        fh = _proxy_ledger_path(proxy_path).open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    with fh:   # one line at a time: the ledger is 100+ MB and only the window's rows are kept
+        for line in fh:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            ts = row.get("ts")
+            # A row without a usable timestamp cannot be placed in a window: it is out.
+            if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not bounds.covers(ts):
+                continue
+            if bounds.session_id is not None and row.get("session_id") != bounds.session_id:
+                continue
+            out.append(row)
     return out
 
 
@@ -1317,13 +1318,8 @@ def _absent() -> dict:
     return {"present": False, "rows": None, "newest_ts": None}
 
 
-def _jsonl_stat(path: Path) -> dict:
-    try:
-        lines = [ln for ln in path.read_text(encoding="utf-8", errors="replace").splitlines()
-                 if ln.strip()]
-    except OSError:
-        return _absent()
-    newest = None
+def _newest_ts(lines) -> object:
+    """The ``ts`` (or ``timestamp``) of the last line, from the end, that parses to an object carrying one."""
     for ln in reversed(lines):
         try:
             row = json.loads(ln)
@@ -1331,9 +1327,34 @@ def _jsonl_stat(path: Path) -> dict:
             continue
         ts = row.get("ts", row.get("timestamp")) if isinstance(row, dict) else None
         if ts is not None:
-            newest = ts
-            break
-    return {"present": True, "rows": len(lines), "newest_ts": newest}
+            return ts
+    return None
+
+
+_TAIL_LINES = 64
+
+
+def _jsonl_stat(path: Path) -> dict:
+    """Presence, non-blank line count and newest ts. Streams the file (it may be 100+ MB): the count is kept
+    as a number and only the last ``_TAIL_LINES`` lines as text; the whole file is searched only when none of
+    them carries a ts."""
+    import collections
+
+    tail: collections.deque = collections.deque(maxlen=_TAIL_LINES)
+    n = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                if ln.strip():
+                    n += 1
+                    tail.append(ln)
+        newest = _newest_ts(tail)
+        if newest is None and n > _TAIL_LINES:
+            with path.open("r", encoding="utf-8", errors="replace") as fh:
+                newest = _newest_ts([ln for ln in fh if ln.strip()])
+    except OSError:
+        return _absent()
+    return {"present": True, "rows": n, "newest_ts": newest}
 
 
 def _db_sources(db_path) -> dict:

@@ -498,6 +498,14 @@ def _read_records(path: Path) -> list[dict]:
     return out
 
 
+def _mentions_router_tool(path: Path) -> bool:
+    """``"router__"`` occurs in the file. Read line by line: the needle holds no newline, so the answer is the
+    one a whole-file ``in`` gives, without holding a transcript of hundreds of MB as one string (LEDGERMEM-1).
+    Raises ``OSError`` as ``read_text`` did."""
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        return any("router__" in line for line in fh)
+
+
 def judge_recent(days: int = 7, root: Path | None = None) -> list[dict]:
     """Verdicts for every routed event in transcripts modified in the last ``days``.
     Read-only. A transcript with no router tool call is skipped without parsing."""
@@ -510,7 +518,7 @@ def judge_recent(days: int = 7, root: Path | None = None) -> list[dict]:
         try:
             if path.stat().st_mtime < cutoff:
                 continue
-            if "router__" not in path.read_text(encoding="utf-8", errors="replace"):
+            if not _mentions_router_tool(path):
                 continue
         except OSError:
             continue
