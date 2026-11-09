@@ -113,6 +113,8 @@ def _embed_ollama(text: str, base_url: str) -> list[float] | None:
     try:
         import urllib.request  # lazy: http.client + email parser, ~8 ms, only when a backend is called
 
+        from llm_router.toolkit.adapters.ollama import ensure_fits
+        ensure_fits(_OLLAMA_EMBED_MODEL, base_url.rstrip("/"), "semantic_classify.embed")
         payload = json.dumps({"model": _OLLAMA_EMBED_MODEL, "prompt": text}).encode()
         req = urllib.request.Request(
             f"{base_url}/api/embeddings",

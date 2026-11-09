@@ -309,7 +309,15 @@ class OllamaBackend:
         self.hedge_s = hedge_s
         self.keep_alive = keep_alive
 
+    async def _guard(self, purpose: str) -> None:
+        """Memory guard before this backend loads its model (``ensure_fits`` blocks, so it runs in a thread).
+        Raises ``MemoryBudgetExceeded`` (a ``LocalModelConflict``); the caller treats it as a backend failure."""
+        from llm_router.toolkit.adapters.ollama import ensure_fits
+        await asyncio.to_thread(ensure_fits, self.model, self.base_url, purpose)
+
     async def complete(self, body: dict, timeout_s: float) -> tuple[dict | None, str | None, dict]:
+        await self._guard("proxy.OllamaBackend.complete")
+
         def _prepare() -> dict:
             payload = to_ollama(body, self.model, num_ctx=self.num_ctx,
                                 max_predict=self.num_predict or num_predict_for(body),
@@ -318,9 +326,14 @@ class OllamaBackend:
             # (system prompt + tool definitions first) rather than find out from a
             # reply about the wrong thing. See local_context_guard module docstring.
             from llm_router.pack_overflow import PayloadPack
+            from llm_router.toolkit.adapters.ollama import ensure_fits, get_local_model
+            # LLM_ROUTER_LOCAL_MODEL set: one allowed model, an overflow never swaps to another.
             pack = PayloadPack(payload, num_ctx=self.num_ctx, base_url=self.base_url,
-                               model=self.model, site="proxy.OllamaBackend")
+                               model=self.model, site="proxy.OllamaBackend",
+                               allow_model_swap=not get_local_model())
             payload = pack.trim_to()
+            if pack.model != self.model:      # a bigger-window swap is a new load: guard it (runs in a thread)
+                ensure_fits(pack.model, self.base_url, "proxy.OllamaBackend.overflow_swap")
             check_overflow(payload, num_ctx=pack.num_ctx, base_url=self.base_url, model=pack.model,
                            site="proxy.OllamaBackend")
             return payload
@@ -379,6 +392,7 @@ class OllamaBackend:
     async def warm_up(self, timeout_s: float = 300.0) -> float:
         """Load the model (and pin it with keep_alive) before the first real
         step needs it. Returns seconds taken."""
+        await self._guard("proxy.OllamaBackend.warm_up")
         loop = asyncio.get_running_loop()
         t0 = loop.time()
         payload = {"model": self.model, "messages": [{"role": "user", "content": "ok"}],
@@ -396,6 +410,7 @@ class OllamaBackend:
         token, streamed, with the serving ``num_ctx`` so it never reloads the
         model. A crashed runner answers it with no lines at all (the 2026-09-30
         post-crash shape), an ``error`` line or an HTTP error."""
+        await self._guard("proxy.OllamaBackend.probe")
         payload = {"model": self.model, "messages": [{"role": "user", "content": "ok"}],
                    "stream": True, "think": False,
                    "options": {"num_ctx": self.num_ctx, "num_predict": 1}}

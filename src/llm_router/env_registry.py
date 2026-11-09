@@ -343,6 +343,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_LOCAL_MODEL": ("llm_router", "toolkit/adapters/ollama.py", 1),
     "LLM_ROUTER_LOCAL_MAX_OTHER_VRAM_GB": ("llm_router", "toolkit/adapters/ollama.py", 1),
     "LLM_ROUTER_LOCAL_MODEL_URL": ("llm_router", "toolkit/adapters/ollama.py", 1),
+    # Memory guard (ensure_fits): no local model load past what this machine's memory allows.
+    "LLM_ROUTER_MEM_GUARD": ("llm_router", "toolkit/adapters/ollama.py", 1),
+    "LLM_ROUTER_MEM_HEADROOM": ("llm_router", "toolkit/adapters/ollama.py", 1),
+    "LLM_ROUTER_MEM_RESERVE_GB": ("llm_router", "toolkit/adapters/ollama.py", 1),
+    "LLM_ROUTER_MEM_ON_PRESSURE": ("llm_router", "toolkit/adapters/ollama.py", 1),
     "LLM_ROUTER_OLLAMA_WARMUP": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_OLLAMA_WATCHDOG": ("llm_router", "ollama_watchdog.py", 1),
     "LLM_ROUTER_OLLAMA_WATCHDOG_FAIL_N": ("llm_router", "ollama_watchdog.py", 1),

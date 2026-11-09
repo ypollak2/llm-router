@@ -139,6 +139,7 @@ def hook_env(home: Path, **extra: str) -> dict[str, str]:
             "LLM_ROUTER_NO_DETACHED_SPAWN": "1",
             "LLM_ROUTER_MAP_REDISCOVERY": "off",
             "LLM_ROUTER_ROUTE_BANNER": "off",
+            "LLM_ROUTER_MEM_GUARD": "off",   # the memory guard probes /api/ps, /api/tags, /api/show; fake Ollama servers count requests
             "LLM_ROUTER_PROVIDER_RESET_PATH": str(state / "provider_reset.json"),
             "CLAUDE_CODE_SESSION_ID": "bind-test-session",
         }

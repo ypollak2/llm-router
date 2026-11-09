@@ -100,6 +100,8 @@ def _events_since_last_seal(store: LibraryStore, book: str) -> list[dict]:
 def _librarian(prompt: str, timeout: int = 60) -> str | None:
     """Call the local $0 librarian. None on any failure (mechanical fallback)."""
     try:
+        from llm_router.toolkit.adapters.ollama import ensure_fits
+        ensure_fits(LIBRARIAN_MODEL, OLLAMA_BASE_URL.rstrip("/"), "library.sealer.librarian")
         req = urllib.request.Request(
             f"{OLLAMA_BASE_URL}/api/generate",
             data=json.dumps({"model": LIBRARIAN_MODEL, "prompt": prompt,

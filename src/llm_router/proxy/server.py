@@ -330,6 +330,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     is the gate's breaker."""
     import httpx
     from starlette.applications import Starlette
+    # Imported here, not at module level: the Ollama adapter pulls in llm_router.classify (via engine), which must
+    # load at build_app, not at import (tests/test_p09e_decision_work.py pins that).
+    from llm_router.toolkit.adapters.ollama import LocalModelConflict
     from starlette.requests import Request
     from starlette.responses import Response, StreamingResponse
     from starlette.routing import Route
@@ -639,6 +642,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             err, reason = str(exc), "local_context_overflow"
         except (asyncio.TimeoutError, httpx.TimeoutException):
             err, reason = f"exceeded step budget {cfg.step_budget_s}s", "budget_exceeded"
+        except LocalModelConflict as exc:
+            # The memory guard refused the load (nothing was sent). Not a backend fault: do not feed the breaker.
+            err, reason, backend_t0 = str(exc), "memory_budget", None
         except Exception as exc:  # noqa: BLE001 - any backend failure is a counted fallback
             err, reason = f"{type(exc).__name__}: {exc}", "backend_error"
         if backend_t0 is not None:
