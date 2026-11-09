@@ -319,7 +319,7 @@ def call_ollama(
     from llm_router.toolkit.adapters import ollama as _ollama_ad
     model = _ollama_ad.resolve_main_model(model, "hooks.direct_executor.call_ollama")
     try:
-        _ollama_ad.check_resident(model)
+        _ollama_ad.check_resident(model, deadline_s=timeout)
     except _ollama_ad.LocalModelConflict as _exc:
         _ollama_ad.record_refusal(_exc)
         _call_failure("ollama", model, "local_model_conflict")

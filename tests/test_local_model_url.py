@@ -25,6 +25,8 @@ def _env(monkeypatch):
     monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
     monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "llmr-classifier")
     monkeypatch.setenv("LLM_ROUTER_DECISION_MODEL", "nimble:9b")
+    from llm_router.toolkit.adapters import ollama as oa
+    oa._PS_CACHE.update(at=0.0, key=None, err=None)   # the resident-guard cache must not leak between tests
 
 
 class _R:
@@ -347,3 +349,185 @@ def test_classifier_paths_use_the_one_model(monkeypatch):
     assert lc._base_url() == MAIN
     assert door_verdict._decision_model_configured() is False
     assert door_verdict.mode() == "off"          # no explicit opt-in: fails open to the non-model path
+
+
+# ── review fixes: every remaining path ────────────────────────────────────────
+
+def _chat_capture(monkeypatch, reply="ok"):
+    """Record every request (url, model); answer chat/generate/tags/ps with canned bodies."""
+    import urllib.request
+    seen: list[tuple[str, str | None]] = []
+
+    def _urlopen(req, *a, **k):
+        url = getattr(req, "full_url", req)
+        model = None
+        if getattr(req, "data", None):
+            try:
+                model = json.loads(req.data).get("model")
+            except Exception:
+                model = None
+        seen.append((url, model))
+        if url.endswith("/api/ps"):
+            return _R({"models": []})
+        if url.endswith("/api/tags"):
+            return _R({"models": [{"name": ALLOWED}, {"name": "other-big:30b"}]})
+        return _R({"message": {"content": reply}, "response": reply})
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    return seen
+
+
+@pytest.fixture
+def one_model(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL", ALLOWED)
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL_URL", MAIN)
+    monkeypatch.delenv("LLM_ROUTER_SUMMARY_MODEL", raising=False)
+    from llm_router.toolkit.adapters import ollama as oa
+    oa._PS_CACHE.update(at=0.0, key=None, err=None)
+    yield
+    oa._PS_CACHE.update(at=0.0, key=None, err=None)
+
+
+def _chats(seen):
+    return [(u, m) for u, m in seen if u.endswith(("/api/chat", "/api/generate", "/v1/systemone"))]
+
+
+def test_context_summary_uses_only_the_one_model(monkeypatch, one_model):
+    from llm_router import context_summary as cs
+    monkeypatch.setenv("LLM_ROUTER_SUMMARY_MODEL", "other-big:30b")
+    seen = _chat_capture(monkeypatch)
+    assert cs.pick_model(["other-big:30b", "x:7b"]) == ALLOWED
+    cs._generate("other-big:30b", "hello")
+    chats = _chats(seen)
+    assert chats and all(u.startswith(MAIN) and m == ALLOWED for u, m in chats), seen
+
+
+def test_context_summary_refused_when_other_big_resident(monkeypatch, one_model):
+    from llm_router import context_summary as cs
+    from llm_router.toolkit.adapters.ollama import LocalModelConflict
+    import urllib.request
+
+    def _urlopen(req, *a, **k):
+        url = getattr(req, "full_url", req)
+        if url.endswith("/api/ps"):
+            return _R({"models": [{"name": "other-big:30b", "size_vram": 20_000_000_000}]})
+        raise AssertionError("no chat request may be sent: " + url)
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    with pytest.raises(LocalModelConflict):
+        cs._generate(ALLOWED, "hello")
+
+
+def test_context_summary_unset_unchanged(monkeypatch):
+    from llm_router import context_summary as cs
+    monkeypatch.delenv("LLM_ROUTER_LOCAL_MODEL", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_SUMMARY_MODEL", "mine:7b")
+    assert cs._ollama_url() == SMALL
+    assert cs.pick_model(["a:7b"]) == "mine:7b"
+
+
+def _load_hook(name):
+    import importlib.util
+    from pathlib import Path
+
+    import llm_router
+    path = Path(llm_router.__file__).parent / "hooks" / name
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_").removesuffix(".py"), path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_auto_route_classify_goes_to_the_one_model_server(monkeypatch, one_model):
+    ar = _load_hook("auto-route.py")
+    seen = _chat_capture(monkeypatch, reply="query")
+    monkeypatch.setattr(ar, "OLLAMA_MODELS", ["other-big:30b"], raising=False)
+    monkeypatch.setattr(ar, "OLLAMA_CODE_MODELS", ["other-big:30b"], raising=False)
+    monkeypatch.setattr(ar, "_ollama_open", lambda req, base, t: __import__("urllib.request").request.urlopen(req))
+    ar.classify_with_ollama("what is two plus two")
+    chats = _chats(seen)
+    assert chats and all(u.startswith(MAIN) and m == ALLOWED for u, m in chats), seen
+
+
+def test_playwright_compress_uses_the_one_model(monkeypatch, one_model):
+    pc = _load_hook("playwright-compress.py")
+    seen = _chat_capture(monkeypatch)
+    monkeypatch.setattr(pc, "_ollama_open", lambda req, base, t: __import__("urllib.request").request.urlopen(req))
+    pc._try_ollama("snapshot")
+    chats = _chats(seen)
+    assert chats and all(u.startswith(MAIN) and m == ALLOWED for u, m in chats), seen
+
+
+def test_vision_is_off_unless_the_vision_model_is_the_one_model(monkeypatch, one_model, tmp_path):
+    from llm_router.hooks import tool_intercept
+    img = tmp_path / "a.png"
+    img.write_bytes(b"\x89PNG" + b"0" * 50)
+    seen = _chat_capture(monkeypatch)
+    assert tool_intercept.describe_image(str(img), "llava:13b") is None
+    assert _chats(seen) == []
+    tool_intercept.describe_image(str(img), ALLOWED)
+    chats = _chats(seen)
+    assert chats and all(u.startswith(MAIN) and m == ALLOWED for u, m in chats)
+
+
+def test_vision_registry_lists_only_the_one_model(monkeypatch, one_model):
+    from llm_router import vision_registry
+    import urllib.request
+    shown = []
+
+    def _urlopen(req, *a, **k):
+        url = getattr(req, "full_url", req)
+        if url.endswith("/api/tags"):
+            return _R({"models": [{"name": ALLOWED}, {"name": "llava:13b"}]})
+        shown.append((url, json.loads(req.data)["model"]))
+        return _R({"capabilities": ["vision"]})
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    assert vision_registry.advertised_vision_models() == [ALLOWED]
+    assert shown == [(f"{MAIN}/api/show", ALLOWED)]
+
+
+def test_classifier_is_guarded_and_on_the_one_server(monkeypatch, one_model):
+    from llm_router import local_classifier as lc
+    from llm_router.toolkit.adapters.ollama import LocalModelConflict
+    monkeypatch.delenv("LLM_ROUTER_LOCAL_MODEL_URL")        # one server: the default one
+    assert lc._base_url() == SMALL
+    import urllib.request
+
+    def _urlopen(req, *a, **k):
+        url = getattr(req, "full_url", req)
+        if url.endswith("/api/ps"):
+            return _R({"models": [{"name": "other-big:30b", "size_vram": 20_000_000_000}]})
+        raise AssertionError("classifier sent a request: " + url)
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    with pytest.raises(LocalModelConflict):
+        lc._post(ALLOWED, "text", 5.0)
+
+
+def test_resident_check_is_cached_and_honours_the_deadline(monkeypatch, one_model):
+    from llm_router.toolkit.adapters import ollama as oa
+    seen = _chat_capture(monkeypatch)
+    oa.check_resident(ALLOWED)
+    oa.check_resident(ALLOWED)
+    assert sum(1 for u, _ in seen if u.endswith("/api/ps")) == 2   # one read per server, second call cached
+    oa._PS_CACHE.update(at=0.0, key=None, err=None)
+    n = len(seen)
+    oa.check_resident(ALLOWED, deadline_s=0.2)                     # no budget: no /api/ps read
+    assert len(seen) == n
+
+
+@pytest.mark.asyncio
+async def test_ollama_chat_prefix_is_covered(monkeypatch, one_model):
+    import litellm
+
+    from llm_router.providers import call_llm
+    cap: dict = {}
+    monkeypatch.setattr(litellm, "acompletion", _fake_litellm(cap))
+    _chat_capture(monkeypatch)
+    await call_llm("ollama_chat/other-big:30b", [{"role": "user", "content": "hi"}])
+    assert cap["model"] == f"ollama_chat/{ALLOWED}" and cap["api_base"] == MAIN
+
+
+@pytest.mark.parametrize("bad", ["http://169.254.169.254:11435", "file:///x", "ftp://h", "http://0.0.0.0:1"])
+def test_new_url_var_is_validated_like_the_old_one(monkeypatch, bad):
+    from llm_router.config import validate_ollama_url
+    from llm_router.toolkit.adapters.ollama import get_local_model_url
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL_URL", bad)
+    assert (get_local_model_url() or "") == validate_ollama_url(bad)   # same verdict as LLM_ROUTER_OLLAMA_URL

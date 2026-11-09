@@ -249,6 +249,9 @@ def describe_image(path: str, model: str, timeout: int = 120) -> str | None:
     one, a model that will not load, a timeout. Falling back costs tokens;
     failing closed with a wrong description costs correctness.
     """
+    from llm_router.toolkit.adapters import ollama as _oa
+    if _oa.get_local_model() and model != _oa.get_local_model():
+        return None   # strictly one local model: a vision model is a second big model, so the image goes to Claude
     try:
         blob = Path(path).read_bytes()
     except OSError:
@@ -269,11 +272,12 @@ def describe_image(path: str, model: str, timeout: int = 120) -> str | None:
     }).encode()
     try:
         from llm_router.hooks.agent_loop import _get_ollama_url
+        _oa.check_resident(model)
         request = urllib.request.Request(
-            f"{_get_ollama_url().rstrip('/')}/api/chat",
+            f"{_oa.url_for_model(model).rstrip('/')}/api/chat",
             data=body, headers={"Content-Type": "application/json"})
         from llm_router import local_privacy
-        with local_privacy.open_url(request, base_url=_get_ollama_url(), timeout=timeout) as response:
+        with local_privacy.open_url(request, base_url=_oa.url_for_model(model), timeout=timeout) as response:
             text = json.loads(response.read()).get("message", {}).get("content", "")
     except Exception:
         return None

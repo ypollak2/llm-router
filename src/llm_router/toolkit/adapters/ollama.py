@@ -103,6 +103,11 @@ def get_local_model_url() -> str | None:
     return validate_ollama_url(raw) or None
 
 
+def main_url() -> str:
+    """Server of THE local model: LLM_ROUTER_LOCAL_MODEL_URL, else the default Ollama URL (one server, never two)."""
+    return get_local_model_url() or get_ollama_url()
+
+
 def url_for_model(model: str | None = None) -> str:
     """The Ollama server a chat/generate call for ``model`` goes to.
 
@@ -153,8 +158,8 @@ def resolve_main_model(model: str | None, site: str = "") -> str | None:
     if not allowed or _is_small_model(model):
         return model
     if model:
-        had_prefix = "ollama/" if model.startswith("ollama/") else ""
-        if model.removeprefix("ollama/") != allowed:
+        had_prefix = next((p for p in ("ollama_chat/", "ollama/") if model.startswith(p)), "")
+        if model.removeprefix("ollama_chat/").removeprefix("ollama/") != allowed:
             _log.warning("LLM_ROUTER_LOCAL_MODEL override at %s: %s -> %s", site or "?", model, allowed)
             return had_prefix + allowed
         return model
@@ -202,7 +207,34 @@ def _same_name(a: str, b: str) -> bool:
     return norm(a) == norm(b)
 
 
-def check_resident(model: str | None = None) -> None:
+_PS_CACHE: dict = {"at": 0.0, "key": None, "err": None}
+_PS_TTL_S = 5.0
+
+
+def check_resident(model: str | None = None, *, deadline_s: float | None = None) -> None:
+    """Cached (~5 s) wrapper over :func:`_check_resident`; ``deadline_s`` is the caller's remaining budget in
+    seconds (the /api/ps reads are skipped when less than 1 s is left, so a hook never spends its budget here)."""
+    allowed = get_local_model()
+    if not allowed or _is_small_model(model):
+        return
+    key = (allowed, get_local_model_url(), get_ollama_url(), _max_other_vram_gb())
+    now = time.monotonic()
+    if _PS_CACHE["key"] == key and now - _PS_CACHE["at"] < _PS_TTL_S:
+        if _PS_CACHE["err"] is not None:
+            raise _PS_CACHE["err"]
+        return
+    if deadline_s is not None and deadline_s < 1.0:
+        _log.info("resident guard skipped: %.2fs of budget left", deadline_s)
+        return
+    try:
+        _check_resident(model)
+        _PS_CACHE.update(at=now, key=key, err=None)
+    except LocalModelConflict as exc:
+        _PS_CACHE.update(at=now, key=key, err=exc)
+        raise
+
+
+def _check_resident(model: str | None = None) -> None:
     """Raise :class:`LocalModelConflict` if a model other than the allowed one is resident above the VRAM limit.
 
     No-op when ``LLM_ROUTER_LOCAL_MODEL`` is unset, or when ``model`` is a small model (its path is exempt).
@@ -413,7 +445,7 @@ class OllamaAdapter:
 __all__ = [
     "AdapterError", "AdapterReply", "OllamaAdapter", "agent_temperature",
     "constrained_decoding_enabled", "default_num_ctx", "estimate_payload_tokens", "get_local_model_url", "get_ollama_url", "url_for_model", "get_local_model",
-    "resolve_main_model", "check_resident", "record_refusal", "last_refusal", "LocalModelConflict",
+    "resolve_main_model", "check_resident", "main_url", "record_refusal", "last_refusal", "LocalModelConflict",
     "num_ctx", "parse_constrained_call", "repair_toolcalls", "repair_xml_toolcalls",
     "tool_call_schema", "validated_ollama_url",
 ]

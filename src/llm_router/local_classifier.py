@@ -255,9 +255,9 @@ def _timeout_s() -> float:
 
 
 def _base_url() -> str:
-    from llm_router.toolkit.adapters.ollama import get_local_model, get_local_model_url
-    if get_local_model() and get_local_model_url():
-        return get_local_model_url()
+    from llm_router.toolkit.adapters.ollama import get_local_model, main_url
+    if get_local_model():
+        return main_url()   # the one local model's server (LOCAL_MODEL_URL, else the default: never two copies)
     return os.environ.get("LLM_ROUTER_OLLAMA_URL", "").strip() or "http://localhost:11434"
 
 
@@ -345,6 +345,8 @@ def _payload(model: str, assembled: str) -> dict:
 
 
 def _post(model: str, assembled: str, timeout: float) -> str:
+    from llm_router.toolkit.adapters.ollama import check_resident
+    check_resident(model, deadline_s=timeout)   # LocalModelConflict (cached ~5 s) = a failed classify: fail open
     if backend() == "systemone":
         from llm_router import decision_classifier
 
@@ -509,6 +511,11 @@ async def _is_loaded(model: str, budget: float) -> bool:
 async def _warm(model: str) -> None:
     if _base_refused():
         return
+    try:
+        from llm_router.toolkit.adapters.ollama import check_resident
+        await asyncio.to_thread(check_resident, model)   # another big model resident: do not load this one
+    except Exception:  # noqa: BLE001 - LocalModelConflict: stay cold, rules answer
+        return
     if backend() == "systemone":
         # A decision model refuses /api/generate and /api/chat ("does not support generate"),
         # so it loads only through its own endpoint; any state works, it is not cached.
@@ -566,6 +573,8 @@ async def _classify(key: tuple, assembled: str, model: str, budget: float, deriv
 
     try:
         async with asyncio.timeout(budget):
+            from llm_router.toolkit.adapters.ollama import check_resident
+            await asyncio.to_thread(check_resident, model, deadline_s=budget)   # LocalModelConflict -> fail open
             if _now() >= _resident_until and not await _is_loaded(model, min(budget, 1.0)):
                 _kick_warmup(model)
                 return _fail("cold", model, derivation, ms())
