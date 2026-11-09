@@ -586,3 +586,42 @@ def test_new_url_var_same_verdict_for_non_loopback_host(monkeypatch, remote):
     got_old = get_ollama_url()
     assert got_new == (validate_ollama_url(remote) or None)
     assert got_new == got_old          # identical verdict (accepted as-is, privacy layers handle remote)
+
+
+def test_session_start_warmup_any_guard_failure_never_falls_back_to_second_model(monkeypatch, one_model):
+    ss = _load_hook("session-start.py")
+    popen_calls = []
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda cmd, **k: popen_calls.append(cmd))
+    monkeypatch.setattr(ss, "_detached_spawn_disabled", lambda: False)
+    monkeypatch.setattr(ss, "_EDIT_WARMED_MODEL", None)
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_WARMUP_MODEL", "other-big:30b")
+    from llm_router.toolkit.adapters import ollama as oa
+
+    def _boom(*a, **k):
+        raise RuntimeError("guard broke")
+    monkeypatch.setattr(oa, "main_url", _boom)
+    ss._warm_ollama_bg()
+    assert popen_calls == []          # fail closed: no warm-up of WARMUP_MODEL at OLLAMA_BASE_URL
+
+
+def test_edit_warmup_skipped_when_other_big_model_resident(monkeypatch, one_model):
+    from llm_router import warm
+    popen_calls = []
+    monkeypatch.setattr(warm.subprocess, "Popen", lambda cmd, **k: popen_calls.append(cmd))
+    monkeypatch.setenv("LLM_ROUTER_ZERO_CLAUDE_SCOPE", "edit")
+    monkeypatch.setenv("LLM_ROUTER_ZCE_WARMUP", "on")
+    _ps_server(monkeypatch, [], {"11434": [{"name": "other-big:30b", "size_vram": 20_000_000_000}]})
+    assert warm.warm_edit_model_bg(ALLOWED) is None
+    assert popen_calls == []
+
+
+def test_edit_warmup_loads_the_one_model_when_nothing_else_resident(monkeypatch, one_model):
+    from llm_router import warm
+    popen_calls = []
+    monkeypatch.setattr(warm.subprocess, "Popen", lambda cmd, **k: popen_calls.append(cmd))
+    monkeypatch.setenv("LLM_ROUTER_ZERO_CLAUDE_SCOPE", "edit")
+    monkeypatch.setenv("LLM_ROUTER_ZCE_WARMUP", "on")
+    _ps_server(monkeypatch, [], {"11434": [], "11435": []})
+    assert warm.warm_edit_model_bg(ALLOWED) == ALLOWED
+    cmd = popen_calls[0]
+    assert ":11435/api/generate" in " ".join(cmd) and json.loads(cmd[cmd.index("-d") + 1])["model"] == ALLOWED

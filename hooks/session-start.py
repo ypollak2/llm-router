@@ -1820,6 +1820,18 @@ def _warm_ollama_bg() -> None:
     base_url = _validated_ollama_env_url(
         os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     ).rstrip("/")
+    try:
+        from llm_router.toolkit.adapters import ollama as _oa
+        if _oa.get_local_model():
+            # Strictly one local model: WARMUP_MODEL / discovery are overridden, the warm-up goes to that
+            # model's server and is skipped when another big model is resident (never load a second one).
+            model, base_url = _oa.get_local_model(), _oa.main_url().rstrip("/")
+            _oa.check_resident(model)
+    except Exception:  # noqa: BLE001
+        # A conflict, or any failure to apply the one-model rule while it is set: never fall
+        # through to WARMUP_MODEL at OLLAMA_BASE_URL (that would be a second model).
+        if os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip():
+            return
     payload = json.dumps({"model": model, "prompt": " ", "stream": False})
     if _detached_spawn_disabled():
         return
