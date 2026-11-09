@@ -66,7 +66,9 @@ def _cache_path() -> Path:
 def _ollama_url() -> str:
     # The daemon the calls go to (LLM_ROUTER_OLLAMA_URL), else Ollama's own variable: an operator's model list is checked
     # against this answer (PHANTOM-LOCAL-1), and asking another daemon would drop models the serving one has.
-    return (os.environ.get("LLM_ROUTER_OLLAMA_URL", "").strip()
+    # LLM_ROUTER_LOCAL_MODEL_URL: the generation candidates live on the big-model server, so list that one.
+    return (os.environ.get("LLM_ROUTER_LOCAL_MODEL_URL", "").strip()
+            or os.environ.get("LLM_ROUTER_OLLAMA_URL", "").strip()
             or os.environ.get("OLLAMA_HOST", "").strip() or "http://127.0.0.1:11434")
 
 
@@ -270,6 +272,9 @@ def available_ollama_models(*, allow_probe: bool = True) -> list[str]:
     env override (only names Ollama reports installed) → fresh cache → live probe (refreshing
     the cache) → stale cache → empty.
     """
+    one = os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip()
+    if one:                      # the single allowed local model: nothing else is a candidate
+        return [one]
     from_env = _from_env_verified(allow_probe=allow_probe)
     if from_env:
         return from_env
@@ -343,6 +348,9 @@ def available_ollama_models_nowait(*, refresh: bool = True) -> list[str]:
     -> []. When the cache is stale or missing and ``refresh`` is true, a throttled detached
     child refreshes it for the next caller.
     """
+    one = os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip()
+    if one:
+        return [one]
     from_env = _from_env_verified(allow_probe=False)
     if from_env:
         return from_env
@@ -670,7 +678,7 @@ def user_local_model_setting() -> str:
     environment by ``env_loader`` in every hook) or the shell. Nothing in the
     codebase supplies a value.
     """
-    return os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "").strip()
+    return os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip() or os.environ.get("LLM_ROUTER_OLLAMA_MODEL", "").strip()
 
 
 def _same_model(a: str, b: str) -> bool:

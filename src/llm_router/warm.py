@@ -93,8 +93,9 @@ def cold_budget_s() -> float:
 
 
 def _base_url() -> str:
-    from llm_router.hooks.direct_executor import _get_ollama_url
-    return _get_ollama_url().rstrip("/")
+    # The zero-Claude edit model is the MAIN local model: LLM_ROUTER_LOCAL_MODEL_URL when set.
+    from llm_router.hooks.direct_executor import _main_model_url
+    return _main_model_url().rstrip("/")
 
 
 def ollama_ps(timeout: float = _PS_TIMEOUT_S) -> list[str] | None:
@@ -221,6 +222,11 @@ def warm_edit_model_bg(model: str | None = None) -> str | None:
             model = edit_model()
         if not model:
             return None                                  # no local model discovered: nothing to warm
+        from llm_router.toolkit.adapters import ollama as _oa
+        if _oa.get_local_model():
+            # Strictly one local model: never load it beside another big resident model.
+            # LocalModelConflict (or any failure here) lands in the except below: no warm-up.
+            _oa.check_resident(model)
         payload = json.dumps(warmup_payload(model))
         subprocess.Popen(
             [

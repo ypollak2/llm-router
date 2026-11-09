@@ -34,7 +34,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from llm_router.hooks.agent_loop import _get_ollama_url
+from llm_router.hooks.agent_loop import _get_ollama_url as _default_ollama_url
+
+
+def _get_ollama_url() -> str:
+    """Probe the server that will describe images: THE local model's server when LLM_ROUTER_LOCAL_MODEL is set."""
+    from llm_router.toolkit.adapters.ollama import get_local_model, main_url
+    return main_url() if get_local_model() else _default_ollama_url()
 
 _CACHE_NAME = "vision_models.json"
 _TTL_S = 604800  # a week, matching agentic_registry
@@ -225,6 +231,9 @@ def advertised_vision_models() -> list[str]:
 
     names = [m["name"] for m in payload.get("models", [])
              if isinstance(m, dict) and isinstance(m.get("name"), str)]
+    from llm_router.toolkit.adapters.ollama import get_local_model
+    if get_local_model():   # strictly one local model: only it may be a vision model; no probe loads another
+        names = [n for n in names if n == get_local_model()]
     capable: list[str] = []
     for name in names:
         try:

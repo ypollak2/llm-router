@@ -290,6 +290,9 @@ def free_memory_pct() -> float | None:
 
 
 def _ollama_url() -> str:
+    from llm_router.toolkit.adapters import ollama as _oa
+    if _oa.get_local_model():      # strictly one local model: it is served from its own server
+        return _oa.main_url()
     return os.environ.get("LLM_ROUTER_OLLAMA_URL", "").strip() or "http://localhost:11434"
 
 
@@ -323,6 +326,9 @@ def pick_model(installed: list[str], map_data: dict | None = None) -> str | None
     user's own local-model setting (``LLM_ROUTER_OLLAMA_MODEL``) when it is among them,
     else the first in discovery order (no family or name preference, D-205); None when
     there is none. ``LLM_ROUTER_SUMMARY_MODEL`` overrides."""
+    from llm_router.toolkit.adapters.ollama import get_local_model
+    if get_local_model():          # strictly one local model: SUMMARY_MODEL and discovery are overridden
+        return get_local_model()
     override = os.environ.get("LLM_ROUTER_SUMMARY_MODEL", "").strip()
     if override:
         return override
@@ -346,6 +352,9 @@ def _generate(model: str, prompt: str) -> str:
     import urllib.request
 
     from llm_router import local_models, local_privacy
+    from llm_router.toolkit.adapters import ollama as _oa
+    model = _oa.resolve_main_model(model, "context_summary")
+    _oa.check_resident(model)       # raises LocalModelConflict: summarise() falls back to the extractive summary
 
     body = json.dumps({"model": model, "stream": False,
                        "messages": [{"role": "user", "content": prompt}],

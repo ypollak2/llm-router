@@ -242,6 +242,7 @@ SINK_FUNCS: dict[tuple[str, str, str], tuple[int, str, str]] = {
     ('hooks/playwright-compress.py', '_ollama_open', 'urlopen'): (1, 'local', 'Ollama base; a remote OLLAMA_HOST is refused for a snapshot holding a secret by _cloud_blocked in _try_ollama (#775)'),
     ('hooks/playwright-compress.py', '_ollama_open', 'open_url'): (1, 'local', 'loopback Ollama'),
     ('resolver/calibrate.py', 'CloudCompleter._cli', 'run_codex'): (1, 'fixed prompt', 'calibration probes'),
+    ('toolkit/adapters/ollama.py', '_check_resident', 'urlopen'): (1, 'probe', 'one-model guard (#864): GET /api/ps on the local-model and Ollama bases, no prompt text'),
 }
 SINK_FILES: dict[str, tuple[int, str, str]] = {
     'agentic/react.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),

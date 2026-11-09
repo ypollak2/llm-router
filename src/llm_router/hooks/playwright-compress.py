@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 7
+# llm_router-hook-version: 8
 """PostToolUse hook — compress Playwright page snapshots via cheap LLM.
 
 After every browser_snapshot call:
@@ -189,21 +189,30 @@ def _try_ollama(snapshot: str) -> str | None:
     sent = snapshot[:MAX_SNAPSHOT_CHARS]
     if not _ollama_is_loopback(OLLAMA_BASE) and _cloud_blocked(sent):
         return None
+    model, base = OLLAMA_MODEL, OLLAMA_BASE
+    try:
+        from llm_router.toolkit.adapters import ollama as _oa
+        if _oa.get_local_model():   # strictly one local model, on its own server, behind the resident guard
+            model, base = _oa.get_local_model(), _oa.main_url()
+            _oa.check_resident(model)
+    except Exception as exc:
+        if type(exc).__name__ == "LocalModelConflict":
+            return None
     prompt = _COMPRESS_PROMPT.format(snapshot=sent)
     body = json.dumps({
-        "model": OLLAMA_MODEL,
+        "model": model,
         "prompt": prompt,
         "stream": False,
         "options": {"temperature": 0, "num_predict": 400},
     }).encode()
     try:
         req = urllib.request.Request(
-            f"{OLLAMA_BASE}/api/generate",
+            f"{base}/api/generate",
             data=body,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with _ollama_open(req, OLLAMA_BASE, OLLAMA_TIMEOUT) as resp:
+        with _ollama_open(req, base, OLLAMA_TIMEOUT) as resp:
             data = json.loads(resp.read())
             text = data.get("response", "").strip()
             return text or None

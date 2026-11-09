@@ -7,6 +7,7 @@ there is one copy; that module re-exports them under its old private names.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -61,6 +62,8 @@ def agent_temperature() -> float:
         return 0.1
 
 
+_log = logging.getLogger(__name__)
+
 OLLAMA_URL_DEFAULT = "http://localhost:11434"
 
 
@@ -81,6 +84,193 @@ def get_ollama_url() -> str:
         or os.environ.get("OLLAMA_BASE_URL")
         or OLLAMA_URL_DEFAULT
     )
+
+
+def get_local_model_url() -> str | None:
+    """``LLM_ROUTER_LOCAL_MODEL_URL`` validated, or None when unset/invalid.
+
+    The server that holds the ONE big local model (a separate Ollama with
+    OLLAMA_MAX_LOADED_MODELS=1). Unset = every local call uses
+    :func:`get_ollama_url`, exactly as before.
+    """
+    raw = os.environ.get("LLM_ROUTER_LOCAL_MODEL_URL", "").strip()
+    if not raw:
+        return None
+    try:
+        from llm_router.config import validate_ollama_url
+    except Exception:  # noqa: BLE001
+        return None
+    return validate_ollama_url(raw) or None
+
+
+def main_url() -> str:
+    """Server of THE local model: LLM_ROUTER_LOCAL_MODEL_URL, else the default Ollama URL (one server, never two)."""
+    return get_local_model_url() or get_ollama_url()
+
+
+def url_for_model(model: str | None = None) -> str:
+    """The Ollama server a chat/generate call for ``model`` goes to.
+
+    The main local model goes to ``LLM_ROUTER_LOCAL_MODEL_URL`` when set. A
+    small model (classifier / decision model, by role or configured name) must
+    NOT move: sending it there would evict the big model (max 1 loaded).
+    """
+    main = get_local_model_url()
+    if main is None:
+        return get_ollama_url()
+    if model:
+        try:
+            from llm_router import local_models
+            bare = model.removeprefix("ollama_chat/").removeprefix("ollama/")
+            if not local_models.serves_generate(bare):
+                return get_ollama_url()
+        except Exception:  # noqa: BLE001
+            pass
+    return main
+
+
+def get_local_model() -> str | None:
+    """``LLM_ROUTER_LOCAL_MODEL``: the single big local model allowed, or None when unset."""
+    return os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip() or None
+
+
+def _is_small_model(model: str | None) -> bool:
+    if get_local_model():      # strictly ONE model: nothing is exempt when LLM_ROUTER_LOCAL_MODEL is set
+        return False
+    if not model:
+        return False
+    try:
+        from llm_router import local_models
+        bare = model.removeprefix("ollama_chat/").removeprefix("ollama/")
+        return not local_models.serves_generate(bare)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def resolve_main_model(model: str | None, site: str = "") -> str | None:
+    """The model a main-local-model path must use.
+
+    With ``LLM_ROUTER_LOCAL_MODEL`` set, every caller-supplied model is replaced by
+    it (the override is logged); a small classifier/decision model is left alone.
+    Unset: ``model`` unchanged.
+    """
+    allowed = get_local_model()
+    if not allowed or _is_small_model(model):
+        return model
+    if model:
+        had_prefix = next((p for p in ("ollama_chat/", "ollama/") if model.startswith(p)), "")
+        if model.removeprefix("ollama_chat/").removeprefix("ollama/") != allowed:
+            _log.warning("LLM_ROUTER_LOCAL_MODEL override at %s: %s -> %s", site or "?", model, allowed)
+            return had_prefix + allowed
+        return model
+    return allowed
+
+
+class LocalModelConflict(RuntimeError):
+    """Another big model is resident on a local Ollama; sending would evict or OOM (typed, fail closed)."""
+
+    status = "backend_error"
+    kind = "local_model_conflict"
+
+    def __init__(self, resident: str, size_gb: float, url: str, allowed: str, limit_gb: float):
+        self.resident, self.size_gb, self.url = resident, size_gb, url
+        super().__init__(
+            f"local_model_conflict: {resident} is resident on {url} using {size_gb:.1f} GB of VRAM "
+            f"(limit for any model other than {allowed}: {limit_gb:g} GB). Not sending the request; "
+            f"this router never unloads another server's model. Stop it with `ollama stop {resident}`.")
+
+
+_LAST = __import__("threading").local()
+
+
+def record_refusal(exc: "LocalModelConflict | None") -> None:
+    """Remember (per thread) why the last main-local call was refused, for callers that get only None."""
+    _LAST.refusal = exc
+
+
+def last_refusal() -> "LocalModelConflict | None":
+    return getattr(_LAST, "refusal", None)
+
+
+def _max_other_vram_gb() -> float:
+    raw = os.environ.get("LLM_ROUTER_LOCAL_MAX_OTHER_VRAM_GB", "").strip()
+    try:
+        value = float(raw)
+        return value if value >= 0 else 2.0
+    except ValueError:
+        return 2.0
+
+
+def _same_name(a: str, b: str) -> bool:
+    def norm(x: str) -> str:
+        return x if ":" in x else x + ":latest"
+    return norm(a) == norm(b)
+
+
+_PS_CACHE: dict = {"at": 0.0, "key": None, "err": None}
+_PS_TTL_S = 5.0
+
+
+def check_resident(model: str | None = None, *, deadline_s: float | None = None) -> None:
+    """Cached (~5 s) wrapper over :func:`_check_resident`; ``deadline_s`` is the caller's remaining budget in
+    seconds (the /api/ps reads are skipped when less than 1 s is left, so a hook never spends its budget here)."""
+    allowed = get_local_model()
+    if not allowed or _is_small_model(model):
+        return
+    key = (allowed, get_local_model_url(), get_ollama_url(), _max_other_vram_gb())
+    now = time.monotonic()
+    if _PS_CACHE["key"] == key and now - _PS_CACHE["at"] < _PS_TTL_S:
+        if _PS_CACHE["err"] is not None:
+            raise _PS_CACHE["err"]
+        return
+    if deadline_s is not None and deadline_s < 1.0:
+        _log.info("resident guard skipped: %.2fs of budget left", deadline_s)
+        return
+    try:
+        _check_resident(model)
+        _PS_CACHE.update(at=now, key=key, err=None)
+    except LocalModelConflict as exc:
+        _PS_CACHE.update(at=now, key=key, err=exc)
+        raise
+
+
+def _check_resident(model: str | None = None) -> None:
+    """Raise :class:`LocalModelConflict` if a model other than the allowed one is resident above the VRAM limit.
+
+    No-op when ``LLM_ROUTER_LOCAL_MODEL`` is unset, or when ``model`` is a small model (its path is exempt).
+    Reads ``/api/ps`` on the local-model URL and on the default Ollama URL. An unreachable server never
+    blocks (logged). Never unloads anything.
+    """
+    allowed = get_local_model()
+    if not allowed or _is_small_model(model):
+        return
+    limit = _max_other_vram_gb()
+    urls = []
+    for u in (get_local_model_url(), get_ollama_url()):
+        if u and u.rstrip("/") not in urls:
+            urls.append(u.rstrip("/"))
+    import json
+    import urllib.request
+    for url in urls:
+        try:
+            with urllib.request.urlopen(urllib.request.Request(f"{url}/api/ps"), timeout=1.5) as resp:  # nosec B310 — validated URL
+                rows = json.loads(resp.read()).get("models") or []
+        except Exception as exc:  # noqa: BLE001
+            _log.info("resident guard: /api/ps on %s unreachable (%s); not blocking", url, exc)
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or row.get("model") or "")
+            if not name or _same_name(name, allowed):
+                continue
+            raw = row.get("size_vram")
+            if raw is None:  # unknown size: not read as 0 GB; logged and not blocking, like an unreachable server
+                _log.info("resident guard: %s on %s reports no size_vram; not blocking", name, url)
+                continue
+            size_gb = float(raw) / 1e9
+            if size_gb > limit:
+                raise LocalModelConflict(name, size_gb, url, allowed, limit)
 
 
 _XML_FUNC_RE = re.compile(
@@ -258,7 +448,8 @@ class OllamaAdapter:
 
 __all__ = [
     "AdapterError", "AdapterReply", "OllamaAdapter", "agent_temperature",
-    "constrained_decoding_enabled", "default_num_ctx", "estimate_payload_tokens", "get_ollama_url",
+    "constrained_decoding_enabled", "default_num_ctx", "estimate_payload_tokens", "get_local_model_url", "get_ollama_url", "url_for_model", "get_local_model",
+    "resolve_main_model", "check_resident", "main_url", "record_refusal", "last_refusal", "LocalModelConflict",
     "num_ctx", "parse_constrained_call", "repair_toolcalls", "repair_xml_toolcalls",
     "tool_call_schema", "validated_ollama_url",
 ]

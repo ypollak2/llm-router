@@ -165,11 +165,19 @@ def _get_ollama_url() -> str:
     return _validated_ollama_url(raw)
 
 
-def _ollama_open(req, timeout):
+def _main_model_url(model: str | None = None) -> str:
+    """Server for the MAIN local model: LLM_ROUTER_LOCAL_MODEL_URL when set, else _get_ollama_url()."""
+    from llm_router.toolkit.adapters import ollama as _ollama
+    if _ollama.get_local_model_url() is None:
+        return _get_ollama_url()   # unset: today's path, unchanged
+    return _ollama.url_for_model(model)
+
+
+def _ollama_open(req, timeout, base_url: str | None = None):
     """``urlopen`` for a request to the Ollama daemon: direct (no proxy env, no redirect) when it is loopback
     (LC-12h: these requests carry the prompt), the user's proxy policy for a remote daemon."""
     from llm_router import local_privacy
-    return local_privacy.open_url(req, base_url=_get_ollama_url(), timeout=timeout)
+    return local_privacy.open_url(req, base_url=base_url or _get_ollama_url(), timeout=timeout)
 
 
 def ollama_is_alive(timeout: float = 0.5) -> bool:
@@ -180,14 +188,14 @@ def ollama_is_alive(timeout: float = 0.5) -> bool:
     network error, including connection-refused and timeout.
     """
     try:
-        ollama_url = _get_ollama_url()
+        ollama_url = _main_model_url()   # liveness of the server the main model is served from
         req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
         # nosec B310 — URL is validated by _get_ollama_url (scheme + host).
         # The previous justification here read "localhost only", which was not
         # true: the URL comes from LLM_ROUTER_OLLAMA_URL/OLLAMA_BASE_URL, which a
         # cloned repo's .env can set. A suppression resting on a false premise
         # is worse than no suppression, because it stops anyone re-checking.
-        with _ollama_open(req, timeout):  # nosec B310
+        with _ollama_open(req, timeout, ollama_url):  # nosec B310
             return True
     except Exception:
         return False
@@ -202,9 +210,9 @@ def available_ollama_models(timeout: float = 0.5) -> set[str] | None:
     silently fall the turn through to Claude (audit §2.4).
     """
     try:
-        ollama_url = _get_ollama_url()
+        ollama_url = _main_model_url()   # validate against the server that will actually be called
         req = urllib.request.Request(f"{ollama_url}/api/tags", method="GET")
-        with _ollama_open(req, timeout) as resp:  # nosec B310 — URL validated by _get_ollama_url (not localhost-only: a remote Ollama is supported)
+        with _ollama_open(req, timeout, ollama_url) as resp:  # nosec B310 — URL validated by _get_ollama_url (not localhost-only: a remote Ollama is supported)
             data = json.loads(resp.read())
         return {m.get("name", "") for m in data.get("models", []) if m.get("name")}
     except Exception:
@@ -308,6 +316,14 @@ def call_ollama(
     ``format``: an optional JSON Schema sent as Ollama's ``format`` (structured
     output). A server that refuses it with HTTP 400 (Ollama < 0.5 takes only
     ``"json"``) is asked again without it, so the call works as before."""
+    from llm_router.toolkit.adapters import ollama as _ollama_ad
+    model = _ollama_ad.resolve_main_model(model, "hooks.direct_executor.call_ollama")
+    try:
+        _ollama_ad.check_resident(model, deadline_s=timeout)
+    except _ollama_ad.LocalModelConflict as _exc:
+        _ollama_ad.record_refusal(_exc)
+        _call_failure("ollama", model, "local_model_conflict")
+        return None, {}
     payload = {
         "model": model,
         "messages": _chat_messages(prompt, history, system_prompt),
@@ -321,7 +337,7 @@ def call_ollama(
         payload["format"] = format
     if keep_alive is not None:
         payload["keep_alive"] = keep_alive
-    ollama_url = _get_ollama_url()
+    ollama_url = _main_model_url(model)
     try:
         from llm_router.local_context_guard import ContextOverflow, check_overflow
         from llm_router.pack_overflow import PayloadPack
@@ -353,7 +369,7 @@ def call_ollama(
     truncated = False
     context_truncated = False
     try:
-        with _ollama_open(req, timeout) as resp:  # nosec B310 — URL validated by _get_ollama_url (not localhost-only: a remote Ollama is supported)
+        with _ollama_open(req, timeout, ollama_url) as resp:  # nosec B310 — URL validated by _get_ollama_url (not localhost-only: a remote Ollama is supported)
             for raw in resp:
                 if not raw.strip():
                     continue

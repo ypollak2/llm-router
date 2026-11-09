@@ -92,6 +92,13 @@ async def eval_ollama_model(model: str, task_type: str = "reasoning") -> Optiona
     
     OLLAMA_URL = "http://localhost:11434"
     OLLAMA_TIMEOUT = 10
+    from llm_router.toolkit.adapters import ollama as _oa
+    if _oa.get_local_model():   # strictly one local model: benchmark only it, on its server, behind the guard
+        model, OLLAMA_URL = _oa.get_local_model(), _oa.main_url()
+        try:
+            _oa.check_resident(model)
+        except _oa.LocalModelConflict:
+            return None
     
     try:
         prompt = BenchmarkSuite.get_prompt(task_type)

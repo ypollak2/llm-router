@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 80
+# llm_router-hook-version: 81
 """UserPromptSubmit hook — scoring classifier with Ollama + API fallback chain.
 
 Classification chain (stops at first success):
@@ -247,7 +247,7 @@ def route_call(logical: str, *args: str) -> str:
 # Cursor/Windsurf/Codex never start the MCP server so check_and_update_hooks()
 # never fires. This check emits a stderr warning when the installed hook is
 # older than the bundled one. The user sees it in their IDE's output panel.
-_THIS_VERSION_LINE = "# llm_router-hook-version: 80"
+_THIS_VERSION_LINE = "# llm_router-hook-version: 81"
 try:
     _PKG_HOOK = Path(__file__).resolve()
     _INSTALLED_HOOK = Path.home() / ".claude" / "hooks" / "llm_router-auto-route.py"
@@ -2810,6 +2810,17 @@ def classify_with_ollama(text: str) -> str | None:
     
     # Select model priority: code-specialized for code tasks, general for others
     models_to_try = OLLAMA_CODE_MODELS if is_code_task else OLLAMA_MODELS
+    ollama_url = OLLAMA_URL
+    try:
+        from llm_router.toolkit.adapters import ollama as _oa
+        _one = _oa.get_local_model()
+        if _one:   # strictly one local model, on its own server, behind the resident guard
+            models_to_try, ollama_url = [_one], _oa.main_url()
+            _oa.check_resident(_one)
+    except Exception as exc:   # LocalModelConflict or import failure: classification is optional
+        if type(exc).__name__ == "LocalModelConflict":
+            _debug_log(f"[classify_with_ollama] refused: {exc}")
+            return None
     
     for model in models_to_try:
         try:
@@ -2830,11 +2841,11 @@ def classify_with_ollama(text: str) -> str | None:
                 "options": {"temperature": 0, "num_predict": 10},
             }).encode()
             req = urllib.request.Request(
-                f"{OLLAMA_URL}/api/chat",
+                f"{ollama_url}/api/chat",
                 data=body,
                 headers={"Content-Type": "application/json"},
             )
-            with _ollama_open(req, OLLAMA_URL, OLLAMA_TIMEOUT) as resp:
+            with _ollama_open(req, ollama_url, OLLAMA_TIMEOUT) as resp:
                 result = json.loads(resp.read())
                 content = result.get("message", {}).get("content", "")
                 category = _extract_category(content)

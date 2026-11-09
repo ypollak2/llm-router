@@ -209,11 +209,18 @@ def mode() -> str:
 
 def backend() -> str:
     """``chat`` (default: /api/chat, prompt v6) or ``systemone`` (decision model, /v1/systemone)."""
+    from llm_router.toolkit.adapters.ollama import get_local_model
+    if get_local_model():
+        # One local model: /v1/systemone belongs to the decision model (nimble), which a general model does not answer.
+        return "chat"
     raw = os.environ.get("LLM_ROUTER_CLASSIFIER_BACKEND", "").strip().lower()
     return raw if raw in BACKENDS else "chat"
 
 
 def _model() -> str:
+    from llm_router.toolkit.adapters.ollama import get_local_model
+    if get_local_model():   # strictly one local model: the classifier uses it too
+        return get_local_model()
     if backend() == "systemone":
         from llm_router import decision_classifier
 
@@ -248,6 +255,9 @@ def _timeout_s() -> float:
 
 
 def _base_url() -> str:
+    from llm_router.toolkit.adapters.ollama import get_local_model, main_url
+    if get_local_model():
+        return main_url()   # the one local model's server (LOCAL_MODEL_URL, else the default: never two copies)
     return os.environ.get("LLM_ROUTER_OLLAMA_URL", "").strip() or "http://localhost:11434"
 
 
@@ -335,6 +345,8 @@ def _payload(model: str, assembled: str) -> dict:
 
 
 def _post(model: str, assembled: str, timeout: float) -> str:
+    from llm_router.toolkit.adapters.ollama import check_resident
+    check_resident(model, deadline_s=timeout)   # LocalModelConflict (cached ~5 s) = a failed classify: fail open
     if backend() == "systemone":
         from llm_router import decision_classifier
 
@@ -499,6 +511,12 @@ async def _is_loaded(model: str, budget: float) -> bool:
 async def _warm(model: str) -> None:
     if _base_refused():
         return
+    from llm_router.toolkit.adapters.ollama import check_resident, get_local_model
+    if get_local_model():   # limit unset: check_resident is a no-op, and a thread hop would only delay the warm-up
+        try:
+            await asyncio.to_thread(check_resident, model)   # another big model resident: do not load this one
+        except Exception:  # noqa: BLE001 - LocalModelConflict: stay cold, rules answer
+            return
     if backend() == "systemone":
         # A decision model refuses /api/generate and /api/chat ("does not support generate"),
         # so it loads only through its own endpoint; any state works, it is not cached.
@@ -556,6 +574,8 @@ async def _classify(key: tuple, assembled: str, model: str, budget: float, deriv
 
     try:
         async with asyncio.timeout(budget):
+            from llm_router.toolkit.adapters.ollama import check_resident
+            await asyncio.to_thread(check_resident, model, deadline_s=budget)   # LocalModelConflict -> fail open
             if _now() >= _resident_until and not await _is_loaded(model, min(budget, 1.0)):
                 _kick_warmup(model)
                 return _fail("cold", model, derivation, ms())

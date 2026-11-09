@@ -337,6 +337,14 @@ async def call_llm(
     _quirk = get_quirk(provider_from_model(model))
     kwargs["model"] = _quirk.transform_model_name(kwargs["model"])
     kwargs = _quirk.transform_request(kwargs)
+    if kwargs["model"].startswith(("ollama/", "ollama_chat/")):
+        from llm_router.toolkit.adapters.ollama import check_resident, resolve_main_model
+        kwargs["model"] = model = resolve_main_model(kwargs["model"], "providers.call_llm")  # LLM_ROUTER_LOCAL_MODEL
+        check_resident(model)   # raises LocalModelConflict -> ordinary local failure, router falls through
+    if kwargs["model"].startswith(("ollama/", "ollama_chat/")) and not kwargs.get("api_base"):
+        from llm_router.toolkit.adapters.ollama import get_local_model_url, url_for_model
+        if get_local_model_url():  # LLM_ROUTER_LOCAL_MODEL_URL: main local model -> its own server
+            kwargs["api_base"] = url_for_model(kwargs["model"])
     from llm_router import eligibility_routing as _er
     from llm_router import local_privacy
     # LC-12h: one predicate for the private paths (the pass-only text job and the secret door).
@@ -616,6 +624,14 @@ async def call_llm_stream_events(
     _quirk = get_quirk(provider_from_model(model))
     kwargs["model"] = _quirk.transform_model_name(kwargs["model"])
     kwargs = _quirk.transform_request(kwargs)
+    if kwargs["model"].startswith(("ollama/", "ollama_chat/")):
+        from llm_router.toolkit.adapters.ollama import check_resident, resolve_main_model
+        kwargs["model"] = model = resolve_main_model(kwargs["model"], "providers.call_llm")  # LLM_ROUTER_LOCAL_MODEL
+        check_resident(model)   # raises LocalModelConflict -> ordinary local failure, router falls through
+    if kwargs["model"].startswith(("ollama/", "ollama_chat/")) and not kwargs.get("api_base"):
+        from llm_router.toolkit.adapters.ollama import get_local_model_url, url_for_model
+        if get_local_model_url():  # LLM_ROUTER_LOCAL_MODEL_URL: main local model -> its own server
+            kwargs["api_base"] = url_for_model(kwargs["model"])
     from llm_router import eligibility_routing as _er
     from llm_router import local_privacy
     _private = private or local_privacy.private_dispatch_active()  # LC-12h: same refusals as call_llm()
