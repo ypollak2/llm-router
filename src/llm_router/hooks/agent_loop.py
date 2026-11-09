@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -452,6 +453,34 @@ def _parse_constrained(content: str) -> tuple[list[dict], str | None]:
     return [{"function": {"name": name, "arguments": args}}], None
 
 
+# Why the last run_agent_loop on THIS thread ended, for callers that must tell a
+# backend failure from a genuine empty answer (both return None). Per-thread
+# because llm_local_task runs the loop in a worker thread. See docs/bugs/AGENT-EMPTY-1.md.
+_LAST = threading.local()
+BACKEND_EMPTY_REPLY = "backend_empty_reply"
+BACKEND_EMPTY_MESSAGE = ("local backend returned an empty reply without done_reason "
+                         "(likely GPU out of memory / runner in error state)")
+
+
+def last_end_reason() -> str | None:
+    """End reason of the last ``run_agent_loop`` on this thread (None if unset)."""
+    return getattr(_LAST, "reason", None)
+
+
+def reset_last_end_reason() -> None:
+    _LAST.reason = None
+
+
+def _is_backend_empty_reply(result: dict, content: str, tool_calls: list,
+                            thinking: str = "") -> bool:
+    """Ollama 0.40 answers HTTP 200 with an empty assistant message and neither
+    ``done_reason`` nor ``eval_count`` when llama-server died ("Compute error",
+    GPU out of memory). A real finish always carries ``done_reason``."""
+    return (not tool_calls and not (content or "").strip()
+            and not (thinking or "").strip()
+            and "done_reason" not in result and "eval_count" not in result)
+
+
 def run_agent_loop(
     prompt: str,
     model: str,
@@ -494,6 +523,8 @@ def run_agent_loop(
     except Exception:                                        # noqa: BLE001
         pass
 
+    _LAST.reason = None
+    backend_retried = False
     messages = []
 
     if system_prompt:
@@ -647,6 +678,20 @@ def run_agent_loop(
                     ms=int((time.monotonic() - _t0) * 1000),
                     n_tool_calls=len(tool_calls), content=content,
                     thinking_len=len(thinking or ""))
+
+        if _is_backend_empty_reply(result, content, tool_calls, thinking):
+            _trace.emit("llm.error", iteration=iteration, error=BACKEND_EMPTY_MESSAGE)
+            # One retry (a model reload can clear it), only with budget to spare.
+            _left = None if deadline_s is None else deadline_s - (time.monotonic() - started)
+            if (not backend_retried and iteration < _MAX_ITERATIONS
+                    and (_left is None or _left > 5.0)):
+                backend_retried = True
+                _trace.emit("llm.retry", iteration=iteration, reason=BACKEND_EMPTY_REPLY)
+                continue
+            _LAST.reason = BACKEND_EMPTY_REPLY
+            _trace.emit("loop.end", reason=BACKEND_EMPTY_REPLY, iteration=iteration,
+                        tools_used=tools_used)
+            return None
 
         # Constrained decoding puts the call in `content` as schema JSON, not in
         # Ollama's `tool_calls` field. Tried before the repair shim because it is
