@@ -1,0 +1,1 @@
+Proxy ledger rows for local (Ollama) calls now carry `prefix_sha_sys`, `n_msgs`, `prefix_common_with_prev`, `appended_only` and `keep_alive`: hashes and counts only, to show whether consecutive turns are append-only so llama.cpp prefix reuse can work. Measurement only; no request is changed.
