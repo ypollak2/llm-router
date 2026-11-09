@@ -226,6 +226,7 @@ from __future__ import annotations
 import json
 import statistics
 import time
+from collections.abc import Iterable
 from pathlib import Path
 
 from llm_router import paths, state_files
@@ -324,25 +325,39 @@ def write_row(row: dict, path: Path | None = None) -> None:
         failopen.record("LR-FO-PROXY-LEDGER-WRITE", exc)
 
 
-def read_rows(path: Path | None = None, days: float | None = None) -> list[dict]:
+def read_rows(path: Path | None = None, days: float | None = None, *,
+              slim_before: float | None = None,
+              slim_keep: Iterable[str] = ()) -> list[dict]:
+    """The ledger rows, read one line at a time (never the whole file as one string).
+
+    ``days`` drops rows older than the window. ``slim_before`` keeps every row but reduces one whose
+    numeric ``ts`` is older than it to the keys in ``slim_keep`` (value copied, key present only when
+    the row had it): a caller that needs only a few fields of old history (a session's kind, the first
+    ``ts`` a key appeared) does not hold 100 MB of dicts. A row with no numeric ``ts`` is never slimmed."""
     target = path or ledger_path()
     cutoff = time.time() - days * 86400 if days else None
+    keep = tuple(slim_keep)
     rows: list[dict] = []
     try:
-        text = target.read_text(encoding="utf-8", errors="replace")
+        fh = target.open("r", encoding="utf-8", errors="replace")
     except OSError:
         return rows
-    for line in text.splitlines():
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        ts = row.get("ts")
-        # A row without a timestamp cannot be placed in a window: it is kept
-        # only when no window was asked for, never read as "time zero".
-        if cutoff is None or (isinstance(ts, (int, float)) and ts >= cutoff):
+    with fh:
+        for line in fh:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            ts = row.get("ts")
+            # A row without a timestamp cannot be placed in a window: it is kept
+            # only when no window was asked for, never read as "time zero".
+            if cutoff is not None and not (isinstance(ts, (int, float)) and ts >= cutoff):
+                continue
+            if (slim_before is not None and isinstance(ts, (int, float)) and not isinstance(ts, bool)
+                    and ts < slim_before):
+                row = {k: row[k] for k in keep if k in row}
             rows.append(row)
     return rows
 

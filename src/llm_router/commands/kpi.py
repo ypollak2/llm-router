@@ -2852,6 +2852,11 @@ def _judge_quality(days: float, now_ts: float, win: "_Window | None") -> dict | 
 
 # ── assembly ───────────────────────────────────────────────────────────────
 
+#: The only fields of a ledger row older than the scorecard window that anything reads (see compute_scorecard).
+_SCORECARD_OLD_KEYS = ("ts", "session_id", "session_kind", "tier_policy_version") + tuple(
+    dict.fromkeys(G3_FIELDS + G3_LATE_FIELDS))
+
+
 def compute_scorecard(days: int = 7, *, include_research: bool = False,
                       schema_since: float | None = None, now: float | None = None,
                       since_policy: str | None = None,
@@ -2876,7 +2881,14 @@ def compute_scorecard(days: int = 7, *, include_research: bool = False,
         days, now = win.days, until
     now_ts = time.time() if now is None else now
     allowed = _allowed_kinds(include_research)
-    all_rows = pl.read_rows()
+    # Rows older than the window are read slim (see _SCORECARD_OLD_KEYS): history is needed only for a session's
+    # stamped kind (KindIndex), the first ts each G3 key appeared (_g3_completeness, _g3_late_first_seen) and the
+    # first row of a tier-policy version (_o3_since_view). Every other consumer reads [window start, now] only.
+    # The margin keeps the 24 h liveness windows full. Row count and every ts are unchanged.
+    # days=0 (CLI `--days 0`) means "no cutoff" to several readers: nothing may be slimmed then.
+    slim_before = (None if (win is None and not days)
+                   else min(win.since if win is not None else now_ts - days * 86400.0, now_ts - 2 * 86400.0))
+    all_rows = pl.read_rows(slim_before=slim_before, slim_keep=_SCORECARD_OLD_KEYS)
     index = sk.KindIndex(all_rows)
     until_ts = None if win is None else win.until
     tool_sessions: dict[str, str] | None = {} if routing_detail else None   # filled by the same pass
