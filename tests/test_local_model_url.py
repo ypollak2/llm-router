@@ -531,3 +531,58 @@ def test_new_url_var_is_validated_like_the_old_one(monkeypatch, bad):
     from llm_router.toolkit.adapters.ollama import get_local_model_url
     monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL_URL", bad)
     assert (get_local_model_url() or "") == validate_ollama_url(bad)   # same verdict as LLM_ROUTER_OLLAMA_URL
+
+
+def test_session_start_warmup_uses_only_the_one_model(monkeypatch, one_model):
+    ss = _load_hook("session-start.py")
+    popen_calls = []
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda cmd, **k: popen_calls.append(cmd))
+    monkeypatch.setattr(ss, "_detached_spawn_disabled", lambda: False)
+    monkeypatch.setattr(ss, "_EDIT_WARMED_MODEL", None)
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_WARMUP", "on")
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_WARMUP_MODEL", "other-big:30b")
+    monkeypatch.setenv("OLLAMA_BASE_URL", SMALL)
+    _chat_capture(monkeypatch)
+    ss._warm_ollama_bg()
+    assert len(popen_calls) == 1
+    cmd = popen_calls[0]
+    assert f"{MAIN}/api/generate" in cmd
+    assert json.loads(cmd[cmd.index("-d") + 1])["model"] == ALLOWED
+
+
+def test_session_start_warmup_skipped_when_other_big_model_resident(monkeypatch, one_model):
+    ss = _load_hook("session-start.py")
+    popen_calls = []
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda cmd, **k: popen_calls.append(cmd))
+    monkeypatch.setattr(ss, "_detached_spawn_disabled", lambda: False)
+    monkeypatch.setattr(ss, "_EDIT_WARMED_MODEL", None)
+    _ps_server(monkeypatch, [], {"11434": [{"name": "other-big:30b", "size_vram": 20_000_000_000}]})
+    ss._warm_ollama_bg()
+    assert popen_calls == []
+
+
+def test_session_start_warmup_unset_unchanged(monkeypatch):
+    ss = _load_hook("session-start.py")
+    popen_calls = []
+    monkeypatch.setattr(ss.subprocess, "Popen", lambda cmd, **k: popen_calls.append(cmd))
+    monkeypatch.setattr(ss, "_detached_spawn_disabled", lambda: False)
+    monkeypatch.setattr(ss, "_EDIT_WARMED_MODEL", None)
+    monkeypatch.delenv("LLM_ROUTER_LOCAL_MODEL", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_WARMUP", "on")
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_WARMUP_MODEL", "mine:7b")
+    monkeypatch.setenv("OLLAMA_BASE_URL", SMALL)
+    ss._warm_ollama_bg()
+    cmd = popen_calls[0]
+    assert f"{SMALL}/api/generate" in cmd and json.loads(cmd[cmd.index("-d") + 1])["model"] == "mine:7b"
+
+
+@pytest.mark.parametrize("remote", ["http://192.168.1.50:11435", "https://gpu.example.com:11435", "http://10.0.0.7:11435"])
+def test_new_url_var_same_verdict_for_non_loopback_host(monkeypatch, remote):
+    from llm_router.config import validate_ollama_url
+    from llm_router.toolkit.adapters.ollama import get_local_model_url, get_ollama_url
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL_URL", remote)
+    got_new = get_local_model_url()
+    monkeypatch.setenv("LLM_ROUTER_OLLAMA_URL", remote)
+    got_old = get_ollama_url()
+    assert got_new == (validate_ollama_url(remote) or None)
+    assert got_new == got_old          # identical verdict (accepted as-is, privacy layers handle remote)
