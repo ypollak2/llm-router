@@ -379,6 +379,9 @@ _AGENT_ENV_LOCK = threading.RLock()
 def _run_loop_scoped(run_agent_loop, objective: str, model: str, root: Path,
                      budget_s: float, apply_writes: bool) -> str | None:
     with _AGENT_ENV_LOCK:
+        # LLM_ROUTER_LOCAL_MODEL resident guard: typed refusal (surfaces as the task's error), nothing sent.
+        from llm_router.toolkit.adapters import ollama as _ollama_ad
+        _ollama_ad.check_resident(_ollama_ad.resolve_main_model(model, "tools.local_task"))
         # Scoped to this call. The `propose` default is right for a hook that fires
         # on every prompt; a caller who submitted a task and named a workdir has
         # asked for the work to happen.

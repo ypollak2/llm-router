@@ -43,7 +43,9 @@ PROBE_PROMPT = (
 def list_installed_models() -> list[str]:
     """Return locally installed Ollama model names, or [] on failure."""
     try:
-        url = f"{_get_ollama_url().rstrip('/')}/api/tags"
+        from llm_router.toolkit.adapters.ollama import get_local_model_url
+        # The server the agent loop will call (LLM_ROUTER_LOCAL_MODEL_URL), else the default.
+        url = f"{(get_local_model_url() or _get_ollama_url()).rstrip('/')}/api/tags"
         with urllib.request.urlopen(url, timeout=10) as response:
             payload = json.loads(response.read().decode("utf-8"))
 

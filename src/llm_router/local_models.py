@@ -89,6 +89,8 @@ def _configured_classifier_bases() -> frozenset[str]:
     """Bare names of the models the classifier path is configured to use (explicit role)."""
     import os
 
+    if os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip():
+        return frozenset()   # the classifier IS the one local model: it must stay a generator
     out = set()
     for v in (os.environ.get("LLM_ROUTER_CLASSIFIER_MODEL", ""), os.environ.get("LLM_ROUTER_DECISION_MODEL", "")):
         v = v.strip().lower()

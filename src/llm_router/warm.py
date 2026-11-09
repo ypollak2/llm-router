@@ -93,8 +93,9 @@ def cold_budget_s() -> float:
 
 
 def _base_url() -> str:
-    from llm_router.hooks.direct_executor import _get_ollama_url
-    return _get_ollama_url().rstrip("/")
+    # The zero-Claude edit model is the MAIN local model: LLM_ROUTER_LOCAL_MODEL_URL when set.
+    from llm_router.hooks.direct_executor import _main_model_url
+    return _main_model_url().rstrip("/")
 
 
 def ollama_ps(timeout: float = _PS_TIMEOUT_S) -> list[str] | None:

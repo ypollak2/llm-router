@@ -209,11 +209,18 @@ def mode() -> str:
 
 def backend() -> str:
     """``chat`` (default: /api/chat, prompt v6) or ``systemone`` (decision model, /v1/systemone)."""
+    from llm_router.toolkit.adapters.ollama import get_local_model
+    if get_local_model():
+        # One local model: /v1/systemone belongs to the decision model (nimble), which a general model does not answer.
+        return "chat"
     raw = os.environ.get("LLM_ROUTER_CLASSIFIER_BACKEND", "").strip().lower()
     return raw if raw in BACKENDS else "chat"
 
 
 def _model() -> str:
+    from llm_router.toolkit.adapters.ollama import get_local_model
+    if get_local_model():   # strictly one local model: the classifier uses it too
+        return get_local_model()
     if backend() == "systemone":
         from llm_router import decision_classifier
 
@@ -248,6 +255,9 @@ def _timeout_s() -> float:
 
 
 def _base_url() -> str:
+    from llm_router.toolkit.adapters.ollama import get_local_model, get_local_model_url
+    if get_local_model() and get_local_model_url():
+        return get_local_model_url()
     return os.environ.get("LLM_ROUTER_OLLAMA_URL", "").strip() or "http://localhost:11434"
 
 

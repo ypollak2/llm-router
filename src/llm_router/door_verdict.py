@@ -131,6 +131,8 @@ class DoorDecision:
 
 
 def _decision_model_configured() -> bool:
+    if os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip():
+        return False   # one local model: no decision model (nimble) is run; mode is off unless set explicitly
     return (os.environ.get("LLM_ROUTER_CLASSIFIER_BACKEND", "").strip().lower() == "systemone"
             and bool(os.environ.get("LLM_ROUTER_DECISION_MODEL", "").strip()))
 

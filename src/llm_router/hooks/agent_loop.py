@@ -390,6 +390,8 @@ _MAX_ITERATIONS = 15  # Safety cap — prevent infinite loops
 _OLLAMA_URL_DEFAULT = _ollama.OLLAMA_URL_DEFAULT
 _validated_ollama_url = _ollama.validated_ollama_url
 _get_ollama_url = _ollama.get_ollama_url
+_url_for_model = _ollama.url_for_model
+_resolve_main_model = _ollama.resolve_main_model
 
 
 # Tool names the model may call — used to spot a tool call the model dumped
@@ -522,7 +524,14 @@ def run_agent_loop(
 
     messages.append({"role": "user", "content": prompt})
 
-    ollama_url = _get_ollama_url()
+    model = _resolve_main_model(model, "hooks.agent_loop")  # LLM_ROUTER_LOCAL_MODEL: the one allowed model
+    try:
+        _ollama.check_resident(model)
+    except _ollama.LocalModelConflict as _exc:
+        _trace.emit("loop.end", reason="local_model_conflict", error=str(_exc), tools_used=0)
+        _ollama.record_refusal(_exc)
+        return None
+    ollama_url = _url_for_model(model)  # LLM_ROUTER_LOCAL_MODEL_URL for the main model
     tools_used = 0  # How many tool calls actually executed across the whole loop.
 
     # A model that asks the identical question twice will not answer it

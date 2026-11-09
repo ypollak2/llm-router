@@ -338,6 +338,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_OLLAMA_THINK": ("llm_router", "providers.py", 1),
     "LLM_ROUTER_OLLAMA_TIMEOUT": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_OLLAMA_URL": ("llm_router", "hooks/agent_loop.py", 3),
+    # One big local model on its own Ollama server; small models keep LLM_ROUTER_OLLAMA_URL.
+    # Single-big-local-model limit: the one allowed model, and the VRAM above which another resident model blocks.
+    "LLM_ROUTER_LOCAL_MODEL": ("llm_router", "toolkit/adapters/ollama.py", 1),
+    "LLM_ROUTER_LOCAL_MAX_OTHER_VRAM_GB": ("llm_router", "toolkit/adapters/ollama.py", 1),
+    "LLM_ROUTER_LOCAL_MODEL_URL": ("llm_router", "toolkit/adapters/ollama.py", 1),
     "LLM_ROUTER_OLLAMA_WARMUP": ("llm_router", "hooks/session-start.py", 1),
     "LLM_ROUTER_OLLAMA_WATCHDOG": ("llm_router", "ollama_watchdog.py", 1),
     "LLM_ROUTER_OLLAMA_WATCHDOG_FAIL_N": ("llm_router", "ollama_watchdog.py", 1),
