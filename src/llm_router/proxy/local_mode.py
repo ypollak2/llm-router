@@ -131,7 +131,10 @@ PIN_CLAUDE = "claude"
 
 #: Reasons that make a conversation permanently Claude's (the local path
 #: cannot ever take it back). Transient ones (kill switch, backend, breaker)
-#: forward the step only.
+#: forward the step only for a conversation already pinned local. A NEW
+#: conversation (no pin yet) refused for ANY reason except a veto is pinned
+#: to Claude, because its prompt cache starts there (proxy/server.py,
+#: ``pinned is None`` branch of the refusal path).
 STRUCTURAL_REASONS = frozenset({REASON_MEDIA, REASON_PROMPT_CAP})
 
 
