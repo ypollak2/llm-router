@@ -55,6 +55,7 @@ from typing import Callable, Protocol
 
 from llm_router import local_models
 from llm_router.local_context_guard import DEFAULT_RESERVED_OUTPUT_TOKENS, check_overflow, check_truncated, effective_window, estimate_payload_tokens
+from llm_router.proxy import prefix_hash
 from llm_router.proxy.steps import STEP_CONTINUATION, non_system, prev_tools
 from llm_router.proxy.translate import from_ollama, to_ollama
 
@@ -325,6 +326,7 @@ class OllamaBackend:
             return payload
 
         payload = await asyncio.to_thread(_prepare) if self.offload_cpu else _prepare()
+        prefix_obs = prefix_hash.observe_payload(payload)  # hashes only; None on failure
         objs: list[dict] = []
         first_token_s = None
         loop = asyncio.get_running_loop()
@@ -369,6 +371,7 @@ class OllamaBackend:
                 site="proxy.OllamaBackend", model=self.model,
             )
 
+        usage["prefix_obs"] = prefix_obs  # popped by the proxy into flat ledger fields
         usage["context_truncated"] = await asyncio.to_thread(_truncated) if self.offload_cpu else _truncated()
         message, err = from_ollama(data, body)
         return message, err, usage

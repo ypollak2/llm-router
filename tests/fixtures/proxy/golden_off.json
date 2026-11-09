@@ -158,6 +158,7 @@
      "input_tokens": 3,
      "output_tokens": 42
     },
+    "appended_only": null,
     "auth": "oauth",
     "authority": "route",
     "backend_usage": {
@@ -196,17 +197,21 @@
     "inventory_sig": null,
     "is_first_call": false,
     "is_main_thread": false,
+    "keep_alive": 600,
     "lane_a_conf": null,
     "lane_a_reason": "off",
     "mixed_history": false,
     "model": "ollama/qwen-golden:1",
     "msg_id": "msg_upstream01",
+    "n_msgs": 6,
     "okf": {
      "injected": false,
      "reason": "no_scope"
     },
     "policy_id": "none",
     "policy_stage": "none",
+    "prefix_common_with_prev": null,
+    "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
@@ -318,6 +323,7 @@
      "input_tokens": 3,
      "output_tokens": 42
     },
+    "appended_only": null,
     "auth": "oauth",
     "authority": "route",
     "backend_usage": {
@@ -356,17 +362,21 @@
     "inventory_sig": null,
     "is_first_call": false,
     "is_main_thread": false,
+    "keep_alive": 600,
     "lane_a_conf": null,
     "lane_a_reason": "off",
     "mixed_history": false,
     "model": "ollama/qwen-golden:1",
     "msg_id": "msg_upstream01",
+    "n_msgs": 6,
     "okf": {
      "injected": false,
      "reason": "no_scope"
     },
     "policy_id": "none",
     "policy_stage": "none",
+    "prefix_common_with_prev": null,
+    "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
@@ -634,6 +644,7 @@
      "input_tokens": 0,
      "output_tokens": 0
     },
+    "appended_only": null,
     "auth": "oauth",
     "authority": "route",
     "backend_usage": {
@@ -671,17 +682,21 @@
     "inventory_sig": null,
     "is_first_call": false,
     "is_main_thread": false,
+    "keep_alive": 600,
     "lane_a_conf": null,
     "lane_a_reason": "off",
     "mixed_history": false,
     "model": "ollama/qwen-golden:1",
     "msg_id": "msg_lr<1>",
+    "n_msgs": 6,
     "okf": {
      "injected": false,
      "reason": "no_scope"
     },
     "policy_id": "none",
     "policy_stage": "none",
+    "prefix_common_with_prev": null,
+    "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
@@ -742,6 +757,7 @@
      "input_tokens": 0,
      "output_tokens": 0
     },
+    "appended_only": null,
     "auth": "oauth",
     "authority": "route",
     "backend_usage": {
@@ -779,17 +795,21 @@
     "inventory_sig": null,
     "is_first_call": false,
     "is_main_thread": false,
+    "keep_alive": 600,
     "lane_a_conf": null,
     "lane_a_reason": "off",
     "mixed_history": false,
     "model": "ollama/qwen-golden:1",
     "msg_id": "msg_lr<1>",
+    "n_msgs": 6,
     "okf": {
      "injected": false,
      "reason": "no_scope"
     },
     "policy_id": "none",
     "policy_stage": "none",
+    "prefix_common_with_prev": null,
+    "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
@@ -851,6 +871,7 @@
      "input_tokens": 3,
      "output_tokens": 42
     },
+    "appended_only": null,
     "auth": "oauth",
     "authority": "route",
     "backend_usage": {
@@ -889,17 +910,21 @@
     "inventory_sig": null,
     "is_first_call": false,
     "is_main_thread": false,
+    "keep_alive": 600,
     "lane_a_conf": null,
     "lane_a_reason": "off",
     "mixed_history": false,
     "model": "ollama/qwen-golden:1",
     "msg_id": "msg_upstream01",
+    "n_msgs": 6,
     "okf": {
      "injected": false,
      "reason": "no_scope"
     },
     "policy_id": "none",
     "policy_stage": "none",
+    "prefix_common_with_prev": null,
+    "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
@@ -1275,6 +1300,7 @@
      "input_tokens": 0,
      "output_tokens": 0
     },
+    "appended_only": null,
     "auth": "oauth",
     "authority": "route",
     "backend_usage": {
@@ -1312,17 +1338,21 @@
     "inventory_sig": null,
     "is_first_call": false,
     "is_main_thread": false,
+    "keep_alive": 600,
     "lane_a_conf": null,
     "lane_a_reason": "off",
     "mixed_history": false,
     "model": "ollama/qwen-golden:1",
     "msg_id": "msg_lr<1>",
+    "n_msgs": 6,
     "okf": {
      "injected": false,
      "reason": "no_scope"
     },
     "policy_id": "none",
     "policy_stage": "none",
+    "prefix_common_with_prev": null,
+    "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
@@ -1364,6 +1394,7 @@
      "input_tokens": 3,
      "output_tokens": 42
     },
+    "appended_only": true,
     "auth": "oauth",
     "authority": "route",
     "backend_usage": {
@@ -1402,17 +1433,21 @@
     "inventory_sig": null,
     "is_first_call": false,
     "is_main_thread": false,
+    "keep_alive": 600,
     "lane_a_conf": null,
     "lane_a_reason": "off",
     "mixed_history": false,
     "model": "ollama/qwen-golden:1",
     "msg_id": "msg_upstream01",
+    "n_msgs": 6,
     "okf": {
      "injected": false,
      "reason": "no_scope"
     },
     "policy_id": "none",
     "policy_stage": "none",
+    "prefix_common_with_prev": 6,
+    "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"
@@ -1979,6 +2014,7 @@
      "input_tokens": 0,
      "output_tokens": 0
     },
+    "appended_only": null,
     "auth": "oauth",
     "authority": "route",
     "backend_usage": {
@@ -2016,17 +2052,21 @@
     "inventory_sig": null,
     "is_first_call": false,
     "is_main_thread": false,
+    "keep_alive": 600,
     "lane_a_conf": null,
     "lane_a_reason": "off",
     "mixed_history": false,
     "model": "ollama/qwen-golden:1",
     "msg_id": "msg_lr<1>",
+    "n_msgs": 6,
     "okf": {
      "injected": false,
      "reason": "no_scope"
     },
     "policy_id": "none",
     "policy_stage": "none",
+    "prefix_common_with_prev": null,
+    "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
     "prev_tools": [
      "Edit"

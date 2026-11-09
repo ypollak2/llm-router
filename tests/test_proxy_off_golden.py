@@ -305,6 +305,14 @@ def _save(name: str, record) -> None:
     GOLDEN.write_text(json.dumps(dict(sorted(data.items())), indent=1, sort_keys=True) + "\n")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_prefix_tracker():
+    """The prefix tracker is process-wide; a case must not see the previous case's turn."""
+    from llm_router.proxy import prefix_hash
+
+    prefix_hash.TRACKER._last.clear()
+
+
 # serve_env: unset (the default) and an explicit "off" must both be today's behaviour.
 @pytest.mark.parametrize("serve_env", [None, "off"])
 @pytest.mark.parametrize("name", sorted(CASES))

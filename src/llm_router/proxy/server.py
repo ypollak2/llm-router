@@ -61,7 +61,7 @@ from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_key, shadow_frontier
 from llm_router import prefixes as user_prefixes
-from llm_router.proxy import cls_decide, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context
+from llm_router.proxy import cls_decide, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context, prefix_hash
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -155,6 +155,17 @@ def validate_upstream(url: str) -> str:
     if parts.scheme in ("http", "https") and parts.hostname in ("127.0.0.1", "localhost", "::1"):
         return url.rstrip("/")
     raise ValueError(f"refusing upstream {url!r}: only {ANTHROPIC_UPSTREAM} or a loopback address")
+
+
+def _note_prefix(row: dict, body: dict, usage: dict | None) -> None:
+    """Move the backend's prefix observation into flat ledger fields (prefix_hash). Never raises."""
+    try:
+        obs = usage.pop("prefix_obs", None) if isinstance(usage, dict) else None
+        if obs:
+            row.update(prefix_hash.TRACKER.fields(
+                conversation_key(body, row.get("session_id")), obs))
+    except Exception:  # noqa: BLE001 - measurement only
+        pass
 
 
 def identity_fields(session_id: str | None) -> dict:
@@ -574,6 +585,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 raise asyncio.TimeoutError
             message, err, backend_usage = await asyncio.wait_for(
                 backend.complete(send, left), timeout=left)
+            _note_prefix(row, body, backend_usage)
             row["backend_usage"] = backend_usage
             if err:
                 reason = "validation"
