@@ -82,7 +82,6 @@ from llm_router.proxy.backends import (
     tool_capable,
 )
 from llm_router.local_context_guard import ContextOverflow
-from llm_router.toolkit.adapters.ollama import LocalModelConflict
 from llm_router.proxy.loop_guard import (
     DEFAULT_MAX_CONSECUTIVE,
     DEFAULT_REPEAT_WINDOW,
@@ -331,6 +330,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     is the gate's breaker."""
     import httpx
     from starlette.applications import Starlette
+    # Imported here, not at module level: the Ollama adapter pulls in llm_router.classify (via engine), which must
+    # load at build_app, not at import (tests/test_p09e_decision_work.py pins that).
+    from llm_router.toolkit.adapters.ollama import LocalModelConflict
     from starlette.requests import Request
     from starlette.responses import Response, StreamingResponse
     from starlette.routing import Route
