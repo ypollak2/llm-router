@@ -4,7 +4,7 @@ status: fixed in `fix/agent-loop-empty-backend-reply`
 ---
 ## AGENT-EMPTY-1. A failed Ollama runner's empty 200 reply was taken as the model's final answer
 
-- **Symptom (2026-11-09, Ollama logs).** GPU out of memory: llama-server logged "Compute error" and Ollama 0.40 still
+- **Symptom (2026-11-09, n=1 incident, source PR #863 and its Ollama server log).** GPU out of memory: llama-server logged "Compute error" and Ollama 0.40 still
   answered HTTP 200 on `/api/chat` with `{"message":{"role":"assistant","content":""},"done":true}` and no `done_reason`
   or `eval_count`. The trace read `llm.response n_tool_calls=0 content=''` then `loop.end reason=final_text_without_any_tool_call`;
   `llm_local_task` reported an empty report with no error ("returned nothing after 11 s").
