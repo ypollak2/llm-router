@@ -271,7 +271,6 @@ def describe_image(path: str, model: str, timeout: int = 120) -> str | None:
         }],
     }).encode()
     try:
-        from llm_router.hooks.agent_loop import _get_ollama_url
         _oa.check_resident(model)
         request = urllib.request.Request(
             f"{_oa.url_for_model(model).rstrip('/')}/api/chat",

@@ -89,7 +89,7 @@ def test_agent_loop_hits_the_right_server(monkeypatch, tmp_path, local_url, expe
     monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL_URL", local_url)
     urls: list[str] = []
     _recorder(monkeypatch, urls)
-    out = agent_loop.run_agent_loop(prompt="hi", model="qwen3.6:35b-a3b-coding", project_root=tmp_path)
+    agent_loop.run_agent_loop(prompt="hi", model="qwen3.6:35b-a3b-coding", project_root=tmp_path)
     assert urls, "no request was made"
     chats = [u for u in urls if u.endswith("/api/chat")]
     assert chats and all(u.startswith(expected) for u in chats), urls
