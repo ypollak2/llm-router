@@ -54,7 +54,8 @@ def test_system_or_tools_change_breaks_append_only():
 
 def test_conversations_are_independent_and_lru_bounded():
     t = ph.PrefixTracker(max_conversations=2)
-    _f(t, "a", [S, U1]); _f(t, "b", [S, U1]); _f(t, "c", [S, U1])
+    for k in ("a", "b", "c"):
+        _f(t, k, [S, U1])
     assert len(t._last) == 2
     assert _f(t, "a", [S, U1])["appended_only"] is None  # evicted, so unknown
     assert _f(t, "c", [S, U1, A1])["appended_only"] is True
