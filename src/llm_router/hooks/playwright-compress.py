@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 7
+# llm_router-hook-version: 8
 """PostToolUse hook — compress Playwright page snapshots via cheap LLM.
 
 After every browser_snapshot call:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 45
+# llm_router-hook-version: 46
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:

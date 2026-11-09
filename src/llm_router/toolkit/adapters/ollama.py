@@ -264,7 +264,11 @@ def _check_resident(model: str | None = None) -> None:
             name = str(row.get("name") or row.get("model") or "")
             if not name or _same_name(name, allowed):
                 continue
-            size_gb = float(row.get("size_vram") or 0) / 1e9
+            raw = row.get("size_vram")
+            if raw is None:  # unknown size: not read as 0 GB; logged and not blocking, like an unreachable server
+                _log.info("resident guard: %s on %s reports no size_vram; not blocking", name, url)
+                continue
+            size_gb = float(raw) / 1e9
             if size_gb > limit:
                 raise LocalModelConflict(name, size_gb, url, allowed, limit)
 

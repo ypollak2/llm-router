@@ -511,11 +511,12 @@ async def _is_loaded(model: str, budget: float) -> bool:
 async def _warm(model: str) -> None:
     if _base_refused():
         return
-    try:
-        from llm_router.toolkit.adapters.ollama import check_resident
-        await asyncio.to_thread(check_resident, model)   # another big model resident: do not load this one
-    except Exception:  # noqa: BLE001 - LocalModelConflict: stay cold, rules answer
-        return
+    from llm_router.toolkit.adapters.ollama import check_resident, get_local_model
+    if get_local_model():   # limit unset: check_resident is a no-op, and a thread hop would only delay the warm-up
+        try:
+            await asyncio.to_thread(check_resident, model)   # another big model resident: do not load this one
+        except Exception:  # noqa: BLE001 - LocalModelConflict: stay cold, rules answer
+            return
     if backend() == "systemone":
         # A decision model refuses /api/generate and /api/chat ("does not support generate"),
         # so it loads only through its own endpoint; any state works, it is not cached.
