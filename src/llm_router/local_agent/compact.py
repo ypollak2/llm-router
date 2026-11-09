@@ -284,6 +284,8 @@ def ollama_embedder(client, base_url: str, model: str, keep_alive: str | int = "
     url = base_url.rstrip("/") + "/api/embed"
 
     async def embed(texts: list[str]) -> list[list[float]]:
+        from llm_router.toolkit.adapters.ollama import ensure_fits
+        await asyncio.to_thread(ensure_fits, model, base_url.rstrip("/"), "local_agent.compact.embed")
         r = await client.post(url, json={"model": model, "input": texts, "keep_alive": keep_alive},
                               timeout=30.0)
         r.raise_for_status()

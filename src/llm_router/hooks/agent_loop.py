@@ -619,10 +619,20 @@ def run_agent_loop(
             # results and never accounts for tool-definition JSON size. See
             # local_context_guard module docstring.
             from llm_router.pack_overflow import PayloadPack
+            # With LLM_ROUTER_LOCAL_MODEL set there is ONE allowed model: an overflow must never swap to another.
             pack = PayloadPack(payload, num_ctx=_ctx, base_url=ollama_url, model=model,
-                               site="hooks.agent_loop")
+                               site="hooks.agent_loop", allow_model_swap=not _ollama.get_local_model())
             payload = pack.trim_to()
             # A bigger-window swap changes the model and window for this and later calls.
+            if pack.model != model:
+                # The swapped-to model is a new load: it goes through the memory guard before anything is sent.
+                try:
+                    _ollama.ensure_fits(pack.model, ollama_url, "hooks.agent_loop.overflow_swap")
+                except _ollama.LocalModelConflict as _exc:
+                    _trace.emit("loop.end", reason="local_model_conflict", error=str(_exc), tools_used=tools_used)
+                    _ollama.record_refusal(_exc)
+                    _LAST.reason, _LAST.detail = LOCAL_MODEL_CONFLICT, str(_exc)
+                    return None
             model, _ctx = pack.model, pack.num_ctx
             check_overflow(payload, num_ctx=_ctx, base_url=ollama_url, model=model,
                            site="hooks.agent_loop")

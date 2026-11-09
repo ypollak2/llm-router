@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 46
+# llm_router-hook-version: 47
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1823,14 +1823,18 @@ def _warm_ollama_bg() -> None:
     try:
         from llm_router.toolkit.adapters import ollama as _oa
         if _oa.get_local_model():
-            # Strictly one local model: WARMUP_MODEL / discovery are overridden, the warm-up goes to that
-            # model's server and is skipped when another big model is resident (never load a second one).
+            # Strictly one local model: WARMUP_MODEL / discovery are overridden and the warm-up goes to that
+            # model's server (never load a second one).
             model, base_url = _oa.get_local_model(), _oa.main_url().rstrip("/")
-            _oa.check_resident(model)
-    except Exception:  # noqa: BLE001
-        # A conflict, or any failure to apply the one-model rule while it is set: never fall
-        # through to WARMUP_MODEL at OLLAMA_BASE_URL (that would be a second model).
-        if os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip():
+        # Memory guard, with or without LLM_ROUTER_LOCAL_MODEL: no load that the machine's memory cannot hold
+        # (resident models + this one, and what the OS reports free). Runs before the detached curl.
+        _oa.ensure_fits(model, base_url, "session-start.warmup")
+    except Exception as _guard_exc:  # noqa: BLE001
+        # A refusal (LocalModelConflict / MemoryBudgetExceeded), or any failure to apply the one-model rule while
+        # it is set: never fall through to WARMUP_MODEL at OLLAMA_BASE_URL (that would be a second model).
+        # Without LLM_ROUTER_LOCAL_MODEL only a refusal skips the warm-up; an import or probe failure fails open.
+        if os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip() or type(_guard_exc).__name__ in (
+                "LocalModelConflict", "MemoryBudgetExceeded"):
             return
     payload = json.dumps({"model": model, "prompt": " ", "stream": False})
     if _detached_spawn_disabled():

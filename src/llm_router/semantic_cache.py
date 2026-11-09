@@ -449,6 +449,8 @@ def _get_embedding(text: str, base_url: str) -> list[float] | None:
     if _pass_only_text_job():
         return None  # LC-12g / LC-12h: defense in depth; the base may name another host
     try:
+        from llm_router.toolkit.adapters.ollama import ensure_fits
+        ensure_fits("nomic-embed-text", base_url.rstrip("/"), "semantic_cache.embedding")
         payload = json.dumps({"model": "nomic-embed-text", "prompt": text}).encode()
         req = urllib.request.Request(
             f"{base_url}/api/embeddings",

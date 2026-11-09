@@ -223,10 +223,9 @@ def warm_edit_model_bg(model: str | None = None) -> str | None:
         if not model:
             return None                                  # no local model discovered: nothing to warm
         from llm_router.toolkit.adapters import ollama as _oa
-        if _oa.get_local_model():
-            # Strictly one local model: never load it beside another big resident model.
-            # LocalModelConflict (or any failure here) lands in the except below: no warm-up.
-            _oa.check_resident(model)
+        # Memory guard (and, with LLM_ROUTER_LOCAL_MODEL, the one-model rule): never load this model beside
+        # others the machine cannot hold. A refusal (or any failure here) lands in the except below: no warm-up.
+        _oa.ensure_fits(model, _base_url(), "warm.edit_model")
         payload = json.dumps(warmup_payload(model))
         subprocess.Popen(
             [

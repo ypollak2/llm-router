@@ -180,6 +180,29 @@ class LocalModelConflict(RuntimeError):
             f"this router never unloads another server's model. Stop it with `ollama stop {resident}`.")
 
 
+class MemoryBudgetExceeded(LocalModelConflict):
+    """Loading ``model`` would put resident local models past what this machine's memory allows (typed, fail closed).
+
+    A :class:`LocalModelConflict`, so every caller that already falls through to the cloud on a conflict does
+    the same here. ``rule`` is ``"sum"`` (resident + target above total - reserve) or ``"free"`` (target above
+    what the OS reports free minus a small reserve).
+    """
+
+    kind = "memory_budget_exceeded"
+
+    def __init__(self, rule: str, model: str, url: str, need_gb: float, resident_gb: float, limit_gb: float,
+                 resident: str = "", allowed: str = ""):
+        self.rule, self.model, self.need_gb, self.resident_gb, self.limit_gb = rule, model, need_gb, resident_gb, limit_gb
+        self.resident, self.size_gb, self.url, self.allowed = resident, resident_gb, url, allowed
+        what = ("resident models + this one exceed total memory minus the reserve" if rule == "sum"
+                else "this model exceeds the memory the OS reports free minus the reserve")
+        RuntimeError.__init__(
+            self,
+            f"memory_budget_exceeded: loading {model} on {url} needs ~{need_gb:.1f} GB with {resident_gb:.1f} GB "
+            f"already resident (limit {limit_gb:.1f} GB; {what}). Not sending the request. "
+            f"Resident: {resident or 'none'}. Unload one with `ollama stop <model>`, or set LLM_ROUTER_MEM_GUARD=off.")
+
+
 _LAST = __import__("threading").local()
 
 
@@ -207,70 +230,245 @@ def _same_name(a: str, b: str) -> bool:
     return norm(a) == norm(b)
 
 
-_PS_CACHE: dict = {"at": 0.0, "key": None, "err": None}
+_GIB = 1024 ** 3
+_SMALL_RESERVE_GIB = 2.0      # rule (b): kept free on top of the target, for the OS and other apps
 _PS_TTL_S = 5.0
+# (model, base_url, settings...) -> (monotonic time, refusal or None). One entry per target, so a decision for
+# one model/server is never served for another (the old single-slot cache was keyed on the allowed model only).
+_PS_CACHE: dict = {}
+
+
+def mem_guard_enabled() -> bool:
+    """``LLM_ROUTER_MEM_GUARD=off`` (also 0/false/no) turns the whole memory guard off."""
+    return os.environ.get("LLM_ROUTER_MEM_GUARD", "").strip().lower() not in ("off", "0", "false", "no")
+
+
+def _headroom() -> float:
+    try:
+        value = float(os.environ.get("LLM_ROUTER_MEM_HEADROOM", "").strip())
+        return value if value >= 1.0 else 1.25
+    except ValueError:
+        return 1.25
+
+
+def _reserve_gib(total_gib: float) -> float:
+    try:
+        value = float(os.environ.get("LLM_ROUTER_MEM_RESERVE_GB", "").strip())
+        if value >= 0:
+            return value
+    except ValueError:
+        pass
+    return max(6.0, 0.20 * total_gib)
+
+
+def _evict_mode() -> bool:
+    """``LLM_ROUTER_MEM_ON_PRESSURE``: ``evict`` unloads a resident model to make room, ``refuse`` never does.
+    Unset: evict only when LLM_ROUTER_LOCAL_MODEL is set (there is then one model that must win), else refuse."""
+    raw = os.environ.get("LLM_ROUTER_MEM_ON_PRESSURE", "").strip().lower()
+    if raw in ("evict", "refuse"):
+        return raw == "evict"
+    return bool(get_local_model())
+
+
+def _bare(model: str) -> str:
+    return model.removeprefix("ollama_chat/").removeprefix("ollama/")
+
+
+def _fail_open(code: str, detail: str, exc: BaseException | None = None) -> None:
+    _log.info("memory guard: %s; not blocking", detail)
+    try:
+        from llm_router import failopen
+        failopen.record(code, exc, detail=detail)
+    except Exception:  # noqa: BLE001 - recording must never block a request
+        pass
+
+
+def _read_ps(url: str) -> list[dict]:
+    """``/api/ps`` rows of one server (raises when unreachable)."""
+    with urllib.request.urlopen(urllib.request.Request(f"{url}/api/ps"), timeout=1.5) as resp:  # nosec B310 — validated URL
+        rows = json.loads(resp.read()).get("models") or []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _tags_size(url: str, name: str) -> int | None:
+    """On-disk size in bytes of ``name`` from ``/api/tags``, or None."""
+    with urllib.request.urlopen(urllib.request.Request(f"{url}/api/tags"), timeout=1.5) as resp:  # nosec B310 — validated URL
+        rows = json.loads(resp.read()).get("models") or []
+    for row in rows:
+        if isinstance(row, dict) and _same_name(str(row.get("name") or row.get("model") or ""), name):
+            size = row.get("size")
+            if isinstance(size, (int, float)) and size > 0:
+                return int(size)
+    return None
+
+
+def _show_size(url: str, name: str) -> int | None:
+    """``size`` of ``name`` from ``/api/show`` when this Ollama reports one, else None."""
+    req = urllib.request.Request(f"{url}/api/show", data=json.dumps({"model": name}).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=1.5) as resp:  # nosec B310 — validated URL
+        size = json.loads(resp.read()).get("size")
+    return int(size) if isinstance(size, (int, float)) and size > 0 else None
+
+
+def _target_size(url: str, name: str) -> int | None:
+    for fetch in (_tags_size, _show_size):
+        try:
+            size = fetch(url, name)
+        except Exception as exc:  # noqa: BLE001
+            _log.info("memory guard: %s on %s failed (%s)", fetch.__name__, url, exc)
+            continue
+        if size:
+            return size
+    return None
+
+
+def _unload(url: str, name: str) -> bool:
+    """Ask the server at ``url`` to drop ``name`` now (``keep_alive`` 0). True when the request was accepted."""
+    body = json.dumps({"model": name, "keep_alive": 0, "prompt": ""}).encode()
+    req = urllib.request.Request(f"{url}/api/generate", data=body,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:  # nosec B310 — validated URL, no prompt text
+            resp.read()
+        _log.warning("memory guard: unloaded %s from %s to make room", name, url)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _log.info("memory guard: could not unload %s from %s (%s)", name, url, exc)
+        return False
+
+
+def _row_bytes(row: dict) -> float:
+    """Memory a loaded model holds. ``size`` includes the KV cache; ``size_vram`` is the fallback."""
+    for key in ("size", "size_vram"):
+        raw = row.get(key)
+        if isinstance(raw, (int, float)) and raw > 0:
+            return float(raw)
+    return 0.0
+
+
+def _machine_memory() -> tuple[float | None, float | None]:
+    """(total, free) in GiB from the host (hardware.probe: sysctl + vm_stat on macOS), None where unreadable."""
+    from llm_router import hardware
+    info = hardware.probe_cached(_PS_TTL_S)
+    return info.get("total_gb"), info.get("free_gb")
+
+
+def _servers(base_url: str) -> list[str]:
+    urls: list[str] = []
+    for u in (base_url, get_local_model_url(), get_ollama_url()):
+        if u and u.rstrip("/") not in urls:
+            urls.append(u.rstrip("/"))
+    return urls
+
+
+def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget: bool = True):
+    """One evaluation of both rules. Returns None (fits / fail open) or ``(refusal, victim)`` where victim is
+    ``(url, model)`` of the resident model eviction would drop, or None."""
+    by_url: dict[str, list[dict]] = {}
+    for url in _servers(base_url):
+        try:
+            by_url[url] = _read_ps(url)
+        except Exception as exc:  # noqa: BLE001
+            _fail_open("CHZ-FO-MEM-GUARD-PS", f"/api/ps on {url} unreachable ({purpose})", exc)
+    if not by_url:
+        return None
+    rows = [(url, r, str(r.get("name") or r.get("model") or "")) for url, rs in by_url.items() for r in rs]
+    rows = [t for t in rows if t[2]]
+    # (0) the one-model rule (#864): a model other than the allowed one above the VRAM limit.
+    if allowed:
+        limit = _max_other_vram_gb()
+        for url, row, rname in rows:
+            if _same_name(rname, allowed) or row.get("size_vram") is None:
+                continue
+            size_gb = float(row["size_vram"]) / 1e9
+            if size_gb > limit:
+                return LocalModelConflict(rname, size_gb, url, allowed, limit), (url, rname)
+    if not budget:      # LLM_ROUTER_MEM_GUARD=off: only the one-model rule above
+        return None
+    # (1) already resident on that server: no new load.
+    if any(url == base_url and _same_name(rname, name) for url, _r, rname in rows):
+        return None
+    size = _target_size(base_url, name)
+    if size is None:
+        _fail_open("CHZ-FO-MEM-GUARD-SIZE", f"size of {name} on {base_url} unknown ({purpose})")
+        return None
+    need = size * _headroom() / _GIB
+    resident = sum(_row_bytes(r) for _u, r, _n in rows) / _GIB
+    listing = ", ".join(f"{n} {_row_bytes(r) / _GIB:.1f} GB" for _u, r, n in rows)
+    try:
+        total, free = _machine_memory()
+    except Exception as exc:  # noqa: BLE001
+        total, free = None, None
+        _fail_open("CHZ-FO-MEM-GUARD-HOST", f"host memory unreadable ({purpose})", exc)
+    refusal = None
+    if total:
+        cap = total - _reserve_gib(total)
+        if resident + need > cap:      # (a) model-sum cap: independent of vm_stat noise
+            refusal = MemoryBudgetExceeded("sum", name, base_url, need, resident, cap, listing, allowed or "")
+    if refusal is None and free is not None:
+        room = free - _SMALL_RESERVE_GIB
+        if need > room:                # (b) catches other apps (docker, arenas) holding the RAM
+            refusal = MemoryBudgetExceeded("free", name, base_url, need, resident, max(room, 0.0), listing, allowed or "")
+    elif refusal is None and free is None and total is not None:
+        _fail_open("CHZ-FO-MEM-GUARD-HOST", f"free memory unreadable, only the sum cap applied ({purpose})")
+    if refusal is None:
+        return None
+    victims = [(url, rname, _row_bytes(r)) for url, r, rname in rows
+               if not _same_name(rname, name) and not (allowed and _same_name(rname, allowed))]
+    victim = max(victims, key=lambda v: v[2]) if victims else None
+    return refusal, (victim[0], victim[1]) if victim else None
+
+
+def ensure_fits(model: str | None, base_url: str | None = None, purpose: str = "", *,
+                deadline_s: float | None = None) -> None:
+    """THE choke point before any local model is loaded: raise :class:`LocalModelConflict` /
+    :class:`MemoryBudgetExceeded` when loading ``model`` on ``base_url`` would not fit.
+
+    Live state only: ``/api/ps`` on every known server (default URL, LLM_ROUTER_LOCAL_MODEL_URL, ``base_url``),
+    ``size`` summed (it includes the KV cache); target size from ``/api/tags`` (or ``/api/show``) times
+    LLM_ROUTER_MEM_HEADROOM; machine memory from sysctl/vm_stat via ``hardware``. Both must pass:
+    (a) resident + target <= total - reserve, (b) target <= free - 2 GiB. A target already resident on that
+    server is always allowed. Unreadable state fails open with a ``failopen`` row. Pressure with
+    ``LLM_ROUTER_MEM_ON_PRESSURE=evict`` unloads the largest other resident model (never the allowed model) and
+    re-checks once. Cached 5 s per (model, base_url). ``deadline_s`` is accepted for call-site compatibility and
+    never skips the check. ``LLM_ROUTER_MEM_GUARD=off`` disables the memory budget and eviction (the one-model rule
+    of LLM_ROUTER_LOCAL_MODEL stays).
+    """
+    allowed = get_local_model()
+    model = model or allowed
+    on = mem_guard_enabled()
+    if not model or (not on and not allowed):     # off keeps only the one-model rule (#864) of LLM_ROUTER_LOCAL_MODEL
+        return
+    name = _bare(model)
+    url = (base_url or url_for_model(model)).rstrip("/")
+    key = (name, url, allowed, on, _max_other_vram_gb(), _headroom(), _reserve_gib(0.0), _evict_mode(),
+           tuple(_servers(url)))
+    now = time.monotonic()
+    hit = _PS_CACHE.get(key)
+    if hit is not None and now - hit[0] < _PS_TTL_S:
+        if hit[1] is not None:
+            raise hit[1]
+        return
+    result = _verdict(name, url, allowed, purpose, budget=on)
+    if result is not None and on and _evict_mode() and result[1] is not None and _unload(*result[1]):
+        time.sleep(0.5)
+        try:
+            from llm_router import hardware
+            hardware.clear_cache()
+        except Exception:  # noqa: BLE001
+            pass
+        result = _verdict(name, url, allowed, purpose, budget=on)
+    refusal = result[0] if result is not None else None
+    _PS_CACHE[key] = (now, refusal)
+    if refusal is not None:
+        raise refusal
 
 
 def check_resident(model: str | None = None, *, deadline_s: float | None = None) -> None:
-    """Cached (~5 s) wrapper over :func:`_check_resident`; ``deadline_s`` is the caller's remaining budget in
-    seconds (the /api/ps reads are skipped when less than 1 s is left, so a hook never spends its budget here)."""
-    allowed = get_local_model()
-    if not allowed or _is_small_model(model):
-        return
-    key = (allowed, get_local_model_url(), get_ollama_url(), _max_other_vram_gb())
-    now = time.monotonic()
-    if _PS_CACHE["key"] == key and now - _PS_CACHE["at"] < _PS_TTL_S:
-        if _PS_CACHE["err"] is not None:
-            raise _PS_CACHE["err"]
-        return
-    if deadline_s is not None and deadline_s < 1.0:
-        _log.info("resident guard skipped: %.2fs of budget left", deadline_s)
-        return
-    try:
-        _check_resident(model)
-        _PS_CACHE.update(at=now, key=key, err=None)
-    except LocalModelConflict as exc:
-        _PS_CACHE.update(at=now, key=key, err=exc)
-        raise
-
-
-def _check_resident(model: str | None = None) -> None:
-    """Raise :class:`LocalModelConflict` if a model other than the allowed one is resident above the VRAM limit.
-
-    No-op when ``LLM_ROUTER_LOCAL_MODEL`` is unset, or when ``model`` is a small model (its path is exempt).
-    Reads ``/api/ps`` on the local-model URL and on the default Ollama URL. An unreachable server never
-    blocks (logged). Never unloads anything.
-    """
-    allowed = get_local_model()
-    if not allowed or _is_small_model(model):
-        return
-    limit = _max_other_vram_gb()
-    urls = []
-    for u in (get_local_model_url(), get_ollama_url()):
-        if u and u.rstrip("/") not in urls:
-            urls.append(u.rstrip("/"))
-    import json
-    import urllib.request
-    for url in urls:
-        try:
-            with urllib.request.urlopen(urllib.request.Request(f"{url}/api/ps"), timeout=1.5) as resp:  # nosec B310 — validated URL
-                rows = json.loads(resp.read()).get("models") or []
-        except Exception as exc:  # noqa: BLE001
-            _log.info("resident guard: /api/ps on %s unreachable (%s); not blocking", url, exc)
-            continue
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            name = str(row.get("name") or row.get("model") or "")
-            if not name or _same_name(name, allowed):
-                continue
-            raw = row.get("size_vram")
-            if raw is None:  # unknown size: not read as 0 GB; logged and not blocking, like an unreachable server
-                _log.info("resident guard: %s on %s reports no size_vram; not blocking", name, url)
-                continue
-            size_gb = float(raw) / 1e9
-            if size_gb > limit:
-                raise LocalModelConflict(name, size_gb, url, allowed, limit)
+    """Back-compat entry point for the call sites that only name a model: :func:`ensure_fits` on the server
+    that model is sent to."""
+    ensure_fits(model, None, "check_resident", deadline_s=deadline_s)
 
 
 _XML_FUNC_RE = re.compile(

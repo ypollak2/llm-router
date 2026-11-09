@@ -201,6 +201,8 @@ def probe_model(model: str, timeout: int = 90) -> bool:
             }],
         }).encode()
         try:
+            from llm_router.toolkit.adapters.ollama import ensure_fits
+            ensure_fits(model, _get_ollama_url().rstrip("/"), "vision_registry.probe")
             request = urllib.request.Request(
                 f"{_get_ollama_url().rstrip('/')}/api/chat",
                 data=body, headers={"Content-Type": "application/json"})

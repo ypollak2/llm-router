@@ -32,6 +32,10 @@ os.environ["LLM_ROUTER_HOME"] = _tempfile.mkdtemp(prefix="llm_router-suite-home-
 # runs next in the worker: it made test_synthetic_replay fail on CI only (violations
 # 127.0.0.1:11434 and ::1:11434). Tests of the poller start their own and need no switch.
 os.environ["LLM_ROUTER_MAP_REDISCOVERY"] = "off"
+# Memory guard (ensure_fits): off for the suite. It reads /api/ps, /api/tags and the host's memory before every local
+# load, which would hit whatever answers on :11434 and add requests that tests count on their fake Ollama servers.
+# tests/test_mem_guard.py turns it back on and fakes the servers and the host memory.
+os.environ["LLM_ROUTER_MEM_GUARD"] = "off"
 
 # F44: no test may leave a detached background child behind. Hooks run as real
 # subprocesses (they inherit this env) and used to start `semantic index`,

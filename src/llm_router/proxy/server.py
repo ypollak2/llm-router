@@ -82,6 +82,7 @@ from llm_router.proxy.backends import (
     tool_capable,
 )
 from llm_router.local_context_guard import ContextOverflow
+from llm_router.toolkit.adapters.ollama import LocalModelConflict
 from llm_router.proxy.loop_guard import (
     DEFAULT_MAX_CONSECUTIVE,
     DEFAULT_REPEAT_WINDOW,
@@ -639,6 +640,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             err, reason = str(exc), "local_context_overflow"
         except (asyncio.TimeoutError, httpx.TimeoutException):
             err, reason = f"exceeded step budget {cfg.step_budget_s}s", "budget_exceeded"
+        except LocalModelConflict as exc:
+            # The memory guard refused the load (nothing was sent). Not a backend fault: do not feed the breaker.
+            err, reason, backend_t0 = str(exc), "memory_budget", None
         except Exception as exc:  # noqa: BLE001 - any backend failure is a counted fallback
             err, reason = f"{type(exc).__name__}: {exc}", "backend_error"
         if backend_t0 is not None:

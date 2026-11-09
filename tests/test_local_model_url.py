@@ -25,8 +25,9 @@ def _env(monkeypatch):
     monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
     monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_MODEL", "llmr-classifier")
     monkeypatch.setenv("LLM_ROUTER_DECISION_MODEL", "nimble:9b")
+    monkeypatch.setenv("LLM_ROUTER_MEM_GUARD", "off")   # this file tests URL routing and the one-model rule; tests/test_mem_guard.py tests the budget
     from llm_router.toolkit.adapters import ollama as oa
-    oa._PS_CACHE.update(at=0.0, key=None, err=None)   # the resident-guard cache must not leak between tests
+    oa._PS_CACHE.clear()   # the resident-guard cache must not leak between tests
 
 
 class _R:
@@ -382,9 +383,9 @@ def one_model(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL_URL", MAIN)
     monkeypatch.delenv("LLM_ROUTER_SUMMARY_MODEL", raising=False)
     from llm_router.toolkit.adapters import ollama as oa
-    oa._PS_CACHE.update(at=0.0, key=None, err=None)
+    oa._PS_CACHE.clear()
     yield
-    oa._PS_CACHE.update(at=0.0, key=None, err=None)
+    oa._PS_CACHE.clear()
 
 
 def _chats(seen):
@@ -501,16 +502,16 @@ def test_classifier_is_guarded_and_on_the_one_server(monkeypatch, one_model):
         lc._post(ALLOWED, "text", 5.0)
 
 
-def test_resident_check_is_cached_and_honours_the_deadline(monkeypatch, one_model):
+def test_resident_check_is_cached_and_never_skips_on_a_short_deadline(monkeypatch, one_model):
     from llm_router.toolkit.adapters import ollama as oa
     seen = _chat_capture(monkeypatch)
     oa.check_resident(ALLOWED)
     oa.check_resident(ALLOWED)
     assert sum(1 for u, _ in seen if u.endswith("/api/ps")) == 2   # one read per server, second call cached
-    oa._PS_CACHE.update(at=0.0, key=None, err=None)
+    oa._PS_CACHE.clear()
     n = len(seen)
-    oa.check_resident(ALLOWED, deadline_s=0.2)                     # no budget: no /api/ps read
-    assert len(seen) == n
+    oa.check_resident(ALLOWED, deadline_s=0.2)                     # a short deadline never skips the check
+    assert len(seen) > n
 
 
 @pytest.mark.asyncio
