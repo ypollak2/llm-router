@@ -70,10 +70,12 @@ def _env(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_MEM_HEADROOM", "1.0")
     from llm_router.toolkit.adapters import ollama as oa
     oa._PS_CACHE.clear()
+    oa._RESERVED.clear()
     monkeypatch.setattr(oa.time, "sleep", lambda s: None)
     host(monkeypatch, 48.0, 40.0)
     yield
     oa._PS_CACHE.clear()
+    oa._RESERVED.clear()
 
 
 def host(monkeypatch, total_gib, free_gib):
@@ -484,3 +486,90 @@ def test_agent_loop_overflow_swap_to_a_model_that_does_not_fit_is_refused(monkey
     assert kwargs["allow_model_swap"] is True              # LLM_ROUTER_LOCAL_MODEL unset: a swap is still allowed...
     assert chats == []                                     # ...but it is a load, so it went through the guard
     assert "bigger:70b" in str(last_refusal())
+
+
+# -- review items -----------------------------------------------------------------------------------------------
+
+def test_two_models_checked_back_to_back_are_summed(monkeypatch):
+    from llm_router.toolkit.adapters import ollama as oa
+    Fake(monkeypatch, {"11434": [row("a:7b", 10)]}, {"one:20b": 20 * GB, "two:20b": 20 * GB})
+    host(monkeypatch, 48.0, 40.0)
+    oa.ensure_fits("one:20b", SMALL, "t")                 # 10 + ~18.6 <= 38.4
+    with pytest.raises(oa.MemoryBudgetExceeded):          # same /api/ps snapshot, but one:20b is loading: 10 + 18.6 + 18.6
+        oa.ensure_fits("two:20b", SMALL, "t")
+
+
+def test_reservation_ends_when_the_model_is_resident_or_expires(monkeypatch):
+    from llm_router.toolkit.adapters import ollama as oa
+    fake = Fake(monkeypatch, {"11434": []}, {"one:20b": 21 * GB, "two:20b": 21 * GB})
+    oa.ensure_fits("one:20b", SMALL, "t")
+    assert ("one:20b", SMALL) in oa._RESERVED
+    fake.ps["11434"] = [row("one:20b", 21)]               # now real: counted once, via /api/ps
+    oa._PS_CACHE.clear()
+    with pytest.raises(oa.MemoryBudgetExceeded):          # 19.6 + 19.6 = 39.1 > 38.4: not double counted (would be 57)
+        oa.ensure_fits("two:20b", SMALL, "t")
+    assert ("one:20b", SMALL) not in oa._RESERVED
+    oa._RESERVED[("ghost:9b", SMALL)] = (0.0, 40 * GB)    # expired entry is pruned and ignored
+    oa._PS_CACHE.clear()
+    oa._prune(oa.time.monotonic())
+    assert ("ghost:9b", SMALL) not in oa._RESERVED
+
+
+def test_evict_polls_until_the_unload_lands_and_never_caches_a_refusal_after_it(monkeypatch):
+    from llm_router.toolkit.adapters import ollama as oa
+    monkeypatch.setenv("LLM_ROUTER_MEM_ON_PRESSURE", "evict")
+    fake = Fake(monkeypatch, {"11434": [row("big:30b", 30)]}, {TARGET: 25 * GB})
+    state = {"n": 0}
+    real = fake._urlopen
+
+    def lagging(req, *a, **k):
+        url = getattr(req, "full_url", req)
+        if url.endswith("/api/generate"):                 # accepted, but the model leaves /api/ps only 3 polls later
+            fake.unloaded.append(("11434", "big:30b"))
+            return _R({"done": True})
+        if url.endswith("/api/ps"):
+            state["n"] += 1
+            if state["n"] > 5:
+                fake.ps["11434"] = []
+        return real(req, *a, **k)
+    monkeypatch.setattr(urllib.request, "urlopen", lagging)
+    oa.ensure_fits(TARGET, SMALL, "t")                    # allowed after polling
+    assert fake.unloaded == [("11434", "big:30b")]
+
+
+def test_refusal_after_a_successful_unload_is_not_cached(monkeypatch):
+    from llm_router.toolkit.adapters import ollama as oa
+    monkeypatch.setenv("LLM_ROUTER_MEM_ON_PRESSURE", "evict")
+    fake = Fake(monkeypatch, {"11434": [row("big:30b", 30), row("big2:30b", 5)]}, {TARGET: 40 * GB})
+    with pytest.raises(oa.MemoryBudgetExceeded):          # 40 GB cannot fit even after the unload
+        oa.ensure_fits(TARGET, SMALL, "t")
+    assert fake.unloaded and not any(v[1] is not None for v in oa._PS_CACHE.values())
+
+
+def test_cached_refusal_raises_a_fresh_exception(monkeypatch):
+    from llm_router.toolkit.adapters import ollama as oa
+    Fake(monkeypatch, {"11434": [row("a:30b", 40)]}, {TARGET: 25 * GB})
+    errs = []
+    for _ in range(2):
+        with pytest.raises(oa.MemoryBudgetExceeded) as ei:
+            oa.ensure_fits(TARGET, SMALL, "t")
+        errs.append(ei.value)
+    assert errs[0] is not errs[1] and str(errs[0]) == str(errs[1])
+
+
+def test_non_loopback_server_skips_the_budget_without_a_failopen_row(monkeypatch):
+    from llm_router import failopen
+    from llm_router.toolkit.adapters import ollama as oa
+    failopen.clear()
+    remote = "http://192.168.1.50:11434"
+    fake = Fake(monkeypatch, {"11434": [row("a:30b", 40)]}, {TARGET: 45 * GB})
+    oa.ensure_fits(TARGET, remote, "t")
+    assert not any(r["c"].startswith("CHZ-FO-MEM-GUARD") and "SIZE" in r["c"] for r in _failopen_rows())
+    assert not any(u.endswith("/api/tags") for u in fake.calls)
+
+
+def test_calibrate_completer_is_guarded(spy):
+    from llm_router.resolver.calibrate import OllamaCompleter
+    posted = []
+    reply = OllamaCompleter(SMALL, lambda *a: posted.append(a)).chat("ollama/m:7b", [{"role": "user", "content": "x"}])
+    assert reply.error and posted == [] and spy[0][2] == "resolver.calibrate.chat"

@@ -174,10 +174,12 @@ class LocalModelConflict(RuntimeError):
 
     def __init__(self, resident: str, size_gb: float, url: str, allowed: str, limit_gb: float):
         self.resident, self.size_gb, self.url = resident, size_gb, url
+        self.allowed, self.limit_gb = allowed, limit_gb
         super().__init__(
             f"local_model_conflict: {resident} is resident on {url} using {size_gb:.1f} GB of VRAM "
-            f"(limit for any model other than {allowed}: {limit_gb:g} GB). Not sending the request; "
-            f"this router never unloads another server's model. Stop it with `ollama stop {resident}`.")
+            f"(limit for any model other than {allowed}: {limit_gb:g} GB). Not sending the request. "
+            f"With eviction on (the default when LLM_ROUTER_LOCAL_MODEL is set; LLM_ROUTER_MEM_ON_PRESSURE) the "
+            f"router unloads it itself and re-checks; otherwise stop it with `ollama stop {resident}`.")
 
 
 class MemoryBudgetExceeded(LocalModelConflict):
@@ -236,6 +238,37 @@ _PS_TTL_S = 5.0
 # (model, base_url, settings...) -> (monotonic time, refusal or None). One entry per target, so a decision for
 # one model/server is never served for another (the old single-slot cache was keyed on the allowed model only).
 _PS_CACHE: dict = {}
+# (model, base_url) -> (expires monotonic, estimated bytes incl. headroom): loads approved but not yet in /api/ps.
+# Without it two different models checked inside the cache window both pass against the same /api/ps snapshot.
+_RESERVED: dict = {}
+_RESERVE_TTL_S = 120.0
+_EVICT_POLLS = 6
+_LOCK = __import__("threading").RLock()
+
+
+def _is_loopback(url: str) -> bool:
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
+def _prune(now: float) -> None:
+    with _LOCK:
+        for k in [k for k, v in _PS_CACHE.items() if now - v[0] >= _PS_TTL_S]:
+            del _PS_CACHE[k]
+        for k in [k for k, v in _RESERVED.items() if v[0] <= now]:
+            del _RESERVED[k]
+
+
+def _clone(exc: LocalModelConflict) -> LocalModelConflict:
+    """A fresh exception equal to a cached one (never re-raise one object: its traceback grows on each raise)."""
+    if isinstance(exc, MemoryBudgetExceeded):
+        return MemoryBudgetExceeded(exc.rule, exc.model, exc.url, exc.need_gb, exc.resident_gb, exc.limit_gb,
+                                    exc.resident, exc.allowed)
+    return LocalModelConflict(exc.resident, exc.size_gb, exc.url, exc.allowed, exc.limit_gb)
 
 
 def mem_guard_enabled() -> bool:
@@ -389,13 +422,26 @@ def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget
     # (1) already resident on that server: no new load.
     if any(url == base_url and _same_name(rname, name) for url, _r, rname in rows):
         return None
+    if not _is_loopback(base_url):
+        _log.debug("memory guard: %s is not a loopback server; its memory is not this machine's, budget skipped", base_url)
+        return None
+    rows = [t for t in rows if _is_loopback(t[0])]     # only this machine's servers count against this machine's RAM
     size = _target_size(base_url, name)
     if size is None:
         _fail_open("CHZ-FO-MEM-GUARD-SIZE", f"size of {name} on {base_url} unknown ({purpose})")
         return None
     need = size * _headroom() / _GIB
-    resident = sum(_row_bytes(r) for _u, r, _n in rows) / _GIB
+    now = time.monotonic()
+    _prune(now)
+    with _LOCK:
+        for (rname, rurl) in list(_RESERVED):      # a reserved load that /api/ps now shows has become real
+            if any(u == rurl and _same_name(n, rname) for u, _r, n in rows):
+                del _RESERVED[(rname, rurl)]
+        reserved = sum(v[1] for k, v in _RESERVED.items() if k != (name, base_url))
+    resident = (sum(_row_bytes(r) for _u, r, _n in rows) + reserved) / _GIB
     listing = ", ".join(f"{n} {_row_bytes(r) / _GIB:.1f} GB" for _u, r, n in rows)
+    if reserved:
+        listing += f", loading {reserved / _GIB:.1f} GB"
     try:
         total, free = _machine_memory()
     except Exception as exc:  # noqa: BLE001
@@ -413,6 +459,8 @@ def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget
     elif refusal is None and free is None and total is not None:
         _fail_open("CHZ-FO-MEM-GUARD-HOST", f"free memory unreadable, only the sum cap applied ({purpose})")
     if refusal is None:
+        with _LOCK:
+            _RESERVED[(name, base_url)] = (now + _RESERVE_TTL_S, size * _headroom())
         return None
     victims = [(url, rname, _row_bytes(r)) for url, r, rname in rows
                if not _same_name(rname, name) and not (allowed and _same_name(rname, allowed))]
@@ -431,7 +479,11 @@ def ensure_fits(model: str | None, base_url: str | None = None, purpose: str = "
     (a) resident + target <= total - reserve, (b) target <= free - 2 GiB. A target already resident on that
     server is always allowed. Unreadable state fails open with a ``failopen`` row. Pressure with
     ``LLM_ROUTER_MEM_ON_PRESSURE=evict`` unloads the largest other resident model (never the allowed model) and
-    re-checks once. Cached 5 s per (model, base_url). ``deadline_s`` is accepted for call-site compatibility and
+    re-checks (polling up to ~3 s, since Ollama defers an unload until in-flight requests finish). With
+    LLM_ROUTER_LOCAL_MODEL set the default is evict: any non-allowed model on ANY known server may be unloaded.
+    An approved load is reserved for 120 s (or until /api/ps shows it) so that two different models checked
+    back to back are summed rather than each judged against the same snapshot. The memory budget is skipped
+    for a non-loopback server (its RAM is not this machine's). Cached 5 s per (model, base_url). ``deadline_s`` is accepted for call-site compatibility and
     never skips the check. ``LLM_ROUTER_MEM_GUARD=off`` disables the memory budget and eviction (the one-model rule
     of LLM_ROUTER_LOCAL_MODEL stays).
     """
@@ -445,22 +497,30 @@ def ensure_fits(model: str | None, base_url: str | None = None, purpose: str = "
     key = (name, url, allowed, on, _max_other_vram_gb(), _headroom(), _reserve_gib(0.0), _evict_mode(),
            tuple(_servers(url)))
     now = time.monotonic()
+    _prune(now)
     hit = _PS_CACHE.get(key)
-    if hit is not None and now - hit[0] < _PS_TTL_S:
+    if hit is not None:
         if hit[1] is not None:
-            raise hit[1]
+            raise _clone(hit[1])
         return
     result = _verdict(name, url, allowed, purpose, budget=on)
+    evicted = False
     if result is not None and on and _evict_mode() and result[1] is not None and _unload(*result[1]):
-        time.sleep(0.5)
-        try:
-            from llm_router import hardware
-            hardware.clear_cache()
-        except Exception:  # noqa: BLE001
-            pass
-        result = _verdict(name, url, allowed, purpose, budget=on)
+        evicted = True
+        for _ in range(_EVICT_POLLS):      # Ollama defers an unload until in-flight requests finish: poll briefly
+            time.sleep(0.5)
+            try:
+                from llm_router import hardware
+                hardware.clear_cache()
+            except Exception:  # noqa: BLE001
+                pass
+            result = _verdict(name, url, allowed, purpose, budget=on)
+            if result is None:
+                break
     refusal = result[0] if result is not None else None
-    _PS_CACHE[key] = (now, refusal)
+    if refusal is None or not evicted:          # a refusal that follows our own unload may just be the unload lagging
+        with _LOCK:
+            _PS_CACHE[key] = (now, refusal)
     if refusal is not None:
         raise refusal
 

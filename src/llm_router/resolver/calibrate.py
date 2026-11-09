@@ -97,6 +97,12 @@ class OllamaCompleter:
             body["options"]["num_ctx"] = int(num_ctx)
         if tools:
             body["tools"] = tools
+        try:
+            from llm_router.toolkit.adapters.ollama import ensure_fits
+            ensure_fits(body["model"], self._base, "resolver.calibrate.chat")    # a calibration probe loads the model
+        except Exception as exc:  # noqa: BLE001 - LocalModelConflict / MemoryBudgetExceeded: a refused probe
+            if type(exc).__name__ in ("LocalModelConflict", "MemoryBudgetExceeded"):
+                return Reply(error=ERR_PROVIDER)
         data = self._post(f"{self._base}/api/chat", body, timeout)
         if not isinstance(data, dict) or "message" not in data:
             if isinstance(data, dict) and data.get("error"):
