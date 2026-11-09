@@ -527,7 +527,9 @@ async def llm_local_task(
         files are not covered, by design: hashing or stat-ing ignored trees such
         as node_modules and .venv is unbounded, and what lives there is build
         output, not the task's edits) and the model's own final ``report``. The report is the worker's
-        account of what it did and is never evidence on its own.
+        account of what it did and is never evidence on its own. Status
+        ``backend_error`` means the model server failed (an empty reply without
+        done_reason, likely GPU out of memory); ``error`` says so and there is no report.
     """
     if not model:
         try:

@@ -73,3 +73,21 @@ def test_local_task_surfaces_backend_error(monkeypatch, tmp_path):
     assert status == lt.BACKEND_ERROR
     assert report is None
     assert "done_reason" in error and "out of memory" in error
+
+
+def test_bad_reply_on_the_final_iteration_is_still_a_backend_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent_loop, "_MAX_ITERATIONS", 1)
+    calls = _fake(monkeypatch, [BAD])
+    out = agent_loop.run_agent_loop(prompt="p", model="m", project_root=tmp_path, read_only=True)
+    assert out is None
+    assert len(calls) == 1, "no iteration left to retry on"
+    assert agent_loop.last_end_reason() == agent_loop.BACKEND_EMPTY_REPLY
+
+
+def test_thinking_only_reply_without_metadata_is_not_a_backend_error(monkeypatch, tmp_path):
+    body = {"message": {"role": "assistant", "content": "", "thinking": "the answer is 4"}, "done": True}
+    calls = _fake(monkeypatch, [body])
+    out = agent_loop.run_agent_loop(prompt="p", model="m", project_root=tmp_path, read_only=True)
+    assert out == "the answer is 4"
+    assert agent_loop.last_end_reason() is None
+    assert len(calls) == 1
