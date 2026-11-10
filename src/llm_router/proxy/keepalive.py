@@ -25,6 +25,8 @@ ENV_AFTER = "LLM_ROUTER_PROXY_KEEPALIVE_AFTER_S"
 ENV_INTERVAL = "LLM_ROUTER_PROXY_KEEPALIVE_INTERVAL_S"
 DEFAULT_AFTER_S = 15.0
 DEFAULT_INTERVAL_S = 10.0
+#: Private row key set by the proxy's write() after a keepalive-committed row is written; never serialized.
+KEEPALIVE_WRITTEN = "_keepalive_written"
 PING = b'event: ping\ndata: {"type": "ping"}\n\n'
 
 
@@ -83,6 +85,12 @@ async def ping_until(task: asyncio.Task, row: dict):
         await asyncio.wait({task}, timeout=interval)
 
 
+async def _aclose(it) -> None:
+    close = getattr(it, "aclose", None)
+    if close is not None:
+        await close()
+
+
 async def relay_fallback(resp):
     """The chunks of a Claude fallback ``resp`` (a Starlette Response) inside the open 200 stream. A 200 is
     relayed as is (its SSE starts with the one message_start); anything else becomes one ``event: error``."""
@@ -100,11 +108,11 @@ async def relay_fallback(resp):
                 async for c in it:
                     yield c
             finally:
-                await it.aclose()   # runs relay()'s finally (upstream close + ledger row) at once on cancel
+                await _aclose(it)   # runs relay()'s finally (upstream close + ledger row) at once on cancel
         return
     if chunks is None:
         try:
             chunks = [c async for c in it]
         finally:
-            await it.aclose()
+            await _aclose(it)
     yield error_frame(status, b"".join(chunks))

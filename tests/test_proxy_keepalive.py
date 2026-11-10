@@ -194,26 +194,23 @@ async def test_streaming_flag_raises_size_cap(env, monkeypatch):  # noqa: F811
 # ── exactly one ledger row on every path ─────────────────────────────────────
 
 
+class NoIdBackend(SlowBackend):
+    """Returns a validated-looking reply without an id: try_serve raises KeyError outside its backend try."""
+
+    async def complete(self, body, timeout_s):
+        m, err, usage = await super().complete(body, timeout_s)
+        m.pop("id", None)
+        return m, err, usage
+
+
 @pytest.mark.timing
 async def test_local_raises_after_commit_writes_one_row_and_an_error_event(env, monkeypatch):  # noqa: F811
-    from llm_router.proxy import ledger as ledger_mod
-    from llm_router.proxy import server as ps
-
     _on(monkeypatch)
-    real, calls = ledger_mod.scrub_detail, []
-
-    def flaky(text):
-        calls.append(text)
-        if len(calls) == 1:                     # the first caller is try_serve's fallback bookkeeping
-            raise RuntimeError("boom")
-        return real(text)
-
-    monkeypatch.setattr(ps.ledger, "scrub_detail", flaky)
-    r = await _post(env.app(SlowBackend(_ollama("x"), 0.2, timeout=True)), _stream_body())
+    r = await _post(env.app(NoIdBackend(_ollama("x"), 0.2)), _stream_body())
     assert r.status_code == 200 and _events(r)[-1][0] == "error"
     assert _events(r)[-1][1]["error"]["type"] == "api_error" and "message_start" not in _names(r)
     (row,) = env.rows()
-    assert row["upstream_status"] == 500 and "RuntimeError" in row["detail"] and row["committed_early"] is True
+    assert row["upstream_status"] == 500 and "KeyError" in row["detail"] and row["committed_early"] is True
 
 
 @pytest.mark.timing
@@ -257,3 +254,58 @@ async def test_client_disconnect_during_pings_writes_one_row(env, monkeypatch): 
     assert len([m for m in sent if m.get("body") == keepalive.PING]) >= 2
     (row,) = env.rows()
     assert row["detail"] == "client_disconnected" and row["committed_early"] is True and row["keepalive_pings"] >= 2
+
+
+def _disconnect_scope(body: dict):
+    raw = json.dumps(body).encode()
+    headers = [(b"authorization", b"Bearer sk-ant-oat01-" + b"Zq9" * 20), (b"anthropic-version", b"2023-06-01"),
+               (b"content-type", b"application/json"), (b"content-length", str(len(raw)).encode())]
+    return raw, {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+                 "scheme": "http", "path": "/v1/messages", "raw_path": b"/v1/messages", "query_string": b"",
+                 "headers": headers, "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8787)}
+
+
+@pytest.mark.timing
+async def test_client_disconnect_during_fallback_relay_writes_one_row_and_closes_upstream(env, monkeypatch):  # noqa: F811
+    _on(monkeypatch)
+    closed = []
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield CLAUDE_SSE
+            await asyncio.sleep(30)          # upstream keeps going; the client leaves mid-relay
+            yield b"never"
+
+        async def aclose(self):
+            closed.append(True)
+
+    env.up = lambda request: httpx.Response(200, stream=Stream(), headers={"content-type": "text/event-stream"})
+    app = env.app(SlowBackend(_ollama("x"), 0.1, timeout=True))
+    raw, scope = _disconnect_scope(_stream_body())
+    sent, state = [], {"body": False}
+
+    async def receive():
+        if not state["body"]:
+            state["body"] = True
+            return {"type": "http.request", "body": raw, "more_body": False}
+        while not any(b"msg_claude" in m.get("body", b"") for m in sent):
+            await asyncio.sleep(0.01)
+        return {"type": "http.disconnect"}
+
+    async def send(msg):
+        sent.append(msg)
+
+    await asyncio.wait_for(app(scope, receive, send), timeout=5)
+    assert closed == [True]
+    (row,) = env.rows()
+    assert row["committed_early"] is True and row["decision"] == "fallback"
+
+
+@pytest.mark.timing
+async def test_private_written_marker_is_never_serialized(env, monkeypatch):  # noqa: F811
+    _on(monkeypatch)
+    env.up = _upstream()
+    await _post(env.app(SlowBackend(_ollama("x"), 0.2)), _stream_body())
+    assert keepalive.KEEPALIVE_WRITTEN not in env.ledger.read_text()
+    (row,) = env.rows()
+    assert row["committed_early"] is True

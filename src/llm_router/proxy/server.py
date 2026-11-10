@@ -62,6 +62,7 @@ from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_key, shadow_frontier
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
+from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
 from llm_router.proxy import cls_decide, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context, prefix_hash
 from llm_router.proxy import escalation
 
@@ -456,8 +457,6 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     def parent_main_of(body: dict) -> bool | None:
         return thread_main.get(thread_parent(body)) if is_thread_continue(body) else None
 
-    keepalive_written: set[int] = set()  # ids of keepalive-committed rows already written (one row per request)
-
     def write(row: dict) -> None:
         remember_thread(row)
         # Real Anthropic spend per call (PR 8). Never lets accounting cost a row.
@@ -467,9 +466,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         except Exception as exc:  # noqa: BLE001 - the ledger row matters more than its cost fields
             failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
         lane_a.ensure_fields(row)  # every continuation row, served or not, carries lane_a_reason/_conf
+        row.pop(KEEPALIVE_WRITTEN, None)
         ledger.write_row(row, cfg.ledger_path)
         if row.get("committed_early"):
-            keepalive_written.add(id(row))
+            row[KEEPALIVE_WRITTEN] = True  # set after the write: never serialized
 
     def _budget_left(t0: float, budget_s: float | None = None) -> float:
         """Seconds left of the step budget that started at ``t0`` (never negative)."""
@@ -1441,7 +1441,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             row["keepalive_pings"] = 0
 
             def write_once(status: int, exc: BaseException | None, detail: str | None = None) -> None:
-                if id(row) in keepalive_written:
+                if row.get(KEEPALIVE_WRITTEN):
                     return
                 row.update(upstream_status=status,
                            detail=detail or ledger.scrub_detail(f"keepalive: {type(exc).__name__}"))
@@ -1485,8 +1485,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                             t.cancel()
                     # Client gone while pinging or waiting: nothing wrote the row yet.
                     if not finished:
-                        write_once(499, None, "client_disconnected")
-                    keepalive_written.discard(id(row))
+                        try:
+                            write_once(499, None, "client_disconnected")
+                        except Exception as exc:  # noqa: BLE001 -- must not mask CancelledError
+                            failopen.record("LR-FO-PROXY-KEEPALIVE-DISCONNECT-ROW", exc)
 
             return StreamingResponse(stream(), media_type="text/event-stream",
                                      headers={"cache-control": "no-cache"})
