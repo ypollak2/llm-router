@@ -254,3 +254,40 @@ async def test_call_llm_sends_shared_window_for_a_different_caller_model(stepped
     sent = mock.call_args.kwargs
     assert sent["model"] == "ollama/" + MODEL
     assert sent["num_ctx"] == STEP
+
+
+def test_providers_num_ctx_non_ollama_name_never_gets_local_window(stepped):
+    from llm_router import providers
+    assert providers._ollama_num_ctx("gemini/gemini-2.5-flash") != STEP
+    assert providers._ollama_num_ctx("gpt-4o") != STEP
+
+
+def test_route_time_ctx_uses_the_shared_window_for_another_ollama_name(stepped):
+    from llm_router import eligibility_routing as er
+    assert er._route_time_ctx("ollama/other:tag") == STEP
+
+
+@pytest.mark.asyncio
+async def test_call_llm_stream_events_sends_shared_window_for_a_different_caller_model(stepped, monkeypatch):
+    from unittest.mock import AsyncMock, patch
+
+    from llm_router import local_privacy, providers
+    from llm_router.toolkit.adapters import ollama as oa
+
+    monkeypatch.setattr(oa, "check_resident", lambda m: None)
+    monkeypatch.setattr(local_privacy, "direct_ollama", lambda *a, **k: False)
+
+    async def _empty():
+        return
+        yield  # pragma: no cover
+
+    mock = AsyncMock(return_value=_empty())
+    with patch("litellm.acompletion", mock):
+        try:
+            async for _ in providers.call_llm_stream_events("ollama/other:tag", [{"role": "user", "content": "hi"}]):
+                pass
+        except Exception:  # noqa: BLE001 - stream post-processing is not under test
+            pass
+    sent = mock.call_args.kwargs
+    assert sent["model"] == "ollama/" + MODEL
+    assert sent["num_ctx"] == STEP
