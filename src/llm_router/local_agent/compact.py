@@ -53,6 +53,7 @@ from typing import Awaitable, Callable
 from llm_router.local_agent import LocalAgentConfig
 from llm_router.proxy.backends import CONDENSED_SYSTEM, _trim_unused_tools
 from llm_router.proxy.steps import non_system, prev_tools
+from llm_router.token_estimate import calibrated_enabled, est_tokens
 from llm_router.proxy.translate import VALIDATE_TOOLS_KEY, ollama_tools, system_text, to_ollama_messages
 
 EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
@@ -159,10 +160,8 @@ def used_tools(body: dict) -> list[str]:
 def estimate_tokens(body: dict) -> int:
     """chars/4 of what the Ollama backend is actually sent (messages + tools)."""
     payload = json.dumps(to_ollama_messages(body)) + json.dumps(ollama_tools(body.get("tools") or []))
-    from llm_router import token_estimate
-
-    if token_estimate.calibrated_enabled():
-        return token_estimate.est_tokens(payload)
+    if calibrated_enabled():
+        return est_tokens(payload)
     return len(payload) // 4
 
 

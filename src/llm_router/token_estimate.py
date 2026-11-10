@@ -34,7 +34,3 @@ def est_tokens(data: object) -> int:
     return math.ceil(DIGIT_TOKENS * digits + WIDE_CHAR_TOKENS * wide
                      + (len(text) - digits - wide) / OTHER_CHARS_PER_TOKEN)
 
-
-def chars_for_tokens(tokens: int) -> int:
-    """Inverse for budgets given in tokens: characters of ordinary text."""
-    return max(0, int(tokens * OTHER_CHARS_PER_TOKEN))

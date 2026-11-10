@@ -37,10 +37,13 @@ import threading
 import time
 import urllib.request
 
+from llm_router.token_estimate import calibrated_enabled, est_tokens
+
 __all__ = [
     "ContextOverflow",
     "CHARS_PER_TOKEN",
     "ESTIMATE_SAFETY_MARGIN",
+    "CALIBRATED_SAFETY_MARGIN",
     "DEFAULT_CONTEXT_WINDOW",
     "DEFAULT_RESERVED_OUTPUT_TOKENS",
     "estimate_tokens",
@@ -61,6 +64,11 @@ CHARS_PER_TOKEN = 3.5
 #: shorter tokens per character); this margin is what makes "estimated to
 #: fit" a safe claim instead of an optimistic one.
 ESTIMATE_SAFETY_MARGIN = 1.15
+
+#: Applied on top of the calibrated estimate when LLM_ROUTER_EST_CALIBRATED is on. This path is the
+#: hard window backstop, so it keeps a margin: the calibration is ONE model (qwen3.6:35b-a3b) on 7
+#: payloads, and the calibrated formula carries 13-15% less margin than chars/3.5 x 1.15 on prose/JSON.
+CALIBRATED_SAFETY_MARGIN = 1.05
 
 #: Ollama's own hardcoded default context window when nothing else says
 #: otherwise (no explicit num_ctx, no resident-model report, no env var).
@@ -112,10 +120,8 @@ def estimate_payload_tokens(payload: dict) -> int:
     message content and never accounts for tool-definition JSON, which on a
     Claude Code request is routinely the larger half of the prompt.
     """
-    from llm_router import token_estimate
-
-    if token_estimate.calibrated_enabled():
-        return token_estimate.est_tokens(payload)
+    if calibrated_enabled():
+        return math.ceil(est_tokens(payload) * CALIBRATED_SAFETY_MARGIN)
     try:
         chars = len(json.dumps(payload, default=str))
     except (TypeError, ValueError):

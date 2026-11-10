@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
 from llm_router import token_estimate
 from llm_router.local_agent import compact
 from llm_router.local_check import runtimes
-from llm_router.local_context_guard import estimate_payload_tokens
+from llm_router.local_context_guard import CALIBRATED_SAFETY_MARGIN, estimate_payload_tokens
 from llm_router.proxy import local_mode
 
 PAYLOAD = {"messages": [{"role": "user", "content": "call 1234567890 now é" * 50}], "model": "m"}
@@ -33,20 +34,40 @@ def test_flag_parse(monkeypatch, value, expected):
     assert token_estimate.calibrated_enabled() is expected
 
 
-def test_flag_off_keeps_old_formulas(monkeypatch):
+SHAPES = [
+    PAYLOAD,
+    {"messages": [{"role": "user", "content": "x"}]},
+    {"messages": [{"role": "user", "content": "日本語のテキスト " * 40}], "tools": [{"name": "t", "input_schema": {"type": "object"}}]},
+    {"messages": [{"role": "user", "content": "\n".join(f"line {i}: 0x{i:08x} ok" for i in range(300))}]},
+    {},
+]
+
+
+@pytest.mark.parametrize("payload", SHAPES)
+def test_flag_off_keeps_old_formulas(monkeypatch, payload):
     monkeypatch.delenv(token_estimate.ENV_FLAG, raising=False)
-    chars = len(json.dumps(PAYLOAD, default=str))
-    assert estimate_payload_tokens(PAYLOAD) == __import__("math").ceil(chars / 3.5 * 1.15)
+    chars = len(json.dumps(payload, default=str))
+    assert estimate_payload_tokens(payload) == math.ceil(max(1, chars) / 3.5 * 1.15)
     assert runtimes.max_prompt_chars(32768) == int((32768 - runtimes.MAX_TOKENS - runtimes.PROMPT_RESERVE_TOKENS) * 3.0)
-    payload = json.dumps(compact.to_ollama_messages(BODY)) + json.dumps(compact.ollama_tools([]))
-    assert compact.estimate_tokens(BODY) == len(payload) // 4
+    body = {"messages": [{"role": "user", "content": json.dumps(payload)}], "tools": []}
+    raw = json.dumps(compact.to_ollama_messages(body)) + json.dumps(compact.ollama_tools([]))
+    assert compact.estimate_tokens(body) == len(raw) // 4
 
 
 def test_flag_on_delegates(monkeypatch):
     monkeypatch.setenv(token_estimate.ENV_FLAG, "1")
-    assert estimate_payload_tokens(PAYLOAD) == token_estimate.est_tokens(PAYLOAD)
-    room = 32768 - runtimes.MAX_TOKENS - runtimes.PROMPT_RESERVE_TOKENS
-    assert runtimes.max_prompt_chars(32768) == token_estimate.chars_for_tokens(room)
-    assert runtimes.max_prompt_chars(None) is None
+    assert estimate_payload_tokens(PAYLOAD) == math.ceil(token_estimate.est_tokens(PAYLOAD) * CALIBRATED_SAFETY_MARGIN)
+    assert CALIBRATED_SAFETY_MARGIN == 1.05
     payload = json.dumps(compact.to_ollama_messages(BODY)) + json.dumps(compact.ollama_tools([]))
     assert compact.estimate_tokens(BODY) == token_estimate.est_tokens(payload)
+
+
+def test_flag_on_char_budget_stays_conservative_for_digit_heavy_text(monkeypatch):
+    monkeypatch.setenv(token_estimate.ENV_FLAG, "1")
+    budget = runtimes.max_prompt_chars(32768)
+    assert budget == int((32768 - runtimes.MAX_TOKENS - runtimes.PROMPT_RESERVE_TOKENS) * 3.0)
+    assert runtimes.max_prompt_chars(None) is None
+    room = 32768 - runtimes.MAX_TOKENS - runtimes.PROMPT_RESERVE_TOKENS
+    digit_text = "1234567890" * (budget // 10)  # fits the char budget, but is ~1.1 tokens per char
+    assert len(digit_text) <= budget
+    assert token_estimate.est_tokens(digit_text) > room  # the text check catches what chars cannot
