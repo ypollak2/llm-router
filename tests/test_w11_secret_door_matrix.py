@@ -244,7 +244,7 @@ SINK_FUNCS: dict[tuple[str, str, str], tuple[int, str, str]] = {
     ('resolver/calibrate.py', 'CloudCompleter._cli', 'run_codex'): (1, 'fixed prompt', 'calibration probes'),
     ('toolkit/adapters/ollama.py', '_read_ps', 'urlopen'): (1, 'probe', 'memory guard: GET /api/ps on the local-model and Ollama bases, no prompt text'),
     ('toolkit/adapters/ollama.py', '_tags_size', 'urlopen'): (1, 'probe', 'memory guard: GET /api/tags for the target model size, no prompt text'),
-    ('toolkit/adapters/ollama.py', '_show_size', 'urlopen'): (1, 'probe', 'memory guard: POST /api/show with the model name only, no prompt text'),
+    ('toolkit/adapters/ollama.py', '_show_payload', 'urlopen'): (1, 'probe', 'memory guard: POST /api/show with the model name only, no prompt text (size and KV model_info)'),
     ('toolkit/adapters/ollama.py', '_unload', 'urlopen'): (1, 'probe', 'memory guard evict: POST /api/generate with keep_alive 0 and an empty prompt, model name only'),
 }
 SINK_FILES: dict[str, tuple[int, str, str]] = {
