@@ -600,10 +600,11 @@ def paired_realized_saving(off_rows: list[dict], on_rows: list[dict]) -> dict:
 
 
 #: Upper bounds (est. prompt tokens, inclusive) of the prompt-size buckets; the 25k edge is
-#: ``local_mode.PROMPT_CAP_TOKENS`` (a prompt of exactly that size is not refused).
+#: ``local_mode.PROMPT_CAP_TOKENS`` (a prompt of exactly that size is not refused), and the 32k/64k/128k
+#: edges are the local window sizes (32768/65536/131072), so a bucket answers "fits that window".
 SIZE_BUCKETS: tuple[tuple[str, int | None], ...] = (
-    ("<=8k", 8_000), ("8-25k", 25_000), ("25-32k", 32_000),
-    ("32-64k", 64_000), ("64-128k", 128_000), (">128k", None),
+    ("<=8k", 8_000), ("8-25k", 25_000), ("25-32k", 32_768),
+    ("32-64k", 65_536), ("64-128k", 131_072), (">128k", None),
 )
 SIZE_BUCKET_UNKNOWN = "unknown"
 
