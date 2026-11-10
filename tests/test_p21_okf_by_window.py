@@ -198,8 +198,12 @@ async def test_row_okf_records_the_ceiling_and_attach_received_it(
     repo = _repo(tmp_path, "repo-a")
     await _post(_app(tmp_path, _Upstream(), _Backend()), _request(repo))
     row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
-    assert row["okf"]["ceiling_src"] == src and row["okf"]["ceiling_tokens"] == seen["ceiling_tokens"] > 0
     assert (seen["fits"] is not None) == (src == "window")
+    if not flag:  # off: the row is unchanged (no P21 keys), only attach's input is checked
+        assert "ceiling_src" not in row["okf"] and "ceiling_tokens" not in row["okf"]
+        assert seen["ceiling_tokens"] > 0
+        return
+    assert row["okf"]["ceiling_src"] == src and row["okf"]["ceiling_tokens"] == seen["ceiling_tokens"] > 0
     if src == "window":
         assert row["okf"]["ceiling_tokens"] <= local_mode.prompt_cap_tokens()
 

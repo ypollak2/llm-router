@@ -703,7 +703,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # and is not counted as one (status "budget", no failopen).
             okf_ceiling_tokens, okf_ceiling_src, okf_fit = (
                 cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS), "agent", None
-            if okf_by_window_on():  # P21: nothing below runs, or costs a thread hop, with the flag off
+            okf_on = okf_by_window_on()
+            if okf_on:  # P21: nothing below runs, or costs a thread hop, with the flag off
                 try:
                     okf_num_ctx = getattr(backend, "num_ctx", None) or local_models.raised_window() or DEFAULT_NUM_CTX
                     okf_ceiling_tokens, okf_ceiling_src = await asyncio.wait_for(
@@ -726,8 +727,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 else:
                     failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
                     row["okf"] = {"status": "timeout"}
-            # P21: which ceiling decided the room, so the attached share can be split by it.
-            if "status" not in row["okf"]:  # attach ran (not the timeout/budget stubs)
+            # P21: which ceiling decided the room, so the attached share can be split by it. Flag on
+            # only: off-mode rows stay byte-identical to the golden (tests/test_proxy_off_golden.py).
+            if okf_on and "status" not in row["okf"]:  # attach ran (not the timeout/budget stubs)
                 row["okf"] = {**row["okf"], "ceiling_tokens": okf_ceiling_tokens, "ceiling_src": okf_ceiling_src}
             # P0.9: context building, not the decision; reported beside it (S6).
             _add_phase(row, "okf_attach", (time.perf_counter() - okf_t0) * 1000.0)
