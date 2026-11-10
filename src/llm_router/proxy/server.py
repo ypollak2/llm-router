@@ -64,7 +64,7 @@ from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
 from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
-from llm_router.proxy import cls_decide, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context, prefix_hash
+from llm_router.proxy import cls_decide, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -855,6 +855,34 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    served_stop_reason=message["stop_reason"])
         return message
 
+    async def mr_shorten(body: dict, row: dict, key_body: dict) -> dict | None:
+        """P9 (LLM_ROUTER_PROXY_MR, default off, caller checks): ``body`` with its oldest history replaced by
+        map-reduce chunk summaries when it is over the local cap, else ``None`` (untouched, or the summarizer
+        failed or did not fit: the turn then follows the unchanged path, usually Claude). The map call goes through
+        the live backend, so it carries the live model and num_ctx and the same queue and memory guards."""
+        if (lm is None or lm.disabled or lm.killed() or health.is_open(cfg.model)
+                or not local_mode.is_agent_turn(body)
+                or lm.pin_of(conversation_key(key_body, row.get("session_id"))) == local_mode.PIN_CLAUDE):
+            return None
+        model = cfg.model.split("/", 1)[1]
+        backend = make_backend(cfg.model)
+
+        async def map_call(prompt: str, num_predict: int) -> str | None:
+            reply, _err, _usage = await backend.complete(
+                {"model": cfg.model, "messages": [{"role": "user", "content": prompt}],
+                 "max_tokens": num_predict, "temperature": 0}, mr_summary.MAP_TIMEOUT_S)
+            if reply is None:
+                return None
+            return "".join(b.get("text", "") for b in reply.get("content") or [] if b.get("type") == "text")
+
+        res = await mr_summary.shorten(
+            body, map_call, cap=local_mode.prompt_cap_tokens(),
+            est=lambda b: local_mode.estimate_prompt_tokens(to_ollama(b, model, num_ctx=cfg.num_ctx, max_predict=1)))
+        if res is None:
+            return None
+        row["mr_summary"] = res.row
+        return res.body if res.changed else None
+
     async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None,
                           cap_body: dict | None = None) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served
@@ -1543,6 +1571,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # estimate, pin decision, Ollama payload, ledger). Claude still gets ``body``/``sent_raw``, unmasked.
         local_src = stripped_body or body if force_local else body
         local_body = None if bypass_local else mask_local_body(local_src, row)
+        mr_body = None
+        if local_body is not None and lm is not None and mr_summary.enabled():
+            mr_body = await mr_shorten(local_body, row, body)
+            local_body = mr_body or local_body
 
         async def finish_forward():
             on_reply = start_shadow(body, row, len(raw)) if shadow is not None else None
@@ -1676,7 +1708,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 # P6: with masking applied, the cap is tested on the masked body only when the flag is on.
                 reduced = cap_after_reduce_on()
                 served = await local_step(local_body, row, force=force_local, key_body=body,
-                                          cap_body=local_src if local_body is not local_src and not reduced else None)
+                                          cap_body=local_src if local_body is not local_src and not reduced and mr_body is None else None)
                 if "history_mask" in row and isinstance(row.get("local_mode"), dict):
                     hm, lmr = row["history_mask"], row["local_mode"]
                     lmr["raw_est_prompt_tokens"] = hm["raw_est_prompt_tokens"]
