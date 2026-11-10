@@ -42,6 +42,9 @@ ENV_RATE = "LLM_ROUTER_PREFILL_TOK_S"
 #: while the local call runs, so a silent wait of 240 s or more risks a client kill and retry. 240 s stays under
 #: it; a follow-up (SSE keepalive pings) is what allows raising the cap.
 DEFAULT_CAP_S = 240.0
+#: With SSE keepalive pings flowing (proxy/keepalive.py, streaming requests only) the watchdog is fed, so the
+#: default cap rises to the owner's 10 min. An explicit LLM_ROUTER_DEADLINE_CAP_S still wins.
+KEEPALIVE_CAP_S = 600.0
 #: Tokens per second of prefill at the 60k reference point (60000 / 93 s, measured, n=1).
 DEFAULT_PREFILL_TOK_S = 645.0
 REFERENCE_TOKENS = 60_000
@@ -75,8 +78,8 @@ def _env_float(raw: str | None, default: float) -> float:
     return v if (math.isfinite(v) and v > 0) else default
 
 
-def cap_s() -> float:
-    return _env_float(os.environ.get("LLM_ROUTER_DEADLINE_CAP_S"), DEFAULT_CAP_S)
+def cap_s(keepalive: bool = False) -> float:
+    return _env_float(os.environ.get("LLM_ROUTER_DEADLINE_CAP_S"), KEEPALIVE_CAP_S if keepalive else DEFAULT_CAP_S)
 
 
 def default_rate() -> float:
@@ -134,9 +137,9 @@ def predicted_prefill_s(tokens: int, samples: list[tuple[int, float]] | None = N
     return _scale(ref_s, REFERENCE_TOKENS, tokens), "default"
 
 
-def compute(tokens: int, samples: list[tuple[int, float]] | None = None) -> dict:
+def compute(tokens: int, samples: list[tuple[int, float]] | None = None, *, keepalive: bool = False) -> dict:
     """{"deadline_s", "predicted_prefill_s", "rate_source", "est_prompt_tokens"} for a prompt of ``tokens``."""
     pred, source = predicted_prefill_s(tokens, samples)
-    deadline = min(cap_s(), BASE_S + MARGIN * pred)
+    deadline = min(cap_s(keepalive), BASE_S + MARGIN * pred)
     return {"deadline_s": round(deadline, 1), "predicted_prefill_s": round(pred, 1),
             "rate_source": source, "est_prompt_tokens": int(tokens)}
