@@ -114,7 +114,7 @@ def _update(session_id: str, mutate, code: str):
 
 
 def note_delivered(session_id: str, tool_use_id: str, prompt_hash: str, *, now: float | None = None) -> None:
-    """The router is about to deny ``tool_use_id`` with a Codex result. Remember it (and the prompt)."""
+    """Remember a Codex delivery (echo-prefixed id for a rewritten Agent, plain id for deny)."""
     now = time.time() if now is None else now
 
     def _m(section: dict) -> None:
@@ -125,11 +125,27 @@ def note_delivered(session_id: str, tool_use_id: str, prompt_hash: str, *, now: 
     _update(session_id, _m, "CHZ-FO-CODEX-HANDOFF-NOTE")
 
 
-def note_agent_launched(session_id: str, tool_use_id: str, *, now: float | None = None) -> int | None:
+FILE_ECHO_MARKER = "Reply with exactly this one line and nothing else. Use no tools.\n\nCodex result saved at "
+
+
+def is_file_echo(tool_input: dict) -> bool:
+    """Recognise the foreground Haiku receipt emitted by agent-route."""
+    return (
+        isinstance(tool_input, dict)
+        and tool_input.get("model") == "haiku"
+        and tool_input.get("run_in_background") is False
+        and tool_input.get("subagent_type") == "general-purpose"
+        and isinstance(tool_input.get("prompt"), str)
+        and tool_input["prompt"].startswith(FILE_ECHO_MARKER)
+    )
+
+
+def note_agent_launched(session_id: str, tool_use_id: str, *, is_echo: bool = False, now: float | None = None) -> int | None:
     """PostToolUse[Agent] fired for ``tool_use_id``. If the router had delivered it, the deny was void: count it.
 
     Returns the session's void count after this one, or None when the call was an ordinary Agent call (or the
-    state is unreadable). The delivered entry is removed, so one id is counted once.
+    state is unreadable), or the expected echo ran. Ignored echo rewrites count as voids too.
+    The delivered entry is removed, so one id is counted once.
     """
     if not tool_use_id:
         return None
@@ -143,15 +159,18 @@ def note_agent_launched(session_id: str, tool_use_id: str, *, now: float | None 
     except Exception as exc:  # noqa: BLE001
         failopen.record("CHZ-FO-CODEX-HANDOFF-READ", exc)
         return None
-    if not any(e[0] == tool_use_id for e in peek):
+    ids = {tool_use_id, f"echo:{tool_use_id}"}
+    if not any(e[0] in ids for e in peek):
         return None
 
     def _m(section: dict) -> int | None:
         kept = _live(section.get("delivered"), now)
-        hit = [e for e in kept if e[0] == tool_use_id]
+        hit = [e for e in kept if e[0] in ids]
         if not hit:
             return None
-        section["delivered"] = [e for e in kept if e[0] != tool_use_id]
+        section["delivered"] = [e for e in kept if e[0] not in ids]
+        if is_echo and all(e[0] == f"echo:{tool_use_id}" for e in hit):
+            return None  # expected receipt, consumed without charging a void
         prior = section.get("void")
         section["void"] = (prior if isinstance(prior, int) and prior > 0 else 0) + 1
         return section["void"]

@@ -147,3 +147,12 @@ def test_post_tool_use_hook_with_no_state_does_nothing(home):
     assert proc.returncode == 0 and proc.stdout == ""
     assert not (home / ".llm-router" / "agent_depth_never-delegated.json").exists()
     assert not os.path.exists(home / ".llm-router" / "north_star_units.jsonl")
+
+
+def test_ignored_echo_rewrites_open_breaker_after_three_strikes(home):
+    for n in range(1, 4):
+        token = f"echo_ignored_{n}"
+        ch.note_delivered(SID, f"echo:{token}", f"hash-{n}")
+        assert ch.note_agent_launched(SID, token, is_echo=False) == n
+        assert ch.note_agent_launched(SID, token, is_echo=False) is None
+        assert ch.breaker_open(SID) is (n >= 3)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 8
+# llm_router-hook-version: 9
 """PostToolUse[Agent] hook — release the agent nesting-depth slot.
 
 The circuit breaker in agent-route.py (PreToolUse[Agent]) increments a
@@ -234,7 +234,9 @@ def _note_void_delegation(hook_input: dict) -> None:
         return  # llm_router is not importable on this host: nothing was delegated from it either
     try:
         session_id = _get_session_id()
-        voided = codex_handoff.note_agent_launched(session_id, token)
+        voided = codex_handoff.note_agent_launched(
+            session_id, token, is_echo=codex_handoff.is_file_echo(hook_input.get("tool_input"))
+        )
         if voided is None:
             return  # an ordinary Agent call
         codex_handoff.record_void(session_id, token, voided)

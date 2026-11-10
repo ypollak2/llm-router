@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 32
+# llm_router-hook-version: 33
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -3003,7 +3003,7 @@ def _results_retention_days() -> float:
 
 
 def _prune_results(d: Path, keep: Path) -> int:
-    """Delete ``*.md`` files in ``d`` older than the retention window, never ``keep``. Silent on OSError."""
+    """Delete hook-named result files in ``d`` older than the retention window, never ``keep``. Silent on OSError."""
     days = _results_retention_days()
     if days <= 0:
         return 0
@@ -3012,7 +3012,7 @@ def _prune_results(d: Path, keep: Path) -> int:
         cutoff = time.time() - days * 86400
         for f in d.iterdir():
             try:
-                if f.suffix == ".md" and f != keep and f.is_file() and f.stat().st_mtime < cutoff:
+                if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\.md", f.name) and f != keep and f.is_file() and f.stat().st_mtime < cutoff:
                     f.unlink()
                     n += 1
             except OSError:
@@ -3154,6 +3154,10 @@ def _main() -> None:
     _current_tool_use_id = str(hook_input.get("tool_use_id") or "").strip()
 
     tool_input = hook_input.get("tool_input", {})
+    from llm_router.codex_handoff import is_file_echo
+
+    if is_file_echo(tool_input):
+        return  # receipt: no routing, budget, spawn state, or North Star unit
     prompt = tool_input.get("prompt", "").strip()
     subagent_type = tool_input.get("subagent_type", "general-purpose")
 

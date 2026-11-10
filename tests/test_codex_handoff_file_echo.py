@@ -120,22 +120,37 @@ def test_ledger_delivery_field_and_unchanged_row(ctx):
     assert "STUB-CODEX-ANSWER" not in ledger_text
 
 
-def test_an_allowed_echo_is_not_counted_as_a_void_deny(ctx):
-    import subprocess
+@pytest.mark.parametrize("actual_echo", [True, False])
+def test_echo_posttooluse_detects_ignored_rewrite(ctx, monkeypatch, actual_echo):
     from tests._bind_support import HOOKS_SRC
     from llm_router import codex_handoff
 
-    ctx.run(tool_use_id="toolu_e1")
+    d = decision_of(ctx.run(tool_use_id="toolu_e1"))
+    tool_input = d["hookSpecificOutput"]["updatedInput"] if actual_echo else {"prompt": SUITABLE_PROMPT}
     post = {"hook_event_name": "PostToolUse", "tool_name": "Agent", "tool_use_id": "toolu_e1",
-            "session_id": "bind-test-session", "tool_input": {"prompt": "x"}, "tool_response": {}}
-    subprocess.run([sys.executable, str(HOOKS_SRC / "agent-depth-release.py")], input=json.dumps(post),
-                   capture_output=True, text=True, cwd=str(ctx.home), env=hook_env(ctx.home))
-    assert not [r for r in ledger_rows(ctx.home) if r["outcome"] == "delegation_void"]
-    os.environ["LLM_ROUTER_HOME"] = str(ctx.home / ".llm-router")
-    try:
-        assert codex_handoff.voids_in_session("bind-test-session") == 0
-    finally:
-        del os.environ["LLM_ROUTER_HOME"]
+            "session_id": "bind-test-session", "tool_input": tool_input, "tool_response": {}}
+    for _ in range(2):  # repeated delivery must not double-charge a void
+        proc = run_hook(HOOKS_SRC / "agent-depth-release.py", post, hook_env(ctx.home), cwd=ctx.home)
+        assert proc.returncode == 0, proc.stderr
+    rows = [r for r in ledger_rows(ctx.home) if r["outcome"] == "delegation_void"]
+    assert len(rows) == int(not actual_echo)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(ctx.home / ".llm-router"))
+    assert codex_handoff.voids_in_session("bind-test-session") == int(not actual_echo)
+
+
+def test_echo_reentry_passes_through_without_codex_or_ledger_unit(ctx):
+    d = decision_of(ctx.run())
+    echo = d["hookSpecificOutput"]["updatedInput"]
+    payload = agent_payload("unused", cwd=str(ctx.home / "project"), tool_use_id="toolu_reentry")
+    payload["tool_input"] = echo
+    before_calls = (ctx.home / "argv.jsonl").read_bytes()
+    before_rows = ledger_rows(ctx.home)
+    proc = run_hook(AGENT_ROUTE, payload, hook_env(ctx.home, CODEX_PATH=str(ctx.home / "bin" / "codex")),
+                    cwd=ctx.home / "hookproc")
+    assert proc.returncode == 0, proc.stderr
+    assert decision_of(proc) is None
+    assert (ctx.home / "argv.jsonl").read_bytes() == before_calls
+    assert ledger_rows(ctx.home) == before_rows
 
 
 # ------------------------------------------------------------------------------------------ retention
@@ -153,9 +168,10 @@ def _seed(home, name, age_days):
 
 def test_old_result_files_are_pruned_and_fresh_ones_kept(ctx):
     old = _seed(ctx.home, "20260101T000000Z-aaaaaaaa.md", 10)
+    foreign = _seed(ctx.home, "notes.md", 10)
     fresh = _seed(ctx.home, "20261109T000000Z-bbbbbbbb.md", 1)
     d = decision_of(ctx.run())
-    assert not old.exists() and fresh.exists()
+    assert not old.exists() and fresh.exists() and foreign.exists()
     assert os.path.exists(echo_path_of(d))  # the file just written is never deleted
     assert _delegated_row(ctx.home)["pruned"] == 1
 

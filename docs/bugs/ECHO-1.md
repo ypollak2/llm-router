@@ -1,6 +1,6 @@
 ---
 id: ECHO-1
-status: fixed in `fix/codex-handoff-file-echo` (deploy: reinstall hooks so hook-version 31 reaches ~/.claude/hooks)
+status: fixed in `fix/codex-handoff-file-echo` (deploy: reinstall hooks so hook-version 33 reaches ~/.claude/hooks)
 ---
 ## ECHO-1. A successful Codex sub-agent handoff showed as a red "Error:" in Claude Code
 
@@ -16,9 +16,9 @@ status: fixed in `fix/codex-handoff-file-echo` (deploy: reinstall hooks so hook-
   with one line naming the file. The same allow+updatedInput mechanism already pins models. The deny remains
   only when the file cannot be written. The ledger row keeps lever and outcome and gains
   `delivery: "file_echo" | "deny_fallback"`. The handoff state records the delivery under a distinct id
-  (`echo:<tool_use_id>`) so the PostToolUse of the now-launched echo is not counted as a void deny. The result
+  (`echo:<tool_use_id>`) so PostToolUse can check the actual input: a foreground Haiku echo is not counted as void, while an ignored rewrite increments the void counter and breaker. Echo re-entry passes through before routing or ledger accounting. The result
   text is in the file only (D-281).
-- **Retention.** Each save deletes `*.md` files in the directory older than `LLM_ROUTER_AGENT_RESULTS_DAYS` days
+- **Retention.** Each save deletes only files matching `[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\.md` in the directory older than `LLM_ROUTER_AGENT_RESULTS_DAYS` days
   (default 7; 0 keeps all), never the file just written, silent on OSError. The count is the `pruned` field of
   the `delegated` ledger row.
 - **Not measured.** No token or cost effect is claimed; only the echo prompt length was measured.
