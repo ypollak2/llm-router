@@ -117,6 +117,7 @@ REASON_CLASSIFIER_VETO = "classifier_veto"
 #: thread (detail ``subagent_thread``). Never served locally; the pin goes to Claude like any refusal.
 COMBINED_FIRST_TOKEN_S = 30.0  # combined mode default first-token deadline (--hedge-s overrides)
 REASON_EXEMPT_SESSION = "exempt_session"
+REASON_COLD_OVER_DEADLINE = "cold_over_deadline"  # P22: this turn only, never pins
 REASON_PREFLIGHT_REFUSED = "preflight_refused"  # combined mode only: local serving off for the process lifetime
 EXEMPT_COORDINATOR = "coordinator_session"
 EXEMPT_SUBAGENT = "subagent_thread"
