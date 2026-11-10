@@ -31,7 +31,7 @@ from tests.test_proxy_local_mode import (  # noqa: F401  (autouse fixture and he
 from tests.test_proxy_tiers import OPUS, SONNET, Upstream, _raw_policy, _sse  # noqa: F401
 
 #: Keys only a local-agent row carries (or sets differently): they are the local step's own bookkeeping.
-LOCAL_KEYS = {"serve_mode", "local_mode", "egress", "reason", "detail", "cls_applied"}
+LOCAL_KEYS = {"serve_mode", "local_mode", "egress", "reason", "detail", "cls_applied", "history_mask"}
 
 
 @pytest.fixture(autouse=True)

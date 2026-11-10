@@ -729,6 +729,26 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    served_stop_reason=message["stop_reason"])
         return message
 
+    def mask_local_body(body: dict, row: dict) -> dict:
+        """P5: the history-masked copy of ``body`` for the local path, or ``body`` itself when the flag is
+        off (history_mask is then not even imported) or masking fails (failopen, never a 500). Writes counts
+        only (no text) to ``row['history_mask']``; the caller copies the raw estimate next to local_mode's
+        ``est_prompt_tokens`` once the local step has written it."""
+        if not os.environ.get("LLM_ROUTER_PROXY_MASK"):
+            return body
+        try:
+            from llm_router.proxy import history_mask
+            if not history_mask.enabled():
+                return body
+            masked, st = history_mask.mask_body(body)
+        except Exception as exc:  # noqa: BLE001 - masking is an optimisation; the unmasked body is served
+            failopen.record("LR-FO-PROXY-HISTORY-MASK", exc)
+            return body
+        row["history_mask"] = {"messages_masked": st.masked, "chars_saved": st.chars_saved,
+                               "raw_est_prompt_tokens": st.est_tokens_before,
+                               "est_prompt_tokens": st.est_tokens_after}
+        return masked
+
     async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served
         message, or ``None`` after writing the reason and the egress notice.
@@ -1367,9 +1387,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         await cls_decide.decide_turn(
             body, row, turn_decisions, lm_on=lm is not None and not lm.disabled, parent_main=parent_main,
             override="claude" if bypass_local else "local" if force_local else None, key=turn_k)
+        # P5 (LLM_ROUTER_PROXY_MASK, default off): ONE masked copy feeds every local-path consumer (cap
+        # estimate, pin decision, Ollama payload, ledger). Claude still gets ``body``/``sent_raw``, unmasked.
+        local_body = None if bypass_local else mask_local_body(stripped_body or body if force_local else body, row)
         if lm is not None and not bypass_local:
-            message = await local_step(
-                stripped_body or body if force_local else body, row, force=force_local, key_body=body)
+            message = await local_step(local_body, row, force=force_local, key_body=body)
+            if "history_mask" in row and isinstance(row.get("local_mode"), dict):
+                row["local_mode"]["raw_est_prompt_tokens"] = row["history_mask"]["raw_est_prompt_tokens"]
             if message is not None:
                 if force_local:
                     prefix_outcome(row["prefix_outcome"])
@@ -1384,7 +1408,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         elif step_class(body, cfg.steps) is None:
             row["reason"] = "not_eligible"
         else:
-            message = await try_serve(body, row)
+            message = await try_serve(local_body, row)
             if message is not None:
                 write(row)
                 if body.get("stream"):
