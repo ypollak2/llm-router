@@ -1,11 +1,20 @@
 """P8: the summary path end to end, through the real proxy app with a mocked local backend.
 
 Pins four properties: MR on (P9) serves a reduced body and writes a consistent ledger row; the rolling summary
-(context_summary, LLM_ROUTER_ROLLING_SUMMARY) never reaches a proxy request, so a request holds exactly one
-summary (the MR chunk summaries) and no chunk is summarised twice; with the chunk store (P10) and the gate (P11)
-on, turn two makes 0 map calls and the gate still runs; every flag off leaves the bytes untouched.
+(context_summary, LLM_ROUTER_ROLLING_SUMMARY) never reaches a proxy request, so the request holds exactly one
+set of MR chunk summaries and no chunk is summarised twice; with the chunk store (P10) and the gate (P11) on,
+turn two makes 0 map calls and the gate still runs; every flag off leaves the Ollama wire payload untouched.
+
 Why the rolling summary cannot double up: ``context_pack.SUMMARY_DOORS`` has no "proxy" door, and
-``proxy.backends._pack_messages`` builds its pack with ``door="proxy"`` and no session id.
+``proxy.backends._pack_messages`` builds its pack with ``door="proxy"`` and no session id; local-agent mode,
+the only caller of MR, refuses every trim but "none", the only trim that is not the pack.
+
+What CAN sit beside the MR summaries is ``proxy.okf_context.attach`` (server.py, ``_build_send``, after MR): a
+follow-up prompt may get one prior-turn session block (session_store, <=300 tokens) in the SYSTEM prompt. It is
+not the rolling summary. Gates: LLM_ROUTER_CONTEXT_INJECTION (default on), a git cwd in the system prompt, a
+reply-shaped newest prompt, recorded session events, and room: with the default 5000-token OKF ceiling an
+MR-reduced body leaves none (reason "no_room"), so no block; only with LLM_ROUTER_OKF_BY_WINDOW on is there room,
+and then exactly one such block and the MR summaries share the request (tests below pin both).
 """
 from __future__ import annotations
 
@@ -149,8 +158,10 @@ async def test_a_chunk_is_never_summarised_twice_in_one_turn(env, monkeypatch): 
 def test_local_agent_cannot_use_the_context_pack_trim(env):  # noqa: F811
     """The only proxy code that builds a context pack is ``--trim fast`` (backends._pack_messages); local-agent
     mode, the only caller of the MR summarizer, refuses every trim but "none"."""
-    with pytest.raises(ValueError, match="--trim none"):
+    with pytest.raises(ValueError) as exc:
         env.app(WireBackend(), trim="fast")
+    assert type(exc.value) is ValueError
+    assert str(exc.value).startswith("--serve local-agent needs") and "--trim none" in str(exc.value)
 
 
 def test_the_proxy_pack_door_has_no_rolling_summary(home, monkeypatch):
@@ -159,6 +170,64 @@ def test_the_proxy_pack_door_has_no_rolling_summary(home, monkeypatch):
     assert "proxy" not in context_pack.SUMMARY_DOORS
     assert context_pack._summary("proxy", "sess-p8") is None
     assert context_pack._summary("hook", "sess-p8") == ROLLING  # control: the hook door does read it
+
+
+def _followup_session(home, monkeypatch, body):
+    """``body`` with a git cwd in its system prompt, a recorded prior turn, and a reply-shaped newest prompt."""
+    import subprocess
+
+    from llm_router import session_store
+
+    repo = home / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    body["system"] = list(body["system"]) + [{"type": "text", "text": f"Primary working directory: {repo}\n"}]
+    sid = json.loads(body["metadata"]["user_id"])["session_id"]
+    monkeypatch.chdir(repo)  # the log is written under the project the cwd names
+    session_store.record_event(sid, "user_prompt", "PRIOR-TURN-MARKER please refactor the widget parser")
+    monkeypatch.chdir(home)
+    body["messages"] += [{"role": "assistant", "content": "I changed the parser."}, {"role": "user", "content": "do it"}]
+    return body
+
+
+SESSION_TAG = "[llm_router-session-context]"
+
+
+async def test_followup_with_mr_default_gets_no_okf_block(env, home, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    monkeypatch.setenv("LLM_ROUTER_ROLLING_SUMMARY", "1")
+    body = _followup_session(home, monkeypatch, _session())
+    _store_rolling(home, body)
+    wire = WireBackend()
+    app = env.app(wire)
+    await _warm(app)
+    await _post(app, copy.deepcopy(body))
+    row = env.rows()[-1]
+    blob = json.dumps(wire.live[-1])
+    assert row["mr_summary"]["outcome"] == "summarized"
+    assert row["okf"]["injected"] is False and row["okf"]["reason"] == "no_room" and row["okf"]["room_tokens"] < 0
+    assert blob.count("<chunk-summary") == row["mr_summary"]["chunks"]
+    assert SESSION_TAG not in blob and "PRIOR-TURN-MARKER" not in blob and "ROLLING-SUMMARY-SENTINEL" not in blob
+
+
+async def test_followup_with_mr_and_okf_by_window_gets_one_session_block_beside_the_summaries(env, home, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    monkeypatch.setenv("LLM_ROUTER_OKF_BY_WINDOW", "1")
+    monkeypatch.setenv("LLM_ROUTER_ROLLING_SUMMARY", "1")
+    body = _followup_session(home, monkeypatch, _session())
+    _store_rolling(home, body)
+    wire = WireBackend()
+    app = env.app(wire)
+    await _warm(app)
+    await _post(app, copy.deepcopy(body))
+    row = env.rows()[-1]
+    sent = wire.live[-1]
+    blob = json.dumps(sent)
+    assert row["mr_summary"]["outcome"] == "summarized" and row["okf"]["injected"] is True
+    assert blob.count(SESSION_TAG) == 1 and blob.count("PRIOR-TURN-MARKER") == 1  # one recall block, in the system prompt
+    assert SESSION_TAG in sent["messages"][0]["content"] and SESSION_TAG not in json.dumps(sent["messages"][1:])
+    assert blob.count("<chunk-summary") == row["mr_summary"]["chunks"]  # the MR summaries are all still there, once
+    assert "ROLLING-SUMMARY-SENTINEL" not in blob
 
 
 # -- 3. chunk store + gate --------------------------------------------------------------------------------
@@ -188,36 +257,42 @@ async def test_second_turn_hits_the_store_and_the_gate_still_runs(env, monkeypat
 
 # -- 4. flags off -----------------------------------------------------------------------------------------
 
-async def _bytes_for(env, home, monkeypatch, *, flags_off_explicitly, body):  # noqa: F811
-    if flags_off_explicitly:
+async def _wire_of(env_, monkeypatch, body, *, off_flags: bool, home):
+    if off_flags:  # every summary flag explicitly off, and a stored rolling summary that must stay unread
         for v in FLAG_VARS:
             monkeypatch.setenv(v, "0")
-        _store_rolling(home, body)  # a stored rolling summary exists but the flag is off
-    backend = MRBackend()
-    app = env.app(backend)
+        _store_rolling(home, body)
+    wire = WireBackend()
+    app = env_.app(wire)
     await _warm(app)
     await _post(app, copy.deepcopy(body))
-    return backend, env.rows()[-1]
+    return wire, env_.rows()[-1]
 
 
-async def test_flags_off_local_body_is_byte_identical(env, home, monkeypatch):  # noqa: F811
+async def _expected_wire(body) -> dict:
+    """The Ollama payload for ``body`` with no summary path at all: the real backend called directly."""
+    ref = WireBackend()
+    await ref.complete(copy.deepcopy(body), 30)
+    return ref.sent[-1]
+
+
+async def test_flags_off_local_wire_payload_equals_the_no_summary_payload(env, home, monkeypatch):  # noqa: F811
     body = _first_call()
-    base, _ = await _bytes_for(env, home, monkeypatch, flags_off_explicitly=False, body=body)
-    env.ledger.unlink(missing_ok=True)
-    off, row = await _bytes_for(env, home, monkeypatch, flags_off_explicitly=True, body=body)
-    key = lambda b: json.dumps(b.lives[-1], sort_keys=True)  # noqa: E731
-    assert key(base) == key(off)
-    assert off.lives[-1]['messages'] == body['messages']  # and it is the posted conversation, untouched
-    assert off.maps == [] and "mr_summary" not in row
+    expected = await _expected_wire(body)
+    wire, row = await _wire_of(env, monkeypatch, body, off_flags=True, home=home)
+    assert wire.maps == [] and "mr_summary" not in row
+    served = [p for p in wire.live if p["messages"][-1] == expected["messages"][-1]]
+    assert served, "the posted turn never reached the backend"
+    assert json.dumps(wire.live[-1], sort_keys=True) == json.dumps(expected, sort_keys=True)
 
 
 async def test_flags_off_over_cap_request_reaches_claude_byte_identical(env, home, monkeypatch):  # noqa: F811
     body = _session()
-    _, base_row = await _bytes_for(env, home, monkeypatch, flags_off_explicitly=False, body=body)
+    _, base_row = await _wire_of(env, monkeypatch, body, off_flags=False, home=home)
     base_bytes = env.up.requests[-1].content
     env.ledger.unlink(missing_ok=True)
     env.up.requests.clear()
-    off, row = await _bytes_for(env, home, monkeypatch, flags_off_explicitly=True, body=body)
+    off, row = await _wire_of(env, monkeypatch, body, off_flags=True, home=home)
     assert off.maps == [] and "mr_summary" not in row and row["reason"] == "prompt_over_cap"
     assert env.up.requests[-1].content == base_bytes
     assert json.loads(base_bytes)["messages"] == body["messages"]
