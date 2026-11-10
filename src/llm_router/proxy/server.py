@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import inspect
 import json
 import os
 import sys
@@ -892,7 +893,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if await asyncio.to_thread(local_mode.over_prompt_cap, payload) is not None:
             return None, "prompt over cap", local_mode.REASON_PROMPT_CAP
         try:
-            message, err, _usage = await make_backend(cfg.model).complete(body, shadow.budget_s)
+            sb = make_backend(cfg.model)
+            # P13: a shadow call is not a live turn, so it queues behind real ones (backends without the knob ignore it).
+            kw = {"priority": "background"} if "priority" in inspect.signature(sb.complete).parameters else {}
+            message, err, _usage = await sb.complete(body, shadow.budget_s, **kw)
         except HedgeTimeout:
             return None, "hedge", "hedge_timeout"
         except ContextOverflow:

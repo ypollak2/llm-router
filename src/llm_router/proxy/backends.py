@@ -267,13 +267,15 @@ def apply_trims(body: dict, trims: list[Trim], *, target_window: int | None = No
 
 
 class Backend(Protocol):
-    async def complete(self, body: dict, timeout_s: float) -> tuple[dict | None, str | None, dict]:
+    async def complete(self, body: dict, timeout_s: float,
+                       priority: str = "interactive") -> tuple[dict | None, str | None, dict]:
         """``(anthropic_message | None, error | None, backend_usage)``."""
 
 
 NUM_PREDICT_EASY = 200  # after Read / Bash / no tool: pick the obvious next action
 NUM_PREDICT_HARD = 700  # anything else (e.g. after an Edit)
 DEFAULT_HEDGE_S = 8.0
+QUEUE_MARGIN_S = 0.25  # queue deadline sits this far inside the caller's budget
 # N20: bounded; an explicit --keep-alive -1 is still honoured (server.parse_keep_alive).
 DEFAULT_KEEP_ALIVE: int | str = 600
 
@@ -314,7 +316,7 @@ class OllamaBackend:
         if _shared:   # one-model policy: never expire the shared runner (CLSCTX-1)
             self.keep_alive = _shared[1]
 
-    async def _admit(self, caller: str, priority: str, timeout_s: float):
+    async def _admit(self, caller: str, priority: str, timeout_s: float, t_entry: float | None = None):
         """P13: take a slot in the local queue. ``(admission | None, remaining_s)``.
 
         Flag off: ``(None, timeout_s)`` with no gate call at all. Flag on: one absolute deadline of
@@ -323,7 +325,10 @@ class OllamaBackend:
         from llm_router.toolkit import local_gate
         if not local_gate.queue_enabled():
             return None, timeout_s
-        deadline = time.monotonic() + timeout_s
+        # The deadline runs from the caller's entry, less a margin, so the queue expires strictly before the
+        # server's own ``wait_for(complete, left)`` and the row says local_queue_timeout, not budget_exceeded.
+        entry = time.monotonic() if t_entry is None else t_entry
+        deadline = entry + timeout_s - min(QUEUE_MARGIN_S, timeout_s * 0.1)
         adm = await local_gate.aadmit(self.base_url, deadline, caller=caller, priority=priority)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -338,7 +343,9 @@ class OllamaBackend:
         from llm_router.toolkit.adapters.ollama import ensure_fits
         await asyncio.to_thread(ensure_fits, self.model, self.base_url, purpose)
 
-    async def complete(self, body: dict, timeout_s: float) -> tuple[dict | None, str | None, dict]:
+    async def complete(self, body: dict, timeout_s: float,
+                       priority: str = "interactive") -> tuple[dict | None, str | None, dict]:
+        t_entry = time.monotonic()
         await self._guard("proxy.OllamaBackend.complete")
 
         def _prepare() -> dict:
@@ -366,17 +373,20 @@ class OllamaBackend:
         objs: list[dict] = []
         first_token_s = None
         loop = asyncio.get_running_loop()
-        t0 = loop.time()
-        adm, http_timeout_s = await self._admit("proxy.complete", "interactive", timeout_s)
+        q0 = loop.time()
+        adm, http_timeout_s = await self._admit("proxy.complete", priority, timeout_s, t_entry)
+        t0 = loop.time()  # first_token_s is model latency: the queue wait is reported apart
+        queue = {"queue_wait_ms": int((t0 - q0) * 1000)} if adm is not None else {}
+        hedge_s = self.hedge_s if (adm is None or self.hedge_s is None) else min(self.hedge_s, http_timeout_s)
         try:
             async with self.client.stream("POST", self.base_url + "/api/chat", json=payload,
                                           timeout=http_timeout_s) as resp:
                 await _raise_with_body(resp)
                 lines = resp.aiter_lines()
                 try:
-                    first = await asyncio.wait_for(lines.__anext__(), timeout=self.hedge_s)
+                    first = await asyncio.wait_for(lines.__anext__(), timeout=hedge_s)
                 except asyncio.TimeoutError:
-                    raise HedgeTimeout(f"no first token within {self.hedge_s}s") from None
+                    raise HedgeTimeout(f"no first token within {hedge_s}s") from None
                 except StopAsyncIteration:
                     first = ""
                 first_token_s = round(loop.time() - t0, 3)
@@ -389,18 +399,18 @@ class OllamaBackend:
             if adm is not None:
                 adm.release()
         if not objs:
-            return None, "empty response", {"first_token_s": first_token_s}
+            return None, "empty response", {"first_token_s": first_token_s, **queue}
         stream_error = next((o["error"] for o in objs if o.get("error")), None)
         if stream_error:
             # A runner failure mid-stream arrives as an ``error`` line; read as
             # a reply it would look merely empty and hide the crash signature.
-            return None, f"ollama error: {str(stream_error)[:200]}", {"first_token_s": first_token_s}
+            return None, f"ollama error: {str(stream_error)[:200]}", {"first_token_s": first_token_s, **queue}
         data = merge_stream(objs)
         usage = {"prompt_tokens": data.get("prompt_eval_count"), "output_tokens": data.get("eval_count"),
                  "prompt_eval_s": round((data.get("prompt_eval_duration") or 0) / 1e9, 2),
                  "eval_s": round((data.get("eval_duration") or 0) / 1e9, 2),
                  "load_s": round((data.get("load_duration") or 0) / 1e9, 2),
-                 "first_token_s": first_token_s}
+                 "first_token_s": first_token_s, **queue}
         # Ollama's own count, checked against the estimate that cleared the
         # preflight above: if it came back truncated anyway (a window this
         # process does not know about, or a race with another resident

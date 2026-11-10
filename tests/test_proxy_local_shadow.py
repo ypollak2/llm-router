@@ -246,6 +246,18 @@ async def test_local_runs_in_parallel_with_claude_not_after_it(env):
     assert env.records()[0]["agree"] is True
 
 
+async def test_p13_shadow_call_asks_the_queue_for_background_priority(env):
+    seen = {}
+
+    class Prio(Backend):
+        async def complete(self, body, timeout_s, priority="interactive"):
+            seen["priority"] = priority
+            return await super().complete(body, timeout_s)
+
+    await _step(env, Prio(), Upstream())
+    assert seen["priority"] == "background"
+
+
 @pytest.mark.timing
 async def test_local_budget_is_capped_when_claude_is_slower(env):
     gate = asyncio.Event()

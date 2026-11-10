@@ -404,6 +404,37 @@ def test_p13_queue_timeout_falls_back_with_its_own_reason_and_does_not_feed_the_
     assert "backend_health" not in row   # not a backend fault
 
 
+def test_p13_real_path_queue_wait_that_uses_the_budget_is_local_queue_timeout(tmp_path, monkeypatch):
+    """Real OllamaBackend + the server's own wait_for: a held slot makes the queue wait consume the step budget."""
+    import time
+
+    from llm_router.proxy.backends import OllamaBackend
+    from llm_router.toolkit import local_gate as g
+    from tests.test_p13_backend_queue import FakeClient
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_GATE_DIR", str(tmp_path / "gate"))
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_SLOTS", "1")
+    g._FS_CACHE.clear()
+    monkeypatch.setattr(g, "_fstype_for", lambda p: "apfs")
+    client = FakeClient()
+    be = OllamaBackend(MODEL, client, base_url="http://localhost:59997", num_ctx=8192, hedge_s=None, num_predict=50)
+
+    async def _noguard(purpose):
+        return None
+    be._guard = _noguard
+    pre = g.admit("http://localhost:59997", time.monotonic() + 5)
+    try:
+        rig = Rig(tmp_path / "rig", backend=be, step_budget_s=1.0)
+        r = rig.post(opus(turn_body(["rename the helper"])))
+    finally:
+        pre.release()
+    (row,) = rig.rows()
+    assert r.status_code == 200 and len(rig.up.requests) == 1 and row["decision"] == "fallback"
+    assert row["reason"] == "local_queue_timeout", row
+    assert client.timeouts == []   # never reached HTTP
+    assert "backend_health" not in row
+
+
 def test_combined_mode_defaults_to_a_bounded_first_token_deadline_and_old_mode_to_none(monkeypatch, tmp_path):
     import uvicorn
     seen = []

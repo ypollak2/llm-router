@@ -229,3 +229,91 @@ def test_probe_is_not_admitted(env, monkeypatch):
     calls = _spy(monkeypatch)
     ok, _d = asyncio.run(_backend(FakeClient()).probe(5.0))
     assert ok and calls == []
+
+
+def test_cancel_during_queue_wait_leaves_no_ticket_and_no_slot(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
+    pre = g.admit(URL, time.monotonic() + 30)
+    c = FakeClient()
+
+    async def run():
+        t = asyncio.create_task(_backend(c).complete(BODY, 30.0))
+        await asyncio.sleep(0.4)
+        assert not c.started.is_set()
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+    try:
+        asyncio.run(run())
+        wait = g._wait_dir(g.gate_dir(URL))
+        assert not wait.exists() or not [p for p in wait.iterdir() if g._ticket_live(p)]
+    finally:
+        pre.release()
+    assert c.timeouts == []
+    g.admit(URL, time.monotonic() + 0.5).release()
+
+
+def test_warm_up_releases_on_exception(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
+
+    class Bad(FakeClient):
+        async def post(self, *a, **k):
+            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError):
+        asyncio.run(_backend(Bad()).warm_up(10.0))
+    assert not _held()
+    g.admit(URL, time.monotonic() + 0.5).release()
+
+
+def test_priority_parameter_defaults_interactive_and_can_be_background(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
+    calls = _spy(monkeypatch)
+    asyncio.run(_backend(FakeClient()).complete(BODY, 30.0, priority="background"))
+    assert calls == [(URL, "proxy.complete", "background")]
+
+
+def test_queue_deadline_sits_inside_the_callers_budget(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
+    seen = []
+    real = g.aadmit
+
+    async def spy(url, deadline, **k):
+        seen.append(deadline)
+        return await real(url, deadline, **k)
+    monkeypatch.setattr(g, "aadmit", spy)
+    t = time.monotonic()
+    asyncio.run(_backend(FakeClient()).complete(BODY, 10.0))
+    assert seen[0] < t + 10.0   # strictly inside, so the queue expires before the server's wait_for
+
+
+def test_first_token_excludes_queue_wait_and_wait_is_reported_when_flag_on(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
+    pre = g.admit(URL, time.monotonic() + 2)
+    c = FakeClient()
+
+    async def run():
+        t = asyncio.create_task(_backend(c).complete(BODY, 10.0))
+        await asyncio.sleep(0.6)
+        pre.release()
+        return await t
+    _m, _e, usage = asyncio.run(run())
+    assert usage["queue_wait_ms"] >= 500
+    assert usage["first_token_s"] < 0.4   # model latency only
+    monkeypatch.delenv("LLM_ROUTER_LOCAL_QUEUE")
+    _m, _e, usage = asyncio.run(_backend(FakeClient()).complete(BODY, 10.0))
+    assert "queue_wait_ms" not in usage
+
+
+def test_hedge_is_clamped_to_the_time_left_after_the_queue_wait(env, monkeypatch):
+    from llm_router.proxy.backends import HedgeTimeout
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
+
+    async def run():
+        c = FakeClient(lines=[], hold=asyncio.Event())
+        b = _backend(c)
+        b.hedge_s = 60.0
+        t0 = time.monotonic()
+        with pytest.raises(HedgeTimeout):
+            await b.complete(BODY, 1.0)
+        return time.monotonic() - t0
+    assert asyncio.run(run()) < 3.0
