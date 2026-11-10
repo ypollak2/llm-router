@@ -739,6 +739,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
+        # P1: prompt-size bucket for every row that reached a local decision (early exits carry no estimate).
+        est_tokens = decision.est_tokens if decision.est_tokens is not None \
+            else local_mode.estimate_prompt_tokens(payload)
+        row["est_prompt_tokens"], row["size_bucket"] = est_tokens, ledger.size_bucket(est_tokens)
         row["local_mode"]["exempt_policy"] = policy[0]
         if policy[3]:
             row["local_mode"]["exempt_policy_invalid"] = policy[3]
