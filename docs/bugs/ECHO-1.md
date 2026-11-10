@@ -1,6 +1,6 @@
 ---
 id: ECHO-1
-status: fixed in `fix/codex-handoff-file-echo` (deploy: reinstall hooks so hook-version 34 reaches ~/.claude/hooks)
+status: fixed in `fix/codex-handoff-file-echo` (deploy: reinstall hooks so hook-version 35 reaches ~/.claude/hooks)
 ---
 ## ECHO-1. A successful Codex sub-agent handoff showed as a red "Error:" in Claude Code
 

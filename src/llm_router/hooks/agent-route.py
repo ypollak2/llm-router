@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 34
+# llm_router-hook-version: 35
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -3003,7 +3003,8 @@ def _results_retention_days() -> float:
 
 
 def _prune_results(d: Path, keep: Path) -> int:
-    """Delete hook-named result files in ``d`` older than the retention window, never ``keep``. Silent on OSError."""
+    """Delete hook-named result files in ``d`` older than the retention window, never ``keep``. An OSError is counted
+    (failopen CHZ-FO-AGENT-RESULTS-PRUNE), never raised."""
     days = _results_retention_days()
     if days <= 0:
         return 0
@@ -3015,10 +3016,11 @@ def _prune_results(d: Path, keep: Path) -> int:
                 if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\.md", f.name) and f != keep and f.is_file() and f.stat().st_mtime < cutoff:
                     f.unlink()
                     n += 1
-            except OSError:
+            except OSError as exc:
+                _failopen("CHZ-FO-AGENT-RESULTS-PRUNE", exc)
                 continue
-    except OSError:
-        pass
+    except OSError as exc:
+        _failopen("CHZ-FO-AGENT-RESULTS-PRUNE", exc)
     return n
 
 
