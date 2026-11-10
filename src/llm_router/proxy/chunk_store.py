@@ -107,6 +107,13 @@ class ChunkStore:
             self._added.discard(key)
             self._removed.add(key)
 
+    def evict(self, key: str) -> None:
+        """Drop an entry the P11 gate rejected (served or freshly written), so the next turn re-maps that chunk.
+        Counters are left alone: store_hits stays "lookups served", it is not un-counted."""
+        if self.entries.pop(key, None) is not None:
+            self._added.discard(key)
+            self._removed.add(key)
+
     def put(self, key: str, body: str) -> None:
         self.entries.pop(key, None)
         self.entries[key] = body
@@ -148,4 +155,6 @@ class ChunkStore:
                     os.unlink(tmp)
 
     def counts(self) -> dict:
+        # store_hits = lookups served from the store. It is NOT "summaries used in the final body": a hit whose chunk
+        # the gate then rejects, or whose turn stays verbatim after a later skip/failure, is still counted.
         return {"store_hits": self.hits, "store_misses": self.misses, "store_writes": self.writes}
