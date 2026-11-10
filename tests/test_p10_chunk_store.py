@@ -1,0 +1,231 @@
+"""P10: LLM_ROUTER_CHUNK_STORE (default off) caches valid chunk summaries for the P9 summarizer.
+
+Unit tests drive ``mr_summary.shorten`` with a stub map call; the proxy tests reuse the P9 fixtures. Every test
+runs against a tmp LLM_ROUTER_HOME, never the real ~/.llm-router. No network.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+import json
+import stat
+
+import pytest
+
+from llm_router import failopen
+from llm_router.proxy import chunk_store, deadline, mr_summary
+from llm_router.token_estimate import est_tokens
+from tests.test_p9_proxy_mr import SUMMARY, MRBackend, _is_map, _post, _session, _warm
+from tests.test_proxy_local_mode import MODEL, Backend, Breaker, _call, _first_call, _ollama, _overrides_readable, env  # noqa: F401  (fixtures)
+
+CAP = 40_000
+
+
+def _est(b: dict) -> int:
+    return est_tokens(json.dumps(b))
+
+
+@pytest.fixture(autouse=True)
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("LLM_ROUTER_CHUNK_STORE", raising=False)
+    return tmp_path / "home"
+
+
+class Counter:
+    def __init__(self, reply=SUMMARY):
+        self.reply, self.prompts, self.nps = reply, [], []
+
+    async def __call__(self, prompt, num_predict):
+        self.prompts.append(prompt)
+        self.nps.append(num_predict)
+        return self.reply
+
+
+def _run(body, call, store, model="ollama/m"):
+    return asyncio.run(mr_summary.shorten(copy.deepcopy(body), call, cap=CAP, est=_est, store=store, model=model))
+
+
+def _body():
+    return _session(pairs=40)
+
+
+def test_second_turn_with_same_chunks_makes_no_map_calls():
+    call = Counter()
+    r1 = _run(_body(), call, chunk_store.ChunkStore())
+    assert r1.changed and r1.row["store_misses"] == r1.row["chunks"] == r1.row["store_writes"] == r1.row["map_calls"] > 0
+    assert r1.row["store_hits"] == 0
+    n = len(call.prompts)
+    r2 = _run(_body(), call, chunk_store.ChunkStore())  # fresh object: read back from the file
+    assert len(call.prompts) == n and r2.row["map_calls"] == 0
+    assert r2.row["store_hits"] == r2.row["chunks"] and r2.row["store_misses"] == r2.row["store_writes"] == 0
+    assert r2.body == r1.body  # the summaries are the same text
+
+
+def test_changed_chunk_prompt_version_model_or_num_predict_is_a_miss(monkeypatch):
+    call = Counter()
+    base = _run(_body(), call, chunk_store.ChunkStore())
+    chunks = base.row["chunks"]
+
+    def hits(**kw):
+        return _run(_body(), call, chunk_store.ChunkStore(), **kw).row["store_hits"]
+
+    assert hits(model="ollama/other") == 0
+    with monkeypatch.context() as m:
+        m.setattr(mr_summary, "PROMPT_VERSION", "mr-map-v2")
+        assert hits() == 0
+    with monkeypatch.context() as m:
+        m.setenv("LLM_ROUTER_MR_MAP_NUM_PREDICT", "300")
+        assert hits() == 0
+    assert hits() == chunks  # the original entries are still there
+    changed = _body()
+    changed["messages"][2]["content"][0]["content"] += "edited"  # first chunk text differs
+    row = _run(changed, call, chunk_store.ChunkStore()).row
+    assert row["store_misses"] >= 1 and row["store_hits"] < chunks
+
+
+def test_corrupt_store_is_a_miss_with_failopen_and_the_request_is_served(home, monkeypatch):
+    seen = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: seen.append(code))
+    home.mkdir(parents=True, exist_ok=True)
+    (home / chunk_store.FILE_NAME).write_text("{not json")
+    call = Counter()
+    r = _run(_body(), call, chunk_store.ChunkStore())
+    assert r.changed and r.row["store_hits"] == 0 and r.row["store_misses"] == r.row["chunks"]
+    assert "LR-FO-PROXY-CHUNK-STORE" in seen
+    assert json.loads((home / chunk_store.FILE_NAME).read_text())["schema"] == chunk_store.SCHEMA  # healed by the next write
+
+
+def test_unreadable_store_path_never_raises(home, monkeypatch):
+    seen = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: seen.append(code))
+    home.mkdir(parents=True, exist_ok=True)
+    (home / chunk_store.FILE_NAME).mkdir()  # a directory where the file should be
+    r = _run(_body(), Counter(), chunk_store.ChunkStore())
+    assert r.changed and seen
+
+
+def test_extractive_results_are_not_stored(home):
+    call = Counter(reply="no headings here")
+    r = _run(_body(), call, chunk_store.ChunkStore())
+    assert r.changed and r.row["extractive_chunks"] == r.row["chunks"]
+    assert r.row["store_writes"] == 0 and not (home / chunk_store.FILE_NAME).exists()
+    good = Counter()
+    r2 = _run(_body(), good, chunk_store.ChunkStore())  # a later model map replaces the extractive one
+    assert r2.row["store_hits"] == 0 and r2.row["store_writes"] == r2.row["chunks"] and good.prompts
+
+
+def test_store_file_is_mode_0600_and_atomic(home):
+    _run(_body(), Counter(), chunk_store.ChunkStore())
+    p = home / chunk_store.FILE_NAME
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert [f.name for f in home.iterdir() if f.name.startswith("chunk_summaries")] == [chunk_store.FILE_NAME]  # no temp file left behind
+
+
+def test_size_cap_evicts_least_recently_used(home):
+    s = chunk_store.ChunkStore(cap=3)
+    for i in range(5):
+        s.put(f"k{i}", "body%d" % i)
+    assert list(s.entries) == ["k2", "k3", "k4"]
+    s.get("k2")
+    s.put("k5", "b")
+    s.flush()
+    assert list(chunk_store.ChunkStore(cap=3).entries) == ["k4", "k2", "k5"]
+    assert chunk_store.max_entries() == chunk_store.DEFAULT_MAX_ENTRIES
+
+
+def test_cap_env_var(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_CHUNK_STORE_MAX", "7")
+    assert chunk_store.max_entries() == 7
+    monkeypatch.setenv("LLM_ROUTER_CHUNK_STORE_MAX", "zero")
+    assert chunk_store.max_entries() == chunk_store.DEFAULT_MAX_ENTRIES
+
+
+def test_ledger_counts_hold_no_text():
+    r = _run(_body(), Counter(), chunk_store.ChunkStore())
+    assert {"store_hits", "store_misses", "store_writes"} <= set(r.row)
+    assert all(isinstance(v, (int, float, str)) for v in r.row.values())
+    blob = json.dumps(r.row)
+    assert "none-0" not in blob and "line 0 of output" not in blob and "chunk-summary" not in blob
+
+
+def test_no_store_row_has_no_store_keys():
+    r = _run(_body(), Counter(), None)
+    assert not any(k.startswith("store_") for k in r.row)
+
+
+# -- through the proxy ----------------------------------------------------------------------------------
+
+async def test_proxy_second_turn_hits_the_store(env, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    monkeypatch.setenv("LLM_ROUTER_CHUNK_STORE", "1")
+    backend = MRBackend()
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, copy.deepcopy(_session()))
+    first = env.rows()[-1]["mr_summary"]
+    n = len(backend.maps)
+    assert first["outcome"] == "summarized" and first["store_writes"] == first["chunks"] == n
+    await _post(app, copy.deepcopy(_session()))
+    second = env.rows()[-1]["mr_summary"]
+    assert len(backend.maps) == n and second["map_calls"] == 0 and second["store_hits"] == second["chunks"]
+    assert env.up.requests == []
+
+
+async def test_proxy_flag_off_writes_no_store_and_adds_no_keys(env, home, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    backend = MRBackend()
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, copy.deepcopy(_session()))
+    mr = env.rows()[-1]["mr_summary"]
+    assert not any(k.startswith("store_") for k in mr) and not (home / chunk_store.FILE_NAME).exists()
+
+
+async def test_store_flag_without_proxy_mr_does_nothing(env, home, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_CHUNK_STORE", "1")
+    backend = MRBackend()
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, copy.deepcopy(_session()))
+    assert backend.maps == [] and "mr_summary" not in env.rows()[-1] and not (home / chunk_store.FILE_NAME).exists()
+
+
+async def test_timeout_row_carries_elapsed_and_map_calls_and_is_stamped_wasted(env, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    monkeypatch.setattr(deadline, "cap_s", lambda keepalive=False: 0.2)
+
+    class Slow(MRBackend):
+        async def complete(self, body, timeout_s):
+            if _is_map(body):
+                await asyncio.sleep(5)
+            return await super().complete(body, timeout_s)
+
+    app = env.app(Slow())
+    await _warm(app)
+    r = await _post(app, copy.deepcopy(_session()))
+    mr = env.rows()[-1]["mr_summary"]
+    assert r.status_code == 200 and mr["outcome"] == "timeout"
+    assert mr["map_calls"] == 1 and 0.1 <= mr["elapsed_s"] < 3
+    assert mr["wasted"] is True and mr["wasted_reason"]
+    assert len(env.up.requests) == 1  # the turn ended on Claude
+
+
+async def test_error_row_carries_elapsed_and_map_calls_and_is_stamped_wasted(env, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    real = mr_summary.shorten
+
+    async def boom(body, map_call, *, progress, **kw):
+        await map_call("p", 1)  # one real map call, then the summarizer dies
+        progress["map_calls"] = 1
+        raise ValueError("estimator broke")
+
+    monkeypatch.setattr(mr_summary, "shorten", boom)
+    app = env.app(MRBackend())
+    await _warm(app)
+    await _post(app, copy.deepcopy(_session()))
+    mr = env.rows()[-1]["mr_summary"]
+    assert mr["outcome"] == "error" and mr["map_calls"] == 1 and mr["elapsed_s"] >= 0
+    assert mr["wasted"] is True and mr["wasted_reason"] and len(env.up.requests) == 1
+    assert real is not boom

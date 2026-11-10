@@ -5,7 +5,7 @@ block_texts, mr_map.py map prompt, validity check, extractive fallback and 300-e
 measured under PREREG-MR-20261109. Changed from the research: est_tokens is the repo's one formula
 (llm_router.token_estimate, the same digit/wide/other formula the research copied), the model call is an
 injected coroutine (the proxy passes the live backend, so the map call carries the live model and num_ctx),
-and there is no on-disk cache, ladder or pinned-paths block (P10 adds the chunk store).
+and there is no ladder or pinned-paths block. The chunk store (P10, LLM_ROUTER_CHUNK_STORE, chunk_store.py) is an optional injected cache.
 
 Flag LLM_ROUTER_PROXY_MR, default off: while off nothing here runs. On, ``shorten`` closes the OLDEST
 chunks (~CHUNK_TARGET est each, whole tool_use+tool_result units, never one of the last W_CLOSE units),
@@ -41,6 +41,7 @@ BLOCK_CHARS = 6_000                # one block longer than this is cut to head 3
 INPUT_EST = 24_000                 # hard cap on the whole map input
 MAP_TIMEOUT_S = 120.0
 MAP_TRIES = 2
+PROMPT_VERSION = "mr-map-v1"       # P10: part of every chunk-store key; bump on any change that alters map replies
 
 OUTCOME_SUMMARIZED = "summarized"
 OUTCOME_NO_CHUNKS = "no_closable_chunks"
@@ -314,12 +315,18 @@ def _with_summaries(body: dict, cut: int, summaries: list[str]) -> dict:
     return out
 
 
-async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dict], int]) -> MRResult | None:
+async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dict], int],
+                  store=None, model: str = "", progress: dict | None = None) -> MRResult | None:
     """The body with its oldest history replaced by chunk summaries, or ``None`` when it is under ``cap`` (nothing to do).
 
     ``cap``: the local prompt cap (local_mode.prompt_cap_tokens, derived from the window). ``est``: the
     estimator the cap is tested with (the Ollama payload's, so one source). A result with ``changed`` False
-    carries the ORIGINAL body and the outcome that explains it."""
+    carries the ORIGINAL body and the outcome that explains it.
+
+    ``store`` (P10, a ``chunk_store.ChunkStore`` or None): a closed chunk whose key (raw chunk, prompt version,
+    ``model``, num_predict) is stored costs no map call; a valid model summary is stored, an extractive one never.
+    ``progress`` (P10): a dict this updates with ``map_calls`` so far, for a caller that cancels the call on a
+    deadline and has no row to read."""
     messages = body.get("messages") or []
     before = est(body)
     if before <= cap or len(messages) < 3:
@@ -331,7 +338,13 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
     def refuse(outcome: str) -> MRResult:
         row["outcome"] = outcome
         row["map_wall_s"] = round(time.monotonic() - t0, 3)
+        _finish_store()
         return MRResult(body, False, row)
+
+    def _finish_store() -> None:
+        if store is not None:
+            store.flush()
+            row.update(store.counts())
 
     hist = messages[1:]
     units = units_of(hist)
@@ -349,13 +362,22 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
     spans = [(units[c[0]][0] + 1, units[c[1]][1] + 1) for c in closable[:k]]  # message indices into ``messages``
     row["chunks"] = k
     summaries: list[str] = []
+    num_predict = map_num_predict()
     for i, (a, b) in enumerate(spans, 1):
         chunk = messages[a:b]
         text = None
-        for _try in range(MAP_TRIES):
+        skey = None
+        if store is not None:
+            from llm_router.proxy import chunk_store
+            skey = chunk_store.chunk_key(chunk, prompt_version=PROMPT_VERSION, prompt_template=MAP_PROMPT,
+                                         model=model, num_predict=num_predict)
+            text = store.get(skey)
+        for _try in range(MAP_TRIES if text is None else 0):
             row["map_calls"] += 1
+            if progress is not None:
+                progress["map_calls"] = row["map_calls"]
             try:
-                reply = await map_call(map_prompt(chunk), map_num_predict())
+                reply = await map_call(map_prompt(chunk), num_predict)
             except Exception:  # noqa: BLE001 - any map failure is the documented fallback, never a 500
                 return refuse(OUTCOME_MAP_FAILED)
             if reply is None:
@@ -363,6 +385,9 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
             reply = reply.strip()
             if valid_summary(reply):
                 text = reply if est_tokens(reply) <= BODY_EST else _head_by_est(reply, BODY_EST)
+                if store is not None:
+                    store.put(skey, text)
+                    store.flush()  # kept even if a later chunk hits the turn deadline
                 break
         if text is None:
             text = extractive(chunk)
@@ -375,4 +400,5 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
         return refuse(OUTCOME_STILL_OVER)
     row["outcome"] = OUTCOME_SUMMARIZED
     row["map_wall_s"] = round(time.monotonic() - t0, 3)
+    _finish_store()
     return MRResult(new, True, row)

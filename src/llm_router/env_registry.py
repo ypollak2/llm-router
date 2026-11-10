@@ -252,6 +252,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_MR_CHUNK_TARGET": ("llm_router", "proxy/mr_summary.py", 1),
     "LLM_ROUTER_MR_CLOSE_THRESHOLD": ("llm_router", "proxy/mr_summary.py", 1),
     "LLM_ROUTER_MR_MAP_NUM_PREDICT": ("llm_router", "proxy/mr_summary.py", 1),
+    "LLM_ROUTER_CHUNK_STORE": ("llm_router", "proxy/chunk_store.py", 1),
+    "LLM_ROUTER_CHUNK_STORE_MAX": ("llm_router", "proxy/chunk_store.py", 1),
     "LLM_ROUTER_CAP_GUARD_RECONCILE": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_OKF_BY_WINDOW": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_UNPIN": ("llm_router", "proxy/server.py", 1),
