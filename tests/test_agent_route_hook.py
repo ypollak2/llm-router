@@ -1152,9 +1152,11 @@ class TestAgentRouteEndToEnd:
         stub = write_codex_stub(tmp_path / "bin", answer="codex says: fixed at line 42")
         env = hook_env(tmp_path, CODEX_PATH=str(stub), LLM_ROUTER_AGENT_ROUTE_CODEX="on",
                        LLM_ROUTER_SUBAGENT_DIRECT="off")
+        from tests._bind_support import break_results_dir
+
+        break_results_dir(tmp_path)  # the deny is the fallback delivery; the file echo is covered in test_codex_handoff_file_echo
         proc = run_hook(AGENT_ROUTE, agent_payload("analyze this bug and explain the root cause"), env,
                         cwd=tmp_path)
-
         out = decision_of(proc)  # raises unless stdout is exactly one JSON object
         assert out["decision"] == "block"
         assert "codex says: fixed at line 42" in out["reason"]
@@ -1224,10 +1226,12 @@ class TestDefaultAgentCallPassesThroughCleanly:
         seen = self._run_main_in_process(mod, monkeypatch, tmp_path, prompt)
         out = json.loads(capsys.readouterr().out)
         assert seen == [prompt]  # went to (stubbed) Codex, nothing else
-        assert out["decision"] == "block"
-        assert "Codex CLI" in out["reason"]
-        assert "codex stub answer" in out["reason"]
-        assert "routed_direct" not in out["reason"]
+        hso = out["hookSpecificOutput"]
+        assert "decision" not in out and hso["permissionDecision"] == "allow"  # file echo, not a deny
+        assert "Codex CLI" in hso["permissionDecisionReason"]
+        from tests._bind_support import delivered_text
+        assert "codex stub answer" in delivered_text(out)
+        assert "routed_direct" not in hso["permissionDecisionReason"]
 
     def test_default_unsuitable_prompt_spawns_normally(self, tmp_path, monkeypatch, capsys):
         """Real default env, prompt NOT Codex-suitable (multi-file write):
