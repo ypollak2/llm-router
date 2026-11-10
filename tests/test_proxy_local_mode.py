@@ -1183,7 +1183,7 @@ def _raw_with_deep_tool_schema(levels: int) -> str:
     return json.dumps(body).replace('"@@"', '{"k":' * levels + "1" + "}" * levels)
 
 
-@pytest.mark.parametrize("levels", [5000, 500])
+@pytest.mark.parametrize("levels", [100_000, 5000, 500])
 async def test_a_deeply_nested_request_goes_to_claude_and_never_crashes(env, levels):
     """ESTREC-1 through the whole proxy: 5000 deep fails json.loads (was a 500); 500 deep parses and failed in
     the estimators (was reason backend_error). Both are forwarded to Claude, none is served locally."""

@@ -21,7 +21,8 @@ status: fixed in `fix/estimate-recursion`
   size_bucket, savings and cost never see a placeholder number.
   Residual: other direct callers of `estimate_payload_tokens` (providers.py, hooks) now see `Unmeasurable` instead of
   `RecursionError`; both are exceptions, and neither was a number.
-- **Test.** `tests/test_local_context_guard.py::test_estimate_payload_tokens_raises_unmeasurable_on_a_5000_deep_payload`,
-  `::test_check_overflow_refuses_a_5000_deep_payload_and_never_prints_a_number`;
-  `tests/test_proxy_local_mode.py::test_a_deeply_nested_request_goes_to_claude_and_never_crashes` (levels 5000 and 500).
+- **Test.** `tests/test_local_context_guard.py::test_estimate_payload_tokens_raises_unmeasurable_on_a_too_deep_payload`,
+  `::test_check_overflow_refuses_a_too_deep_payload_and_never_prints_a_number`;
+  `tests/test_proxy_local_mode.py::test_a_deeply_nested_request_goes_to_claude_and_never_crashes` (levels 100000, 5000 and 500).
   On the previous head the proxy test fails for 5000 (status 500) and for 500 (reason `backend_error`).
+- **Python version note (2026-11-10).** The depth at which `json.dumps` and `str()` raise `RecursionError` depends on the interpreter. Measured locally, n=1 run per version: CPython 3.11.15 raises at 5000; 3.13.14 and 3.14.6 do not raise at 5000 but do at 100000. The first CI run on 3.13 failed the guard tests at 5000 for that reason, so the guard tests use 100000 levels. The proxy test runs 100000, 5000 and 500 levels.
