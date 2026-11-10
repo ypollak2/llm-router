@@ -741,12 +741,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
         # P1: prompt-size bucket for every row that reached a local decision. Early exits (kill switch,
         # exempt, pinned, media) carry no estimate, so it is computed here (~25 ms on a 512 KB payload);
-        # an unserialisable payload becomes "unknown" instead of failing the request.
+        # a payload that cannot be measured (circular, too deep, odd keys) becomes "unknown"; a KPI field
+        # must never fail the request.
         est_tokens = decision.est_tokens
         if est_tokens is None:
             try:
                 est_tokens = local_mode.estimate_prompt_tokens(payload)
-            except (TypeError, ValueError):
+            except Exception:
                 est_tokens = None
         row["est_prompt_tokens"], row["size_bucket"] = est_tokens, ledger.size_bucket(est_tokens)
         row["local_mode"]["exempt_policy"] = policy[0]

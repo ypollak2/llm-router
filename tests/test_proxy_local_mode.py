@@ -307,6 +307,24 @@ async def test_kill_switch_takes_effect_without_a_restart_and_is_not_sticky(env)
     assert len(backend.calls) == 2 and env.rows()[2]["decision"] == "served"  # same conversation, local again
 
 
+async def test_early_exit_rows_carry_a_size_bucket_and_an_unmeasurable_payload_is_unknown(env, monkeypatch):
+    backend = Backend(_ollama("x"))
+    app = env.app(backend)
+    env.kill.write_text("")
+    await _post(app, _first_call())
+    row = env.rows()[0]
+    assert row["reason"] == "kill_switch" and row["size_bucket"] == "<=8k" and row["est_prompt_tokens"] > 0
+
+    def deep(_payload):
+        raise RecursionError("too deep")
+
+    monkeypatch.setattr(local_mode, "estimate_prompt_tokens", deep)
+    await _post(app, _first_call())
+    row = env.rows()[1]
+    assert row["reason"] == "kill_switch" and row["size_bucket"] == "unknown" and row["est_prompt_tokens"] is None
+    assert backend.calls == []
+
+
 async def test_open_quality_breaker_forwards_with_its_reason(env):
     backend = Backend(_ollama("x"))
     await _post(env.app(backend, breaker=Breaker(allowed=False)), _first_call())
