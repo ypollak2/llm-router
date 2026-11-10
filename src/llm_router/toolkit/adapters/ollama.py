@@ -355,12 +355,28 @@ def _tags_size(url: str, name: str) -> int | None:
     return None
 
 
-def _show_size(url: str, name: str) -> int | None:
-    """``size`` of ``name`` from ``/api/show`` when this Ollama reports one, else None."""
+# (url, bare name) -> /api/show payload. Static metadata of an installed model, so asked once, not per check.
+_SHOW_CACHE: dict = {}
+
+
+def _show_payload(url: str, name: str) -> dict:
+    """``/api/show`` of ``name``, cached per (url, name); raises when unreachable (failures are not cached)."""
+    key = (url, _bare(name))
+    hit = _SHOW_CACHE.get(key)
+    if hit is not None:
+        return hit
     req = urllib.request.Request(f"{url}/api/show", data=json.dumps({"model": name}).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=1.5) as resp:  # nosec B310 — validated URL
-        size = json.loads(resp.read()).get("size")
+        payload = json.loads(resp.read())
+    payload = payload if isinstance(payload, dict) else {}
+    _SHOW_CACHE[key] = payload
+    return payload
+
+
+def _show_size(url: str, name: str) -> int | None:
+    """``size`` of ``name`` from ``/api/show`` when this Ollama reports one, else None."""
+    size = _show_payload(url, name).get("size")
     return int(size) if isinstance(size, (int, float)) and size > 0 else None
 
 
@@ -371,23 +387,35 @@ def _show_size(url: str, name: str) -> int | None:
 # recurrent state 188 MiB, compute buffer ~0.5 GiB (RESEARCH-256K-R3-ENGINE-20261110.md section 5).
 _MIB = 1024 ** 2
 _COMPUTE_BYTES = 512 * _MIB
+# Speculative (MTP) draft context KV is +2 MiB per 1k on top of 20 (engine log): x1.1 on both the registry and GGUF paths.
+_KV_DRAFT_MARGIN = 1.1
+_SMALL_MODEL_BYTES = 4 * _GIB
 # bare model name -> (KV bytes per 1k tokens, constant state bytes). Used when /api/show has no usable metadata.
 _KV_REGISTRY: dict[str, tuple[int, int]] = {
-    "qwen3.6:35b-a3b-coding": (22 * _MIB, 188 * _MIB),
+    "qwen3.6:35b-a3b-coding": (20 * _MIB, 188 * _MIB),
 }
 # Unknown model with no metadata: 128 MiB per 1k tokens = 32 layers x 8 KV heads x 128 dim x f16 (an 8B-class GQA
 # dense model). It is deliberately on the high side: over-counting refuses one load, under-counting can OOM the Mac.
 _KV_DEFAULT_PER_1K = 128 * _MIB
-_METAL_FRACTION = 0.75        # default Metal working-set cap as a share of RAM (published ~75%; measured 78% here)
+_METAL_FRACTION = 0.78        # default Metal working-set cap / RAM: measured 40,200.90 MB of 51,539.6 MB (Ollama log)
+_WIRED_MB: list = []          # cached iogpu.wired_limit_mb (static per boot); [None] = unreadable
 
 
 def _show_model_info(url: str, name: str) -> dict:
-    """``model_info`` from ``/api/show`` ({} when absent or unreadable)."""
-    req = urllib.request.Request(f"{url}/api/show", data=json.dumps({"model": name}).encode(),
-                                 headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=1.5) as resp:  # nosec B310 — validated URL
-        info = json.loads(resp.read()).get("model_info")
+    """``model_info`` from ``/api/show`` ({} when absent)."""
+    info = _show_payload(url, name).get("model_info")
     return info if isinstance(info, dict) else {}
+
+
+def _trained_ctx(url: str, name: str) -> int | None:
+    """The model's own trained context length (``<arch>.context_length``); Ollama clamps a request to it."""
+    try:
+        info = _show_model_info(url, name)
+    except Exception:  # noqa: BLE001
+        return None
+    arch = info.get("general.architecture")
+    v = info.get(f"{arch}.context_length") if isinstance(arch, str) else None
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
 
 
 def _kv_from_info(info: dict) -> tuple[int, int] | None:
@@ -428,9 +456,9 @@ def _kv_from_info(info: dict) -> tuple[int, int] | None:
     return int(per_token), state
 
 
-def _kv_terms(url: str, name: str, ctx: int) -> tuple[float, str]:
+def _kv_terms(url: str, name: str, ctx: int, size: float = 0.0) -> tuple[float, str]:
     """(bytes the context window adds on top of the weights, source label) for ``ctx`` tokens:
-    KV(ctx) + recurrent state + compute buffer."""
+    KV(ctx) x draft margin + recurrent state + compute buffer."""
     try:
         derived = _kv_from_info(_show_model_info(url, name))
     except Exception as exc:  # noqa: BLE001
@@ -438,28 +466,35 @@ def _kv_terms(url: str, name: str, ctx: int) -> tuple[float, str]:
         derived = None
     if derived is not None:
         per_token, state = derived
-        return per_token * ctx + state + _COMPUTE_BYTES, "gguf"
+        return per_token * ctx * _KV_DRAFT_MARGIN + state + _COMPUTE_BYTES, "gguf"
     for key, (per_1k, state) in _KV_REGISTRY.items():
         if _same_name(key, name):
-            return per_1k * ctx / 1000 + state + _COMPUTE_BYTES, "registry"
+            return per_1k * ctx / 1000 * _KV_DRAFT_MARGIN + state + _COMPUTE_BYTES, "registry"
+    if size < _SMALL_MODEL_BYTES:
+        # No metadata (often /api/show timing out while Ollama is busy) and a small model: the flat default would
+        # over-count a 1 GB model by 4 GiB and refuse it. Keep today's weights x headroom and record it.
+        _fail_open("CHZ-FO-MEM-GUARD-KV", f"no KV metadata for small model {name} on {url}; weights x headroom only")
+        return 0.0, "failopen"
     return _KV_DEFAULT_PER_1K * ctx / 1000 + _COMPUTE_BYTES, "default"
 
 
 def _metal_cap_gib(total_gib: float) -> float | None:
-    """Metal working-set cap in GiB on Apple Silicon: ``iogpu.wired_limit_mb`` when set (readable without sudo),
-    else 75% of RAM. None off macOS or when unreadable."""
+    """Metal working-set cap in GiB on Apple Silicon: ``iogpu.wired_limit_mb`` when set (readable without sudo,
+    read once per process), else 78% of RAM. None off macOS."""
     import sys
     if sys.platform != "darwin":
         return None
-    try:
-        import subprocess
-        out = subprocess.run(["sysctl", "-n", "iogpu.wired_limit_mb"], capture_output=True, text=True,
-                             timeout=1.5, check=False).stdout.strip()
-        if out.isdigit() and int(out) > 0:
-            return int(out) / 1024
-    except Exception:  # noqa: BLE001
-        pass
-    return total_gib * _METAL_FRACTION
+    if not _WIRED_MB:
+        wired = None
+        try:
+            import subprocess
+            out = subprocess.run(["sysctl", "-n", "iogpu.wired_limit_mb"], capture_output=True, text=True,
+                                 timeout=1.5, check=False).stdout.strip()
+            wired = int(out) if out.isdigit() and int(out) > 0 else None
+        except Exception:  # noqa: BLE001
+            wired = None
+        _WIRED_MB.append(wired)
+    return _WIRED_MB[0] / 1024 if _WIRED_MB[0] else total_gib * _METAL_FRACTION
 
 
 def _target_size(url: str, name: str) -> int | None:
@@ -539,6 +574,9 @@ def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget
         return None
     from llm_router import local_models
     want_ctx = local_models.num_ctx(name)
+    trained = _trained_ctx(base_url, name)
+    if trained:
+        want_ctx = min(want_ctx, trained)      # Ollama clamps the request to the model's own window
     # (1) already resident on that server: no new load, unless it was loaded with a smaller window than the one
     # requested (a reload). Same-or-larger window, or an unreported one: nothing to add, never double counted.
     same = [(u, r, n) for u, r, n in rows if u == base_url and _same_name(n, name)]
@@ -555,7 +593,7 @@ def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget
     if size is None:
         _fail_open("CHZ-FO-MEM-GUARD-SIZE", f"size of {name} on {base_url} unknown ({purpose})")
         return None
-    extra, kv_src = _kv_terms(base_url, name, want_ctx)
+    extra, kv_src = _kv_terms(base_url, name, want_ctx, size)
     # weights + window (KV + state + compute); the old weights x headroom stays as the floor, never lowered.
     need_bytes = max(size * _headroom(), size + extra)
     need = need_bytes / _GIB

@@ -72,6 +72,7 @@ def _env(monkeypatch):
     from llm_router.toolkit.adapters import ollama as oa
     oa._PS_CACHE.clear()
     oa._RESERVED.clear()
+    oa._SHOW_CACHE.clear()
     monkeypatch.setattr(oa.time, "sleep", lambda s: None)
     monkeypatch.setattr(oa, "_metal_cap_gib", lambda total: None)
     host(monkeypatch, 48.0, 40.0)
