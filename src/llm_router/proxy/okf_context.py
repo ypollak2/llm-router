@@ -31,6 +31,7 @@ Four rules, each a way this could cost a call instead of helping one:
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from llm_router.local_agent import DEFAULT_MAX_PROMPT_TOKENS
@@ -87,8 +88,21 @@ def session_scope(body: dict) -> str | None:
     return str(root) if (root / ".git").exists() else None
 
 
+def _with_block(send: dict, block: str) -> dict:
+    """*send* with *block* first in its system prompt (a shallow copy)."""
+    system = send.get("system")
+    if isinstance(system, list):
+        merged = [{"type": "text", "text": block}, *system]
+    elif isinstance(system, str) and system:
+        merged = f"{block}\n\n{system}"
+    else:
+        merged = block
+    return dict(send, system=merged)
+
+
 def attach(send: dict, original: dict, *,
-           ceiling_tokens: int = DEFAULT_MAX_PROMPT_TOKENS) -> tuple[dict, dict]:
+           ceiling_tokens: int = DEFAULT_MAX_PROMPT_TOKENS,
+           fits: Callable[[dict], bool] | None = None) -> tuple[dict, dict]:
     """``(request_for_the_local_backend, info)``.
 
     *send* is the already-trimmed (or compacted) request; *original* is the
@@ -144,7 +158,8 @@ def attach(send: dict, original: dict, *,
                 # nothing from this module, not just that line.)
                 block = None
                 break  # fewer documents cannot change that
-            if _tokens(block) <= room:
+            # *fits* (optional) judges the finished request with the caller's own estimators.
+            if _tokens(block) <= room and (fits is None or fits(_with_block(send, block))):
                 break
             info["reason"] = REASON_OVER_BUDGET
             block = None
@@ -152,15 +167,8 @@ def attach(send: dict, original: dict, *,
             info["room_tokens"] = room
             return send, info
 
-        system = send.get("system")
-        if isinstance(system, list):
-            merged = [{"type": "text", "text": block}, *system]
-        elif isinstance(system, str) and system:
-            merged = f"{block}\n\n{system}"
-        else:
-            merged = block
         info.update(injected=True, reason=REASON_INJECTED, tokens=_tokens(block), room_tokens=room)
-        return dict(send, system=merged), info
+        return _with_block(send, block), info
     except Exception as exc:  # noqa: BLE001 - fail-open: a step is served with or without context
         failopen.record("LR-FO-PROXY-OKF-ATTACH", exc)
         info.update(injected=False, reason=REASON_ERROR)
