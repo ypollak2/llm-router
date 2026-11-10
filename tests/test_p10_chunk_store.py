@@ -399,3 +399,52 @@ def test_symlinked_target_is_replaced_not_followed(home):
     p = home / chunk_store.FILE_NAME
     assert not p.is_symlink() and victim.read_text() == "keep me"
     assert stat.S_IMODE(p.stat().st_mode) == 0o600 and chunk_store.ChunkStore().entries == {"k": "v"}
+
+
+# ---- P10 x P11: the store holds the raw summary; the gate runs on every result, hit or fresh ----------------
+def _gated_body():
+    from tests.test_p11_summary_gate import _session as gated_session
+    return gated_session(40)
+
+
+def _gated_run(call, store=None):
+    return _run(_gated_body(), call, store or chunk_store.ChunkStore())
+
+
+def test_store_hit_still_runs_the_gate_and_pins_a_missing_fact(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_SUMMARY_GATE", "1")
+    call = Counter()  # SUMMARY names none of the chunk's paths / errors
+    r1 = _gated_run(call)
+    assert r1.changed and r1.row["map_calls"] > 0 and r1.row["gate_missing_path"] > 0
+    n = len(call.prompts)
+    r2 = _gated_run(call)
+    assert len(call.prompts) == n and r2.row["map_calls"] == 0 and r2.row["store_hits"] == r2.row["chunks"] > 0
+    assert r2.row["gate_checked"] == r1.row["gate_checked"] and r2.row["gate_missing_path"] == r1.row["gate_missing_path"] > 0
+    served = json.dumps(r2.body["messages"][0])
+    assert "pinned:" in served and "src/pkg/mod0.py" in served and "ValueError: boom 0" in served
+    assert r2.body == r1.body
+
+
+def test_stored_entry_is_the_raw_summary_not_the_gated_one(home, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_SUMMARY_GATE", "1")
+    store = chunk_store.ChunkStore()
+    r = _gated_run(Counter(), store)
+    assert r.row["gate_missing_path"] > 0 and "pinned:" in json.dumps(r.body["messages"][0])
+    assert store.entries and set(store.entries.values()) == {SUMMARY.strip()}
+    assert set(chunk_store.ChunkStore().entries.values()) == {SUMMARY.strip()}  # and so is the file
+
+
+def test_gate_rejection_on_a_hit_behaves_like_a_fresh_rejection(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_SUMMARY_GATE", "1")
+    call = Counter()
+    ok = _gated_run(call)  # populates the store with the raw summaries
+    assert ok.changed
+    from llm_router.proxy import summary_gate
+    monkeypatch.setattr(summary_gate, "pin_block", lambda facts, miss: "")  # facts stay missing: the gate rejects
+    fresh = _gated_run(Counter(), chunk_store.ChunkStore(path=chunk_store.store_path().with_name("other.json")))
+    n = len(call.prompts)
+    hit = _gated_run(call)
+    assert len(call.prompts) == n and hit.row["store_hits"] > 0  # the entry was served as a hit...
+    for r in (fresh, hit):  # ...and the gate still rejected it exactly as for a fresh summary
+        assert not r.changed and r.row["outcome"] == mr_summary.OUTCOME_GATE_FAILED and r.row["gate_failed"] == 1
+        assert r.body == _gated_body()
