@@ -186,8 +186,8 @@ def warm_primary(model: str | None = None) -> None:
     def _run() -> None:
         try:
             asyncio.run(local_llm_classify("warmup ping", target, timeout_seconds=90.0))
-        except Exception:  # noqa: BLE001 — warmup is best-effort
-            pass
+        except Exception as exc:  # noqa: BLE001 — warmup is best-effort, but not silent
+            log.warning("ensemble warm-up failed: %s", type(exc).__name__)
 
     import threading
 

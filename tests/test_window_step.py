@@ -201,3 +201,93 @@ def test_invalid_value_warns_once(unset, monkeypatch, caplog):
         assert local_models.raised_window() is None
         assert local_models.raised_window() is None
     assert caplog.text.count("131072.0") == 1
+
+
+# --- num_ctx follows the model actually SENT (providers.call_llm rewrites to LOCAL_MODEL) ---
+
+def test_providers_num_ctx_resolves_caller_name_to_shared_model(stepped):
+    from llm_router import providers
+    assert providers._ollama_num_ctx("ollama/other:tag") == STEP
+    assert providers._ollama_num_ctx("ollama/" + MODEL) == STEP
+
+
+def test_providers_num_ctx_resolution_is_quiet(stepped, caplog):
+    from llm_router import providers
+    with caplog.at_level("WARNING"):
+        providers._ollama_num_ctx("ollama/other:tag")
+    assert "override" not in caplog.text
+
+
+def test_providers_num_ctx_unset_local_model_unchanged(monkeypatch):
+    from llm_router import local_models, providers
+    monkeypatch.delenv("LLM_ROUTER_LOCAL_MODEL", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_WINDOW_STEP", str(STEP))
+    for k in ("LLM_ROUTER_OLLAMA_NUM_CTX", "LLM_ROUTER_LOCAL_NUM_CTX", "LLM_ROUTER_AGENT_NUM_CTX"):
+        monkeypatch.delenv(k, raising=False)
+    assert providers._ollama_num_ctx("ollama/other:tag") == local_models.num_ctx("other:tag")
+
+
+def test_providers_num_ctx_unset_step_unchanged(unset):
+    from llm_router import local_models, providers
+    assert providers._ollama_num_ctx("ollama/other:tag") == local_models.num_ctx(MODEL) == 32768
+
+
+@pytest.mark.asyncio
+async def test_call_llm_sends_shared_window_for_a_different_caller_model(stepped, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from llm_router import local_privacy, providers
+    from llm_router.toolkit.adapters import ollama as oa
+
+    monkeypatch.setattr(oa, "check_resident", lambda m: None)
+    monkeypatch.setattr(local_privacy, "direct_ollama", lambda *a, **k: False)
+    resp = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None), finish_reason="stop")],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1), model=MODEL)
+    mock = AsyncMock(return_value=resp)
+    with patch("litellm.acompletion", mock):
+        try:
+            await providers.call_llm("ollama/other:tag", [{"role": "user", "content": "hi"}])
+        except Exception:  # noqa: BLE001 - response post-processing is not under test
+            pass
+    sent = mock.call_args.kwargs
+    assert sent["model"] == "ollama/" + MODEL
+    assert sent["num_ctx"] == STEP
+
+
+def test_providers_num_ctx_non_ollama_name_never_gets_local_window(stepped):
+    from llm_router import providers
+    assert providers._ollama_num_ctx("gemini/gemini-2.5-flash") != STEP
+    assert providers._ollama_num_ctx("gpt-4o") != STEP
+
+
+def test_route_time_ctx_uses_the_shared_window_for_another_ollama_name(stepped):
+    from llm_router import eligibility_routing as er
+    assert er._route_time_ctx("ollama/other:tag") == STEP
+
+
+@pytest.mark.asyncio
+async def test_call_llm_stream_events_sends_shared_window_for_a_different_caller_model(stepped, monkeypatch):
+    from unittest.mock import AsyncMock, patch
+
+    from llm_router import local_privacy, providers
+    from llm_router.toolkit.adapters import ollama as oa
+
+    monkeypatch.setattr(oa, "check_resident", lambda m: None)
+    monkeypatch.setattr(local_privacy, "direct_ollama", lambda *a, **k: False)
+
+    async def _empty():
+        return
+        yield  # pragma: no cover
+
+    mock = AsyncMock(return_value=_empty())
+    with patch("litellm.acompletion", mock):
+        try:
+            async for _ in providers.call_llm_stream_events("ollama/other:tag", [{"role": "user", "content": "hi"}]):
+                pass
+        except Exception:  # noqa: BLE001 - stream post-processing is not under test
+            pass
+    sent = mock.call_args.kwargs
+    assert sent["model"] == "ollama/" + MODEL
+    assert sent["num_ctx"] == STEP
