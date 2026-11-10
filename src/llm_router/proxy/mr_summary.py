@@ -469,6 +469,9 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
                 row["gate_missing_" + kind] += c
             if not ok:  # this chunk and every later one stay verbatim; never retried longer
                 row["gate_failed"] += 1
+                if store is not None and skey is not None:
+                    store.evict(skey)  # hit or fresh: a gate-rejected raw summary would fail again, so the next turn re-maps
+                    store.flush()
                 stop = OUTCOME_GATE_FAILED
                 break
             summaries.append(final)

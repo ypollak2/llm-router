@@ -448,3 +448,27 @@ def test_gate_rejection_on_a_hit_behaves_like_a_fresh_rejection(monkeypatch):
     for r in (fresh, hit):  # ...and the gate still rejected it exactly as for a fresh summary
         assert not r.changed and r.row["outcome"] == mr_summary.OUTCOME_GATE_FAILED and r.row["gate_failed"] == 1
         assert r.body == _gated_body()
+
+
+def test_gate_rejected_hit_is_evicted_and_next_run_remaps(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_SUMMARY_GATE", "1")
+    call = Counter()
+    assert _gated_run(call).changed  # populates the store
+    from llm_router.proxy import summary_gate
+    with monkeypatch.context() as m:
+        m.setattr(summary_gate, "pin_block", lambda facts, miss: "")  # the gate rejects the stored summary
+        n = len(call.prompts)
+        hit = _gated_run(call)
+        assert len(call.prompts) == n and hit.row["store_hits"] > 0 and hit.row["gate_failed"] == 1
+    healed = _gated_run(call)  # gate works again: the evicted chunk is mapped afresh, not served from the store
+    assert len(call.prompts) > n and healed.row["map_calls"] >= 1
+
+
+def test_gate_rejected_fresh_summary_is_also_evicted(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_SUMMARY_GATE", "1")
+    from llm_router.proxy import summary_gate
+    monkeypatch.setattr(summary_gate, "pin_block", lambda facts, miss: "")
+    store = chunk_store.ChunkStore()
+    r = _gated_run(Counter(), store)
+    assert r.row["gate_failed"] == 1 and r.row["store_writes"] >= 1
+    assert not store.entries and not chunk_store.ChunkStore().entries
