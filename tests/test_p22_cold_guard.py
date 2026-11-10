@@ -197,42 +197,112 @@ def sim_time(monkeypatch):
     SIM["first_line_s"] = 0.0
 
 
+def _real_app(env, *, num_ctx=24576, trim="none"):  # noqa: F811
+    """The real make_backend path (cfg.num_ctx, cfg.hedge_s) over a mocked transport; Ollama calls are recorded."""
+    seen = []
+
+    def handler(request):
+        if request.url.path == "/api/chat":
+            seen.append(json.loads(request.content))
+            line = json.dumps({"message": {"role": "assistant", "content": "ok"}, "done": True, "eval_count": 1,
+                               "prompt_eval_count": 50})
+            return httpx.Response(200, content=(line + "\n").encode(), headers={"content-type": "application/x-ndjson"})
+        return env.up(request)
+
+    config = ps.ProxyConfig(upstream="http://127.0.0.1:9", ledger_path=env.ledger, kill_switch=env.kill,
+                            model="ollama/fake:1", trim=trim, serve="local-agent", hedge_s=pb.DEFAULT_HEDGE_S,
+                            warm_up=False, num_ctx=num_ctx, ollama_url="http://127.0.0.1:11999")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app = ps.build_app(config, client=client,
+                       breaker_fn=lambda lever, task_type: type("D", (), {"allowed": True, "reason": "t"})())
+    return app, config, seen, client
+
+
+async def _until_warm_up_ends():
+    for _ in range(500):
+        if cold_guard.GUARD._inflight is None:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("warm-up never ended")
+
+
 async def test_the_warm_up_outlives_the_default_hedge_and_the_prefix_becomes_warm(env, monkeypatch, sim_time):  # noqa: F811
     monkeypatch.setenv("LLM_ROUTER_COLD_GUARD", "1")
     _long(monkeypatch)
-    client = _Client()
-    made = []
-
-    def factory(model):
-        b = pb.OllamaBackend("ollama/fake:1", client, base_url="http://localhost:59998", num_ctx=32768,
-                             hedge_s=pb.DEFAULT_HEDGE_S)
-        made.append(b)
-        return b
-
+    app, config, seen, client = _real_app(env)
     SIM["first_line_s"] = 30.0  # prefill: far past the 8 s default hedge, inside the warm-up deadline
-    old_path = pb.OllamaBackend("ollama/fake:1", client, base_url="http://localhost:59998", num_ctx=32768,
-                                hedge_s=pb.DEFAULT_HEDGE_S)
+    old_path = pb.OllamaBackend("ollama/fake:1", client,
+                                base_url="http://127.0.0.1:11999", num_ctx=config.num_ctx, hedge_s=pb.DEFAULT_HEDGE_S)
     with pytest.raises(pb.HedgeTimeout):  # what the old code path (default hedge) did to the warm-up
         await old_path.complete(_first_call(), 60.0, priority="background")
-
-    config = ps.ProxyConfig(upstream="http://127.0.0.1:9", ledger_path=env.ledger, kill_switch=env.kill,
-                            model="ollama/fake:1", trim="none", serve="local-agent", hedge_s=pb.DEFAULT_HEDGE_S,
-                            warm_up=False)
-    app = ps.build_app(config, client=httpx.AsyncClient(transport=httpx.MockTransport(env.up)),
-                       backend_factory=factory, breaker_fn=lambda lever, task_type: type(
-                           "D", (), {"allowed": True, "reason": "t"})())
     first = _first_call()
     await _post(app, first)
-    for _ in range(300):
-        if cold_guard.GUARD.is_warm(cold_guard.GUARD.observe(_ollama_payload(first))):
-            break
-        await asyncio.sleep(0.01)
-    assert cold_guard.GUARD.is_warm(cold_guard.GUARD.observe(_ollama_payload(first)))
-    warm = [p for p in client.payloads if p["options"].get("num_predict") == 1]
-    assert warm and warm[-1]["options"]["num_ctx"] == 32768  # the resident model's num_ctx
+    await _until_warm_up_ends()
+    warm = [p for p in seen if p["options"].get("num_predict") == 1]
+    assert warm and warm[-1]["options"]["num_ctx"] == config.num_ctx == 24576
     SIM["first_line_s"] = 0.0
-    await _post(app, first)  # warm now: served locally
-    assert env.rows()[-1]["decision"] == "served"
+    nxt = copy.deepcopy(first)
+    nxt["messages"] += [{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                        {"role": "user", "content": [{"type": "text", "text": "continue"}]}]
+    await _post(app, nxt)
+    assert env.rows()[-1]["decision"] == "served" and len(env.up.requests) == 1  # warm: the cold turn alone left
+
+
+async def test_warm_up_primes_the_prepared_prefix_not_the_raw_request(env, monkeypatch, sim_time):  # noqa: F811
+    """Default config: trim fast + OKF attach change the system prompt. Warmth is judged on what the live path
+    sends, so a warm-up followed by the next turn is warm; on the raw body it was not."""
+    monkeypatch.setenv("LLM_ROUTER_COLD_GUARD", "1")
+    _long(monkeypatch)
+
+    def attach(send, body, **kw):  # what the OKF attach does to the request: repo knowledge into the system prompt
+        out = copy.deepcopy(send)
+        out["system"] = [*(out["system"] if isinstance(out.get("system"), list) else [{"type": "text", "text": out.get("system") or ""}]),
+                         {"type": "text", "text": "[repo knowledge] pkg/mod01.py defines add_one"}]
+        return out, {"status": "attached"}
+
+    monkeypatch.setattr(ps.okf_context, "attach", attach)
+    app, config, seen, client = _real_app(env)
+    first = _first_call()
+    raw_sys = _ollama_payload(first)["messages"][0]
+    await _post(app, first)
+    await _until_warm_up_ends()
+    warm = [p for p in seen if p["options"].get("num_predict") == 1][-1]
+    assert warm["messages"][0] != raw_sys  # premise: the prepared system prompt differs from the raw one
+    nxt = copy.deepcopy(first)
+    nxt["messages"] += [{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                        {"role": "user", "content": [{"type": "text", "text": "continue"}]}]
+    await _post(app, nxt)
+    assert env.rows()[-1]["decision"] == "served", env.rows()[-1]
+    live = [p for p in seen if p["options"].get("num_predict") != 1][-1]
+    assert live["messages"][0] == warm["messages"][0]  # the live turn sent the prefix the warm-up primed
+
+
+async def test_a_queue_on_warm_up_is_admitted_in_the_background_lane(env, monkeypatch, sim_time, tmp_path):  # noqa: F811
+    from llm_router.toolkit import local_gate as g
+
+    monkeypatch.setenv("LLM_ROUTER_COLD_GUARD", "1")
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "1")
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_SLOTS", "1")
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_GATE_DIR", str(tmp_path / "gate"))
+    g._FS_CACHE.clear()
+    monkeypatch.setattr(g, "_fstype_for", lambda p: "apfs")
+    _long(monkeypatch)
+    admitted = []
+    real_aadmit = g.aadmit
+
+    async def spy(*a, **kw):
+        admitted.append(kw.get("priority"))
+        return await real_aadmit(*a, **kw)
+
+    monkeypatch.setattr(g, "aadmit", spy)
+    app, config, seen, client = _real_app(env)
+    SIM["first_line_s"] = 30.0
+    first = _first_call()
+    await _post(app, first)
+    await _until_warm_up_ends()
+    assert admitted == ["background"]
+    assert cold_guard.GUARD.is_warm(cold_guard.GUARD.observe(
+        [p for p in seen if p["options"].get("num_predict") == 1][-1]))
 
 
 # ── resident prefix lifetime, failure memory, generations ──────────────────────────────────────────────────
@@ -253,6 +323,14 @@ def test_ttl_from_keep_alive():
     f = cold_guard.ttl_from_keep_alive
     assert f(600) == 600.0 and f("10m") == 600.0 and f("90s") == 90.0
     assert f(-1) == f("-1") == f(None) == f("forever") == cold_guard.DEFAULT_TTL_S
+
+
+def test_keep_alive_zero_means_unloaded_so_nothing_is_ever_warm():
+    for ka in (0, "0", "0s", 0.0):
+        g = cold_guard.ColdGuard()
+        g.ttl_s = cold_guard.ttl_from_keep_alive(ka)
+        g.note_resident(_obs("a"), now=100.0)
+        assert g.ttl_s == 0.0 and not g.is_warm(_obs("a", "b"), now=100.0), ka
 
 
 def test_a_local_failure_clears_the_resident_prefix():

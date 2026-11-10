@@ -464,6 +464,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
     upstream = validate_upstream(cfg.upstream)
     trims = resolve_trims(cfg.trim)
+    if cold_guard.enabled():
+        cold_guard.GUARD.ttl_s = cold_guard.ttl_from_keep_alive(cfg.keep_alive)
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
     # Stops sending steps to a crashed local backend (proxy.backend_health).
@@ -606,6 +608,76 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         row["deadline"] = dict(d, step_budget_s=budget, hedge_s=hedge, base_step_budget_s=cfg.step_budget_s)
         return budget
 
+    async def _build_send(body: dict, row: dict, backend, t0: float, step_budget_s: float, *,
+                          consume_checks: bool = True) -> dict:
+        """The request a live local turn sends: local_agent.prepare or the trims, then the OKF attach. One
+        implementation for try_serve and the P22 cold guard. ``consume_checks=False`` (the guard's look-ahead)
+        leaves the pending post-apply checks for the live turn: the only difference is a failure note in
+        the last tool result, the tail of the prompt."""
+        if local_agent is not None:
+            send, row["compaction"] = await local_agent.prepare(body)
+        else:
+            src = body
+            if lm is not None and consume_checks:
+                # Post-apply check of the edits served at the previous step.
+                src, checks = local_mode.annotate_failed_checks(body, lm, la_session_cwd(body))
+                if checks:
+                    row["post_apply_checks"] = checks
+            # Off the event loop (D-94(a)): the ``fast`` trim builds the context pack
+            # and estimates tokens over the whole prompt. Bounded by what is left of the
+            # step budget, since it shares the default thread pool with okf attaches that
+            # may outlive their own timeout: a stuck pool is a budget_exceeded fallback,
+            # never a hang. An error still reaches the counted-fallback handler below.
+            trim_t0 = time.perf_counter()
+            send = await asyncio.wait_for(asyncio.to_thread(
+                apply_trims, src, trims, target_window=getattr(backend, "num_ctx", None)),
+                timeout=_budget_left(t0, step_budget_s))
+            _add_phase(row, "trim", (time.perf_counter() - trim_t0) * 1000.0)
+        # Repo knowledge for the local model (proxy.okf_context): the trimmed
+        # request is all it sees. Local path only, never the pass-through;
+        # fail-open; in a thread because retrieval and the repo-state line
+        # do file and git I/O. ``body`` (the client's request) is untouched.
+        # Bounded: repo_facts can run several git calls; a slow attach must
+        # not eat the step budget. On timeout the step goes ahead without it
+        # (the worker thread finishes on its own and its result is dropped).
+        okf_t0 = time.perf_counter()
+        # Within the step deadline: when the budget, not the attach's own 2 s cap, is
+        # what cuts it short, the step is out of time; that is not an attach failure
+        # and is not counted as one (status "budget", no failopen).
+        okf_ceiling_tokens, okf_ceiling_src, okf_fit = (
+            cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS), "agent", None
+        okf_on = okf_by_window_on()
+        if okf_on:  # P21: nothing below runs, or costs a thread hop, with the flag off
+            try:
+                okf_num_ctx = getattr(backend, "num_ctx", None) or local_models.raised_window() or DEFAULT_NUM_CTX
+                okf_ceiling_tokens, okf_ceiling_src = await asyncio.wait_for(
+                    asyncio.to_thread(okf_ceiling, cfg, send, okf_num_ctx),
+                    timeout=min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0, step_budget_s)))
+                okf_fit = okf_fits(local_mode.prompt_cap_tokens(), okf_num_ctx)
+            except Exception as exc:  # noqa: BLE001 - fail-open: the step is served with the agent ceiling
+                failopen.record("LR-FO-PROXY-OKF-CEILING", exc)
+                okf_ceiling_tokens, okf_ceiling_src, okf_fit = (
+                    cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS
+                ), "agent_fallback", None
+        okf_cap = min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0, step_budget_s))
+        try:
+            send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
+                okf_context.attach, send, body, ceiling_tokens=okf_ceiling_tokens, fits=okf_fit),
+                timeout=okf_cap)
+        except asyncio.TimeoutError as exc:
+            if okf_cap < OKF_ATTACH_TIMEOUT_S:
+                row["okf"] = {"status": "budget"}
+            else:
+                failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
+                row["okf"] = {"status": "timeout"}
+        # P21: which ceiling decided the room, so the attached share can be split by it. Flag on
+        # only: off-mode rows stay byte-identical to the golden (tests/test_proxy_off_golden.py).
+        if okf_on and "status" not in row["okf"]:  # attach ran (not the timeout/budget stubs)
+            row["okf"] = {**row["okf"], "ceiling_tokens": okf_ceiling_tokens, "ceiling_src": okf_ceiling_src}
+        # P0.9: context building, not the decision; reported beside it (S6).
+        _add_phase(row, "okf_attach", (time.perf_counter() - okf_t0) * 1000.0)
+        return send
+
     async def try_serve(body: dict, row: dict) -> dict | None:
         t0 = time.monotonic()
         session_id = row.get("session_id")
@@ -694,68 +766,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row.update(decision=ledger.DECISION_FORWARDED, reason=REASON_BACKEND_UNHEALTHY,
                            added_latency_s=round(time.monotonic() - t0, 3))
                 return None
-            if local_agent is not None:
-                send, row["compaction"] = await local_agent.prepare(body)
-            else:
-                src = body
-                if lm is not None:
-                    # Post-apply check of the edits served at the previous step.
-                    src, checks = local_mode.annotate_failed_checks(body, lm, la_session_cwd(body))
-                    if checks:
-                        row["post_apply_checks"] = checks
-                # Off the event loop (D-94(a)): the ``fast`` trim builds the context pack
-                # and estimates tokens over the whole prompt. Bounded by what is left of the
-                # step budget, since it shares the default thread pool with okf attaches that
-                # may outlive their own timeout: a stuck pool is a budget_exceeded fallback,
-                # never a hang. An error still reaches the counted-fallback handler below.
-                trim_t0 = time.perf_counter()
-                send = await asyncio.wait_for(asyncio.to_thread(
-                    apply_trims, src, trims, target_window=getattr(backend, "num_ctx", None)),
-                    timeout=_budget_left(t0, step_budget_s))
-                _add_phase(row, "trim", (time.perf_counter() - trim_t0) * 1000.0)
-            # Repo knowledge for the local model (proxy.okf_context): the trimmed
-            # request is all it sees. Local path only, never the pass-through;
-            # fail-open; in a thread because retrieval and the repo-state line
-            # do file and git I/O. ``body`` (the client's request) is untouched.
-            # Bounded: repo_facts can run several git calls; a slow attach must
-            # not eat the step budget. On timeout the step goes ahead without it
-            # (the worker thread finishes on its own and its result is dropped).
-            okf_t0 = time.perf_counter()
-            # Within the step deadline: when the budget, not the attach's own 2 s cap, is
-            # what cuts it short, the step is out of time; that is not an attach failure
-            # and is not counted as one (status "budget", no failopen).
-            okf_ceiling_tokens, okf_ceiling_src, okf_fit = (
-                cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS), "agent", None
-            okf_on = okf_by_window_on()
-            if okf_on:  # P21: nothing below runs, or costs a thread hop, with the flag off
-                try:
-                    okf_num_ctx = getattr(backend, "num_ctx", None) or local_models.raised_window() or DEFAULT_NUM_CTX
-                    okf_ceiling_tokens, okf_ceiling_src = await asyncio.wait_for(
-                        asyncio.to_thread(okf_ceiling, cfg, send, okf_num_ctx),
-                        timeout=min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0, step_budget_s)))
-                    okf_fit = okf_fits(local_mode.prompt_cap_tokens(), okf_num_ctx)
-                except Exception as exc:  # noqa: BLE001 - fail-open: the step is served with the agent ceiling
-                    failopen.record("LR-FO-PROXY-OKF-CEILING", exc)
-                    okf_ceiling_tokens, okf_ceiling_src, okf_fit = (
-                        cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS
-                    ), "agent_fallback", None
-            okf_cap = min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0, step_budget_s))
-            try:
-                send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
-                    okf_context.attach, send, body, ceiling_tokens=okf_ceiling_tokens, fits=okf_fit),
-                    timeout=okf_cap)
-            except asyncio.TimeoutError as exc:
-                if okf_cap < OKF_ATTACH_TIMEOUT_S:
-                    row["okf"] = {"status": "budget"}
-                else:
-                    failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
-                    row["okf"] = {"status": "timeout"}
-            # P21: which ceiling decided the room, so the attached share can be split by it. Flag on
-            # only: off-mode rows stay byte-identical to the golden (tests/test_proxy_off_golden.py).
-            if okf_on and "status" not in row["okf"]:  # attach ran (not the timeout/budget stubs)
-                row["okf"] = {**row["okf"], "ceiling_tokens": okf_ceiling_tokens, "ceiling_src": okf_ceiling_src}
-            # P0.9: context building, not the decision; reported beside it (S6).
-            _add_phase(row, "okf_attach", (time.perf_counter() - okf_t0) * 1000.0)
+            send = await _build_send(body, row, backend, t0, step_budget_s)
             backend_t0 = time.monotonic()
             # One deadline for the whole step (t0 + step_budget_s, as the edit protocol
             # below): the trim and the okf attach above spend from it, they do not add to it.
@@ -868,13 +879,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
     async def _cold_check(body: dict, payload: dict, decision) -> dict | None:
         """P22 (LLM_ROUTER_COLD_GUARD). The ledger row, or None when the turn may go local as decided
-        (warm, or predicted prefill within the cap). Otherwise the turn goes to Claude and, at most once per
-        prefix and one at a time, a prefill-only warm-up is queued. Fail-open: an error keeps the decision."""
+        (predicted prefill within the cap, or warm). Otherwise the turn goes to Claude and, at most once per
+        prefix key and one at a time, a prefill-only warm-up of the request the live path would send is queued.
+        Warmth is judged on that prepared request (trim + OKF attach), because the runner's cache is keyed on
+        the exact prefix it was sent. The look-ahead runs only for turns predicted over the cap (it costs the
+        trim and the OKF retrieval) and consumes nothing: the live turn's post-apply checks stay pending.
+        Fail-open: an error keeps the decision."""
         try:
-            cold_guard.GUARD.ttl_s = cold_guard.ttl_from_keep_alive(cfg.keep_alive)
-            obs = cold_guard.GUARD.observe(payload)
-            if cold_guard.GUARD.is_warm(obs):
-                return None
             est = decision.est_tokens
             if est is None:
                 est = await asyncio.to_thread(local_mode.estimate_prompt_tokens, payload)
@@ -883,10 +894,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             cap = deadline.cap_s(ka)
             if d["predicted_prefill_s"] <= cap:
                 return None
+            model = cfg.model.split("/", 1)[1]
+            send = await _build_send(body, {}, make_backend(cfg.model), time.monotonic(),
+                                     max(cfg.step_budget_s, 60.0), consume_checks=False)
+            sent_payload = await asyncio.to_thread(to_ollama, send, model, num_ctx=cfg.num_ctx, max_predict=1)
+            obs = cold_guard.GUARD.observe(sent_payload)
+            if cold_guard.GUARD.is_warm(obs):
+                return None
             started = cold_guard.GUARD.begin_warm_up(obs)
             if started is not None:
                 wd = cold_guard.warm_deadline_s(cap, d["predicted_prefill_s"])
-                task = asyncio.create_task(_run_warm_up(body, started[0], started[1], obs, wd))
+                task = asyncio.create_task(_run_warm_up(send, started[0], started[1], obs, wd))
                 _warm_tasks.add(task)
                 task.add_done_callback(_warm_tasks.discard)
             return {"predicted_prefill_s": d["predicted_prefill_s"], "cap_s": cap,
@@ -896,7 +914,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             failopen.record("LR-FO-PROXY-COLD-GUARD", exc)
             return None
 
-    async def _run_warm_up(body: dict, key: str, generation: int, obs: dict | None, warm_deadline: float) -> None:
+    async def _run_warm_up(send: dict, key: str, generation: int, obs: dict | None, warm_deadline: float) -> None:
         ok, sent = False, None
         try:
             backend = make_backend(cfg.model)  # same model and num_ctx as a live turn: no runner reload
@@ -904,18 +922,18 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # Own deadline, not the live-turn hedge: nobody waits, and the first line only arrives after the
             # whole prefill. Hedge, queue deadline and HTTP timeout all derive from warm_deadline.
             backend.hedge_s = warm_deadline
-            _msg, err, usage = await backend.complete(body, warm_deadline, priority="background")
+            _msg, err, usage = await backend.complete(send, warm_deadline, priority="background")
             ok = err is None
             sent = usage.get("prefix_obs") if isinstance(usage, dict) else None  # what the runner got (post-trim)
             if err:
                 logging.getLogger(__name__).warning("cold_guard warm-up failed: %s", ledger.scrub_detail(str(err)))
-        except asyncio.CancelledError:
-            cold_guard.GUARD.end_warm_up(key, obs, False, generation)
-            raise
         except Exception as exc:  # noqa: BLE001 -- recorded as not warm; a warm-up never raises
-            logging.getLogger(__name__).warning("cold_guard warm-up failed: %s",
-                                                ledger.scrub_detail(f"{type(exc).__name__}: {exc}"))
-        cold_guard.GUARD.end_warm_up(key, sent or obs, ok, generation)
+            ok = False
+            with contextlib.suppress(Exception):
+                logging.getLogger(__name__).warning("cold_guard warm-up failed: %s",
+                                                    ledger.scrub_detail(f"{type(exc).__name__}: {exc}"))
+        finally:  # the in-flight marker is released whatever happens, cancellation included
+            cold_guard.GUARD.end_warm_up(key, (sent or obs) if ok else None, ok, generation)
 
     async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None,
                           cap_body: dict | None = None) -> dict | None:
@@ -925,6 +943,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         so every turn of the conversation shares one key. ``cap_body`` (P6, flag off, masking applied) is the
         raw body the size cap is tested on; ``body`` is still what is served."""
         row["serve_mode"] = local_mode.SERVE_LOCAL_AGENT
+        if cold_guard.enabled():
+            cold_guard.GUARD.ttl_s = cold_guard.ttl_from_keep_alive(cfg.keep_alive)
         if lm.disabled:
             row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_PREFLIGHT_REFUSED)
             row["local_mode"] = {"served": False, "reason": local_mode.REASON_PREFLIGHT_REFUSED,

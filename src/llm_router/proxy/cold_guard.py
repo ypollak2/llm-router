@@ -36,14 +36,15 @@ def enabled() -> bool:
 
 
 def ttl_from_keep_alive(keep_alive) -> float:
-    """Seconds the runner keeps its model (and prefix) after the last call; DEFAULT_TTL_S when not finite."""
+    """Seconds the runner keeps its model (and prefix) after the last call. 0 (or any non-forever value of zero
+    length) means unload at once: TTL 0, never warm. -1, None and anything unparsable: DEFAULT_TTL_S."""
     try:
         if isinstance(keep_alive, bool) or keep_alive is None:
             return DEFAULT_TTL_S
         if isinstance(keep_alive, (int, float)):
-            return float(keep_alive) if keep_alive > 0 else DEFAULT_TTL_S
+            return float(keep_alive) if keep_alive >= 0 else DEFAULT_TTL_S
         m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([smh]?)\s*", str(keep_alive))
-        if m and float(m.group(1)) > 0:
+        if m:
             return float(m.group(1)) * _UNITS[m.group(2) or "s"]
     except Exception:  # noqa: BLE001
         pass
