@@ -63,7 +63,8 @@ _cache: dict = {"at": 0.0, "path": None, "rows": []}
 
 
 def enabled() -> bool:
-    return os.environ.get("LLM_ROUTER_DEADLINE_BY_SIZE", "")  # literal: env_registry scans for it.strip().lower() in ("1", "on", "true", "yes")
+    # literal name below: env_registry's scan needs it
+    return os.environ.get("LLM_ROUTER_DEADLINE_BY_SIZE", "").strip().lower() in ("1", "on", "true", "yes")
 
 
 def _env_float(raw: str | None, default: float) -> float:
