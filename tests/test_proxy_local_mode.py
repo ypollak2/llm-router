@@ -1198,3 +1198,22 @@ async def test_a_deeply_nested_request_goes_to_claude_and_never_crashes(env, lev
         (row,) = env.rows()
         assert row["decision"] == "fallback" and row["reason"] == local_mode.REASON_PROMPT_UNMEASURABLE
         assert "1000000000" not in json.dumps(row)
+
+
+async def test_an_id_less_backend_reply_is_served_with_an_id_and_a_ledger_row(env):
+    """BUG-IDLESS-1: message["id"] raised KeyError (500, no row) when a backend returned a message without one."""
+    class IdLess(Backend):
+        async def complete(self, body, timeout_s):
+            m, err, usage = await super().complete(body, timeout_s)
+            m.pop("id")
+            return m, err, usage
+
+    r = await _post(env.app(IdLess(_ollama("", [_call("Bash", {"command": "ls"})]))), _first_call())
+    assert r.status_code == 200
+    (start,) = [json.loads(ln[6:]) for ln in r.text.splitlines()
+                if ln.startswith("data: ") and '"message_start"' in ln]
+    sent_id = start["message"]["id"]
+    assert sent_id.startswith("msg_lr")
+    (row,) = env.rows()
+    assert row["decision"] == "served" and row["msg_id"] == sent_id
+

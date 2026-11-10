@@ -194,23 +194,20 @@ async def test_streaming_flag_raises_size_cap(env, monkeypatch):  # noqa: F811
 # ── exactly one ledger row on every path ─────────────────────────────────────
 
 
-class NoIdBackend(SlowBackend):
-    """Returns a validated-looking reply without an id: try_serve raises KeyError outside its backend try."""
-
-    async def complete(self, body, timeout_s):
-        m, err, usage = await super().complete(body, timeout_s)
-        m.pop("id", None)
-        return m, err, usage
-
-
 @pytest.mark.timing
 async def test_local_raises_after_commit_writes_one_row_and_an_error_event(env, monkeypatch):  # noqa: F811
     _on(monkeypatch)
-    r = await _post(env.app(NoIdBackend(_ollama("x"), 0.2)), _stream_body())
+    from llm_router.proxy import loop_guard
+
+    def boom(self, *a, **kw):
+        raise RuntimeError("record_served exploded")
+
+    monkeypatch.setattr(loop_guard.LoopGuard, "record_served", boom)  # a failure after the stream committed
+    r = await _post(env.app(SlowBackend(_ollama("x"), 0.2)), _stream_body())
     assert r.status_code == 200 and _events(r)[-1][0] == "error"
     assert _events(r)[-1][1]["error"]["type"] == "api_error" and "message_start" not in _names(r)
     (row,) = env.rows()
-    assert row["upstream_status"] == 500 and "KeyError" in row["detail"] and row["committed_early"] is True
+    assert row["upstream_status"] == 500 and "RuntimeError" in row["detail"] and row["committed_early"] is True
 
 
 @pytest.mark.timing
