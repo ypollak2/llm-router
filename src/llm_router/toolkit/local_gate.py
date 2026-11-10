@@ -4,7 +4,12 @@ Primitives only: URL canonicalisation, a per-server gate directory with permanen
 ``slot-<k>.lock`` files and a permanent ``config.lock``, ``slots.json`` written via
 temp + fsync + rename, and ``admit`` / ``admit_exclusive`` (sync and async).
 
-Wording: deadline-bounded waiting; not starvation-free; order not FIFO.
+Wording: deadline-bounded waiting; not starvation-free. Callers that pass no ``priority`` keep the
+unordered path (order not FIFO). Callers that pass ``priority="interactive"|"background"`` queue through
+per-waiter ticket files: interactive before background, FIFO within a class, cross-process, no daemon.
+A ticket is a file in ``<gate>/wait/`` whose flock its owner holds; a dead owner's lock vanishes, so
+any waiter that can lock a ticket knows it is stale and deletes it. A background holder polls
+``Admission.should_yield()``; the abort primitive lives in ``local_gate_abort``.
 
 Off by default (``LLM_ROUTER_LOCAL_QUEUE``). PR-1 wires no callers: enabling the
 queue before PR-3 is unsupported.
@@ -41,11 +46,14 @@ __all__ = [
     "aadmit_exclusive",
     "canonical_url",
     "gate_dir",
+    "PRIORITIES",
     "queue_enabled",
     "reset",
+    "should_yield",
 ]
 
 POLL_S = 0.025
+PRIORITIES = ("interactive", "background")  # rank = index; lower is served first
 _USE_MSVCRT = sys.platform == "win32"
 _O_FLAGS = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
 _CONTENTION = {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK, 36}
@@ -323,9 +331,10 @@ def _gc_close(fds: list) -> None:
 class Admission:
     """One held admission (one slot, or all slots when exclusive). Closing the fds releases the locks."""
 
-    def __init__(self, url: str, fds, slots, exclusive: bool, wait_ms: int, caller: str, disabled: bool = False):
+    def __init__(self, url: str, fds, slots, exclusive: bool, wait_ms: int, caller: str, disabled: bool = False,
+                 priority: str | None = None):
         self.url, self.slots, self.exclusive, self.disabled = url, tuple(slots), exclusive, disabled
-        self.wait_ms, self.caller = wait_ms, caller
+        self.wait_ms, self.caller, self.priority = wait_ms, caller, priority
         self._fds = list(fds)
         self._valid = True
         self._t0 = time.monotonic()
@@ -342,6 +351,14 @@ class Admission:
         if self._finalizer is not None:
             self._finalizer.detach()
         self._fds[:] = []  # child side of a fork: the fds were already closed
+
+    def should_yield(self) -> bool:
+        """True when this is a live background admission and an interactive request is waiting.
+
+        Cooperative: a background job polls this between chunks and stops (or aborts its call)."""
+        if not self._valid or self.disabled or self.priority != "background":
+            return False
+        return should_yield(self.url)
 
     def release(self) -> None:
         if not self._valid:
@@ -447,7 +464,8 @@ class _Flags:
     corrupt_logged = False
 
 
-def _attempt(url: str, d: Path, exclusive: bool, caller: str, wait_ms: int, flags: _Flags):
+def _attempt(url: str, d: Path, exclusive: bool, caller: str, wait_ms: int, flags: _Flags,
+             priority: str | None = None):
     """One admission attempt. Returns Admission, or None on contention. Nothing is held on None."""
     mine = _wanted_slots()
     fds: list[int] = []
@@ -508,7 +526,7 @@ def _attempt(url: str, d: Path, exclusive: bool, caller: str, wait_ms: int, flag
                     with contextlib.suppress(OSError):
                         os.close(fd)
             keep = True
-            return Admission(url, slot_fds, got_idx, exclusive, wait_ms, caller)
+            return Admission(url, slot_fds, got_idx, exclusive, wait_ms, caller, priority=priority)
         finally:
             if not keep:
                 for fd in fds:
@@ -516,6 +534,91 @@ def _attempt(url: str, d: Path, exclusive: bool, caller: str, wait_ms: int, flag
                         _OPEN_FDS.discard(fd)
                         with contextlib.suppress(OSError):
                             os.close(fd)
+
+
+# ── priority tickets ─────────────────────────────────────────────────────────
+
+def _wait_dir(d: Path) -> Path:
+    return d / "wait"
+
+
+def _ticket_live(path: Path) -> bool:
+    """A ticket is live while its owner holds its flock. If we can lock it the owner is gone: delete it."""
+    with _LIFECYCLE:
+        try:
+            # No O_CREAT: a scanner must never recreate a ticket its owner just removed.
+            fd = os.open(str(path), _O_FLAGS & ~os.O_CREAT, 0o600)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True  # cannot tell: treat as live, never drop a waiter on doubt
+        _OPEN_FDS.add(fd)
+        try:
+            if _try_lock(fd):
+                with contextlib.suppress(OSError):
+                    path.unlink()
+                return False
+            return True
+        finally:
+            _OPEN_FDS.discard(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def _live_tickets(d: Path) -> list[Path]:
+    """Live tickets of this server, in service order (class rank, then arrival time, then pid)."""
+    out = []
+    for p in sorted(glob.glob(str(_wait_dir(d) / "*.wait"))):
+        if _ticket_live(Path(p)):
+            out.append(Path(p))
+    return out
+
+
+class _Ticket:
+    """This waiter's place in line. The flock on the file is the liveness proof."""
+
+    def __init__(self, d: Path, priority: str):
+        if priority not in PRIORITIES:
+            raise ValueError(f"priority must be one of {PRIORITIES}, got {priority!r}")
+        _wait_dir(d).mkdir(parents=True, exist_ok=True)
+        name = f"{PRIORITIES.index(priority)}-{time.time_ns():020d}-{os.getpid():08d}-{os.urandom(3).hex()}.wait"
+        self.path = _wait_dir(d) / name
+        # Create and lock under a name scanners do not glob, then rename into the line: a scanner can
+        # never see (and reap) a ticket whose owner has not locked it yet.
+        tmp = _wait_dir(d) / f".tmp-{name}"
+        with _LIFECYCLE:
+            self._fd = _open(tmp)
+            try:
+                if not _try_lock(self._fd):  # fresh random name: cannot happen
+                    raise OSError(errno.EBUSY, "ticket lock contended")
+                os.rename(tmp, self.path)
+            except BaseException:
+                _OPEN_FDS.discard(self._fd)
+                with contextlib.suppress(OSError):
+                    os.close(self._fd)
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
+                raise
+
+    def is_head(self, d: Path) -> bool:
+        live = _live_tickets(d)
+        return not live or live[0] == self.path
+
+    def close(self) -> None:
+        with contextlib.suppress(OSError):
+            self.path.unlink()
+        _close_fds([self._fd])
+
+
+def should_yield(url: str) -> bool:
+    """True when an interactive request is waiting on this server (queue on, ticket live)."""
+    if not queue_enabled():
+        return False
+    d = gate_dir(url)
+    for p in sorted(glob.glob(str(_wait_dir(d) / "0-*.wait"))):
+        if _ticket_live(Path(p)):
+            return True
+    return False
 
 
 def _prepare(url: str, caller: str):
@@ -543,66 +646,88 @@ def _timeout(url: str, caller: str, t0: float, exclusive: bool) -> LocalQueueTim
         f"local_queue_timeout: no slot on {canonical_url(url)} within the deadline (waited {wait_ms} ms)", url)
 
 
-def _run_sync(url, deadline, exclusive, caller):
+def _run_sync(url, deadline, exclusive, caller, priority=None):
     d, off = _prepare(url, caller)
     if off is not None:
         return off
     _guard_reentrant(url, exclusive)
     t0, flags = time.monotonic(), _Flags()
-    while True:
-        try:
-            adm = _attempt(url, d, exclusive, caller, int((time.monotonic() - t0) * 1000), flags)
-        except LocalModelConflict:
-            raise
-        except OSError as exc:
-            failopen.record("CHZ-FO-LOCAL-GATE-LOCK", exc)
-            return _disabled(url, "lock_error", caller)
-        if adm is not None:
-            return adm
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _timeout(url, caller, t0, exclusive)
-        time.sleep(min(POLL_S, remaining))
+    try:
+        tk = _Ticket(d, priority) if priority else None
+    except OSError as exc:
+        failopen.record("CHZ-FO-LOCAL-GATE-TICKET", exc)
+        return _disabled(url, "ticket_error", caller)
+    try:
+        while True:
+            if tk is None or tk.is_head(d):
+                try:
+                    adm = _attempt(url, d, exclusive, caller, int((time.monotonic() - t0) * 1000), flags, priority)
+                except LocalModelConflict:
+                    raise
+                except OSError as exc:
+                    failopen.record("CHZ-FO-LOCAL-GATE-LOCK", exc)
+                    return _disabled(url, "lock_error", caller)
+                if adm is not None:
+                    return adm
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _timeout(url, caller, t0, exclusive)
+            time.sleep(min(POLL_S, remaining))
+    finally:
+        if tk is not None:
+            tk.close()
 
 
-async def _run_async(url, deadline, exclusive, caller):
+async def _run_async(url, deadline, exclusive, caller, priority=None):
     d, off = _prepare(url, caller)
     if off is not None:
         return off
     _guard_reentrant(url, exclusive)
     t0, flags = time.monotonic(), _Flags()
-    while True:
-        try:
-            adm = _attempt(url, d, exclusive, caller, int((time.monotonic() - t0) * 1000), flags)
-        except LocalModelConflict:
-            raise
-        except OSError as exc:
-            failopen.record("CHZ-FO-LOCAL-GATE-LOCK", exc)
-            return _disabled(url, "lock_error", caller)
-        if adm is not None:
-            return adm
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _timeout(url, caller, t0, exclusive)
-        await asyncio.sleep(min(POLL_S, remaining))
+    try:
+        tk = _Ticket(d, priority) if priority else None
+    except OSError as exc:
+        failopen.record("CHZ-FO-LOCAL-GATE-TICKET", exc)
+        return _disabled(url, "ticket_error", caller)
+    try:
+        while True:
+            if tk is None or tk.is_head(d):
+                try:
+                    adm = _attempt(url, d, exclusive, caller, int((time.monotonic() - t0) * 1000), flags, priority)
+                except LocalModelConflict:
+                    raise
+                except OSError as exc:
+                    failopen.record("CHZ-FO-LOCAL-GATE-LOCK", exc)
+                    return _disabled(url, "lock_error", caller)
+                if adm is not None:
+                    return adm
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _timeout(url, caller, t0, exclusive)
+            await asyncio.sleep(min(POLL_S, remaining))
+    finally:
+        if tk is not None:
+            tk.close()
 
 
-def admit(url: str, deadline: float, *, caller: str = "") -> Admission:
-    """Take one slot. ``deadline`` is an absolute time.monotonic() value."""
-    return _run_sync(url, deadline, False, caller)
+def admit(url: str, deadline: float, *, caller: str = "", priority: str | None = None) -> Admission:
+    """Take one slot. ``deadline`` is an absolute time.monotonic() value.
+
+    ``priority`` ("interactive" | "background") joins the ordered line; None keeps the unordered path."""
+    return _run_sync(url, deadline, False, caller, priority)
 
 
-def admit_exclusive(url: str, deadline: float, *, caller: str = "") -> Admission:
+def admit_exclusive(url: str, deadline: float, *, caller: str = "", priority: str | None = None) -> Admission:
     """Take every slot in one attempt (all or nothing) for load/unload."""
-    return _run_sync(url, deadline, True, caller)
+    return _run_sync(url, deadline, True, caller, priority)
 
 
-async def aadmit(url: str, deadline: float, *, caller: str = "") -> Admission:
-    return await _run_async(url, deadline, False, caller)
+async def aadmit(url: str, deadline: float, *, caller: str = "", priority: str | None = None) -> Admission:
+    return await _run_async(url, deadline, False, caller, priority)
 
 
-async def aadmit_exclusive(url: str, deadline: float, *, caller: str = "") -> Admission:
-    return await _run_async(url, deadline, True, caller)
+async def aadmit_exclusive(url: str, deadline: float, *, caller: str = "", priority: str | None = None) -> Admission:
+    return await _run_async(url, deadline, True, caller, priority)
 
 
 def reset(url: str, deadline: float, *, slots: int | None = None) -> int:
