@@ -11,6 +11,8 @@ import copy
 import json
 import time
 
+import pytest
+
 from llm_router.proxy import local_mode, mr_summary, summary_gate
 from tests.test_p9_proxy_mr import SUMMARY, MRBackend, _est, _is_map, _warm  # noqa: F401  (fixtures)
 from tests.test_proxy_local_mode import _first_call, _overrides_readable, _post, env  # noqa: F401  (fixtures)
@@ -160,6 +162,7 @@ def test_extractive_and_the_gate_share_one_path_source():
 
 # -- linear time --------------------------------------------------------------------------------------------
 
+@pytest.mark.timing
 def test_extraction_is_linear_on_adversarial_text():
     n = 200_000
     cases = ["x" * n, "0123abcd" * (n // 8), "a/b/" * (n // 4), ("var a=function(){return b.c.d(e)};" * 6000)[:n],
