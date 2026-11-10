@@ -88,6 +88,8 @@ from llm_router.proxy.loop_guard import (
     DEFAULT_MAX_CONSECUTIVE,
     DEFAULT_REPEAT_WINDOW,
     REASON_LOOP_GUARD,
+    TRIGGER_CAP,
+    TRIGGER_REPEAT,
     LoopGuard,
 )
 from llm_router.proxy.cache_cost import ReadOnlyStickiness, Stickiness, conversation_key
@@ -370,6 +372,12 @@ def cap_after_reduce_on() -> bool:
     return os.environ.get("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def loop_guard_cap_no_pin_on() -> bool:
+    """LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN, default off. On: a loop_guard CAP trip sends that one step to
+    Claude without pinning the session (the guard has already reset, so local gets a fresh budget)."""
+    return os.environ.get("LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def unpin_on() -> bool:
     """P7: LLM_ROUTER_UNPIN, default off. On (with masking applied and CAP_AFTER_REDUCE on): a
     ``prompt_over_cap`` pin is lifted, once per session, when the reduced estimate fits the cap."""
@@ -545,9 +553,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if exhausted is not None:
             # Forced fallback: this session already hit the consecutive-served
             # cap, so the streak is broken WITHOUT trying the backend at all.
-            guard.reset(session_id)
+            if loop_guard_cap_no_pin_on():
+                trigger = guard.cap_trip(session_id)  # flag on: remembers the window to spot a cycle
+            else:
+                guard.reset(session_id)
+                trigger = TRIGGER_CAP
             row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
-                       detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3))
+                       detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3),
+                       loop_guard_trigger=trigger)
             return None
         try:
             from llm_router import capability_filter
@@ -746,7 +759,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             row.update(decision=ledger.DECISION_FALLBACK, reason=reason or "validation",
                        detail=ledger.scrub_detail(err or "no message"), added_latency_s=elapsed)
             return None
-        repeat = guard.repeat_reason(session_id, message)
+        repeat_hit = guard.repeat_hit(session_id, message)
+        repeat = None if repeat_hit is None else f"repeat:{repeat_hit[0]}"
         if repeat is not None:
             # The candidate is real (passed validation) but repeats a recent
             # served step: served/avoided metrics must never see it.
@@ -754,9 +768,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if gate_decision is not None:
                 row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_REPEAT)
             row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
-                       detail=repeat, added_latency_s=elapsed)
+                       detail=repeat, added_latency_s=elapsed, loop_guard_sig=repeat_hit[1],
+                       loop_guard_trigger=TRIGGER_REPEAT)
             return None
-        guard.record_served(session_id, message)
+        guard.record_served(session_id, message, track_window=loop_guard_cap_no_pin_on())
         if gate_decision is not None:
             lane_gate.note_served(session_id, gate_decision, message, row.get("session_kind"))
         if lm is not None:
@@ -870,8 +885,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # A failed local step: this step goes to Claude and the conversation
             # stays there (one logged move, never back and forth). NS-A2 residual, kept on
             # purpose: see the cls_decide module doc.
-            lm.set_pin(key, local_mode.PIN_CLAUDE)
-            row["local_mode"]["pin_change"] = "local->claude"
+            if (loop_guard_cap_no_pin_on() and row.get("reason") == REASON_LOOP_GUARD
+                    and row.get("loop_guard_trigger") == TRIGGER_CAP):
+                row["pin_skipped"] = "loop_guard_cap"
+            else:
+                lm.set_pin(key, local_mode.PIN_CLAUDE)
+                row["local_mode"]["pin_change"] = "local->claude"
             reason = row.get("reason") or "validation"
         else:
             if force:

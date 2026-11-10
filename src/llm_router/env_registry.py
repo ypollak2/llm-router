@@ -258,6 +258,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_UPSTREAM_PORT": ("llm_router", "proxy/failopen_shim.py", 1),
     "LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW": ("llm_router", "proxy/server.py", 1),
+    # Cap trip falls back one step without pinning the session to Claude (default off).
+    "LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN": ("llm_router", "proxy/server.py", 1),
     # Backend-health breaker (proxy/backend_health.py): consecutive empty or
     # sub-second invalid replies before local serving pauses, and the pause.
     "LLM_ROUTER_PROXY_BACKEND_FAIL_N": ("llm_router", "proxy/server.py", 1),
