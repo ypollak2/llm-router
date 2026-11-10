@@ -104,6 +104,8 @@ REASON_PINNED_CLAUDE = "pinned_claude"
 REASON_STARTED_ELSEWHERE = "conversation_started_on_claude"
 REASON_MEDIA = "media_present"
 REASON_PROMPT_CAP = "prompt_over_cap"
+#: LLM_ROUTER_CAP_GUARD_RECONCILE: under the cap, but the backend's window guard would refuse it.
+REASON_PROMPT_GUARD = "prompt_over_guard"
 REASON_BREAKER_OPEN = "breaker_open"
 REASON_BACKEND_UNHEALTHY = "backend_unhealthy"
 REASON_NOT_ELIGIBLE = "not_eligible"
@@ -153,7 +155,7 @@ PIN_CLAUDE = "claude"
 #: conversation (no pin yet) refused for ANY reason except a veto is pinned
 #: to Claude, because its prompt cache starts there (proxy/server.py,
 #: ``pinned is None`` branch of the refusal path).
-STRUCTURAL_REASONS = frozenset({REASON_MEDIA, REASON_PROMPT_CAP})
+STRUCTURAL_REASONS = frozenset({REASON_MEDIA, REASON_PROMPT_CAP, REASON_PROMPT_GUARD})
 
 
 def parse_serve_mode(raw: str | None) -> str:
