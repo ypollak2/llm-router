@@ -66,11 +66,13 @@ def key_salt() -> str:
         import inspect
         try:
             src = "".join(inspect.getsource(f) for f in (render_message, _cut_block, _cut_by_est, _result_text,
-                                                         _head_by_est, _tail_by_est, valid_summary, _sections))
+                                                         _head_by_est, _tail_by_est, valid_summary, _sections,
+                                                         map_prompt, est_tokens))
         except (OSError, TypeError):
             src = "nosource"
         _CODE_HASH = hashlib.sha256(src.encode("utf-8", "surrogatepass")).hexdigest()
-    return "%d|%d|%d|%d|%s" % (BODY_EST, BLOCK_CHARS, INPUT_EST, SUMMARY_CEIL, _CODE_HASH)
+    return "%d|%d|%d|%d|%r|%r|%s" % (BODY_EST, BLOCK_CHARS, INPUT_EST, SUMMARY_CEIL, BLOCK_MARK, INPUT_MARK,
+                                     _CODE_HASH)
 
 
 def enabled() -> bool:
@@ -398,7 +400,9 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
                 skey = None
             if skey is not None:
                 text = store.get(skey)
-                if text is not None and not (valid_summary(text) and est_tokens(text) <= BODY_EST):
+                # a stored summary is the BODY_EST-clipped reply (validated before the clip), so a clipped one is
+                # no longer a full valid_summary: a hit needs the first heading and to fit, nothing stricter
+                if text is not None and not (text.startswith(HEADINGS[0]) and est_tokens(text) <= BODY_EST):
                     store.reject(skey)  # stale or poisoned entry: a miss, dropped, never served
                     text = None
         for _try in range(MAP_TRIES if text is None else 0):

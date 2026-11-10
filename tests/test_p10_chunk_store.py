@@ -268,6 +268,27 @@ def test_changed_clip_constant_is_a_miss(monkeypatch, name, value):
         assert _run(_body(), call, chunk_store.ChunkStore()).row["store_hits"] == 0
 
 
+def test_changed_mark_is_a_miss(monkeypatch):
+    call = Counter()
+    _run(_body(), call, chunk_store.ChunkStore())
+    for name in ("BLOCK_MARK", "INPUT_MARK"):
+        with monkeypatch.context() as m:
+            m.setattr(mr_summary, name, getattr(mr_summary, name) + " ")
+            assert _run(_body(), call, chunk_store.ChunkStore()).row["store_hits"] == 0
+
+
+def test_over_length_valid_reply_hits_on_the_second_turn_with_identical_text():
+    long_reply = "\n".join(f"{h}\n" + " ".join(["word"] * 40) for h in mr_summary.HEADINGS)
+    assert mr_summary.valid_summary(long_reply) and est_tokens(long_reply) > mr_summary.BODY_EST
+    call = Counter(long_reply)
+    r1 = _run(_body(), call, chunk_store.ChunkStore())
+    assert r1.changed and r1.row["map_calls"] > 0
+    n = len(call.prompts)
+    r2 = _run(_body(), call, chunk_store.ChunkStore())
+    assert len(call.prompts) == n and r2.row["map_calls"] == 0 and r2.row["store_hits"] == r2.row["chunks"]
+    assert r2.body == r1.body  # injected text byte-identical to what the miss injected
+
+
 def test_changed_render_or_validity_code_hash_is_a_miss(monkeypatch):
     call = Counter()
     _run(_body(), call, chunk_store.ChunkStore())
