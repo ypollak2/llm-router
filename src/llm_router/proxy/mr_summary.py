@@ -20,6 +20,7 @@ tokens_after, map_wall_s, outcome.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import os
@@ -50,6 +51,8 @@ OUTCOME_MAP_FAILED = "map_failed"
 OUTCOME_STILL_OVER = "still_over"
 OUTCOME_TIMEOUT = "timeout"
 OUTCOME_ERROR = "error"
+OUTCOME_GATE_SKIPPED = "gate_skipped"  # P11: the first chunk had more facts than the pin budget
+OUTCOME_GATE_FAILED = "gate_failed"  # P11: the first chunk's final wrapper still missed a fact
 OUTCOME_WASTED = "wasted"  # summarized, but the turn was then forwarded to Claude (row carries wasted_reason)
 
 
@@ -206,8 +209,13 @@ def _cut_by_est(text: str, cap_est: int = INPUT_EST) -> str:
     return out
 
 
+def slice_text(messages: list[dict]) -> str:
+    """The session slice the map call receives (after the per-block and whole-input cuts)."""
+    return _cut_by_est("\n".join(render_message(m) for m in messages))
+
+
 def map_prompt(messages: list[dict]) -> str:
-    return MAP_PROMPT % _cut_by_est("\n".join(render_message(m) for m in messages))
+    return MAP_PROMPT % slice_text(messages)
 
 
 def _sections(body: str) -> dict[str, str] | None:
@@ -233,7 +241,7 @@ def valid_summary(body: str) -> bool:
 
 
 _ERR = re.compile(r"(error|exception|traceback|failed|fatal|denied|not found)", re.I)
-_PATH = re.compile(r"(?<![\w/.\-~:])(?:~|\.{1,2})?(?:/[\w.@+\-]+){2,}|(?<![\w/.\-~:])[\w.\-]+(?:/[\w.\-]+)+\.[A-Za-z0-9]{1,6}\b")
+_PATH = re.compile(summary_gate.PATH_ABS_SRC + "|" + summary_gate.PATH_REL_SRC)  # one canonical source (P11)
 
 
 def _block_texts(m: dict) -> list[str]:
@@ -276,11 +284,10 @@ def _wrapped(i: int, n: int, a: int, b: int, body: str) -> str:
     return "<chunk-summary n=%d of %d covers messages %d-%d>\n%s\n</chunk-summary>" % (i, n, a, b, body)
 
 
-def fit_summary(body: str, i: int, n: int, a: int, b: int) -> str:
-    """The wrapped summary is at most SUMMARY_CEIL est (wrapper counted inside); the BODY tail is cut, never the wrapper."""
+def _fit_body(body: str, i: int, n: int, a: int, b: int) -> str:
     w = _wrapped(i, n, a, b, body)
     if est_tokens(w) <= SUMMARY_CEIL:
-        return w
+        return body
     lo, hi = 0, len(body)
     while lo < hi:
         mid = (lo + hi + 1) // 2
@@ -288,7 +295,21 @@ def fit_summary(body: str, i: int, n: int, a: int, b: int) -> str:
             lo = mid
         else:
             hi = mid - 1
-    return _wrapped(i, n, a, b, body[:lo])
+    return body[:lo]
+
+
+def fit_summary(body: str, i: int, n: int, a: int, b: int) -> str:
+    """The wrapped summary is at most SUMMARY_CEIL est (wrapper counted inside); the BODY tail is cut, never the wrapper."""
+    return _wrapped(i, n, a, b, _fit_body(body, i, n, a, b))
+
+
+def _compose_gated(text: str, facts: summary_gate.Facts, i: int, n: int, a: int, b: int) -> tuple[str, dict[str, int], bool]:
+    """P11: the fitted body, then every fact it lacks appended verbatim as a ``pinned:`` block (outside SUMMARY_CEIL;
+    the caller's final cap check is authoritative), then the FINAL wrapper is checked: (wrapper, missing counts, passed)."""
+    clipped = _fit_body(text, i, n, a, b)
+    miss = summary_gate.missing(facts, clipped)
+    final = _wrapped(i, n, a, b, clipped + summary_gate.pin_block(facts, miss))
+    return final, summary_gate.counts(miss), not any(summary_gate.missing(facts, final).values())
 
 
 # ------------------------------------------------------------------ orchestration
@@ -350,11 +371,22 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
     spans = [(units[c[0]][0] + 1, units[c[1]][1] + 1) for c in closable[:k]]  # message indices into ``messages``
     row["chunks"] = k
     summaries: list[str] = []
-    kept: list[tuple[str, int, int]] = []
     gate_on = summary_gate.enabled()
+    kept: list[tuple[str, summary_gate.Facts, int, int]] = []
+    stop = ""
+    if gate_on:
+        row.update(gate_checked=0, gate_skipped=0, gate_failed=0, **{"gate_missing_" + k: 0 for k in summary_gate.KINDS})
     for i, (a, b) in enumerate(spans, 1):
         chunk = messages[a:b]
         text = None
+        facts: summary_gate.Facts = {}
+        if gate_on:
+            facts = await asyncio.to_thread(lambda: summary_gate.extract(slice_text(chunk)))  # off the event loop
+            row["gate_checked"] += 1
+            if summary_gate.over_budget(facts):  # too many facts to pin: no map call, the chunk stays verbatim
+                row["gate_skipped"] += 1
+                stop = OUTCOME_GATE_SKIPPED
+                break
         for _try in range(MAP_TRIES):
             row["map_calls"] += 1
             try:
@@ -370,24 +402,28 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
         if text is None:
             text = extractive(chunk)
             row["extractive_chunks"] = row.get("extractive_chunks", 0) + 1
-        wrapped = fit_summary(text, i, k, a, b - 1)
         if gate_on:
-            res = summary_gate.check(chunk, wrapped)
-            row["gate_checked"] = row.get("gate_checked", 0) + 1
-            if not res.passed:  # P11: this chunk and every later one stay verbatim; no longer retry
-                row["gate_failed"] = row.get("gate_failed", 0) + 1
-                row["gate_missing"] = dict(res.missing)
+            final, miss, ok = await asyncio.to_thread(_compose_gated, text, facts, i, k, a, b - 1)
+            for kind, c in miss.items():
+                row["gate_missing_" + kind] += c
+            if not ok:  # this chunk and every later one stay verbatim; never retried longer
+                row["gate_failed"] += 1
+                stop = OUTCOME_GATE_FAILED
                 break
-        summaries.append(wrapped)
-        kept.append((text, a, b))
-    if gate_on:
-        row.setdefault("gate_checked", 0)
-        row.setdefault("gate_failed", 0)
-        if len(kept) < k:
-            row["chunks"] = len(kept)
-            if not kept:
-                return refuse(OUTCOME_STILL_OVER)
-            summaries = [fit_summary(t, n, len(kept), a, b - 1) for n, (t, a, b) in enumerate(kept, 1)]
+            summaries.append(final)
+            kept.append((text, facts, a, b))
+        else:
+            summaries.append(fit_summary(text, i, k, a, b - 1))
+    if gate_on and len(summaries) < k:
+        summaries = []
+        for n, (t, f, a, b) in enumerate(kept, 1):  # renumber "n of len(kept)" and re-check the wrappers actually served
+            final, _miss, ok = _compose_gated(t, f, n, len(kept), a, b - 1)
+            if not ok:
+                break
+            summaries.append(final)
+        row["chunks"] = len(summaries)
+        if not summaries:
+            return refuse(stop)
     new = _with_summaries(body, spans[len(summaries) - 1][1], summaries)
     after = est(new)
     row["tokens_after"] = after

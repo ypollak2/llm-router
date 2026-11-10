@@ -1,4 +1,5 @@
-"""P11: LLM_ROUTER_SUMMARY_GATE (default off) keeps a chunk verbatim when its summary drops a fact.
+"""P11: LLM_ROUTER_SUMMARY_GATE (default off): extract a chunk's facts from the map input, pin the ones the
+summary drops, and keep a chunk verbatim when its facts cannot be pinned.
 
 Behaviour only, mocked backend, no network. Extraction tests are pure; the integration tests drive the
 P9 summarizer through the proxy.
@@ -8,18 +9,20 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 
-from llm_router.proxy import local_mode, summary_gate
+from llm_router.proxy import local_mode, mr_summary, summary_gate
 from tests.test_p9_proxy_mr import SUMMARY, MRBackend, _est, _is_map, _warm  # noqa: F401  (fixtures)
-from tests.test_proxy_local_mode import _call, _first_call, _ollama, _overrides_readable, _post, env  # noqa: F401  (fixtures)
-
-
-def _msgs(*texts: str) -> list[dict]:
-    return [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": t}]} for t in texts]
+from tests.test_proxy_local_mode import _first_call, _overrides_readable, _post, env  # noqa: F401  (fixtures)
 
 
 def _facts(*texts: str) -> dict[str, list[str]]:
-    return summary_gate.extract_facts(_msgs(*texts))
+    f = summary_gate.extract("\n".join(texts))
+    return {k: list(v) for k, v in f.items()}
+
+
+def _miss(text: str, summary: str, pinned: str = "") -> dict[str, int]:
+    return summary_gate.counts(summary_gate.missing(summary_gate.extract(text), summary + pinned))
 
 
 # -- extraction ---------------------------------------------------------------------------------------------
@@ -30,35 +33,42 @@ def test_paths_are_extracted_and_negatives_are_not():
     assert _facts("a plain sentence, 3/4 of the way, and/or maybe")["path"] == []
 
 
-def test_paths_inside_code_fences_and_tool_use_inputs_count():
-    fenced = _facts("```bash\ncat src/a/b.py\n```")
-    assert fenced["path"] == ["src/a/b.py"]
-    msg = [{"role": "assistant", "content": [{"type": "tool_use", "id": "x", "name": "Read", "input": {"file_path": "/tmp/x/y.py"}}]}]
-    assert summary_gate.extract_facts(msg)["path"] == ["/tmp/x/y.py"]
+def test_paths_inside_code_fences_and_tool_use_render_count():
+    assert _facts("```bash\ncat src/a/b.py\n```")["path"] == ["src/a/b.py"]
+    assert _facts('[tool_use Read] {"file_path": "/tmp/x/y.py"}')["path"] == ["/tmp/x/y.py"]
 
 
 def test_windows_paths_are_not_recognised():
-    assert _facts(r"opened C:\Users\me\proj\main.py")["path"] == []  # documented limit: the prototype has no pattern
+    assert _facts(r"opened C:\Users\me\proj\main.py")["path"] == []  # documented limit
 
 
-def test_ids_hashes_and_tickets_are_in_the_path_kind():
+def test_hashes_tickets_and_ids():
     f = _facts("commit 7189d67c fixed ABC-123 via toolu_01ABCDEFGHIJ")
     assert set(f["path"]) == {"7189d67c", "ABC-123", "toolu_01ABCDEFGHIJ"}
-    assert "deadbeef" not in _facts("the word deadbeef")["path"]
+    assert _facts("the word deadbeef, digits 1234567, short abc12")["path"] == []  # needs a digit AND a letter, >=7
 
 
-def test_error_lines():
-    f = _facts("ok\nValueError: bad value 3\n  indented ValueError: not at line start\nFAILED tests/test_a.py::test_x - assert 1 == 2\n"
-               "error[E0308]: mismatched types\nfatal: not a git repository\nno problem here")
+def test_standards_are_not_tickets():
+    text = "charset=UTF-8 SHA-256 SHA-1 ISO-8601 HTTP-2 GPT-4 X-509 TLS-13 PROJ-42"
+    assert _facts(text)["path"] == ["PROJ-42"]
+    assert _facts("CVE-2024-1234")["path"] == []
+
+
+def test_error_lines_including_render_prefixes():
+    f = _facts("ok\n[tool_result error] ValueError: bad value 3\n  indented ValueError: not at line start\n"
+               "FAILED tests/test_a.py::test_x - assert 1 == 2\nerror[E0308]: mismatched types\nfatal: not a git repository\nno problem")
     assert f["error"] == ["valueerror: bad value 3", "failed tests/test_a.py::test_x - assert 1 == 2",
                           "error[e0308]: mismatched types", "fatal: not a git repository"]
 
 
-def test_traceback_contributes_its_terminating_exception_line():
-    tb = "Traceback (most recent call last):\n  File \"a.py\", line 3, in f\n    g()\nKeyError\n"
-    f = _facts(tb)
-    assert f["error"] == ["keyerror"]  # a terminator without "Error:" still counts
-    assert _facts(tb + tb)["error"] == ["keyerror"]  # duplicates collapse
+def test_error_facts_keep_their_original_case_for_pinning():
+    assert summary_gate.extract("ValueError: Bad Thing")["error"] == {"valueerror: bad thing": "ValueError: Bad Thing"}
+
+
+def test_traceback_contributes_its_terminating_exception_line_and_duplicates_collapse():
+    tb = 'Traceback (most recent call last):\n  File "a.py", line 3, in f\n    g()\nKeyError\n'
+    assert _facts(tb)["error"] == ["keyerror"]
+    assert _facts(tb + tb)["error"] == ["keyerror"]
 
 
 def test_pytest_e_prefix_counts():
@@ -66,7 +76,7 @@ def test_pytest_e_prefix_counts():
 
 
 def test_nonzero_exit_codes_only():
-    assert _facts("Exit code 1\nboom")["exit"] == ["1"]
+    assert _facts("[tool_result error] Exit code 1\nboom")["exit"] == ["1"]
     assert _facts("Exit code 0\nfine")["exit"] == []
     assert _facts("process exited with code 137, then exit status 2")["exit"] == ["137", "2"]
     assert _facts("the exit code is mentioned but has no number")["exit"] == []
@@ -79,56 +89,60 @@ def test_test_names():
     assert _facts("a test_helper mention in prose only")["test"] == []
 
 
-def test_system_reminders_are_not_scanned():
-    m = [{"role": "user", "content": [{"type": "text", "text": "<system-reminder>see /a/b/c.py</system-reminder>"}]}]
-    assert summary_gate.extract_facts(m)["path"] == []
+def test_system_reminders_are_not_scanned_and_an_unclosed_one_is_kept():
+    assert _facts("<system-reminder>see /a/b/c.py</system-reminder> and /d/e/f.py")["path"] == ["/d/e/f.py"]
+    assert _facts("<system-reminder>see /a/b/c.py")["path"] == ["/a/b/c.py"]
 
 
-# -- the gate -----------------------------------------------------------------------------------------------
+# -- the check ----------------------------------------------------------------------------------------------
 
-CHUNK = _msgs("Exit code 2\nsrc/a/b.py\nValueError: bad thing\nFAILED tests/test_q.py::test_z")
-
-
-def test_a_complete_summary_passes_and_counts_the_facts():
-    summ = "ran src/a/b.py, got ValueError: bad thing, exit 2; FAILED tests/test_q.py::test_z"
-    r = summary_gate.check(CHUNK, summ)
-    assert r.passed and r.missing_total == 0
-    assert r.facts == {"path": 2, "error": 2, "exit": 1, "test": 1}
+CHUNK = "Exit code 2\nsrc/a/b.py\nValueError: bad thing\nFAILED tests/test_q.py::test_z"
 
 
-def test_a_summary_missing_one_path_fails_and_adding_it_passes():
-    summ = "ValueError: bad thing, exit code 2; FAILED tests/test_q.py::test_z"
-    r = summary_gate.check(CHUNK, summ)
-    assert not r.passed and r.missing == {"path": 1, "error": 0, "exit": 0, "test": 0}
-    assert summary_gate.check(CHUNK, summ + " in src/a/b.py").passed
+def test_a_complete_summary_misses_nothing():
+    assert _miss(CHUNK, "ran src/a/b.py, got ValueError: bad thing, exit 2; FAILED tests/test_q.py::test_z") == dict.fromkeys(summary_gate.KINDS, 0)
 
 
-def test_missing_exit_code_and_error_and_test_are_counted_per_kind():
-    r = summary_gate.check(CHUNK, "src/a/b.py tests/test_q.py::test_z")
-    assert r.missing == {"path": 0, "error": 2, "exit": 1, "test": 0}
+def test_missing_facts_are_counted_per_kind():
+    assert _miss(CHUNK, "src/a/b.py tests/test_q.py::test_z") == {"path": 0, "error": 2, "exit": 1, "test": 0}
 
 
-def test_exit_code_needs_its_number_next_to_an_exit_word():
-    assert not summary_gate.check(_msgs("Exit code 12"), "exit code 1 only").passed
-    assert summary_gate.check(_msgs("Exit code 12"), "rc=12").passed
+def test_exit_code_needs_a_whole_exit_word_and_its_number():
+    assert _miss("Exit code 1", "see src/foo.py line 1")["exit"] == 1  # "rc" inside "src" is not an exit word
+    assert _miss("Exit code 1", "barcode 1, codex 1")["exit"] == 1
+    assert _miss("Exit code 12", "exit code 1 only")["exit"] == 1
+    assert _miss("Exit code 12", "rc=12")["exit"] == 0
 
 
-def test_pinned_list_satisfies_a_fact():
-    summ = "ValueError: bad thing, exit 2; FAILED tests/test_q.py::test_z"
-    assert not summary_gate.check(CHUNK, summ).passed
-    assert summary_gate.check(CHUNK, summ, pinned=["src/a/b.py"]).passed
+def test_a_longer_or_truncated_path_does_not_satisfy_a_fact():
+    assert _miss("/a/b", "/a/bc")["path"] == 1
+    assert _miss("/a/b", "/a/b.py")["path"] == 1
+    assert _miss("/a/b", "x/a/b")["path"] == 1
+    assert _miss("/a/b", "see /a/b. Then")["path"] == 0
+    assert _miss("test_one failed\nFAILED x - test_one", "test_one_more")["test"] == 1
 
 
-def test_whitespace_is_normalised_and_errors_are_case_insensitive():
-    assert summary_gate.check(_msgs("ValueError:   bad\n thing"), "valueerror: bad thing").passed
+def test_pin_block_satisfies_every_missing_fact_verbatim():
+    facts = summary_gate.extract(CHUNK)
+    miss = summary_gate.missing(facts, "nothing useful")
+    block = summary_gate.pin_block(facts, miss)
+    assert block.startswith("\npinned:\n") and "ValueError: bad thing" in block and "exit code 2" in block
+    assert not any(summary_gate.missing(facts, "nothing useful" + block).values())
+    assert summary_gate.pin_block(facts, summary_gate.missing(facts, "")) != ""
+    assert summary_gate.pin_block(facts, {}) == ""
 
 
-def test_empty_chunk_passes_and_result_has_no_text():
-    r = summary_gate.check(_msgs("nothing to see"), "")
-    assert r.passed and r.facts == {"path": 0, "error": 0, "exit": 0, "test": 0}
-    r2 = summary_gate.check(CHUNK, "")
-    assert all(isinstance(v, int) for v in list(r2.facts.values()) + list(r2.missing.values()))
-    assert "src/a/b.py" not in repr(r2)
+def test_whitespace_normalised_and_errors_case_insensitive():
+    assert _miss("ValueError:   bad\n thing", "valueerror: bad thing")["error"] == 0
+
+
+def test_budget(monkeypatch):
+    facts = summary_gate.extract(CHUNK)
+    assert not summary_gate.over_budget(facts)
+    monkeypatch.setenv("LLM_ROUTER_PIN_BUDGET_CHARS", "20")
+    assert summary_gate.over_budget(facts)
+    monkeypatch.setenv("LLM_ROUTER_PIN_BUDGET_CHARS", "junk")
+    assert summary_gate.pin_budget() == summary_gate.DEFAULT_PIN_BUDGET_CHARS == 800
 
 
 def test_flag_default_off_and_on(monkeypatch):
@@ -138,120 +152,151 @@ def test_flag_default_off_and_on(monkeypatch):
     assert summary_gate.enabled()
 
 
+def test_extractive_and_the_gate_share_one_path_source():
+    sample = "a/b/c.py /x/y/z ~/q/r.txt 7189d67c ABC-123"
+    assert [m.group(0) for m in mr_summary._PATH.finditer(sample)] == ["a/b/c.py", "/x/y/z", "~/q/r.txt"]
+    assert mr_summary._PATH.pattern == summary_gate.PATH_ABS_SRC + "|" + summary_gate.PATH_REL_SRC
+
+
+# -- linear time --------------------------------------------------------------------------------------------
+
+def test_extraction_is_linear_on_adversarial_text():
+    n = 200_000
+    cases = ["x" * n, "0123abcd" * (n // 8), "a/b/" * (n // 4), ("var a=function(){return b.c.d(e)};" * 6000)[:n],
+             "." * n, "/a" * (n // 2), "_" * n, "Exit code" + " " * n, "test_" * (n // 5), "E " + "x" * n]
+    t0 = time.perf_counter()
+    for c in cases:
+        summary_gate.extract(c)
+    assert time.perf_counter() - t0 < 2.0 * len(cases) / 4  # the old _NODE_ID needed ~5 s for ONE 50k-char run
+    t0 = time.perf_counter()
+    for c in cases[:4]:
+        summary_gate.extract(c)
+    assert time.perf_counter() - t0 < 0.5
+
+
 # -- through the proxy --------------------------------------------------------------------------------------
 
-def _session(pairs: int = 20) -> dict:
-    """Like the P9 session, but every command names a distinct file path, so each chunk carries path facts."""
+def _session(pairs: int = 12, heavy: bool = True) -> dict:
+    """Every round trip names a distinct path and its result carries an error, an exit code and a failing test."""
     body = _first_call()
     msgs = [body["messages"][0]]
     for i in range(pairs):
         msgs.append({"role": "assistant", "content": [
-            {"type": "tool_use", "id": f"toolu_{i}", "name": "Bash", "input": {"command": f"cat src/pkg/mod{i}.py"}}]})
+            {"type": "tool_use", "id": f"toolu_{i}", "name": "Bash", "input": {"command": f"pytest src/pkg/mod{i}.py"}}]})
+        head = f"Exit code 1\nValueError: boom {i}\nFAILED tests/test_m{i}.py::test_case{i} - assert 0\n" if heavy else ""
         msgs.append({"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": f"toolu_{i}", "content": ("line %d of output\n" % i) * 400}]})
+            {"type": "tool_result", "tool_use_id": f"toolu_{i}", "content": head + ("line %d of output\n" % i) * 400}]})
     body["messages"] = msgs
     return body
 
 
-class EchoBackend(MRBackend):
-    """The first ``good`` map calls echo every path of their slice; later ones give the path-free SUMMARY."""
-
-    def __init__(self, good: int):
-        super().__init__()
-        self.good = good
-
-    async def complete(self, body, timeout_s):
-        if _is_map(body):
-            n = len(self.maps)
-            if n < self.good:
-                paths = summary_gate.PATH_RE.findall(body["messages"][0]["content"].split("<slice>", 1)[1])
-                self.map_reply = SUMMARY.replace("none-1", " ".join(dict.fromkeys(paths)))
-            else:
-                self.map_reply = SUMMARY
-        return await super().complete(body, timeout_s)
-
-
-async def test_gate_on_complete_summaries_behave_like_p9(env, monkeypatch):  # noqa: F811
+def _gate_env(monkeypatch, threshold="20000"):
     monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
     monkeypatch.setenv("LLM_ROUTER_SUMMARY_GATE", "1")
-    body = _session()
-    backend = EchoBackend(good=99)
+    monkeypatch.setenv("LLM_ROUTER_MR_CLOSE_THRESHOLD", threshold)  # two chunks planned, one is enough for the cap
+
+
+def _summary_texts(sent: dict) -> str:
+    return "\n".join(b["text"] for b in sent["messages"][0]["content"] if b.get("type") == "text" and "<chunk-summary" in b["text"])
+
+
+async def test_tool_heavy_chunks_are_served_with_every_fact_in_summary_or_pinned(env, monkeypatch):  # noqa: F811
+    _gate_env(monkeypatch, "36000")
+    body = _session(20)
+    backend = MRBackend()  # the map reply carries no fact at all
     app = env.app(backend)
     await _warm(app)
     await _post(app, copy.deepcopy(body))
     mr = env.rows()[-1]["mr_summary"]
     assert env.up.requests == [] and mr["outcome"] == "summarized"
-    assert mr["gate_checked"] == mr["chunks"] >= 1 and mr["gate_failed"] == 0 and "gate_missing" not in mr
-
-
-async def test_failed_chunk_stays_verbatim_and_a_still_fitting_turn_is_served_local(env, monkeypatch):  # noqa: F811
-    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
-    monkeypatch.setenv("LLM_ROUTER_SUMMARY_GATE", "1")
-    monkeypatch.setenv("LLM_ROUTER_MR_CLOSE_THRESHOLD", "20000")  # two chunks are planned, one is enough for the cap
-    body = _session(12)
-    backend = EchoBackend(good=1)  # chunk 1 passes, chunk 2 drops its paths
-    app = env.app(backend)
-    await _warm(app)
-    await _post(app, copy.deepcopy(body))
-    row = env.rows()[-1]["mr_summary"]
-    assert row["gate_checked"] == 2 and row["gate_failed"] == 1 and row["gate_missing"]["path"] >= 1
-    assert len(backend.maps) == 2  # no retry with a longer summary, no later chunk spent
-    assert row["outcome"] == "summarized" and row["chunks"] == 1
+    assert mr["gate_checked"] == len(backend.maps) == mr["chunks"] >= 1 and mr["gate_failed"] == 0 and mr["gate_skipped"] == 0
+    assert mr["gate_missing_path"] > 0 and mr["gate_missing_error"] > 0 and mr["gate_missing_exit"] > 0 and mr["gate_missing_test"] > 0
     sent = backend.lives[-1]
-    texts = [b["text"] for b in sent["messages"][0]["content"] if b.get("type") == "text"]
-    assert sum("<chunk-summary" in t for t in texts) == 1 and "n=1 of 1" in "".join(texts)  # the wrapper counts what was kept
-    kept = json.dumps(sent["messages"][1:])
-    assert "mod0.py" not in kept  # chunk 1 (summarized, gate passed) is gone
-    assert "mod3.py" in kept and "mod4.py" in kept  # chunk 2 (gate failed) is verbatim
-    assert sent["messages"][-1] == body["messages"][-1] and _est(sent) <= local_mode.prompt_cap_tokens()
-    assert env.up.requests == []
+    served = _summary_texts(sent)
+    checked = 0
+    for i in range(mr["chunks"] * 3):  # the first chunks cover pairs 0.. ; every closed pair's facts are in the wrapper
+        if "mod%d.py" % i not in json.dumps(sent["messages"][1:]):
+            assert "src/pkg/mod%d.py" % i in served and "ValueError: boom %d" % i in served
+            assert "tests/test_m%d.py::test_case%d" % (i, i) in served
+            checked += 1
+    assert checked >= 3
+    assert "exit code 1" in served and "pinned:" in served
+    assert _est(sent) <= local_mode.prompt_cap_tokens()
 
 
-async def test_all_chunks_failing_follows_the_existing_still_over_fallback(env, monkeypatch):  # noqa: F811
-    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
-    monkeypatch.setenv("LLM_ROUTER_SUMMARY_GATE", "1")
-    body = _session()
-    backend = EchoBackend(good=0)
+async def test_a_chunk_over_the_pin_budget_is_skipped_without_a_map_call(env, monkeypatch):  # noqa: F811
+    _gate_env(monkeypatch, "36000")
+    monkeypatch.setenv("LLM_ROUTER_PIN_BUDGET_CHARS", "100")
+    body = _session(20)
+    backend = MRBackend()
     app = env.app(backend)
     await _warm(app)
     await _post(app, copy.deepcopy(body))
-    row = env.rows()[-1]["mr_summary"]
-    assert row["outcome"] == "still_over" and row["gate_checked"] == row["gate_failed"] == 1 and row["chunks"] == 0
-    assert len(backend.maps) == 1
-    assert [b for b in backend.lives if len(b["messages"]) > 2] == []  # nothing shortened was served
+    mr = env.rows()[-1]["mr_summary"]
+    assert mr["outcome"] == "gate_skipped" and mr["gate_skipped"] == 1 and mr["gate_checked"] == 1 and mr["map_calls"] == 0
+    assert backend.maps == [] and [b for b in backend.lives if len(b["messages"]) > 2] == []
     (req,) = env.up.requests
     assert json.loads(req.content)["messages"] == body["messages"]  # Claude gets the full original history
 
 
-async def test_ledger_has_counts_only_never_fact_text(env, monkeypatch):  # noqa: F811
-    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
-    monkeypatch.setenv("LLM_ROUTER_SUMMARY_GATE", "1")
-    backend = EchoBackend(good=0)
+async def test_later_skipped_chunk_stays_verbatim_and_the_wrapper_is_renumbered(env, monkeypatch):  # noqa: F811
+    _gate_env(monkeypatch)
+    body = _session(12)
+    # chunk 1 is light (no facts besides one path), chunk 2 is heavy: the budget sits between them
+    for i in range(3):
+        body["messages"][2 + 2 * i]["content"][0]["content"] = ("line %d of output\n" % i) * 400
+    monkeypatch.setenv("LLM_ROUTER_PIN_BUDGET_CHARS", "200")
+    backend = MRBackend()
     app = env.app(backend)
     await _warm(app)
-    await _post(app, _session())
+    await _post(app, copy.deepcopy(body))
+    mr = env.rows()[-1]["mr_summary"]
+    assert mr["outcome"] == "summarized" and mr["chunks"] == 1 and mr["gate_skipped"] == 1 and mr["gate_checked"] == 2
+    sent = backend.lives[-1]
+    assert "n=1 of 1" in _summary_texts(sent)
+    kept = json.dumps(sent["messages"][1:])
+    assert "mod0.py" not in kept and "mod3.py" in kept and "boom 3" in kept  # the skipped chunk is verbatim
+    assert len(backend.maps) == 1
+
+
+async def test_facts_in_the_cut_part_of_a_block_are_not_required():
+    big = "head /a/seen/one\n" + "filler line\n" * 3000 + "/a/never/shown\n" + "filler line\n" * 3000 + "tail /a/seen/two\n"
+    msgs = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": big}]}]
+    seen = summary_gate.extract(mr_summary.slice_text(msgs))["path"]
+    assert "/a/seen/one" in seen and "/a/seen/two" in seen and "/a/never/shown" not in seen
+
+
+async def test_ledger_has_counts_only_never_fact_text(env, monkeypatch):  # noqa: F811
+    _gate_env(monkeypatch, "36000")
+    backend = MRBackend()
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, _session(20))
     row = env.rows()[-1]["mr_summary"]
-    assert set(row["gate_missing"]) == set(summary_gate.KINDS)
-    assert all(isinstance(v, int) for v in row["gate_missing"].values())
+    gate = {k: v for k, v in row.items() if k.startswith("gate_")}
+    assert set(gate) == {"gate_checked", "gate_skipped", "gate_failed"} | {"gate_missing_" + k for k in summary_gate.KINDS}
+    assert all(type(v) is int for v in gate.values())
     dumped = json.dumps(env.rows()[-1])
-    assert "src/pkg/mod" not in dumped and "line 0 of output" not in dumped
+    assert "src/pkg/mod" not in dumped and "boom" not in dumped and "line 0 of output" not in dumped
 
 
-async def test_flag_off_carries_no_gate_fields_and_proxy_mr_off_ignores_the_gate(env, monkeypatch):  # noqa: F811
+async def test_flag_off_carries_no_gate_fields(env, monkeypatch):  # noqa: F811
     monkeypatch.delenv("LLM_ROUTER_SUMMARY_GATE", raising=False)
     monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
-    backend = EchoBackend(good=0)  # path-free summaries would fail a gate; with it off they are used
+    backend = MRBackend()
     app = env.app(backend)
     await _warm(app)
-    await _post(app, _session())
+    await _post(app, _session(20))
     mr = env.rows()[-1]["mr_summary"]
     assert mr["outcome"] == "summarized" and not [k for k in mr if k.startswith("gate_")]
+    assert "pinned:" not in json.dumps(backend.lives[-1])
+
 
 async def test_gate_without_proxy_mr_does_nothing(env, monkeypatch):  # noqa: F811
     monkeypatch.delenv("LLM_ROUTER_PROXY_MR", raising=False)
     monkeypatch.setenv("LLM_ROUTER_SUMMARY_GATE", "1")
-    backend = EchoBackend(good=0)
+    backend = MRBackend()
     app = env.app(backend)
     await _warm(app)
-    await _post(app, _session())
+    await _post(app, _session(20))
     assert backend.maps == [] and "mr_summary" not in env.rows()[-1]
