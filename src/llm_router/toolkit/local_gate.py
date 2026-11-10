@@ -21,6 +21,7 @@ import os
 import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -30,6 +31,7 @@ from llm_router.toolkit.adapters.ollama import LocalModelConflict
 __all__ = [
     "Admission",
     "LocalQueueConfigConflict",
+    "LocalQueueReentrant",
     "LocalQueueResetRefused",
     "LocalQueueTimeout",
     "admit",
@@ -74,6 +76,12 @@ class LocalQueueConfigConflict(_LocalQueueError):
     """LLM_ROUTER_LOCAL_SLOTS differs from the server's shared slots.json."""
 
     kind = "local_queue_config_conflict"
+
+
+class LocalQueueReentrant(_LocalQueueError):
+    """admit_exclusive() while this process already holds an admission on the same server (would self-block)."""
+
+    kind = "local_queue_reentrant"
 
 
 class LocalQueueResetRefused(_LocalQueueError):
@@ -232,7 +240,10 @@ def _unlock(fd: int) -> None:
 # ── fork lifecycle (v4 §4, v5 §3) ────────────────────────────────────────────
 
 _LIFECYCLE = threading.Lock()
-_LIVE: dict[int, "Admission"] = {}  # id(admission) -> admission, for after-fork invalidation
+# id(admission) -> admission, for after-fork invalidation and the re-entrancy guard. Weak: a dropped
+# Admission must be collectable so its finalizer can free the slot.
+_LIVE: "weakref.WeakValueDictionary[int, Admission]" = weakref.WeakValueDictionary()
+_PENDING_CLOSE: list[int] = []  # fds a GC finalizer could not close without the lifecycle lock
 _OPEN_FDS: set[int] = set()  # every gate fd currently open (admissions and in-flight attempts)
 
 
@@ -277,6 +288,35 @@ def _close_fds(fds) -> None:
                     os.close(fd)
 
 
+def _drain_pending() -> None:
+    """Close fds that GC finalizers deferred. Caller holds _LIFECYCLE."""
+    while _PENDING_CLOSE:
+        fd = _PENDING_CLOSE.pop()
+        if fd in _OPEN_FDS:
+            _OPEN_FDS.discard(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def _gc_close(fds: list) -> None:
+    """Finalizer for an Admission dropped without release(): free its slot. Never blocks: GC can run
+    while this same thread holds _LIFECYCLE, so on contention the fds are deferred to the next attempt."""
+    held, fds[:] = list(fds), []
+    if not held:
+        return
+    if _LIFECYCLE.acquire(blocking=False):
+        try:
+            for fd in held:
+                if fd in _OPEN_FDS:
+                    _OPEN_FDS.discard(fd)
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
+        finally:
+            _LIFECYCLE.release()
+    else:
+        _PENDING_CLOSE.extend(held)
+
+
 class Admission:
     """One held admission (one slot, or all slots when exclusive). Closing the fds releases the locks."""
 
@@ -286,18 +326,26 @@ class Admission:
         self._fds = list(fds)
         self._valid = True
         self._t0 = time.monotonic()
+        self._finalizer = None
         if self._fds:
             _LIVE[id(self)] = self
+            # Shares the fd list (never rebound) so the finalizer holds no reference to self.
+            self._finalizer = weakref.finalize(self, _gc_close, self._fds)
 
     def _invalidate(self) -> None:
         self._valid = False
-        self._fds = []
+        if self._finalizer is not None:
+            self._finalizer.detach()
+        self._fds[:] = []  # child side of a fork: the fds were already closed
 
     def release(self) -> None:
         if not self._valid:
             return
         self._valid = False
-        fds, self._fds = self._fds, []
+        if self._finalizer is not None:
+            self._finalizer.detach()
+        fds = list(self._fds)
+        self._fds[:] = []
         with _LIFECYCLE:
             _LIVE.pop(id(self), None)
         _close_fds(fds)
@@ -322,6 +370,23 @@ class Admission:
 def _disabled(url: str, why: str, caller: str, **fields) -> Admission:
     _log_row(url, why, caller=caller, **fields)
     return Admission(url, [], [], False, 0, caller, disabled=True)
+
+
+def _off(url: str, caller: str) -> Admission:
+    """Queue switched off: a true no-op, no log row and no filesystem access."""
+    return Admission(url, [], [], False, 0, caller, disabled=True)
+
+
+def _guard_reentrant(url: str, exclusive: bool) -> None:
+    """admit_exclusive needs every slot; if this process already holds one it would wait out its deadline."""
+    if not exclusive:
+        return
+    key = canonical_url(url)
+    for adm in list(_LIVE.values()):
+        if adm._valid and not adm.disabled and canonical_url(adm.url) == key:
+            raise LocalQueueReentrant(
+                f"local_queue_reentrant: this process already holds an admission on {key}; "
+                "release it before admit_exclusive", url)
 
 
 # ── config ───────────────────────────────────────────────────────────────────
@@ -381,6 +446,7 @@ def _attempt(url: str, d: Path, exclusive: bool, caller: str, wait_ms: int, flag
     fds: list[int] = []
     keep = False
     with _LIFECYCLE:
+        _drain_pending()
         try:
             cfd = _open(d / "config.lock")
             fds.append(cfd)
@@ -448,7 +514,7 @@ def _attempt(url: str, d: Path, exclusive: bool, caller: str, wait_ms: int, flag
 def _prepare(url: str, caller: str):
     """Return (dir, None) to proceed or (None, disabled Admission) to fail open."""
     if not queue_enabled():
-        return None, _disabled(url, "disabled", caller)
+        return None, _off(url, caller)
     d = gate_dir(url)
     try:
         d.mkdir(parents=True, exist_ok=True)
@@ -474,6 +540,7 @@ def _run_sync(url, deadline, exclusive, caller):
     d, off = _prepare(url, caller)
     if off is not None:
         return off
+    _guard_reentrant(url, exclusive)
     t0, flags = time.monotonic(), _Flags()
     while True:
         try:
@@ -495,6 +562,7 @@ async def _run_async(url, deadline, exclusive, caller):
     d, off = _prepare(url, caller)
     if off is not None:
         return off
+    _guard_reentrant(url, exclusive)
     t0, flags = time.monotonic(), _Flags()
     while True:
         try:
@@ -531,7 +599,13 @@ async def aadmit_exclusive(url: str, deadline: float, *, caller: str = "") -> Ad
 
 
 def reset(url: str, deadline: float, *, slots: int | None = None) -> int:
-    """Rewrite slots.json. Takes config.lock plus every slot-*.lock present, or refuses."""
+    """Rewrite slots.json. Takes config.lock plus every slot-*.lock present, or refuses.
+
+    Deliberate: a live holder makes this raise LocalQueueResetRefused immediately, without waiting for
+    ``deadline``. ``deadline`` only bounds contention on config.lock itself (another reset/attempt).
+    Raises ValueError when ``slots`` < 1."""
+    if slots is not None and slots < 1:
+        raise ValueError(f"slots must be >= 1, got {slots}")
     d = gate_dir(url)
     d.mkdir(parents=True, exist_ok=True)
     new = slots if slots is not None else _wanted_slots()

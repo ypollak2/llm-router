@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import gc
 import json
 import os
 import select
@@ -408,18 +409,32 @@ def test_async_acquires_after_release_and_exclusive(env, procs):
 # ── kill switch / fail open ──────────────────────────────────────────────────
 
 @pytest.mark.parametrize("val", [None, "off", "0", ""])
-def test_kill_switch_default_off_is_a_noop_with_row(env, procs, monkeypatch, val):
+def test_kill_switch_default_off_is_a_noop_without_row(env, procs, monkeypatch, val):
     a = hold(procs)                                      # children run with the queue on
+    gate_root = env / "gate"
+    before = sorted(p.name for p in (env / "home").rglob("*"))
     if val is None:
         monkeypatch.delenv("LLM_ROUTER_LOCAL_QUEUE")
     else:
         monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", val)
+    rows_before = len(rows(env))
     t = time.monotonic()
     adm = g.admit(URL, dl(5))
     assert adm.disabled and time.monotonic() - t < 0.5   # on, this would wait for the holder
-    assert rows(env)[-1]["outcome"] == "disabled"
     adm.release()
+    assert len(rows(env)) == rows_before                 # no row written by the off path
+    assert sorted(p.name for p in (env / "home").rglob("*")) == before
     drop(a)
+    # a fresh process that never had the queue on touches nothing at all
+    fresh = env / "fresh"
+    (fresh / "home").mkdir(parents=True)
+    e = {"HOME": str(fresh / "home"), "LLM_ROUTER_LOCAL_GATE_DIR": str(fresh / "gate"), "PYTHONPATH": SRC,
+         "PATH": os.environ.get("PATH", "")}
+    code = ("import time; from llm_router.toolkit import local_gate as g; "
+            "a = g.admit('%s', time.monotonic() + 1); assert a.disabled; a.release()" % URL)
+    subprocess.run([sys.executable, "-c", code], env=e, check=True, timeout=30)
+    assert not (fresh / "gate").exists() and not list((fresh / "home").rglob("*"))
+    assert gate_root.exists()                            # only the earlier queue-on holder created it
 
 
 def test_unwritable_gate_dir_fails_open_with_row(env, monkeypatch):
@@ -489,3 +504,64 @@ def test_windows_msvcrt_path(monkeypatch, tmp_path):
     assert set(Fake.pos) == {0}                          # always seek(0) first
     os.close(fd1)
     os.close(fd2)
+
+
+# ── review fixes: GC fallback, re-entrancy guard, reset validation ───────────
+
+def test_dropped_admission_frees_its_slot_via_gc(env):
+    a = g.admit(URL, dl(2))
+    assert not a.disabled
+    del a                                                # no release(), no with
+    gc.collect()
+    t = time.monotonic()
+    b = g.admit(URL, dl(2))
+    assert not b.disabled and time.monotonic() - t < 1.0
+    b.release()
+
+
+def test_dropped_admission_under_held_lifecycle_lock_is_deferred_then_freed(env):
+    a = g.admit(URL, dl(2))
+    with g._LIFECYCLE:                                   # GC inside a locked region must not deadlock
+        del a
+        gc.collect()
+    assert g._PENDING_CLOSE
+    b = g.admit(URL, dl(2))                              # next attempt drains the deferred fd
+    assert not b.disabled and not g._PENDING_CLOSE
+    b.release()
+
+
+def test_release_detaches_finalizer_so_reused_fd_is_not_closed(env):
+    a = g.admit(URL, dl(2))
+    a.release()
+    b = g.admit(URL, dl(2))                              # likely reuses a's fd number
+    fd = b._fds[0]
+    del a
+    gc.collect()
+    os.fstat(fd)                                         # still open
+    b.release()
+
+
+def test_admit_exclusive_while_holding_a_slot_raises_immediately(env):
+    a = g.admit(URL, dl(2))
+    t = time.monotonic()
+    with pytest.raises(g.LocalQueueReentrant) as ei:
+        g.admit_exclusive(URL, dl(30))
+    assert time.monotonic() - t < 1.0
+    assert isinstance(ei.value, g._LocalQueueError) and isinstance(ei.value, LocalModelConflict)
+    with pytest.raises(g.LocalQueueReentrant):
+        asyncio.run(g.aadmit_exclusive(URL, dl(30)))
+    a.release()
+    g.admit_exclusive(URL, dl(2)).release()              # fine once released
+
+
+def test_admit_exclusive_reentrancy_ignores_other_servers(env):
+    a = g.admit(URL, dl(2))
+    g.admit_exclusive("http://localhost:11998", dl(2)).release()
+    a.release()
+
+
+@pytest.mark.parametrize("bad", [0, -1, -5])
+def test_reset_rejects_slots_below_one(env, bad):
+    with pytest.raises(ValueError):
+        g.reset(URL, dl(1), slots=bad)
+    assert not (g.gate_dir(URL) / "slots.json").exists()
