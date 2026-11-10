@@ -370,6 +370,20 @@ def cap_after_reduce_on() -> bool:
     return os.environ.get("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def okf_by_window_on() -> bool:
+    """P21: LLM_ROUTER_OKF_BY_WINDOW, default off. On: the OKF block's ceiling is the window-derived
+    prompt cap, not the ~5k local-agent compaction target. Off: the agent target, as before."""
+    return os.environ.get("LLM_ROUTER_OKF_BY_WINDOW", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def okf_ceiling(cfg: ProxyConfig) -> tuple[int, str]:
+    """``(ceiling_tokens, source)`` for ``okf_context.attach``; source is "window" or "agent".
+    The window cap comes from ``local_mode.prompt_cap_tokens`` (the one canonical derivation)."""
+    if okf_by_window_on():
+        return local_mode.prompt_cap_tokens(), "window"
+    return (cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS), "agent"
+
+
 def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None,
               haiku_guard_run=None, local_gate_deps=None):
     """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
@@ -646,10 +660,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # what cuts it short, the step is out of time; that is not an attach failure
             # and is not counted as one (status "budget", no failopen).
             okf_cap = min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0, step_budget_s))
+            okf_ceiling_tokens, okf_ceiling_src = okf_ceiling(cfg)
             try:
                 send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
-                    okf_context.attach, send, body,
-                    ceiling_tokens=cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS),
+                    okf_context.attach, send, body, ceiling_tokens=okf_ceiling_tokens),
                     timeout=okf_cap)
             except asyncio.TimeoutError as exc:
                 if okf_cap < OKF_ATTACH_TIMEOUT_S:
@@ -657,6 +671,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 else:
                     failopen.record("LR-FO-PROXY-OKF-ATTACH-TIMEOUT", exc)
                     row["okf"] = {"status": "timeout"}
+            # P21: which ceiling decided the room, so the attached share can be split by it.
+            if "status" not in row["okf"]:  # attach ran (not the timeout/budget stubs)
+                row["okf"] = {**row["okf"], "ceiling_tokens": okf_ceiling_tokens, "ceiling_src": okf_ceiling_src}
             # P0.9: context building, not the decision; reported beside it (S6).
             _add_phase(row, "okf_attach", (time.perf_counter() - okf_t0) * 1000.0)
             backend_t0 = time.monotonic()
