@@ -1436,6 +1436,7 @@
     "keep_alive": 600,
     "lane_a_conf": null,
     "lane_a_reason": "off",
+    "loop_guard_sig": "00d87c3365",
     "mixed_history": false,
     "model": "ollama/qwen-golden:1",
     "msg_id": "msg_upstream01",

@@ -43,12 +43,16 @@ only with the sessions currently mid-streak.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections import deque
 from dataclasses import dataclass, field
 
 REASON_LOOP_GUARD = "loop_guard"
+# Which trigger tripped; the proxy reads this structured value (row["loop_guard_trigger"]), never the detail string.
+TRIGGER_CAP = "cap"
+TRIGGER_REPEAT = "repeat"
 DEFAULT_MAX_CONSECUTIVE = 8
 DEFAULT_REPEAT_WINDOW = 3
 
@@ -108,16 +112,23 @@ class LoopGuard:
             return f"consecutive_served_exceeded:{n}"
         return None
 
-    def repeat_reason(self, session_id: str | None, message: dict) -> str | None:
-        """A fallback detail string naming the tool call this served
-        candidate repeats, or ``None`` if it is new (or cannot be checked)."""
+    def repeat_hit(self, session_id: str | None, message: dict) -> tuple[str, str] | None:
+        """``(tool name, sha256[:10] of the repeated signature)`` when this served
+        candidate repeats a recent one, else ``None``. The hash makes a repeat
+        auditable without writing the call's arguments (user text) anywhere."""
         if not session_id or self.repeat_window <= 0:
             return None
         recent = self._sessions[session_id].recent_tool_sigs if session_id in self._sessions else ()
         for sig in _tool_signatures(message):
             if sig in recent:
-                return f"repeat:{sig.split(':', 1)[0]}"
+                return sig.split(":", 1)[0], hashlib.sha256(sig.encode("utf-8", "replace")).hexdigest()[:10]
         return None
+
+    def repeat_reason(self, session_id: str | None, message: dict) -> str | None:
+        """A fallback detail string naming the tool call this served
+        candidate repeats, or ``None`` if it is new (or cannot be checked)."""
+        hit = self.repeat_hit(session_id, message)
+        return None if hit is None else f"repeat:{hit[0]}"
 
     def record_served(self, session_id: str | None, message: dict) -> None:
         """The candidate was actually served: extend the streak."""
