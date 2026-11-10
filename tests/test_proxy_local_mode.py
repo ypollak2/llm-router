@@ -807,6 +807,7 @@ async def test_flag_off_over_cap_stays_on_claude(env, monkeypatch):
 
 
 async def test_flag_on_masks_the_ollama_payload_and_the_cap_uses_the_masked_estimate(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
     monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
     body = _long_history()
     assert local_mode.estimate_prompt_tokens(body) > local_mode.PROMPT_CAP_TOKENS  # raw would be refused
@@ -830,6 +831,7 @@ async def test_flag_on_masks_the_ollama_payload_and_the_cap_uses_the_masked_esti
 
 
 async def test_claude_fallback_receives_the_original_unmasked_body(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
     monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
     body = _long_history()
     backend = _FailsAfterFirst(_ollama("", [_call("Bash", {"command": "ls"})]))
@@ -874,6 +876,7 @@ async def test_the_pin_decision_uses_the_masked_estimate(env, monkeypatch):
     off_lm = env.rows()[-1]["local_mode"]
     assert off_lm["reason"] == "prompt_over_cap" and off_lm["pin_change"] == "local->claude"  # structural pin
     monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
     env.ledger.unlink()
     on = env.app(_backend())  # a fresh app: its pins start empty
     await _warm(on)
@@ -885,6 +888,7 @@ async def test_the_pin_decision_uses_the_masked_estimate(env, monkeypatch):
 
 
 async def test_local_prefix_path_also_sends_the_masked_payload(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
     monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
     body = _long_history()
     body["messages"][0]["content"] = [{"type": "text", "text": "local: continue the task"}]
@@ -897,6 +901,99 @@ async def test_local_prefix_path_also_sends_the_masked_payload(env, monkeypatch)
     assert row["local_mode"].get("forced") is True
     assert row["history_mask"]["messages_masked"] == 9
     assert row["local_mode"]["raw_est_prompt_tokens"] > local_mode.PROMPT_CAP_TOKENS
+
+
+# -- P6: LLM_ROUTER_PROXY_CAP_AFTER_REDUCE tests the cap on the body that is sent locally (default off) -----
+
+
+async def test_mask_on_cap_flag_off_still_caps_on_the_raw_estimate(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    monkeypatch.delenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", raising=False)
+    backend = _backend()
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, _long_history())
+    assert len(backend.calls) == 1 and len(env.up.requests) == 1  # raw is over the cap: Claude, though masked fits
+    row = env.rows()[-1]
+    assert row["reason"] == "prompt_over_cap"
+    lm = row["local_mode"]
+    assert lm["cap_estimate"] == "raw" and lm["pin_change"] == "local->claude"
+    assert lm["est_prompt_tokens"] > local_mode.PROMPT_CAP_TOKENS  # the decision saw the raw body
+    assert lm["raw_est_prompt_tokens"] > local_mode.PROMPT_CAP_TOKENS
+    assert lm["reduced_est_prompt_tokens"] <= local_mode.PROMPT_CAP_TOKENS
+
+
+async def test_cap_flag_on_decides_on_the_reduced_estimate_and_records_both(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
+    backend = _backend()
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, _long_history())
+    assert len(backend.calls) == 2 and env.up.requests == []
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["local"] is True and lm["cap_estimate"] == "reduced"
+    assert lm["raw_est_prompt_tokens"] > local_mode.PROMPT_CAP_TOKENS >= lm["reduced_est_prompt_tokens"]
+    assert lm["est_prompt_tokens"] <= local_mode.PROMPT_CAP_TOKENS
+
+
+async def test_cap_flag_on_reduced_still_over_the_cap_goes_to_claude(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
+    backend = _backend()
+    app = env.app(backend)
+    await _warm(app)
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", 200)  # the masked body no longer fits either
+    await _post(app, _long_history())
+    assert len(backend.calls) == 1 and len(env.up.requests) == 1
+    row = env.rows()[-1]
+    assert row["reason"] == "prompt_over_cap" and row["local_mode"]["cap_estimate"] == "reduced"
+
+
+@pytest.mark.parametrize("result_chars", [500, 20_000])  # one body under the cap, one over
+async def test_cap_flag_is_inert_without_masking(env, monkeypatch, result_chars):
+    """Mask off: the cap flag must change nothing (served payload, decision row) whatever its value."""
+    monkeypatch.delenv("LLM_ROUTER_PROXY_MASK", raising=False)
+    body = _long_history(result_chars=result_chars)
+    seen = []
+    for value in (None, "1"):
+        if value is None:
+            monkeypatch.delenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", raising=False)
+        else:
+            monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", value)
+        env.ledger.unlink(missing_ok=True)
+        env.up.requests.clear()
+        backend = _backend()
+        app = env.app(backend)
+        await _warm(app)
+        await _post(app, copy.deepcopy(body))
+        row = env.rows()[-1]
+        seen.append((backend.calls, len(env.up.requests), row["reason"], row["decision"], row["local_mode"],
+                     row["est_prompt_tokens"], sorted(set(row) & {"history_mask", "cap_estimate"})))
+    assert seen[0] == seen[1]
+    assert "cap_estimate" not in seen[0][4] and "history_mask" not in seen[0][6]
+
+
+async def test_cap_flag_on_overflow_guard_still_falls_back_to_claude(env, monkeypatch):
+    """The reduced estimate fits, the real local payload does not: the backend's local_context_guard
+    raises ContextOverflow and the step goes to Claude with the unmasked original."""
+    from llm_router.local_context_guard import ContextOverflow
+
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
+    body = _long_history()
+    assert local_mode.estimate_prompt_tokens(body) > local_mode.PROMPT_CAP_TOKENS
+    backend = Backend(_ollama("", [_call("Bash", {"command": "ls"})]))
+    app = env.app(backend)
+    await _warm(app)
+    backend.exc = ContextOverflow("prompt ~99999 tokens > window")
+    await _post(app, copy.deepcopy(body))
+    assert len(backend.calls) == 2  # the cap let it through (reduced fits); the guard refused it
+    row = env.rows()[-1]
+    assert row["local_mode"]["cap_estimate"] == "reduced" and row["local_mode"]["local"] is True
+    assert row["decision"] == "fallback" and row["reason"] == "local_context_overflow"
+    (req,) = env.up.requests
+    assert json.loads(req.content)["messages"] == body["messages"] and PLACEHOLDER not in req.content.decode()
 
 
 @pytest.mark.parametrize("value", [None, "0", "false", "off", ""])
