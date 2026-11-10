@@ -239,7 +239,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_HEDGE_S": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_STEP_BUDGET_S": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_DEADLINE_BY_SIZE": ("llm_router", "proxy/deadline.py", 1),
-    "LLM_ROUTER_COLD_GUARD": ("llm_router", "proxy/server.py", 1),
+    "LLM_ROUTER_COLD_GUARD": ("llm_router", "proxy/cold_guard.py", 1),
     "LLM_ROUTER_DEADLINE_CAP_S": ("llm_router", "proxy/deadline.py", 1),
     "LLM_ROUTER_PREFILL_TOK_S": ("llm_router", "proxy/deadline.py", 1),
     "LLM_ROUTER_PROXY_KEEPALIVE": ("llm_router", "proxy/keepalive.py", 1),

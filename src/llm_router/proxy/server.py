@@ -48,6 +48,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import logging
 import os
 import sys
 import time
@@ -169,6 +170,8 @@ def _note_prefix(row: dict, body: dict, usage: dict | None) -> None:
         if obs:
             row.update(prefix_hash.TRACKER.fields(
                 conversation_key(body, row.get("session_id")), obs))
+            if cold_guard.enabled():
+                cold_guard.GUARD.note_resident(obs)  # P22: the post-trim prefix the runner actually holds
     except Exception:  # noqa: BLE001 - measurement only
         pass
 
@@ -863,14 +866,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
     _warm_tasks: set = set()
 
-    async def _cold_check(body: dict, payload: dict, decision) -> tuple[dict | None, dict | None]:
-        """P22 (LLM_ROUTER_COLD_GUARD). ``(row, obs)``; row is None when the turn may go local as decided
+    async def _cold_check(body: dict, payload: dict, decision) -> dict | None:
+        """P22 (LLM_ROUTER_COLD_GUARD). The ledger row, or None when the turn may go local as decided
         (warm, or predicted prefill within the cap). Otherwise the turn goes to Claude and, at most once per
         prefix and one at a time, a prefill-only warm-up is queued. Fail-open: an error keeps the decision."""
         try:
+            cold_guard.GUARD.ttl_s = cold_guard.ttl_from_keep_alive(cfg.keep_alive)
             obs = cold_guard.GUARD.observe(payload)
             if cold_guard.GUARD.is_warm(obs):
-                return None, obs
+                return None
             est = decision.est_tokens
             if est is None:
                 est = await asyncio.to_thread(local_mode.estimate_prompt_tokens, payload)
@@ -878,31 +882,40 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             d = await asyncio.to_thread(lambda: deadline.compute(est, keepalive=ka))
             cap = deadline.cap_s(ka)
             if d["predicted_prefill_s"] <= cap:
-                return None, obs
-            key = cold_guard.GUARD.begin_warm_up(obs)
-            if key is not None:
-                task = asyncio.create_task(_run_warm_up(body, key, obs, cap))
+                return None
+            started = cold_guard.GUARD.begin_warm_up(obs)
+            if started is not None:
+                wd = cold_guard.warm_deadline_s(cap, d["predicted_prefill_s"])
+                task = asyncio.create_task(_run_warm_up(body, started[0], started[1], obs, wd))
                 _warm_tasks.add(task)
                 task.add_done_callback(_warm_tasks.discard)
             return {"predicted_prefill_s": d["predicted_prefill_s"], "cap_s": cap,
-                    "warm_up_queued": key is not None,
-                    "detail": f"cold, predicted prefill {d['predicted_prefill_s']}s > cap {cap:g}s"}, obs
+                    "warm_up_queued": started is not None,
+                    "detail": f"cold, predicted prefill {d['predicted_prefill_s']}s > cap {cap:g}s"}
         except Exception as exc:  # noqa: BLE001 -- a guard error never changes the decision
             failopen.record("LR-FO-PROXY-COLD-GUARD", exc)
-            return None, None
+            return None
 
-    async def _run_warm_up(body: dict, key: str, obs: dict | None, cap: float) -> None:
-        ok = False
+    async def _run_warm_up(body: dict, key: str, generation: int, obs: dict | None, warm_deadline: float) -> None:
+        ok, sent = False, None
         try:
             backend = make_backend(cfg.model)  # same model and num_ctx as a live turn: no runner reload
             backend.num_predict = 1
-            _msg, err, _usage = await backend.complete(body, cap, priority="background")
+            # Own deadline, not the live-turn hedge: nobody waits, and the first line only arrives after the
+            # whole prefill. Hedge, queue deadline and HTTP timeout all derive from warm_deadline.
+            backend.hedge_s = warm_deadline
+            _msg, err, usage = await backend.complete(body, warm_deadline, priority="background")
             ok = err is None
-        except BaseException as exc:  # noqa: BLE001 -- recorded as not warm; a warm-up never raises
-            if isinstance(exc, asyncio.CancelledError):
-                cold_guard.GUARD.end_warm_up(key, obs, False)
-                raise
-        cold_guard.GUARD.end_warm_up(key, obs, ok)
+            sent = usage.get("prefix_obs") if isinstance(usage, dict) else None  # what the runner got (post-trim)
+            if err:
+                logging.getLogger(__name__).warning("cold_guard warm-up failed: %s", ledger.scrub_detail(str(err)))
+        except asyncio.CancelledError:
+            cold_guard.GUARD.end_warm_up(key, obs, False, generation)
+            raise
+        except Exception as exc:  # noqa: BLE001 -- recorded as not warm; a warm-up never raises
+            logging.getLogger(__name__).warning("cold_guard warm-up failed: %s",
+                                                ledger.scrub_detail(f"{type(exc).__name__}: {exc}"))
+        cold_guard.GUARD.end_warm_up(key, sent or obs, ok, generation)
 
     async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None,
                           cap_body: dict | None = None) -> dict | None:
@@ -966,7 +979,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     f"~{over[0]} guard tokens > window {over[1]} - reserve", decision.est_tokens)
         cold_row = None
         if decision.local and not force and cold_guard.enabled():
-            cold_row, cold_obs = await _cold_check(body, payload, decision)
+            cold_row = await _cold_check(body, payload, decision)
             if cold_row is not None:
                 decision = local_mode.LocalDecision(False, local_mode.REASON_COLD_OVER_DEADLINE,
                                                     cold_row["detail"], decision.est_tokens)
@@ -1007,10 +1020,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if pinned is None:
                 lm.set_pin(key, local_mode.PIN_LOCAL)
                 row["local_mode"]["pin"] = local_mode.PIN_LOCAL
+            cold_seq = cold_guard.GUARD.seq
             message = await try_serve(body, row)
-            if message is not None:
-                if cold_guard.enabled():
+            if cold_guard.enabled():
+                if message is None:
+                    cold_guard.GUARD.clear()  # a failed or timed-out local call: the runner's state is unknown
+                elif cold_guard.GUARD.seq == cold_seq:  # _note_prefix did not record the sent (post-trim) prefix
                     cold_guard.GUARD.note_resident(cold_guard.GUARD.observe(payload))
+            if message is not None:
                 if force:
                     row["prefix_outcome"] = "served_local"
                     if stored is None and is_first_call(body):
