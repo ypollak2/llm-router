@@ -61,7 +61,7 @@ from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_key, shadow_frontier
 from llm_router import prefixes as user_prefixes
-from llm_router.proxy import cls_decide, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context, prefix_hash
+from llm_router.proxy import cls_decide, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context, prefix_hash
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -466,9 +466,30 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         lane_a.ensure_fields(row)  # every continuation row, served or not, carries lane_a_reason/_conf
         ledger.write_row(row, cfg.ledger_path)
 
-    def _budget_left(t0: float) -> float:
+    def _budget_left(t0: float, budget_s: float | None = None) -> float:
         """Seconds left of the step budget that started at ``t0`` (never negative)."""
-        return max(0.0, t0 + cfg.step_budget_s - time.monotonic())
+        return max(0.0, t0 + (cfg.step_budget_s if budget_s is None else budget_s) - time.monotonic())
+
+    async def _size_deadline(body: dict, row: dict, backend) -> float:
+        """Size-aware deadline (LLM_ROUTER_DEADLINE_BY_SIZE): sets the backend's first-token hedge and returns
+        the step budget. Never below the configured values; a hedge that is off stays off. Fail-open."""
+        try:
+            lmrow = row.get("local_mode") or {}
+            est = lmrow.get("est_prompt_tokens") or await asyncio.to_thread(local_mode.estimate_prompt_tokens, body)
+            d = await asyncio.to_thread(deadline.compute, est)
+        except Exception as exc:  # noqa: BLE001 -- a deadline estimate never fails the step
+            failopen.record("LR-FO-PROXY-DEADLINE-BY-SIZE", exc)
+            return cfg.step_budget_s
+        budget = max(cfg.step_budget_s, d["deadline_s"])
+        hedge = getattr(backend, "hedge_s", None)
+        if hedge is not None:
+            hedge = max(hedge, d["deadline_s"])
+            try:
+                backend.hedge_s = hedge
+            except AttributeError:
+                pass
+        row["deadline"] = dict(d, step_budget_s=budget, hedge_s=hedge, base_step_budget_s=cfg.step_budget_s)
+        return budget
 
     async def try_serve(body: dict, row: dict) -> dict | None:
         t0 = time.monotonic()
@@ -538,8 +559,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return None
         message, err, reason = None, None, None
         backend_t0, backend_outcome = None, None
+        step_budget_s = cfg.step_budget_s
         try:
             backend = make_backend(choice["model"])
+            if deadline.enabled():
+                step_budget_s = await _size_deadline(body, row, backend)
             admitted, health_info = await health.admit(choice["model"], backend)
             if health_info is not None:
                 row["backend_health"] = health_info
@@ -567,7 +591,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 trim_t0 = time.perf_counter()
                 send = await asyncio.wait_for(asyncio.to_thread(
                     apply_trims, src, trims, target_window=getattr(backend, "num_ctx", None)),
-                    timeout=_budget_left(t0))
+                    timeout=_budget_left(t0, step_budget_s))
                 _add_phase(row, "trim", (time.perf_counter() - trim_t0) * 1000.0)
             # Repo knowledge for the local model (proxy.okf_context): the trimmed
             # request is all it sees. Local path only, never the pass-through;
@@ -580,7 +604,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # Within the step deadline: when the budget, not the attach's own 2 s cap, is
             # what cuts it short, the step is out of time; that is not an attach failure
             # and is not counted as one (status "budget", no failopen).
-            okf_cap = min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0))
+            okf_cap = min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0, step_budget_s))
             try:
                 send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
                     okf_context.attach, send, body,
@@ -597,7 +621,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             backend_t0 = time.monotonic()
             # One deadline for the whole step (t0 + step_budget_s, as the edit protocol
             # below): the trim and the okf attach above spend from it, they do not add to it.
-            left = _budget_left(t0)
+            left = _budget_left(t0, step_budget_s)
             if left <= 0:
                 raise asyncio.TimeoutError
             message, err, backend_usage = await asyncio.wait_for(
@@ -631,7 +655,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     from llm_router.local_agent.proxy_step import generator_for
 
                     edited, edit_err, row["edit_protocol"] = await la_capability.run_edit_protocol(
-                        verdict, message, body, generator_for(backend), t0 + cfg.step_budget_s)
+                        verdict, message, body, generator_for(backend), t0 + step_budget_s)
                     if edit_err:
                         row["edit_protocol"]["fallback"] = la_capability.REASON_RAW_EDIT_CHECKED
                         row["served_via"] = la_capability.REASON_RAW_EDIT_CHECKED
@@ -640,7 +664,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                         row["served_via"] = la_capability.ROUTE_EDIT
                 elif verdict.route == la_capability.ROUTE_EDIT:
                     message, err, row["edit_protocol"] = await local_agent.edit_step(
-                        verdict, message, body, backend, t0 + cfg.step_budget_s)
+                        verdict, message, body, backend, t0 + step_budget_s)
                     if err:
                         reason = "edit_protocol_failed"
                     else:
@@ -655,7 +679,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # from a genuine backend failure — see local_context_guard.
             err, reason = str(exc), "local_context_overflow"
         except (asyncio.TimeoutError, httpx.TimeoutException):
-            err, reason = f"exceeded step budget {cfg.step_budget_s}s", "budget_exceeded"
+            err, reason = f"exceeded step budget {step_budget_s}s", "budget_exceeded"
         except LocalModelConflict as exc:
             # The memory guard refused the load (nothing was sent). Not a backend fault: do not feed the breaker.
             err, reason, backend_t0 = str(exc), "memory_budget", None
