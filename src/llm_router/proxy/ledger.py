@@ -599,6 +599,44 @@ def paired_realized_saving(off_rows: list[dict], on_rows: list[dict]) -> dict:
     }
 
 
+#: Upper bounds (est. prompt tokens, inclusive) of the prompt-size buckets; the 25k edge is
+#: ``local_mode.PROMPT_CAP_TOKENS`` (a prompt of exactly that size is not refused), and the 32k/64k/128k
+#: edges are the local window sizes (32768/65536/131072), so a bucket answers "fits that window".
+SIZE_BUCKETS: tuple[tuple[str, int | None], ...] = (
+    ("<=8k", 8_000), ("8-25k", 25_000), ("25-32k", 32_768),
+    ("32-64k", 65_536), ("64-128k", 131_072), (">128k", None),
+)
+SIZE_BUCKET_UNKNOWN = "unknown"
+
+
+def size_bucket(est_tokens: int | None) -> str:
+    """The bucket label for an estimated prompt size (the proxy's own ``estimate_prompt_tokens``)."""
+    if est_tokens is None:
+        return SIZE_BUCKET_UNKNOWN
+    for label, upper in SIZE_BUCKETS:
+        if upper is None or est_tokens <= upper:
+            return label
+    return SIZE_BUCKET_UNKNOWN  # unreachable: the last bucket is unbounded
+
+
+def size_bucket_stats(rows: list[dict]) -> dict:
+    """Per prompt-size bucket: calls, served, fallbacks and routed share. A row without
+    ``size_bucket`` (written before this field, or that never reached a local decision) is ``unknown``."""
+    order = [label for label, _ in SIZE_BUCKETS] + [SIZE_BUCKET_UNKNOWN]
+    out = {label: {"calls": 0, "served": 0, "fallbacks": 0, "routed_share": None} for label in order}
+    for r in rows:
+        label = r.get("size_bucket")
+        b = out[label if label in out else SIZE_BUCKET_UNKNOWN]
+        b["calls"] += 1
+        if r.get("decision") == DECISION_SERVED and r.get("reason") != REASON_LOOP_GUARD:
+            b["served"] += 1
+        elif r.get("decision") == DECISION_FALLBACK:
+            b["fallbacks"] += 1
+    for b in out.values():
+        b["routed_share"] = round(b["served"] / b["calls"], 4) if b["calls"] else None
+    return out
+
+
 def stats(rows: list[dict]) -> dict:
     """The four proxy metrics, each with its own n. See the module docstring.
 
@@ -669,6 +707,7 @@ def stats(rows: list[dict]) -> dict:
                      "max_calls_per_session": max(session_counts) if session_counts else None},
         "routed_share": {"served": len(served), "calls": calls,
                          "share": round(len(served) / calls, 4) if calls else None},
+        "size_buckets": size_bucket_stats(rows),
         "routed_share_excl_repeats": {
             "served": len(served), "calls": calls_excl_repeats, "repeats_excluded": len(loop_flagged),
             "share": round(len(served) / calls_excl_repeats, 4) if calls_excl_repeats else None,
@@ -723,6 +762,13 @@ def format_stats(s: dict) -> str:
         f"cache_creation median (known-usage rows only): after a served turn {an['cache_creation_median_after_served_turn']} "
         f"(n={an['after_served_n']}) vs clean history {an['cache_creation_median_clean_history']} (n={an['clean_n']})",
     ]
+    sb = s.get("size_buckets")
+    if sb:
+        lines.append("routed share by est. prompt size: " + ("; ".join(
+            f"{k} {v['served']}/{v['calls']}"
+            + (f" ({v['routed_share'] * 100:.1f}%)" if v["routed_share"] is not None else "")
+            + (f" fb {v['fallbacks']}" if v["fallbacks"] else "")
+            for k, v in sb.items() if v["calls"]) or "no calls"))
     t = s.get("tiers")
     if t:
         lines += [
