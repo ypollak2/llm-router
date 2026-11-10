@@ -27,8 +27,14 @@ Two entry points share one per-conversation state:
 
 This module does not summarize. On the trim path the messages before the boundary are dropped, as the sliding
 window dropped them. A turn it cannot arrange (no first human message, an orphan tool_result in the input)
-returns ``None`` and the caller keeps its previous behaviour. The ``fast`` trim's mutable context layers
-(rolling summary, session context) are not added in this layout: they change every turn.
+returns ``None`` and the caller keeps its previous behaviour. 
+DROPPED LAYERS (trim path only, ledger ``layout.dropped``): the rolling summary, the session context, the
+context_pack per-turn text caps and the 6000-token full-mode cap (``LLM_ROUTER_PROXY_FULL_CAP``) are NOT
+applied: tool results go verbatim and a prompt may reach 50-80% of the window (cold-prefill territory; the P22
+cold guard is off by default). No latency claim is made. When LLM_ROUTER_SESSION_CONTEXT forbids session
+content for ollama, ``arrange`` returns None and the old packing (which honours it) runs. It also returns None
+when the first message or the newest unit alone exceed the SOFT share, instead of moving every turn.
+Sizes use token_estimate x EST_CORRECTION (the guard's math) and reserve OKF_RESERVE for the OKF block.
 
 Never emitted: a tool_result without its tool_use, or a tool_use (outside the last message) without its
 result. Units are the same fused pairs P9 closes (mr_summary.units_of); every layout is validated again.
@@ -49,16 +55,26 @@ import hashlib
 import json
 import os
 import threading
+from contextvars import ContextVar
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from llm_router.proxy import mr_summary
+from llm_router.proxy.steps import non_system, session_id_of
 from llm_router.token_estimate import est_tokens
 
 DEFAULT_K = 4
 SOFT = 0.50
 HARD = 0.80
 MAX_CONVERSATIONS = 64
+#: The guard's estimate (3.5 chars/token x 1.15 margin, local_context_guard) runs ~18% above token_estimate (3.6): measured by the #900 review.
+EST_CORRECTION = 1.18
+#: Reserved for the OKF block attached after the trim (its ceiling is 300 tokens).
+OKF_RESERVE = 300
+#: Layers the old ``fast`` packing added or capped that this layout does not (ledger ``dropped``).
+DROPPED_TRIM = ("rolling_summary", "session_context", "context_pack_text_caps", "full_mode_cap")
+#: Set by server.py local_step: the local-agent path owns this request's state, the ``fast`` trim must not also write it.
+LOCAL_AGENT_OWNS = ContextVar("p14_local_agent_owns", default=False)
 SUMMARY_OPEN = "<chunk-summary"
 
 REASON_FIRST = "first"
@@ -115,13 +131,24 @@ def split_head(head: dict) -> tuple[list, list]:
     return [b for b in blocks if not _is_summary(b)], [b for b in blocks if _is_summary(b)]
 
 
-def conv_key(messages: list) -> str:
-    """Hash of the first human message WITHOUT P9's summary blocks, so a chunk close keeps the key."""
-    for m in messages or []:
-        if isinstance(m, dict) and m.get("role") == "user" and _human(m):
-            base, _ = split_head(m)
-            return sig(base)
-    return "-"
+def _system_text(system) -> str:
+    if isinstance(system, list):
+        system = "\n".join(str(b.get("text", "")) if isinstance(b, dict) else str(b) for b in system)
+    lines = [ln for ln in str(system or "").split("\n") if not ln.startswith("x-anthropic-billing-header")]
+    return "\n".join(lines)
+
+
+def conv_key(body: dict) -> str | None:
+    """Key of a conversation: session id, system prompt (billing header line dropped: it varies), tool names,
+    the first human message WITHOUT P9's summary blocks (so a chunk close keeps the key) and the first
+    reply. ``None`` when the body has no human first message: no state is kept for it."""
+    msgs = non_system(body.get("messages") or [])
+    if not msgs or msgs[0].get("role") != "user" or not _human(msgs[0]):
+        return None
+    base, _ = split_head(msgs[0])
+    names = sorted(str(t.get("name")) for t in body.get("tools") or [] if isinstance(t, dict))
+    return sig([session_id_of(body), _system_text(body.get("system")), names, sig(base),
+                sig(msgs[1]) if len(msgs) > 1 else ""])
 
 
 def _human(m: dict) -> bool:
@@ -156,6 +183,7 @@ DEFAULT_GROWTH = 2_000  # est tokens a turn adds, until the conversation shows i
 class _Conv:
     head: dict | None = None      # the frozen first message as sent (P9 summaries and their pins included)
     head_sig: str = ""
+    head_src: str = ""          # sig of the first message WITHOUT summaries: which conversation the head belongs to
     boundary_sig: str = ""        # content hash of the first tail message; "" = nothing frozen
     age: int = 0                  # turns held since the last move
     last_sig: str = ""
@@ -184,9 +212,12 @@ def take_stats(key: str) -> dict | None:
         return out
 
 
-def _commit(key: str, msgs: list, *, moved: bool, reason: str, fixed_est: int = 0, freeze: bool = False) -> None:
+def _commit(key: str | None, msgs: list, *, moved: bool, reason: str, fixed_est: int = 0, freeze: bool = False,
+            dropped: tuple = ()) -> None:
     """Remember what was sent for the conversation and compute the counters. ``freeze``: ``msgs[0]`` and the
     boundary ``msgs[1]`` become the layout later turns hold."""
+    if key is None:
+        return
     hashes = [sig(m) for m in msgs]
     est = fixed_est + est_tokens(msgs)
     with _LOCK:
@@ -209,10 +240,11 @@ def _commit(key: str, msgs: list, *, moved: bool, reason: str, fixed_est: int = 
             conv.growth = max(est - conv.last_est, int(conv.growth * 0.75), 1)
         if freeze and len(msgs) > 1:
             conv.head, conv.head_sig, conv.boundary_sig = copy.deepcopy(msgs[0]), hashes[0], hashes[1]
+            conv.head_src = sig(split_head(msgs[0])[0])
         elif not freeze:
             conv.head, conv.head_sig, conv.boundary_sig = None, "", ""
         conv.last, conv.last_sig, conv.last_est = hashes, hashes[-1], est
-        conv.stats = {"moved": moved, "reason": reason, "age": conv.age, "held_before_move": held, "msgs": len(msgs), "tokens_est": est,
+        conv.stats = {"moved": moved, "reason": reason, "age": conv.age, "held_before_move": held, "msgs": len(msgs), "tokens_est": est, "dropped": list(dropped),
                       "msgs_same_prev": common,
                       "tokens_same_prev": None if common is None else fixed_est + est_tokens(msgs[:common])}
         _STATE[key] = conv
@@ -235,22 +267,33 @@ def _starts(rest: list, prefer_assistant: bool = True) -> list[int]:
     return (asst or starts) if prefer_assistant else starts
 
 
+def _locate(rest: list, boundary: str) -> int | None:
+    """Index into ``rest`` of the FIRST unit start whose message hashes to ``boundary`` (one rule for both paths)."""
+    return next((a for a, _ in mr_summary.units_of(rest) if sig(rest[a]) == boundary), None)
+
+
 # ------------------------------------------------------------------ local-agent path (with P9)
-def hold(messages: list, fits) -> list | None:
+def hold(key: str | None, messages: list, fits) -> list | None:
     """The previous turn's frozen layout applied to this turn's full history, or ``None`` (move needed).
 
     ``messages``: the client's full message list. ``fits(candidate_messages) -> bool``: does it still fit the
-    local cap. The candidate is the stored head (first message plus the summaries P9 made at the last move)
-    and every message from the stored boundary on. ``None`` when nothing is frozen, the boundary message is
-    gone (the client rewrote history), the candidate is not paired, or it no longer fits."""
+    local cap. The candidate is a COPY of the stored head (first message plus the summaries P9 made at the
+    last move) and every message from the stored boundary on. ``None`` when nothing is frozen, the stored head
+    belongs to another first message, the boundary message is gone (the client rewrote history), the candidate
+    is not paired, or it no longer fits."""
     try:
-        with _LOCK:
-            conv = _STATE.get(conv_key(messages))
-            head, boundary = (conv.head, conv.boundary_sig) if conv is not None else (None, "")
-        if head is None or not boundary or len(messages) < 2:
+        if key is None or len(messages) < 2:
             return None
+        with _LOCK:
+            conv = _STATE.get(key)
+            if conv is None or conv.head is None or not conv.boundary_sig:
+                return None
+            _STATE.move_to_end(key)
+            head, boundary, src = copy.deepcopy(conv.head), conv.boundary_sig, conv.head_src
+        if src != sig(split_head(messages[0])[0]):
+            return None  # never apply another conversation's summaries
         rest = messages[1:]
-        at = next((a for a, _ in mr_summary.units_of(rest) if sig(rest[a]) == boundary), None)
+        at = _locate(rest, boundary)
         if at is None:
             return None
         cand = [head] + rest[at:]
@@ -259,34 +302,42 @@ def hold(messages: list, fits) -> list | None:
         return None
 
 
-def move_goal(messages: list, cap: int) -> int:
+def move_goal(key: str | None, cap: int) -> int:
     """The prompt size a move should bring the history down to: ``cap`` less K turns of the growth this
-    conversation showed, never below half the cap. Passed to P9 as its goal, so the next K turns fit."""
+    conversation showed, never below half the cap. Passed to P9 as its goal, so the next K turns tend to fit."""
     with _LOCK:
-        conv = _STATE.get(conv_key(messages))
+        conv = _STATE.get(key) if key is not None else None
         growth = conv.growth if conv is not None else DEFAULT_GROWTH
     return max(int(cap * SOFT), cap - k_turns() * growth)
 
 
-def observe(messages: list, *, moved: bool, reason: str, freeze: bool = False, fixed_est: int = 0) -> None:
+def observe(key: str | None, messages: list, *, moved: bool, reason: str, freeze: bool = False,
+            fixed_est: int = 0) -> None:
     """Record the messages actually sent this turn (local-agent path). ``freeze`` after a move; never raises."""
     try:
-        if len(messages) >= 2:
-            _commit(conv_key(messages), messages, moved=moved, reason=reason, fixed_est=fixed_est, freeze=freeze)
+        if key is not None and len(messages) >= 2:
+            _commit(key, messages, moved=moved, reason=reason, fixed_est=fixed_est, freeze=freeze)
     except Exception:  # noqa: BLE001 - measurement and bookkeeping only
         pass
 
 
 # ------------------------------------------------------------------ trim path (the ``fast`` trim)
-def arrange(turns: list, *, window: int, fixed_est: int, reserved: int = 0) -> list | None:
-    """The messages to send, or ``None`` when this layout cannot arrange the turns (caller keeps its packing)."""
+def arrange(turns: list, *, key: str | None, window: int, fixed_est: int, reserved: int = 0) -> list | None:
+    """The messages to send, or ``None`` when this layout cannot or must not arrange the turns (the caller keeps
+    its packing): no key, the privacy rule withholds session content, the local-agent path owns this request,
+    or the head plus the newest unit exceed the SOFT share (a huge first message would otherwise move every turn) of the window."""
     try:
-        return _arrange(turns, window, fixed_est, reserved)
+        if key is None or LOCAL_AGENT_OWNS.get():
+            return None
+        from llm_router.session_store import allows_session_content
+        if not allows_session_content("ollama"):  # the one rule: LLM_ROUTER_SESSION_CONTEXT=off sends no history
+            return None
+        return _arrange(turns, key, window, fixed_est, reserved)
     except Exception:  # noqa: BLE001 - an optimisation: any failure is the previous packing, never a 500
         return None
 
 
-def _arrange(turns: list, window: int, fixed_est: int, reserved: int) -> list | None:
+def _arrange(turns: list, key: str, window: int, fixed_est: int, reserved: int) -> list | None:
     if len(turns) < 2 or not all(isinstance(m, dict) for m in turns):
         return None
     head = turns[0]
@@ -296,21 +347,24 @@ def _arrange(turns: list, window: int, fixed_est: int, reserved: int) -> list | 
     base, summaries = split_head(head)
     head_out = _head_out(head, base, summaries)
     head_sig = sig(head_out)
-    key = conv_key(turns)
-    usable = max(window - reserved, 1)
+    # the guard's math: our estimate x EST_CORRECTION must fit the window less the reserve and the OKF block
+    usable = max((window - reserved - OKF_RESERVE) / EST_CORRECTION, 1)
     head_est = fixed_est + est_tokens(head_out)
     rest_est = [est_tokens(m) for m in rest]
     starts = _starts(rest)
-    by_sig = {sig(rest[a]): a for a in starts}
 
     def total(s: int) -> int:
         return head_est + sum(rest_est[s:])
 
     with _LOCK:
         conv = _STATE.get(key)
+        if conv is not None:
+            _STATE.move_to_end(key)
         frozen_sig = conv.boundary_sig if conv is not None else ""
         conv_head_sig, conv_age = (conv.head_sig, conv.age) if conv is not None else ("", 0)
-    frozen = by_sig.get(frozen_sig) if frozen_sig else None
+    frozen = _locate(rest, frozen_sig) if frozen_sig else None
+    if frozen is not None and frozen not in starts:
+        frozen = None
     reason, s = REASON_HOLD, frozen
     if not frozen_sig:
         reason = REASON_FIRST
@@ -321,7 +375,9 @@ def _arrange(turns: list, window: int, fixed_est: int, reserved: int) -> list | 
     elif conv_age >= k_turns() and total(frozen) > SOFT * usable:
         reason = REASON_K_TURNS
     if reason != REASON_HOLD:
-        s = next((a for a in starts if total(a) <= SOFT * usable), starts[-1])
+        s = next((a for a in starts if total(a) <= SOFT * usable), None)
+        if s is None:
+            return None  # even the newest unit does not fit the SOFT share: the old packing, not a move every turn
     msgs = [head_out] + rest[s:]
     while not paired(msgs):  # defensive: units are fused, so this only walks on malformed input
         earlier = [a for a in starts if a < s]
@@ -329,5 +385,6 @@ def _arrange(turns: list, window: int, fixed_est: int, reserved: int) -> list | 
             return None
         s = earlier[-1]
         msgs = [head_out] + rest[s:]
-    _commit(key, msgs, moved=reason != REASON_HOLD, reason=reason, fixed_est=fixed_est, freeze=True)
+    _commit(key, msgs, moved=reason != REASON_HOLD, reason=reason, fixed_est=fixed_est, freeze=True,
+            dropped=DROPPED_TRIM)
     return msgs

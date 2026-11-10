@@ -171,7 +171,7 @@ def _note_prefix(row: dict, body: dict, usage: dict | None) -> None:
             row.update(prefix_hash.TRACKER.fields(
                 conversation_key(body, row.get("session_id")), obs))
             if history_layout.enabled():  # P14: counts only; flag off adds no field
-                stats = history_layout.take_stats(history_layout.conv_key(body.get("messages") or []))
+                stats = history_layout.take_stats(history_layout.conv_key(body))
                 if stats:
                     row["layout"] = stats
             if cold_guard.enabled():
@@ -1068,6 +1068,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
         decision = decide(cap_payload)
         layout_event = None
+        layout_key = history_layout.conv_key(body) if history_layout.enabled() else None  # the client's body, before P9
         if (decision.reason == local_mode.REASON_PROMPT_CAP and mr_summary.enabled()
                 and decide(None).local):
             # P9: over the cap is the only refusal the summarizer cures. ``decide(None)`` is the same rule
@@ -1076,7 +1077,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             layout_on = history_layout.enabled()
             held = None
             if layout_on:  # P14: last move's frozen layout, if it still fits: no map call, an append-only prefix
-                held = history_layout.hold(body.get("messages") or [], lambda msgs: local_mode.estimate_prompt_tokens(
+                history_layout.LOCAL_AGENT_OWNS.set(True)  # this request's layout state is written here only
+                held = history_layout.hold(layout_key, body.get("messages") or [], lambda msgs: local_mode.estimate_prompt_tokens(
                     to_ollama(dict(body, messages=msgs), cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx,
                               max_predict=1)) <= local_mode.prompt_cap_tokens())
             if held is not None:
@@ -1085,7 +1087,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             else:
                 # a move: with the layout on, aim below the cap so the next K turns fit (P9 still accepts the plain goal)
                 shorter = await mr_shorten(body, row, goal=history_layout.move_goal(
-                    body.get("messages") or [], local_mode.prompt_cap_tokens()) if layout_on else None)
+                    layout_key, local_mode.prompt_cap_tokens()) if layout_on else None)
                 if shorter is not None:
                     layout_event = (True, history_layout.REASON_OVER_CAP)
             if shorter is not None:
@@ -1147,9 +1149,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             cold_seq = cold_guard.GUARD.seq
             if history_layout.enabled():  # P14: the counter; flag off adds no field and no call
                 ev = layout_event or (False, history_layout.REASON_UNDER_CAP)
-                history_layout.observe(body.get("messages") or [], moved=ev[0], reason=ev[1],
+                history_layout.LOCAL_AGENT_OWNS.set(True)
+                history_layout.observe(layout_key, body.get("messages") or [], moved=ev[0], reason=ev[1],
                                        freeze=layout_event is not None)
-                row_layout = history_layout.take_stats(history_layout.conv_key(body.get("messages") or []))
+                row_layout = history_layout.take_stats(layout_key)
                 if row_layout:
                     row["layout"] = row_layout
             message = await try_serve(body, row)

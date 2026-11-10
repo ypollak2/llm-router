@@ -223,7 +223,7 @@ def _trim_fast(body: dict, target_window: int | None = None) -> dict:
         window = target_window if isinstance(target_window, int) and target_window > 0 else local_models.num_ctx(None)
         if history_layout.enabled():  # P14: append-only layout instead of the sliding last-7 window; None = not arrangeable
             laid = history_layout.arrange(
-                turns, window=window, reserved=DEFAULT_RESERVED_OUTPUT_TOKENS,
+                turns, key=history_layout.conv_key(body), window=window, reserved=DEFAULT_RESERVED_OUTPUT_TOKENS,
                 fixed_est=est_tokens({"system": out["system"], "tools": out.get("tools")}))
             if laid is not None:
                 out["messages"] = laid

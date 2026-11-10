@@ -41,7 +41,7 @@ def _pair(i: int, chars: int = 400) -> list[dict]:
     return [{"role": "assistant", "content": [
                 {"type": "tool_use", "id": f"toolu_{i}", "name": "Bash", "input": {"command": f"cat f{i}.py"}}]},
             {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": f"toolu_{i}", "content": (f"out {i} " * 200)[:chars]}]}]
+                {"type": "tool_result", "tool_use_id": f"toolu_{i}", "content": (f"out {i} " * (chars // 5 + 1))[:chars]}]}]
 
 
 def _body(pairs: int, chars: int = 400) -> dict:
@@ -78,6 +78,17 @@ def _send(body: dict, window: int = WINDOW) -> dict:
     msg, err, _usage = asyncio.run(go())
     assert err is None, err
     return sent[-1]
+
+
+def _k(msgs, **extra) -> str | None:
+    return hl.conv_key(dict({"messages": msgs}, **extra))
+
+
+def _arr(turns, key=None, window=WINDOW, fixed_est=500, reserved=0):
+    return hl.arrange(turns, key=key or _k(turns), window=window, fixed_est=fixed_est, reserved=reserved)
+
+
+P9_KEY = _k(_body(24, 2400)["messages"])  # what the client's own (unshortened) body keys to
 
 
 def _lead(a: list, b: list) -> int:
@@ -155,9 +166,8 @@ def _run(monkeypatch, start: int, turns: int, chars: int, k: int | None = None):
     out = []
     for n in range(start, start + turns):
         body = _body(n, chars)
-        msgs = hl.arrange(pb.non_system(body["messages"]), window=WINDOW, fixed_est=500,
-                          reserved=DEFAULT_RESERVED_OUTPUT_TOKENS)
-        out.append((msgs, hl.take_stats(hl.conv_key(body["messages"]))))
+        msgs = _arr(pb.non_system(body["messages"]), fixed_est=500, reserved=DEFAULT_RESERVED_OUTPUT_TOKENS)
+        out.append((msgs, hl.take_stats(_k(body["messages"]))))
     return out
 
 
@@ -198,22 +208,22 @@ def test_hard_limit_forces_a_move_before_k(monkeypatch):
     seen = set()
     for n in range(4, 60):
         body = _body(n, 2400)
-        hl.arrange(pb.non_system(body["messages"]), window=WINDOW, fixed_est=500, reserved=DEFAULT_RESERVED_OUTPUT_TOKENS)
-        seen.add(hl.take_stats(hl.conv_key(body["messages"]))["reason"])
+        _arr(pb.non_system(body["messages"]), fixed_est=500, reserved=DEFAULT_RESERVED_OUTPUT_TOKENS)
+        seen.add(hl.take_stats(_k(body["messages"]))["reason"])
     assert "over_hard" in seen and "k_turns" not in seen
 
 
 def test_client_rewriting_history_moves_the_boundary(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
     turns = pb.non_system(_body(30, 2400)["messages"])
-    hl.arrange(turns, window=WINDOW, fixed_est=500, reserved=0)
-    hl.take_stats(hl.conv_key(turns))
+    _arr(turns, fixed_est=500, reserved=0)
+    hl.take_stats(_k(turns))
     rewritten = copy.deepcopy(turns)
-    for m in rewritten[1:]:
+    for m in rewritten[3:]:  # message 1 stays: it is part of the conversation key
         if m["role"] == "assistant":
             m["content"][0]["input"]["command"] += " --changed"
-    hl.arrange(rewritten + _pair(99), window=WINDOW, fixed_est=500, reserved=0)
-    assert hl.take_stats(hl.conv_key(turns))["reason"] == "history_changed"
+    _arr(rewritten + _pair(99), fixed_est=500, reserved=0)
+    assert hl.take_stats(_k(turns))["reason"] == "history_changed"
 
 
 # -- composition with P9 summaries and P11 pins ------------------------------------------------------------
@@ -235,24 +245,24 @@ def test_p9_summaries_and_p11_pins_stay_in_the_frozen_head_in_order(monkeypatch)
     monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
     pin = "\npinned:\n- path src/app.py\n- test test_it"
     t1 = _p9_body(24, 10, 1, pin)
-    m1 = hl.arrange(t1, window=WINDOW, fixed_est=500, reserved=0)
+    m1 = _arr(t1, key=P9_KEY, fixed_est=500, reserved=0)
     t2 = _p9_body(25, 10, 1, pin)
-    m2 = hl.arrange(t2, window=WINDOW, fixed_est=500, reserved=0)
+    m2 = _arr(t2, key=P9_KEY, fixed_est=500, reserved=0)
     head = m2[0]["content"]
     assert head[0]["text"].startswith("Fix the failing test")
     assert head[1]["text"].startswith("<chunk-summary") and "pinned:" in head[1]["text"] and "src/app.py" in head[1]["text"]
     assert m2[: len(m1)] == m1  # summaries + pins + tail so far are a byte-identical prefix
-    st = hl.take_stats(hl.conv_key(t2))
+    st = hl.take_stats(P9_KEY)
     assert st["moved"] is False and st["msgs_same_prev"] == len(m1)
 
 
 def test_a_new_closed_chunk_moves_the_boundary_at_once(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
-    m1 = hl.arrange(_p9_body(24, 10, 1, ""), window=WINDOW, fixed_est=500, reserved=0)
-    hl.take_stats(hl.conv_key(m1))
+    m1 = _arr(_p9_body(24, 10, 1, ""), key=P9_KEY, fixed_est=500, reserved=0)
+    hl.take_stats(P9_KEY)
     t2 = _p9_body(25, 14, 2, "")  # P9 closed one more chunk: two summaries, the cut moved forward
-    m2 = hl.arrange(t2, window=WINDOW, fixed_est=500, reserved=0)
-    st = hl.take_stats(hl.conv_key(t2))
+    m2 = _arr(t2, key=P9_KEY, fixed_est=500, reserved=0)
+    st = hl.take_stats(P9_KEY)
     assert st["moved"] and st["reason"] == "chunk_closed"
     heads = [b["text"] for b in m2[0]["content"] if b["text"].startswith("<chunk-summary")]
     assert len(heads) == 2
@@ -260,10 +270,10 @@ def test_a_new_closed_chunk_moves_the_boundary_at_once(monkeypatch):
 
 
 def test_conv_key_ignores_summary_blocks():
-    a = _p9_body(24, 10, 1, "")
-    b = _p9_body(24, 14, 2, "")
     full = _body(24, 2400)["messages"]
-    assert hl.conv_key(a) == hl.conv_key(b) == hl.conv_key(full)
+    shortened = copy.deepcopy(full)
+    shortened[0]["content"] = [{"type": "text", "text": full[0]["content"]}, {"type": "text", "text": _summary(1, 1, 1, 8)}]
+    assert _k(shortened) == _k(full)
 
 
 # -- tool-call pairing -------------------------------------------------------------------------------------
@@ -296,7 +306,7 @@ def test_no_orphan_in_any_layout_and_the_wire_payload(monkeypatch):
 def test_unit_with_a_tool_pair_is_never_split_even_when_the_cut_falls_inside(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
     turns = pb.non_system(_body(60, 2400)["messages"])
-    msgs = hl.arrange(turns, window=WINDOW, fixed_est=500, reserved=0)
+    msgs = _arr(turns, fixed_est=500, reserved=0)
     assert msgs[1]["role"] == "assistant"  # the tail starts at a tool_use, never at its result
     assert hl.paired(msgs)
 
@@ -312,8 +322,8 @@ def test_paired_rejects_orphans():
 def test_malformed_input_falls_back_to_none(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
     orphan = [{"role": "user", "content": "hi"}, _pair(1)[1], {"role": "user", "content": "go"}]
-    assert hl.arrange(orphan, window=WINDOW, fixed_est=0, reserved=0) is None
-    assert hl.arrange([{"role": "user", "content": "hi"}], window=WINDOW, fixed_est=0, reserved=0) is None
+    assert _arr(orphan, fixed_est=0, reserved=0) is None
+    assert _arr([{"role": "user", "content": "hi"}], fixed_est=0, reserved=0) is None
     # and the trim then keeps the legacy packing
     body = {"system": "s", "tools": TOOLS, "messages": orphan}
     assert _fast(body)["messages"]
@@ -327,7 +337,7 @@ def test_ledger_counter_counts_leading_identical_messages_and_tokens(monkeypatch
     rows = []
     for n in (20, 21, 22):
         body = _body(n, 2400)
-        hl.arrange(pb.non_system(body["messages"]), window=WINDOW, fixed_est=500, reserved=0)
+        _arr(pb.non_system(body["messages"]), key=hl.conv_key(body), fixed_est=500, reserved=0)
         row: dict = {}
         ps._note_prefix(row, body, {"prefix_obs": {"sys": "x", "msgs": ["a"], "keep_alive": -1}})
         rows.append(row["layout"])
@@ -335,23 +345,23 @@ def test_ledger_counter_counts_leading_identical_messages_and_tokens(monkeypatch
     assert rows[1]["msgs_same_prev"] == rows[0]["msgs"] and rows[1]["tokens_same_prev"] > 0
     assert rows[2]["msgs_same_prev"] == rows[1]["msgs"]
     for r in rows:
-        assert set(r) == {"moved", "reason", "age", "held_before_move", "msgs", "tokens_est", "msgs_same_prev", "tokens_same_prev"}
-        assert all(isinstance(v, (int, bool, str, type(None))) for v in r.values())  # counts only, no text
+        assert set(r) == {"moved", "reason", "age", "held_before_move", "msgs", "tokens_est", "dropped", "msgs_same_prev", "tokens_same_prev"}
+        assert all(isinstance(v, (int, bool, str, list, type(None))) for v in r.values())  # counts only, no text
 
 
 def test_a_retry_of_the_same_request_does_not_age_the_boundary(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
     turns = pb.non_system(_body(10, 400)["messages"])
     for _ in range(6):
-        hl.arrange(turns, window=WINDOW, fixed_est=0, reserved=0)
-    assert hl.take_stats(hl.conv_key(turns))["age"] <= 1
+        _arr(turns, fixed_est=0, reserved=0)
+    assert hl.take_stats(_k(turns))["age"] <= 1
 
 
 def test_state_is_lru_bounded(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
     for i in range(hl.MAX_CONVERSATIONS + 10):
         turns = [{"role": "user", "content": f"task {i}"}] + _pair(0)
-        hl.arrange(turns, window=WINDOW, fixed_est=0, reserved=0)
+        _arr(turns, fixed_est=0, reserved=0)
     assert len(hl._STATE) == hl.MAX_CONVERSATIONS
 
 
@@ -364,25 +374,6 @@ def test_mutation_sliding_boundary_breaks_prefix_stability(monkeypatch):
     monkeypatch.setattr(hl, "SOFT", 0.0)
     sent = [_send(_body(n, 3000))["messages"] for n in range(40, 44)]
     assert any(later[: len(sent[0])] != sent[0] for later in sent[1:])
-
-
-def test_mutation_a_paired_check_that_always_passes_lets_an_orphan_through():
-    p = _pair(1)
-    assert hl.paired([p[1]]) is False
-    orig = hl.paired
-    try:
-        hl.paired = lambda m: True
-        assert hl.paired([p[1]]) is True  # the mutated guard is blind: the real one is what the tests above rely on
-    finally:
-        hl.paired = orig
-
-
-def test_mutation_split_units_would_orphan(monkeypatch):
-    """A boundary at a tool_result message (what a non-fused chunker gives) is caught by ``paired``."""
-    turns = pb.non_system(_body(10, 400)["messages"])
-    for cut in range(1, len(turns)):
-        tail = [turns[0]] + turns[cut:]
-        assert hl.paired(tail) == (turns[cut]["role"] == "assistant" or turns[cut]["content"][0].get("type") != "tool_result")
 
 
 # -- end to end through the proxy (local-agent mode + P9): the wire payload and the ledger row -----------
@@ -470,7 +461,7 @@ async def test_proxy_flag_on_wire_payload_through_a_real_ollama_backend(env, mon
 async def test_mutation_no_hold_re_maps_and_moves_the_prefix_every_turn(env, monkeypatch):  # noqa: F811
     monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
     monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
-    monkeypatch.setattr(hl, "hold", lambda messages, fits: None)  # the mutation: never hold
+    monkeypatch.setattr(hl, "hold", lambda key, messages, fits: None)  # the mutation: never hold
     backend = MRBackend()
     lives = await _grow(env, backend, 40, 6, 3_000)
     rows = [r["layout"] for r in env.rows() if r.get("layout")][1:]
@@ -497,25 +488,26 @@ async def test_proxy_a_chunk_close_while_held_is_a_move_with_a_reason(env, monke
 
 def test_hold_returns_none_without_state_or_boundary_and_when_it_does_not_fit():
     msgs = _body(60, 2400)["messages"]
-    assert hl.hold(msgs, lambda m: True) is None  # nothing frozen yet
+    key = _k(msgs)
+    assert hl.hold(key, msgs, lambda m: True) is None  # nothing frozen yet
     head = copy.deepcopy(msgs[0])
     cut = msgs[1 + 2 * 20:]
-    hl.observe([head] + cut, moved=True, reason="over_cap", freeze=True)
+    hl.observe(key, [head] + cut, moved=True, reason="over_cap", freeze=True)
     grown = msgs + _pair(61)
-    held = hl.hold(grown, lambda m: True)
+    held = hl.hold(key, grown, lambda m: True)
     assert held is not None and held[: len([head] + cut)] == [head] + cut and len(held) == len(cut) + 3
-    assert hl.hold(grown, lambda m: False) is None  # no longer fits: a move
+    assert hl.hold(key, grown, lambda m: False) is None  # no longer fits: a move
     rewritten = copy.deepcopy(grown)
     rewritten[1 + 2 * 20]["content"][0]["input"]["command"] = "other"
-    assert hl.hold(rewritten, lambda m: True) is None  # the boundary message is gone
-    hl.observe(grown[:2], moved=False, reason="under_cap")  # freeze cleared when the whole history fits again
-    assert hl.hold(grown, lambda m: True) is None
+    assert hl.hold(key, rewritten, lambda m: True) is None  # the boundary message is gone
+    hl.observe(key, grown[:2], moved=False, reason="under_cap")  # freeze cleared when the whole history fits again
+    assert hl.hold(key, grown, lambda m: True) is None
 
 
 def test_move_goal_reserves_k_turns_of_observed_growth_and_never_goes_below_half_cap():
     msgs = _body(10, 400)["messages"]
-    assert hl.move_goal(msgs, 25_000) == 25_000 - 4 * hl.DEFAULT_GROWTH
-    assert hl.move_goal(msgs, 5_000) == int(5_000 * hl.SOFT)
+    assert hl.move_goal(_k(msgs), 25_000) == 25_000 - 4 * hl.DEFAULT_GROWTH
+    assert hl.move_goal(_k(msgs), 5_000) == int(5_000 * hl.SOFT)
 
 
 async def test_p9_goal_is_a_target_not_a_requirement():
@@ -532,3 +524,169 @@ async def test_p9_goal_is_a_target_not_a_requirement():
     plain = await mr_summary.shorten(copy.deepcopy(body), map_call, cap=cap, est=est)
     deep = await mr_summary.shorten(copy.deepcopy(body), map_call, cap=cap, est=est, goal=1)
     assert plain.changed and deep.changed and deep.row["tokens_after"] <= plain.row["tokens_after"] <= cap
+
+
+# -- review fixes (#900): privacy, key, double write, dropped layers, size, guards ---------------------------
+
+def test_session_context_off_makes_the_layout_step_aside(monkeypatch):
+    """LLM_ROUTER_SESSION_CONTEXT=off: the old packing withholds history; the layout must send none of its own."""
+    monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
+    body = _body(40, 3000)
+    on = _fast(body)["messages"]
+    monkeypatch.setenv("LLM_ROUTER_SESSION_CONTEXT", "off")
+    hl.clear()
+    off = _fast(body)["messages"]
+    monkeypatch.delenv("LLM_ROUTER_PROXY_LAYOUT")
+    legacy = _fast(body)["messages"]
+    assert off == legacy and off != on  # the layout stepped aside: exactly what the privacy-honouring path sends
+    assert hl.take_stats(hl.conv_key(body)) is None
+
+
+def test_keys_differ_for_system_tools_session_and_first_reply_and_none_without_a_human_message():
+    base = _body(5)
+    k = hl.conv_key(base)
+    assert k and k == hl.conv_key(copy.deepcopy(base))
+    assert hl.conv_key(dict(base, system="another system")) != k
+    assert hl.conv_key(dict(base, tools=TOOLS[:2])) != k
+    assert hl.conv_key(dict(base, metadata={"user_id": json.dumps({"session_id": "s-2"})})) != k
+    other = copy.deepcopy(base)
+    other["messages"][1]["content"][0]["input"]["command"] = "different"
+    assert hl.conv_key(other) != k
+    billing = dict(base, system="x-anthropic-billing-header: cch=abc\nsame")
+    assert hl.conv_key(billing) == hl.conv_key(dict(base, system="x-anthropic-billing-header: cch=zzz\nsame"))
+    assert hl.conv_key({"messages": [_pair(1)[1]]}) is None and hl.conv_key({"messages": []}) is None
+
+
+def test_two_conversations_with_the_same_first_message_never_share_or_cross_apply_state(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
+    a, b = _body(30, 2400), _body(30, 2400)
+    b["system"] = "a different system prompt"
+    ka, kb = hl.conv_key(a), hl.conv_key(b)
+    assert ka != kb
+    hl.arrange(pb.non_system(a["messages"]), key=ka, window=WINDOW, fixed_est=0, reserved=0)
+    assert hl.take_stats(kb) is None
+    hl.arrange(pb.non_system(b["messages"]), key=kb, window=WINDOW, fixed_est=0, reserved=0)
+    assert hl.take_stats(kb)["reason"] == "first"  # b did not inherit a's boundary
+    # hold() refuses a head whose source message is not this conversation's, even under a (forced) shared key
+    head = copy.deepcopy(a["messages"][0])
+    head["content"] = [{"type": "text", "text": head["content"]}, {"type": "text", "text": _summary(1, 1, 1, 8)}]
+    hl.observe(ka, [head] + a["messages"][21:], moved=True, reason="over_cap", freeze=True)
+    foreign = copy.deepcopy(a["messages"])
+    foreign[0]["content"] = "a different first message"
+    assert hl.hold(ka, foreign, lambda m: True) is None
+    assert hl.hold(ka, a["messages"], lambda m: True) is not None
+
+
+def test_no_key_means_no_layout_and_no_state(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
+    turns = [_pair(1)[1], {"role": "user", "content": "x"}]
+    assert hl.arrange(turns, key=None, window=WINDOW, fixed_est=0, reserved=0) is None
+    hl.observe(None, [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}], moved=True, reason="x")
+    assert hl._STATE == {} or "-" not in hl._STATE
+
+
+def test_one_request_writes_the_state_once_when_the_local_agent_path_owns_it(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
+    body = _body(30, 2400)
+    key = hl.conv_key(body)
+    hl.observe(key, body["messages"][:2], moved=False, reason="under_cap")
+    before = copy.deepcopy(hl._STATE[key]).__dict__
+    tok = hl.LOCAL_AGENT_OWNS.set(True)
+    try:
+        out = _fast(body)  # the fast trim runs in the same request (all three flags on)
+    finally:
+        hl.LOCAL_AGENT_OWNS.reset(tok)
+    assert hl._STATE[key].__dict__ == before  # untouched: age and growth counted once
+    monkeypatch.delenv("LLM_ROUTER_PROXY_LAYOUT")
+    assert out["messages"] == _fast(body)["messages"]  # it fell back to exactly the old packing
+
+
+def test_trim_path_marks_the_dropped_layers_in_the_ledger_row(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
+    body = _body(30, 2400)
+    _fast(body)
+    st = hl.take_stats(hl.conv_key(body))
+    assert st["dropped"] == ["rolling_summary", "session_context", "context_pack_text_caps", "full_mode_cap"]
+    hl.clear()
+    turns = pb.non_system(body["messages"])
+    hl.observe(hl.conv_key(body), turns[:4], moved=False, reason="under_cap")
+    assert hl.take_stats(hl.conv_key(body))["dropped"] == []  # local-agent path drops nothing
+
+
+def test_huge_head_or_huge_newest_unit_returns_none_instead_of_moving_every_turn(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
+    big_head = [{"role": "user", "content": "log " * 30_000}] + _pair(0) + _pair(1)
+    assert _arr(big_head, window=WINDOW, fixed_est=0, reserved=0) is None
+    big_unit = [{"role": "user", "content": "task"}] + _pair(0) + _pair(1, 120_000)
+    assert _arr(big_unit, window=WINDOW, fixed_est=0, reserved=0) is None
+    assert hl.take_stats(_k(big_head)) is None and hl.take_stats(_k(big_unit)) is None
+    assert _arr([{"role": "user", "content": "task"}] + _pair(0), window=WINDOW, fixed_est=0, reserved=0)  # control
+
+
+def test_sizes_use_the_guards_math_and_reserve_the_okf_block(monkeypatch):
+    """HARD is 80% of the window by token_estimate x 1.18 less reserve and OKF, not by the raw estimate."""
+    monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
+    monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT_K", "1000")
+    worst = 0
+    for n in range(4, 60):
+        turns = pb.non_system(_body(n, 2400)["messages"])
+        msgs = _arr(turns, fixed_est=0, reserved=DEFAULT_RESERVED_OUTPUT_TOKENS)
+        worst = max(worst, est_tokens(msgs))
+    limit = (WINDOW - DEFAULT_RESERVED_OUTPUT_TOKENS - hl.OKF_RESERVE)
+    assert worst > 0.5 * limit / 1.18  # the run does reach the hard region: not vacuous
+    assert worst * 1.18 <= hl.HARD * limit  # 1.18: the guard/estimate ratio measured by the #900 review; 80% of the window by the guard's math, not the raw estimate
+
+
+def test_starts_never_begin_a_tail_at_a_tool_result():
+    """Pins the fused units directly: the pairing loop must not be what repairs a split."""
+    rest = _pair(0) + _pair(1) + [{"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}]
+    starts = hl._starts(rest, prefer_assistant=False)
+    assert starts == [0, 2, 4, 5]
+    assert all(not (rest[a]["role"] == "user" and rest[a]["content"][0].get("type") == "tool_result")
+               for a in starts if isinstance(rest[a]["content"], list))
+
+
+def test_hold_refuses_an_unpaired_candidate():
+    key_msgs = [{"role": "user", "content": "task"}, _pair(1)[1], {"role": "assistant", "content": "ok"}, {"role": "user", "content": "go"}]
+    key = _k(key_msgs)
+    hl.observe(key, [key_msgs[0], key_msgs[1], key_msgs[2], key_msgs[3]], moved=True, reason="over_cap", freeze=True)
+    # the frozen boundary is a tool_result whose tool_use is not in the history: held, it would be an orphan
+    assert hl.hold(key, key_msgs, lambda m: True) is None
+
+
+def test_cache_control_moving_between_turns_does_not_break_the_hold():
+    msgs = _body(30, 2400)["messages"]
+    key = _k(msgs)
+    cut = msgs[1 + 2 * 10:]
+    hl.observe(key, [copy.deepcopy(msgs[0])] + cut, moved=True, reason="over_cap", freeze=True)
+    moved = copy.deepcopy(msgs) + _pair(99)
+    for m in moved[1 + 2 * 10: 1 + 2 * 10 + 2]:
+        for b in m["content"]:
+            b["cache_control"] = {"type": "ephemeral"}  # Claude Code moves this marker every turn
+    held = hl.hold(key, moved, lambda m: True)
+    assert held is not None and len(held) == len(cut) + 3
+
+
+def test_hold_returns_a_copy_of_the_head_and_touches_lru_on_read():
+    msgs = _body(30, 2400)["messages"]
+    key = _k(msgs)
+    hl.observe(key, [copy.deepcopy(msgs[0])] + msgs[21:], moved=True, reason="over_cap", freeze=True)
+    held = hl.hold(key, msgs, lambda m: True)
+    held[0]["content"] = "mutated downstream"
+    assert hl.hold(key, msgs, lambda m: True)[0]["content"] != "mutated downstream"
+    other = [{"role": "user", "content": "other"}] + _pair(0)
+    hl.observe(_k(other), other, moved=False, reason="under_cap")
+    assert list(hl._STATE)[-1] == _k(other)
+    hl.hold(key, msgs, lambda m: True)
+    assert list(hl._STATE)[-1] == key
+
+
+def test_both_paths_pick_the_same_boundary_among_duplicate_messages():
+    dup = {"role": "assistant", "content": "ok"}
+    rest = [copy.deepcopy(dup), {"role": "user", "content": "a"}, copy.deepcopy(dup), {"role": "user", "content": "b"}]
+    assert hl._locate(rest, hl.sig(dup)) == 0  # the first, as hold() and arrange() both resolve it
+
+
+def test_commit_without_a_key_keeps_no_state():
+    hl._commit(None, [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}], moved=True, reason="x")
+    assert len(hl._STATE) == 0
