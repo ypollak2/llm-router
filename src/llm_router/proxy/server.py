@@ -867,6 +867,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                        detail=repeat, added_latency_s=elapsed, loop_guard_sig=repeat_hit[1],
                        loop_guard_trigger=TRIGGER_REPEAT)
             return None
+        if not message.get("id"):  # IDLESS-1: also covers a reply the edit protocol put in place of the first one
+            message["id"] = new_msg_id()
         guard.record_served(session_id, message, track_window=loop_guard_cap_no_pin_on())
         if gate_decision is not None:
             lane_gate.note_served(session_id, gate_decision, message, row.get("session_kind"))

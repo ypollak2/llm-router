@@ -1193,3 +1193,4 @@ async def test_an_id_less_backend_reply_is_served_with_an_id_and_a_ledger_row(en
     assert sent_id.startswith("msg_lr")
     (row,) = env.rows()
     assert row["decision"] == "served" and row["msg_id"] == sent_id
+
