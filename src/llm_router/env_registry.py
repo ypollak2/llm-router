@@ -243,6 +243,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_MODEL": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TRIM": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_FULL_CAP": ("llm_router", "proxy/backends.py", 1),
+    # Raises the shared local model's window (local_models.raised_window); derived caps follow.
+    "LLM_ROUTER_WINDOW_STEP": ("llm_router", "local_models.py", 1),
     "LLM_ROUTER_PROXY_NUM_CTX": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_UPSTREAM": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_PORT": ("llm_router", "proxy/server.py", 1),

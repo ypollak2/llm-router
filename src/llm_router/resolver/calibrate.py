@@ -311,7 +311,14 @@ def probe_long_context(c: Completer, model: str, timeout: float, *, tokens: int,
     prompt = (block[:half] + f"\nThe access code is {code}.\n" + block[half:] +
               "\n\nWhat is the access code? Reply with the code only.")
     t0 = time.monotonic()
-    r = c.chat(model, [{"role": "user", "content": prompt}], num_ctx=tokens + 1024, timeout=timeout)
+    ctx = tokens + 1024
+    try:    # the one shared local model must be asked for its own window, or Ollama reloads it
+        from llm_router.toolkit.adapters.ollama import shared_runner_opts
+        shared = shared_runner_opts(model)
+        ctx = shared[0] if shared else ctx
+    except Exception:  # noqa: BLE001 - a probe sizing helper, never fatal
+        pass
+    r = c.chat(model, [{"role": "user", "content": prompt}], num_ctx=ctx, timeout=timeout)
     lat = time.monotonic() - t0
     if r.error:
         return ProbeResult(False, _safe_err(r), lat, tokens)

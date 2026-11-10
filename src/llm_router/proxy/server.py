@@ -229,6 +229,14 @@ class ProxyConfig:
     local_gate: bool = False
 
     def __post_init__(self) -> None:
+        if self.num_ctx is not None and self.model and local_models.raised_window() is not None:
+            from llm_router.toolkit.adapters.ollama import shared_runner_opts
+            if shared_runner_opts(self.model) and self.num_ctx != local_models.raised_window():
+                import logging
+                logging.getLogger(__name__).warning(
+                    "WARN proxy num_ctx %s ignored for %s: LLM_ROUTER_WINDOW_STEP sets %s, and a different "
+                    "num_ctx would reload the only runner", self.num_ctx, self.model, local_models.raised_window())
+                self.num_ctx = None
         if self.num_ctx is not None and self.model:
             _table = local_models.num_ctx(self.model)
             if self.num_ctx != _table:

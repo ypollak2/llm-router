@@ -67,6 +67,25 @@ SERVE_MODES = (SERVE_OFF, SERVE_LOCAL_AGENT)
 #: with a calibrated estimate; ``local_context_guard`` stays the 32k window backstop
 #: inside the backend (see ``DIGIT_TOKENS`` for why it cannot decide this one).
 PROMPT_CAP_TOKENS = 25_000
+
+
+#: Share of the free window the raised cap admits (only used with LLM_ROUTER_WINDOW_STEP).
+CAP_SAFETY_FACTOR = 0.9
+
+
+def prompt_cap_tokens() -> int:
+    """The cap in force: ``PROMPT_CAP_TOKENS`` unless ``LLM_ROUTER_WINDOW_STEP`` raises the
+    window, then 0.9 x (window - reply tokens - reserved prompt overhead - the OKF block). The 0.9 keeps the
+    margin the 25k cap has against the estimator (``estimate_prompt_tokens`` can under-count real
+    tokens), because Ollama silently drops the head of an overflowing prompt."""
+    window = local_models.raised_window()
+    if window is None:
+        return PROMPT_CAP_TOKENS
+    from llm_router.local_context_guard import DEFAULT_RESERVED_OUTPUT_TOKENS as reserved
+    from llm_router.proxy.okf_context import MAX_BLOCK_TOKENS
+    return int(CAP_SAFETY_FACTOR * (window - LOCAL_NUM_PREDICT - reserved - MAX_BLOCK_TOKENS))
+
+
 #: ``num_ctx`` the mode requires of the resident model (the owner's 32k decision).
 MIN_NUM_CTX = 32_768
 #: In this mode a step is not given up on at 8 s / 30 s: the first call of a
@@ -216,8 +235,10 @@ def estimate_prompt_tokens(payload: dict) -> int:
                      + (len(text) - digits - wide) / OTHER_CHARS_PER_TOKEN)
 
 
-def over_prompt_cap(payload: dict, cap: int = PROMPT_CAP_TOKENS) -> int | None:
-    """The estimate when ``payload`` is over ``cap``, else ``None``."""
+def over_prompt_cap(payload: dict, cap: int | None = None) -> int | None:
+    """The estimate when ``payload`` is over ``cap`` (default :func:`prompt_cap_tokens`), else ``None``."""
+    if cap is None:
+        cap = prompt_cap_tokens()
     estimate = estimate_prompt_tokens(payload)
     return estimate if estimate > cap else None
 
@@ -324,7 +345,7 @@ def decide_local(body: dict, session: LocalSession) -> LocalDecision:
     if session.payload is not None:
         est = over_prompt_cap(session.payload)
         if est is not None:
-            return LocalDecision(False, REASON_PROMPT_CAP, f"~{est} tokens > {PROMPT_CAP_TOKENS}", est)
+            return LocalDecision(False, REASON_PROMPT_CAP, f"~{est} tokens > {prompt_cap_tokens()}", est)
         est = estimate_prompt_tokens(session.payload)
     if session.verdict:
         return LocalDecision(False, REASON_CLASSIFIER_VETO, session.verdict, est)
@@ -485,7 +506,7 @@ def banner_lines(*, model: str | None, num_ctx: int | None, kill_path: Path, kil
         f"llm-router proxy: SERVE MODE = local-agent (opt-in). Claude Code steps are answered by "
         f"{model} on this machine; conversations are pinned local at their first call.",
         f"  egress: a step goes to Anthropic only when it is not eligible (reason in the ledger, notice on "
-        f"stderr): media, prompt > {PROMPT_CAP_TOKENS} tokens, backend unhealthy, quality breaker open, a "
+        f"stderr): media, prompt > {prompt_cap_tokens()} tokens, backend unhealthy, quality breaker open, a "
         f"failed local step, a conversation that began on Claude, or an exempt session (coordinator in "
         f"session_kind_overrides.json, or a sub-agent thread; which of the two is set by {EXEMPT_POLICY_ENV}, "
         f"default both, see the line below). Never a placeholder, never silent.",

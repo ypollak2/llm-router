@@ -35,8 +35,66 @@ def _name(model: str | None) -> str:
     return name.split("/", 1)[1] if name.startswith("ollama/") else name
 
 
+#: Operator flag: raise the window of the ONE shared local model (LLM_ROUTER_LOCAL_MODEL) to
+#: this many tokens. Unset (default) changes nothing. The server must run with the same
+#: OLLAMA_CONTEXT_LENGTH, or Ollama reloads the model on the first call.
+WINDOW_STEP_ENV = "LLM_ROUTER_WINDOW_STEP"
+#: A step below this is ignored (the proxy refuses to start under it).
+MIN_WINDOW_STEP = 32768
+
+
+_WARNED: set[str] = set()
+
+
+def _warn_once(raw: str, why: str) -> None:
+    if raw in _WARNED:
+        return
+    _WARNED.add(raw)
+    import logging
+    logging.getLogger(__name__).warning(
+        "WARN LLM_ROUTER_WINDOW_STEP=%r %s: ignored, the local window stays at the table value", raw, why)
+
+
+def raised_window() -> int | None:
+    """The raised window of the shared local model, or None when the flag is off.
+
+    Active only when ``LLM_ROUTER_WINDOW_STEP`` is an int >= ``MIN_WINDOW_STEP`` AND
+    ``LLM_ROUTER_LOCAL_MODEL`` is set: with no shared model nothing would send the step."""
+    import os
+
+    raw = os.environ.get("LLM_ROUTER_WINDOW_STEP", "").strip()
+    if not raw:
+        return None
+    try:
+        step = int(raw)
+    except ValueError:
+        _warn_once(raw, "is not an integer")
+        return None
+    if step < MIN_WINDOW_STEP:
+        _warn_once(raw, f"is below the {MIN_WINDOW_STEP} floor")
+        return None
+    if not os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip():
+        return None
+    return step
+
+
+def _is_shared_model(model: str | None) -> bool:
+    import os
+
+    one = _name(os.environ.get("LLM_ROUTER_LOCAL_MODEL", ""))
+    name = _name(model)
+    if not one:
+        return False
+    if not name:       # a caller that names no model gets the shared one
+        return True
+    return (name if ":" in name else name + ":latest") == (one if ":" in one else one + ":latest")
+
+
 def num_ctx(model: str | None = None) -> int:
     """The context window to request for *model* (``ollama/`` prefix optional).
+
+    With ``LLM_ROUTER_WINDOW_STEP`` set (see :func:`raised_window`) the shared local model
+    gets that window; every other model keeps its table value.
 
     An exact table entry wins. Otherwise the bare base name is tried, because
     Ollama reports an alias with a tag (``llmr-edit:latest`` in ``ollama list``,
@@ -45,6 +103,9 @@ def num_ctx(model: str | None = None) -> int:
     family's window; anything else gets ``DEFAULT_NUM_CTX``.
     """
     name = _name(model)
+    step = raised_window()
+    if step is not None and _is_shared_model(model):
+        return step
     if name in NUM_CTX:
         return NUM_CTX[name]
     base = name.split(":", 1)[0]
