@@ -803,8 +803,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         exempt, overrides_problem = local_mode.exempt_reason(key_body or body, row.get("session_id"),
                                                                 parent_main_of(key_body or body), policy)
         unpin_try = False
+        # An absent count is "masking did not report", not zero masked: it never unpins.
+        masked_n = (row.get("history_mask") or {}).get("messages_masked")
         if (stored == local_mode.PIN_CLAUDE and not force and not exempt and not lm.killed()
-                and (row.get("history_mask") or {}).get("messages_masked", 0) > 0
+                and isinstance(masked_n, int) and masked_n > 0
                 and unpin_on() and cap_after_reduce_on()
                 and lm.pin_reason_of(key) == local_mode.REASON_PROMPT_CAP and key not in lm.unpinned_once):
             # P7: ``payload`` is the masked body's (cap_body is None while CAP_AFTER_REDUCE is on).
