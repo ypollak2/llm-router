@@ -359,6 +359,12 @@ class LocalModeState:
         self.max_pins = max_pins
         self.max_pending = max_pending
         self.pins: OrderedDict[str, str] = OrderedDict()
+        # P7: why a claude pin was stored, only for structural reasons (prompt_over_cap / media_present).
+        # ``unpinned_once``: sessions whose prompt_over_cap pin was lifted; never lifted a second time.
+        # Memory only, like the pins: a restart forgets both (a conversation seen again mid-way is then
+        # pinned to Claude by ``started_elsewhere``, so no marker is needed across a restart).
+        self.pin_reasons: dict[str, str] = {}
+        self.unpinned_once: OrderedDict[str, bool] = OrderedDict()
         self.pending: OrderedDict[str, dict] = OrderedDict()
         # NS-A2: conversations whose first turn this process saw and the classifier vetoed.
         # A veto stores no pin, so without this the next call would read ``started_elsewhere``.
@@ -379,11 +385,33 @@ class LocalModeState:
     def pin_of(self, key: str) -> str | None:
         return self.pins.get(key)
 
-    def set_pin(self, key: str, pin: str) -> None:
+    def set_pin(self, key: str, pin: str, reason: str | None = None) -> None:
         self.pins[key] = pin
         self.pins.move_to_end(key)
+        if reason is not None:
+            self.pin_reasons[key] = reason
+        else:
+            self.pin_reasons.pop(key, None)
         while len(self.pins) > self.max_pins:
-            self.pins.popitem(last=False)
+            old, _ = self.pins.popitem(last=False)
+            self.pin_reasons.pop(old, None)
+
+    def pin_reason_of(self, key: str) -> str | None:
+        return self.pin_reasons.get(key)
+
+    def unpin_over_cap(self, key: str) -> bool:
+        """P7: lift a ``prompt_over_cap`` claude pin, at most once per session. False (nothing changed)
+        for any other pin, no pin, or a session already unpinned once."""
+        if (self.pins.get(key) != PIN_CLAUDE or self.pin_reasons.get(key) != REASON_PROMPT_CAP
+                or key in self.unpinned_once):
+            return False
+        del self.pins[key]
+        self.pin_reasons.pop(key, None)
+        self.unpinned_once[key] = True
+        while len(self.unpinned_once) > self.max_pins:
+            self.unpinned_once.popitem(last=False)
+        self.mark_seen(key)
+        return True
 
     def remember_edits(self, message: dict) -> None:
         for b in message.get("content") or []:
