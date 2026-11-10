@@ -65,7 +65,7 @@ _PS_TIMEOUT_S = 0.5
 DEFAULT_KEEP_ALIVE_S = 600
 
 
-def edit_keep_alive() -> int | str:
+def edit_keep_alive(model: str | None = None) -> int | str:
     """The ``keep_alive`` every edit-path Ollama call sends. Default 600 s (bounded).
 
     ``LLM_ROUTER_LOCAL_KEEP_ALIVE`` overrides it with an integer (seconds, -1 =
@@ -73,6 +73,10 @@ def edit_keep_alive() -> int | str:
     ``"30m"``. An empty or missing value falls back to ``DEFAULT_KEEP_ALIVE_S`` (N20: a
     forever-pinned model contributed to an Ollama hang/eviction on 2026-10-10).
     """
+    from llm_router.toolkit.adapters.ollama import shared_runner_opts
+    shared = shared_runner_opts(model)
+    if shared:   # one-model policy: never expire the shared runner (CLSCTX-1)
+        return shared[1]
     raw = os.environ.get("LLM_ROUTER_LOCAL_KEEP_ALIVE", "").strip()
     if not raw:
         return DEFAULT_KEEP_ALIVE_S
@@ -197,7 +201,7 @@ def warmup_payload(model: str) -> dict:
         "prompt": " ",
         "stream": False,
         "think": False,
-        "keep_alive": edit_keep_alive(),
+        "keep_alive": edit_keep_alive(model),
         "options": options,
     }
 

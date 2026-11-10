@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 47
+# llm_router-hook-version: 48
 """SessionStart hook — inject routing banner, start Ollama, refresh Claude usage.
 
 Fires once when a new Claude Code session begins. Four jobs:
@@ -1836,7 +1836,14 @@ def _warm_ollama_bg() -> None:
         if os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip() or type(_guard_exc).__name__ in (
                 "LocalModelConflict", "MemoryBudgetExceeded"):
             return
-    payload = json.dumps({"model": model, "prompt": " ", "stream": False})
+    _body = {"model": model, "prompt": " ", "stream": False}
+    try:
+        _shared = _oa.shared_runner_opts(model)
+        if _shared:   # one-model policy: load at the proxy's context, pinned (CLSCTX-1)
+            _body["options"], _body["keep_alive"] = {"num_ctx": _shared[0]}, _shared[1]
+    except Exception:
+        pass
+    payload = json.dumps(_body)
     if _detached_spawn_disabled():
         return
     try:

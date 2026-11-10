@@ -229,8 +229,22 @@ class ProxyConfig:
     local_gate: bool = False
 
     def __post_init__(self) -> None:
+        if self.num_ctx is not None and self.model:
+            _table = local_models.num_ctx(self.model)
+            if self.num_ctx != _table:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "WARN proxy num_ctx %s differs from the table value %s for %s: other processes "
+                    "(classifier, edit path) call this model at %s, and with one Ollama slot each "
+                    "differing call reloads the runner (thrash; docs/bugs/CLSCTX-1.md)",
+                    self.num_ctx, _table, self.model, _table)
         if self.num_ctx is None and self.model:
             self.num_ctx = local_models.num_ctx(self.model)
+        if self.model:   # one-model policy: never expire the shared runner (CLSCTX-1)
+            from llm_router.toolkit.adapters.ollama import shared_runner_opts
+            _shared = shared_runner_opts(self.model)
+            if _shared:
+                self.keep_alive = _shared[1]
 
     @classmethod
     def from_env(cls) -> "ProxyConfig":

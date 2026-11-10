@@ -356,9 +356,13 @@ def _generate(model: str, prompt: str) -> str:
     model = _oa.resolve_main_model(model, "context_summary")
     _oa.check_resident(model)       # raises LocalModelConflict: summarise() falls back to the extractive summary
 
-    body = json.dumps({"model": model, "stream": False,
-                       "messages": [{"role": "user", "content": prompt}],
-                       "options": {"num_ctx": local_models.num_ctx(model), "temperature": 0}}).encode()
+    shared = _oa.shared_runner_opts(model)   # one-model policy: proxy window, never expire (CLSCTX-1)
+    body = {"model": model, "stream": False,
+            "messages": [{"role": "user", "content": prompt}],
+            "options": {"num_ctx": local_models.num_ctx(model), "temperature": 0}}
+    if shared:
+        body["options"]["num_ctx"], body["keep_alive"] = shared
+    body = json.dumps(body).encode()
     req = urllib.request.Request(_ollama_url() + "/api/chat", data=body,
                                  headers={"Content-Type": "application/json"})
     with local_privacy.open_url(req, base_url=_ollama_url(), timeout=120) as r:  # LC-12h: conversation text, direct

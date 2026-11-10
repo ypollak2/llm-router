@@ -246,6 +246,24 @@ def _keep_alive() -> str | int:
         return raw
 
 
+def _num_ctx_for(model: str) -> int:
+    shared = _shared_opts(model)
+    return shared[0] if shared else NUM_CTX
+
+
+def _keep_alive_for(model: str) -> str | int:
+    shared = _shared_opts(model)
+    return shared[1] if shared else _keep_alive()
+
+
+def _shared_opts(model: str):
+    try:
+        from llm_router.toolkit.adapters.ollama import shared_runner_opts
+        return shared_runner_opts(model)
+    except Exception:  # noqa: BLE001 - never raise from the classifier
+        return None
+
+
 def _timeout_s() -> float:
     try:
         ms = int(os.environ.get("LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS", ""))
@@ -318,10 +336,10 @@ def parse_verdict(content: str, *, model: str = DEFAULT_MODEL, ms: float = 0.0,
                    model, PROMPT_VERSION, ms)
 
 
-def _options() -> dict:
+def _options(model: str = "") -> dict:
     """Shared by the real call and the warm-up. A load with no ``num_ctx`` gets the server's
     default (32768 here), and the real call's 4096 then forces a second runner load."""
-    return {"temperature": 0, "num_predict": NUM_PREDICT, "num_ctx": NUM_CTX}
+    return {"temperature": 0, "num_predict": NUM_PREDICT, "num_ctx": _num_ctx_for(model)}
 
 
 def _payload(model: str, assembled: str) -> dict:
@@ -336,8 +354,8 @@ def _payload(model: str, assembled: str) -> dict:
         "format": SCHEMA,
         "stream": False,
         "think": False,
-        "keep_alive": _keep_alive(),
-        "options": _options(),
+        "keep_alive": _keep_alive_for(model),
+        "options": _options(model),
     }
 
 
@@ -504,7 +522,7 @@ async def _is_loaded(model: str, budget: float) -> bool:
             # not report context_length is taken at its word.
             ctx = m.get("context_length")
             # a decision model runs at its own default context: there is no 4096 to match
-            return ctx is None or ctx == NUM_CTX or backend() == "systemone"
+            return ctx is None or ctx == _num_ctx_for(model) or backend() == "systemone"
     return False
 
 
@@ -525,7 +543,8 @@ async def _warm(model: str) -> None:
         url, body = decision_classifier.ENDPOINT, decision_classifier.payload(model, "warm-up")
     else:
         url, body = "/api/chat", {"model": model, "messages": [], "stream": False,
-                                  "keep_alive": _keep_alive(), "options": _options()}
+                                  "keep_alive": _keep_alive_for(model),
+                                  "options": _options(model)}
     try:
         async with _session().post(
             f"{_base_url()}{url}", json=body, timeout=aiohttp.ClientTimeout(total=120),
