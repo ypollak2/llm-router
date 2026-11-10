@@ -9,8 +9,10 @@ here reaches the network or a real Ollama (the preflight takes injected
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import os
+import types
 from pathlib import Path
 
 import httpx
@@ -1013,3 +1015,163 @@ def test_flag_not_on_never_imports_history_mask(value):
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
     assert out.returncode == 0, out.stderr[-500:]
     assert out.stdout.strip().splitlines()[-1] == "False"
+
+
+# -- P7: LLM_ROUTER_UNPIN lifts a prompt_over_cap pin once the reduced estimate fits (default off) ---------
+
+
+async def _pin_over_cap(env, monkeypatch, backend):
+    """Warm, then an over-cap turn with masking on and CAP_AFTER_REDUCE off: the structural pin."""
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    monkeypatch.delenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", raising=False)
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, _long_history())
+    row = env.rows()[-1]
+    assert row["reason"] == "prompt_over_cap" and row["local_mode"]["pin_change"] == "local->claude"
+    return app
+
+
+async def test_unpin_lifts_prompt_over_cap_pin_when_reduced_fits(env, monkeypatch):
+    backend = _backend()
+    app = await _pin_over_cap(env, monkeypatch, backend)
+    n_local = len(backend.calls)
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
+    monkeypatch.setenv("LLM_ROUTER_UNPIN", "1")
+    await _post(app, _long_history())
+    assert len(backend.calls) == n_local + 1  # served locally again
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["local"] is True and lm["pin"] == "local"  # unpinned, then pinned local again
+    assert lm["unpin"] == {"reason": "reduced_fits", "reduced_est": lm["est_prompt_tokens"],
+                           "cap": local_mode.prompt_cap_tokens()}
+    assert lm["unpin"]["reduced_est"] <= lm["unpin"]["cap"]
+    assert "line of output" not in json.dumps(env.rows()[-1])  # counts only
+
+
+@pytest.mark.parametrize("flags", [
+    {"LLM_ROUTER_UNPIN": None, "LLM_ROUTER_PROXY_CAP_AFTER_REDUCE": "1", "LLM_ROUTER_PROXY_MASK": "1"},
+    {"LLM_ROUTER_UNPIN": "1", "LLM_ROUTER_PROXY_CAP_AFTER_REDUCE": None, "LLM_ROUTER_PROXY_MASK": "1"},
+    {"LLM_ROUTER_UNPIN": "1", "LLM_ROUTER_PROXY_CAP_AFTER_REDUCE": "1", "LLM_ROUTER_PROXY_MASK": None},
+], ids=["unpin_off", "cap_after_reduce_off", "masking_not_applied"])
+async def test_unpin_not_applied_when_a_condition_is_missing(env, monkeypatch, flags):
+    backend = _backend()
+    app = await _pin_over_cap(env, monkeypatch, backend)
+    n_local = len(backend.calls)
+    for name, value in flags.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    await _post(app, _long_history())
+    assert len(backend.calls) == n_local
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "pinned_claude" and "unpin" not in lm
+
+
+def test_unpin_never_lifts_a_media_or_unreasoned_pin():
+    lm = local_mode.LocalModeState(kill_path=Path("/nonexistent/kill"))
+    lm.set_pin("m", local_mode.PIN_CLAUDE, local_mode.REASON_MEDIA)
+    lm.set_pin("f", local_mode.PIN_CLAUDE)  # e.g. a failed local step
+    lm.set_pin("l", local_mode.PIN_LOCAL)
+    assert not any(lm.unpin_over_cap(k) for k in ("m", "f", "l", "absent"))
+    assert lm.pin_of("m") == lm.pin_of("f") == local_mode.PIN_CLAUDE
+    lm.set_pin("c", local_mode.PIN_CLAUDE, local_mode.REASON_PROMPT_CAP)
+    lm.set_pin("c", local_mode.PIN_CLAUDE)  # re-pinned for another reason: the cap reason is gone
+    assert not lm.unpin_over_cap("c")
+
+
+async def test_unpin_at_most_once_per_session(env, monkeypatch):
+    backend = _backend()
+    app = await _pin_over_cap(env, monkeypatch, backend)
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
+    monkeypatch.setenv("LLM_ROUTER_UNPIN", "1")
+    await _post(app, _long_history())
+    assert "unpin" in env.rows()[-1]["local_mode"]
+    real_cap = local_mode.PROMPT_CAP_TOKENS
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", 200)  # over the cap again, even reduced
+    await _post(app, _long_history())
+    row = env.rows()[-1]
+    assert row["reason"] == "prompt_over_cap" and row["local_mode"]["pin_change"] == "local->claude"
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", real_cap)
+    n_local = len(backend.calls)
+    await _post(app, _long_history())  # now it would fit, but the one unpin is spent
+    assert len(backend.calls) == n_local
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "pinned_claude" and "unpin" not in lm
+
+
+async def test_flag_off_ledger_rows_identical_whatever_the_unpin_state(env, monkeypatch):
+    """UNPIN unset vs explicitly off: the same decision rows (no unpin key), same pin store."""
+    rows = []
+    for value in (None, "0"):
+        env.ledger.unlink(missing_ok=True)
+        backend = _backend()
+        app = await _pin_over_cap(env, monkeypatch, backend)
+        if value is None:
+            monkeypatch.delenv("LLM_ROUTER_UNPIN", raising=False)
+        else:
+            monkeypatch.setenv("LLM_ROUTER_UNPIN", value)
+        monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
+        await _post(app, _long_history())
+        r = env.rows()[-1]["local_mode"]
+        assert "unpin" not in r
+        rows.append(r)
+    assert rows[0] == rows[1]
+
+
+async def _unpin_ready(env, monkeypatch, breaker=None):
+    backend = _backend()
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    monkeypatch.delenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", raising=False)
+    app = env.app(backend, breaker=breaker)
+    await _warm(app)
+    await _post(app, _long_history())
+    assert env.rows()[-1]["local_mode"]["pin_change"] == "local->claude"
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
+    monkeypatch.setenv("LLM_ROUTER_UNPIN", "1")
+    return app, backend
+
+
+async def test_transient_not_local_turn_leaves_the_unpin_unspent(env, monkeypatch):
+    app, backend = await _unpin_ready(env, monkeypatch)
+    n = len(backend.calls)
+    real = local_mode.decide_local
+    monkeypatch.setattr(local_mode, "decide_local", lambda body, s: real(
+        body, dataclasses.replace(s, backend_healthy=False)))  # the backend is unhealthy for one turn
+    await _post(app, _long_history())
+    lm = env.rows()[-1]["local_mode"]
+    assert len(backend.calls) == n and lm["reason"] == "backend_unhealthy" and "unpin" not in lm
+    monkeypatch.setattr(local_mode, "decide_local", real)
+    await _post(app, _long_history())  # the lift is still available
+    lm = env.rows()[-1]["local_mode"]
+    assert len(backend.calls) == n + 1 and lm["local"] is True and "unpin" in lm
+
+
+async def test_kill_switch_and_exempt_turns_leave_the_unpin_unspent(env, monkeypatch):
+    app, backend = await _unpin_ready(env, monkeypatch)
+    n = len(backend.calls)
+    env.kill.write_text("")
+    await _post(app, _long_history())
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "kill_switch" and "unpin" not in lm
+    env.kill.unlink()
+    real = local_mode.exempt_reason
+    monkeypatch.setattr(local_mode, "exempt_reason", lambda *a, **k: (local_mode.EXEMPT_COORDINATOR, None))
+    await _post(app, _long_history())
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "exempt_session" and "unpin" not in lm
+    monkeypatch.setattr(local_mode, "exempt_reason", real)
+    await _post(app, _long_history())
+    assert len(backend.calls) == n + 1 and "unpin" in env.rows()[-1]["local_mode"]
+
+
+async def test_unpin_needs_messages_actually_masked(env, monkeypatch):
+    app, backend = await _unpin_ready(env, monkeypatch)
+    n = len(backend.calls)
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", 10**9)  # the body fits, so only the mask gate decides
+    stats = types.SimpleNamespace(masked=0, chars_saved=0, est_tokens_before=1, est_tokens_after=1)
+    monkeypatch.setattr(history_mask, "mask_body", lambda body: (body, stats))
+    await _post(app, _long_history())
+    lm = env.rows()[-1]["local_mode"]
+    assert env.rows()[-1]["history_mask"]["messages_masked"] == 0
+    assert len(backend.calls) == n and lm["reason"] == "pinned_claude" and "unpin" not in lm

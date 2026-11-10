@@ -370,6 +370,12 @@ def cap_after_reduce_on() -> bool:
     return os.environ.get("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def unpin_on() -> bool:
+    """P7: LLM_ROUTER_UNPIN, default off. On (with masking applied and CAP_AFTER_REDUCE on): a
+    ``prompt_over_cap`` pin is lifted, once per session, when the reduced estimate fits the cap."""
+    return os.environ.get("LLM_ROUTER_UNPIN", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None,
               haiku_guard_run=None, local_gate_deps=None):
     """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
@@ -796,18 +802,36 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         policy = local_mode.exempt_policy()  # D-455: LLM_ROUTER_LOCAL_EXEMPT, read per request
         exempt, overrides_problem = local_mode.exempt_reason(key_body or body, row.get("session_id"),
                                                                 parent_main_of(key_body or body), policy)
+        unpin_try = False
+        # An absent count is "masking did not report", not zero masked: it never unpins.
+        masked_n = (row.get("history_mask") or {}).get("messages_masked")
+        if (stored == local_mode.PIN_CLAUDE and not force and not exempt and not lm.killed()
+                and isinstance(masked_n, int) and masked_n > 0
+                and unpin_on() and cap_after_reduce_on()
+                and lm.pin_reason_of(key) == local_mode.REASON_PROMPT_CAP and key not in lm.unpinned_once):
+            # P7: ``payload`` is the masked body's (cap_body is None while CAP_AFTER_REDUCE is on).
+            # The unpin is only tried here; it is spent below when the turn actually goes local.
+            reduced_est = await asyncio.to_thread(local_mode.estimate_prompt_tokens, payload)
+            cap = local_mode.prompt_cap_tokens()
+            unpin_try = reduced_est <= cap
         cap_payload = payload if cap_body is None else await asyncio.to_thread(
             to_ollama, cap_body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
         decision = local_mode.decide_local(body, local_mode.LocalSession(
-            key=key, pinned=pinned, kill_switch=lm.killed(), backend_healthy=not health.is_open(cfg.model),
-            breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=cap_payload,
+            key=key, pinned=None if unpin_try else pinned, kill_switch=lm.killed(),
+            backend_healthy=not health.is_open(cfg.model), breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=cap_payload,
             verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
+        unpin_row = None
+        if unpin_try and decision.local and lm.unpin_over_cap(key):
+            stored = pinned = None
+            unpin_row = {"reason": "reduced_fits", "reduced_est": reduced_est, "cap": cap}
         vetoed = decision.reason == local_mode.REASON_CLASSIFIER_VETO
         if vetoed:
             row["cls_applied"] = True
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
+        if unpin_row is not None:
+            row["local_mode"]["unpin"] = unpin_row  # counts only: reason, reduced est, cap
         # P1: prompt-size bucket for every row that reached a local decision. Early exits (kill switch,
         # exempt, pinned, media) carry no estimate, so it is computed here (~25 ms on a 512 KB payload);
         # a payload that cannot be measured (circular, too deep, odd keys) becomes "unknown"; a KPI field
@@ -859,7 +883,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 # conversation was seen so its next call is not `started_elsewhere`.
                 lm.mark_seen(key)
             elif pinned is None or reason in local_mode.STRUCTURAL_REASONS:
-                lm.set_pin(key, local_mode.PIN_CLAUDE)
+                lm.set_pin(key, local_mode.PIN_CLAUDE,
+                           str(reason) if reason in local_mode.STRUCTURAL_REASONS else None)
                 row["local_mode"]["pin_change"] = f"{pinned or 'new'}->claude"
         row["egress"] = True
         print(local_mode.egress_notice(str(reason), row.get("session_id")), file=sys.stderr, flush=True)
