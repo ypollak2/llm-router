@@ -362,7 +362,7 @@ def _with_summaries(body: dict, cut: int, summaries: list[str]) -> dict:
 
 
 async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dict], int],
-                  store=None, model: str = "", progress: dict | None = None) -> MRResult | None:
+                  store=None, model: str = "", progress: dict | None = None, goal: int | None = None) -> MRResult | None:
     """The body with its oldest history replaced by chunk summaries, or ``None`` when it is under ``cap`` (nothing to do).
 
     ``cap``: the local prompt cap (local_mode.prompt_cap_tokens, derived from the window). ``est``: the
@@ -372,7 +372,10 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
     ``store`` (P10, a ``chunk_store.ChunkStore`` or None): a closed chunk whose key (raw chunk, prompt version,
     ``model``, num_predict) is stored costs no map call; a valid model summary is stored, an extractive one never.
     ``progress`` (P10): a dict this updates with ``map_calls`` so far, for a caller that cancels the call on a
-    deadline and has no row to read."""
+    deadline and has no row to read.
+
+    ``goal`` (P14, None = unchanged): a lower size to close chunks down to when it can be reached; the result
+    is accepted at the usual goal ``min(close_threshold, cap)``, so a deeper goal never turns a fit into a refusal."""
     messages = body.get("messages") or []
     before = est(body)
     if before <= cap or len(messages) < 3:
@@ -396,14 +399,15 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
     units = units_of(hist)
     uests = [est_tokens(hist[a:b]) for a, b in units]
     closable = [c for c in partition(uests, chunk_target())[:-1] if c[1] < len(units) - W_CLOSE]
-    goal = min(close_threshold(), cap)
+    floor = min(close_threshold(), cap)
+    goal = floor if goal is None else min(goal, floor)
     k, saved = 0, 0
     while k < len(closable) and before - saved + k * SUMMARY_CEIL > goal:
         saved += closable[k][2]
         k += 1
     if not closable:
         return refuse(OUTCOME_NO_CHUNKS)
-    if before - saved + k * SUMMARY_CEIL > goal:
+    if before - saved + k * SUMMARY_CEIL > floor:
         return refuse(OUTCOME_CANNOT_FIT)  # every closable chunk would not bring it down: no model call is spent
     spans = [(units[c[0]][0] + 1, units[c[1]][1] + 1) for c in closable[:k]]  # message indices into ``messages``
     row["chunks"] = k
