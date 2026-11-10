@@ -234,6 +234,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_GATEWAY_HOST": ("llm_router", "presets.py", 1),
     "LLM_ROUTER_GATEWAY_PORT": ("llm_router", "presets.py", 1),
     "LLM_ROUTER_GATEWAY_URL": ("llm_router", "presets.py", 1),
+    "LLM_ROUTER_EST_CALIBRATED": ("llm_router", "token_estimate.py", 1),
     "LLM_ROUTER_PROXY_STEPS": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_HEDGE_S": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_STEP_BUDGET_S": ("llm_router", "proxy/server.py", 1),

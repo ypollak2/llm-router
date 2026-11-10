@@ -38,8 +38,6 @@ explicitly with a reason, never replaced by a placeholder.
 
 from __future__ import annotations
 
-import json
-import math
 import os
 import re
 import subprocess
@@ -65,7 +63,7 @@ SERVE_MODES = (SERVE_OFF, SERVE_LOCAL_AGENT)
 #: Phase 1 of the probes: 13 of 14 sessions that reached ~25-27k tokens ended
 #: wrong, because history compaction loses the task. Checked by ``over_prompt_cap``
 #: with a calibrated estimate; ``local_context_guard`` stays the 32k window backstop
-#: inside the backend (see ``DIGIT_TOKENS`` for why it cannot decide this one).
+#: inside the backend (see the estimator note below for why it cannot decide this one).
 PROMPT_CAP_TOKENS = 25_000
 
 
@@ -213,26 +211,15 @@ def is_agent_turn(body: dict) -> bool:
     return bool(msgs) and msgs[-1].get("role") == "user"
 
 
-#: Estimator constants, fitted to REAL Ollama prompt counts for qwen3.6:35b-a3b-coding
-#: (Ollama 0.32.13, 2026-10-05, n=7 payloads: three real Claude Code first-call
-#: bodies, a continuation carrying 150/300/450-line logs, prose and code). Digits
-#: are one token each in qwen; everything else is ~3.6 characters per token or
-#: better. Estimate / real came out between 1.02x and 1.21x, never under
-#: (``tests/test_proxy_local_mode.py::CALIBRATION``). ``local_context_guard``'s
-#: chars/3.04 is 1.4x high on JSON tool schemas (it would refuse the 18.5k-token
-#: MCP body at ~26k) and 0.90x LOW on a 450-line log, so it cannot decide the cap;
-#: it stays the hard window backstop inside the backend.
-DIGIT_TOKENS = 1.1
-WIDE_CHAR_TOKENS = 1.5
-OTHER_CHARS_PER_TOKEN = 3.6
+# Estimator: ``token_estimate.est_tokens`` (constants, calibration and evidence live there).
+# ``local_context_guard``'s chars/3.04 was 1.4x high on JSON tool schemas (it would refuse the
+# 18.5k-token MCP body at ~26k) and 0.90x LOW on a 450-line log, so it cannot decide the cap;
+# it stays the hard window backstop inside the backend.
+from llm_router.token_estimate import est_tokens  # noqa: E402  (one formula, shared)
 
 
 def estimate_prompt_tokens(payload: dict) -> int:
-    text = json.dumps(payload, default=str, ensure_ascii=False)
-    digits = sum(c.isdigit() for c in text)
-    wide = sum(ord(c) > 127 for c in text)
-    return math.ceil(DIGIT_TOKENS * digits + WIDE_CHAR_TOKENS * wide
-                     + (len(text) - digits - wide) / OTHER_CHARS_PER_TOKEN)
+    return est_tokens(payload)
 
 
 def over_prompt_cap(payload: dict, cap: int | None = None) -> int | None:

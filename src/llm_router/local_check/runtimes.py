@@ -195,6 +195,9 @@ def max_prompt_chars(ctx: int | None, max_tokens: int = MAX_TOKENS) -> int | Non
     if not ctx or ctx <= 0:
         return None
     room = ctx - max_tokens - PROMPT_RESERVE_TOKENS
+    # Stays a fixed 3.0 chars/token even under LLM_ROUTER_EST_CALIBRATED: a char budget cannot see
+    # its text, and the calibrated 3.6 would over-admit digit-heavy or CJK input (diffs, logs) by
+    # ~20%. Callers that hold the text check ``token_estimate.est_tokens(text)`` against the tokens.
     return max(0, int(room * CHARS_PER_TOKEN))
 
 

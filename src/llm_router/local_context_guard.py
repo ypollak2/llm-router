@@ -37,10 +37,13 @@ import threading
 import time
 import urllib.request
 
+from llm_router.token_estimate import calibrated_enabled, est_tokens
+
 __all__ = [
     "ContextOverflow",
     "CHARS_PER_TOKEN",
     "ESTIMATE_SAFETY_MARGIN",
+    "CALIBRATED_SAFETY_MARGIN",
     "DEFAULT_CONTEXT_WINDOW",
     "DEFAULT_RESERVED_OUTPUT_TOKENS",
     "estimate_tokens",
@@ -61,6 +64,12 @@ CHARS_PER_TOKEN = 3.5
 #: shorter tokens per character); this margin is what makes "estimated to
 #: fit" a safe claim instead of an optimistic one.
 ESTIMATE_SAFETY_MARGIN = 1.15
+
+#: Applied on top of the calibrated estimate when LLM_ROUTER_EST_CALIBRATED is on. This path is the
+#: hard window backstop and the calibration is ONE model (qwen3.6:35b-a3b) on 7 payloads, so with the
+#: flag on the guard takes max(legacy chars/3.5 x 1.15, calibrated x this margin): never looser than
+#: the legacy guard (calibrated x 1.05 reads ~9-11% below it on prose/JSON, ~10% above on code).
+CALIBRATED_SAFETY_MARGIN = 1.05
 
 #: Ollama's own hardcoded default context window when nothing else says
 #: otherwise (no explicit num_ctx, no resident-model report, no env var).
@@ -116,7 +125,15 @@ def estimate_payload_tokens(payload: dict) -> int:
         chars = len(json.dumps(payload, default=str))
     except (TypeError, ValueError):
         chars = sum(len(str(v)) for v in payload.values())
-    return estimate_tokens(chars)
+    legacy = estimate_tokens(chars)
+    if calibrated_enabled():
+        # Never looser than the legacy guard: the calibrated count only raises the estimate (code),
+        # it never lowers the backstop on prose/JSON, where it reads ~9-11% below chars/3.5 x 1.15.
+        try:
+            return max(legacy, math.ceil(est_tokens(payload) * CALIBRATED_SAFETY_MARGIN))
+        except (TypeError, ValueError, RuntimeError):  # unserialisable or too deep (RecursionError): legacy counted it
+            return legacy
+    return legacy
 
 
 def _name_matches(wanted: str, resident: str) -> bool:
