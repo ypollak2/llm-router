@@ -222,6 +222,24 @@ def effective_window(
     return DEFAULT_CONTEXT_WINDOW, "default"
 
 
+def overflow_estimate(
+    payload: dict,
+    *,
+    num_ctx: int | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+    reserved_output: int = DEFAULT_RESERVED_OUTPUT_TOKENS,
+) -> tuple[int, int, str] | None:
+    """``(estimated, window, source)`` when `payload` would not fit the effective window, else ``None``.
+
+    The one decision `check_overflow` raises on; the proxy's admission calls it too so both agree."""
+    estimated = estimate_payload_tokens(payload)
+    window, source = effective_window(num_ctx=num_ctx, base_url=base_url, model=model)
+    if estimated <= window - reserved_output:
+        return None
+    return estimated, window, source
+
+
 def check_overflow(
     payload: dict,
     *,
@@ -239,11 +257,11 @@ def check_overflow(
     `failopen.render_report`) and raises so the caller escalates instead of
     letting Ollama silently drop the front of the prompt.
     """
-    estimated = estimate_payload_tokens(payload)
-    window, source = effective_window(num_ctx=num_ctx, base_url=base_url, model=model)
-    budget = window - reserved_output
-    if estimated <= budget:
+    over = overflow_estimate(payload, num_ctx=num_ctx, base_url=base_url, model=model,
+                             reserved_output=reserved_output)
+    if over is None:
         return
+    estimated, window, source = over
     from llm_router import failopen
 
     detail = (f"site={site} model={model} estimated={estimated} window={window} "

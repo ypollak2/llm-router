@@ -373,6 +373,12 @@ def cap_after_reduce_on() -> bool:
     return os.environ.get("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def cap_guard_reconcile_on() -> bool:
+    """LLM_ROUTER_CAP_GUARD_RECONCILE, default off. On: admission also refuses a request the backend's
+    window guard (``local_context_guard.overflow_estimate``) would refuse, instead of a wasted local attempt."""
+    return os.environ.get("LLM_ROUTER_CAP_GUARD_RECONCILE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def okf_by_window_on() -> bool:
     """P21: LLM_ROUTER_OKF_BY_WINDOW, default off. On: the OKF block's ceiling is the window-derived
     prompt cap, not the ~5k local-agent compaction target. Off: the agent target, as before."""
@@ -907,6 +913,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             key=key, pinned=None if unpin_try else pinned, kill_switch=lm.killed(),
             backend_healthy=not health.is_open(cfg.model), breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=cap_payload,
             verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
+        if decision.local and cap_guard_reconcile_on():
+            from llm_router.local_context_guard import overflow_estimate
+            over = await asyncio.to_thread(overflow_estimate, payload,
+                                           num_ctx=(payload.get("options") or {}).get("num_ctx"))
+            if over is not None:
+                decision = local_mode.LocalDecision(
+                    False, local_mode.REASON_PROMPT_GUARD,
+                    f"~{over[0]} guard tokens > window {over[1]} - reserve", decision.est_tokens)
         unpin_row = None
         if unpin_try and decision.local and lm.unpin_over_cap(key):
             stored = pinned = None
