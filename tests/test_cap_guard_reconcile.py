@@ -54,13 +54,13 @@ def _in_band() -> dict:
     return body
 
 
-async def test_band_payload_is_admitted_with_flag_off(env):
+async def test_band_payload_is_admitted_with_flag_off(env):  # noqa: F811
     backend = _backend()
     await _post(env.app(backend, num_ctx=NUM_CTX), _in_band())
     assert len(backend.calls) == 1 and env.up.requests == []
 
 
-async def test_band_payload_is_refused_at_admission_with_flag_on(env, monkeypatch):
+async def test_band_payload_is_refused_at_admission_with_flag_on(env, monkeypatch):  # noqa: F811
     monkeypatch.setenv(FLAG, "1")
     backend = _backend()
     await _post(env.app(backend, num_ctx=NUM_CTX), _in_band())
@@ -70,8 +70,16 @@ async def test_band_payload_is_refused_at_admission_with_flag_on(env, monkeypatc
     assert row["local_mode"]["local"] is False and row["local_mode"]["reason"] == local_mode.REASON_PROMPT_GUARD
 
 
+async def test_guard_refusal_sets_a_claude_pin_like_the_cap_with_flag_on(env, monkeypatch):  # noqa: F811
+    monkeypatch.setenv(FLAG, "1")
+    await _post(env.app(_backend(), num_ctx=NUM_CTX), _in_band())
+    lm = env.rows()[-1]["local_mode"]
+    # structural reason: the session is pinned to Claude, as for prompt_over_cap (P7 unpin lifts only prompt_over_cap)
+    assert lm["reason"] == local_mode.REASON_PROMPT_GUARD and lm["pin_change"].endswith("->claude")
+
+
 @pytest.mark.parametrize("flag", [None, "1"])
-async def test_small_payload_is_admitted_either_way(env, monkeypatch, flag):
+async def test_small_payload_is_admitted_either_way(env, monkeypatch, flag):  # noqa: F811
     if flag:
         monkeypatch.setenv(FLAG, flag)
     body = _sized(20_000)
@@ -83,7 +91,7 @@ async def test_small_payload_is_admitted_either_way(env, monkeypatch, flag):
 
 
 @pytest.mark.parametrize("flag", [None, "1"])
-async def test_payload_over_the_cap_is_refused_either_way_as_the_cap(env, monkeypatch, flag):
+async def test_payload_over_the_cap_is_refused_either_way_as_the_cap(env, monkeypatch, flag):  # noqa: F811
     if flag:
         monkeypatch.setenv(FLAG, flag)
     body = _sized(200_000)
@@ -94,7 +102,7 @@ async def test_payload_over_the_cap_is_refused_either_way_as_the_cap(env, monkey
     assert env.rows()[-1]["reason"] == local_mode.REASON_PROMPT_CAP
 
 
-async def test_flag_off_ledger_row_gains_no_keys(env, monkeypatch):
+async def test_flag_off_ledger_row_gains_no_keys(env, monkeypatch):  # noqa: F811
     backend = _backend()
     await _post(env.app(backend, num_ctx=NUM_CTX), _sized(20_000))
     off = env.rows()[-1]
