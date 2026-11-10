@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import errno
 import glob
 import hashlib
@@ -243,6 +244,9 @@ _LIFECYCLE = threading.Lock()
 # id(admission) -> admission, for after-fork invalidation and the re-entrancy guard. Weak: a dropped
 # Admission must be collectable so its finalizer can free the slot.
 _LIVE: "weakref.WeakValueDictionary[int, Admission]" = weakref.WeakValueDictionary()
+# Admissions held by the current execution context (thread, or asyncio task plus tasks spawned from it).
+# Immutable tuple of weakrefs, re-set on admit; release flips Admission._valid, so no per-context cleanup.
+_HELD: "contextvars.ContextVar[tuple]" = contextvars.ContextVar("local_gate_held", default=())
 _PENDING_CLOSE: list[int] = []  # fds a GC finalizer could not close without the lifecycle lock
 _OPEN_FDS: set[int] = set()  # every gate fd currently open (admissions and in-flight attempts)
 
@@ -329,6 +333,8 @@ class Admission:
         self._finalizer = None
         if self._fds:
             _LIVE[id(self)] = self
+            live = tuple(r for r in _HELD.get() if (a := r()) is not None and a._valid)
+            _HELD.set(live + (weakref.ref(self),))
             # Shares the fd list (never rebound) so the finalizer holds no reference to self.
             self._finalizer = weakref.finalize(self, _gc_close, self._fds)
 
@@ -378,14 +384,16 @@ def _off(url: str, caller: str) -> Admission:
 
 
 def _guard_reentrant(url: str, exclusive: bool) -> None:
-    """admit_exclusive needs every slot; if this process already holds one it would wait out its deadline."""
+    """admit_exclusive needs every slot; if the caller's own context (thread, or task and its children)
+    already holds one it would wait out its deadline. Other threads/tasks holding a slot just wait."""
     if not exclusive:
         return
     key = canonical_url(url)
-    for adm in list(_LIVE.values()):
-        if adm._valid and not adm.disabled and canonical_url(adm.url) == key:
+    for ref in _HELD.get():
+        adm = ref()
+        if adm is not None and adm._valid and not adm.disabled and canonical_url(adm.url) == key:
             raise LocalQueueReentrant(
-                f"local_queue_reentrant: this process already holds an admission on {key}; "
+                f"local_queue_reentrant: this execution context already holds an admission on {key}; "
                 "release it before admit_exclusive", url)
 
 

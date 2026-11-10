@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -565,3 +566,54 @@ def test_reset_rejects_slots_below_one(env, bad):
     with pytest.raises(ValueError):
         g.reset(URL, dl(1), slots=bad)
     assert not (g.gate_dir(URL) / "slots.json").exists()
+
+
+def test_other_thread_holding_makes_exclusive_wait_not_raise(env):
+    held, go = threading.Event(), threading.Event()
+
+    def holder():
+        a = g.admit(URL, dl(5))
+        held.set()
+        go.wait(10)
+        a.release()
+
+    th = threading.Thread(target=holder)
+    th.start()
+    assert held.wait(5)
+    threading.Timer(0.4, go.set).start()
+    t = time.monotonic()
+    ex = g.admit_exclusive(URL, dl(10))                  # must wait for the other thread, not raise
+    assert not ex.disabled and time.monotonic() - t >= 0.3
+    ex.release()
+    th.join(5)
+
+
+def test_other_task_holding_makes_exclusive_wait_but_child_task_raises(env):
+    async def main():
+        held, go = asyncio.Event(), asyncio.Event()
+
+        async def holder():
+            a = await g.aadmit(URL, dl(5))
+            held.set()
+            await go.wait()
+            a.release()
+
+        async def spawned_by_holder():
+            a = await g.aadmit(URL, dl(5))
+            try:
+                with pytest.raises(g.LocalQueueReentrant):
+                    await asyncio.create_task(g.aadmit_exclusive(URL, dl(30)))
+            finally:
+                a.release()
+
+        h = asyncio.create_task(holder())
+        await held.wait()
+        asyncio.get_running_loop().call_later(0.4, go.set)
+        t = time.monotonic()
+        ex = await g.aadmit_exclusive(URL, dl(10))       # sibling task: waits, does not raise
+        assert not ex.disabled and time.monotonic() - t >= 0.3
+        ex.release()
+        await h
+        await spawned_by_holder()
+
+    asyncio.run(main())
