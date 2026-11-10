@@ -326,6 +326,21 @@ async def test_off_mode_matches_golden(tmp_path, monkeypatch, name, serve_env):
     assert record == golden[name]
 
 
+@pytest.mark.parametrize("layout_value", ["0", "off", ""])
+@pytest.mark.parametrize("name", sorted(CASES))
+async def test_p14_layout_flag_not_on_matches_golden(tmp_path, monkeypatch, name, layout_value):
+    """P14: LLM_ROUTER_PROXY_LAYOUT set to anything but an on value changes no byte of what off mode sends or records."""
+    clean = _clean_env
+
+    def clean_then_set(mp):
+        clean(mp)
+        mp.setenv("LLM_ROUTER_PROXY_LAYOUT", layout_value)
+
+    monkeypatch.setitem(globals(), "_clean_env", clean_then_set)
+    record = await _run_case(tmp_path, monkeypatch, name, None)
+    assert record == _load()[name]
+
+
 @pytest.mark.parametrize("serve_env", [None, "off"])
 def test_off_mode_banner_matches_golden(monkeypatch, serve_env):
     banner = _banner(monkeypatch, serve_env)
