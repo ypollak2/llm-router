@@ -65,7 +65,7 @@ from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
 from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
-from llm_router.proxy import cls_decide, cold_guard, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
+from llm_router.proxy import chunk_store, cls_decide, cold_guard, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -945,9 +945,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         ``deadline.cap_s`` (the registered LLM_ROUTER_DEADLINE_CAP_S, 240 s, or its keepalive cap 600 s
         when keepalive is on); it runs inside ``attempt_local``, so a streaming client gets the keepalive pings
         live turns get."""
+        t_mr = time.monotonic()
+        progress = {"map_calls": 0}
         try:
             model = cfg.model.split("/", 1)[1]
             backend = make_backend(cfg.model)
+            store = None
+            if chunk_store.enabled():  # P10: only with PROXY_MR (this function is its only caller)
+                store = chunk_store.ChunkStore()
 
             async def map_call(prompt: str, num_predict: int) -> str | None:
                 reply, _err, _usage = await backend.complete(
@@ -959,14 +964,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
             res = await asyncio.wait_for(mr_summary.shorten(
                 body, map_call, cap=local_mode.prompt_cap_tokens(),
-                est=lambda b: local_mode.estimate_prompt_tokens(to_ollama(b, model, num_ctx=cfg.num_ctx, max_predict=1))),
+                est=lambda b: local_mode.estimate_prompt_tokens(to_ollama(b, model, num_ctx=cfg.num_ctx, max_predict=1)),
+                store=store, model=cfg.model, progress=progress),
                 timeout=deadline.cap_s(keepalive=proxy_keepalive.enabled()))
         except asyncio.TimeoutError:
-            row["mr_summary"] = {"outcome": mr_summary.OUTCOME_TIMEOUT}
+            row["mr_summary"] = {"outcome": mr_summary.OUTCOME_TIMEOUT, "elapsed_s": round(time.monotonic() - t_mr, 3),
+                                 "map_calls": progress["map_calls"]}
             return None
         except Exception as exc:  # noqa: BLE001 - the summarizer is an optimisation; Claude fallback, never a 500
             failopen.record("LR-FO-PROXY-MR", exc)
-            row["mr_summary"] = {"outcome": mr_summary.OUTCOME_ERROR}
+            row["mr_summary"] = {"outcome": mr_summary.OUTCOME_ERROR, "elapsed_s": round(time.monotonic() - t_mr, 3),
+                                 "map_calls": progress["map_calls"]}
             return None
         if res is None:
             return None
@@ -1136,6 +1144,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         mr_row = row.get("mr_summary")
         if isinstance(mr_row, dict) and mr_row.get("outcome") == mr_summary.OUTCOME_SUMMARIZED:
             mr_row.update(outcome=mr_summary.OUTCOME_WASTED, wasted_reason=str(reason))  # maps ran, the turn went to Claude
+        elif isinstance(mr_row, dict) and mr_row.get("outcome") in (mr_summary.OUTCOME_TIMEOUT, mr_summary.OUTCOME_ERROR):
+            mr_row.update(wasted=True, wasted_reason=str(reason))  # local time spent (elapsed_s), the turn went to Claude
         row["egress"] = True
         print(local_mode.egress_notice(str(reason), row.get("session_id")), file=sys.stderr, flush=True)
         return None
