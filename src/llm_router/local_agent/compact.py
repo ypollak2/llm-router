@@ -159,6 +159,10 @@ def used_tools(body: dict) -> list[str]:
 def estimate_tokens(body: dict) -> int:
     """chars/4 of what the Ollama backend is actually sent (messages + tools)."""
     payload = json.dumps(to_ollama_messages(body)) + json.dumps(ollama_tools(body.get("tools") or []))
+    from llm_router import token_estimate
+
+    if token_estimate.calibrated_enabled():
+        return token_estimate.est_tokens(payload)
     return len(payload) // 4
 
 

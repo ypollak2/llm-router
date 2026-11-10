@@ -112,6 +112,10 @@ def estimate_payload_tokens(payload: dict) -> int:
     message content and never accounts for tool-definition JSON, which on a
     Claude Code request is routinely the larger half of the prompt.
     """
+    from llm_router import token_estimate
+
+    if token_estimate.calibrated_enabled():
+        return token_estimate.est_tokens(payload)
     try:
         chars = len(json.dumps(payload, default=str))
     except (TypeError, ValueError):

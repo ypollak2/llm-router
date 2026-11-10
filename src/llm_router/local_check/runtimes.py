@@ -195,6 +195,10 @@ def max_prompt_chars(ctx: int | None, max_tokens: int = MAX_TOKENS) -> int | Non
     if not ctx or ctx <= 0:
         return None
     room = ctx - max_tokens - PROMPT_RESERVE_TOKENS
+    from llm_router import token_estimate
+
+    if token_estimate.calibrated_enabled():
+        return token_estimate.chars_for_tokens(room)
     return max(0, int(room * CHARS_PER_TOKEN))
 
 
