@@ -565,6 +565,27 @@ def _ticket_live(path: Path) -> bool:
                 os.close(fd)
 
 
+#: A ``.tmp-*`` ticket older than this is a leftover of a creator killed between create and rename.
+#: The age guard keeps a scanner from locking (and deleting) a file whose creator has opened it but
+#: not locked it yet, which would make that creator's lock fail.
+STALE_TMP_S = 60.0
+
+
+def _reap_stale_tmp(d: Path) -> int:
+    """Delete unlocked ``.tmp-*`` tickets older than ``STALE_TMP_S``. Best effort; returns the count."""
+    n = 0
+    now = time.time()
+    for p in glob.glob(str(_wait_dir(d) / ".tmp-*.wait")):
+        try:
+            if now - os.stat(p).st_mtime < STALE_TMP_S:
+                continue
+        except OSError:
+            continue
+        if not _ticket_live(Path(p)):
+            n += 1
+    return n
+
+
 def _live_tickets(d: Path) -> list[Path]:
     """Live tickets of this server, in service order (class rank, then arrival time, then pid)."""
     out = []
@@ -581,6 +602,7 @@ class _Ticket:
         if priority not in PRIORITIES:
             raise ValueError(f"priority must be one of {PRIORITIES}, got {priority!r}")
         _wait_dir(d).mkdir(parents=True, exist_ok=True)
+        _reap_stale_tmp(d)
         name = f"{PRIORITIES.index(priority)}-{time.time_ns():020d}-{os.getpid():08d}-{os.urandom(3).hex()}.wait"
         self.path = _wait_dir(d) / name
         # Create and lock under a name scanners do not glob, then rename into the line: a scanner can
