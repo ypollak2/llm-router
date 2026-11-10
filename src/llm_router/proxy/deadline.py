@@ -127,14 +127,21 @@ def recent_samples(path: Path | None = None, *, now: float | None = None) -> lis
 
 
 def predicted_prefill_s(tokens: int, samples: list[tuple[int, float]] | None = None) -> tuple[float, str]:
-    """Predicted prefill seconds for ``tokens`` and the source of the rate ("ledger" or "default")."""
+    """Predicted prefill seconds for ``tokens`` and the source of the rate ("ledger" or "default").
+
+    Never faster than the cold reference curve: a warm-cache row has the full prompt_tokens but only the
+    uncached suffix's prompt_eval_s, so its fitted rate is far too fast (measured 2026-11-10: ledger
+    predicted 2.4 s at 31k, measured warm TTFT 33 s). The ledger can only lengthen the prediction.
+    """
     tokens = max(1, int(tokens))
     rows = recent_samples() if samples is None else samples
+    floor = _scale(REFERENCE_TOKENS / default_rate(), REFERENCE_TOKENS, tokens)
     if len(rows) >= MIN_ROWS:
         near = sorted(rows, key=lambda r: abs(math.log(r[0] / tokens)))[:NEAREST_ROWS]
-        return statistics.median(_scale(s, n, tokens) for n, s in near), "ledger"
-    ref_s = REFERENCE_TOKENS / default_rate()
-    return _scale(ref_s, REFERENCE_TOKENS, tokens), "default"
+        fitted = statistics.median(_scale(s, n, tokens) for n, s in near)
+        if fitted > floor:
+            return fitted, "ledger"
+    return floor, "default"
 
 
 def compute(tokens: int, samples: list[tuple[int, float]] | None = None, *, keepalive: bool = False) -> dict:

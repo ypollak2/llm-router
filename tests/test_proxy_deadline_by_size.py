@@ -48,13 +48,44 @@ def test_fewer_than_five_rows_uses_the_default():
 
 def test_rate_from_ledger_rows_median_of_nearest(tmp_path):
     p = tmp_path / "l.jsonl"
-    _ledger(p, [_row(30_000, 20.0)] * 6 + [_row(10_000, 99.0, "fallback"), _row(500, 9.0), {"x": 1}])
+    _ledger(p, [_row(30_000, 60.0)] * 6 + [_row(10_000, 99.0, "fallback"), _row(500, 9.0), {"x": 1}])
     samples = deadline.recent_samples(p)
     assert len(samples) == 6                      # fallback row, tiny row and junk row ignored
     pred, source = deadline.predicted_prefill_s(30_000, samples)
-    assert source == "ledger" and pred == pytest.approx(20.0)
+    assert source == "ledger" and pred == pytest.approx(60.0)
     # 60k from 30k rows: scaled by the super-linear exponent, not by 2
-    assert deadline.predicted_prefill_s(60_000, samples)[0] == pytest.approx(20.0 * 2 ** 1.585)
+    assert deadline.predicted_prefill_s(60_000, samples)[0] == pytest.approx(60.0 * 2 ** 1.585)
+
+
+# Warm-cache rows: full prompt_tokens, but prompt_eval_s of only the uncached suffix.
+_WARM = [(n, 1.5) for n in (12_000, 20_000, 31_000, 45_000, 66_000, 90_000, 120_000)]
+_SIZES = list(range(10_000, 130_001, 10_000))
+
+
+def test_warm_cache_samples_cannot_undercut_the_cold_curve():
+    for n in _SIZES:
+        cold = deadline.compute(n, [])
+        warm = deadline.compute(n, _WARM)
+        assert warm["deadline_s"] >= cold["deadline_s"]
+        assert warm["rate_source"] == "default"
+
+
+def test_deadline_monotonic_with_warm_cache_samples():
+    ds = [deadline.compute(n, _WARM)["deadline_s"] for n in _SIZES]
+    assert ds == sorted(ds)
+    below = [d for d in ds if d < deadline.DEFAULT_CAP_S]
+    assert len(below) >= 4 and len(set(below)) == len(below)    # strictly rising until the cap
+
+
+def test_slower_ledger_rows_still_win():
+    rows = [(30_000, 90.0)] * 6
+    pred, source = deadline.predicted_prefill_s(30_000, rows)
+    assert source == "ledger" and pred == pytest.approx(90.0)
+
+
+def test_cap_still_applies_with_warm_samples(monkeypatch):
+    assert deadline.compute(500_000, _WARM)["deadline_s"] == 240.0
+    assert deadline.compute(500_000, _WARM, keepalive=True)["deadline_s"] == 600.0
 
 
 def test_missing_ledger_gives_no_samples(tmp_path):
