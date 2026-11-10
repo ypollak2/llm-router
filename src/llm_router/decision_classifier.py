@@ -82,7 +82,7 @@ def payload(model: str, assembled: str, keep_alive: str | int | None = None) -> 
         "state": state,
         "questions": {QUESTION: {"type": "choice", "instructions": INSTRUCTIONS,
                                  "criteria": dict(CRITERIA)}},
-        "keep_alive": lc._keep_alive() if keep_alive is None else keep_alive,
+        "keep_alive": lc._keep_alive_for(model) if keep_alive is None else keep_alive,
     }
 
 

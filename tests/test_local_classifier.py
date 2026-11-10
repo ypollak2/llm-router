@@ -616,3 +616,50 @@ async def test_the_async_path_never_uses_the_sync_one(monkeypatch):
     monkeypatch.setattr(lc, "_post", forbidden)
     async with FakeOllama(monkeypatch):
         assert (await _ask()).source == "llm"
+
+
+# --- shared runner: one-model policy (docs/BUGS.md CLSCTX-1) ----------------------------------
+
+
+@pytest.fixture
+def one_model(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL", "llmr-classifier")
+    monkeypatch.setenv("LLM_ROUTER_PROXY_NUM_CTX", "32768")
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", "30m")
+
+
+async def test_one_model_payload_uses_proxy_ctx_and_keeps_forever(monkeypatch, one_model):
+    async with FakeOllama(monkeypatch, ctx=32768) as o:
+        assert (await _ask("a")).source == "llm"
+    assert o.chat[0]["options"]["num_ctx"] == 32768
+    assert o.chat[0]["keep_alive"] == -1
+
+
+async def test_one_model_is_loaded_at_proxy_ctx_and_cold_at_other(monkeypatch, one_model):
+    async with FakeOllama(monkeypatch, ctx=32768):
+        assert await lc._is_loaded("llmr-classifier", 1.0) is True
+    async with FakeOllama(monkeypatch, ctx=4096):
+        assert await lc._is_loaded("llmr-classifier", 1.0) is False
+
+
+@pytest.mark.timing
+async def test_one_model_resident_at_proxy_ctx_triggers_no_warmup(monkeypatch, one_model):
+    async with FakeOllama(monkeypatch, ctx=32768) as o:
+        for i in range(3):
+            assert (await _ask(f"s{i}")).source == "llm"
+        await asyncio.sleep(0.05)
+        assert o.warm == []
+
+
+async def test_one_model_warmup_matches_proxy_ctx(monkeypatch, one_model):
+    async with FakeOllama(monkeypatch, loaded=False) as o:
+        await lc._warm("llmr-classifier")
+    assert o.warm[0]["options"]["num_ctx"] == 32768 and o.warm[0]["keep_alive"] == -1
+
+
+async def test_without_one_model_policy_payload_is_unchanged(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_LOCAL_MODEL", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", "30m")
+    async with FakeOllama(monkeypatch, ctx=4096) as o:
+        assert (await _ask("a")).source == "llm"
+    assert o.chat[0]["options"]["num_ctx"] == 4096 and o.chat[0]["keep_alive"] == "30m"

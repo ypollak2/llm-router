@@ -246,6 +246,39 @@ def _keep_alive() -> str | int:
         return raw
 
 
+def _shared_runner(model: str) -> bool:
+    """True when the one-model policy is on and *model* is that model: the classifier then
+    shares the proxy's runner and must not reload or expire it (Ollama keys a runner on
+    num_ctx; with one slot a 4096 load evicts the proxy's 32768 one)."""
+    try:
+        from llm_router.toolkit.adapters.ollama import get_local_model
+        one = get_local_model()
+        return bool(one and model and _same_model(model, one))
+    except Exception:  # noqa: BLE001 - never raise from the classifier
+        return False
+
+
+def _shared_num_ctx(model: str) -> int:
+    """The context the proxy runs *model* at: LLM_ROUTER_PROXY_NUM_CTX, else the table value."""
+    raw = os.environ.get("LLM_ROUTER_PROXY_NUM_CTX", "").strip()
+    try:
+        if raw and int(raw) > 0:
+            return int(raw)
+    except ValueError:
+        pass
+    from llm_router.local_models import num_ctx
+    return num_ctx(model)
+
+
+def _num_ctx_for(model: str) -> int:
+    return _shared_num_ctx(model) if _shared_runner(model) else NUM_CTX
+
+
+def _keep_alive_for(model: str) -> str | int:
+    """-1 (forever) on the shared runner: a shorter value would expire the proxy's model."""
+    return -1 if _shared_runner(model) else _keep_alive()
+
+
 def _timeout_s() -> float:
     try:
         ms = int(os.environ.get("LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS", ""))
@@ -318,10 +351,10 @@ def parse_verdict(content: str, *, model: str = DEFAULT_MODEL, ms: float = 0.0,
                    model, PROMPT_VERSION, ms)
 
 
-def _options() -> dict:
+def _options(model: str = "") -> dict:
     """Shared by the real call and the warm-up. A load with no ``num_ctx`` gets the server's
     default (32768 here), and the real call's 4096 then forces a second runner load."""
-    return {"temperature": 0, "num_predict": NUM_PREDICT, "num_ctx": NUM_CTX}
+    return {"temperature": 0, "num_predict": NUM_PREDICT, "num_ctx": _num_ctx_for(model)}
 
 
 def _payload(model: str, assembled: str) -> dict:
@@ -336,8 +369,8 @@ def _payload(model: str, assembled: str) -> dict:
         "format": SCHEMA,
         "stream": False,
         "think": False,
-        "keep_alive": _keep_alive(),
-        "options": _options(),
+        "keep_alive": _keep_alive_for(model),
+        "options": _options(model),
     }
 
 
@@ -504,7 +537,7 @@ async def _is_loaded(model: str, budget: float) -> bool:
             # not report context_length is taken at its word.
             ctx = m.get("context_length")
             # a decision model runs at its own default context: there is no 4096 to match
-            return ctx is None or ctx == NUM_CTX or backend() == "systemone"
+            return ctx is None or ctx == _num_ctx_for(model) or backend() == "systemone"
     return False
 
 
@@ -525,7 +558,8 @@ async def _warm(model: str) -> None:
         url, body = decision_classifier.ENDPOINT, decision_classifier.payload(model, "warm-up")
     else:
         url, body = "/api/chat", {"model": model, "messages": [], "stream": False,
-                                  "keep_alive": _keep_alive(), "options": _options()}
+                                  "keep_alive": _keep_alive_for(model),
+                                  "options": _options(model)}
     try:
         async with _session().post(
             f"{_base_url()}{url}", json=body, timeout=aiohttp.ClientTimeout(total=120),
