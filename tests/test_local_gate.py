@@ -71,6 +71,7 @@ def env(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home / ".llm-router"))   # paths.state_path honours it first
     monkeypatch.setenv("LLM_ROUTER_LOCAL_GATE_DIR", str(tmp_path / "gate"))
     monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
     monkeypatch.setenv("LLM_ROUTER_LOCAL_SLOTS", "1")
@@ -137,6 +138,7 @@ def dl(s):
 
 # ── occupancy ────────────────────────────────────────────────────────────────
 
+@pytest.mark.timing
 def test_one_slot_second_holder_times_out_then_waits_and_acquires(env, procs):
     a = hold(procs)
     t = time.monotonic()
@@ -409,6 +411,7 @@ def test_async_acquires_after_release_and_exclusive(env, procs):
 
 # ── kill switch / fail open ──────────────────────────────────────────────────
 
+@pytest.mark.timing
 @pytest.mark.parametrize("val", [None, "off", "0", ""])
 def test_kill_switch_default_off_is_a_noop_without_row(env, procs, monkeypatch, val):
     a = hold(procs)                                      # children run with the queue on
@@ -509,6 +512,7 @@ def test_windows_msvcrt_path(monkeypatch, tmp_path):
 
 # ── review fixes: GC fallback, re-entrancy guard, reset validation ───────────
 
+@pytest.mark.timing
 def test_dropped_admission_frees_its_slot_via_gc(env):
     a = g.admit(URL, dl(2))
     assert not a.disabled
@@ -573,6 +577,7 @@ def test_release_detaches_finalizer_so_reused_fd_is_not_closed(env):
     b.release()
 
 
+@pytest.mark.timing
 def test_admit_exclusive_while_holding_a_slot_raises_immediately(env):
     a = g.admit(URL, dl(2))
     t = time.monotonic()
@@ -599,6 +604,7 @@ def test_reset_rejects_slots_below_one(env, bad):
     assert not (g.gate_dir(URL) / "slots.json").exists()
 
 
+@pytest.mark.timing
 def test_other_thread_holding_makes_exclusive_wait_not_raise(env):
     held, go = threading.Event(), threading.Event()
 
@@ -619,6 +625,7 @@ def test_other_thread_holding_makes_exclusive_wait_not_raise(env):
     th.join(5)
 
 
+@pytest.mark.timing
 def test_other_task_holding_makes_exclusive_wait_but_child_task_raises(env):
     async def main():
         held, go = asyncio.Event(), asyncio.Event()

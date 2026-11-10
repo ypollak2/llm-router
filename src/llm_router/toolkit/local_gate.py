@@ -26,7 +26,7 @@ import weakref
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from llm_router import failopen
+from llm_router import failopen, paths, state_files
 from llm_router.toolkit.adapters.ollama import LocalModelConflict
 
 __all__ = [
@@ -127,7 +127,7 @@ def _key(url: str) -> str:
 
 def gate_dir(url: str) -> Path:
     base = os.environ.get("LLM_ROUTER_LOCAL_GATE_DIR", "").strip()
-    root = Path(base) if base else Path(os.path.expanduser("~")) / ".llm-router" / "run" / "local-gate"
+    root = Path(base) if base else paths.state_path("run", "local-gate")
     return root / _key(url)
 
 
@@ -135,9 +135,7 @@ def _log_row(url: str, outcome: str, **fields) -> None:
     """Counts only, never prompt text."""
     row = {"ts": round(time.time(), 3), "url_key": _key(url), "outcome": outcome, **fields}
     try:
-        path = Path(os.path.expanduser("~")) / ".llm-router" / "local_gate.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as fh:
+        with state_files.open_private(paths.state_path("local_gate.jsonl"), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
     except OSError as exc:
         failopen.record("CHZ-FO-LOCAL-GATE-LOG", exc)
@@ -416,7 +414,7 @@ def _read_config(path: Path):
 
 def _write_config(d: Path, n: int) -> None:
     tmp = d / f"slots.json.tmp.{os.getpid()}"
-    with open(tmp, "w", encoding="utf-8") as fh:
+    with state_files.open_private(tmp, "w", encoding="utf-8") as fh:
         fh.write(json.dumps({"slots": n}))
         fh.flush()
         os.fsync(fh.fileno())
