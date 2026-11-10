@@ -117,6 +117,8 @@ _INDIRECT_READS = frozenset({
     "LLM_ROUTER_STATUSLINE",
     # Same script: the sampled statusline timing row (PLAN v16 P0.9-c).
     "LLM_ROUTER_STATUSLINE_TIMING",
+    # D-455: proxy/local_mode.py reads it through the EXEMPT_POLICY_ENV constant, not a literal.
+    "LLM_ROUTER_LOCAL_EXEMPT",
     # P3.8-a: public settings read ONLY through pydantic RouterConfig (field name ==
     # env name, case-insensitive), which the literal-arg scan cannot see.
     # test_every_public_name_is_registered_and_read checks each against model_fields.

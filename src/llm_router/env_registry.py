@@ -252,6 +252,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # Opt-in serve mode (proxy/local_mode.py): off (default) or local-agent.
     "LLM_ROUTER_PROXY_LOCAL_AGENT_MODE": ("llm_router", "proxy/server.py", 1),
     # Opt-in SHADOW mode (proxy/local_shadow.py): off (default) or on.
+    # D-455: which exempt classes refuse local serving (proxy/local_mode.py, read per request
+    # through EXEMPT_POLICY_ENV): "coordinator,subagent" (default; also unset/empty/invalid),
+    # "coordinator", "subagent" or "none"; case-insensitive.
+    "LLM_ROUTER_LOCAL_EXEMPT": ("llm_router", "proxy/local_mode.py", 1),
     "LLM_ROUTER_PROXY_LOCAL_GATE": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_LOCAL_SHADOW": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TIERS": ("llm_router", "proxy/server.py", 1),
