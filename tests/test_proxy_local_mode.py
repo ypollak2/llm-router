@@ -1175,3 +1175,22 @@ async def test_unpin_needs_messages_actually_masked(env, monkeypatch):
     lm = env.rows()[-1]["local_mode"]
     assert env.rows()[-1]["history_mask"]["messages_masked"] == 0
     assert len(backend.calls) == n and lm["reason"] == "pinned_claude" and "unpin" not in lm
+
+
+async def test_an_id_less_backend_reply_is_served_with_an_id_and_a_ledger_row(env):
+    """BUG-IDLESS-1: message["id"] raised KeyError (500, no row) when a backend returned a message without one."""
+    class IdLess(Backend):
+        async def complete(self, body, timeout_s):
+            m, err, usage = await super().complete(body, timeout_s)
+            m.pop("id")
+            return m, err, usage
+
+    r = await _post(env.app(IdLess(_ollama("", [_call("Bash", {"command": "ls"})]))), _first_call())
+    assert r.status_code == 200
+    (start,) = [json.loads(ln[6:]) for ln in r.text.splitlines()
+                if ln.startswith("data: ") and '"message_start"' in ln]
+    sent_id = start["message"]["id"]
+    assert sent_id.startswith("msg_lr")
+    (row,) = env.rows()
+    assert row["decision"] == "served" and row["msg_id"] == sent_id
+

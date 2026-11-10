@@ -109,6 +109,7 @@ from llm_router.proxy.translate import (
     to_ollama,
     has_served_turn,
     is_thinking_rejection,
+    new_msg_id,
     parse_sse_usage,
     sse_from_message,
     sse_response_model,
@@ -777,6 +778,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 backend.complete(send, left), timeout=left)
             _note_prefix(row, body, backend_usage)
             row["backend_usage"] = backend_usage
+            if isinstance(message, dict) and not message.get("id"):
+                # BUG-IDLESS-1: the Backend protocol does not promise an id; every served message carries one.
+                message["id"] = new_msg_id()
             if err:
                 reason = "validation"
             # The backend's own outcome and time, captured before the capability
@@ -863,12 +867,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                        detail=repeat, added_latency_s=elapsed, loop_guard_sig=repeat_hit[1],
                        loop_guard_trigger=TRIGGER_REPEAT)
             return None
+        if not message.get("id"):  # IDLESS-1: also covers a reply the edit protocol put in place of the first one
+            message["id"] = new_msg_id()
         guard.record_served(session_id, message, track_window=loop_guard_cap_no_pin_on())
         if gate_decision is not None:
             lane_gate.note_served(session_id, gate_decision, message, row.get("session_kind"))
         if lm is not None:
             lm.remember_edits(message)
-        row.update(decision=ledger.DECISION_SERVED, reason=None, msg_id=message["id"],
+        row.update(decision=ledger.DECISION_SERVED, reason=None, msg_id=message.get("id"),
                    added_latency_s=0.0,
                    served_blocks=[b["type"] + (":" + b["name"] if b.get("name") else "")
                                   for b in message["content"]],
