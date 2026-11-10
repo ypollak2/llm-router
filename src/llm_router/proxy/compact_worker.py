@@ -175,13 +175,15 @@ class Worker:
         key = min(ready)[1]
         st = self.convs[key]
         self._busy = True
+        evaluated = st.body
         try:
             return await self._step(key, st)
         except Exception as exc:  # noqa: BLE001 - an optimisation, never a crash of the proxy
             failopen.record("LR-FO-PROXY-COMPACT-BG", exc)
             return None
         finally:
-            st.body = None   # evaluated: the next note_done brings a fresh body; never keep a 256K-token request alive
+            if st.body is evaluated:   # a turn that finished while we planned has handed over a newer body: keep it
+                st.body = None   # evaluated: the next note_done brings a fresh body; never keep a 256K-token request alive
             self._busy = False
 
     async def _plan(self, body: dict) -> _Plan:

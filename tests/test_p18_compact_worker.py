@@ -416,3 +416,21 @@ def test_each_reply_check_matters_on_its_own(reply, why):
     live_turn(w)
     idle(w)
     assert run(w.tick())["outcome"] == "invalid" and not chunk_store.ChunkStore().entries, why
+
+
+def test_d1_a_body_handed_over_during_planning_survives():
+    w = mk(MapStub())
+    live_turn(w)
+    idle(w)
+    fresh = _session(pairs=3)
+    real_plan = w._plan
+
+    async def plan_while_a_turn_finishes(body):
+        plan = await real_plan(body)
+        w.note_request("c")
+        w.note_done("c", fresh, TEXT_REPLY)   # a quick live turn ends mid-plan
+        return plan
+
+    w._plan = plan_while_a_turn_finishes
+    run(w.tick())
+    assert w.convs["c"].body is fresh

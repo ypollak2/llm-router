@@ -20,7 +20,12 @@ FLAGS = {"LLM_ROUTER_COMPACT_BG": "1", "LLM_ROUTER_LOCAL_QUEUE": "on", "LLM_ROUT
 class PBackend(MRBackend):
     base_url = "http://localhost:59996"   # never contacted
 
+    def __init__(self):
+        super().__init__()
+        self.priorities = []
+
     async def complete(self, body, timeout_s, priority="interactive"):
+        self.priorities.append(priority)
         return await super().complete(body, timeout_s)
 
 
@@ -56,13 +61,16 @@ async def _serve(env, monkeypatch, flags):  # noqa: F811
     for k, v in flags.items():
         monkeypatch.setenv(k, v)
     seen = _spy_run(monkeypatch)
-    app = env.app(PBackend())
-    out = {}
+    backend = PBackend()
+    app = env.app(backend)
+    out = {"backend": backend}
     async with app.router.lifespan_context(app):
         await asyncio.sleep(0)
         out["during"] = compact_worker.get()
         await _post(app, _first_call())
         out["counts"] = out["during"].counts() if out["during"] else None
+        if out["during"] is not None:   # a real map through the proxy's own map_call
+            out["reply"] = await out["during"].map_call("You compress one slice of a session", 450)
     await asyncio.sleep(0)
     out.update(after=compact_worker.get(), seen=seen, row=env.rows()[-1])
     return out
@@ -90,3 +98,11 @@ async def test_each_missing_flag_builds_no_worker(env, monkeypatch, missing):  #
         assert out["during"] is None and "compact_bg" not in out["row"]
     else:
         assert out["during"] is None and not out["seen"]["started"] and "compact_bg" not in out["row"]
+
+
+async def test_worker_maps_go_out_at_background_priority(env, monkeypatch):  # noqa: F811
+    out = await _serve(env, monkeypatch, FLAGS)
+    backend = out["backend"]
+    assert out["reply"] and out["reply"].startswith("## Goal")   # the map reached the live backend and came back
+    assert backend.priorities[-1] == "background" and backend.maps   # the worker's map, not the live turn
+    assert "background" not in backend.priorities[:-1]            # live turns stay interactive
