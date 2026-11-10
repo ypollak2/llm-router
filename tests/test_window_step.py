@@ -21,11 +21,14 @@ def stepped(unset, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_WINDOW_STEP", str(STEP))
 
 
-def _show(window):
+def _show(window, model=MODEL, params=None):
     from llm_router.local_check.runtimes import OllamaAdapter
     a = OllamaAdapter("http://127.0.0.1:11435")
-    a._show_info = lambda model: {"model_info": {"qwen35moe.context_length": 262144}}
-    return a.context_length("m")
+    info = {"model_info": {"qwen35moe.context_length": 262144}}
+    if params:
+        info["parameters"] = params
+    a._show_info = lambda m: info
+    return a.context_length(model)
 
 
 def test_unset_values_unchanged(unset):
@@ -71,7 +74,7 @@ def test_step_values(stepped):
     assert local_models.num_ctx(None) == STEP          # a caller naming no model gets the shared one
     assert local_models.num_ctx("llmr-classifier") == 4096
     assert local_models.num_ctx("qwen3-coder:30b") == 32768
-    assert local_mode.prompt_cap_tokens() == STEP - local_mode.LOCAL_NUM_PREDICT - 256 - MAX_BLOCK_TOKENS == 127268
+    assert local_mode.prompt_cap_tokens() == int(0.9 * (STEP - local_mode.LOCAL_NUM_PREDICT - 256 - MAX_BLOCK_TOKENS)) == 114541
     assert local_mode.MIN_NUM_CTX == 32768
     assert _show(None) == STEP
 
@@ -147,3 +150,51 @@ def test_window_probe_sends_the_shared_window(stepped):
 def test_env_var_registered():
     from llm_router.env_registry import registered_names
     assert "LLM_ROUTER_WINDOW_STEP" in registered_names()
+
+
+def test_probe_ignores_a_modelfile_window_for_the_shared_model(stepped):
+    assert _show(None, params="num_ctx                        32768") == STEP
+
+
+def test_probe_keeps_the_old_cap_for_other_models(stepped):
+    assert _show(None, model="other:7b") == 32768                       # min(native 262144, cap)
+    assert _show(None, model="other:7b", params="num_ctx 8192") == 8192
+
+
+def test_probe_flag_off_keeps_modelfile_value(unset):
+    assert _show(None, params="num_ctx 16384") == 16384
+
+
+def test_cap_admits_what_the_guard_still_refuses_not_silently_truncates(stepped):
+    """A prompt at the raised cap that the guard's stricter estimate cannot fit is refused
+    before send (ContextOverflow), never sent to be truncated by Ollama."""
+    from llm_router.local_context_guard import ContextOverflow, check_overflow
+    from llm_router.proxy import local_mode
+    cap = local_mode.prompt_cap_tokens()
+    payload = {"m": "a" * int(local_mode.OTHER_CHARS_PER_TOKEN * (cap - 100))}
+    assert local_mode.over_prompt_cap(payload) is None
+    with pytest.raises(ContextOverflow):
+        check_overflow(payload, num_ctx=STEP, model=MODEL, site="test")
+
+
+def test_proxy_num_ctx_cannot_override_the_raised_window(stepped, caplog):
+    from llm_router.proxy.server import ProxyConfig
+    with caplog.at_level("WARNING"):
+        cfg = ProxyConfig(model="ollama/" + MODEL, num_ctx=65536)
+    assert cfg.num_ctx == STEP
+    assert "65536" in caplog.text and "ignored" in caplog.text
+
+
+def test_proxy_num_ctx_override_still_wins_flag_off(unset):
+    from llm_router.proxy.server import ProxyConfig
+    assert ProxyConfig(model="ollama/" + MODEL, num_ctx=65536).num_ctx == 65536
+
+
+def test_invalid_value_warns_once(unset, monkeypatch, caplog):
+    from llm_router import local_models
+    local_models._WARNED.clear()
+    monkeypatch.setenv("LLM_ROUTER_WINDOW_STEP", "131072.0")
+    with caplog.at_level("WARNING"):
+        assert local_models.raised_window() is None
+        assert local_models.raised_window() is None
+    assert caplog.text.count("131072.0") == 1

@@ -359,6 +359,14 @@ class OllamaAdapter(_Adapter):
 
     def context_length(self, model: str) -> int | None:
         info = _dict(self._show_info(model))
+        from llm_router import local_models
+        if local_models.raised_window() is not None:
+            # The shared model is asked for (and loaded at) the raised window whatever the
+            # Modelfile or the trained length says; the fetch above still fills remote_marker.
+            from llm_router.toolkit.adapters.ollama import shared_runner_opts
+            shared = shared_runner_opts(model)
+            if shared:
+                return shared[0]
         params = info.get("parameters")
         for line in (params if isinstance(params, str) else "").splitlines():
             m = re.match(r"\s*num_ctx\s+(\d+)", line)
@@ -366,8 +374,7 @@ class OllamaAdapter(_Adapter):
                 return int(m.group(1))
         for k, v in _dict(info.get("model_info")).items():
             if k.endswith(".context_length") and isinstance(v, int) and v > 0:
-                from llm_router import local_models
-                return min(v, local_models.raised_window() or OLLAMA_CTX_CAP)
+                return min(v, OLLAMA_CTX_CAP)
         return None
 
     def digest(self, model: str) -> str | None:

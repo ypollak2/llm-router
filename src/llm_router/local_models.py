@@ -43,6 +43,18 @@ WINDOW_STEP_ENV = "LLM_ROUTER_WINDOW_STEP"
 MIN_WINDOW_STEP = 32768
 
 
+_WARNED: set[str] = set()
+
+
+def _warn_once(raw: str, why: str) -> None:
+    if raw in _WARNED:
+        return
+    _WARNED.add(raw)
+    import logging
+    logging.getLogger(__name__).warning(
+        "WARN LLM_ROUTER_WINDOW_STEP=%r %s: ignored, the local window stays at the table value", raw, why)
+
+
 def raised_window() -> int | None:
     """The raised window of the shared local model, or None when the flag is off.
 
@@ -50,11 +62,18 @@ def raised_window() -> int | None:
     ``LLM_ROUTER_LOCAL_MODEL`` is set: with no shared model nothing would send the step."""
     import os
 
-    try:
-        step = int(os.environ.get("LLM_ROUTER_WINDOW_STEP", "").strip())
-    except ValueError:
+    raw = os.environ.get("LLM_ROUTER_WINDOW_STEP", "").strip()
+    if not raw:
         return None
-    if step < MIN_WINDOW_STEP or not os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip():
+    try:
+        step = int(raw)
+    except ValueError:
+        _warn_once(raw, "is not an integer")
+        return None
+    if step < MIN_WINDOW_STEP:
+        _warn_once(raw, f"is below the {MIN_WINDOW_STEP} floor")
+        return None
+    if not os.environ.get("LLM_ROUTER_LOCAL_MODEL", "").strip():
         return None
     return step
 
