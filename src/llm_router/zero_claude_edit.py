@@ -485,7 +485,7 @@ def generate_edits(
         with _hl_phase("zce_model"):
             response, _usage = call_ollama(
                 prompt, model, int(round(call_timeout)), system_prompt=_EDIT_SYSTEM_PROMPT,
-                format=EDIT_PAIRS_SCHEMA, keep_alive=edit_keep_alive(),
+                format=EDIT_PAIRS_SCHEMA, keep_alive=edit_keep_alive(model),
             )
         if not response:
             history.append(f"attempt {attempt}: model returned no response")

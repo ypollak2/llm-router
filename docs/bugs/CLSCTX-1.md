@@ -13,9 +13,13 @@ status: fixed in `fix/classifier-shared-runner` (deploy: restart the MCP server 
 - **Cause.** `local_classifier` hard-coded `NUM_CTX = 4096` and `keep_alive` 30m, and `_is_loaded` reported the
   model cold at any other context, so `_warm` reloaded it at 4096. Ollama keys a runner on num_ctx; with one slot
   each warm-up evicted the proxy's runner, then the short keep_alive expired the 4096 one.
-- **Fix.** When `LLM_ROUTER_LOCAL_MODEL` is set and is the classifier's model, `_num_ctx_for` returns the proxy's
-  context (`LLM_ROUTER_PROXY_NUM_CTX`, else `local_models.num_ctx`), `_keep_alive_for` returns -1, and
-  `_is_loaded` accepts that context. `decision_classifier.payload` uses the same keep_alive. Without the policy,
-  nothing changes.
-- **Test.** `tests/test_local_classifier.py`: `test_one_model_*` (payload ctx and keep_alive, `_is_loaded`, no
-  warm-up when resident at the proxy context, warm-up body) and `test_without_one_model_policy_payload_is_unchanged`.
+- **Fix.** One helper, `toolkit/adapters/ollama.shared_runner_opts(model) -> (num_ctx, keep_alive) | None`: set only
+  when `LLM_ROUTER_LOCAL_MODEL` equals the model; num_ctx is `LLM_ROUTER_PROXY_NUM_CTX` else the table value, keep_alive
+  is -1. It beats `LLM_ROUTER_AGENT_NUM_CTX` / `LLM_ROUTER_LOCAL_NUM_CTX` (`ollama.num_ctx` consults it, so the agent
+  loop, `direct_executor._local_num_ctx` and `warm.warmup_payload` follow). Callers using it: `local_classifier`
+  (payload, warm-up, `_is_loaded`), `decision_classifier.payload`, `proxy/backends.OllamaBackend`,
+  `proxy/server.ProxyConfig` (warm-up body), `warm.edit_keep_alive(model)` (so `zero_claude_edit` and the edit warm-up),
+  `direct_executor.call_ollama`, and the `hooks/session-start.py` generic warm-up. Without the policy nothing changes.
+  An explicit `--num-ctx` on the proxy is left as given (it is the proxy's own window).
+- **Test.** `tests/test_shared_runner_opts.py` (one per caller; 10 of 12 fail on origin/main) and the `test_one_model_*`
+  tests in `tests/test_local_classifier.py`.

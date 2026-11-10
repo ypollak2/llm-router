@@ -246,37 +246,22 @@ def _keep_alive() -> str | int:
         return raw
 
 
-def _shared_runner(model: str) -> bool:
-    """True when the one-model policy is on and *model* is that model: the classifier then
-    shares the proxy's runner and must not reload or expire it (Ollama keys a runner on
-    num_ctx; with one slot a 4096 load evicts the proxy's 32768 one)."""
-    try:
-        from llm_router.toolkit.adapters.ollama import get_local_model
-        one = get_local_model()
-        return bool(one and model and _same_model(model, one))
-    except Exception:  # noqa: BLE001 - never raise from the classifier
-        return False
-
-
-def _shared_num_ctx(model: str) -> int:
-    """The context the proxy runs *model* at: LLM_ROUTER_PROXY_NUM_CTX, else the table value."""
-    raw = os.environ.get("LLM_ROUTER_PROXY_NUM_CTX", "").strip()
-    try:
-        if raw and int(raw) > 0:
-            return int(raw)
-    except ValueError:
-        pass
-    from llm_router.local_models import num_ctx
-    return num_ctx(model)
-
-
 def _num_ctx_for(model: str) -> int:
-    return _shared_num_ctx(model) if _shared_runner(model) else NUM_CTX
+    shared = _shared_opts(model)
+    return shared[0] if shared else NUM_CTX
 
 
 def _keep_alive_for(model: str) -> str | int:
-    """-1 (forever) on the shared runner: a shorter value would expire the proxy's model."""
-    return -1 if _shared_runner(model) else _keep_alive()
+    shared = _shared_opts(model)
+    return shared[1] if shared else _keep_alive()
+
+
+def _shared_opts(model: str):
+    try:
+        from llm_router.toolkit.adapters.ollama import shared_runner_opts
+        return shared_runner_opts(model)
+    except Exception:  # noqa: BLE001 - never raise from the classifier
+        return None
 
 
 def _timeout_s() -> float:

@@ -37,8 +37,32 @@ def default_num_ctx(model: str | None) -> int:
     return _table_num_ctx(model)
 
 
+def shared_runner_opts(model: str | None) -> tuple[int, int] | None:
+    """``(num_ctx, keep_alive)`` every caller must send for *model*, or None.
+
+    Set only when ``LLM_ROUTER_LOCAL_MODEL`` is set and equals *model* (``ollama/`` prefix
+    optional). Ollama keys a runner on num_ctx and, with one slot, a call at another context
+    evicts the proxy's runner while a short keep_alive expires it (docs/bugs/CLSCTX-1.md). So
+    under the one-model policy the proxy's window wins over every other override
+    (``LLM_ROUTER_PROXY_NUM_CTX``, else the table value) and keep_alive is -1."""
+    one = get_local_model()
+    name = (model or "").strip()
+    name = name.split("/", 1)[1] if name.startswith("ollama/") else name
+    if not one or not name or not _same_name(name, one):
+        return None
+    raw = os.environ.get("LLM_ROUTER_PROXY_NUM_CTX", "").strip()
+    try:
+        ctx = int(raw) if raw else 0
+    except ValueError:
+        ctx = 0
+    return (ctx if ctx > 0 else default_num_ctx(name)), -1
+
+
 def num_ctx(model: str | None = None) -> int | None:
     """Context window to request, or None to accept the server's default."""
+    shared = shared_runner_opts(model)
+    if shared:
+        return shared[0]
     raw = (os.environ.get("LLM_ROUTER_AGENT_NUM_CTX", "").strip()
            or os.environ.get("LLM_ROUTER_LOCAL_NUM_CTX", "").strip())
     if not raw:

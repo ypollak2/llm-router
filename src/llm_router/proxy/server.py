@@ -231,6 +231,11 @@ class ProxyConfig:
     def __post_init__(self) -> None:
         if self.num_ctx is None and self.model:
             self.num_ctx = local_models.num_ctx(self.model)
+        if self.model:   # one-model policy: never expire the shared runner (CLSCTX-1)
+            from llm_router.toolkit.adapters.ollama import shared_runner_opts
+            _shared = shared_runner_opts(self.model)
+            if _shared:
+                self.keep_alive = _shared[1]
 
     @classmethod
     def from_env(cls) -> "ProxyConfig":

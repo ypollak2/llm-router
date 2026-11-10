@@ -337,6 +337,9 @@ def call_ollama(
         payload["format"] = format
     if keep_alive is not None:
         payload["keep_alive"] = keep_alive
+    _shared = _ollama_ad.shared_runner_opts(model)
+    if _shared:   # one-model policy: never expire the shared runner (CLSCTX-1)
+        payload["keep_alive"] = _shared[1]
     ollama_url = _main_model_url(model)
     try:
         from llm_router.local_context_guard import ContextOverflow, check_overflow

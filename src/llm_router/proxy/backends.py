@@ -308,6 +308,10 @@ class OllamaBackend:
         self.num_ctx = num_ctx if num_ctx is not None else local_models.num_ctx(self.model)
         self.hedge_s = hedge_s
         self.keep_alive = keep_alive
+        from llm_router.toolkit.adapters.ollama import shared_runner_opts
+        _shared = shared_runner_opts(self.model)
+        if _shared:   # one-model policy: never expire the shared runner (CLSCTX-1)
+            self.keep_alive = _shared[1]
 
     async def _guard(self, purpose: str) -> None:
         """Memory guard before this backend loads its model (``ensure_fits`` blocks, so it runs in a thread).
