@@ -46,7 +46,8 @@ class Fake:
             name = json.loads(req.data)["model"]
             if name not in self.show:
                 raise OSError("no such model")
-            return _R({"size": self.show[name]})
+            val = self.show[name]
+            return _R(val if isinstance(val, dict) else {"size": val})
         if url.endswith("/api/generate"):
             body = json.loads(req.data)
             assert body["keep_alive"] == 0, body
@@ -72,6 +73,7 @@ def _env(monkeypatch):
     oa._PS_CACHE.clear()
     oa._RESERVED.clear()
     monkeypatch.setattr(oa.time, "sleep", lambda s: None)
+    monkeypatch.setattr(oa, "_metal_cap_gib", lambda total: None)
     host(monkeypatch, 48.0, 40.0)
     yield
     oa._PS_CACHE.clear()
@@ -208,7 +210,7 @@ def test_short_deadline_still_checks(monkeypatch):
 
 def test_cache_is_keyed_on_model_and_url(monkeypatch):
     from llm_router.toolkit.adapters import ollama as oa
-    fake = Fake(monkeypatch, {"11434": [row("a:30b", 40)], "11435": []},
+    fake = Fake(monkeypatch, {"11434": [row("a:30b", 30)], "11435": []},
                 {TARGET: 25 * GB, "tiny:1b": 1 * GB})
     with pytest.raises(oa.MemoryBudgetExceeded):
         oa.ensure_fits(TARGET, SMALL, "t")
