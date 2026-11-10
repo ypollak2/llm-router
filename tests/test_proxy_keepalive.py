@@ -10,7 +10,7 @@ import pytest
 
 from llm_router.proxy import deadline, keepalive
 from llm_router.proxy.translate import from_ollama
-from tests.test_proxy_local_mode import Backend, _first_call, _ollama, _overrides_readable, _post, env  # noqa: F401  (fixtures)
+from tests.test_proxy_local_mode import PLACEHOLDER, Backend, _first_call, _long_history, _ollama, _texts, _overrides_readable, _post, env  # noqa: F401  (fixtures)
 
 CLAUDE_SSE = (b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_claude","content":[]}}\n\n'
               b'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
@@ -309,3 +309,28 @@ async def test_private_written_marker_is_never_serialized(env, monkeypatch):  # 
     assert keepalive.KEEPALIVE_WRITTEN not in env.ledger.read_text()
     (row,) = env.rows()
     assert row["committed_early"] is True
+
+
+@pytest.mark.timing
+async def test_mask_flag_on_keepalive_path_sends_masked_payload_and_stamps_ledger(env, monkeypatch):  # noqa: F811
+    _on(monkeypatch)
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    env.up = _upstream()
+
+    class Recording(SlowBackend):
+        async def complete(self, body, timeout_s):
+            self.calls.append(body)
+            return await super().complete(body, timeout_s)
+
+    backend = Recording(_ollama("hello"), 0.3)
+    app = env.app(backend)
+    await _post(app, _first_call())  # conversation start (served locally, non-streaming: no keepalive)
+    r = await _post(app, dict(_long_history(), stream=True))
+    assert "ping" in _names(r) and "message_stop" in _names(r)  # committed early, then served from the stream
+    sent = backend.calls[-1]
+    assert sum(t.startswith(PLACEHOLDER) for t in _texts(sent)) == 9
+    row = env.rows()[-1]
+    assert row["committed_early"] is True and row["decision"] == "served"
+    assert row["history_mask"]["messages_masked"] == 9
+    assert row["local_mode"]["raw_est_prompt_tokens"] > row["local_mode"]["est_prompt_tokens"]
+    assert row["est_prompt_tokens"] == row["local_mode"]["est_prompt_tokens"]  # the size KPI reads the masked body

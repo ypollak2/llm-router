@@ -123,7 +123,7 @@ def test_flag_off_means_not_imported_anywhere():
     src = Path(hm.__file__).resolve().parents[1]
     hits = [str(p.relative_to(src)) for p in src.rglob("*.py")
             if p.name not in ("history_mask.py", "env_registry.py") and "history_mask" in p.read_text(encoding="utf-8")]
-    assert hits == []
+    assert hits == ["proxy/server.py"]  # P5: the one lazy import, behind LLM_ROUTER_PROXY_MASK (see mask_local_body)
     code = "import sys, llm_router.proxy.translate, llm_router.proxy.local_mode; print('llm_router.proxy.history_mask' in sys.modules)"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False"

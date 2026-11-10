@@ -16,8 +16,9 @@ from pathlib import Path
 import httpx
 import pytest
 
+from llm_router import failopen
 from llm_router.local_agent import capability as cap
-from llm_router.proxy import ledger, local_mode
+from llm_router.proxy import history_mask, ledger, local_mode
 from llm_router.proxy import server as ps
 from llm_router.proxy.translate import from_ollama
 
@@ -732,3 +733,186 @@ async def test_a_pinned_main_thread_does_not_pin_a_new_subagents_first_call(env,
     assert rows[0]["reason"] == "conversation_started_on_claude" and rows[1]["reason"] == "pinned_claude"
     assert rows[2]["local_mode"]["pin"] is None or rows[2]["local_mode"]["pin"] == "local"
     assert rows[2]["reason"] != "pinned_claude" and rows[2]["local_mode"]["reason"] != "pinned_claude"
+
+
+# -- P5: LLM_ROUTER_PROXY_MASK wires history_mask into the local path (default off) ------------------------
+# The masked copy feeds the cap estimate, the pin decision, the backend payload and the ledger; Claude gets the original.
+
+PLACEHOLDER = history_mask.PLACEHOLDER_PREFIX
+
+
+def _long_history(result_chars: int = 20_000, pairs: int = 15) -> dict:
+    """A main-session conversation of ``pairs`` tool round trips ending on a user tool_result (31 messages:
+    mask boundary 20, so tool_results at messages 2..18 (9 of them) are masked and the last 11 messages stay verbatim)."""
+    body = _first_call()
+    first = body["messages"][0]
+    msgs = [first]
+    for i in range(pairs):
+        msgs.append({"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"toolu_{i}", "name": "Bash", "input": {"command": f"cat f{i}.py"}}]})
+        msgs.append({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": f"toolu_{i}",
+             # only the results below the mask boundary are big, so masking is what brings it under the cap
+             "content": ("line of output %d\n" % i) * ((result_chars if 2 * i + 2 < 20 else 20) // 20)}]})
+    body["messages"] = msgs
+    return body
+
+
+def _texts(body: dict) -> list[str]:
+    out = []
+    for m in body["messages"]:
+        if isinstance(m["content"], list):
+            out += [str(b.get("content")) for b in m["content"] if b.get("type") == "tool_result"]
+    return out
+
+
+def _backend():
+    # distinct replies: the loop guard refuses an identical repeated step
+    return Backend(*[_ollama("", [_call("Bash", {"command": f"ls {i}"})]) for i in range(4)])
+
+
+class _FailsAfterFirst(Backend):
+    async def complete(self, body, timeout_s):
+        if self.calls:
+            self.calls.append(body)
+            raise RuntimeError("backend down")
+        return await super().complete(body, timeout_s)
+
+
+async def _warm(app):
+    """The conversation's first call, served locally: later calls of it are not 'started elsewhere'."""
+    await _post(app, _first_call())
+
+
+async def test_flag_off_payload_and_ledger_are_unchanged(env, monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROXY_MASK", raising=False)
+    body = _long_history(result_chars=500)  # under the cap, so served locally
+    backend = _backend()
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, copy.deepcopy(body))
+    assert backend.calls[-1]["messages"] == body["messages"]
+    row = env.rows()[-1]
+    assert "history_mask" not in row and "raw_est_prompt_tokens" not in row["local_mode"]
+
+
+async def test_flag_off_over_cap_stays_on_claude(env, monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_PROXY_MASK", raising=False)
+    backend = _backend()
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, _long_history())
+    assert len(backend.calls) == 1 and len(env.up.requests) == 1  # only the warm-up was local
+    assert env.rows()[-1]["reason"] == "prompt_over_cap"
+
+
+async def test_flag_on_masks_the_ollama_payload_and_the_cap_uses_the_masked_estimate(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    body = _long_history()
+    assert local_mode.estimate_prompt_tokens(body) > local_mode.PROMPT_CAP_TOKENS  # raw would be refused
+    backend = _backend()
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, copy.deepcopy(body))
+    assert len(backend.calls) == 2 and env.up.requests == []  # served locally: the cap saw the masked body
+    sent = backend.calls[-1]
+    texts = _texts(sent)
+    assert sum(t.startswith(PLACEHOLDER) for t in texts) == 9
+    assert texts[-1] == _texts(body)[-1]  # the verbatim window is untouched
+    row = env.rows()[-1]
+    hm = row["history_mask"]
+    assert hm["messages_masked"] == 9 and hm["chars_saved"] > 0
+    assert hm["raw_est_prompt_tokens"] > local_mode.PROMPT_CAP_TOKENS > hm["est_prompt_tokens"]
+    lm = row["local_mode"]
+    assert lm["raw_est_prompt_tokens"] == hm["raw_est_prompt_tokens"] > lm["est_prompt_tokens"]
+    assert lm["est_prompt_tokens"] <= local_mode.PROMPT_CAP_TOKENS  # the decision saw the masked estimate
+    assert "line of output" not in json.dumps(row)  # counts only, never text
+
+
+async def test_claude_fallback_receives_the_original_unmasked_body(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    body = _long_history()
+    backend = _FailsAfterFirst(_ollama("", [_call("Bash", {"command": "ls"})]))
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, copy.deepcopy(body))
+    assert len(backend.calls) == 2 and len(backend.calls[1]["messages"]) == len(body["messages"])
+    assert any(t.startswith(PLACEHOLDER) for t in _texts(backend.calls[1]))  # local saw the masked copy
+    (req,) = env.up.requests
+    sent = json.loads(req.content)
+    assert sent["messages"] == body["messages"]
+    assert PLACEHOLDER not in req.content.decode()
+    assert env.rows()[-1]["decision"] == "fallback"
+
+
+async def test_masking_raising_serves_unmasked_and_records_failopen(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    seen = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **k: seen.append((code, type(exc).__name__)))
+
+    def boom(*a, **k):
+        raise ValueError("mask broke")
+
+    monkeypatch.setattr(history_mask, "mask_body", boom)
+    body = _long_history(result_chars=500)
+    backend = _backend()
+    app = env.app(backend)
+    await _warm(app)
+    r = await _post(app, copy.deepcopy(body))
+    assert r.status_code == 200
+    assert backend.calls[-1]["messages"] == body["messages"]
+    assert ("LR-FO-PROXY-HISTORY-MASK", "ValueError") in seen
+    assert "history_mask" not in env.rows()[-1]
+
+
+async def test_the_pin_decision_uses_the_masked_estimate(env, monkeypatch):
+    body = _long_history()
+    monkeypatch.delenv("LLM_ROUTER_PROXY_MASK", raising=False)
+    off = env.app(_backend())
+    await _warm(off)
+    await _post(off, copy.deepcopy(body))
+    off_lm = env.rows()[-1]["local_mode"]
+    assert off_lm["reason"] == "prompt_over_cap" and off_lm["pin_change"] == "local->claude"  # structural pin
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    env.ledger.unlink()
+    on = env.app(_backend())  # a fresh app: its pins start empty
+    await _warm(on)
+    await _post(on, copy.deepcopy(body))
+    row = env.rows()[-1]
+    assert row["local_mode"]["local"] is True and "pin_change" not in row["local_mode"]
+    await _post(on, copy.deepcopy(body))  # and the conversation is still local on the next turn
+    assert env.rows()[-1]["local_mode"]["reason"] != "pinned_claude"
+
+
+async def test_local_prefix_path_also_sends_the_masked_payload(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    body = _long_history()
+    body["messages"][0]["content"] = [{"type": "text", "text": "local: continue the task"}]
+    backend = _backend()
+    await _post(env.app(backend), copy.deepcopy(body))
+    assert len(backend.calls) == 1 and env.up.requests == []  # forced local, no warm-up needed
+    texts = _texts(backend.calls[0])
+    assert sum(t.startswith(PLACEHOLDER) for t in texts) == 9
+    row = env.rows()[-1]
+    assert row["local_mode"].get("forced") is True
+    assert row["history_mask"]["messages_masked"] == 9
+    assert row["local_mode"]["raw_est_prompt_tokens"] > local_mode.PROMPT_CAP_TOKENS
+
+
+@pytest.mark.parametrize("value", [None, "0", "false", "off", ""])
+def test_flag_not_on_never_imports_history_mask(value):
+    """A fresh interpreter (this module imports history_mask at the top): an off-looking value must not import it."""
+    import subprocess
+    import sys
+    code = ("import sys\n"
+            "from llm_router.proxy.server import mask_local_body\n"
+            "body = {'messages': [{'role': 'user', 'content': 'hi'}]}\n"
+            "row = {}\n"
+            "assert mask_local_body(body, row) is body and row == {}\n"
+            "print('llm_router.proxy.history_mask' in sys.modules)\n")
+    env = {k: v for k, v in os.environ.items() if k != "LLM_ROUTER_PROXY_MASK"}
+    if value is not None:
+        env["LLM_ROUTER_PROXY_MASK"] = value
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stderr[-500:]
+    assert out.stdout.strip().splitlines()[-1] == "False"
