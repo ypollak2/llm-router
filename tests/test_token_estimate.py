@@ -71,6 +71,13 @@ def test_flag_on_guard_never_looser_than_legacy(monkeypatch, payload):
     assert estimate_payload_tokens(payload) >= math.ceil(max(1, chars) / 3.5 * 1.15)
 
 
+def test_flag_on_unserialisable_payload_falls_back_to_legacy(monkeypatch):
+    monkeypatch.setenv(token_estimate.ENV_FLAG, "1")
+    payload = {1: 2, (1, 2): "x" * 400}  # tuple key: json.dumps raises TypeError even with default=str
+    legacy = math.ceil(max(1, sum(len(str(v)) for v in payload.values())) / 3.5 * 1.15)
+    assert estimate_payload_tokens(payload) == legacy
+
+
 def test_flag_on_char_budget_stays_conservative_for_digit_heavy_text(monkeypatch):
     monkeypatch.setenv(token_estimate.ENV_FLAG, "1")
     budget = runtimes.max_prompt_chars(32768)

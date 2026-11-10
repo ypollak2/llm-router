@@ -129,7 +129,10 @@ def estimate_payload_tokens(payload: dict) -> int:
     if calibrated_enabled():
         # Never looser than the legacy guard: the calibrated count only raises the estimate (code),
         # it never lowers the backstop on prose/JSON, where it reads ~9-11% below chars/3.5 x 1.15.
-        return max(legacy, math.ceil(est_tokens(payload) * CALIBRATED_SAFETY_MARGIN))
+        try:
+            return max(legacy, math.ceil(est_tokens(payload) * CALIBRATED_SAFETY_MARGIN))
+        except (TypeError, ValueError, RuntimeError):  # unserialisable or too deep (RecursionError): legacy counted it
+            return legacy
     return legacy
 
 
