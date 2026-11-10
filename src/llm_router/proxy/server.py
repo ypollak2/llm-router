@@ -341,6 +341,27 @@ def refusal_message(text: str, model: str | None) -> dict:
             "usage": {"input_tokens": 0, "output_tokens": 0}}
 
 
+def mask_local_body(body: dict, row: dict) -> dict:
+    """P5: the history-masked copy of ``body`` for the local path, or ``body`` itself when the flag is
+    off (history_mask is then not even imported) or masking fails (failopen, never a 500). Writes counts
+    only (no text) to ``row['history_mask']``; the caller copies the raw estimate next to local_mode's
+    ``est_prompt_tokens`` once the local step has written it."""
+    if os.environ.get("LLM_ROUTER_PROXY_MASK", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return body  # same parse as history_mask.enabled(), without importing it
+    try:
+        from llm_router.proxy import history_mask
+        if not history_mask.enabled():
+            return body
+        masked, st = history_mask.mask_body(body)
+    except Exception as exc:  # noqa: BLE001 - masking is an optimisation; the unmasked body is served
+        failopen.record("LR-FO-PROXY-HISTORY-MASK", exc)
+        return body
+    row["history_mask"] = {"messages_masked": st.masked, "chars_saved": st.chars_saved,
+                           "raw_est_prompt_tokens": st.est_tokens_before,
+                           "est_prompt_tokens": st.est_tokens_after}
+    return masked
+
+
 def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None,
               haiku_guard_run=None, local_gate_deps=None):
     """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
@@ -728,26 +749,6 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                                   for b in message["content"]],
                    served_stop_reason=message["stop_reason"])
         return message
-
-    def mask_local_body(body: dict, row: dict) -> dict:
-        """P5: the history-masked copy of ``body`` for the local path, or ``body`` itself when the flag is
-        off (history_mask is then not even imported) or masking fails (failopen, never a 500). Writes counts
-        only (no text) to ``row['history_mask']``; the caller copies the raw estimate next to local_mode's
-        ``est_prompt_tokens`` once the local step has written it."""
-        if not os.environ.get("LLM_ROUTER_PROXY_MASK"):
-            return body
-        try:
-            from llm_router.proxy import history_mask
-            if not history_mask.enabled():
-                return body
-            masked, st = history_mask.mask_body(body)
-        except Exception as exc:  # noqa: BLE001 - masking is an optimisation; the unmasked body is served
-            failopen.record("LR-FO-PROXY-HISTORY-MASK", exc)
-            return body
-        row["history_mask"] = {"messages_masked": st.masked, "chars_saved": st.chars_saved,
-                               "raw_est_prompt_tokens": st.est_tokens_before,
-                               "est_prompt_tokens": st.est_tokens_after}
-        return masked
 
     async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served

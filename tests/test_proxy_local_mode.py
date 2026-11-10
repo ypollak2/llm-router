@@ -864,3 +864,37 @@ async def test_the_pin_decision_uses_the_masked_estimate(env, monkeypatch):
     assert row["local_mode"]["local"] is True and "pin_change" not in row["local_mode"]
     await _post(on, copy.deepcopy(body))  # and the conversation is still local on the next turn
     assert env.rows()[-1]["local_mode"]["reason"] != "pinned_claude"
+
+
+async def test_local_prefix_path_also_sends_the_masked_payload(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    body = _long_history()
+    body["messages"][0]["content"] = [{"type": "text", "text": "local: continue the task"}]
+    backend = _backend()
+    await _post(env.app(backend), copy.deepcopy(body))
+    assert len(backend.calls) == 1 and env.up.requests == []  # forced local, no warm-up needed
+    texts = _texts(backend.calls[0])
+    assert sum(t.startswith(PLACEHOLDER) for t in texts) == 9
+    row = env.rows()[-1]
+    assert row["local_mode"].get("forced") is True
+    assert row["history_mask"]["messages_masked"] == 9
+    assert row["local_mode"]["raw_est_prompt_tokens"] > local_mode.PROMPT_CAP_TOKENS
+
+
+@pytest.mark.parametrize("value", [None, "0", "false", "off", ""])
+def test_flag_not_on_never_imports_history_mask(value):
+    """A fresh interpreter (this module imports history_mask at the top): an off-looking value must not import it."""
+    import subprocess
+    import sys
+    code = ("import sys\n"
+            "from llm_router.proxy.server import mask_local_body\n"
+            "body = {'messages': [{'role': 'user', 'content': 'hi'}]}\n"
+            "row = {}\n"
+            "assert mask_local_body(body, row) is body and row == {}\n"
+            "print('llm_router.proxy.history_mask' in sys.modules)\n")
+    env = {k: v for k, v in os.environ.items() if k != "LLM_ROUTER_PROXY_MASK"}
+    if value is not None:
+        env["LLM_ROUTER_PROXY_MASK"] = value
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert out.returncode == 0, out.stderr[-500:]
+    assert out.stdout.strip().splitlines()[-1] == "False"
