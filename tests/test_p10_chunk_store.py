@@ -289,6 +289,40 @@ def test_over_length_valid_reply_hits_on_the_second_turn_with_identical_text():
     assert r2.body == r1.body  # injected text byte-identical to what the miss injected
 
 
+def test_preamble_reply_is_not_stored_and_does_not_churn_the_file(home):
+    call = Counter("Sure, here:\n" + SUMMARY)
+    assert mr_summary.valid_summary(call.reply)
+    r1 = _run(_body(), call, chunk_store.ChunkStore())
+    assert r1.changed and r1.row["store_writes"] == 0
+    p = home / chunk_store.FILE_NAME
+    before = p.read_bytes() if p.exists() else None
+    r2 = _run(_body(), call, chunk_store.ChunkStore())
+    assert r2.row["store_writes"] == 0 and r2.row["store_hits"] == 0
+    assert (p.read_bytes() if p.exists() else None) == before
+
+
+def test_changed_map_prompt_est_tokens_or_token_constant_is_a_miss(monkeypatch):
+    from llm_router import token_estimate as te
+    call = Counter()
+    _run(_body(), call, chunk_store.ChunkStore())
+    orig_prompt, orig_est = mr_summary.map_prompt, mr_summary.est_tokens
+
+    def other_prompt(messages):
+        return orig_prompt(messages)  # different source, same text
+
+    def other_est(x):
+        return orig_est(x)
+
+    for target, name, val in ((mr_summary, "map_prompt", other_prompt), (mr_summary, "est_tokens", other_est),
+                              (te, "DIGIT_TOKENS", te.DIGIT_TOKENS + 0.1),
+                              (te, "WIDE_CHAR_TOKENS", te.WIDE_CHAR_TOKENS + 0.1),
+                              (te, "OTHER_CHARS_PER_TOKEN", te.OTHER_CHARS_PER_TOKEN + 0.1)):
+        with monkeypatch.context() as m:
+            m.setattr(mr_summary, "_CODE_HASH", None)  # recomputed from the patched source
+            m.setattr(target, name, val)
+            assert _run(_body(), call, chunk_store.ChunkStore()).row["store_hits"] == 0, name
+
+
 def test_changed_render_or_validity_code_hash_is_a_miss(monkeypatch):
     call = Counter()
     _run(_body(), call, chunk_store.ChunkStore())

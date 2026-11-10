@@ -71,8 +71,10 @@ def key_salt() -> str:
         except (OSError, TypeError):
             src = "nosource"
         _CODE_HASH = hashlib.sha256(src.encode("utf-8", "surrogatepass")).hexdigest()
-    return "%d|%d|%d|%d|%r|%r|%s" % (BODY_EST, BLOCK_CHARS, INPUT_EST, SUMMARY_CEIL, BLOCK_MARK, INPUT_MARK,
-                                     _CODE_HASH)
+    from llm_router import token_estimate as te
+    return "%d|%d|%d|%d|%r|%r|%r|%r|%r|%s" % (BODY_EST, BLOCK_CHARS, INPUT_EST, SUMMARY_CEIL, BLOCK_MARK,
+                                              INPUT_MARK, te.DIGIT_TOKENS, te.WIDE_CHAR_TOKENS,
+                                              te.OTHER_CHARS_PER_TOKEN, _CODE_HASH)
 
 
 def enabled() -> bool:
@@ -418,7 +420,7 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
             reply = reply.strip()
             if valid_summary(reply):
                 text = reply if est_tokens(reply) <= BODY_EST else _head_by_est(reply, BODY_EST)
-                if skey is not None:
+                if skey is not None and text.startswith(HEADINGS[0]):  # a preamble reply could never hit
                     store.put(skey, text)
                     store.flush()  # kept even if a later chunk hits the turn deadline
                 break
