@@ -144,8 +144,8 @@ except Exception:
 try:
     from llm_router.ensemble import warm_primary as _warm_primary
     _warm_primary()
-except Exception:
-    pass
+except Exception as _warm_exc:  # noqa: BLE001 — best-effort, but not silent
+    log.warning("ensemble warm-up failed to start: %s", type(_warm_exc).__name__)
 
 # ── Initialize dynamic routing tables on startup ────────────────────────────────
 # Build custom routing tables based on discovered available providers.

@@ -167,12 +167,12 @@ def _is_small_model(model: str | None) -> bool:
         return False
 
 
-def resolve_main_model(model: str | None, site: str = "") -> str | None:
+def resolve_main_model(model: str | None, site: str = "", *, quiet: bool = False) -> str | None:
     """The model a main-local-model path must use.
 
     With ``LLM_ROUTER_LOCAL_MODEL`` set, every caller-supplied model is replaced by
     it (the override is logged); a small classifier/decision model is left alone.
-    Unset: ``model`` unchanged.
+    Unset: ``model`` unchanged. ``quiet`` suppresses the override log (pure lookups).
     """
     allowed = get_local_model()
     if not allowed or _is_small_model(model):
@@ -180,7 +180,8 @@ def resolve_main_model(model: str | None, site: str = "") -> str | None:
     if model:
         had_prefix = next((p for p in ("ollama_chat/", "ollama/") if model.startswith(p)), "")
         if model.removeprefix("ollama_chat/").removeprefix("ollama/") != allowed:
-            _log.warning("LLM_ROUTER_LOCAL_MODEL override at %s: %s -> %s", site or "?", model, allowed)
+            if not quiet:
+                _log.warning("LLM_ROUTER_LOCAL_MODEL override at %s: %s -> %s", site or "?", model, allowed)
             return had_prefix + allowed
         return model
     return allowed

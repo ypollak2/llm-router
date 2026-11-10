@@ -129,7 +129,12 @@ def _ollama_num_ctx(model: str | None = None) -> int | None:
     """
     import os
 
-    from llm_router.toolkit.adapters.ollama import shared_runner_opts
+    from llm_router.toolkit.adapters.ollama import resolve_main_model, shared_runner_opts
+    # num_ctx must match the model actually SENT: call_llm rewrites the caller's
+    # name to LLM_ROUTER_LOCAL_MODEL later, so resolve it the same way first.
+    # Otherwise the shared runner is hit with the table window and reloaded.
+    if model:
+        model = resolve_main_model(model, quiet=True) or model
     shared = shared_runner_opts(model.split("/", 1)[-1] if model else None)
     if shared:   # one-model policy beats an explicit LLM_ROUTER_OLLAMA_NUM_CTX (CLSCTX-1)
         return shared[0]
