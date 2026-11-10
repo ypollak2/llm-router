@@ -690,3 +690,28 @@ def test_both_paths_pick_the_same_boundary_among_duplicate_messages():
 def test_commit_without_a_key_keeps_no_state():
     hl._commit(None, [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}], moved=True, reason="x")
     assert len(hl._STATE) == 0
+
+
+async def test_owner_marker_is_back_to_default_after_the_request_even_when_local_step_raises(env, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    monkeypatch.setenv("LLM_ROUTER_PROXY_LAYOUT", "1")
+    seen = []
+    real = hl.observe
+
+    def spy(*a, **k):
+        seen.append(hl.LOCAL_AGENT_OWNS.get())  # inside the step the marker is set
+        return real(*a, **k)
+
+    monkeypatch.setattr(hl, "observe", spy)
+    app = env.app(MRBackend())
+    await _warm(app)
+    await _post(app, copy.deepcopy(_session(pairs=40, result_chars=3_000)))
+    assert seen and all(seen) and hl.LOCAL_AGENT_OWNS.get() is False
+
+    def boom(*a, **k):
+        raise RuntimeError("step failed")
+
+    monkeypatch.setattr(hl, "observe", boom)
+    with pytest.raises(RuntimeError, match="step failed"):  # local_step raises through the app
+        await _post(app, copy.deepcopy(_session(pairs=41, result_chars=3_000)))
+    assert hl.LOCAL_AGENT_OWNS.get() is False

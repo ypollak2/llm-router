@@ -1010,7 +1010,18 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             est=lambda b: local_mode.estimate_prompt_tokens(to_ollama(b, model, num_ctx=cfg.num_ctx, max_predict=1)),
             yield_check=lambda: queue_gate.should_yield(backend.base_url)))
 
-    async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None,
+    async def local_step(*args, **kwargs):
+        """P14: with the layout on, this request's layout state is written by the local-agent path only (the
+        ``fast`` trim must not also write it); the marker is reset when the step ends, raised or not."""
+        if not history_layout.enabled():
+            return await _local_step(*args, **kwargs)
+        token = history_layout.LOCAL_AGENT_OWNS.set(True)
+        try:
+            return await _local_step(*args, **kwargs)
+        finally:
+            history_layout.LOCAL_AGENT_OWNS.reset(token)
+
+    async def _local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None,
                           cap_body: dict | None = None) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served
         message, or ``None`` after writing the reason and the egress notice.
@@ -1077,7 +1088,6 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             layout_on = history_layout.enabled()
             held = None
             if layout_on:  # P14: last move's frozen layout, if it still fits: no map call, an append-only prefix
-                history_layout.LOCAL_AGENT_OWNS.set(True)  # this request's layout state is written here only
                 held = history_layout.hold(layout_key, body.get("messages") or [], lambda msgs: local_mode.estimate_prompt_tokens(
                     to_ollama(dict(body, messages=msgs), cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx,
                               max_predict=1)) <= local_mode.prompt_cap_tokens())
@@ -1149,7 +1159,6 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             cold_seq = cold_guard.GUARD.seq
             if history_layout.enabled():  # P14: the counter; flag off adds no field and no call
                 ev = layout_event or (False, history_layout.REASON_UNDER_CAP)
-                history_layout.LOCAL_AGENT_OWNS.set(True)
                 history_layout.observe(layout_key, body.get("messages") or [], moved=ev[0], reason=ev[1],
                                        freeze=layout_event is not None)
                 row_layout = history_layout.take_stats(layout_key)
