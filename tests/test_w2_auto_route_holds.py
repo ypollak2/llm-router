@@ -43,6 +43,12 @@ def _env(home: Path, enforce: str = "smart") -> dict:
     e.update(HOME=str(home), LLM_ROUTER_HOME=str(home / ".llm-router"), LLM_ROUTER_ENFORCE=enforce,
              LLM_ROUTER_DISABLE_LLM_CLASSIFIERS="1", LLM_ROUTER_DIRECT_EXECUTION="0",
              OPENAI_API_KEY="", GEMINI_API_KEY="", GOOGLE_API_KEY="")
+    # Pin provider detection. The first hook run spawns a detached resource-map refresh;
+    # on a machine with no connected provider (CI) the map it writes makes the next turn
+    # "no provider": observation only, "nothing held" never printed. A key name always
+    # counts (task_availability.available_providers), so the verdict no longer depends on
+    # the machine or on whether that child finished before the next turn.
+    e.update(DEEPSEEK_API_KEY="test-key-never-used")
     return e
 
 
