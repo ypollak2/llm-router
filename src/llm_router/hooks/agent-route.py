@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 30
+# llm_router-hook-version: 35
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -2754,13 +2754,14 @@ def _handoff_state():
         return None
 
 
-def _note_handoff_delivered(session_id: str, prompt: str) -> None:
+def _note_handoff_delivered(session_id: str, prompt: str, tool_use_id: "str | None" = None) -> None:
     """Remember that this Agent call is being denied with a Codex result (void detection, re-issue guard)."""
     handoff = _handoff_state()
     if handoff is None:
         return
     try:
-        handoff.note_delivered(session_id, _current_tool_use_id, handoff.prompt_fingerprint(prompt))
+        handoff.note_delivered(session_id, _current_tool_use_id if tool_use_id is None else tool_use_id,
+                               handoff.prompt_fingerprint(prompt))
     except Exception as exc:  # noqa: BLE001
         try:
             from llm_router import failopen
@@ -2790,7 +2791,9 @@ def _try_codex_subagent_delegation(
     work (``_blocked_marker``) is NOT returned: it is logged ``codex_blocked``
     and None is returned, so the Agent call is allowed and Claude does the work.
     """
-    global _last_codex_model
+    global _last_codex_model, _last_codex_saved_path, _last_codex_pruned
+    _last_codex_saved_path = None
+    _last_codex_pruned = 0
     # Documented carve-out (owner, 2026-10-02): unlike the local-model direct path and
     # the routing note, which are now opt-in, Codex delegation stays ON by default
     # (opt out with LLM_ROUTER_AGENT_ROUTE_CODEX=off); it is measured separately.
@@ -2957,8 +2960,11 @@ def _try_codex_subagent_delegation(
                       prompt, task_type, complexity, session_id, ledger_session_id)
     _govern_run(subagent_type, "codex", res.model,
                 max(1, len(prompt) // 4), max(1, len(res.content) // 4), complexity)
+    _last_codex_saved_path = _save_codex_result(res.content)
     _delegated_ts = _record_north_star_unit(
         "agent_route_codex", model=res.model, outcome="delegated",
+        delivery="file_echo" if _last_codex_saved_path else "deny_fallback",
+        pruned=_last_codex_pruned,
         subagent_type=subagent_type, task_type=task_type,
         complexity=complexity, session_id=session_id,
         duration_sec=res.duration_sec, sandbox=sandbox,
@@ -2975,6 +2981,106 @@ def _try_codex_subagent_delegation(
         _verify_enqueue_marker(res, session_id, _delegated_ts, working_dir)
     _last_codex_model = res.model
     return res.content
+
+
+# ── Save to file + tiny echo (fix/codex-handoff-file-echo) ───────────────────
+# A deny is labelled "Error:" by Claude Code whatever the reason says, and no hook decision can substitute a tool
+# result (PostToolUse updatedOutput is ignored for built-in tools, tested live 2026-09-12). So a successful Codex
+# run is written to a private file and the Agent call is ALLOWED with a rewritten prompt: a Haiku sub-agent that
+# replies with one line naming the file. The parent reads the file for the result. The deny stays as the fallback
+# when the file cannot be written. The file holds model output: nothing else (log, ledger, stderr) carries its text.
+_last_codex_saved_path: "str | None" = None  # where the last delegated result was saved (None: not saved)
+_last_codex_pruned = 0  # old result files the last save deleted (retention)
+
+
+def _results_retention_days() -> float:
+    """LLM_ROUTER_AGENT_RESULTS_DAYS: result files older than this are deleted on each save (default 7; 0 keeps all)."""
+    raw = os.environ.get("LLM_ROUTER_AGENT_RESULTS_DAYS", "").strip()
+    try:
+        return max(0.0, float(raw)) if raw else 7.0
+    except ValueError:
+        return 7.0
+
+
+def _prune_results(d: Path, keep: Path) -> int:
+    """Delete hook-named result files in ``d`` older than the retention window, never ``keep``. An OSError is counted
+    (failopen CHZ-FO-AGENT-ROUTE-RESULTS-PRUNE), never raised."""
+    days = _results_retention_days()
+    if days <= 0:
+        return 0
+    n = 0
+    try:
+        cutoff = time.time() - days * 86400
+        for f in d.iterdir():
+            try:
+                if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\.md", f.name) and f != keep and f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    n += 1
+            except OSError as exc:
+                _failopen("CHZ-FO-AGENT-ROUTE-RESULTS-PRUNE", exc)
+                continue
+    except OSError as exc:
+        _failopen("CHZ-FO-AGENT-ROUTE-RESULTS-PRUNE", exc)
+    return n
+
+
+def _agent_results_dir() -> Path:
+    return _router_home() / "agent-results"
+
+
+def _save_codex_result(text: str) -> "str | None":
+    """Write ``text`` to ``<router home>/agent-results/<utc-ts>-<uuid8>.md`` (file 0600, dir 0700) and return its
+    absolute path, or None when it cannot be written (the caller then falls back to the deny)."""
+    try:
+        d = _agent_results_dir()
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(d, 0o700)
+        name = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:8]}.md"
+        path = d / name
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        global _last_codex_pruned
+        _last_codex_pruned = _prune_results(d, path)
+        return str(path.resolve())
+    except Exception as exc:  # noqa: BLE001 -- unwritable dir/disk: the deny path delivers the result instead
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-CODEX-RESULT-FILE", exc)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+
+def _echo_prompt(path: str, description: str) -> str:
+    desc = " ".join(str(description or "").split())[:120] or "sub-agent task"
+    line = f"Codex result saved at {path} (task: {desc}). Read that file for the full result."
+    return ("Reply with exactly this one line and nothing else. Use no tools.\n\n" + line)
+
+
+def _emit_file_echo(tool_input: dict, path: str) -> None:
+    """ALLOW the Agent call with its input rewritten to a one-line echo that names ``path``. Works for a foreground
+    and a background spawn alike: the echo is forced foreground, and its reply is the parent's tool result."""
+    description = tool_input.get("description") or ""
+    new_input = {k: v for k, v in tool_input.items() if k not in ("isolation", "worktree")}
+    new_input.update({
+        "model": "haiku",
+        "subagent_type": "general-purpose",
+        "run_in_background": False,
+        "prompt": _echo_prompt(path, description),
+    })
+    _emit({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": new_input,
+            "permissionDecisionReason": (
+                f"[llm-router] This sub-agent task ran on Codex CLI "
+                f"({_last_codex_model or 'ChatGPT subscription'}, outside your Claude quota); "
+                f"the result is saved at {path}"
+            ),
+        }
+    })
 
 
 def _note_local_candidate(prompt: str, task_type: str, complexity: str, subagent_type: str, session_id: str,
@@ -3050,6 +3156,14 @@ def _main() -> None:
     _current_tool_use_id = str(hook_input.get("tool_use_id") or "").strip()
 
     tool_input = hook_input.get("tool_input", {})
+    try:
+        from llm_router.codex_handoff import is_file_echo
+    except ImportError:  # llm_router not importable here: no echo can have been emitted from it
+        def is_file_echo(_tool_input) -> bool:
+            return False
+
+    if is_file_echo(tool_input):
+        return  # receipt: no routing, budget, spawn state, or North Star unit
     prompt = tool_input.get("prompt", "").strip()
     subagent_type = tool_input.get("subagent_type", "general-purpose")
 
@@ -3212,6 +3326,12 @@ def _main() -> None:
         ) if not _secret_hold and not _verdict_claude else None
     if _codex_delegated is not None:
         _log_agent_call(subagent_type, prompt, "routed_codex_subagent")
+        if _last_codex_saved_path:
+            # the call is ALLOWED, so PostToolUse[Agent] will fire for it: a distinct id keeps that from counting as a
+            # void deny, while the prompt fingerprint still feeds the re-issue guard
+            _note_handoff_delivered(session_id, prompt, tool_use_id=f"echo:{_current_tool_use_id}")
+            _emit_file_echo(tool_input, _last_codex_saved_path)
+            return
         _note_handoff_delivered(session_id, prompt)
         _emit(_deny(_result_message(
             _codex_delegated,

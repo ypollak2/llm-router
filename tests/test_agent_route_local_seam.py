@@ -20,6 +20,7 @@ import pytest
 from llm_router import agent_route_local as local
 from llm_router import paths
 from tests._bind_support import (
+    delivered_text,
     AGENT_ROUTE,
     agent_payload,
     decision_of,
@@ -243,7 +244,7 @@ def test_a_benched_codex_leaves_the_decision_alone_and_records_the_local_verdict
 def test_a_delegated_task_writes_no_local_row(ctx):
     proc = ctx.run(PROMPT)
     decision = decision_of(proc)
-    assert decision and "STUB-CODEX-ANSWER-w11" in json.dumps(decision)
+    assert decision and "STUB-CODEX-ANSWER-w11" in delivered_text(decision)
     assert [r["lever"] for r in ledger_rows(ctx.home)] == ["agent_route_codex"]
     assert not (ctx.home / ".llm-router" / local.LOG_FILE).exists()
 
@@ -252,7 +253,7 @@ def test_end_to_end_a_long_bench_is_probed_by_the_real_task_and_lifted(ctx):
     ctx.bench(48 * HOUR)
     proc = ctx.run(PROMPT)
     decision = decision_of(proc)
-    assert decision and "STUB-CODEX-ANSWER-w11" in json.dumps(decision)  # bound exactly like any Codex answer
+    assert decision and "STUB-CODEX-ANSWER-w11" in delivered_text(decision)  # bound exactly like any Codex answer
     assert len(stub_calls(ctx.log)) == 1
     delegated = [r for r in ledger_rows(ctx.home) if r["outcome"] == "delegated"]
     assert len(delegated) == 1 and delegated[0]["canary"] is True

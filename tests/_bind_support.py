@@ -203,3 +203,26 @@ def ledger_rows(home: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def break_results_dir(home: Path) -> None:
+    """Make ``<router home>/agent-results`` unwritable-as-a-directory (a regular file stands there), so a Codex
+    handoff takes the deny fallback instead of the file echo."""
+    state = home / ".llm-router"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "agent-results").write_text("not a directory")
+
+
+def echo_path_of(decision: dict) -> str:
+    """The saved-result path named by a file-echo decision (allow + rewritten prompt)."""
+    import re
+
+    prompt = decision["hookSpecificOutput"]["updatedInput"]["prompt"]
+    return re.search(r"Codex result saved at (\S+) \(task:", prompt).group(1)
+
+
+def delivered_text(decision: dict) -> str:
+    """The Codex answer a decision delivered: the deny reason, or the content of the file the echo names."""
+    if "reason" in decision:
+        return decision["reason"]
+    return Path(echo_path_of(decision)).read_text(encoding="utf-8")

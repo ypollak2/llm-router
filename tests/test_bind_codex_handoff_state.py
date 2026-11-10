@@ -147,3 +147,31 @@ def test_post_tool_use_hook_with_no_state_does_nothing(home):
     assert proc.returncode == 0 and proc.stdout == ""
     assert not (home / ".llm-router" / "agent_depth_never-delegated.json").exists()
     assert not os.path.exists(home / ".llm-router" / "north_star_units.jsonl")
+
+
+def test_unconfirmed_echoes_are_counted_but_never_open_the_breaker(home):
+    for n in range(1, 5):
+        token = f"echo_ignored_{n}"
+        ch.note_delivered(SID, f"echo:{token}", f"hash-{n}")
+        assert ch.note_agent_launched(SID, token, is_echo=False) == 0      # hit, nothing charged
+        assert ch.note_agent_launched(SID, token, is_echo=False) is None   # counted once per id
+        assert ch.echo_unconfirmed_in_session(SID) == n
+        assert ch.voids_in_session(SID) == 0
+        assert not ch.breaker_open(SID)
+
+
+def test_mixed_plain_and_echo_entries_charge_one_void_and_consume_both(home):
+    ch.note_delivered(SID, "toolu_mix", "hash-a")
+    ch.note_delivered(SID, "echo:toolu_mix", "hash-b")
+    assert ch.note_agent_launched(SID, "toolu_mix", is_echo=False) == 1
+    assert ch.note_agent_launched(SID, "toolu_mix", is_echo=True) is None   # both entries consumed
+    assert ch.voids_in_session(SID) == 1
+    assert ch.echo_unconfirmed_in_session(SID) == 0
+
+
+def test_plain_id_void_still_opens_breaker_after_three_strikes(home):
+    for n in range(1, 4):
+        token = f"deny_void_{n}"
+        ch.note_delivered(SID, token, f"hash-{n}")
+        assert ch.note_agent_launched(SID, token, is_echo=False) == n
+        assert ch.breaker_open(SID) is (n >= 3)

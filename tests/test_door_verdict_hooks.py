@@ -20,6 +20,7 @@ import pytest
 
 from llm_router import door_verdict as dv
 from tests._bind_support import (
+    delivered_text,
     AGENT_ROUTE,
     HOOKS_SRC,
     SUITABLE_PROMPT,
@@ -275,14 +276,14 @@ def ctx(tmp_path):
 
 def test_spawn_off_delegates_to_codex_as_before(ctx, fake):
     decision = decision_of(ctx.run("off", fake.url))
-    assert ANSWER in decision["reason"] and len(stub_calls(ctx.log)) == 1
+    assert ANSWER in delivered_text(decision) and len(stub_calls(ctx.log)) == 1
     assert fake.calls == 0
 
 
 def test_spawn_shadow_logs_a_verdict_and_still_delegates(ctx, fake):
     fake.probs = OPUS
     decision = decision_of(ctx.run("shadow", fake.url))
-    assert ANSWER in decision["reason"] and len(stub_calls(ctx.log)) == 1
+    assert ANSWER in delivered_text(decision) and len(stub_calls(ctx.log)) == 1
     r = _verdict_rows(ctx.home)[0]
     assert (r["hook_kind"], r["tier"], r["door"], r["applied"], r["tool_use_id"]) == (
         "agent", "opus", "claude", False, "toolu_bind_1")
@@ -301,14 +302,14 @@ def test_spawn_on_keeps_a_confident_opus_spawn_on_claude(ctx, fake):
 def test_spawn_on_lets_a_sonnet_spawn_through_the_existing_codex_gates(ctx, fake):
     fake.probs = SONNET
     decision = decision_of(ctx.run("on", fake.url))
-    assert ANSWER in decision["reason"] and len(stub_calls(ctx.log)) == 1
+    assert ANSWER in delivered_text(decision) and len(stub_calls(ctx.log)) == 1
     assert _verdict_rows(ctx.home)[0]["door"] == "codex"
 
 
 def test_spawn_on_with_a_down_model_delegates_as_before(ctx, fake):
     fake.fail = True
     decision = decision_of(ctx.run("on", fake.url))
-    assert ANSWER in decision["reason"] and len(stub_calls(ctx.log)) == 1
+    assert ANSWER in delivered_text(decision) and len(stub_calls(ctx.log)) == 1
 
 
 def test_spawn_explore_and_retrieval_get_no_verdict(ctx, fake):
