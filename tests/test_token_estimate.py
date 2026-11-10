@@ -56,10 +56,19 @@ def test_flag_off_keeps_old_formulas(monkeypatch, payload):
 
 def test_flag_on_delegates(monkeypatch):
     monkeypatch.setenv(token_estimate.ENV_FLAG, "1")
-    assert estimate_payload_tokens(PAYLOAD) == math.ceil(token_estimate.est_tokens(PAYLOAD) * CALIBRATED_SAFETY_MARGIN)
+    legacy = math.ceil(max(1, len(json.dumps(PAYLOAD, default=str))) / 3.5 * 1.15)
+    calibrated = math.ceil(token_estimate.est_tokens(PAYLOAD) * CALIBRATED_SAFETY_MARGIN)
+    assert estimate_payload_tokens(PAYLOAD) == max(legacy, calibrated)
     assert CALIBRATED_SAFETY_MARGIN == 1.05
     payload = json.dumps(compact.to_ollama_messages(BODY)) + json.dumps(compact.ollama_tools([]))
     assert compact.estimate_tokens(BODY) == token_estimate.est_tokens(payload)
+
+
+@pytest.mark.parametrize("payload", SHAPES)
+def test_flag_on_guard_never_looser_than_legacy(monkeypatch, payload):
+    monkeypatch.setenv(token_estimate.ENV_FLAG, "1")
+    chars = len(json.dumps(payload, default=str))
+    assert estimate_payload_tokens(payload) >= math.ceil(max(1, chars) / 3.5 * 1.15)
 
 
 def test_flag_on_char_budget_stays_conservative_for_digit_heavy_text(monkeypatch):

@@ -66,8 +66,9 @@ CHARS_PER_TOKEN = 3.5
 ESTIMATE_SAFETY_MARGIN = 1.15
 
 #: Applied on top of the calibrated estimate when LLM_ROUTER_EST_CALIBRATED is on. This path is the
-#: hard window backstop, so it keeps a margin: the calibration is ONE model (qwen3.6:35b-a3b) on 7
-#: payloads, and the calibrated formula carries 13-15% less margin than chars/3.5 x 1.15 on prose/JSON.
+#: hard window backstop and the calibration is ONE model (qwen3.6:35b-a3b) on 7 payloads, so with the
+#: flag on the guard takes max(legacy chars/3.5 x 1.15, calibrated x this margin): never looser than
+#: the legacy guard (calibrated x 1.05 reads ~9-11% below it on prose/JSON, ~10% above on code).
 CALIBRATED_SAFETY_MARGIN = 1.05
 
 #: Ollama's own hardcoded default context window when nothing else says
@@ -120,13 +121,16 @@ def estimate_payload_tokens(payload: dict) -> int:
     message content and never accounts for tool-definition JSON, which on a
     Claude Code request is routinely the larger half of the prompt.
     """
-    if calibrated_enabled():
-        return math.ceil(est_tokens(payload) * CALIBRATED_SAFETY_MARGIN)
     try:
         chars = len(json.dumps(payload, default=str))
     except (TypeError, ValueError):
         chars = sum(len(str(v)) for v in payload.values())
-    return estimate_tokens(chars)
+    legacy = estimate_tokens(chars)
+    if calibrated_enabled():
+        # Never looser than the legacy guard: the calibrated count only raises the estimate (code),
+        # it never lowers the backstop on prose/JSON, where it reads ~9-11% below chars/3.5 x 1.15.
+        return max(legacy, math.ceil(est_tokens(payload) * CALIBRATED_SAFETY_MARGIN))
+    return legacy
 
 
 def _name_matches(wanted: str, resident: str) -> bool:
