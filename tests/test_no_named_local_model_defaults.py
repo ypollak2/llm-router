@@ -47,6 +47,8 @@ ALLOWLIST: dict[str, str] = {
         "num_ctx table keyed by model tag; a lookup for a model already chosen",
     "src/llm_router/router.py":
         "_SLOW_MODEL_MARKERS: a guard that keeps escalation OUT of slow models; selects nothing",
+    "src/llm_router/toolkit/adapters/ollama.py":
+        "_KV_REGISTRY: memory-guard KV size keyed by model tag; a lookup for a model already chosen",
 }
 
 # Files that used to pick a model by name. They may not carry ANY family string literal.

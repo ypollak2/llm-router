@@ -355,13 +355,146 @@ def _tags_size(url: str, name: str) -> int | None:
     return None
 
 
-def _show_size(url: str, name: str) -> int | None:
-    """``size`` of ``name`` from ``/api/show`` when this Ollama reports one, else None."""
+# (url, bare name) -> /api/show payload. Static metadata of an installed model, so asked once, not per check.
+_SHOW_CACHE: dict = {}
+
+
+def _show_payload(url: str, name: str) -> dict:
+    """``/api/show`` of ``name``, cached per (url, name); raises when unreachable (failures are not cached)."""
+    key = (url, _bare(name))
+    hit = _SHOW_CACHE.get(key)
+    if hit is not None:
+        return hit
     req = urllib.request.Request(f"{url}/api/show", data=json.dumps({"model": name}).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=1.5) as resp:  # nosec B310 — validated URL
-        size = json.loads(resp.read()).get("size")
+        payload = json.loads(resp.read())
+    payload = payload if isinstance(payload, dict) else {}
+    _SHOW_CACHE[key] = payload
+    return payload
+
+
+def _show_size(url: str, name: str) -> int | None:
+    """``size`` of ``name`` from ``/api/show`` when this Ollama reports one, else None."""
+    size = _show_payload(url, name).get("size")
     return int(size) if isinstance(size, (int, float)) and size > 0 else None
+
+
+# -- context-window (KV) memory ---------------------------------------------------------------------------------
+# The weights on disk are not what a load holds: the KV cache grows with num_ctx, a hybrid model adds a recurrent
+# state, and the runtime adds a compute buffer. Sources: engine log of qwen3.6:35b-a3b-coding (qwen35moe, 10
+# full-attention layers): KV f16 640 MiB at 32768 cells = 20 MiB per 1k tokens, MTP draft KV +2 MiB per 1k,
+# recurrent state 188 MiB, compute buffer ~0.5 GiB (RESEARCH-256K-R3-ENGINE-20261110.md section 5).
+_MIB = 1024 ** 2
+_COMPUTE_BYTES = 512 * _MIB
+# Speculative (MTP) draft context KV is +2 MiB per 1k on top of 20 (engine log): x1.1 on both the registry and GGUF paths.
+_KV_DRAFT_MARGIN = 1.1
+_SMALL_MODEL_BYTES = 4 * _GIB
+# bare model name -> (KV bytes per 1k tokens, constant state bytes). Used when /api/show has no usable metadata.
+_KV_REGISTRY: dict[str, tuple[int, int]] = {
+    "qwen3.6:35b-a3b-coding": (20 * _MIB, 188 * _MIB),
+}
+# Unknown model with no metadata: 128 MiB per 1k tokens = 32 layers x 8 KV heads x 128 dim x f16 (an 8B-class GQA
+# dense model). It is deliberately on the high side: over-counting refuses one load, under-counting can OOM the Mac.
+_KV_DEFAULT_PER_1K = 128 * _MIB
+_METAL_FRACTION = 0.78        # default Metal working-set cap / RAM: measured 40,200.90 MB of 51,539.6 MB (Ollama log)
+_WIRED_MB: list = []          # cached iogpu.wired_limit_mb (static per boot); [None] = unreadable
+
+
+def _show_model_info(url: str, name: str) -> dict:
+    """``model_info`` from ``/api/show`` ({} when absent)."""
+    info = _show_payload(url, name).get("model_info")
+    return info if isinstance(info, dict) else {}
+
+
+def _trained_ctx(url: str, name: str) -> int | None:
+    """The model's own trained context length (``<arch>.context_length``); Ollama clamps a request to it."""
+    try:
+        info = _show_model_info(url, name)
+    except Exception:  # noqa: BLE001
+        return None
+    arch = info.get("general.architecture")
+    v = info.get(f"{arch}.context_length") if isinstance(arch, str) else None
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+
+
+def _kv_from_info(info: dict) -> tuple[int, int] | None:
+    """(KV bytes per token f16, constant state bytes) from GGUF metadata, or None when it lacks the fields."""
+    arch = info.get("general.architecture")
+    if not isinstance(arch, str) or not arch:
+        return None
+
+    def num(key: str):
+        v = info.get(f"{arch}.{key}")
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+
+    blocks = num("block_count")
+    heads_kv = info.get(f"{arch}.attention.head_count_kv")
+    heads = num("attention.head_count")
+    if not blocks:
+        return None
+    klen = num("attention.key_length")
+    vlen = num("attention.value_length") or klen
+    if not klen:
+        emb = num("embedding_length")
+        if not (emb and heads):
+            return None
+        klen = vlen = emb / heads
+    interval = num("full_attention_interval")      # hybrid models: only every Nth block keeps a KV cache
+    layers = int(blocks // interval) if interval else int(blocks)
+    if isinstance(heads_kv, list):
+        kv_heads = sum(h for h in heads_kv if isinstance(h, (int, float)) and h > 0)    # per-layer list
+        if not kv_heads:
+            return None
+        per_token = kv_heads * (klen + vlen) * 2
+    else:
+        h = heads_kv if isinstance(heads_kv, (int, float)) and heads_kv > 0 else heads
+        if not h:
+            return None
+        per_token = layers * h * (klen + vlen) * 2
+    state = 192 * _MIB if interval else 0       # hybrid recurrent layers hold a constant state (188 MiB measured)
+    return int(per_token), state
+
+
+def _kv_terms(url: str, name: str, ctx: int, size: float = 0.0) -> tuple[float, str]:
+    """(bytes the context window adds on top of the weights, source label) for ``ctx`` tokens:
+    KV(ctx) x draft margin + recurrent state + compute buffer."""
+    try:
+        derived = _kv_from_info(_show_model_info(url, name))
+    except Exception as exc:  # noqa: BLE001
+        _log.info("memory guard: /api/show model_info of %s on %s failed (%s)", name, url, exc)
+        derived = None
+    if derived is not None:
+        per_token, state = derived
+        return per_token * ctx * _KV_DRAFT_MARGIN + state + _COMPUTE_BYTES, "gguf"
+    for key, (per_1k, state) in _KV_REGISTRY.items():
+        if _same_name(key, name):
+            return per_1k * ctx / 1000 * _KV_DRAFT_MARGIN + state + _COMPUTE_BYTES, "registry"
+    if size < _SMALL_MODEL_BYTES:
+        # No metadata (often /api/show timing out while Ollama is busy) and a small model: the flat default would
+        # over-count a 1 GB model by 4 GiB and refuse it. Keep today's weights x headroom and record it.
+        _fail_open("CHZ-FO-MEM-GUARD-KV", f"no KV metadata for small model {name} on {url}; weights x headroom only")
+        return 0.0, "failopen"
+    return _KV_DEFAULT_PER_1K * ctx / 1000 + _COMPUTE_BYTES, "default"
+
+
+def _metal_cap_gib(total_gib: float) -> float | None:
+    """Metal working-set cap in GiB on Apple Silicon: ``iogpu.wired_limit_mb`` when set (readable without sudo,
+    read once per process), else 78% of RAM. None off macOS."""
+    import sys
+    if sys.platform != "darwin":
+        return None
+    if not _WIRED_MB:
+        wired = None
+        try:
+            import subprocess
+            out = subprocess.run(["sysctl", "-n", "iogpu.wired_limit_mb"], capture_output=True, text=True,
+                                 timeout=1.5, check=False).stdout.strip()
+            wired = int(out) if out.isdigit() and int(out) > 0 else None
+        except Exception:  # noqa: BLE001
+            wired = None
+        _WIRED_MB.append(wired)
+    return _WIRED_MB[0] / 1024 if _WIRED_MB[0] else total_gib * _METAL_FRACTION
 
 
 def _target_size(url: str, name: str) -> int | None:
@@ -439,9 +572,19 @@ def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget
                 return LocalModelConflict(rname, size_gb, url, allowed, limit), (url, rname)
     if not budget:      # LLM_ROUTER_MEM_GUARD=off: only the one-model rule above
         return None
-    # (1) already resident on that server: no new load.
-    if any(url == base_url and _same_name(rname, name) for url, _r, rname in rows):
-        return None
+    from llm_router import local_models
+    want_ctx = local_models.num_ctx(name)
+    trained = _trained_ctx(base_url, name)
+    if trained:
+        want_ctx = min(want_ctx, trained)      # Ollama clamps the request to the model's own window
+    # (1) already resident on that server: no new load, unless it was loaded with a smaller window than the one
+    # requested (a reload). Same-or-larger window, or an unreported one: nothing to add, never double counted.
+    same = [(u, r, n) for u, r, n in rows if u == base_url and _same_name(n, name)]
+    if same:
+        have = same[0][1].get("context_length")
+        if not isinstance(have, (int, float)) or have >= want_ctx:
+            return None
+        rows = [t for t in rows if t not in same]      # the reload replaces the resident copy: count it once
     if not _is_loopback(base_url):
         _log.debug("memory guard: %s is not a loopback server; its memory is not this machine's, budget skipped", base_url)
         return None
@@ -450,7 +593,12 @@ def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget
     if size is None:
         _fail_open("CHZ-FO-MEM-GUARD-SIZE", f"size of {name} on {base_url} unknown ({purpose})")
         return None
-    need = size * _headroom() / _GIB
+    extra, kv_src = _kv_terms(base_url, name, want_ctx, size)
+    # weights + window (KV + state + compute); the old weights x headroom stays as the floor, never lowered.
+    need_bytes = max(size * _headroom(), size + extra)
+    need = need_bytes / _GIB
+    _log.info("memory guard: %s needs %.1f GiB (weights %.1f + window %.1f GiB at num_ctx %d, %s)",
+              name, need, size / _GIB, extra / _GIB, want_ctx, kv_src)
     now = time.monotonic()
     _prune(now)
     with _LOCK:
@@ -472,6 +620,9 @@ def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget
         cap = total - _reserve_gib(total)
         if resident + need > cap:      # (a) model-sum cap: independent of vm_stat noise
             refusal = MemoryBudgetExceeded("sum", name, base_url, need, resident, cap, listing, allowed or "")
+        metal = _metal_cap_gib(total)
+        if refusal is None and metal is not None and resident + need > metal:     # (c) Metal working-set cap
+            refusal = MemoryBudgetExceeded("sum", name, base_url, need, resident, metal, listing, allowed or "")
     if refusal is None and free is not None:
         room = free - _SMALL_RESERVE_GIB
         if need > room:                # (b) catches other apps (docker, arenas) holding the RAM
@@ -480,7 +631,7 @@ def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget
         _fail_open("CHZ-FO-MEM-GUARD-HOST", f"free memory unreadable, only the sum cap applied ({purpose})")
     if refusal is None:
         with _LOCK:
-            _RESERVED[(name, base_url)] = (now + _RESERVE_TTL_S, size * _headroom())
+            _RESERVED[(name, base_url)] = (now + _RESERVE_TTL_S, need_bytes)
         return None
     victims = [(url, rname, _row_bytes(r)) for url, r, rname in rows
                if not _same_name(rname, name) and not (allowed and _same_name(rname, allowed))]
@@ -497,7 +648,9 @@ def ensure_fits(model: str | None, base_url: str | None = None, purpose: str = "
     ``size`` summed (it includes the KV cache); target size from ``/api/tags`` (or ``/api/show``) times
     LLM_ROUTER_MEM_HEADROOM; machine memory from sysctl/vm_stat via ``hardware``. Both must pass:
     (a) resident + target <= total - reserve, (b) target <= free - 2 GiB. A target already resident on that
-    server is always allowed. Unreadable state fails open with a ``failopen`` row. Pressure with
+    server at that window is always allowed. The target is weights + context window (KV(num_ctx) + state +
+    compute, from /api/show model_info, a per-model registry, or a conservative default), never less than
+    weights x headroom, and must also fit the Metal working-set cap. Unreadable state fails open with a ``failopen`` row. Pressure with
     ``LLM_ROUTER_MEM_ON_PRESSURE=evict`` unloads the largest other resident model (never the allowed model) and
     re-checks (polling up to ~3 s, since Ollama defers an unload until in-flight requests finish). With
     LLM_ROUTER_LOCAL_MODEL set the default is evict: any non-allowed model on ANY known server may be unloaded.
