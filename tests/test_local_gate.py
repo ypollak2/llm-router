@@ -531,6 +531,37 @@ def test_dropped_admission_under_held_lifecycle_lock_is_deferred_then_freed(env)
     b.release()
 
 
+def test_reset_drains_gc_deferred_fd_instead_of_refusing(env):
+    a = g.admit(URL, dl(2))
+    with g._LIFECYCLE:
+        del a
+        gc.collect()
+    assert g._PENDING_CLOSE
+    assert g.reset(URL, dl(2), slots=1) == 1             # deferred fd is not a live holder
+    assert not g._PENDING_CLOSE
+
+
+def test_fork_child_forgets_parent_deferred_fds(env):
+    a = g.admit(URL, dl(2))
+    with g._LIFECYCLE:
+        del a
+        gc.collect()
+    assert g._PENDING_CLOSE
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        os.write(w, b"1" if not g._PENDING_CLOSE else b"0")
+        os._exit(0)
+    os.close(w)
+    got = os.read(r, 1)
+    os.close(r)
+    os.waitpid(pid, 0)
+    assert got == b"1"
+    g.admit(URL, dl(2)).release()                        # parent still drains its own deferred fd
+    assert not g._PENDING_CLOSE
+
+
 def test_release_detaches_finalizer_so_reused_fd_is_not_closed(env):
     a = g.admit(URL, dl(2))
     a.release()

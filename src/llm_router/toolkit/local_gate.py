@@ -266,6 +266,7 @@ def _after_fork_child() -> None:
         with contextlib.suppress(OSError):
             os.close(fd)
     _OPEN_FDS.clear()
+    _PENDING_CLOSE.clear()   # deferred fd numbers belong to the parent; the child may reuse them
     for adm in list(_LIVE.values()):
         adm._invalidate()
     _LIVE.clear()
@@ -619,6 +620,7 @@ def reset(url: str, deadline: float, *, slots: int | None = None) -> int:
     new = slots if slots is not None else _wanted_slots()
     while True:
         with _LIFECYCLE:
+            _drain_pending()   # a GC-deferred fd is not a live holder
             fds: list[int] = []
             try:
                 cfd = _open(d / "config.lock")
