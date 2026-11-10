@@ -2,6 +2,7 @@
 
 Offline: retrieval is faked; only the ceiling arithmetic and the server's choice of ceiling run.
 """
+# ruff: noqa: F811
 from __future__ import annotations
 
 import pytest
@@ -102,7 +103,78 @@ def test_row_fields_in_both_modes(window, monkeypatch):
         assert got == src and isinstance(ceiling, int) and ceiling > 0
 
 
-# ── end to end: the ledger row says which ceiling decided ─────────────────────
+# ── real estimators: admission cap AND the backend overflow guard ─────────────
+from llm_router import local_context_guard as lcg  # noqa: E402
+
+NUM_CTX = 131072
+
+
+def _filled(target_admit_tokens: int) -> dict:
+    """A request whose admission estimate (local_mode.estimate_prompt_tokens on the Ollama payload)
+    is just under target, built from prose-like filler (bisection on the real estimator)."""
+    def mk(n):
+        return {"system": "S", "messages": [{"role": "user", "content": "fix the reconcile_invoice bug " * n}]}
+    lo, hi = 1, 40_000
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if local_mode.estimate_prompt_tokens(ps._okf_payload(mk(mid), NUM_CTX)) <= target_admit_tokens:
+            lo = mid
+        else:
+            hi = mid - 1
+    return mk(lo)
+
+
+def _measure(send):
+    p = ps._okf_payload(send, NUM_CTX)
+    return local_mode.estimate_prompt_tokens(p), lcg.estimate_payload_tokens(p)
+
+
+@pytest.mark.parametrize("gap", [10, 500, 3_000, 10_000, 20_000, 40_000])
+def test_block_never_pushes_past_the_cap_or_the_overflow_guard(window, fake_retrieval, monkeypatch, gap):
+    monkeypatch.setenv("LLM_ROUTER_OKF_BY_WINDOW", "1")
+    cap = local_mode.prompt_cap_tokens()
+    budget = lcg.effective_window(num_ctx=NUM_CTX)[0] - lcg.DEFAULT_RESERVED_OUTPUT_TOKENS
+    send = _filled(cap - gap)
+    admit, guard = _measure(send)
+    assert admit <= cap
+    ceiling, src = ps.okf_ceiling(_cfg(), send, NUM_CTX)
+    assert src == "window" and ceiling <= cap
+    out, info = okf_context.attach(send, send, ceiling_tokens=ceiling, fits=ps.okf_fits(cap, NUM_CTX))
+    admit2, guard2 = _measure(out)
+    assert admit2 <= cap, (gap, admit, admit2, info)
+    if guard <= budget:  # a request the guard already refuses is not made worse by this check
+        assert guard2 <= budget, (gap, guard, guard2, info)
+        lcg.check_overflow(ps._okf_payload(out, NUM_CTX), num_ctx=NUM_CTX)  # does not raise
+    if not info["injected"]:
+        assert out is send
+    if gap >= 10_000:
+        assert info["injected"] is True, info  # the test must not pass only because nothing was attached
+
+
+def test_the_ceiling_only_shrinks_and_hits_zero_room_at_the_edge(window, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_OKF_BY_WINDOW", "1")
+    cap = local_mode.prompt_cap_tokens()
+    small = _req(400)
+    assert ps.okf_ceiling(_cfg(), small, NUM_CTX)[0] <= cap
+    edge = _filled(cap - 5)
+    ceiling, _ = ps.okf_ceiling(_cfg(), edge, NUM_CTX)
+    assert ceiling - estimate_tokens(edge) < okf_context.MIN_ROOM_TOKENS
+
+
+@pytest.mark.parametrize("tokens", [5_000, 12_000, 20_000])
+def test_requests_in_the_old_over_budget_range_get_a_block(window, fake_retrieval, monkeypatch, tokens):
+    monkeypatch.setenv("LLM_ROUTER_OKF_BY_WINDOW", "1")
+    cap = local_mode.prompt_cap_tokens()
+    send = _filled(tokens)
+    ceiling, _ = ps.okf_ceiling(_cfg(), send, NUM_CTX)
+    out, info = okf_context.attach(send, send, ceiling_tokens=ceiling, fits=ps.okf_fits(cap, NUM_CTX))
+    assert info["injected"] is True, info
+    off, off_info = okf_context.attach(send, send, ceiling_tokens=5000)
+    if tokens >= 5_000:
+        assert off_info["injected"] is False
+
+
+# ── end to end: the ledger row says which ceiling decided, and attach got it ──
 import json  # noqa: E402
 
 from tests.test_proxy_okf_context import (  # noqa: E402,F401  (fixtures are used by name)
@@ -111,9 +183,24 @@ from tests.test_proxy_okf_context import (  # noqa: E402,F401  (fixtures are use
 
 
 @pytest.mark.parametrize("flag,src", [("", "agent"), ("1", "window")])
-async def test_row_okf_records_the_ceiling(home, tmp_path, policy, monkeypatch, flag, src):  # noqa: F811
+async def test_row_okf_records_the_ceiling_and_attach_received_it(
+        home, tmp_path, policy, monkeypatch, flag, src):
     monkeypatch.setenv("LLM_ROUTER_OKF_BY_WINDOW", flag)
+    if flag:
+        monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL", "qwen3-coder:30b")
+        monkeypatch.setenv("LLM_ROUTER_WINDOW_STEP", "131072")
+    seen = {}
+    real = okf_context.attach
+
+    def spy(send, body, **kw):
+        seen.update(kw)
+        return real(send, body, **kw)
+
+    monkeypatch.setattr(okf_context, "attach", spy)
     repo = _repo(tmp_path, "repo-a")
     await _post(_app(tmp_path, _Upstream(), _Backend()), _request(repo))
     row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
-    assert row["okf"]["ceiling_src"] == src and row["okf"]["ceiling_tokens"] > 0
+    assert row["okf"]["ceiling_src"] == src and row["okf"]["ceiling_tokens"] == seen["ceiling_tokens"] > 0
+    assert (seen["fits"] is not None) == (src == "window")
+    if src == "window":
+        assert row["okf"]["ceiling_tokens"] <= local_mode.prompt_cap_tokens()
