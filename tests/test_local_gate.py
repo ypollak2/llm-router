@@ -430,6 +430,18 @@ def test_unwritable_gate_dir_fails_open_with_row(env, monkeypatch):
     assert rows(env)[-1]["outcome"] == "gate_dir_unwritable"
 
 
+def test_readonly_existing_gate_dir_fails_open_with_row(env):
+    d = g.gate_dir(URL)
+    d.mkdir(parents=True)
+    d.chmod(0o500)
+    try:
+        adm = g.admit(URL, dl(1))
+        assert adm.disabled and adm.slots == ()
+        assert rows(env)[-1]["outcome"] == "gate_dir_unwritable"
+    finally:
+        d.chmod(0o700)
+
+
 def test_unexpected_lock_error_fails_open(env, monkeypatch):
     def boom(fd):
         raise OSError(errno.EIO, "io")
