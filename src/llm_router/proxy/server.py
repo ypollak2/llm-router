@@ -920,7 +920,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         try:
             sb = make_backend(cfg.model)
             # P13: a shadow call is not a live turn, so it queues behind real ones (backends without the knob ignore it).
-            kw = {"priority": "background"} if "priority" in inspect.signature(sb.complete).parameters else {}
+            try:
+                params = inspect.signature(sb.complete).parameters
+            except (ValueError, TypeError):
+                params = {}
+            takes = "priority" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+            kw = {"priority": "background"} if takes else {}
             message, err, _usage = await sb.complete(body, shadow.budget_s, **kw)
         except HedgeTimeout:
             return None, "hedge", "hedge_timeout"

@@ -258,6 +258,35 @@ async def test_p13_shadow_call_asks_the_queue_for_background_priority(env):
     assert seen["priority"] == "background"
 
 
+async def test_p13_shadow_priority_reaches_a_kwargs_backend(env):
+    seen = {}
+
+    class Kw(Backend):
+        async def complete(self, body, timeout_s, **kw):
+            seen.update(kw)
+            return await super().complete(body, timeout_s)
+
+    await _step(env, Kw(), Upstream())
+    assert seen == {"priority": "background"}
+
+
+async def test_p13_shadow_falls_back_to_no_priority_when_signature_is_unreadable(env, monkeypatch):
+    import inspect
+    seen = {}
+
+    def boom(*a, **k):
+        raise ValueError("no signature")
+    monkeypatch.setattr(inspect, "signature", boom)
+
+    class Plain(Backend):
+        async def complete(self, body, timeout_s):
+            seen["called"] = True
+            return await super().complete(body, timeout_s)
+
+    await _step(env, Plain(), Upstream())
+    assert seen == {"called": True}
+
+
 @pytest.mark.timing
 async def test_local_budget_is_capped_when_claude_is_slower(env):
     gate = asyncio.Event()

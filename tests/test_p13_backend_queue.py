@@ -304,16 +304,30 @@ def test_first_token_excludes_queue_wait_and_wait_is_reported_when_flag_on(env, 
     assert "queue_wait_ms" not in usage
 
 
-def test_hedge_is_clamped_to_the_time_left_after_the_queue_wait(env, monkeypatch):
+def test_clamped_hedge_expiry_is_a_budget_timeout_not_a_hedge_timeout(env, monkeypatch):
     from llm_router.proxy.backends import HedgeTimeout
     monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
 
     async def run():
         c = FakeClient(lines=[], hold=asyncio.Event())
         b = _backend(c)
-        b.hedge_s = 60.0
+        b.hedge_s = 60.0   # the queue deadline (1.0 s) is what expires first
         t0 = time.monotonic()
-        with pytest.raises(HedgeTimeout):
+        with pytest.raises(asyncio.TimeoutError) as ei:
             await b.complete(BODY, 1.0)
+        assert not isinstance(ei.value, HedgeTimeout)
         return time.monotonic() - t0
     assert asyncio.run(run()) < 3.0
+
+
+def test_budget_already_used_before_the_queue_takes_no_slot(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
+    calls = _spy(monkeypatch)
+    b = _backend(FakeClient())
+
+    async def slow_guard(purpose):
+        await asyncio.sleep(0.3)
+    b._guard = slow_guard
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(b.complete(BODY, 0.2))
+    assert calls == [] and not _held()

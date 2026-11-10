@@ -329,6 +329,8 @@ class OllamaBackend:
         # server's own ``wait_for(complete, left)`` and the row says local_queue_timeout, not budget_exceeded.
         entry = time.monotonic() if t_entry is None else t_entry
         deadline = entry + timeout_s - min(QUEUE_MARGIN_S, timeout_s * 0.1)
+        if deadline - time.monotonic() <= 0:   # _guard/_prepare already used the budget: do not take a slot for nothing
+            raise asyncio.TimeoutError(f"step budget of {timeout_s:g}s used before the queue")
         adm = await local_gate.aadmit(self.base_url, deadline, caller=caller, priority=priority)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -378,6 +380,8 @@ class OllamaBackend:
         t0 = loop.time()  # first_token_s is model latency: the queue wait is reported apart
         queue = {"queue_wait_ms": int((t0 - q0) * 1000)} if adm is not None else {}
         hedge_s = self.hedge_s if (adm is None or self.hedge_s is None) else min(self.hedge_s, http_timeout_s)
+        # When the queue wait shrank the hedge, its expiry is the step budget running out, not a slow model.
+        hedge_clamped = hedge_s != self.hedge_s
         try:
             async with self.client.stream("POST", self.base_url + "/api/chat", json=payload,
                                           timeout=http_timeout_s) as resp:
@@ -386,6 +390,9 @@ class OllamaBackend:
                 try:
                     first = await asyncio.wait_for(lines.__anext__(), timeout=hedge_s)
                 except asyncio.TimeoutError:
+                    if hedge_clamped:
+                        raise asyncio.TimeoutError(
+                            f"step budget used up waiting for a first token ({hedge_s:.1f}s left after the queue)") from None
                     raise HedgeTimeout(f"no first token within {hedge_s}s") from None
                 except StopAsyncIteration:
                     first = ""
