@@ -185,6 +185,15 @@ def test_cap_trip_rules_overlap_min_sigs_and_text_only_keeps_history():
     assert _window(g2, "wxyz") == "cap"  # 0% overlap
 
 
+def test_cap_trip_one_rerun_command_between_progressing_edits_is_not_a_cycle():
+    g = loop_guard.LoopGuard(max_consecutive=8, repeat_window=0)
+    assert _window(g, "papbpcpd") == "cap"
+    # half the calls repeat "p", but only 1 distinct overlapping hash: progress, not a loop
+    assert _window(g, "pepfpgph") == "cap"
+    assert _window(g, "pipjpkpl") == "cap"
+    # 3 distinct re-issued hashes is a cycle
+    assert _window(g, "pabcpabc") == "cap_cycle"
+
 def test_flag_off_window_sigs_is_not_populated():
     g = loop_guard.LoopGuard(max_consecutive=4, repeat_window=0)
     g.record_served("s", _call_msg("a"))

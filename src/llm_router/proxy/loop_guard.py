@@ -170,8 +170,8 @@ class LoopGuard:
 
     def cap_trip(self, session_id: str | None) -> str:
         """The cap tripped: end the window like ``reset`` but remember its tool signature
-        hashes. Returns ``TRIGGER_CAP_CYCLE`` when the window has at least ``CYCLE_MIN_SIGS``
-        signatures and at least ``CYCLE_OVERLAP`` of them are in the union of the last
+        hashes. Returns ``TRIGGER_CAP_CYCLE`` when at least ``CYCLE_MIN_SIGS`` distinct
+        signatures of the window, and at least ``CYCLE_OVERLAP`` of its distinct ones, are in the union of the last
         ``CYCLE_WINDOWS`` cap windows (a loop longer than the repeat window, or alternating
         windows), else ``TRIGGER_CAP``. A text-only window gives no verdict and keeps the history."""
         if not session_id:
@@ -183,7 +183,10 @@ class LoopGuard:
         hist = self._prev_window.get(session_id)
         if hist and len(cur) >= CYCLE_MIN_SIGS:
             seen = set().union(*hist)
-            if sum(1 for x in cur if x in seen) / len(cur) >= CYCLE_OVERLAP:
+            uniq = set(cur)
+            ov = uniq & seen
+            # distinct hashes only: one re-run command (e.g. pytest between edits) cannot trip it alone
+            if len(ov) >= CYCLE_MIN_SIGS and len(ov) / len(uniq) >= CYCLE_OVERLAP:
                 self._prev_window.pop(session_id, None)
                 return TRIGGER_CAP_CYCLE
         if hist is None:
