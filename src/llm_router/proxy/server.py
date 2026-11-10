@@ -983,10 +983,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
     def build_compact_worker():
         """P18 (LLM_ROUTER_COMPACT_BG, default off): the one background compaction worker, or None. Needs the
-        local queue (LLM_ROUTER_LOCAL_QUEUE): without it a background map could not be told to yield. Its map
+        local queue (LLM_ROUTER_LOCAL_QUEUE): without it a background map could not be told to yield. It also needs
+        P9 (LLM_ROUTER_PROXY_MR) and the chunk store (LLM_ROUTER_CHUNK_STORE): they are the only readers of what
+        the worker maps, so without either its maps would be spent for nothing. Its map
         goes through the same backend as P9's (live model, live num_ctx) at the ``background`` priority."""
         from llm_router.toolkit import local_gate as queue_gate
-        if lm is None or not queue_gate.queue_enabled():
+        if lm is None or not (queue_gate.queue_enabled() and mr_summary.enabled() and chunk_store.enabled()):
             return None
         model = cfg.model.split("/", 1)[1]
         backend = make_backend(cfg.model)
@@ -1932,6 +1934,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 cw = build_compact_worker()
                 if cw is not None:
                     compact_task = asyncio.create_task(cw.run())
+                else:
+                    compact_worker.clear()
             except Exception as exc:  # noqa: BLE001 - an optimisation; the proxy serves without it
                 from llm_router import failopen as _fo
                 _fo.record("LR-FO-PROXY-COMPACT-BG", exc, detail="start")
@@ -1947,6 +1951,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             rescan_task.cancel()
         if compact_task is not None:
             compact_task.cancel()
+        if compact_worker.enabled():
+            compact_worker.clear()
         if task is not None and not task.done():
             task.cancel()
         if guard_task is not None and not guard_task.done():

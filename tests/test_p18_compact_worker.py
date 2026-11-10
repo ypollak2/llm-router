@@ -365,3 +365,54 @@ def test_non_local_turn_forgets_the_conversation():
     assert "c" not in w.convs
     idle(w)
     assert run(w.tick()) is None
+
+
+# ---------------------------------------------------------------- review fixes (S1, S3, NITs)
+def test_s1_conversations_are_bounded_lru_and_ttl(monkeypatch):
+    monkeypatch.setattr(compact_worker, "MAX_CONVS", 3)
+    w = mk(MapStub())
+    w.note_request("live")   # stays in flight: never evicted
+    for i in range(10):
+        w.clock_.t += 1
+        live_turn(w, key=f"k{i}", body={"messages": []})
+    assert len(w.convs) <= 3 and "live" in w.convs and "k9" in w.convs and "k0" not in w.convs
+    w.note_done("live", None, TEXT_REPLY)
+    w.clock_.t += compact_worker.CONV_TTL_S + 1
+    w.note_request("fresh")
+    assert set(w.convs) == {"fresh"}   # every idle one past the TTL is gone
+
+
+def test_s1_request_body_is_released_after_evaluation():
+    w = mk(MapStub())
+    live_turn(w)
+    assert w.convs["c"].body is not None
+    idle(w)
+    run(w.tick())
+    assert w.convs["c"].body is None
+    idle(w)
+    assert run(w.tick()) is None   # nothing to evaluate until the next live turn brings a body
+
+
+def test_s3_no_ledger_row_per_live_turn_and_the_file_rotates(home, monkeypatch):
+    w = mk(MapStub())
+    for _ in range(5):
+        live_turn(w)
+    assert w.rows == [] and w.counts()["live_turns"] == 5
+    monkeypatch.setattr(compact_worker, "LEDGER_MAX_BYTES", 300)
+    for i in range(20):
+        compact_worker._file_sink({"ts": i, "outcome": "stored", "counts": {"a": 1}})
+    main, old = home / compact_worker.LEDGER_NAME, home / (compact_worker.LEDGER_NAME + ".1")
+    assert old.exists() and main.stat().st_size <= 300 + 100 and (main.stat().st_mode & 0o777) == 0o600
+
+
+@pytest.mark.parametrize("reply,why", [
+    ("Sure, here you go:\n" + SUMMARY, "preamble before the first heading: valid_summary passes, HEADINGS[0] check fails"),
+    (mr_summary.HEADINGS[0] + "\nonly the first section", "starts right, but valid_summary fails"),
+])
+def test_each_reply_check_matters_on_its_own(reply, why):
+    assert mr_summary.valid_summary(reply) == reply.startswith("Sure")
+    assert reply.startswith(mr_summary.HEADINGS[0]) == (not reply.startswith("Sure"))
+    w = mk(MapStub(reply=reply))
+    live_turn(w)
+    idle(w)
+    assert run(w.tick())["outcome"] == "invalid" and not chunk_store.ChunkStore().entries, why

@@ -22,12 +22,17 @@ quickly) has NOT been run: that is why tool gaps are a separate, off flag.
 Safety. One worker per process, at most one map in flight. The map is issued by the proxy's own
 ``map_call`` (live model, live num_ctx, P12 ``background`` priority), and the worker polls ``should_yield`` and
 its own live-request flag every POLL_S while the map runs, cancelling ONLY the task it started. The ledger
-(``compact_worker.jsonl`` in the state dir, plus ``counts()``) holds counts and seconds, never text.
+(``compact_worker.jsonl`` in the state dir, rotated at LEDGER_MAX_BYTES, plus ``counts()``) holds counts and
+seconds, never text, and one row per worker event (queued map outcome, thrash stop), none per live turn.
+"started" is counted when the map task is created, so a map aborted while still waiting in the queue counts
+as started. Memory: at most MAX_CONVS conversations are tracked, each idle one dropped after CONV_TTL_S, and a
+conversation's request body is released as soon as the worker has evaluated it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -47,6 +52,9 @@ TICK_S = 5.0
 THRASH_REFILLS = 3
 REFILL_RESET_TURNS = 20
 LEDGER_NAME = "compact_worker.jsonl"
+LEDGER_MAX_BYTES = 1_000_000   # one rotation to <name>.1 above this; the ledger never grows without bound
+MAX_CONVS = 64                 # conversations tracked at once (LRU by last activity; live ones are never evicted)
+CONV_TTL_S = 6 * 3600.0        # an idle conversation older than this is forgotten
 
 #: ``MapCall(prompt, num_predict) -> reply text or None``; raises on failure. Supplied by the proxy: the live backend, priority "background".
 MapCall = Callable[[str, int], Awaitable[str | None]]
@@ -117,6 +125,7 @@ class Worker:
         st.tool_gap = False
         st.mapped_in_gap = False
         st.settled = False
+        self._evict()
         if self._inflight is not None and not self._inflight.done():
             self._preempt = True
 
@@ -129,7 +138,6 @@ class Worker:
         st.last_activity = self.clock()
         self.c["live_turns"] += 1
         self.c["live_maps_paid"] += maps_paid
-        self._emit("live_turn", maps_paid=maps_paid)
         if served is None:
             if st.active == 0:
                 self.convs.pop(key, None)
@@ -137,6 +145,16 @@ class Worker:
         st.body = body
         st.tool_gap = _has_tool_use(served)
         st.settled = False
+        self._evict()
+
+    def _evict(self) -> None:
+        """Bound memory: drop idle conversations past the TTL, then the least recently active beyond MAX_CONVS."""
+        now = self.clock()
+        for k in [k for k, s in self.convs.items() if not s.active and now - s.last_activity > CONV_TTL_S]:
+            del self.convs[k]
+        idle_keys = sorted((s.last_activity, k) for k, s in self.convs.items() if not s.active)
+        while len(self.convs) > MAX_CONVS and idle_keys:
+            del self.convs[idle_keys.pop(0)[1]]
 
     # ------------------------------------------------------------ scheduling
     def _gap_ok(self, st: _Conv) -> bool:
@@ -163,6 +181,7 @@ class Worker:
             failopen.record("LR-FO-PROXY-COMPACT-BG", exc)
             return None
         finally:
+            st.body = None   # evaluated: the next note_done brings a fresh body; never keep a 256K-token request alive
             self._busy = False
 
     async def _plan(self, body: dict) -> _Plan:
@@ -315,6 +334,9 @@ class Worker:
 def _file_sink(row: dict) -> None:
     path = paths.state_path(LEDGER_NAME)
     path.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(OSError):
+        if path.stat().st_size > LEDGER_MAX_BYTES:
+            os.replace(path, path.with_name(LEDGER_NAME + ".1"))
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -334,4 +356,10 @@ def get() -> Worker | None:
     return _WORKER
 
 
-__all__ = ["Worker", "enabled", "tool_gaps_enabled", "install", "get"]
+def clear() -> None:
+    """Forget the installed worker (proxy shutdown, or a restart that does not build one)."""
+    global _WORKER
+    _WORKER = None
+
+
+__all__ = ["Worker", "enabled", "tool_gaps_enabled", "install", "get", "clear"]
