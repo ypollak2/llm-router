@@ -39,6 +39,7 @@ import pytest
 from llm_router import codex_agent, failopen
 from llm_router.codex_agent import IGNORE_RULES_FLAG, codex_exec_args, run_codex
 from tests._bind_support import (
+    delivered_text,
     AGENT_ROUTE,
     SUITABLE_PROMPT,
     agent_payload,
@@ -460,7 +461,7 @@ def hook(tmp_path):
 
 def test_the_agent_route_hook_delegates_with_the_flag(hook):
     decision = decision_of(hook.run())
-    assert decision["decision"] == "block" and "HOOK-STUB-ANSWER" in decision["reason"]
+    assert "HOOK-STUB-ANSWER" in delivered_text(decision)
     calls = stub_calls(hook.argv_log)
     assert len(calls) == 1 and calls[0]["argv"][:4] == RUN_CODEX_HEAD, calls
     assert "workspace-write" in calls[0]["argv"]

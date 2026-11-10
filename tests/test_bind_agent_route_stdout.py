@@ -22,6 +22,7 @@ import pytest
 
 from tests.secret_fixtures import real_shaped
 from tests._bind_support import (
+    delivered_text,
     AGENT_ROUTE,
     SUITABLE_PROMPT,
     UNSUITABLE_PROMPT,
@@ -85,7 +86,7 @@ def test_delegated_handoff_is_one_json_object(ctx):
     proc = ctx.run(agent_payload(SUITABLE_PROMPT), codex=ctx.stub())
     decision = decision_of(proc)
     assert decision is not None, proc.stderr[-500:]
-    assert ANSWER in decision["reason"]
+    assert ANSWER in delivered_text(decision)
     # Non-vacuous: the line that used to lead the JSON on stdout was emitted, on stderr.
     assert "Tracked:" in proc.stderr, proc.stderr[-800:]
     assert "Tracked:" not in proc.stdout
@@ -103,7 +104,7 @@ def test_a_library_that_logs_to_stdout_at_exit_cannot_follow_the_decision(ctx):
     stay on stderr until the process exits."""
     proc = ctx.run(agent_payload(SUITABLE_PROMPT), codex=ctx.stub(), LITELLM_LOG="DEBUG")
     decision = decision_of(proc)
-    assert decision is not None and ANSWER in decision["reason"], proc.stderr[-500:]
+    assert decision is not None and ANSWER in delivered_text(decision), proc.stderr[-500:]
     assert "LiteLLM" in proc.stderr, "LiteLLM did not log at all, so this proved nothing: " + proc.stderr[-400:]
     assert "LiteLLM" not in proc.stdout
 

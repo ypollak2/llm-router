@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -645,9 +646,15 @@ def test_main_passes_the_hook_payload_cwd_to_delegation(tmp_path, monkeypatch, c
     }
     monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
 
-    mod.main()  # the delegated path emits a block decision and returns
+    mod.main()  # the delegated path saves the result and emits the file echo (ECHO-1), or the deny fallback
     out = capsys.readouterr().out
-    assert "run by Codex CLI" in out
+    hso = json.loads(out)["hookSpecificOutput"]
+    # The results dir is writable here (HOME/LLM_ROUTER_HOME under tmp_path), so delivery must be the file echo.
+    assert hso["permissionDecision"] == "allow", out
+    m = re.search(r"(/\S*/agent-results/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}\.md)", hso["updatedInput"]["prompt"])
+    assert m, out
+    saved = Path(m.group(1))
+    assert saved.is_file() and "the root cause is X" in saved.read_text(), out
 
     assert captured.get("context_root") == str(repo_a.resolve()), out
     # D-357: the payload cwd's repository is the delegated run's writable sandbox root (not the process cwd, repo_b).
