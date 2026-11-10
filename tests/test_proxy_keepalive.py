@@ -315,6 +315,7 @@ async def test_private_written_marker_is_never_serialized(env, monkeypatch):  # 
 async def test_mask_flag_on_keepalive_path_sends_masked_payload_and_stamps_ledger(env, monkeypatch):  # noqa: F811
     _on(monkeypatch)
     monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
     env.up = _upstream()
 
     class Recording(SlowBackend):

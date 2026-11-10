@@ -364,6 +364,12 @@ def mask_local_body(body: dict, row: dict) -> dict:
     return masked
 
 
+def cap_after_reduce_on() -> bool:
+    """P6: LLM_ROUTER_PROXY_CAP_AFTER_REDUCE, default off. On: the prompt-size cap tests the body that is
+    sent locally (the masked copy when P5 masked it). Off: it tests the raw body, as before masking."""
+    return os.environ.get("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None,
               haiku_guard_run=None, local_gate_deps=None):
     """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
@@ -756,11 +762,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    served_stop_reason=message["stop_reason"])
         return message
 
-    async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None) -> dict | None:
+    async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None,
+                          cap_body: dict | None = None) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served
         message, or ``None`` after writing the reason and the egress notice.
         ``key_body`` is the unstripped request a forced step keys its pin on,
-        so every turn of the conversation shares one key."""
+        so every turn of the conversation shares one key. ``cap_body`` (P6, flag off, masking applied) is the
+        raw body the size cap is tested on; ``body`` is still what is served."""
         row["serve_mode"] = local_mode.SERVE_LOCAL_AGENT
         if lm.disabled:
             row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_PREFLIGHT_REFUSED)
@@ -788,9 +796,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         policy = local_mode.exempt_policy()  # D-455: LLM_ROUTER_LOCAL_EXEMPT, read per request
         exempt, overrides_problem = local_mode.exempt_reason(key_body or body, row.get("session_id"),
                                                                 parent_main_of(key_body or body), policy)
+        cap_payload = payload if cap_body is None else await asyncio.to_thread(
+            to_ollama, cap_body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
         decision = local_mode.decide_local(body, local_mode.LocalSession(
             key=key, pinned=pinned, kill_switch=lm.killed(), backend_healthy=not health.is_open(cfg.model),
-            breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=payload,
+            breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=cap_payload,
             verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
         vetoed = decision.reason == local_mode.REASON_CLASSIFIER_VETO
         if vetoed:
@@ -1407,7 +1417,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             override="claude" if bypass_local else "local" if force_local else None, key=turn_k)
         # P5 (LLM_ROUTER_PROXY_MASK, default off): ONE masked copy feeds every local-path consumer (cap
         # estimate, pin decision, Ollama payload, ledger). Claude still gets ``body``/``sent_raw``, unmasked.
-        local_body = None if bypass_local else mask_local_body(stripped_body or body if force_local else body, row)
+        local_src = stripped_body or body if force_local else body
+        local_body = None if bypass_local else mask_local_body(local_src, row)
 
         async def finish_forward():
             on_reply = start_shadow(body, row, len(raw)) if shadow is not None else None
@@ -1538,9 +1549,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
         if lm is not None and not bypass_local:
             async def run_local_step():
-                served = await local_step(local_body, row, force=force_local, key_body=body)
+                # P6: with masking applied, the cap is tested on the masked body only when the flag is on.
+                reduced = cap_after_reduce_on()
+                served = await local_step(local_body, row, force=force_local, key_body=body,
+                                          cap_body=local_src if local_body is not local_src and not reduced else None)
                 if "history_mask" in row and isinstance(row.get("local_mode"), dict):
-                    row["local_mode"]["raw_est_prompt_tokens"] = row["history_mask"]["raw_est_prompt_tokens"]
+                    hm, lmr = row["history_mask"], row["local_mode"]
+                    lmr["raw_est_prompt_tokens"] = hm["raw_est_prompt_tokens"]
+                    if "est_prompt_tokens" in lmr:  # counts only: which estimate decided the cap, and both numbers
+                        lmr["cap_estimate"] = "reduced" if reduced else "raw"
+                        lmr["reduced_est_prompt_tokens"] = hm["est_prompt_tokens"]
                 return served
 
             message, early = await attempt_local(run_local_step)
