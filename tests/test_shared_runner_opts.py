@@ -78,11 +78,24 @@ def test_edit_keep_alive_unchanged_without_policy(no_policy):
 
 
 def test_zero_claude_edit_sends_shared_opts(one_model):
-    """zero_claude_edit passes the model so edit_keep_alive can see the policy."""
-    import inspect
+    """zero_claude_edit passes the model so edit_keep_alive can see the policy (behavioural: capture the call)."""
+    import time
 
     from llm_router import warm, zero_claude_edit
-    assert "keep_alive=edit_keep_alive(model)" in inspect.getsource(zero_claude_edit)
+    from llm_router.hooks import direct_executor as de
+    seen = []
+
+    def fake_call(prompt, model, timeout, **kw):
+        seen.append(kw.get("keep_alive"))
+        return None, None                          # no response: the loop records a failed attempt and retries
+
+    monkeypatch_ctx = pytest.MonkeyPatch()
+    monkeypatch_ctx.setattr(de, "call_ollama", fake_call)
+    try:
+        zero_claude_edit.generate_edits("t", {"a.py": "x = 1\n"}, MODEL, time.monotonic() + 30)
+    finally:
+        monkeypatch_ctx.undo()
+    assert seen and all(k == -1 for k in seen)
     assert warm.edit_keep_alive(MODEL) == -1
 
 
