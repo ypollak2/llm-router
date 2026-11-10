@@ -43,6 +43,11 @@ class AbortHandle:
         with contextlib.suppress(Exception):
             closer()
 
+    def unregister(self, closer) -> None:
+        with self._lock:
+            if closer in self._closers:
+                self._closers.remove(closer)
+
     def abort(self) -> None:
         with self._lock:
             self.event.set()
@@ -93,6 +98,9 @@ def abortable_post(url: str, body: bytes, handle: AbortHandle, *, timeout: float
     try:
         if handle.aborted:
             raise LocalCallAborted("aborted before send")
+        conn.connect()
+        if handle.aborted:  # abort during connect found no socket to close
+            raise LocalCallAborted("aborted during connect")
         conn.request("POST", (parts.path or "/") + (f"?{parts.query}" if parts.query else ""),
                      body=body, headers=headers or {})
         resp = conn.getresponse()
@@ -102,4 +110,5 @@ def abortable_post(url: str, body: bytes, handle: AbortHandle, *, timeout: float
             raise LocalCallAborted("local call aborted") from exc
         raise
     finally:
+        handle.unregister(_kill)
         conn.close()

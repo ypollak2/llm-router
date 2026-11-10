@@ -280,3 +280,69 @@ def test_background_call_aborts_when_interactive_waits(env, slow_server):
     assert isinstance(res.get("err"), ab.LocalCallAborted)
     bg.release()
     w.join(timeout=10)
+
+
+# ── regression: a new ticket must never be reaped before its owner has locked it ──
+
+RACE = textwrap.dedent("""
+    import sys, time
+    from llm_router.toolkit import local_gate as g
+    d = g.gate_dir("http://127.0.0.1:19999")
+    if sys.argv[1] == "scan":
+        end = time.time() + 3
+        while time.time() < end:
+            g._live_tickets(d)
+            g.should_yield("http://127.0.0.1:19999")
+    else:
+        err = lost = n = 0
+        end = time.time() + 2.5
+        while time.time() < end:
+            n += 1
+            try:
+                t = g._Ticket(d, "interactive")
+            except OSError:
+                err += 1
+                continue
+            if not t.path.exists():
+                lost += 1
+            t.close()
+        print(n, err, lost)
+""")
+
+
+def test_new_ticket_not_reaped_by_concurrent_scanners(env):
+    cmd = [sys.executable, "-c", RACE]
+    scanners = [subprocess.Popen(cmd + ["scan"], env=os.environ.copy(), stderr=subprocess.PIPE)
+                for _ in range(4)]
+    creator = subprocess.run(cmd + ["create"], env=os.environ.copy(), capture_output=True, text=True, timeout=60)
+    for p in scanners:
+        assert p.wait(timeout=60) == 0, p.stderr.read()
+    assert creator.returncode == 0, creator.stderr
+    n, err, lost = map(int, creator.stdout.split())
+    assert n > 100  # the check found something to check
+    assert (err, lost) == (0, 0)
+
+
+def test_ticket_creation_failure_fails_open(env, monkeypatch):
+    def boom(*a, **k):
+        raise OSError(28, "no space")
+    monkeypatch.setattr(g, "_Ticket", boom)
+    a = g.admit(URL, time.monotonic() + 1, priority="interactive")
+    assert a.disabled
+    a.release()
+
+
+def test_abort_during_connect_is_caught(slow_server):
+    h = ab.AbortHandle()
+    real = ab.http.client.HTTPConnection.connect
+
+    def connect_then_abort(self):
+        h.abort()  # closers run while conn.sock is still None
+        real(self)
+
+    ab.http.client.HTTPConnection.connect = connect_then_abort
+    try:
+        with pytest.raises(ab.LocalCallAborted):
+            ab.abortable_post(slow_server, b"{}", h, timeout=5)
+    finally:
+        ab.http.client.HTTPConnection.connect = real

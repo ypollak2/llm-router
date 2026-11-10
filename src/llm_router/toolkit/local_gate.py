@@ -546,11 +546,13 @@ def _ticket_live(path: Path) -> bool:
     """A ticket is live while its owner holds its flock. If we can lock it the owner is gone: delete it."""
     with _LIFECYCLE:
         try:
-            fd = _open(path)
+            # No O_CREAT: a scanner must never recreate a ticket its owner just removed.
+            fd = os.open(str(path), _O_FLAGS & ~os.O_CREAT, 0o600)
         except FileNotFoundError:
             return False
         except OSError:
             return True  # cannot tell: treat as live, never drop a waiter on doubt
+        _OPEN_FDS.add(fd)
         try:
             if _try_lock(fd):
                 with contextlib.suppress(OSError):
@@ -581,10 +583,22 @@ class _Ticket:
         _wait_dir(d).mkdir(parents=True, exist_ok=True)
         name = f"{PRIORITIES.index(priority)}-{time.time_ns():020d}-{os.getpid():08d}-{os.urandom(3).hex()}.wait"
         self.path = _wait_dir(d) / name
+        # Create and lock under a name scanners do not glob, then rename into the line: a scanner can
+        # never see (and reap) a ticket whose owner has not locked it yet.
+        tmp = _wait_dir(d) / f".tmp-{name}"
         with _LIFECYCLE:
-            self._fd = _open(self.path)
-            if not _try_lock(self._fd):  # fresh random name: cannot happen
-                raise OSError(errno.EBUSY, "ticket lock contended")
+            self._fd = _open(tmp)
+            try:
+                if not _try_lock(self._fd):  # fresh random name: cannot happen
+                    raise OSError(errno.EBUSY, "ticket lock contended")
+                os.rename(tmp, self.path)
+            except BaseException:
+                _OPEN_FDS.discard(self._fd)
+                with contextlib.suppress(OSError):
+                    os.close(self._fd)
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
+                raise
 
     def is_head(self, d: Path) -> bool:
         live = _live_tickets(d)
@@ -638,7 +652,11 @@ def _run_sync(url, deadline, exclusive, caller, priority=None):
         return off
     _guard_reentrant(url, exclusive)
     t0, flags = time.monotonic(), _Flags()
-    tk = _Ticket(d, priority) if priority else None
+    try:
+        tk = _Ticket(d, priority) if priority else None
+    except OSError as exc:
+        failopen.record("CHZ-FO-LOCAL-GATE-TICKET", exc)
+        return _disabled(url, "ticket_error", caller)
     try:
         while True:
             if tk is None or tk.is_head(d):
@@ -666,7 +684,11 @@ async def _run_async(url, deadline, exclusive, caller, priority=None):
         return off
     _guard_reentrant(url, exclusive)
     t0, flags = time.monotonic(), _Flags()
-    tk = _Ticket(d, priority) if priority else None
+    try:
+        tk = _Ticket(d, priority) if priority else None
+    except OSError as exc:
+        failopen.record("CHZ-FO-LOCAL-GATE-TICKET", exc)
+        return _disabled(url, "ticket_error", caller)
     try:
         while True:
             if tk is None or tk.is_head(d):
