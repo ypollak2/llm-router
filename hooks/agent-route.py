@@ -3004,7 +3004,7 @@ def _results_retention_days() -> float:
 
 def _prune_results(d: Path, keep: Path) -> int:
     """Delete hook-named result files in ``d`` older than the retention window, never ``keep``. An OSError is counted
-    (failopen CHZ-FO-AGENT-RESULTS-PRUNE), never raised."""
+    (failopen CHZ-FO-AGENT-ROUTE-RESULTS-PRUNE), never raised."""
     days = _results_retention_days()
     if days <= 0:
         return 0
@@ -3017,10 +3017,10 @@ def _prune_results(d: Path, keep: Path) -> int:
                     f.unlink()
                     n += 1
             except OSError as exc:
-                _failopen("CHZ-FO-AGENT-RESULTS-PRUNE", exc)
+                _failopen("CHZ-FO-AGENT-ROUTE-RESULTS-PRUNE", exc)
                 continue
     except OSError as exc:
-        _failopen("CHZ-FO-AGENT-RESULTS-PRUNE", exc)
+        _failopen("CHZ-FO-AGENT-ROUTE-RESULTS-PRUNE", exc)
     return n
 
 
