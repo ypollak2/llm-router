@@ -50,7 +50,8 @@ Row fields:
                   (``steps.step_ineligible``)
   decision        served | forwarded | fallback
   reason          why not served: routing_off | not_eligible | policy_kept |
-                  budget_exceeded | backend_error | validation |
+                  budget_exceeded | memory_budget | local_queue_timeout (the
+                  local queue wait used the budget; LLM_ROUTER_LOCAL_QUEUE) | backend_error | validation |
                   backend_unhealthy (skipped, no attempt: see backend_health) |
                   edit_to_claude (an Edit/Write reply from the raw tool-call
                   loop, never served) and, with ``--local-agent``,

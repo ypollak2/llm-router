@@ -51,6 +51,7 @@ import copy
 import importlib
 import json
 import os
+import time
 from typing import Callable, Protocol
 
 from llm_router import local_models
@@ -266,13 +267,15 @@ def apply_trims(body: dict, trims: list[Trim], *, target_window: int | None = No
 
 
 class Backend(Protocol):
-    async def complete(self, body: dict, timeout_s: float) -> tuple[dict | None, str | None, dict]:
+    async def complete(self, body: dict, timeout_s: float,
+                       priority: str = "interactive") -> tuple[dict | None, str | None, dict]:
         """``(anthropic_message | None, error | None, backend_usage)``."""
 
 
 NUM_PREDICT_EASY = 200  # after Read / Bash / no tool: pick the obvious next action
 NUM_PREDICT_HARD = 700  # anything else (e.g. after an Edit)
 DEFAULT_HEDGE_S = 8.0
+QUEUE_MARGIN_S = 0.25  # queue deadline sits this far inside the caller's budget
 # N20: bounded; an explicit --keep-alive -1 is still honoured (server.parse_keep_alive).
 DEFAULT_KEEP_ALIVE: int | str = 600
 
@@ -313,13 +316,38 @@ class OllamaBackend:
         if _shared:   # one-model policy: never expire the shared runner (CLSCTX-1)
             self.keep_alive = _shared[1]
 
+    async def _admit(self, caller: str, priority: str, timeout_s: float, t_entry: float | None = None):
+        """P13: take a slot in the local queue. ``(admission | None, remaining_s)``.
+
+        Flag off: ``(None, timeout_s)`` with no gate call at all. Flag on: one absolute deadline of
+        ``timeout_s``; the queue wait is spent from it and the caller gets what remains for its HTTP
+        call. Expiry (or nothing left) raises ``LocalQueueTimeout``, a ``LocalModelConflict``."""
+        from llm_router.toolkit import local_gate
+        if not local_gate.queue_enabled():
+            return None, timeout_s
+        # The deadline runs from the caller's entry, less a margin, so the queue expires strictly before the
+        # server's own ``wait_for(complete, left)`` and the row says local_queue_timeout, not budget_exceeded.
+        entry = time.monotonic() if t_entry is None else t_entry
+        deadline = entry + timeout_s - min(QUEUE_MARGIN_S, timeout_s * 0.1)
+        if deadline - time.monotonic() <= 0:   # _guard/_prepare already used the budget: do not take a slot for nothing
+            raise asyncio.TimeoutError(f"step budget of {timeout_s:g}s used before the queue")
+        adm = await local_gate.aadmit(self.base_url, deadline, caller=caller, priority=priority)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            adm.release()
+            raise local_gate.LocalQueueTimeout(
+                f"local_queue_timeout: nothing left of the {timeout_s:g}s budget after the queue wait", self.base_url)
+        return adm, remaining
+
     async def _guard(self, purpose: str) -> None:
         """Memory guard before this backend loads its model (``ensure_fits`` blocks, so it runs in a thread).
         Raises ``MemoryBudgetExceeded`` (a ``LocalModelConflict``); the caller treats it as a backend failure."""
         from llm_router.toolkit.adapters.ollama import ensure_fits
         await asyncio.to_thread(ensure_fits, self.model, self.base_url, purpose)
 
-    async def complete(self, body: dict, timeout_s: float) -> tuple[dict | None, str | None, dict]:
+    async def complete(self, body: dict, timeout_s: float,
+                       priority: str = "interactive") -> tuple[dict | None, str | None, dict]:
+        t_entry = time.monotonic()
         await self._guard("proxy.OllamaBackend.complete")
 
         def _prepare() -> dict:
@@ -347,36 +375,49 @@ class OllamaBackend:
         objs: list[dict] = []
         first_token_s = None
         loop = asyncio.get_running_loop()
-        t0 = loop.time()
-        async with self.client.stream("POST", self.base_url + "/api/chat", json=payload,
-                                      timeout=timeout_s) as resp:
-            await _raise_with_body(resp)
-            lines = resp.aiter_lines()
-            try:
-                first = await asyncio.wait_for(lines.__anext__(), timeout=self.hedge_s)
-            except asyncio.TimeoutError:
-                raise HedgeTimeout(f"no first token within {self.hedge_s}s") from None
-            except StopAsyncIteration:
-                first = ""
-            first_token_s = round(loop.time() - t0, 3)
-            if first.strip():
-                objs.append(json.loads(first))
-            async for line in lines:
-                if line.strip():
-                    objs.append(json.loads(line))
+        q0 = loop.time()
+        adm, http_timeout_s = await self._admit("proxy.complete", priority, timeout_s, t_entry)
+        t0 = loop.time()  # first_token_s is model latency: the queue wait is reported apart
+        queue = {"queue_wait_ms": int((t0 - q0) * 1000)} if adm is not None else {}
+        hedge_s = self.hedge_s if (adm is None or self.hedge_s is None) else min(self.hedge_s, http_timeout_s)
+        # When the queue wait shrank the hedge, its expiry is the step budget running out, not a slow model.
+        hedge_clamped = hedge_s != self.hedge_s
+        try:
+            async with self.client.stream("POST", self.base_url + "/api/chat", json=payload,
+                                          timeout=http_timeout_s) as resp:
+                await _raise_with_body(resp)
+                lines = resp.aiter_lines()
+                try:
+                    first = await asyncio.wait_for(lines.__anext__(), timeout=hedge_s)
+                except asyncio.TimeoutError:
+                    if hedge_clamped:
+                        raise asyncio.TimeoutError(
+                            f"step budget used up waiting for a first token ({hedge_s:.1f}s left after the queue)") from None
+                    raise HedgeTimeout(f"no first token within {hedge_s}s") from None
+                except StopAsyncIteration:
+                    first = ""
+                first_token_s = round(loop.time() - t0, 3)
+                if first.strip():
+                    objs.append(json.loads(first))
+                async for line in lines:
+                    if line.strip():
+                        objs.append(json.loads(line))
+        finally:
+            if adm is not None:
+                adm.release()
         if not objs:
-            return None, "empty response", {"first_token_s": first_token_s}
+            return None, "empty response", {"first_token_s": first_token_s, **queue}
         stream_error = next((o["error"] for o in objs if o.get("error")), None)
         if stream_error:
             # A runner failure mid-stream arrives as an ``error`` line; read as
             # a reply it would look merely empty and hide the crash signature.
-            return None, f"ollama error: {str(stream_error)[:200]}", {"first_token_s": first_token_s}
+            return None, f"ollama error: {str(stream_error)[:200]}", {"first_token_s": first_token_s, **queue}
         data = merge_stream(objs)
         usage = {"prompt_tokens": data.get("prompt_eval_count"), "output_tokens": data.get("eval_count"),
                  "prompt_eval_s": round((data.get("prompt_eval_duration") or 0) / 1e9, 2),
                  "eval_s": round((data.get("eval_duration") or 0) / 1e9, 2),
                  "load_s": round((data.get("load_duration") or 0) / 1e9, 2),
-                 "first_token_s": first_token_s}
+                 "first_token_s": first_token_s, **queue}
         # Ollama's own count, checked against the estimate that cleared the
         # preflight above: if it came back truncated anyway (a window this
         # process does not know about, or a race with another resident
@@ -404,8 +445,13 @@ class OllamaBackend:
                    "options": {"num_ctx": self.num_ctx, "num_predict": 1}}
         if self.keep_alive is not None:
             payload["keep_alive"] = self.keep_alive
-        r = await self.client.post(self.base_url + "/api/chat", json=payload, timeout=timeout_s)
-        r.raise_for_status()
+        adm, http_timeout_s = await self._admit("proxy.warm_up", "background", timeout_s)
+        try:
+            r = await self.client.post(self.base_url + "/api/chat", json=payload, timeout=http_timeout_s)
+            r.raise_for_status()
+        finally:
+            if adm is not None:
+                adm.release()
         return round(loop.time() - t0, 2)
 
 
@@ -413,7 +459,11 @@ class OllamaBackend:
         """The breaker's cheap health request (``proxy.backend_health``): one
         token, streamed, with the serving ``num_ctx`` so it never reloads the
         model. A crashed runner answers it with no lines at all (the 2026-09-30
-        post-crash shape), an ``error`` line or an HTTP error."""
+        post-crash shape), an ``error`` line or an HTTP error.
+
+        P13: deliberately NOT admitted to the local queue. A probe that raised ``LocalQueueTimeout``
+        behind a long interactive stream would count as a failed probe and keep a healthy backend's
+        breaker open; it is one token and not a user turn, so it bypasses the line."""
         await self._guard("proxy.OllamaBackend.probe")
         payload = {"model": self.model, "messages": [{"role": "user", "content": "ok"}],
                    "stream": True, "think": False,

@@ -386,6 +386,85 @@ def test_a_hedge_timeout_in_combined_mode_falls_back_to_the_tier_path_and_pins_c
     assert row["reason"] == "hedge_timeout" and row["local_mode"]["pin_change"] == "local->claude"   # D-442
 
 
+def test_p13_queue_timeout_falls_back_with_its_own_reason_and_does_not_feed_the_breaker(tmp_path):
+    from llm_router.toolkit.local_gate import LocalQueueTimeout
+
+    class Queued:
+        calls = []
+
+        async def complete(self, body, timeout_s):
+            self.calls.append(1)
+            raise LocalQueueTimeout("local_queue_timeout: no slot", "http://x")
+
+    rig = Rig(tmp_path, backend=Queued())
+    r = rig.post(opus(turn_body(["rename the helper"])))
+    (row,) = rig.rows()
+    assert r.status_code == 200 and len(rig.up.requests) == 1 and row["decision"] == "fallback"
+    assert row["reason"] == "local_queue_timeout" and row["reason"] != "memory_budget"
+    assert "backend_health" not in row   # not a backend fault
+
+
+def test_p13_real_path_queue_wait_that_uses_the_budget_is_local_queue_timeout(tmp_path, monkeypatch):
+    """Real OllamaBackend + the server's own wait_for: a held slot makes the queue wait consume the step budget."""
+    import time
+
+    from llm_router.proxy.backends import OllamaBackend
+    from llm_router.toolkit import local_gate as g
+    from tests.test_p13_backend_queue import FakeClient
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_GATE_DIR", str(tmp_path / "gate"))
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_SLOTS", "1")
+    g._FS_CACHE.clear()
+    monkeypatch.setattr(g, "_fstype_for", lambda p: "apfs")
+    client = FakeClient()
+    be = OllamaBackend(MODEL, client, base_url="http://localhost:59997", num_ctx=8192, hedge_s=None, num_predict=50)
+
+    async def _noguard(purpose):
+        return None
+    be._guard = _noguard
+    pre = g.admit("http://localhost:59997", time.monotonic() + 5)
+    try:
+        rig = Rig(tmp_path / "rig", backend=be, step_budget_s=1.0)
+        r = rig.post(opus(turn_body(["rename the helper"])))
+    finally:
+        pre.release()
+    (row,) = rig.rows()
+    assert r.status_code == 200 and len(rig.up.requests) == 1 and row["decision"] == "fallback"
+    assert row["reason"] == "local_queue_timeout", row
+    assert client.timeouts == []   # never reached HTTP
+    assert "backend_health" not in row
+
+
+def test_p13_clamped_hedge_is_budget_exceeded_not_hedge_timeout(tmp_path, monkeypatch):
+    """Queue wait leaves less than hedge_s and no first line arrives: the step budget ran out, not a slow model."""
+    import threading
+    import time
+
+    from llm_router.proxy.backends import OllamaBackend
+    from llm_router.toolkit import local_gate as g
+    from tests.test_p13_backend_queue import FakeClient
+    url = "http://localhost:59996"
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_GATE_DIR", str(tmp_path / "gate"))
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_QUEUE", "on")
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_SLOTS", "1")
+    g._FS_CACHE.clear()
+    monkeypatch.setattr(g, "_fstype_for", lambda p: "apfs")
+    client = FakeClient(lines=[], hold=asyncio.Event())
+    be = OllamaBackend(MODEL, client, base_url=url, num_ctx=8192, hedge_s=60.0, num_predict=50)
+
+    async def _noguard(purpose):
+        return None
+    be._guard = _noguard
+    pre = g.admit(url, time.monotonic() + 5)
+    threading.Timer(0.3, pre.release).start()
+    rig = Rig(tmp_path / "rig", backend=be, step_budget_s=1.5)
+    r = rig.post(opus(turn_body(["rename the helper"])))
+    (row,) = rig.rows()
+    assert r.status_code == 200 and row["decision"] == "fallback"
+    assert row["reason"] == "budget_exceeded", row
+    assert row["detail"] and "step budget" in row["detail"]   # not the hedge_timeout wording
+
+
 def test_combined_mode_defaults_to_a_bounded_first_token_deadline_and_old_mode_to_none(monkeypatch, tmp_path):
     import uvicorn
     seen = []

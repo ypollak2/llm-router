@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import inspect
 import json
 import os
 import sys
@@ -741,8 +742,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         except (asyncio.TimeoutError, httpx.TimeoutException):
             err, reason = f"exceeded step budget {step_budget_s}s", "budget_exceeded"
         except LocalModelConflict as exc:
-            # The memory guard refused the load (nothing was sent). Not a backend fault: do not feed the breaker.
-            err, reason, backend_t0 = str(exc), "memory_budget", None
+            # The memory guard refused the load, or (P13) the local queue expired: nothing was sent.
+            # Not a backend fault: do not feed the breaker. Distinct reasons keep the two countable.
+            from llm_router.toolkit.local_gate import LocalQueueTimeout
+            err, backend_t0 = str(exc), None
+            reason = "local_queue_timeout" if isinstance(exc, LocalQueueTimeout) else "memory_budget"
         except Exception as exc:  # noqa: BLE001 - any backend failure is a counted fallback
             err, reason = f"{type(exc).__name__}: {exc}", "backend_error"
         if backend_t0 is not None:
@@ -933,7 +937,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if await asyncio.to_thread(local_mode.over_prompt_cap, payload) is not None:
             return None, "prompt over cap", local_mode.REASON_PROMPT_CAP
         try:
-            message, err, _usage = await make_backend(cfg.model).complete(body, shadow.budget_s)
+            sb = make_backend(cfg.model)
+            # P13: a shadow call is not a live turn, so it queues behind real ones (backends without the knob ignore it).
+            try:
+                params = inspect.signature(sb.complete).parameters
+            except (ValueError, TypeError):
+                params = {}
+            takes = "priority" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+            kw = {"priority": "background"} if takes else {}
+            message, err, _usage = await sb.complete(body, shadow.budget_s, **kw)
         except HedgeTimeout:
             return None, "hedge", "hedge_timeout"
         except ContextOverflow:
