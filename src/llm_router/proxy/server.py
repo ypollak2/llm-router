@@ -65,7 +65,7 @@ from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
 from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
-from llm_router.proxy import chunk_store, cls_decide, cold_guard, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
+from llm_router.proxy import chunk_store, cls_decide, compact_worker, cold_guard, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -981,6 +981,31 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         row["mr_summary"] = res.row
         return res.body if res.changed else None
 
+    def build_compact_worker():
+        """P18 (LLM_ROUTER_COMPACT_BG, default off): the one background compaction worker, or None. Needs the
+        local queue (LLM_ROUTER_LOCAL_QUEUE): without it a background map could not be told to yield. It also needs
+        P9 (LLM_ROUTER_PROXY_MR) and the chunk store (LLM_ROUTER_CHUNK_STORE): they are the only readers of what
+        the worker maps, so without either its maps would be spent for nothing. Its map
+        goes through the same backend as P9's (live model, live num_ctx) at the ``background`` priority."""
+        from llm_router.toolkit import local_gate as queue_gate
+        if lm is None or not (queue_gate.queue_enabled() and mr_summary.enabled() and chunk_store.enabled()):
+            return None
+        model = cfg.model.split("/", 1)[1]
+        backend = make_backend(cfg.model)
+
+        async def bg_map_call(prompt: str, num_predict: int) -> str | None:
+            reply, _err, _usage = await backend.complete(
+                {"model": cfg.model, "messages": [{"role": "user", "content": prompt}],
+                 "max_tokens": num_predict, "temperature": 0}, mr_summary.MAP_TIMEOUT_S, priority="background")
+            if reply is None:
+                return None
+            return "".join(b.get("text", "") for b in reply.get("content") or [] if b.get("type") == "text")
+
+        return compact_worker.install(compact_worker.Worker(
+            bg_map_call, model=cfg.model, limit_fn=local_mode.prompt_cap_tokens,
+            est=lambda b: local_mode.estimate_prompt_tokens(to_ollama(b, model, num_ctx=cfg.num_ctx, max_predict=1)),
+            yield_check=lambda: queue_gate.should_yield(backend.base_url)))
+
     async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None,
                           cap_body: dict | None = None) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served
@@ -1844,8 +1869,20 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             async def run_local_step():
                 # P6: with masking applied, the cap is tested on the masked body only when the flag is on.
                 reduced = cap_after_reduce_on()
-                served = await local_step(local_body, row, force=force_local, key_body=body,
-                                          cap_body=local_src if local_body is not local_src and not reduced else None)
+                cw = compact_worker.get() if compact_worker.enabled() else None
+                cw_key = None
+                if cw is not None:  # P18: this turn ends any gap and preempts a background map the proxy started
+                    cw_key = conversation_key(body, row.get("session_id"))
+                    cw.note_request(cw_key)
+                served = None
+                try:
+                    served = await local_step(local_body, row, force=force_local, key_body=body,
+                                              cap_body=local_src if local_body is not local_src and not reduced else None)
+                finally:
+                    if cw is not None:
+                        paid = (row.get("mr_summary") or {}).get("map_calls", 0)
+                        cw.note_done(cw_key, local_body, served, paid if isinstance(paid, int) else 0)
+                        row["compact_bg"] = {"live_maps_paid": paid if isinstance(paid, int) else 0}
                 if "history_mask" in row and isinstance(row.get("local_mode"), dict):
                     hm, lmr = row["history_mask"], row["local_mode"]
                     lmr["raw_est_prompt_tokens"] = hm["raw_est_prompt_tokens"]
@@ -1891,6 +1928,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # also when the breaker (not the YAML) turned the rewrite off: recovery runs on this loop
         if tier_policy is not None and (tier_policy.haiku_rewrite or getattr(tier_policy, "haiku_breaker", None) is not None):
             guard_task = asyncio.create_task(haiku_guard.guard_loop(tier_policy, run=haiku_guard_run))
+        compact_task = None
+        if compact_worker.enabled():  # P18: flag off, none of this runs
+            try:
+                cw = build_compact_worker()
+                if cw is not None:
+                    compact_task = asyncio.create_task(cw.run())
+                else:
+                    compact_worker.clear()
+            except Exception as exc:  # noqa: BLE001 - an optimisation; the proxy serves without it
+                from llm_router import failopen as _fo
+                _fo.record("LR-FO-PROXY-COMPACT-BG", exc, detail="start")
         rescan_task = None
         try:  # D-205: periodic / on-change rediscovery without a restart
             from llm_router.discovery_rescan import rescan_loop
@@ -1901,6 +1949,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         yield
         if rescan_task is not None:
             rescan_task.cancel()
+        if compact_task is not None:
+            compact_task.cancel()
+        if compact_worker.enabled():
+            compact_worker.clear()
         if task is not None and not task.done():
             task.cancel()
         if guard_task is not None and not guard_task.done():
