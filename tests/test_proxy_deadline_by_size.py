@@ -62,7 +62,7 @@ def test_missing_ledger_gives_no_samples(tmp_path):
 
 
 def test_cap_applies_and_env_overrides(monkeypatch):
-    assert deadline.compute(10_000_000)["deadline_s"] == deadline.DEFAULT_CAP_S == 480.0
+    assert deadline.compute(10_000_000)["deadline_s"] == deadline.DEFAULT_CAP_S == 240.0
     monkeypatch.setenv(deadline.ENV_CAP, "600")
     assert deadline.compute(10_000_000)["deadline_s"] == 600.0
     monkeypatch.setenv(deadline.ENV_CAP, "garbage")
@@ -124,3 +124,17 @@ async def test_flag_on_never_shortens_and_a_hedge_that_is_off_stays_off(env, mon
     (row,) = env.rows()
     assert row["deadline"]["step_budget_s"] == 120.0 and row["deadline"]["hedge_s"] is None
     assert not hasattr(backend, "hedge_s")
+
+
+@pytest.mark.parametrize("raw", ["inf", "nan", "-inf", "0", "-5"])
+def test_cap_rejects_non_finite_and_non_positive(monkeypatch, raw):
+    monkeypatch.setenv(deadline.ENV_CAP, raw)
+    assert deadline.cap_s() == deadline.DEFAULT_CAP_S
+
+
+def test_empty_ledger_result_is_cached_only_briefly(tmp_path):
+    p = tmp_path / "l.jsonl"
+    assert deadline.recent_samples(p, now=100.0) == []
+    _ledger(p, [_row(30_000, 20.0)] * 6)
+    assert deadline.recent_samples(p, now=101.0) == []          # inside the short TTL
+    assert len(deadline.recent_samples(p, now=100.0 + deadline.EMPTY_CACHE_S + 1)) == 6

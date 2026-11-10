@@ -15,6 +15,10 @@ The rate comes from the proxy's own ledger when it has enough rows: each recent 
 exponent, and the median of the rows nearest in size is used. With fewer than ``MIN_ROWS`` usable rows the
 constant ``DEFAULT_PREFILL_TOK_S`` (tokens/s at the 60k reference point) applies.
 
+The 1.585 exponent rests on two single (n=1) measurements. Ollama's prompt_eval_count counts only uncached
+tokens, so a row served from a warm prefix cache underpredicts the prefill of a cold prompt of the same size.
+Not budgeted: cold model load (load_s 8-110 s) and decode time; the shadow path is untouched.
+
 The deadline never goes below the value that is configured today (the 8 s hedge, the 30 s or 120 s step
 budget): the flag can only lengthen a wait, never shorten one. Hook-path budgets are not touched here.
 """
@@ -32,9 +36,12 @@ ENV_FLAG = "LLM_ROUTER_DEADLINE_BY_SIZE"
 ENV_CAP = "LLM_ROUTER_DEADLINE_CAP_S"
 ENV_RATE = "LLM_ROUTER_PREFILL_TOK_S"
 
-#: Cap below Claude Code's own request timeout (SDK default 600 s, API_TIMEOUT_MS), leaving ~2 min for the
-#: fall-back-to-Claude call that follows a local timeout to complete before the client gives up.
-DEFAULT_CAP_S = 480.0
+#: The binding client timer is Claude Code's stream idle watchdog on a custom ANTHROPIC_BASE_URL (event-level
+#: ~300 s per https://code.claude.com/docs/en/env-vars and https://code.claude.com/docs/en/network-config;
+#: the byte-level default is unconfirmed), not API_TIMEOUT_MS (600 s, headers wait). The proxy sends no bytes
+#: while the local call runs, so a silent wait of 240 s or more risks a client kill and retry. 240 s stays under
+#: it; a follow-up (SSE keepalive pings) is what allows raising the cap.
+DEFAULT_CAP_S = 240.0
 #: Tokens per second of prefill at the 60k reference point (60000 / 93 s, measured, n=1).
 DEFAULT_PREFILL_TOK_S = 645.0
 REFERENCE_TOKENS = 60_000
@@ -49,12 +56,14 @@ MIN_ROW_TOKENS = 2_000
 NEAREST_ROWS = 25
 TAIL_BYTES = 4 * 1024 * 1024
 CACHE_S = 60.0
+#: An empty result is cached briefly only: the ledger may be about to gain rows.
+EMPTY_CACHE_S = 5.0
 
 _cache: dict = {"at": 0.0, "path": None, "rows": []}
 
 
 def enabled() -> bool:
-    return os.environ.get("LLM_ROUTER_DEADLINE_BY_SIZE", "").strip().lower() in ("1", "on", "true", "yes")
+    return os.environ.get("LLM_ROUTER_DEADLINE_BY_SIZE", "")  # literal: env_registry scans for it.strip().lower() in ("1", "on", "true", "yes")
 
 
 def _env_float(raw: str | None, default: float) -> float:
@@ -62,7 +71,7 @@ def _env_float(raw: str | None, default: float) -> float:
         v = float(raw or default)
     except ValueError:
         return default
-    return v if v > 0 else default
+    return v if (math.isfinite(v) and v > 0) else default
 
 
 def cap_s() -> float:
@@ -83,7 +92,7 @@ def recent_samples(path: Path | None = None, *, now: float | None = None) -> lis
 
     target = path or ledger.ledger_path()
     t = time.monotonic() if now is None else now
-    if _cache["path"] == str(target) and t - _cache["at"] < CACHE_S:
+    if _cache["path"] == str(target) and t - _cache["at"] < (CACHE_S if _cache["rows"] else EMPTY_CACHE_S):
         return _cache["rows"]
     out: list[tuple[int, float]] = []
     try:
