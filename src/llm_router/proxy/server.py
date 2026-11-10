@@ -65,7 +65,7 @@ from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
 from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
-from llm_router.proxy import chunk_store, cls_decide, compact_worker, cold_guard, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
+from llm_router.proxy import chunk_store, cls_decide, compact_worker, cold_guard, deadline, haiku_arm, haiku_guard, history_layout, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -171,6 +171,10 @@ def _note_prefix(row: dict, body: dict, usage: dict | None) -> None:
         if obs:
             row.update(prefix_hash.TRACKER.fields(
                 conversation_key(body, row.get("session_id")), obs))
+            if history_layout.enabled():  # P14: counts only; flag off adds no field
+                stats = history_layout.take_stats(history_layout.conv_key(body))
+                if stats:
+                    row["layout"] = stats
             if cold_guard.enabled():
                 cold_guard.GUARD.note_resident(obs)  # P22: the post-trim prefix the runner actually holds
     except Exception:  # noqa: BLE001 - measurement only
@@ -941,7 +945,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         finally:  # the in-flight marker is released whatever happens, cancellation included
             cold_guard.GUARD.end_warm_up(key, (sent or obs) if ok else None, ok, generation)
 
-    async def mr_shorten(body: dict, row: dict) -> dict | None:
+    async def mr_shorten(body: dict, row: dict, goal: int | None = None) -> dict | None:
         """P9 (LLM_ROUTER_PROXY_MR, default off). Called from ``local_step`` only for a turn whose every
         non-size rule already passed (``decide_local`` without the payload), so no map call is spent on a
         turn that goes to Claude anyway. Returns ``body`` with its oldest history replaced by map-reduce chunk
@@ -969,7 +973,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return "".join(b.get("text", "") for b in reply.get("content") or [] if b.get("type") == "text")
 
             res = await asyncio.wait_for(mr_summary.shorten(
-                body, map_call, cap=local_mode.prompt_cap_tokens(),
+                body, map_call, cap=local_mode.prompt_cap_tokens(), goal=goal,
                 est=lambda b: local_mode.estimate_prompt_tokens(to_ollama(b, model, num_ctx=cfg.num_ctx, max_predict=1)),
                 store=store, model=cfg.model, progress=progress),
                 timeout=deadline.cap_s(keepalive=proxy_keepalive.enabled()))
@@ -1012,7 +1016,18 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             est=lambda b: local_mode.estimate_prompt_tokens(to_ollama(b, model, num_ctx=cfg.num_ctx, max_predict=1)),
             yield_check=lambda: queue_gate.should_yield(backend.base_url)))
 
-    async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None,
+    async def local_step(*args, **kwargs):
+        """P14: with the layout on, this request's layout state is written by the local-agent path only (the
+        ``fast`` trim must not also write it); the marker is reset when the step ends, raised or not."""
+        if not history_layout.enabled():
+            return await _local_step(*args, **kwargs)
+        token = history_layout.LOCAL_AGENT_OWNS.set(True)
+        try:
+            return await _local_step(*args, **kwargs)
+        finally:
+            history_layout.LOCAL_AGENT_OWNS.reset(token)
+
+    async def _local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None,
                           cap_body: dict | None = None) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served
         message, or ``None`` after writing the reason and the egress notice.
@@ -1069,12 +1084,28 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 payload=cap_pl, verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
 
         decision = decide(cap_payload)
+        layout_event = None
+        layout_key = history_layout.conv_key(body) if history_layout.enabled() else None  # the client's body, before P9
         if (decision.reason == local_mode.REASON_PROMPT_CAP and mr_summary.enabled()
                 and decide(None).local):
             # P9: over the cap is the only refusal the summarizer cures. ``decide(None)`` is the same rule
             # set with the size check skipped, so exempt / pinned / media / veto / breaker / health turns
             # never reach a map call.
-            shorter = await mr_shorten(body, row)
+            layout_on = history_layout.enabled()
+            held = None
+            if layout_on:  # P14: last move's frozen layout, if it still fits: no map call, an append-only prefix
+                held = history_layout.hold(layout_key, body.get("messages") or [], lambda msgs: local_mode.estimate_prompt_tokens(
+                    to_ollama(dict(body, messages=msgs), cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx,
+                              max_predict=1)) <= local_mode.prompt_cap_tokens())
+            if held is not None:
+                shorter, layout_event = dict(body, messages=held), (False, history_layout.REASON_HOLD)
+                row["mr_summary"] = {"outcome": "layout_held"}
+            else:
+                # a move: with the layout on, aim below the cap so the next K turns fit (P9 still accepts the plain goal)
+                shorter = await mr_shorten(body, row, goal=history_layout.move_goal(
+                    layout_key, local_mode.prompt_cap_tokens()) if layout_on else None)
+                if shorter is not None:
+                    layout_event = (True, history_layout.REASON_OVER_CAP)
             if shorter is not None:
                 body = shorter
                 payload = cap_payload = await asyncio.to_thread(
@@ -1132,6 +1163,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 lm.set_pin(key, local_mode.PIN_LOCAL)
                 row["local_mode"]["pin"] = local_mode.PIN_LOCAL
             cold_seq = cold_guard.GUARD.seq
+            if history_layout.enabled():  # P14: the counter; flag off adds no field and no call
+                ev = layout_event or (False, history_layout.REASON_UNDER_CAP)
+                history_layout.observe(layout_key, body.get("messages") or [], moved=ev[0], reason=ev[1],
+                                       freeze=layout_event is not None)
+                row_layout = history_layout.take_stats(layout_key)
+                if row_layout:
+                    row["layout"] = row_layout
             message = await try_serve(body, row)
             if cold_guard.enabled():
                 if message is None:

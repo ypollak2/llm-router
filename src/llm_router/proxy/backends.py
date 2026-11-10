@@ -56,9 +56,10 @@ from typing import Callable, Protocol
 
 from llm_router import local_models
 from llm_router.local_context_guard import DEFAULT_RESERVED_OUTPUT_TOKENS, check_overflow, check_truncated, effective_window, estimate_payload_tokens
-from llm_router.proxy import prefix_hash
+from llm_router.proxy import history_layout, prefix_hash
 from llm_router.proxy.steps import STEP_CONTINUATION, non_system, prev_tools
 from llm_router.proxy.translate import from_ollama, to_ollama
+from llm_router.token_estimate import est_tokens
 
 Trim = Callable[[dict], dict]
 
@@ -220,6 +221,13 @@ def _trim_fast(body: dict, target_window: int | None = None) -> dict:
     turns = non_system(body.get("messages") or [])
     if turns:
         window = target_window if isinstance(target_window, int) and target_window > 0 else local_models.num_ctx(None)
+        if history_layout.enabled():  # P14: append-only layout instead of the sliding last-7 window; None = not arrangeable
+            laid = history_layout.arrange(
+                turns, key=history_layout.conv_key(body), window=window, reserved=DEFAULT_RESERVED_OUTPUT_TOKENS,
+                fixed_est=est_tokens({"system": out["system"], "tools": out.get("tools")}))
+            if laid is not None:
+                out["messages"] = laid
+                return out
         system_layers, messages = _pack_messages(turns, window, out)
         out["messages"] = messages
         if system_layers:
