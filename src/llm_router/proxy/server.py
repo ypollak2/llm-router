@@ -456,6 +456,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     def parent_main_of(body: dict) -> bool | None:
         return thread_main.get(thread_parent(body)) if is_thread_continue(body) else None
 
+    keepalive_written: set[int] = set()  # ids of keepalive-committed rows already written (one row per request)
+
     def write(row: dict) -> None:
         remember_thread(row)
         # Real Anthropic spend per call (PR 8). Never lets accounting cost a row.
@@ -466,6 +468,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
         lane_a.ensure_fields(row)  # every continuation row, served or not, carries lane_a_reason/_conf
         ledger.write_row(row, cfg.ledger_path)
+        if row.get("committed_early"):
+            keepalive_written.add(id(row))
 
     def _budget_left(t0: float, budget_s: float | None = None) -> float:
         """Seconds left of the step budget that started at ``t0`` (never negative)."""
@@ -1436,8 +1440,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             row["committed_early"] = True
             row["keepalive_pings"] = 0
 
+            def write_once(status: int, exc: BaseException | None, detail: str | None = None) -> None:
+                if id(row) in keepalive_written:
+                    return
+                row.update(upstream_status=status,
+                           detail=detail or ledger.scrub_detail(f"keepalive: {type(exc).__name__}"))
+                write(row)
+
             async def stream():
                 fin = None
+                finished = False
                 try:
                     async for ping in proxy_keepalive.ping_until(task, row):
                         yield ping
@@ -1445,11 +1457,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                         message = task.result()
                     except Exception as exc:  # noqa: BLE001 -- reported inside the open stream
                         failopen.record("LR-FO-PROXY-KEEPALIVE-LOCAL", exc)
+                        write_once(500, exc)
                         yield proxy_keepalive.error_frame(500, b"")
                         return
                     if message is not None:
                         serve_message(message)
                         yield sse_from_message(message)
+                        finished = True
                         return
                     fin = asyncio.ensure_future(finish_forward())
                     async for ping in proxy_keepalive.ping_until(fin, row):
@@ -1458,14 +1472,21 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                         resp = fin.result()
                     except Exception as exc:  # noqa: BLE001 -- reported inside the open stream
                         failopen.record("LR-FO-PROXY-KEEPALIVE-FALLBACK", exc)
+                        write_once(502, exc)
                         yield proxy_keepalive.error_frame(502, b"")
                         return
-                    async for chunk in proxy_keepalive.relay_fallback(resp):
-                        yield chunk
+                    async with contextlib.aclosing(proxy_keepalive.relay_fallback(resp)) as chunks:
+                        async for chunk in chunks:
+                            yield chunk
+                    finished = True
                 finally:
                     for t in (task, fin):
                         if t is not None and not t.done():
                             t.cancel()
+                    # Client gone while pinging or waiting: nothing wrote the row yet.
+                    if not finished:
+                        write_once(499, None, "client_disconnected")
+                    keepalive_written.discard(id(row))
 
             return StreamingResponse(stream(), media_type="text/event-stream",
                                      headers={"cache-control": "no-cache"})

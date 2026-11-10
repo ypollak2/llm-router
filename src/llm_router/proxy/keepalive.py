@@ -96,9 +96,15 @@ async def relay_fallback(resp):
         if chunks is not None:
             yield chunks[0]
         else:
-            async for c in it:
-                yield c
+            try:
+                async for c in it:
+                    yield c
+            finally:
+                await it.aclose()   # runs relay()'s finally (upstream close + ledger row) at once on cancel
         return
     if chunks is None:
-        chunks = [c async for c in it]
+        try:
+            chunks = [c async for c in it]
+        finally:
+            await it.aclose()
     yield error_frame(status, b"".join(chunks))
