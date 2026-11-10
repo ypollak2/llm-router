@@ -64,7 +64,7 @@ from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
 from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
-from llm_router.proxy import cls_decide, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context, prefix_hash
+from llm_router.proxy import cls_decide, cold_guard, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context, prefix_hash
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -855,6 +855,49 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    served_stop_reason=message["stop_reason"])
         return message
 
+    _warm_tasks: set = set()
+
+    async def _cold_check(body: dict, payload: dict, decision) -> tuple[dict | None, dict | None]:
+        """P22 (LLM_ROUTER_COLD_GUARD). ``(row, obs)``; row is None when the turn may go local as decided
+        (warm, or predicted prefill within the cap). Otherwise the turn goes to Claude and, at most once per
+        prefix and one at a time, a prefill-only warm-up is queued. Fail-open: an error keeps the decision."""
+        try:
+            obs = cold_guard.GUARD.observe(payload)
+            if cold_guard.GUARD.is_warm(obs):
+                return None, obs
+            est = decision.est_tokens
+            if est is None:
+                est = await asyncio.to_thread(local_mode.estimate_prompt_tokens, payload)
+            ka = proxy_keepalive.enabled() and bool(body.get("stream"))
+            d = await asyncio.to_thread(lambda: deadline.compute(est, keepalive=ka))
+            cap = deadline.cap_s(ka)
+            if d["predicted_prefill_s"] <= cap:
+                return None, obs
+            key = cold_guard.GUARD.begin_warm_up(obs)
+            if key is not None:
+                task = asyncio.create_task(_run_warm_up(body, key, obs, cap))
+                _warm_tasks.add(task)
+                task.add_done_callback(_warm_tasks.discard)
+            return {"predicted_prefill_s": d["predicted_prefill_s"], "cap_s": cap,
+                    "warm_up_queued": key is not None,
+                    "detail": f"cold, predicted prefill {d['predicted_prefill_s']}s > cap {cap:g}s"}, obs
+        except Exception as exc:  # noqa: BLE001 -- a guard error never changes the decision
+            failopen.record("LR-FO-PROXY-COLD-GUARD", exc)
+            return None, None
+
+    async def _run_warm_up(body: dict, key: str, obs: dict | None, cap: float) -> None:
+        ok = False
+        try:
+            backend = make_backend(cfg.model)  # same model and num_ctx as a live turn: no runner reload
+            backend.num_predict = 1
+            _msg, err, _usage = await backend.complete(body, cap, priority="background")
+            ok = err is None
+        except BaseException as exc:  # noqa: BLE001 -- recorded as not warm; a warm-up never raises
+            if isinstance(exc, asyncio.CancelledError):
+                cold_guard.GUARD.end_warm_up(key, obs, False)
+                raise
+        cold_guard.GUARD.end_warm_up(key, obs, ok)
+
     async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None,
                           cap_body: dict | None = None) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served
@@ -907,6 +950,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             key=key, pinned=None if unpin_try else pinned, kill_switch=lm.killed(),
             backend_healthy=not health.is_open(cfg.model), breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=cap_payload,
             verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
+        cold_row = None
+        if decision.local and not force and cold_guard.enabled():
+            cold_row, cold_obs = await _cold_check(body, payload, decision)
+            if cold_row is not None:
+                decision = local_mode.LocalDecision(False, local_mode.REASON_COLD_OVER_DEADLINE,
+                                                    cold_row["detail"], decision.est_tokens)
         unpin_row = None
         if unpin_try and decision.local and lm.unpin_over_cap(key):
             stored = pinned = None
@@ -917,6 +966,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
+        if cold_row is not None:
+            row["local_mode"]["cold_guard"] = {k: v for k, v in cold_row.items() if k != "detail"}
         if unpin_row is not None:
             row["local_mode"]["unpin"] = unpin_row  # counts only: reason, reduced est, cap
         # P1: prompt-size bucket for every row that reached a local decision. Early exits (kill switch,
@@ -944,6 +995,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row["local_mode"]["pin"] = local_mode.PIN_LOCAL
             message = await try_serve(body, row)
             if message is not None:
+                if cold_guard.enabled():
+                    cold_guard.GUARD.note_resident(cold_guard.GUARD.observe(payload))
                 if force:
                     row["prefix_outcome"] = "served_local"
                     if stored is None and is_first_call(body):
@@ -969,7 +1022,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return refuse_local(row, decision.reason)
             reason = decision.reason
             row.update(decision=ledger.DECISION_FORWARDED, reason=reason, detail=decision.detail or None)
-            if vetoed:
+            if vetoed or cold_row is not None:
                 # NS-A2: a veto is this turn's, never the conversation's. No pin; remember that the
                 # conversation was seen so its next call is not `started_elsewhere`.
                 lm.mark_seen(key)

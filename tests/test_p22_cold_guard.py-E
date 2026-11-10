@@ -1,0 +1,138 @@
+"""P22 cold-start rule (LLM_ROUTER_COLD_GUARD): behaviour through the real proxy app."""
+from __future__ import annotations
+
+import asyncio
+import copy
+
+import pytest
+
+from llm_router.proxy import cold_guard
+from tests.test_proxy_local_mode import (  # noqa: F401
+    Backend, _first_call, _ollama, _overrides_readable, _post, env,
+)
+from llm_router.proxy.translate import from_ollama
+
+
+class WarmBackend(Backend):
+    """Records num_predict and queue priority of every call; a warm-up is a call with num_predict 1."""
+
+    def __init__(self, *replies):
+        super().__init__(*replies)
+        self.meta = []
+        self.num_predict = None
+        self.model = "fake:1"
+        self.num_ctx = 32768
+        self.gate = None  # an asyncio.Event a test can hold a warm-up behind
+
+    async def complete(self, body, timeout_s, priority="interactive"):
+        self.meta.append({"priority": priority, "num_predict": self.num_predict,
+                          "model": self.model, "num_ctx": self.num_ctx})
+        if priority == "background" and self.gate is not None:
+            await self.gate.wait()
+        self.calls.append(body)
+        m, err = from_ollama(self.replies[0], body)
+        return m, err, {"prompt_tokens": 10, "output_tokens": 2}
+
+
+@pytest.fixture(autouse=True)
+def _fresh_guard(monkeypatch):
+    monkeypatch.setattr(cold_guard, "GUARD", cold_guard.ColdGuard())
+    monkeypatch.delenv("LLM_ROUTER_COLD_GUARD", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_DEADLINE_CAP_S", raising=False)
+
+
+def _long(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_DEADLINE_CAP_S", "0.05")  # any prompt now predicts a longer prefill
+
+
+async def _settle(backend, n_calls):
+    for _ in range(200):
+        if len(backend.calls) >= n_calls:
+            await asyncio.sleep(0.02)
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("warm-up never completed")
+
+
+async def test_cold_and_long_goes_to_claude_without_pin_and_queues_one_warm_up(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_COLD_GUARD", "1")
+    _long(monkeypatch)
+    backend = WarmBackend(_ollama("x"))
+    app = env.app(backend)
+    await _post(app, _first_call())
+    await _settle(backend, 1)
+    assert len(env.up.requests) == 1
+    (row,) = env.rows()
+    assert row["reason"] == "cold_over_deadline" and row["egress"] is True
+    cg = row["local_mode"]["cold_guard"]
+    assert cg["warm_up_queued"] is True and cg["predicted_prefill_s"] > 0
+    assert "pin_change" not in row["local_mode"]
+    assert backend.meta == [{"priority": "background", "num_predict": 1, "model": "fake:1", "num_ctx": 32768}]
+
+
+async def test_the_next_turn_after_the_warm_up_completes_goes_local(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_COLD_GUARD", "1")
+    _long(monkeypatch)
+    backend = WarmBackend(_ollama("x"))
+    app = env.app(backend)
+    first = _first_call()
+    await _post(app, first)
+    await _settle(backend, 1)
+    nxt = copy.deepcopy(first)  # append-only: the same conversation plus one more exchange
+    nxt["messages"] += [{"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                        {"role": "user", "content": [{"type": "text", "text": "continue"}]}]
+    await _post(app, nxt)
+    rows = env.rows()
+    assert rows[1]["decision"] == "served" and len(env.up.requests) == 1  # only the cold turn went to Claude
+    assert rows[1]["local_mode"]["pin"] == "local"
+    assert len(backend.calls) == 2 and "cold_guard" not in rows[1]["local_mode"]
+
+
+async def test_warm_and_long_goes_local(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_COLD_GUARD", "1")
+    _long(monkeypatch)
+    backend = WarmBackend(_ollama("x"))
+    app = env.app(backend)
+    body = _first_call()
+    cold_guard.GUARD.note_resident(cold_guard.GUARD.observe(_ollama_payload(body)))
+    await _post(app, body)
+    (row,) = env.rows()
+    assert row["decision"] == "served" and env.up.requests == []
+
+
+def _ollama_payload(body):
+    from llm_router.proxy.translate import to_ollama
+    return to_ollama(body, "fake:1", num_ctx=32768, max_predict=1)
+
+
+async def test_cold_and_short_goes_local(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_COLD_GUARD", "1")
+    backend = WarmBackend(_ollama("x"))
+    await _post(env.app(backend), _first_call())
+    (row,) = env.rows()
+    assert row["decision"] == "served" and env.up.requests == []
+    assert backend.meta[0]["priority"] == "interactive"
+
+
+async def test_flag_off_is_unchanged(env, monkeypatch):
+    _long(monkeypatch)
+    backend = WarmBackend(_ollama("x"))
+    await _post(env.app(backend), _first_call())
+    (row,) = env.rows()
+    assert row["decision"] == "served" and "cold_guard" not in row["local_mode"]
+    assert len(backend.calls) == 1 and env.up.requests == []
+
+
+async def test_duplicate_cold_turns_queue_one_warm_up(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_COLD_GUARD", "1")
+    _long(monkeypatch)
+    backend = WarmBackend(_ollama("x"))
+    backend.gate = asyncio.Event()  # hold the warm-up so both cold turns arrive while it runs
+    app = env.app(backend)
+    await _post(app, _first_call())
+    await _post(app, _first_call())
+    backend.gate.set()
+    await _settle(backend, 1)
+    queued = [r["local_mode"]["cold_guard"]["warm_up_queued"] for r in env.rows()]
+    assert queued == [True, False]
+    assert len(backend.meta) == 1
