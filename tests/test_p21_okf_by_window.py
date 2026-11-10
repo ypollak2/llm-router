@@ -2,7 +2,6 @@
 
 Offline: retrieval is faked; only the ceiling arithmetic and the server's choice of ceiling run.
 """
-# ruff: noqa: F811
 from __future__ import annotations
 
 import pytest
@@ -170,8 +169,7 @@ def test_requests_in_the_old_over_budget_range_get_a_block(window, fake_retrieva
     out, info = okf_context.attach(send, send, ceiling_tokens=ceiling, fits=ps.okf_fits(cap, NUM_CTX))
     assert info["injected"] is True, info
     off, off_info = okf_context.attach(send, send, ceiling_tokens=5000)
-    if tokens >= 5_000:
-        assert off_info["injected"] is False
+    assert off_info["injected"] is False
 
 
 # ── end to end: the ledger row says which ceiling decided, and attach got it ──
@@ -184,7 +182,7 @@ from tests.test_proxy_okf_context import (  # noqa: E402,F401  (fixtures are use
 
 @pytest.mark.parametrize("flag,src", [("", "agent"), ("1", "window")])
 async def test_row_okf_records_the_ceiling_and_attach_received_it(
-        home, tmp_path, policy, monkeypatch, flag, src):
+        home, tmp_path, policy, monkeypatch, flag, src):  # noqa: F811
     monkeypatch.setenv("LLM_ROUTER_OKF_BY_WINDOW", flag)
     if flag:
         monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL", "qwen3-coder:30b")
@@ -204,3 +202,32 @@ async def test_row_okf_records_the_ceiling_and_attach_received_it(
     assert (seen["fits"] is not None) == (src == "window")
     if src == "window":
         assert row["okf"]["ceiling_tokens"] <= local_mode.prompt_cap_tokens()
+
+
+async def test_a_failing_ceiling_setup_is_failopen_and_the_step_is_still_served_locally(
+        home, tmp_path, policy, monkeypatch):  # noqa: F811
+    from llm_router import failopen
+
+    monkeypatch.setenv("LLM_ROUTER_OKF_BY_WINDOW", "1")
+    seen = {}
+    real = okf_context.attach
+
+    def boom(*a, **k):
+        raise RuntimeError("estimator exploded")
+
+    def spy(send, body, **kw):
+        seen.update(kw)
+        return real(send, body, **kw)
+
+    monkeypatch.setattr(ps, "okf_ceiling", boom)
+    monkeypatch.setattr(okf_context, "attach", spy)
+    codes = []
+    monkeypatch.setattr(failopen, "record", lambda code, *a, **k: codes.append(code))
+    repo = _repo(tmp_path, "repo-a")
+    backend, up = _Backend(), _Upstream()
+    await _post(_app(tmp_path, up, backend), _request(repo))
+    assert up.requests == [] and len(backend.calls) == 1, "served locally, not handed to Claude"
+    assert "LR-FO-PROXY-OKF-CEILING" in codes
+    assert seen["fits"] is None
+    row = json.loads((tmp_path / "proxy_calls.jsonl").read_text().splitlines()[-1])
+    assert row["okf"]["ceiling_src"] == "agent_fallback"

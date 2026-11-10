@@ -695,10 +695,21 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # Within the step deadline: when the budget, not the attach's own 2 s cap, is
             # what cuts it short, the step is out of time; that is not an attach failure
             # and is not counted as one (status "budget", no failopen).
+            okf_ceiling_tokens, okf_ceiling_src, okf_fit = (
+                cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS), "agent", None
+            if okf_by_window_on():  # P21: nothing below runs, or costs a thread hop, with the flag off
+                try:
+                    okf_num_ctx = getattr(backend, "num_ctx", None) or local_models.raised_window() or DEFAULT_NUM_CTX
+                    okf_ceiling_tokens, okf_ceiling_src = await asyncio.wait_for(
+                        asyncio.to_thread(okf_ceiling, cfg, send, okf_num_ctx),
+                        timeout=min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0, step_budget_s)))
+                    okf_fit = okf_fits(local_mode.prompt_cap_tokens(), okf_num_ctx)
+                except Exception as exc:  # noqa: BLE001 - fail-open: the step is served with the agent ceiling
+                    failopen.record("LR-FO-PROXY-OKF-CEILING", exc)
+                    okf_ceiling_tokens, okf_ceiling_src, okf_fit = (
+                        cfg.local_agent.max_prompt_tokens if cfg.local_agent else DEFAULT_MAX_PROMPT_TOKENS
+                    ), "agent_fallback", None
             okf_cap = min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0, step_budget_s))
-            okf_num_ctx = getattr(backend, "num_ctx", None) or local_models.raised_window() or DEFAULT_NUM_CTX
-            okf_ceiling_tokens, okf_ceiling_src = await asyncio.to_thread(okf_ceiling, cfg, send, okf_num_ctx)
-            okf_fit = okf_fits(local_mode.prompt_cap_tokens(), okf_num_ctx) if okf_ceiling_src == "window" else None
             try:
                 send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
                     okf_context.attach, send, body, ceiling_tokens=okf_ceiling_tokens, fits=okf_fit),
