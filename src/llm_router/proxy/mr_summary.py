@@ -47,6 +47,9 @@ OUTCOME_NO_CHUNKS = "no_closable_chunks"
 OUTCOME_CANNOT_FIT = "cannot_fit"
 OUTCOME_MAP_FAILED = "map_failed"
 OUTCOME_STILL_OVER = "still_over"
+OUTCOME_TIMEOUT = "timeout"
+OUTCOME_ERROR = "error"
+OUTCOME_WASTED = "wasted"  # summarized, but the turn was then forwarded to Claude (row carries wasted_reason)
 
 
 def enabled() -> bool:

@@ -861,29 +861,39 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                    served_stop_reason=message["stop_reason"])
         return message
 
-    async def mr_shorten(body: dict, row: dict, key_body: dict) -> dict | None:
-        """P9 (LLM_ROUTER_PROXY_MR, default off, caller checks): ``body`` with its oldest history replaced by
-        map-reduce chunk summaries when it is over the local cap, else ``None`` (untouched, or the summarizer
-        failed or did not fit: the turn then follows the unchanged path, usually Claude). The map call goes through
-        the live backend, so it carries the live model and num_ctx and the same queue and memory guards."""
-        if (lm is None or lm.disabled or lm.killed() or health.is_open(cfg.model)
-                or not local_mode.is_agent_turn(body)
-                or lm.pin_of(conversation_key(key_body, row.get("session_id"))) == local_mode.PIN_CLAUDE):
+    async def mr_shorten(body: dict, row: dict) -> dict | None:
+        """P9 (LLM_ROUTER_PROXY_MR, default off). Called from ``local_step`` only for a turn whose every
+        non-size rule already passed (``decide_local`` without the payload), so no map call is spent on a
+        turn that goes to Claude anyway. Returns ``body`` with its oldest history replaced by map-reduce chunk
+        summaries, or ``None`` (under the cap, or the summarizer failed / did not fit / timed out / raised: the
+        turn then follows the unchanged path). The map call goes through the live backend, so it carries the
+        live model and num_ctx and the same queue and memory guards. The whole phase is bounded by
+        ``deadline.cap_s`` (the registered LLM_ROUTER_DEADLINE_CAP_S, 240 s, or its keepalive cap 600 s
+        when keepalive is on); it runs inside ``attempt_local``, so a streaming client gets the keepalive pings
+        live turns get."""
+        try:
+            model = cfg.model.split("/", 1)[1]
+            backend = make_backend(cfg.model)
+
+            async def map_call(prompt: str, num_predict: int) -> str | None:
+                reply, _err, _usage = await backend.complete(
+                    {"model": cfg.model, "messages": [{"role": "user", "content": prompt}],
+                     "max_tokens": num_predict, "temperature": 0}, mr_summary.MAP_TIMEOUT_S)
+                if reply is None:
+                    return None
+                return "".join(b.get("text", "") for b in reply.get("content") or [] if b.get("type") == "text")
+
+            res = await asyncio.wait_for(mr_summary.shorten(
+                body, map_call, cap=local_mode.prompt_cap_tokens(),
+                est=lambda b: local_mode.estimate_prompt_tokens(to_ollama(b, model, num_ctx=cfg.num_ctx, max_predict=1))),
+                timeout=deadline.cap_s(keepalive=proxy_keepalive.enabled()))
+        except asyncio.TimeoutError:
+            row["mr_summary"] = {"outcome": mr_summary.OUTCOME_TIMEOUT}
             return None
-        model = cfg.model.split("/", 1)[1]
-        backend = make_backend(cfg.model)
-
-        async def map_call(prompt: str, num_predict: int) -> str | None:
-            reply, _err, _usage = await backend.complete(
-                {"model": cfg.model, "messages": [{"role": "user", "content": prompt}],
-                 "max_tokens": num_predict, "temperature": 0}, mr_summary.MAP_TIMEOUT_S)
-            if reply is None:
-                return None
-            return "".join(b.get("text", "") for b in reply.get("content") or [] if b.get("type") == "text")
-
-        res = await mr_summary.shorten(
-            body, map_call, cap=local_mode.prompt_cap_tokens(),
-            est=lambda b: local_mode.estimate_prompt_tokens(to_ollama(b, model, num_ctx=cfg.num_ctx, max_predict=1)))
+        except Exception as exc:  # noqa: BLE001 - the summarizer is an optimisation; Claude fallback, never a 500
+            failopen.record("LR-FO-PROXY-MR", exc)
+            row["mr_summary"] = {"outcome": mr_summary.OUTCOME_ERROR}
+            return None
         if res is None:
             return None
         row["mr_summary"] = res.row
@@ -937,10 +947,24 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             unpin_try = reduced_est <= cap
         cap_payload = payload if cap_body is None else await asyncio.to_thread(
             to_ollama, cap_body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
-        decision = local_mode.decide_local(body, local_mode.LocalSession(
-            key=key, pinned=None if unpin_try else pinned, kill_switch=lm.killed(),
-            backend_healthy=not health.is_open(cfg.model), breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=cap_payload,
-            verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
+        def decide(cap_pl):
+            return local_mode.decide_local(body, local_mode.LocalSession(
+                key=key, pinned=None if unpin_try else pinned, kill_switch=lm.killed(),
+                backend_healthy=not health.is_open(cfg.model), breaker_closed=breaker_ok, breaker_detail=breaker_detail,
+                payload=cap_pl, verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
+
+        decision = decide(cap_payload)
+        if (decision.reason == local_mode.REASON_PROMPT_CAP and mr_summary.enabled()
+                and decide(None).local):
+            # P9: over the cap is the only refusal the summarizer cures. ``decide(None)`` is the same rule
+            # set with the size check skipped, so exempt / pinned / media / veto / breaker / health turns
+            # never reach a map call.
+            shorter = await mr_shorten(body, row)
+            if shorter is not None:
+                body = shorter
+                payload = cap_payload = await asyncio.to_thread(
+                    to_ollama, body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
+                decision = decide(cap_payload)
         if decision.local and cap_guard_reconcile_on():
             from llm_router.local_context_guard import overflow_estimate
             over = await asyncio.to_thread(overflow_estimate, payload,
@@ -1019,6 +1043,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 lm.set_pin(key, local_mode.PIN_CLAUDE,
                            str(reason) if reason in local_mode.STRUCTURAL_REASONS else None)
                 row["local_mode"]["pin_change"] = f"{pinned or 'new'}->claude"
+        mr_row = row.get("mr_summary")
+        if isinstance(mr_row, dict) and mr_row.get("outcome") == mr_summary.OUTCOME_SUMMARIZED:
+            mr_row.update(outcome=mr_summary.OUTCOME_WASTED, wasted_reason=str(reason))  # maps ran, the turn went to Claude
         row["egress"] = True
         print(local_mode.egress_notice(str(reason), row.get("session_id")), file=sys.stderr, flush=True)
         return None
@@ -1585,10 +1612,6 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # estimate, pin decision, Ollama payload, ledger). Claude still gets ``body``/``sent_raw``, unmasked.
         local_src = stripped_body or body if force_local else body
         local_body = None if bypass_local else mask_local_body(local_src, row)
-        mr_body = None
-        if local_body is not None and lm is not None and mr_summary.enabled():
-            mr_body = await mr_shorten(local_body, row, body)
-            local_body = mr_body or local_body
 
         async def finish_forward():
             on_reply = start_shadow(body, row, len(raw)) if shadow is not None else None
@@ -1722,7 +1745,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 # P6: with masking applied, the cap is tested on the masked body only when the flag is on.
                 reduced = cap_after_reduce_on()
                 served = await local_step(local_body, row, force=force_local, key_body=body,
-                                          cap_body=local_src if local_body is not local_src and not reduced and mr_body is None else None)
+                                          cap_body=local_src if local_body is not local_src and not reduced else None)
                 if "history_mask" in row and isinstance(row.get("local_mode"), dict):
                     hm, lmr = row["history_mask"], row["local_mode"]
                     lmr["raw_est_prompt_tokens"] = hm["raw_est_prompt_tokens"]
