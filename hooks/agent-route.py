@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 31
+# llm_router-hook-version: 32
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -2791,8 +2791,9 @@ def _try_codex_subagent_delegation(
     work (``_blocked_marker``) is NOT returned: it is logged ``codex_blocked``
     and None is returned, so the Agent call is allowed and Claude does the work.
     """
-    global _last_codex_model, _last_codex_saved_path
+    global _last_codex_model, _last_codex_saved_path, _last_codex_pruned
     _last_codex_saved_path = None
+    _last_codex_pruned = 0
     # Documented carve-out (owner, 2026-10-02): unlike the local-model direct path and
     # the routing note, which are now opt-in, Codex delegation stays ON by default
     # (opt out with LLM_ROUTER_AGENT_ROUTE_CODEX=off); it is measured separately.
@@ -2963,6 +2964,7 @@ def _try_codex_subagent_delegation(
     _delegated_ts = _record_north_star_unit(
         "agent_route_codex", model=res.model, outcome="delegated",
         delivery="file_echo" if _last_codex_saved_path else "deny_fallback",
+        pruned=_last_codex_pruned,
         subagent_type=subagent_type, task_type=task_type,
         complexity=complexity, session_id=session_id,
         duration_sec=res.duration_sec, sandbox=sandbox,
@@ -2988,6 +2990,36 @@ def _try_codex_subagent_delegation(
 # replies with one line naming the file. The parent reads the file for the result. The deny stays as the fallback
 # when the file cannot be written. The file holds model output: nothing else (log, ledger, stderr) carries its text.
 _last_codex_saved_path: "str | None" = None  # where the last delegated result was saved (None: not saved)
+_last_codex_pruned = 0  # old result files the last save deleted (retention)
+
+
+def _results_retention_days() -> float:
+    """LLM_ROUTER_AGENT_RESULTS_DAYS: result files older than this are deleted on each save (default 7; 0 keeps all)."""
+    raw = os.environ.get("LLM_ROUTER_AGENT_RESULTS_DAYS", "").strip()
+    try:
+        return max(0.0, float(raw)) if raw else 7.0
+    except ValueError:
+        return 7.0
+
+
+def _prune_results(d: Path, keep: Path) -> int:
+    """Delete ``*.md`` files in ``d`` older than the retention window, never ``keep``. Silent on OSError."""
+    days = _results_retention_days()
+    if days <= 0:
+        return 0
+    n = 0
+    try:
+        cutoff = time.time() - days * 86400
+        for f in d.iterdir():
+            try:
+                if f.suffix == ".md" and f != keep and f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    n += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return n
 
 
 def _agent_results_dir() -> Path:
@@ -3006,6 +3038,8 @@ def _save_codex_result(text: str) -> "str | None":
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
+        global _last_codex_pruned
+        _last_codex_pruned = _prune_results(d, path)
         return str(path.resolve())
     except Exception as exc:  # noqa: BLE001 -- unwritable dir/disk: the deny path delivers the result instead
         try:

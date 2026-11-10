@@ -18,6 +18,9 @@ status: fixed in `fix/codex-handoff-file-echo` (deploy: reinstall hooks so hook-
   `delivery: "file_echo" | "deny_fallback"`. The handoff state records the delivery under a distinct id
   (`echo:<tool_use_id>`) so the PostToolUse of the now-launched echo is not counted as a void deny. The result
   text is in the file only (D-281).
+- **Retention.** Each save deletes `*.md` files in the directory older than `LLM_ROUTER_AGENT_RESULTS_DAYS` days
+  (default 7; 0 keeps all), never the file just written, silent on OSError. The count is the `pruned` field of
+  the `delegated` ledger row.
 - **Not measured.** No token or cost effect is claimed; only the echo prompt length was measured.
 - **Test.** `tests/test_codex_handoff_file_echo.py` (allow+updatedInput shape, file mode and exact content,
   path in the echo prompt, background and isolation keys, deny fallback on an unwritable directory, ledger

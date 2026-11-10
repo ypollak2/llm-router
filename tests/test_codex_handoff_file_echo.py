@@ -136,3 +136,66 @@ def test_an_allowed_echo_is_not_counted_as_a_void_deny(ctx):
         assert codex_handoff.voids_in_session("bind-test-session") == 0
     finally:
         del os.environ["LLM_ROUTER_HOME"]
+
+
+# ------------------------------------------------------------------------------------------ retention
+
+
+def _seed(home, name, age_days):
+    d = home / ".llm-router" / "agent-results"
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    f = d / name
+    f.write_text("old result")
+    t = __import__("time").time() - age_days * 86400
+    os.utime(f, (t, t))
+    return f
+
+
+def test_old_result_files_are_pruned_and_fresh_ones_kept(ctx):
+    old = _seed(ctx.home, "20260101T000000Z-aaaaaaaa.md", 10)
+    fresh = _seed(ctx.home, "20261109T000000Z-bbbbbbbb.md", 1)
+    d = decision_of(ctx.run())
+    assert not old.exists() and fresh.exists()
+    assert os.path.exists(echo_path_of(d))  # the file just written is never deleted
+    assert _delegated_row(ctx.home)["pruned"] == 1
+
+
+def test_the_retention_knob_changes_the_window(ctx, monkeypatch):
+    f = _seed(ctx.home, "20261105T000000Z-cccccccc.md", 3)
+    decision_of(_run_with(ctx, LLM_ROUTER_AGENT_RESULTS_DAYS="2"))  # 3 days old > 2 days
+    assert not f.exists() and _delegated_row(ctx.home)["pruned"] == 1
+    kept = _seed(ctx.home, "20261105T000000Z-dddddddd.md", 3)
+    decision_of(_run_with(ctx, prompt=SUITABLE_PROMPT + " (variant two)", LLM_ROUTER_AGENT_RESULTS_DAYS="0"))  # 0 keeps all
+    assert kept.exists() and _delegated_row(ctx.home)["pruned"] == 0
+
+
+def _run_with(ctx, prompt=SUITABLE_PROMPT, **env):
+    payload = agent_payload(prompt, cwd=str(ctx.home / "project"))
+    cwd = ctx.home / "hookproc"
+    cwd.mkdir(exist_ok=True)
+    stub = ctx.home / "bin" / "codex"
+    return run_hook(AGENT_ROUTE, payload, hook_env(ctx.home, CODEX_PATH=str(stub), **env), cwd=cwd)
+
+
+def test_an_unreadable_directory_does_not_break_the_delivery(tmp_path, monkeypatch):
+    """In-process: the listing the prune needs raises OSError; the save and its return value are unaffected."""
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("agent_route_prune_unit", AGENT_ROUTE)
+    mod = importlib.util.module_from_spec(spec)
+    saved = dict(os.environ)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+
+    def _boom(self):
+        raise PermissionError("unreadable")
+
+    monkeypatch.setattr(Path, "iterdir", _boom)
+    path = mod._save_codex_result(ANSWER)
+    assert path and open(path, encoding="utf-8").read() == ANSWER
+    assert mod._last_codex_pruned == 0
