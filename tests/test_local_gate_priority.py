@@ -346,3 +346,29 @@ def test_abort_during_connect_is_caught(slow_server):
             ab.abortable_post(slow_server, b"{}", h, timeout=5)
     finally:
         ab.http.client.HTTPConnection.connect = real
+
+
+def test_stale_tmp_ticket_reaped_fresh_and_held_kept(env):
+    """A creator killed between create and rename leaves ``.tmp-*``; the next ticket removes it.
+    A fresh one (creator may not have locked it yet) and a locked one stay."""
+    w = g.gate_dir(URL) / "wait"
+    w.mkdir(parents=True, exist_ok=True)
+    old = time.time() - g.STALE_TMP_S - 5
+    stale = w / ".tmp-1-stale.wait"
+    stale.touch()
+    os.utime(stale, (old, old))
+    fresh = w / ".tmp-1-fresh.wait"
+    fresh.touch()
+    held = w / ".tmp-1-held.wait"
+    held.touch()
+    os.utime(held, (old, old))
+    fd = os.open(str(held), os.O_RDWR)
+    try:
+        assert g._try_lock(fd)
+        a = g.admit(URL, time.monotonic() + 1, priority="interactive")
+        a.release()
+        assert not stale.exists()
+        assert fresh.exists()
+        assert held.exists()
+    finally:
+        os.close(fd)
