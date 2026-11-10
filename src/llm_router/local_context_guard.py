@@ -64,6 +64,8 @@ CHARS_PER_TOKEN = 3.5
 #: shorter tokens per character); this margin is what makes "estimated to
 #: fit" a safe claim instead of an optimistic one.
 ESTIMATE_SAFETY_MARGIN = 1.15
+# Returned when the payload is too deeply nested to measure: larger than any context window.
+UNMEASURABLE_TOKENS = 10**9
 
 #: Applied on top of the calibrated estimate when LLM_ROUTER_EST_CALIBRATED is on. This path is the
 #: hard window backstop and the calibration is ONE model (qwen3.6:35b-a3b) on 7 payloads, so with the
@@ -123,8 +125,16 @@ def estimate_payload_tokens(payload: dict) -> int:
     """
     try:
         chars = len(json.dumps(payload, default=str))
+    except RecursionError:
+        # BUG-ESTREC-1: a payload nested past the interpreter's limit cannot be measured, and the
+        # str() fallback recurses the same way. Unmeasurable counts as over every window, so the
+        # request goes to Claude, never to a local model that would silently truncate it.
+        return UNMEASURABLE_TOKENS
     except (TypeError, ValueError):
-        chars = sum(len(str(v)) for v in payload.values())
+        try:
+            chars = sum(len(str(v)) for v in payload.values())
+        except RecursionError:
+            return UNMEASURABLE_TOKENS
     legacy = estimate_tokens(chars)
     if calibrated_enabled():
         # Never looser than the legacy guard: the calibrated count only raises the estimate (code),

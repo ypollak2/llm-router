@@ -217,3 +217,24 @@ def test_estimate_payload_tokens_never_raises_on_odd_values():
     # json.dumps(..., default=str) covers this; the sum-of-str() fallback
     # exists for whatever that still can't handle. Either way: no raise.
     assert lcg.estimate_payload_tokens(payload) > 0
+
+
+def _deep(levels: int) -> dict:
+    node: dict = {}
+    for _ in range(levels):
+        node = {"k": node}
+    return {"messages": node}
+
+
+def test_estimate_payload_tokens_survives_a_5000_deep_payload():
+    """BUG-ESTREC-1: json.dumps raised RecursionError (not caught); the str() fallback recurses too."""
+    from llm_router import local_context_guard as g
+
+    est = g.estimate_payload_tokens(_deep(5000))
+    assert est == g.UNMEASURABLE_TOKENS and est > 10**6
+
+
+def test_a_5000_deep_payload_is_an_overflow_not_a_crash():
+    from llm_router import local_context_guard as g
+
+    assert g.estimate_payload_tokens(_deep(5000)) > g.estimate_payload_tokens({"messages": "x" * 10**6})
