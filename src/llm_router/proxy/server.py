@@ -61,6 +61,8 @@ from llm_router.local_agent import capability as la_capability
 from llm_router.local_agent.compact import session_cwd as la_session_cwd
 from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_key, shadow_frontier
 from llm_router import prefixes as user_prefixes
+from llm_router.proxy import keepalive as proxy_keepalive
+from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
 from llm_router.proxy import cls_decide, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context, prefix_hash
 from llm_router.proxy import escalation
 
@@ -493,7 +495,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         except Exception as exc:  # noqa: BLE001 - the ledger row matters more than its cost fields
             failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
         lane_a.ensure_fields(row)  # every continuation row, served or not, carries lane_a_reason/_conf
+        row.pop(KEEPALIVE_WRITTEN, None)
         ledger.write_row(row, cfg.ledger_path)
+        if row.get("committed_early"):
+            row[KEEPALIVE_WRITTEN] = True  # set after the write: never serialized
 
     def _budget_left(t0: float, budget_s: float | None = None) -> float:
         """Seconds left of the step budget that started at ``t0`` (never negative)."""
@@ -505,7 +510,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         try:
             lmrow = row.get("local_mode") or {}
             est = lmrow.get("est_prompt_tokens") or await asyncio.to_thread(local_mode.estimate_prompt_tokens, body)
-            d = await asyncio.to_thread(deadline.compute, est)
+            d = await asyncio.to_thread(
+                lambda: deadline.compute(est, keepalive=proxy_keepalive.enabled() and bool(row.get("stream"))))
         except Exception as exc:  # noqa: BLE001 -- a deadline estimate never fails the step
             failopen.record("LR-FO-PROXY-DEADLINE-BY-SIZE", exc)
             return cfg.step_budget_s
@@ -792,6 +798,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
+        # P1: prompt-size bucket for every row that reached a local decision. Early exits (kill switch,
+        # exempt, pinned, media) carry no estimate, so it is computed here (~25 ms on a 512 KB payload);
+        # a payload that cannot be measured (circular, too deep, odd keys) becomes "unknown"; a KPI field
+        # must never fail the request.
+        est_tokens = decision.est_tokens
+        if est_tokens is None:
+            try:
+                est_tokens = local_mode.estimate_prompt_tokens(payload)
+            except Exception:
+                est_tokens = None
+        row["est_prompt_tokens"], row["size_bucket"] = est_tokens, ledger.size_bucket(est_tokens)
         row["local_mode"]["exempt_policy"] = policy[0]
         if policy[3]:
             row["local_mode"]["exempt_policy_invalid"] = policy[3]
@@ -1391,17 +1408,146 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         # P5 (LLM_ROUTER_PROXY_MASK, default off): ONE masked copy feeds every local-path consumer (cap
         # estimate, pin decision, Ollama payload, ledger). Claude still gets ``body``/``sent_raw``, unmasked.
         local_body = None if bypass_local else mask_local_body(stripped_body or body if force_local else body, row)
-        if lm is not None and not bypass_local:
-            message = await local_step(local_body, row, force=force_local, key_body=body)
-            if "history_mask" in row and isinstance(row.get("local_mode"), dict):
-                row["local_mode"]["raw_est_prompt_tokens"] = row["history_mask"]["raw_est_prompt_tokens"]
-            if message is not None:
-                if force_local:
-                    prefix_outcome(row["prefix_outcome"])
+
+        async def finish_forward():
+            on_reply = start_shadow(body, row, len(raw)) if shadow is not None else None
+            if tier_policy is None:
+                return await forward(request, sent_raw, sent_body or body, row,
+                                     original=original, on_reply=on_reply)
+            decision = await decide_tier(body, row)
+            if ov is not None and ov.name in user_prefixes.CLAUDE_TIER_PREFIXES:
+                prefix_outcome(f"tier:{row.get('tier') or body.get('model')}")
+            if decision is None:
+                return await forward(request, sent_raw, sent_body or body, row,
+                                     original=original, on_reply=on_reply)
+            if (frontier is not None and row.get("tier_reason") == REASON_HAIKU_REWRITE
+                    and decision.served_model != body.get("model")):
+                if row.get("lane_a_reason") == lane_a.R_SERVED:
+                    # prereg section 3: the sha of the bytes the Frontier replay must send; the pair is void if the two differ
+                    row["lane_a_body_sha"] = shadow_frontier.body_sha(raw)
+                on_reply = frontier_on_reply(request, raw, row, on_reply, lane_a_shadow.context_from_row(row, body, pair_identity_sha()))
+            key = conversation_key(body, row.get("session_id"))
+
+            def _on_usage(usage) -> None:
+                sticky.record_usage(key, usage)
+
+            if not decision.rewritten and decision.body_rewrite is None:
+                return await forward(request, sent_raw, sent_body or body, row, original=original,
+                                     on_usage=_on_usage, on_reply=on_reply)
+            sent = dict(sent_body or body, model=decision.served_model)
+            if decision.body_rewrite == REWRITE_HAIKU:
+                # Haiku 4.5 400s on `thinking.type: adaptive` and has no effort
+                # parameter: serve it a body it accepts (translate.for_haiku).
+                fold_t0 = time.perf_counter()
+                sent = for_haiku(sent, fold_system=tier_policy.haiku_folds_system, model=tier_policy.haiku_model)
+                _add_phase(row, "fold", (time.perf_counter() - fold_t0) * 1000.0)
+                row["tier_body_rewrite"] = REWRITE_HAIKU
+
+            lane_feed = None
+            if row.get("lane_a_reason") == lane_a.R_SERVED and tier_policy.lane_runtime is not None:
+                from llm_router.proxy.lane_a_breaker import ServedStep
+
+                lane_feed = ServedStep(tier_policy.lane_runtime, probe=decision.detail == lane_a.DETAIL_PROBE,
+                                       session_id=row.get("session_id"), model=decision.served_model,
+                                       session_kind=row.get("session_kind"), probe_id=decision.lane_a_probe_id)
+
+            def _on_retry() -> None:
+                sticky.record(key, body.get("model"), decision.complexity, "tier_rejected")
+                if lane_feed is not None:
+                    tier_policy.lane_a_unserved(body, row.get("session_id"))
+
+            return await forward(request, json.dumps(sent).encode(), sent, row, original=(raw, body),
+                                 on_retry=_on_retry, on_usage=_on_usage, on_reply=on_reply, lane_feed=lane_feed)
+
+        def serve_message(message):
+            if force_local:
+                prefix_outcome(row["prefix_outcome"])
+            write(row)
+            if body.get("stream"):
+                return Response(sse_from_message(message), media_type="text/event-stream")
+            return Response(json.dumps(message), media_type="application/json")
+
+        async def attempt_local(make):
+            """Run the local attempt ``make()``. With LLM_ROUTER_PROXY_KEEPALIVE on and a streaming request that
+            outlasts ``keepalive.after_s()``, returns the already-committed keepalive Response instead of the
+            served message (the second value); the rest of the request then runs inside that stream."""
+            if not (proxy_keepalive.enabled() and body.get("stream")):
+                return await make(), None
+            task = asyncio.ensure_future(make())
+            await asyncio.wait({task}, timeout=proxy_keepalive.after_s())
+            if task.done():
+                return task.result(), None
+            return None, keepalive_response(task)
+
+        def keepalive_response(task):
+            row["committed_early"] = True
+            row["keepalive_pings"] = 0
+
+            def write_once(status: int, exc: BaseException | None, detail: str | None = None) -> None:
+                if row.get(KEEPALIVE_WRITTEN):
+                    return
+                row.update(upstream_status=status,
+                           detail=detail or ledger.scrub_detail(f"keepalive: {type(exc).__name__}"))
                 write(row)
-                if body.get("stream"):
-                    return Response(sse_from_message(message), media_type="text/event-stream")
-                return Response(json.dumps(message), media_type="application/json")
+
+            async def stream():
+                fin = None
+                finished = False
+                try:
+                    async for ping in proxy_keepalive.ping_until(task, row):
+                        yield ping
+                    try:
+                        message = task.result()
+                    except Exception as exc:  # noqa: BLE001 -- reported inside the open stream
+                        failopen.record("LR-FO-PROXY-KEEPALIVE-LOCAL", exc)
+                        write_once(500, exc)
+                        yield proxy_keepalive.error_frame(500, b"")
+                        return
+                    if message is not None:
+                        serve_message(message)
+                        yield sse_from_message(message)
+                        finished = True
+                        return
+                    fin = asyncio.ensure_future(finish_forward())
+                    async for ping in proxy_keepalive.ping_until(fin, row):
+                        yield ping
+                    try:
+                        resp = fin.result()
+                    except Exception as exc:  # noqa: BLE001 -- reported inside the open stream
+                        failopen.record("LR-FO-PROXY-KEEPALIVE-FALLBACK", exc)
+                        write_once(502, exc)
+                        yield proxy_keepalive.error_frame(502, b"")
+                        return
+                    async with contextlib.aclosing(proxy_keepalive.relay_fallback(resp)) as chunks:
+                        async for chunk in chunks:
+                            yield chunk
+                    finished = True
+                finally:
+                    for t in (task, fin):
+                        if t is not None and not t.done():
+                            t.cancel()
+                    # Client gone while pinging or waiting: nothing wrote the row yet.
+                    if not finished:
+                        try:
+                            write_once(499, None, "client_disconnected")
+                        except Exception as exc:  # noqa: BLE001 -- must not mask CancelledError
+                            failopen.record("LR-FO-PROXY-KEEPALIVE-DISCONNECT-ROW", exc)
+
+            return StreamingResponse(stream(), media_type="text/event-stream",
+                                     headers={"cache-control": "no-cache"})
+
+        if lm is not None and not bypass_local:
+            async def run_local_step():
+                served = await local_step(local_body, row, force=force_local, key_body=body)
+                if "history_mask" in row and isinstance(row.get("local_mode"), dict):
+                    row["local_mode"]["raw_est_prompt_tokens"] = row["history_mask"]["raw_est_prompt_tokens"]
+                return served
+
+            message, early = await attempt_local(run_local_step)
+            if early is not None:
+                return early
+            if message is not None:
+                return serve_message(message)
         elif bypass_local:
             row["reason"] = "explicit_prefix"
         elif not cfg.steps:
@@ -1409,60 +1555,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         elif step_class(body, cfg.steps) is None:
             row["reason"] = "not_eligible"
         else:
-            message = await try_serve(local_body, row)
+            message, early = await attempt_local(lambda: try_serve(local_body, row))
+            if early is not None:
+                return early
             if message is not None:
-                write(row)
-                if body.get("stream"):
-                    return Response(sse_from_message(message), media_type="text/event-stream")
-                return Response(json.dumps(message), media_type="application/json")
-        on_reply = start_shadow(body, row, len(raw)) if shadow is not None else None
-        if tier_policy is None:
-            return await forward(request, sent_raw, sent_body or body, row,
-                                 original=original, on_reply=on_reply)
-        decision = await decide_tier(body, row)
-        if ov is not None and ov.name in user_prefixes.CLAUDE_TIER_PREFIXES:
-            prefix_outcome(f"tier:{row.get('tier') or body.get('model')}")
-        if decision is None:
-            return await forward(request, sent_raw, sent_body or body, row,
-                                 original=original, on_reply=on_reply)
-        if (frontier is not None and row.get("tier_reason") == REASON_HAIKU_REWRITE
-                and decision.served_model != body.get("model")):
-            if row.get("lane_a_reason") == lane_a.R_SERVED:
-                # prereg section 3: the sha of the bytes the Frontier replay must send; the pair is void if the two differ
-                row["lane_a_body_sha"] = shadow_frontier.body_sha(raw)
-            on_reply = frontier_on_reply(request, raw, row, on_reply, lane_a_shadow.context_from_row(row, body, pair_identity_sha()))
-        key = conversation_key(body, row.get("session_id"))
-
-        def _on_usage(usage) -> None:
-            sticky.record_usage(key, usage)
-
-        if not decision.rewritten and decision.body_rewrite is None:
-            return await forward(request, sent_raw, sent_body or body, row, original=original,
-                                 on_usage=_on_usage, on_reply=on_reply)
-        sent = dict(sent_body or body, model=decision.served_model)
-        if decision.body_rewrite == REWRITE_HAIKU:
-            # Haiku 4.5 400s on `thinking.type: adaptive` and has no effort
-            # parameter: serve it a body it accepts (translate.for_haiku).
-            fold_t0 = time.perf_counter()
-            sent = for_haiku(sent, fold_system=tier_policy.haiku_folds_system, model=tier_policy.haiku_model)
-            _add_phase(row, "fold", (time.perf_counter() - fold_t0) * 1000.0)
-            row["tier_body_rewrite"] = REWRITE_HAIKU
-
-        lane_feed = None
-        if row.get("lane_a_reason") == lane_a.R_SERVED and tier_policy.lane_runtime is not None:
-            from llm_router.proxy.lane_a_breaker import ServedStep
-
-            lane_feed = ServedStep(tier_policy.lane_runtime, probe=decision.detail == lane_a.DETAIL_PROBE,
-                                   session_id=row.get("session_id"), model=decision.served_model,
-                                   session_kind=row.get("session_kind"), probe_id=decision.lane_a_probe_id)
-
-        def _on_retry() -> None:
-            sticky.record(key, body.get("model"), decision.complexity, "tier_rejected")
-            if lane_feed is not None:
-                tier_policy.lane_a_unserved(body, row.get("session_id"))
-
-        return await forward(request, json.dumps(sent).encode(), sent, row, original=(raw, body),
-                             on_retry=_on_retry, on_usage=_on_usage, on_reply=on_reply, lane_feed=lane_feed)
+                return serve_message(message)
+        return await finish_forward()
 
     @contextlib.asynccontextmanager
     async def lifespan(app):

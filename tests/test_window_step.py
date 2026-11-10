@@ -81,15 +81,17 @@ def test_step_values(stepped):
 
 def test_cap_follows_the_decision(stepped):
     from llm_router.proxy import local_mode
-    big = {"messages": [{"role": "user", "content": "x" * int(local_mode.OTHER_CHARS_PER_TOKEN * 60_000)}]}
+    from llm_router import token_estimate
+    big = {"messages": [{"role": "user", "content": "x" * int(token_estimate.OTHER_CHARS_PER_TOKEN * 60_000)}]}
     assert local_mode.over_prompt_cap(big) is None                 # 60k est: over 25k, under 127k
-    huge = {"messages": [{"role": "user", "content": "x" * int(local_mode.OTHER_CHARS_PER_TOKEN * 140_000)}]}
+    huge = {"messages": [{"role": "user", "content": "x" * int(token_estimate.OTHER_CHARS_PER_TOKEN * 140_000)}]}
     assert local_mode.over_prompt_cap(huge) is not None
 
 
 def test_cap_unset_refuses_the_same_60k(unset):
     from llm_router.proxy import local_mode
-    big = {"messages": [{"role": "user", "content": "x" * int(local_mode.OTHER_CHARS_PER_TOKEN * 60_000)}]}
+    from llm_router import token_estimate
+    big = {"messages": [{"role": "user", "content": "x" * int(token_estimate.OTHER_CHARS_PER_TOKEN * 60_000)}]}
     assert local_mode.over_prompt_cap(big) is not None
 
 
@@ -170,8 +172,9 @@ def test_cap_admits_what_the_guard_still_refuses_not_silently_truncates(stepped)
     before send (ContextOverflow), never sent to be truncated by Ollama."""
     from llm_router.local_context_guard import ContextOverflow, check_overflow
     from llm_router.proxy import local_mode
+    from llm_router import token_estimate
     cap = local_mode.prompt_cap_tokens()
-    payload = {"m": "a" * int(local_mode.OTHER_CHARS_PER_TOKEN * (cap - 100))}
+    payload = {"m": "a" * int(token_estimate.OTHER_CHARS_PER_TOKEN * (cap - 100))}
     assert local_mode.over_prompt_cap(payload) is None
     with pytest.raises(ContextOverflow):
         check_overflow(payload, num_ctx=STEP, model=MODEL, site="test")
