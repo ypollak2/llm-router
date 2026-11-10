@@ -144,7 +144,8 @@ def note_agent_launched(session_id: str, tool_use_id: str, *, is_echo: bool = Fa
     """PostToolUse[Agent] fired for ``tool_use_id``. If the router had delivered it, the deny was void: count it.
 
     Returns the session's void count after this one, or None when the call was an ordinary Agent call (or the
-    state is unreadable), or the expected echo ran. Ignored echo rewrites count as voids too.
+    state is unreadable), or the expected echo ran. An echo id whose input is not the echo is counted under
+    ``echo_unconfirmed`` and is not charged as a void until the PostToolUse payload shape is measured.
     The delivered entry is removed, so one id is counted once.
     """
     if not tool_use_id:
@@ -169,13 +170,30 @@ def note_agent_launched(session_id: str, tool_use_id: str, *, is_echo: bool = Fa
         if not hit:
             return None
         section["delivered"] = [e for e in kept if e[0] not in ids]
-        if is_echo and all(e[0] == f"echo:{tool_use_id}" for e in hit):
-            return None  # expected receipt, consumed without charging a void
+        if all(e[0] == f"echo:{tool_use_id}" for e in hit):
+            if is_echo:
+                return None  # expected receipt, consumed without charging a void
+            # Not the echo's input. Either the host ignored updatedInput (the task ran twice) or PostToolUse reports
+            # the pre-rewrite input. Which one is not yet measured on a real host (docs/bugs/ECHO-1.md), and charging
+            # a void on a false positive would open the breaker and stop Codex delegation. Count it; do not charge.
+            prior = section.get("echo_unconfirmed")
+            section["echo_unconfirmed"] = (prior if isinstance(prior, int) and prior > 0 else 0) + 1
+            return None
         prior = section.get("void")
         section["void"] = (prior if isinstance(prior, int) and prior > 0 else 0) + 1
         return section["void"]
 
     return _update(session_id, _m, "CHZ-FO-CODEX-HANDOFF-VOID")
+
+
+def echo_unconfirmed_in_session(session_id: str) -> int:
+    """Echo receipts whose PostToolUse input did not look like the echo (counted, never charged as voids)."""
+    try:
+        raw = _section(_read(_depth_file(session_id))).get("echo_unconfirmed")
+    except Exception as exc:  # noqa: BLE001
+        failopen.record("CHZ-FO-CODEX-HANDOFF-READ", exc)
+        return 0
+    return raw if isinstance(raw, int) and raw > 0 else 0
 
 
 def voids_in_session(session_id: str) -> int:

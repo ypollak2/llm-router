@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 33
+# llm_router-hook-version: 34
 """PreToolUse[Agent] hook — intercept subagent spawning, route reasoning to cheap models.
 
 When Claude spawns a subagent (Agent tool), this hook intercepts and decides:
@@ -3154,7 +3154,11 @@ def _main() -> None:
     _current_tool_use_id = str(hook_input.get("tool_use_id") or "").strip()
 
     tool_input = hook_input.get("tool_input", {})
-    from llm_router.codex_handoff import is_file_echo
+    try:
+        from llm_router.codex_handoff import is_file_echo
+    except ImportError:  # llm_router not importable here: no echo can have been emitted from it
+        def is_file_echo(_tool_input) -> bool:
+            return False
 
     if is_file_echo(tool_input):
         return  # receipt: no routing, budget, spawn state, or North Star unit

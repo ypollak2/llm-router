@@ -132,10 +132,13 @@ def test_echo_posttooluse_detects_ignored_rewrite(ctx, monkeypatch, actual_echo)
     for _ in range(2):  # repeated delivery must not double-charge a void
         proc = run_hook(HOOKS_SRC / "agent-depth-release.py", post, hook_env(ctx.home), cwd=ctx.home)
         assert proc.returncode == 0, proc.stderr
+    # A non-echo input on an echo id is counted, never charged as a void: PostToolUse may report the pre-rewrite
+    # input, and a false void would open the breaker (ECHO-1, payload shape not yet measured on a real host).
     rows = [r for r in ledger_rows(ctx.home) if r["outcome"] == "delegation_void"]
-    assert len(rows) == int(not actual_echo)
+    assert rows == []
     monkeypatch.setenv("LLM_ROUTER_HOME", str(ctx.home / ".llm-router"))
-    assert codex_handoff.voids_in_session("bind-test-session") == int(not actual_echo)
+    assert codex_handoff.voids_in_session("bind-test-session") == 0
+    assert codex_handoff.echo_unconfirmed_in_session("bind-test-session") == int(not actual_echo)
 
 
 def test_echo_reentry_passes_through_without_codex_or_ledger_unit(ctx):
