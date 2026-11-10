@@ -366,7 +366,8 @@ class OllamaAdapter(_Adapter):
                 return int(m.group(1))
         for k, v in _dict(info.get("model_info")).items():
             if k.endswith(".context_length") and isinstance(v, int) and v > 0:
-                return min(v, OLLAMA_CTX_CAP)
+                from llm_router import local_models
+                return min(v, local_models.raised_window() or OLLAMA_CTX_CAP)
         return None
 
     def digest(self, model: str) -> str | None:
