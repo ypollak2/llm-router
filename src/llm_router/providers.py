@@ -129,6 +129,10 @@ def _ollama_num_ctx(model: str | None = None) -> int | None:
     """
     import os
 
+    from llm_router.toolkit.adapters.ollama import shared_runner_opts
+    shared = shared_runner_opts(model.split("/", 1)[-1] if model else None)
+    if shared:   # one-model policy beats an explicit LLM_ROUTER_OLLAMA_NUM_CTX (CLSCTX-1)
+        return shared[0]
     raw = os.environ.get("LLM_ROUTER_OLLAMA_NUM_CTX", "").strip()
     if not raw:
         # I2 (2026-09-24): unset now means the SHARED local window, not the

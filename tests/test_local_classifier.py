@@ -624,7 +624,9 @@ async def test_the_async_path_never_uses_the_sync_one(monkeypatch):
 @pytest.fixture
 def one_model(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL", "llmr-classifier")
-    monkeypatch.setenv("LLM_ROUTER_PROXY_NUM_CTX", "32768")
+    from llm_router import local_models
+    monkeypatch.setitem(local_models.NUM_CTX, "llmr-classifier", 32768)   # the table value is the shared window
+    monkeypatch.setenv("LLM_ROUTER_PROXY_NUM_CTX", "16384")                # ignored by the helper
     monkeypatch.setenv("LLM_ROUTER_CLASSIFIER_KEEP_ALIVE", "30m")
 
 

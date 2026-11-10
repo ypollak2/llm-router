@@ -44,18 +44,14 @@ def shared_runner_opts(model: str | None) -> tuple[int, int] | None:
     optional). Ollama keys a runner on num_ctx and, with one slot, a call at another context
     evicts the proxy's runner while a short keep_alive expires it (docs/bugs/CLSCTX-1.md). So
     under the one-model policy the proxy's window wins over every other override
-    (``LLM_ROUTER_PROXY_NUM_CTX``, else the table value) and keep_alive is -1."""
+    (the ``local_models`` table value, which every process derives alike; the env is not
+    consulted) and keep_alive is -1."""
     one = get_local_model()
     name = (model or "").strip()
     name = name.split("/", 1)[1] if name.startswith("ollama/") else name
     if not one or not name or not _same_name(name, one):
         return None
-    raw = os.environ.get("LLM_ROUTER_PROXY_NUM_CTX", "").strip()
-    try:
-        ctx = int(raw) if raw else 0
-    except ValueError:
-        ctx = 0
-    return (ctx if ctx > 0 else default_num_ctx(name)), -1
+    return default_num_ctx(name), -1
 
 
 def num_ctx(model: str | None = None) -> int | None:
