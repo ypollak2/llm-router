@@ -106,6 +106,7 @@ REASON_MEDIA = "media_present"
 REASON_PROMPT_CAP = "prompt_over_cap"
 #: LLM_ROUTER_CAP_GUARD_RECONCILE: under the cap, but the backend's window guard would refuse it.
 REASON_PROMPT_GUARD = "prompt_over_guard"
+REASON_PROMPT_UNMEASURABLE = "prompt_unmeasurable"  # ESTREC-1: nested past the recursion limit; no token count exists
 REASON_BREAKER_OPEN = "breaker_open"
 REASON_BACKEND_UNHEALTHY = "backend_unhealthy"
 REASON_NOT_ELIGIBLE = "not_eligible"

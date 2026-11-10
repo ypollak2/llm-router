@@ -37,10 +37,11 @@ import threading
 import time
 import urllib.request
 
-from llm_router.token_estimate import calibrated_enabled, est_tokens
+from llm_router.token_estimate import Unmeasurable, calibrated_enabled, est_tokens
 
 __all__ = [
     "ContextOverflow",
+    "Unmeasurable",
     "CHARS_PER_TOKEN",
     "ESTIMATE_SAFETY_MARGIN",
     "CALIBRATED_SAFETY_MARGIN",
@@ -64,8 +65,6 @@ CHARS_PER_TOKEN = 3.5
 #: shorter tokens per character); this margin is what makes "estimated to
 #: fit" a safe claim instead of an optimistic one.
 ESTIMATE_SAFETY_MARGIN = 1.15
-# Returned when the payload is too deeply nested to measure: larger than any context window.
-UNMEASURABLE_TOKENS = 10**9
 
 #: Applied on top of the calibrated estimate when LLM_ROUTER_EST_CALIBRATED is on. This path is the
 #: hard window backstop and the calibration is ONE model (qwen3.6:35b-a3b) on 7 payloads, so with the
@@ -125,16 +124,15 @@ def estimate_payload_tokens(payload: dict) -> int:
     """
     try:
         chars = len(json.dumps(payload, default=str))
-    except RecursionError:
-        # BUG-ESTREC-1: a payload nested past the interpreter's limit cannot be measured, and the
-        # str() fallback recurses the same way. Unmeasurable counts as over every window, so the
-        # request goes to Claude, never to a local model that would silently truncate it.
-        return UNMEASURABLE_TOKENS
+    except RecursionError as exc:
+        # ESTREC-1: nested past the recursion limit (and the str() fallback recurses too). No count exists,
+        # so none is invented: callers refuse local on `Unmeasurable` and the request goes to Claude.
+        raise Unmeasurable("payload nested too deeply to measure") from exc
     except (TypeError, ValueError):
         try:
             chars = sum(len(str(v)) for v in payload.values())
-        except RecursionError:
-            return UNMEASURABLE_TOKENS
+        except RecursionError as exc:
+            raise Unmeasurable("payload nested too deeply to measure") from exc
     legacy = estimate_tokens(chars)
     if calibrated_enabled():
         # Never looser than the legacy guard: the calibrated count only raises the estimate (code),
@@ -267,8 +265,16 @@ def check_overflow(
     `failopen.render_report`) and raises so the caller escalates instead of
     letting Ollama silently drop the front of the prompt.
     """
-    over = overflow_estimate(payload, num_ctx=num_ctx, base_url=base_url, model=model,
-                             reserved_output=reserved_output)
+    try:
+        over = overflow_estimate(payload, num_ctx=num_ctx, base_url=base_url, model=model,
+                                 reserved_output=reserved_output)
+    except Unmeasurable:
+        from llm_router import failopen
+
+        failopen.record("CHZ-FO-LOCAL-CTX-OVERFLOW", detail=f"site={site} model={model} estimated=unmeasurable")
+        raise ContextOverflow(
+            "payload is nested too deeply to measure (unmeasurable); escalating instead of "
+            "sending an unmeasured prompt to Ollama") from None
     if over is None:
         return
     estimated, window, source = over

@@ -104,6 +104,7 @@ from llm_router.proxy import cost_accounting
 from llm_router.proxy.tiers import (
     REASON_DECISION_ERROR, REASON_HAIKU_REWRITE, REWRITE_HAIKU, ClaudeTierPolicy, haiku_block_reason, has_mid_conversation_system_message,
 )
+from llm_router.token_estimate import Unmeasurable
 from llm_router.proxy.translate import (
     for_haiku,
     to_ollama,
@@ -421,9 +422,10 @@ def okf_ceiling(cfg: ProxyConfig, send: dict | None = None, num_ctx: int | None 
     if send is None or num_ctx is None:
         return cap, "window"
     from llm_router import local_context_guard as lcg
+    from llm_router.token_estimate import dumps_measured
 
     payload = _okf_payload(send, num_ctx)
-    chars = len(json.dumps(payload, default=str, ensure_ascii=False))
+    chars = len(dumps_measured(payload))
     admit_est = max(1, local_mode.estimate_prompt_tokens(payload))
     guard_est = max(1, lcg.estimate_payload_tokens(payload))
     guard_budget = lcg.effective_window(num_ctx=num_ctx)[0] - lcg.DEFAULT_RESERVED_OUTPUT_TOKENS
@@ -835,6 +837,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             from llm_router.toolkit.local_gate import LocalQueueTimeout
             err, backend_t0 = str(exc), None
             reason = "local_queue_timeout" if isinstance(exc, LocalQueueTimeout) else "memory_budget"
+        except (Unmeasurable, RecursionError) as exc:
+            err, reason = f"payload nested too deeply to process ({type(exc).__name__})", local_mode.REASON_PROMPT_UNMEASURABLE  # ESTREC-1: no count exists; Claude serves it
         except Exception as exc:  # noqa: BLE001 - any backend failure is a counted fallback
             err, reason = f"{type(exc).__name__}: {exc}", "backend_error"
         if backend_t0 is not None:
@@ -1640,7 +1644,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             return await forward(request, raw, None, None)
         try:
             body = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):  # ESTREC-1: nested past the parser's limit -> Claude, untouched
             body = None
         if not isinstance(body, dict):
             return await forward(request, raw, None, None)
@@ -1878,6 +1882,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 try:
                     served = await local_step(local_body, row, force=force_local, key_body=body,
                                               cap_body=local_src if local_body is not local_src and not reduced else None)
+                except (Unmeasurable, RecursionError):
+                    # ESTREC-1: a payload nested past the recursion limit has no token count. Never local.
+                    served = None
+                    if force_local:
+                        served = refuse_local(row, local_mode.REASON_PROMPT_UNMEASURABLE)
+                    else:
+                        row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_PROMPT_UNMEASURABLE,
+                                   detail="payload nested too deeply to measure")
                 finally:
                     if cw is not None:
                         paid = (row.get("mr_summary") or {}).get("map_calls", 0)

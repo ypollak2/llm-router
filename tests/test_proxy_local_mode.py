@@ -1175,3 +1175,26 @@ async def test_unpin_needs_messages_actually_masked(env, monkeypatch):
     lm = env.rows()[-1]["local_mode"]
     assert env.rows()[-1]["history_mask"]["messages_masked"] == 0
     assert len(backend.calls) == n and lm["reason"] == "pinned_claude" and "unpin" not in lm
+
+
+def _raw_with_deep_tool_schema(levels: int) -> str:
+    body = _first_call()
+    body["tools"][0]["input_schema"]["x_deep"] = "@@"
+    return json.dumps(body).replace('"@@"', '{"k":' * levels + "1" + "}" * levels)
+
+
+@pytest.mark.parametrize("levels", [5000, 500])
+async def test_a_deeply_nested_request_goes_to_claude_and_never_crashes(env, levels):
+    """ESTREC-1 through the whole proxy: 5000 deep fails json.loads (was a 500); 500 deep parses and failed in
+    the estimators (was reason backend_error). Both are forwarded to Claude, none is served locally."""
+    headers = {"authorization": "Bearer sk-ant-oat01-" + "Zq9" * 20, "anthropic-version": "2023-06-01",
+               "content-type": "application/json"}
+    app = env.app(Backend(_ollama("", [_call("Bash", {"command": "ls"})])))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
+                                 base_url="http://127.0.0.1:8787") as c:
+        r = await c.post("/v1/messages?beta=true", content=_raw_with_deep_tool_schema(levels), headers=headers)
+    assert r.status_code == 200 and len(env.up.requests) == 1
+    if levels == 500:
+        (row,) = env.rows()
+        assert row["decision"] == "fallback" and row["reason"] == local_mode.REASON_PROMPT_UNMEASURABLE
+        assert "1000000000" not in json.dumps(row)

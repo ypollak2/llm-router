@@ -25,10 +25,24 @@ def calibrated_enabled() -> bool:
     return os.environ.get("LLM_ROUTER_EST_CALIBRATED", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+class Unmeasurable(ValueError):
+    """The payload is nested past the interpreter's recursion limit, so it has no token count.
+
+    ESTREC-1. Not a number: callers refuse local (the request goes to Claude) and say "unmeasurable"."""
+
+
+def dumps_measured(data: object) -> str:
+    """``json.dumps`` as the backend receives it; raises :class:`Unmeasurable` where it would recurse out."""
+    try:
+        return json.dumps(data, default=str, ensure_ascii=False)
+    except RecursionError as exc:
+        raise Unmeasurable("payload nested too deeply to measure") from exc
+
+
 def est_tokens(data: object) -> int:
     """Estimated prompt tokens of ``data``: a string, or any JSON-able payload
-    (serialized the way the backend receives it)."""
-    text = data if isinstance(data, str) else json.dumps(data, default=str, ensure_ascii=False)
+    (serialized the way the backend receives it). Raises :class:`Unmeasurable` on a too-deep payload."""
+    text = data if isinstance(data, str) else dumps_measured(data)
     digits = sum(c.isdigit() for c in text)
     wide = sum(ord(c) > 127 for c in text)
     return math.ceil(DIGIT_TOKENS * digits + WIDE_CHAR_TOKENS * wide

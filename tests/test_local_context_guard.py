@@ -226,15 +226,13 @@ def _deep(levels: int) -> dict:
     return {"messages": node}
 
 
-def test_estimate_payload_tokens_survives_a_5000_deep_payload():
-    """BUG-ESTREC-1: json.dumps raised RecursionError (not caught); the str() fallback recurses too."""
-    from llm_router import local_context_guard as g
-
-    est = g.estimate_payload_tokens(_deep(5000))
-    assert est == g.UNMEASURABLE_TOKENS and est > 10**6
+def test_estimate_payload_tokens_raises_unmeasurable_on_a_5000_deep_payload():
+    """ESTREC-1: json.dumps raised RecursionError (uncaught); the str() fallback recurses too. No number is invented."""
+    with pytest.raises(lcg.Unmeasurable):
+        lcg.estimate_payload_tokens(_deep(5000))
 
 
-def test_a_5000_deep_payload_is_an_overflow_not_a_crash():
-    from llm_router import local_context_guard as g
-
-    assert g.estimate_payload_tokens(_deep(5000)) > g.estimate_payload_tokens({"messages": "x" * 10**6})
+def test_check_overflow_refuses_a_5000_deep_payload_and_never_prints_a_number():
+    with pytest.raises(lcg.ContextOverflow, match="unmeasurable") as ei:
+        lcg.check_overflow(_deep(5000), num_ctx=32768, site="t")
+    assert "estimated" not in str(ei.value)
