@@ -28,6 +28,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
+from llm_router.proxy import summary_gate
 from llm_router.token_estimate import est_tokens
 
 #: Env-registered parameters LLM_ROUTER_MR_CHUNK_TARGET / _CLOSE_THRESHOLD / _MAP_NUM_PREDICT (defaults from PLAN-SUMMARY-SPEED-256K-20261110 section 4, row P9).
@@ -349,6 +350,8 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
     spans = [(units[c[0]][0] + 1, units[c[1]][1] + 1) for c in closable[:k]]  # message indices into ``messages``
     row["chunks"] = k
     summaries: list[str] = []
+    kept: list[tuple[str, int, int]] = []
+    gate_on = summary_gate.enabled()
     for i, (a, b) in enumerate(spans, 1):
         chunk = messages[a:b]
         text = None
@@ -367,8 +370,25 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
         if text is None:
             text = extractive(chunk)
             row["extractive_chunks"] = row.get("extractive_chunks", 0) + 1
-        summaries.append(fit_summary(text, i, k, a, b - 1))
-    new = _with_summaries(body, spans[-1][1], summaries)
+        wrapped = fit_summary(text, i, k, a, b - 1)
+        if gate_on:
+            res = summary_gate.check(chunk, wrapped)
+            row["gate_checked"] = row.get("gate_checked", 0) + 1
+            if not res.passed:  # P11: this chunk and every later one stay verbatim; no longer retry
+                row["gate_failed"] = row.get("gate_failed", 0) + 1
+                row["gate_missing"] = dict(res.missing)
+                break
+        summaries.append(wrapped)
+        kept.append((text, a, b))
+    if gate_on:
+        row.setdefault("gate_checked", 0)
+        row.setdefault("gate_failed", 0)
+        if len(kept) < k:
+            row["chunks"] = len(kept)
+            if not kept:
+                return refuse(OUTCOME_STILL_OVER)
+            summaries = [fit_summary(t, n, len(kept), a, b - 1) for n, (t, a, b) in enumerate(kept, 1)]
+    new = _with_summaries(body, spans[len(summaries) - 1][1], summaries)
     after = est(new)
     row["tokens_after"] = after
     if after > cap:
