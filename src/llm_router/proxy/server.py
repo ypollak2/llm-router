@@ -802,22 +802,26 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         policy = local_mode.exempt_policy()  # D-455: LLM_ROUTER_LOCAL_EXEMPT, read per request
         exempt, overrides_problem = local_mode.exempt_reason(key_body or body, row.get("session_id"),
                                                                 parent_main_of(key_body or body), policy)
-        unpin_row = None
+        unpin_try = False
         if (stored == local_mode.PIN_CLAUDE and not force and not exempt and not lm.killed()
-                and "history_mask" in row and unpin_on() and cap_after_reduce_on()
+                and (row.get("history_mask") or {}).get("messages_masked", 0) > 0
+                and unpin_on() and cap_after_reduce_on()
                 and lm.pin_reason_of(key) == local_mode.REASON_PROMPT_CAP and key not in lm.unpinned_once):
             # P7: ``payload`` is the masked body's (cap_body is None while CAP_AFTER_REDUCE is on).
+            # The unpin is only tried here; it is spent below when the turn actually goes local.
             reduced_est = await asyncio.to_thread(local_mode.estimate_prompt_tokens, payload)
             cap = local_mode.prompt_cap_tokens()
-            if reduced_est <= cap and lm.unpin_over_cap(key):
-                stored = pinned = None
-                unpin_row = {"reason": "reduced_fits", "reduced_est": reduced_est, "cap": cap}
+            unpin_try = reduced_est <= cap
         cap_payload = payload if cap_body is None else await asyncio.to_thread(
             to_ollama, cap_body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
         decision = local_mode.decide_local(body, local_mode.LocalSession(
-            key=key, pinned=pinned, kill_switch=lm.killed(), backend_healthy=not health.is_open(cfg.model),
-            breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=cap_payload,
+            key=key, pinned=None if unpin_try else pinned, kill_switch=lm.killed(),
+            backend_healthy=not health.is_open(cfg.model), breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=cap_payload,
             verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
+        unpin_row = None
+        if unpin_try and decision.local and lm.unpin_over_cap(key):
+            stored = pinned = None
+            unpin_row = {"reason": "reduced_fits", "reduced_est": reduced_est, "cap": cap}
         vetoed = decision.reason == local_mode.REASON_CLASSIFIER_VETO
         if vetoed:
             row["cls_applied"] = True

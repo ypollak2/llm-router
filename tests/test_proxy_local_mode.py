@@ -9,8 +9,10 @@ here reaches the network or a real Ollama (the preflight takes injected
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import os
+import types
 from pathlib import Path
 
 import httpx
@@ -1115,3 +1117,61 @@ async def test_flag_off_ledger_rows_identical_whatever_the_unpin_state(env, monk
         assert "unpin" not in r
         rows.append(r)
     assert rows[0] == rows[1]
+
+
+async def _unpin_ready(env, monkeypatch, breaker=None):
+    backend = _backend()
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MASK", "1")
+    monkeypatch.delenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", raising=False)
+    app = env.app(backend, breaker=breaker)
+    await _warm(app)
+    await _post(app, _long_history())
+    assert env.rows()[-1]["local_mode"]["pin_change"] == "local->claude"
+    monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
+    monkeypatch.setenv("LLM_ROUTER_UNPIN", "1")
+    return app, backend
+
+
+async def test_transient_not_local_turn_leaves_the_unpin_unspent(env, monkeypatch):
+    app, backend = await _unpin_ready(env, monkeypatch)
+    n = len(backend.calls)
+    real = local_mode.decide_local
+    monkeypatch.setattr(local_mode, "decide_local", lambda body, s: real(
+        body, dataclasses.replace(s, backend_healthy=False)))  # the backend is unhealthy for one turn
+    await _post(app, _long_history())
+    lm = env.rows()[-1]["local_mode"]
+    assert len(backend.calls) == n and lm["reason"] == "backend_unhealthy" and "unpin" not in lm
+    monkeypatch.setattr(local_mode, "decide_local", real)
+    await _post(app, _long_history())  # the lift is still available
+    lm = env.rows()[-1]["local_mode"]
+    assert len(backend.calls) == n + 1 and lm["local"] is True and "unpin" in lm
+
+
+async def test_kill_switch_and_exempt_turns_leave_the_unpin_unspent(env, monkeypatch):
+    app, backend = await _unpin_ready(env, monkeypatch)
+    n = len(backend.calls)
+    env.kill.write_text("")
+    await _post(app, _long_history())
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "kill_switch" and "unpin" not in lm
+    env.kill.unlink()
+    real = local_mode.exempt_reason
+    monkeypatch.setattr(local_mode, "exempt_reason", lambda *a, **k: (local_mode.EXEMPT_COORDINATOR, None))
+    await _post(app, _long_history())
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "exempt_session" and "unpin" not in lm
+    monkeypatch.setattr(local_mode, "exempt_reason", real)
+    await _post(app, _long_history())
+    assert len(backend.calls) == n + 1 and "unpin" in env.rows()[-1]["local_mode"]
+
+
+async def test_unpin_needs_messages_actually_masked(env, monkeypatch):
+    app, backend = await _unpin_ready(env, monkeypatch)
+    n = len(backend.calls)
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", 10**9)  # the body fits, so only the mask gate decides
+    stats = types.SimpleNamespace(masked=0, chars_saved=0, est_tokens_before=1, est_tokens_after=1)
+    monkeypatch.setattr(history_mask, "mask_body", lambda body: (body, stats))
+    await _post(app, _long_history())
+    lm = env.rows()[-1]["local_mode"]
+    assert env.rows()[-1]["history_mask"]["messages_masked"] == 0
+    assert len(backend.calls) == n and lm["reason"] == "pinned_claude" and "unpin" not in lm
