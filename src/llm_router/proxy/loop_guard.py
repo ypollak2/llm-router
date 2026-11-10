@@ -55,8 +55,12 @@ TRIGGER_CAP = "cap"
 TRIGGER_REPEAT = "repeat"
 # Flag-on only: a second cap trip whose window mostly re-issued the previous window's calls is a loop.
 TRIGGER_CAP_CYCLE = "cap_cycle"
-# Share of the new window's tool signatures that must also be in the previous window for "cap_cycle".
+# Share of the new window's tool signatures that must also be in the union of the last CYCLE_WINDOWS cap
+# windows for "cap_cycle", and the fewest signatures a window needs to be judged (loops of 3 or fewer
+# calls are the repeat check's job). A false positive falls back to today's pin.
 CYCLE_OVERLAP = 0.5
+CYCLE_WINDOWS = 3
+CYCLE_MIN_SIGS = 3
 DEFAULT_MAX_CONSECUTIVE = 8
 DEFAULT_REPEAT_WINDOW = 3
 
@@ -82,11 +86,16 @@ def _tool_signatures(message: dict) -> list[str]:
     return sigs
 
 
+def _sig_hash(sig: str) -> str:
+    return hashlib.sha256(sig.encode("utf-8", "replace")).hexdigest()[:10]
+
+
 @dataclass
 class _SessionState:
     consecutive_served: int = 0
     recent_tool_sigs: deque = field(default_factory=deque)
-    window_sigs: list = field(default_factory=list)  # every tool signature served since the last reset
+    # sha256[:10] of each tool signature served since the last reset; filled only when cycle tracking is on
+    window_sigs: deque = field(default_factory=deque)
 
 
 class LoopGuard:
@@ -98,7 +107,8 @@ class LoopGuard:
         self.repeat_window = (_env_int("LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW", DEFAULT_REPEAT_WINDOW)
                                if repeat_window is None else repeat_window)
         self._sessions: dict[str, _SessionState] = {}
-        self._prev_window: dict[str, frozenset] = {}  # signatures of the window a cap trip just ended
+        # hashes of the tool signatures of the last CYCLE_WINDOWS cap windows (flag on only)
+        self._prev_window: dict[str, deque] = {}
 
     def _state(self, session_id: str) -> _SessionState:
         st = self._sessions.get(session_id)
@@ -129,7 +139,7 @@ class LoopGuard:
         recent = self._sessions[session_id].recent_tool_sigs if session_id in self._sessions else ()
         for sig in _tool_signatures(message):
             if sig in recent:
-                return sig.split(":", 1)[0], hashlib.sha256(sig.encode("utf-8", "replace")).hexdigest()[:10]
+                return sig.split(":", 1)[0], _sig_hash(sig)
         return None
 
     def repeat_reason(self, session_id: str | None, message: dict) -> str | None:
@@ -138,15 +148,19 @@ class LoopGuard:
         hit = self.repeat_hit(session_id, message)
         return None if hit is None else f"repeat:{hit[0]}"
 
-    def record_served(self, session_id: str | None, message: dict) -> None:
-        """The candidate was actually served: extend the streak."""
+    def record_served(self, session_id: str | None, message: dict, track_window: bool = False) -> None:
+        """The candidate was actually served: extend the streak. ``track_window`` (the
+        cap-no-pin flag) also keeps the signature hashes for ``cap_trip``; off, nothing extra is stored."""
         if not session_id:
             return
         st = self._state(session_id)
         st.consecutive_served += 1
         sigs = _tool_signatures(message)
         st.recent_tool_sigs.extend(sigs)
-        st.window_sigs.extend(sigs)
+        if track_window:
+            if st.window_sigs.maxlen is None:
+                st.window_sigs = deque(st.window_sigs, maxlen=max(self.max_consecutive, 1) * 2)
+            st.window_sigs.extend(_sig_hash(x) for x in sigs)
 
     def reset(self, session_id: str | None) -> None:
         """A non-served step for this session: the streak is broken."""
@@ -155,18 +169,24 @@ class LoopGuard:
             self._prev_window.pop(session_id, None)
 
     def cap_trip(self, session_id: str | None) -> str:
-        """The cap tripped: end the window like ``reset`` but remember its tool
-        signatures. Returns ``TRIGGER_CAP_CYCLE`` when at least ``CYCLE_OVERLAP`` of
-        this window's signatures were also in the previous window's (a loop with a
-        period longer than the repeat window), else ``TRIGGER_CAP``. A window with
-        no tool signatures (text-only) is never a cycle."""
+        """The cap tripped: end the window like ``reset`` but remember its tool signature
+        hashes. Returns ``TRIGGER_CAP_CYCLE`` when the window has at least ``CYCLE_MIN_SIGS``
+        signatures and at least ``CYCLE_OVERLAP`` of them are in the union of the last
+        ``CYCLE_WINDOWS`` cap windows (a loop longer than the repeat window, or alternating
+        windows), else ``TRIGGER_CAP``. A text-only window gives no verdict and keeps the history."""
         if not session_id:
             return TRIGGER_CAP
         st = self._sessions.pop(session_id, None)
         cur = list(st.window_sigs) if st else []
-        prev = self._prev_window.pop(session_id, None)
-        if cur and prev is not None and sum(1 for x in cur if x in prev) / len(cur) >= CYCLE_OVERLAP:
-            return TRIGGER_CAP_CYCLE
-        if cur:
-            self._prev_window[session_id] = frozenset(cur)
+        if not cur:
+            return TRIGGER_CAP
+        hist = self._prev_window.get(session_id)
+        if hist and len(cur) >= CYCLE_MIN_SIGS:
+            seen = set().union(*hist)
+            if sum(1 for x in cur if x in seen) / len(cur) >= CYCLE_OVERLAP:
+                self._prev_window.pop(session_id, None)
+                return TRIGGER_CAP_CYCLE
+        if hist is None:
+            hist = self._prev_window[session_id] = deque(maxlen=CYCLE_WINDOWS)
+        hist.append(frozenset(cur))
         return TRIGGER_CAP

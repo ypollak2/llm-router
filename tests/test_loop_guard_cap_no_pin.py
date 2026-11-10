@@ -131,14 +131,63 @@ async def test_flag_on_progressing_calls_are_never_pinned_across_three_cap_trips
     assert not any(r["reason"] == "pinned_claude" for r in rows)
 
 
-def test_cap_trip_unit_cycle_and_text_only_window():
-    g = loop_guard.LoopGuard(max_consecutive=2, repeat_window=0)
-    call = lambda c: {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": c}}]}  # noqa: E731
-    for m in (call("a"), call("b")):
-        g.record_served("s", m)
+async def test_flag_on_period12_cycle_with_cap8_is_pinned_within_three_trips(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN", "1")
+    backend = Backend(*[_bash(i % 12) for i in range(60)])
+    app = env.app(backend, loop_max_consecutive=8)
+    await _drive(app, 3 * 9 + 1)
+    rows = env.rows()
+    trips = [r for r in rows if r["reason"] == "loop_guard"]
+    assert 2 <= len(trips) <= 3 and trips[-1]["loop_guard_trigger"] == "cap_cycle"
+    assert "pin_skipped" not in trips[-1] and rows[rows.index(trips[-1]) + 1]["reason"] == "pinned_claude"
+
+
+async def test_flag_on_disjoint_ab_alternation_is_pinned(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN", "1")
+    a = [_bash(f"a{i}") for i in range(4)]
+    b = [_bash(f"b{i}") for i in range(4)]
+    backend = Backend(*(a + b + a + b))
+    app = env.app(backend, loop_max_consecutive=4)
+    await _drive(app, 3 * 5 + 1)
+    trips = [r for r in env.rows() if r["reason"] == "loop_guard"]
+    assert [t["loop_guard_trigger"] for t in trips] == ["cap", "cap", "cap_cycle"]
+
+
+async def test_flag_on_progressing_calls_are_never_pinned_across_four_cap_trips(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN", "1")
+    app = env.app(Backend(*[_bash(i) for i in range(40)]), loop_max_consecutive=3)
+    await _drive(app, 4 * 4 + 1)
+    rows = env.rows()
+    assert len([r for r in rows if r["reason"] == "loop_guard"]) == 4
+    assert not any(r["reason"] == "pinned_claude" for r in rows)
+
+
+def _call_msg(c):
+    return {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": c}}]}
+
+
+def _window(g, cmds):
+    for c in cmds:
+        g.record_served("s", _call_msg(c), track_window=True)
+    return g.cap_trip("s")
+
+
+def test_cap_trip_rules_overlap_min_sigs_and_text_only_keeps_history():
+    g = loop_guard.LoopGuard(max_consecutive=4, repeat_window=0)
+    assert _window(g, "abcd") == "cap"
+    # text-only window: no verdict, history kept
+    g.record_served("s", {"content": [{"type": "text", "text": "hi"}]}, track_window=True)
     assert g.cap_trip("s") == "cap"
-    for m in (call("b"), call("z")):
-        g.record_served("s", m)
-    assert g.cap_trip("s") == "cap_cycle"  # 1 of 2 signatures overlaps = 0.5
-    g.record_served("t", {"content": [{"type": "text", "text": "hi"}]})
-    assert g.cap_trip("t") == "cap"
+    assert _window(g, "abcd") == "cap_cycle"  # cycle, text-only, cycle is still caught
+    g2 = loop_guard.LoopGuard(max_consecutive=4, repeat_window=0)
+    assert _window(g2, "abcd") == "cap"
+    assert _window(g2, "ab") == "cap"  # fewer than CYCLE_MIN_SIGS: no verdict, even at 100% overlap
+    assert _window(g2, "wxyz") == "cap"  # 0% overlap
+
+
+def test_flag_off_window_sigs_is_not_populated():
+    g = loop_guard.LoopGuard(max_consecutive=4, repeat_window=0)
+    g.record_served("s", _call_msg("a"))
+    assert not g._sessions["s"].window_sigs and not g._prev_window
+    g.record_served("s", _call_msg("b"), track_window=True)
+    assert g._sessions["s"].window_sigs.maxlen == 8
