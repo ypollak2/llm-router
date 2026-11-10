@@ -52,70 +52,94 @@ def store_path() -> Path:
 
 
 def chunk_key(chunk: list[dict], *, prompt_version: str, prompt_template: str, model: str,
-              num_predict: int, mode: str = MODE_MODEL) -> str:
+              num_predict: int, mode: str = MODE_MODEL, salt: str = "") -> str:
+    """``salt``: everything else that shapes the stored text (clip lengths, render and validity code); see
+    ``mr_summary.key_salt``. surrogatepass: a lone surrogate in a chunk must not make the key raise."""
     raw = json.dumps(chunk, sort_keys=True, ensure_ascii=False, default=str)
-    parts = [raw, prompt_version, hashlib.sha256(prompt_template.encode()).hexdigest(), model, str(num_predict), mode]
-    return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
+    parts = [raw, prompt_version, hashlib.sha256(prompt_template.encode("utf-8", "surrogatepass")).hexdigest(),
+             model, str(num_predict), mode, salt]
+    return hashlib.sha256("\x00".join(parts).encode("utf-8", "surrogatepass")).hexdigest()
 
 
 class ChunkStore:
-    """Load once, serve hits from memory, write once (``flush``) when something was added. Never raises."""
+    """Load once, serve hits from memory, ``flush`` after a put (re-read + merge + atomic replace). Never raises."""
 
     def __init__(self, path: Path | None = None, cap: int | None = None):
         self.path = path or store_path()
         self.cap = cap or max_entries()
         self.entries: dict[str, str] = {}  # insertion order = recency (oldest first)
         self.hits = self.misses = self.writes = 0
-        self._dirty = False
-        self._load()
+        self._added: set[str] = set()
+        self._removed: set[str] = set()
+        self.entries = self._read()
 
-    def _load(self) -> None:
+    def _read(self) -> dict[str, str]:
+        out: dict[str, str] = {}
         try:
             if not self.path.exists():
-                return
+                return out
             doc = json.loads(self.path.read_text(encoding="utf-8"))
             ents = doc["entries"]
             if doc.get("schema") != SCHEMA or not isinstance(ents, list):
                 raise ValueError("unrecognised chunk store layout")
             for k, body in ents:
                 if isinstance(k, str) and isinstance(body, str):
-                    self.entries[k] = body
+                    out[k] = body
         except Exception as exc:  # noqa: BLE001 - a broken store is a miss, never a request failure
-            self.entries = {}
             failopen.record("LR-FO-PROXY-CHUNK-STORE", exc, detail="load")
+            return {}
+        return out
 
     def get(self, key: str) -> str | None:
         body = self.entries.pop(key, None)
         if body is None:
             self.misses += 1
             return None
-        self.entries[key] = body  # most recently used
+        self.entries[key] = body  # most recently used (in memory; a get alone never rewrites the file)
         self.hits += 1
-        self._dirty = True
         return body
+
+    def reject(self, key: str) -> None:
+        """A hit that failed re-validation: it was a miss, and the entry is dropped (also from the file at next flush)."""
+        if self.entries.pop(key, None) is not None:
+            self.hits -= 1
+            self.misses += 1
+            self._added.discard(key)
+            self._removed.add(key)
 
     def put(self, key: str, body: str) -> None:
         self.entries.pop(key, None)
         self.entries[key] = body
-        while len(self.entries) > self.cap:
-            del self.entries[next(iter(self.entries))]
+        self._added.add(key)
+        self._removed.discard(key)
         self.writes += 1
-        self._dirty = True
 
     def flush(self) -> None:
-        """Persist (atomic, 0600) if anything was added or touched. Failure is recorded, not raised."""
-        if not self._dirty:
+        """Persist if something was put or rejected: re-read the file, apply our changes on top (ours are newer),
+        cap, atomic 0600 replace. Failure is recorded, not raised."""
+        if not (self._added or self._removed):
             return
         tmp = None
         try:
+            merged = self._read()
+            for k in self._removed:
+                merged.pop(k, None)
+            for k in self.entries:
+                if k in self._added:
+                    merged.pop(k, None)
+                    merged[k] = self.entries[k]
+            while len(merged) > self.cap:
+                del merged[next(iter(merged))]
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), prefix=FILE_NAME + ".", suffix=".tmp")
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 os.fchmod(fh.fileno(), 0o600)
-                json.dump({"schema": SCHEMA, "entries": list(self.entries.items())}, fh, ensure_ascii=False)
+                json.dump({"schema": SCHEMA, "entries": list(merged.items())}, fh, ensure_ascii=False)
             os.replace(tmp, self.path)
             tmp = None
-            self._dirty = False
+            self.entries = merged
+            self._added.clear()
+            self._removed.clear()
         except Exception as exc:  # noqa: BLE001
             failopen.record("LR-FO-PROXY-CHUNK-STORE", exc, detail="write")
         finally:

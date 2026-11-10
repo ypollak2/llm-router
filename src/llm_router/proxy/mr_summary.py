@@ -53,6 +53,26 @@ OUTCOME_ERROR = "error"
 OUTCOME_WASTED = "wasted"  # summarized, but the turn was then forwarded to Claude (row carries wasted_reason)
 
 
+_CODE_HASH: str | None = None
+
+
+def key_salt() -> str:
+    """Everything besides prompt/model/num_predict that shapes a stored summary: the clip constants (read now,
+    so a patched value changes the key) and a hash of the render / validity code, so an edit to either misses
+    old entries without a hand-bumped version."""
+    global _CODE_HASH
+    if _CODE_HASH is None:
+        import hashlib
+        import inspect
+        try:
+            src = "".join(inspect.getsource(f) for f in (render_message, _cut_block, _cut_by_est, _result_text,
+                                                         _head_by_est, _tail_by_est, valid_summary, _sections))
+        except (OSError, TypeError):
+            src = "nosource"
+        _CODE_HASH = hashlib.sha256(src.encode("utf-8", "surrogatepass")).hexdigest()
+    return "%d|%d|%d|%d|%s" % (BODY_EST, BLOCK_CHARS, INPUT_EST, SUMMARY_CEIL, _CODE_HASH)
+
+
 def enabled() -> bool:
     return os.environ.get("LLM_ROUTER_PROXY_MR", "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -369,9 +389,18 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
         skey = None
         if store is not None:
             from llm_router.proxy import chunk_store
-            skey = chunk_store.chunk_key(chunk, prompt_version=PROMPT_VERSION, prompt_template=MAP_PROMPT,
-                                         model=model, num_predict=num_predict)
-            text = store.get(skey)
+            try:
+                skey = chunk_store.chunk_key(chunk, prompt_version=PROMPT_VERSION, prompt_template=MAP_PROMPT,
+                                             model=model, num_predict=num_predict, salt=key_salt())
+            except Exception as exc:  # noqa: BLE001 - no key, no store for this chunk; the map still runs
+                from llm_router import failopen
+                failopen.record("LR-FO-PROXY-CHUNK-STORE", exc, detail="key")
+                skey = None
+            if skey is not None:
+                text = store.get(skey)
+                if text is not None and not (valid_summary(text) and est_tokens(text) <= BODY_EST):
+                    store.reject(skey)  # stale or poisoned entry: a miss, dropped, never served
+                    text = None
         for _try in range(MAP_TRIES if text is None else 0):
             row["map_calls"] += 1
             if progress is not None:
@@ -385,7 +414,7 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
             reply = reply.strip()
             if valid_summary(reply):
                 text = reply if est_tokens(reply) <= BODY_EST else _head_by_est(reply, BODY_EST)
-                if store is not None:
+                if skey is not None:
                     store.put(skey, text)
                     store.flush()  # kept even if a later chunk hits the turn deadline
                 break

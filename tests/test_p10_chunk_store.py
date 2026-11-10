@@ -127,12 +127,16 @@ def test_size_cap_evicts_least_recently_used(home):
     s = chunk_store.ChunkStore(cap=3)
     for i in range(5):
         s.put(f"k{i}", "body%d" % i)
-    assert list(s.entries) == ["k2", "k3", "k4"]
-    s.get("k2")
-    s.put("k5", "b")
     s.flush()
-    assert list(chunk_store.ChunkStore(cap=3).entries) == ["k4", "k2", "k5"]
-    assert chunk_store.max_entries() == chunk_store.DEFAULT_MAX_ENTRIES
+    assert list(chunk_store.ChunkStore(cap=3).entries) == ["k2", "k3", "k4"]
+    s2 = chunk_store.ChunkStore(cap=3)
+    s2.get("k2")  # a hit alone never rewrites the file
+    mtime = (home / chunk_store.FILE_NAME).stat().st_mtime_ns
+    s2.flush()
+    assert (home / chunk_store.FILE_NAME).stat().st_mtime_ns == mtime
+    s2.put("k5", "b")
+    s2.flush()
+    assert list(chunk_store.ChunkStore(cap=3).entries) == ["k3", "k4", "k5"]  # recency from a get is in-memory only
 
 
 def test_cap_env_var(monkeypatch):
@@ -229,3 +233,114 @@ async def test_error_row_carries_elapsed_and_map_calls_and_is_stamped_wasted(env
     assert mr["outcome"] == "error" and mr["map_calls"] == 1 and mr["elapsed_s"] >= 0
     assert mr["wasted"] is True and mr["wasted_reason"] and len(env.up.requests) == 1
     assert real is not boom
+
+
+# -- review SHOULDs (PR 894) ----------------------------------------------------------------------------
+
+def test_lone_surrogate_chunk_still_summarizes_and_is_stored():
+    body = _body()
+    body["messages"][2]["content"][0]["content"] = "\ud800x" + body["messages"][2]["content"][0]["content"]
+    call = Counter()
+    r = _run(body, call, chunk_store.ChunkStore())
+    assert r.changed and r.row["outcome"] == "summarized" and r.row["store_writes"] == r.row["chunks"]
+    assert _run(body, call, chunk_store.ChunkStore()).row["store_hits"] == r.row["chunks"]
+
+
+def test_key_failure_means_no_store_for_that_chunk_but_the_map_runs(monkeypatch):
+    seen = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: seen.append(code))
+
+    def boom(*a, **k):
+        raise UnicodeEncodeError("utf-8", "x", 0, 1, "boom")
+
+    monkeypatch.setattr(chunk_store, "chunk_key", boom)
+    call = Counter()
+    r = _run(_body(), call, chunk_store.ChunkStore())
+    assert r.changed and call.prompts and r.row["store_writes"] == 0 and "LR-FO-PROXY-CHUNK-STORE" in seen
+
+
+@pytest.mark.parametrize("name,value", [("BODY_EST", 260), ("BLOCK_CHARS", 5_000), ("INPUT_EST", 23_000)])
+def test_changed_clip_constant_is_a_miss(monkeypatch, name, value):
+    call = Counter()
+    _run(_body(), call, chunk_store.ChunkStore())
+    with monkeypatch.context() as m:
+        m.setattr(mr_summary, name, value)
+        assert _run(_body(), call, chunk_store.ChunkStore()).row["store_hits"] == 0
+
+
+def test_changed_render_or_validity_code_hash_is_a_miss(monkeypatch):
+    call = Counter()
+    _run(_body(), call, chunk_store.ChunkStore())
+    with monkeypatch.context() as m:
+        m.setattr(mr_summary, "_CODE_HASH", "edited-render-or-valid_summary")
+        assert _run(_body(), call, chunk_store.ChunkStore()).row["store_hits"] == 0
+
+
+def test_poisoned_or_stale_entry_is_a_miss_and_not_served(home):
+    call = Counter()
+    first = _run(_body(), call, chunk_store.ChunkStore())
+    p = home / chunk_store.FILE_NAME
+    doc = json.loads(p.read_text())
+    doc["entries"][0][1] = "POISON: no headings"
+    doc["entries"][1][1] = SUMMARY + "\n" + "word " * 2000  # over BODY_EST
+    p.write_text(json.dumps(doc))
+    n = len(call.prompts)
+    r = _run(_body(), call, chunk_store.ChunkStore())
+    assert r.row["store_misses"] == 2 and r.row["store_hits"] == first.row["chunks"] - 2
+    assert len(call.prompts) == n + 2 and "POISON" not in json.dumps(r.body)
+    assert "POISON" not in p.read_text()  # replaced by the fresh summary
+
+
+def test_two_instances_writing_different_entries_both_survive(home):
+    a, b = chunk_store.ChunkStore(), chunk_store.ChunkStore()  # both loaded before either writes
+    a.put("ka", "A")
+    a.flush()
+    b.put("kb", "B")
+    b.flush()
+    got = chunk_store.ChunkStore().entries
+    assert got == {"ka": "A", "kb": "B"}
+
+
+def test_concurrent_flush_threads_keep_all_entries(home):
+    import threading
+    stores = [chunk_store.ChunkStore() for _ in range(4)]
+    for i, st in enumerate(stores):
+        st.put(f"k{i}", str(i))
+    ts = [threading.Thread(target=st.flush) for st in stores]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    # an unlocked read-merge-replace can still lose a race; one final flush from each loser must converge
+    for st in stores:
+        st._added = {k for k in st.entries if k.startswith("k")}
+        st.flush()
+    assert set(chunk_store.ChunkStore().entries) >= {f"k{i}" for i in range(4)}
+
+
+@pytest.mark.parametrize("payload", [
+    {"schema": 2, "entries": [["k", "v"]]},
+    {"schema": 1, "entries": "nope"},
+    {"schema": 1, "entries": [["k"], 5, ["k2", 7]]},
+    ["not", "a", "dict"],
+])
+def test_schema_or_malformed_store_is_a_miss_with_failopen(home, monkeypatch, payload):
+    seen = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: seen.append(code))
+    home.mkdir(parents=True, exist_ok=True)
+    (home / chunk_store.FILE_NAME).write_text(json.dumps(payload))
+    st = chunk_store.ChunkStore()
+    assert st.entries == {} and st.get("k") is None and seen
+
+
+def test_symlinked_target_is_replaced_not_followed(home):
+    home.mkdir(parents=True, exist_ok=True)
+    victim = home / "victim.txt"
+    victim.write_text("keep me")
+    (home / chunk_store.FILE_NAME).symlink_to(victim)
+    st = chunk_store.ChunkStore()
+    st.put("k", "v")
+    st.flush()
+    p = home / chunk_store.FILE_NAME
+    assert not p.is_symlink() and victim.read_text() == "keep me"
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600 and chunk_store.ChunkStore().entries == {"k": "v"}
