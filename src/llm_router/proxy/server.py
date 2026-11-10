@@ -553,11 +553,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if exhausted is not None:
             # Forced fallback: this session already hit the consecutive-served
             # cap, so the streak is broken WITHOUT trying the backend at all.
-            guard.reset(session_id)
-            row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
-                       detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3))
             if loop_guard_cap_no_pin_on():
-                row["loop_guard_trigger"] = TRIGGER_CAP
+                trigger = guard.cap_trip(session_id)  # flag on: remembers the window to spot a cycle
+            else:
+                guard.reset(session_id)
+                trigger = TRIGGER_CAP
+            row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
+                       detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3),
+                       loop_guard_trigger=trigger)
             return None
         try:
             from llm_router import capability_filter
@@ -765,9 +768,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if gate_decision is not None:
                 row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_REPEAT)
             row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
-                       detail=repeat, added_latency_s=elapsed, loop_guard_sig=repeat_hit[1])
-            if loop_guard_cap_no_pin_on():
-                row["loop_guard_trigger"] = TRIGGER_REPEAT
+                       detail=repeat, added_latency_s=elapsed, loop_guard_sig=repeat_hit[1],
+                       loop_guard_trigger=TRIGGER_REPEAT)
             return None
         guard.record_served(session_id, message)
         if gate_decision is not None:

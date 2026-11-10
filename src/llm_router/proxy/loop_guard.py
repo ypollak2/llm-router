@@ -53,6 +53,10 @@ REASON_LOOP_GUARD = "loop_guard"
 # Which trigger tripped; the proxy reads this structured value (row["loop_guard_trigger"]), never the detail string.
 TRIGGER_CAP = "cap"
 TRIGGER_REPEAT = "repeat"
+# Flag-on only: a second cap trip whose window mostly re-issued the previous window's calls is a loop.
+TRIGGER_CAP_CYCLE = "cap_cycle"
+# Share of the new window's tool signatures that must also be in the previous window for "cap_cycle".
+CYCLE_OVERLAP = 0.5
 DEFAULT_MAX_CONSECUTIVE = 8
 DEFAULT_REPEAT_WINDOW = 3
 
@@ -82,6 +86,7 @@ def _tool_signatures(message: dict) -> list[str]:
 class _SessionState:
     consecutive_served: int = 0
     recent_tool_sigs: deque = field(default_factory=deque)
+    window_sigs: list = field(default_factory=list)  # every tool signature served since the last reset
 
 
 class LoopGuard:
@@ -93,6 +98,7 @@ class LoopGuard:
         self.repeat_window = (_env_int("LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW", DEFAULT_REPEAT_WINDOW)
                                if repeat_window is None else repeat_window)
         self._sessions: dict[str, _SessionState] = {}
+        self._prev_window: dict[str, frozenset] = {}  # signatures of the window a cap trip just ended
 
     def _state(self, session_id: str) -> _SessionState:
         st = self._sessions.get(session_id)
@@ -115,7 +121,9 @@ class LoopGuard:
     def repeat_hit(self, session_id: str | None, message: dict) -> tuple[str, str] | None:
         """``(tool name, sha256[:10] of the repeated signature)`` when this served
         candidate repeats a recent one, else ``None``. The hash makes a repeat
-        auditable without writing the call's arguments (user text) anywhere."""
+        auditable without writing the call's arguments (user text) anywhere. The
+        10-hex sha256 prefix is UNSALTED: a short input (a file path, a brief
+        command) can be confirmed by guessing it. It stays in the local ledger."""
         if not session_id or self.repeat_window <= 0:
             return None
         recent = self._sessions[session_id].recent_tool_sigs if session_id in self._sessions else ()
@@ -136,9 +144,29 @@ class LoopGuard:
             return
         st = self._state(session_id)
         st.consecutive_served += 1
-        st.recent_tool_sigs.extend(_tool_signatures(message))
+        sigs = _tool_signatures(message)
+        st.recent_tool_sigs.extend(sigs)
+        st.window_sigs.extend(sigs)
 
     def reset(self, session_id: str | None) -> None:
         """A non-served step for this session: the streak is broken."""
         if session_id:
             self._sessions.pop(session_id, None)
+            self._prev_window.pop(session_id, None)
+
+    def cap_trip(self, session_id: str | None) -> str:
+        """The cap tripped: end the window like ``reset`` but remember its tool
+        signatures. Returns ``TRIGGER_CAP_CYCLE`` when at least ``CYCLE_OVERLAP`` of
+        this window's signatures were also in the previous window's (a loop with a
+        period longer than the repeat window), else ``TRIGGER_CAP``. A window with
+        no tool signatures (text-only) is never a cycle."""
+        if not session_id:
+            return TRIGGER_CAP
+        st = self._sessions.pop(session_id, None)
+        cur = list(st.window_sigs) if st else []
+        prev = self._prev_window.pop(session_id, None)
+        if cur and prev is not None and sum(1 for x in cur if x in prev) / len(cur) >= CYCLE_OVERLAP:
+            return TRIGGER_CAP_CYCLE
+        if cur:
+            self._prev_window[session_id] = frozenset(cur)
+        return TRIGGER_CAP

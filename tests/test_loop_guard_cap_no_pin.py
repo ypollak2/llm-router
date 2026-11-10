@@ -105,3 +105,40 @@ def test_repeat_hit_hash_is_stable_and_none_when_new():
     name, h = g.repeat_hit("s", msg)
     assert name == "Bash" and len(h) == 10 and SECRET not in h
     assert g.repeat_reason("s", msg) == "repeat:Bash"
+
+
+async def test_flag_on_period4_cycle_is_pinned_at_the_second_cap_trip(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN", "1")
+    cycle = [_ollama("", [_call("Bash", {"command": f"echo {c}"})]) for c in "abcd"]
+    backend = Backend(*(cycle * 6))
+    app = env.app(backend, loop_max_consecutive=4)
+    await _drive(app, 4 + 1 + 4 + 1 + 1)
+    rows = env.rows()
+    assert rows[4]["loop_guard_trigger"] == "cap" and rows[4]["pin_skipped"] == "loop_guard_cap"
+    assert rows[9]["loop_guard_trigger"] == "cap_cycle" and "pin_skipped" not in rows[9]
+    assert rows[9]["local_mode"]["pin_change"] == "local->claude"
+    assert rows[10]["reason"] == "pinned_claude"
+
+
+async def test_flag_on_progressing_calls_are_never_pinned_across_three_cap_trips(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN", "1")
+    backend = Backend(*[_bash(i) for i in range(30)])
+    app = env.app(backend, loop_max_consecutive=2)
+    await _drive(app, 3 * 3 + 1)
+    rows = env.rows()
+    trips = [r for r in rows if r["reason"] == "loop_guard"]
+    assert len(trips) == 3 and all(r["loop_guard_trigger"] == "cap" and r["pin_skipped"] for r in trips)
+    assert not any(r["reason"] == "pinned_claude" for r in rows)
+
+
+def test_cap_trip_unit_cycle_and_text_only_window():
+    g = loop_guard.LoopGuard(max_consecutive=2, repeat_window=0)
+    call = lambda c: {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": c}}]}  # noqa: E731
+    for m in (call("a"), call("b")):
+        g.record_served("s", m)
+    assert g.cap_trip("s") == "cap"
+    for m in (call("b"), call("z")):
+        g.record_served("s", m)
+    assert g.cap_trip("s") == "cap_cycle"  # 1 of 2 signatures overlaps = 0.5
+    g.record_served("t", {"content": [{"type": "text", "text": "hi"}]})
+    assert g.cap_trip("t") == "cap"
