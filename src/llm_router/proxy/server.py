@@ -722,8 +722,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         except (asyncio.TimeoutError, httpx.TimeoutException):
             err, reason = f"exceeded step budget {step_budget_s}s", "budget_exceeded"
         except LocalModelConflict as exc:
-            # The memory guard refused the load (nothing was sent). Not a backend fault: do not feed the breaker.
-            err, reason, backend_t0 = str(exc), "memory_budget", None
+            # The memory guard refused the load, or (P13) the local queue expired: nothing was sent.
+            # Not a backend fault: do not feed the breaker. Distinct reasons keep the two countable.
+            from llm_router.toolkit.local_gate import LocalQueueTimeout
+            err, backend_t0 = str(exc), None
+            reason = "local_queue_timeout" if isinstance(exc, LocalQueueTimeout) else "memory_budget"
         except Exception as exc:  # noqa: BLE001 - any backend failure is a counted fallback
             err, reason = f"{type(exc).__name__}: {exc}", "backend_error"
         if backend_t0 is not None:

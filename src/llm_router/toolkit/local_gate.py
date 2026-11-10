@@ -11,8 +11,9 @@ A ticket is a file in ``<gate>/wait/`` whose flock its owner holds; a dead owner
 any waiter that can lock a ticket knows it is stale and deletes it. A background holder polls
 ``Admission.should_yield()``; the abort primitive lives in ``local_gate_abort``.
 
-Off by default (``LLM_ROUTER_LOCAL_QUEUE``). PR-1 wires no callers: enabling the
-queue before PR-3 is unsupported.
+Off by default (``LLM_ROUTER_LOCAL_QUEUE``). Wired caller: the proxy Ollama backend
+(``proxy/backends.py``, P13: ``complete`` interactive, ``warm_up`` background, ``probe`` exempt). No other
+caller is wired.
 """
 from __future__ import annotations
 

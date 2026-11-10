@@ -386,6 +386,24 @@ def test_a_hedge_timeout_in_combined_mode_falls_back_to_the_tier_path_and_pins_c
     assert row["reason"] == "hedge_timeout" and row["local_mode"]["pin_change"] == "local->claude"   # D-442
 
 
+def test_p13_queue_timeout_falls_back_with_its_own_reason_and_does_not_feed_the_breaker(tmp_path):
+    from llm_router.toolkit.local_gate import LocalQueueTimeout
+
+    class Queued:
+        calls = []
+
+        async def complete(self, body, timeout_s):
+            self.calls.append(1)
+            raise LocalQueueTimeout("local_queue_timeout: no slot", "http://x")
+
+    rig = Rig(tmp_path, backend=Queued())
+    r = rig.post(opus(turn_body(["rename the helper"])))
+    (row,) = rig.rows()
+    assert r.status_code == 200 and len(rig.up.requests) == 1 and row["decision"] == "fallback"
+    assert row["reason"] == "local_queue_timeout" and row["reason"] != "memory_budget"
+    assert "backend_health" not in row   # not a backend fault
+
+
 def test_combined_mode_defaults_to_a_bounded_first_token_deadline_and_old_mode_to_none(monkeypatch, tmp_path):
     import uvicorn
     seen = []
