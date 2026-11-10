@@ -139,6 +139,9 @@ def test_echo_posttooluse_detects_ignored_rewrite(ctx, monkeypatch, actual_echo)
     monkeypatch.setenv("LLM_ROUTER_HOME", str(ctx.home / ".llm-router"))
     assert codex_handoff.voids_in_session("bind-test-session") == 0
     assert codex_handoff.echo_unconfirmed_in_session("bind-test-session") == int(not actual_echo)
+    errlog = ctx.home / ".llm-router" / "hook_errors.log"
+    lines = errlog.read_text().splitlines() if errlog.exists() else []
+    assert sum("echo_unconfirmed" in ln for ln in lines) == int(not actual_echo)   # surfaced once, not silent
 
 
 def test_echo_reentry_passes_through_without_codex_or_ledger_unit(ctx):

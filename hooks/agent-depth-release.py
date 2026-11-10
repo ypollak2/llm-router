@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 9
+# llm_router-hook-version: 10
 """PostToolUse[Agent] hook — release the agent nesting-depth slot.
 
 The circuit breaker in agent-route.py (PreToolUse[Agent]) increments a
@@ -239,6 +239,11 @@ def _note_void_delegation(hook_input: dict) -> None:
         )
         if voided is None:
             return  # an ordinary Agent call
+        if voided == 0:  # echo id, but the input was not the echo: counted, not charged (docs/bugs/ECHO-1.md)
+            _msg = f"echo_unconfirmed: Agent call {token} carried an echo id but not the echo input"
+            print(f"llm-router: {_msg}", file=sys.stderr)
+            _log_hook_error(_msg)
+            return
         codex_handoff.record_void(session_id, token, voided)
         left = max(0, codex_handoff.VOID_LIMIT - voided)
         print(

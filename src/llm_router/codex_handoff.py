@@ -144,8 +144,8 @@ def note_agent_launched(session_id: str, tool_use_id: str, *, is_echo: bool = Fa
     """PostToolUse[Agent] fired for ``tool_use_id``. If the router had delivered it, the deny was void: count it.
 
     Returns the session's void count after this one, or None when the call was an ordinary Agent call (or the
-    state is unreadable), or the expected echo ran. An echo id whose input is not the echo is counted under
-    ``echo_unconfirmed`` and is not charged as a void until the PostToolUse payload shape is measured.
+    state is unreadable), or the expected echo ran. Returns 0 for an echo id whose input is not the echo: it is
+    counted under ``echo_unconfirmed`` and not charged as a void until the PostToolUse payload shape is measured.
     The delivered entry is removed, so one id is counted once.
     """
     if not tool_use_id:
@@ -178,7 +178,7 @@ def note_agent_launched(session_id: str, tool_use_id: str, *, is_echo: bool = Fa
             # a void on a false positive would open the breaker and stop Codex delegation. Count it; do not charge.
             prior = section.get("echo_unconfirmed")
             section["echo_unconfirmed"] = (prior if isinstance(prior, int) and prior > 0 else 0) + 1
-            return None
+            return 0  # hit, but nothing charged: the caller surfaces it
         prior = section.get("void")
         section["void"] = (prior if isinstance(prior, int) and prior > 0 else 0) + 1
         return section["void"]
