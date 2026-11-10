@@ -26,9 +26,15 @@ MAX_PATHS = 8
 MAX_ERRORS = 5
 MAX_ERROR_CHARS = 200
 
-_PATH_RE = re.compile(r"(?<![\w/.:@+~-])(?:~|\.{1,2})?/?(?:[\w.@+-]+/)+[\w.@+-]+(?::\d+)?")
-_EXIT_RE = re.compile(r"(?i)\b(?:exit(?:ed)?(?:\s+with)?(?:\s+(?:code|status))?|return\s?code|status\s+code)[:=\s]+(-?\d+)")
-_ERROR_RE = re.compile(r"(?i)(?:error|exception|traceback|failed|failure|fatal|panic|assertion)")
+_PATH_RE = re.compile(
+    r"(?<![\w/.:@+~-])(?:"
+    r"(?:~|\.{1,2})?/(?:[\w.@+-]+/)*[\w.@+-]+"          # leading / ./ ../ ~/
+    r"|(?:[\w.@+-]+/)+[\w@+-]+\.[A-Za-z]\w{0,7}"         # dir/file.ext
+    r"|[\w@+-]+\.[A-Za-z]\w{0,7}(?=[:\s,;)'\"]|$)"       # bare file.ext
+    r")(?::\d+)?")
+_EXIT_RE = re.compile(r"(?i)\b(?:exit(?:ed)?(?:\s+with)?(?:[\s_]+(?:code|status))?|return[\s_]?code)[:=\s]+(-?\d+)")
+_ERROR_RE = re.compile(r"(?i:\b(?:errors?|exceptions?|traceback|failed|failures?|fatal|panic|assertion\w*)\b)|\b\w+(?:Error|Exception)\b")
+_ZERO_RE = re.compile(r"(?i)\b0\s+(?:errors?|failures?|failed)\b|=\s*0\b|\bno\s+errors?\b")
 
 
 def enabled() -> bool:
@@ -54,11 +60,18 @@ def _result_text(content) -> str:
     return "" if content is None else str(content)
 
 
-def placeholder(name: str, text: str, is_error: bool = False) -> str:
+def _count_images(content) -> int:
+    return sum(1 for x in content if isinstance(x, dict) and x.get("type") in ("image", "document")) \
+        if isinstance(content, list) else 0
+
+
+def placeholder(name: str, text: str, is_error: bool = False, images: int = 0) -> str:
     """Deterministic summary of one tool result: same input, same bytes."""
     parts = [f"{name or '?'}, {len(text)} chars"]
     if is_error:
         parts.append("is_error")
+    if images:
+        parts.append(f"images: {images}")
     m = _EXIT_RE.search(text)
     if m:
         parts.append(f"exit code {m.group(1)}")
@@ -73,7 +86,7 @@ def placeholder(name: str, text: str, is_error: bool = False) -> str:
     errors: list[str] = []
     for line in text.splitlines():
         line = line.strip()
-        if line and _ERROR_RE.search(line):
+        if line and _ERROR_RE.search(line) and not _ZERO_RE.search(line):
             line = line[:MAX_ERROR_CHARS]
             if line not in errors:
                 errors.append(line)
@@ -106,7 +119,7 @@ def mask_body(body: dict, *, keep_last: int = DEFAULT_KEEP_LAST,
             out.append(m)
             continue
         for b in content:
-            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
+            if isinstance(b, dict) and b.get("type") == "tool_use" and isinstance(b.get("id"), str):
                 names[b["id"]] = str(b.get("name", "?"))
         if i == 0 or i >= cut:
             out.append(m)
@@ -115,8 +128,10 @@ def mask_body(body: dict, *, keep_last: int = DEFAULT_KEEP_LAST,
         for b in content:
             if isinstance(b, dict) and b.get("type") == "tool_result":
                 text = _result_text(b.get("content"))
+                tid = b.get("tool_use_id")
                 if not text.startswith(PLACEHOLDER_PREFIX):
-                    ph = placeholder(names.get(b.get("tool_use_id"), "?"), text, bool(b.get("is_error")))
+                    ph = placeholder(names.get(tid, "?") if isinstance(tid, str) else "?", text,
+                                     bool(b.get("is_error")), _count_images(b.get("content")))
                     if len(ph) < len(text):
                         b = {**b, "content": ph}
                         changed = True
@@ -125,5 +140,6 @@ def mask_body(body: dict, *, keep_last: int = DEFAULT_KEEP_LAST,
             new_blocks.append(b)
         out.append({**m, "content": new_blocks} if changed else m)
     new_body = {**body, "messages": out} if masked else body
-    return new_body, MaskStats(masked, saved, cut, estimate_prompt_tokens(body),
-                               estimate_prompt_tokens(new_body) if masked else estimate_prompt_tokens(body))
+    before = estimate_prompt_tokens(body)
+    after = estimate_prompt_tokens(new_body) if masked else before
+    return new_body, MaskStats(masked, saved, cut, before, after)

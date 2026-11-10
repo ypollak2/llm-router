@@ -127,3 +127,60 @@ def test_flag_off_means_not_imported_anywhere():
     code = "import sys, llm_router.proxy.translate, llm_router.proxy.local_mode; print('llm_router.proxy.history_mask' in sys.modules)"
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "False"
+
+
+def test_malformed_ids_do_not_crash():
+    body = _convo(30)
+    body["messages"][1]["content"][1]["id"] = ["x"]
+    body["messages"][2]["content"][0]["tool_use_id"] = {"a": 1}
+    new, st = hm.mask_body(body)
+    assert st.masked > 0
+    assert new["messages"][2]["content"][0]["content"].startswith(hm.PLACEHOLDER_PREFIX)
+
+
+def test_images_counted():
+    body = _convo(30)
+    body["messages"][2]["content"][0]["content"] = [
+        {"type": "text", "text": BIG}, {"type": "image", "source": {}}, {"type": "image", "source": {}}]
+    new, _ = hm.mask_body(body)
+    assert "images: 2" in new["messages"][2]["content"][0]["content"]
+
+
+def test_error_regex_skips_zero_counts_and_substrings():
+    text = "0 errors\nno error\nerrors=0\nPASSED (failures=0)\nterror\ntracebackless\nreal Error: boom\n"
+    ph = hm.placeholder("Bash", text)
+    assert "errors: real Error: boom" in ph and ph.count("|") == 0
+    assert "terror" not in ph and "tracebackless" not in ph
+
+
+def test_path_regex_false_positives_and_bare_files():
+    ph = hm.placeholder("Read", "and/or width/height 2024/01/05 1/2 see file.py and ./run.sh, src/a/b.c:7 /etc/hosts")
+    for bad in ("and/or", "width/height", "2024/01/05", "1/2"):
+        assert bad not in ph
+    for good in ("file.py", "./run.sh", "src/a/b.c:7", "/etc/hosts"):
+        assert good in ph
+
+
+def test_exit_code_forms():
+    assert "exit code 2" in hm.placeholder("Bash", "exit_code: 2")
+    assert "exit code" not in hm.placeholder("Bash", "HTTP status code 200")
+
+
+def test_boundary_invariant_property():
+    prev_cut, prev = 0, None
+    snaps = {}
+    for n in range(1, 80):
+        body = _convo(0)
+        body["messages"] = _convo(n)["messages"][:n]
+        new, st = hm.mask_body(body, keep_last=10, batch=10)
+        msgs = new["messages"]
+        assert msgs[0] == body["messages"][0]
+        assert msgs[max(0, n - 10):] == body["messages"][max(0, n - 10):]
+        snaps[n] = msgs
+        cut = st.cut
+        assert cut == hm.boundary(n, 10, 10) <= max(0, n - 10)
+        if prev is not None:
+            assert json.dumps(msgs[:prev_cut]) == json.dumps(prev[:prev_cut])
+            if cut == prev_cut:
+                assert json.dumps(msgs[:cut]) == json.dumps(prev[:cut])
+        prev_cut, prev = cut, msgs
