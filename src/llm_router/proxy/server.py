@@ -65,7 +65,7 @@ from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
 from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
-from llm_router.proxy import cls_decide, cold_guard, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, okf_context, prefix_hash
+from llm_router.proxy import cls_decide, cold_guard, deadline, haiku_arm, haiku_guard, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
 from llm_router.proxy import escalation
 
 from llm_router.proxy.backend_health import (
@@ -935,6 +935,44 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         finally:  # the in-flight marker is released whatever happens, cancellation included
             cold_guard.GUARD.end_warm_up(key, (sent or obs) if ok else None, ok, generation)
 
+    async def mr_shorten(body: dict, row: dict) -> dict | None:
+        """P9 (LLM_ROUTER_PROXY_MR, default off). Called from ``local_step`` only for a turn whose every
+        non-size rule already passed (``decide_local`` without the payload), so no map call is spent on a
+        turn that goes to Claude anyway. Returns ``body`` with its oldest history replaced by map-reduce chunk
+        summaries, or ``None`` (under the cap, or the summarizer failed / did not fit / timed out / raised: the
+        turn then follows the unchanged path). The map call goes through the live backend, so it carries the
+        live model and num_ctx and the same queue and memory guards. The whole phase is bounded by
+        ``deadline.cap_s`` (the registered LLM_ROUTER_DEADLINE_CAP_S, 240 s, or its keepalive cap 600 s
+        when keepalive is on); it runs inside ``attempt_local``, so a streaming client gets the keepalive pings
+        live turns get."""
+        try:
+            model = cfg.model.split("/", 1)[1]
+            backend = make_backend(cfg.model)
+
+            async def map_call(prompt: str, num_predict: int) -> str | None:
+                reply, _err, _usage = await backend.complete(
+                    {"model": cfg.model, "messages": [{"role": "user", "content": prompt}],
+                     "max_tokens": num_predict, "temperature": 0}, mr_summary.MAP_TIMEOUT_S)
+                if reply is None:
+                    return None
+                return "".join(b.get("text", "") for b in reply.get("content") or [] if b.get("type") == "text")
+
+            res = await asyncio.wait_for(mr_summary.shorten(
+                body, map_call, cap=local_mode.prompt_cap_tokens(),
+                est=lambda b: local_mode.estimate_prompt_tokens(to_ollama(b, model, num_ctx=cfg.num_ctx, max_predict=1))),
+                timeout=deadline.cap_s(keepalive=proxy_keepalive.enabled()))
+        except asyncio.TimeoutError:
+            row["mr_summary"] = {"outcome": mr_summary.OUTCOME_TIMEOUT}
+            return None
+        except Exception as exc:  # noqa: BLE001 - the summarizer is an optimisation; Claude fallback, never a 500
+            failopen.record("LR-FO-PROXY-MR", exc)
+            row["mr_summary"] = {"outcome": mr_summary.OUTCOME_ERROR}
+            return None
+        if res is None:
+            return None
+        row["mr_summary"] = res.row
+        return res.body if res.changed else None
+
     async def local_step(body: dict, row: dict, *, force=False, key_body: dict | None = None,
                           cap_body: dict | None = None) -> dict | None:
         """``--serve local-agent``: pin, decide, serve. Returns the served
@@ -985,10 +1023,24 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             unpin_try = reduced_est <= cap
         cap_payload = payload if cap_body is None else await asyncio.to_thread(
             to_ollama, cap_body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
-        decision = local_mode.decide_local(body, local_mode.LocalSession(
-            key=key, pinned=None if unpin_try else pinned, kill_switch=lm.killed(),
-            backend_healthy=not health.is_open(cfg.model), breaker_closed=breaker_ok, breaker_detail=breaker_detail, payload=cap_payload,
-            verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
+        def decide(cap_pl):
+            return local_mode.decide_local(body, local_mode.LocalSession(
+                key=key, pinned=None if unpin_try else pinned, kill_switch=lm.killed(),
+                backend_healthy=not health.is_open(cfg.model), breaker_closed=breaker_ok, breaker_detail=breaker_detail,
+                payload=cap_pl, verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
+
+        decision = decide(cap_payload)
+        if (decision.reason == local_mode.REASON_PROMPT_CAP and mr_summary.enabled()
+                and decide(None).local):
+            # P9: over the cap is the only refusal the summarizer cures. ``decide(None)`` is the same rule
+            # set with the size check skipped, so exempt / pinned / media / veto / breaker / health turns
+            # never reach a map call.
+            shorter = await mr_shorten(body, row)
+            if shorter is not None:
+                body = shorter
+                payload = cap_payload = await asyncio.to_thread(
+                    to_ollama, body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
+                decision = decide(cap_payload)
         if decision.local and cap_guard_reconcile_on():
             from llm_router.local_context_guard import overflow_estimate
             over = await asyncio.to_thread(overflow_estimate, payload,
@@ -1081,6 +1133,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 lm.set_pin(key, local_mode.PIN_CLAUDE,
                            str(reason) if reason in local_mode.STRUCTURAL_REASONS else None)
                 row["local_mode"]["pin_change"] = f"{pinned or 'new'}->claude"
+        mr_row = row.get("mr_summary")
+        if isinstance(mr_row, dict) and mr_row.get("outcome") == mr_summary.OUTCOME_SUMMARIZED:
+            mr_row.update(outcome=mr_summary.OUTCOME_WASTED, wasted_reason=str(reason))  # maps ran, the turn went to Claude
         row["egress"] = True
         print(local_mode.egress_notice(str(reason), row.get("session_id")), file=sys.stderr, flush=True)
         return None
