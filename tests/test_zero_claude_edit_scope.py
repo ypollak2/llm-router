@@ -720,6 +720,7 @@ def test_classify_negated_edit_is_not_an_edit(prompt):
         "Fix a.py and b.py. Never touch any file outside src.",
         "Fix a.py and b.py. Don't change any code in c.py",
         "Fix a.py and b.py. Never write any code in tests",
+        "Before changing anything else, rename foo to bar in a.py and b.py",
     ],
 )
 def test_classify_two_file_edit_still_an_edit(prompt):

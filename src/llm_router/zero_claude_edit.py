@@ -113,7 +113,7 @@ _NEGATED_EDIT_RE = re.compile(
     r"\b(?:do\s+not|don'?t|dont|never)\s+(?:" + "|".join(_EDIT_VERBS) + r"|edit|touch|write)"
     r"\s+anything\s+(?:yet|for\s+now|until)\b"
     r"|\bbefore\s+(?:you\s+)?(?:modif(?:y|ying)|chang(?:e|ing)|edit(?:ing)?|touch(?:ing)?|"
-    r"writ(?:e|ing))\s+anything\b",
+    r"writ(?:e|ing))\s+anything\b(?!\s+else)",
     re.IGNORECASE,
 )
 
