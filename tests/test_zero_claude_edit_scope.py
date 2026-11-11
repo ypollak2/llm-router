@@ -692,3 +692,33 @@ def test_maybe_replace_asks_ollama_while_git_status_runs(tmp_path, monkeypatch):
                             deadline_s=time.monotonic() + 5)
     assert seen == {"tags_saw_ps": True, "ps_saw_tags": True}
     assert out is not None and out.action == "fallthrough" and "cold" in out.log_reason
+
+
+# ── ZCE-NEGATION-1: "do not modify anything yet" is a read-first request ─────
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "I am pasting our pkg below. Do not modify anything yet. First run `grep -n 'def fee' a/m1.py`, then tell me what "
+        "fee returns.\n\n### file: a/m1.py\nx = 1\n\n### file: a/m2.py\ny = 2\n",
+        "Don't change anything yet; read pkg/core.py and pkg/util.py and explain the retry path.",
+        "Before you change anything, first look at pkg/core.py and report what the loop does.",
+    ],
+)
+def test_classify_negated_edit_is_not_an_edit(prompt):
+    result = zce.classify_edit_prompt(prompt)
+    assert not result.is_edit, result.reason
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "fix the off-by-one in pkg/core.py and update pkg/util.py to match",
+        "fix the off-by-one in pkg/core.py and pkg/util.py, don't change anything else",
+    ],
+)
+def test_classify_two_file_edit_still_an_edit(prompt):
+    result = zce.classify_edit_prompt(prompt)
+    assert result.is_edit, result.reason
+    assert len(result.files) == 2

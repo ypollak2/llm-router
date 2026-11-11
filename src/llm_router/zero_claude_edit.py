@@ -104,6 +104,18 @@ _QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# An explicit "not yet" negation ("do not modify anything yet", "before you
+# change anything, first ...") makes the edit verb a NON-request: the turn
+# asks to read/investigate first. "anything else" is a scope limiter on a
+# real edit ("fix a.py, don't change anything else"), so it is excluded.
+_NEGATED_EDIT_RE = re.compile(
+    r"\b(?:do\s+not|don'?t|dont|never)\s+(?:\w+\s+)?(?:" + "|".join(_EDIT_VERBS) + r"|edit|touch|write)"
+    r"\s+(?:anything|any\s+files?|any\s+code)\b(?!\s+else)"
+    r"|\bbefore\s+(?:you\s+)?(?:modif(?:y|ying)|chang(?:e|ing)|edit(?:ing)?|touch(?:ing)?|"
+    r"updat(?:e|ing)|writ(?:e|ing)|fix(?:ing)?)\s+anything\b",
+    re.IGNORECASE,
+)
+
 _CODE_EXTENSIONS = (
     "py", "ts", "tsx", "js", "jsx", "go", "rs", "java", "rb", "c", "cpp",
     "h", "hpp", "cs", "php", "swift", "kt", "sh", "yaml", "yml", "json",
@@ -180,6 +192,8 @@ def classify_edit_prompt(prompt: str) -> EditClassification:
         return EditClassification(False, (), "empty prompt")
     if _QUESTION_RE.match(text):
         return EditClassification(False, (), "interrogative — reads as a question, not a change request")
+    if _NEGATED_EDIT_RE.search(text):
+        return EditClassification(False, (), "negated — asks to read/investigate before any change")
     if not _EDIT_VERB_RE.search(text):
         return EditClassification(False, (), "no imperative edit verb found")
     files = tuple(dict.fromkeys(
