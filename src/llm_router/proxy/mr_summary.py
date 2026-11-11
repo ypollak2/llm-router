@@ -488,9 +488,10 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
             final, _miss, ok = _compose_gated(t, f, n, len(kept), a, b - 1)
             if not ok:
                 # No evict here, on purpose (review P10B #895): `kept` holds chunks whose RAW summary already passed the
-                # gate above (that path evicts on failure). Only the renumbered wrapper ("n of len(kept)") failed, so the
-                # stored raw summary is fine and the next turn rebuilds the wrapper from it with no map call. A re-map
-                # would not change a wrapper-only failure. Pinned by test_renumber_failure_keeps_the_stored_summary.
+                # gate above (that path evicts on failure). Renumbering only changes the wrapper ("n of len(kept)") and
+                # recomputes the pins; by reading the code (not proven) it cannot turn a passing summary into a content
+                # failure, so the stored raw summary is kept and the next turn rebuilds the wrapper from it with no map
+                # call; evicting would add a map call every turn. Pinned by test_renumber_failure_keeps_the_stored_summary.
                 break
             summaries.append(final)
         row["chunks"] = len(summaries)
