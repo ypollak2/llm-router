@@ -5,8 +5,9 @@ Usage: python scripts/p14_key_stability.py LEDGER.jsonl
 
 Prints COUNTS ONLY (no session ids, no row contents): per session the main-thread rows that carry
 ``layout_shadow`` and their distinct keys; for consecutive main-thread rows of one session (ordered by ``ts``)
-where ``n_messages`` grew, how many kept the key and how many changed; for the changed ones, which component
-hash changed. Sub-agent rows (``main_thread`` not true) and rows with no session id are counted and left out of
+where ``n_messages`` grew, how many kept the key and how many changed, their ratio, and how many sessions
+contribute at least one such pair (the PREREG-P14 minimum is stated in pairs AND sessions); for the changed ones,
+which component hash changed. Sub-agent rows (``main_thread`` not true) and rows with no session id are counted and left out of
 the pairs: a sub-agent shares the session id but not the first message, so it would read as a key change.
 """
 from __future__ import annotations
@@ -38,11 +39,12 @@ def analyse(lines) -> dict:
             # rows are written when a call finishes, so file order is not request order: sort by request start
             sessions.setdefault(row["session_id"], []).append((ts if isinstance(ts, (int, float)) else float("inf"), i, shadow))
     sessions = {sid: [s for _, _, s in sorted(rows, key=lambda t: t[:2])] for sid, rows in sessions.items()}
-    kept = changed = 0
+    kept = changed = with_pairs = 0
     by_component: Counter = Counter()
     per_session = []
     for rows in sessions.values():
         per_session.append((len(rows), len({r.get("key") for r in rows})))
+        before = kept + changed
         for prev, cur in zip(rows, rows[1:]):
             grew = isinstance(prev.get("n_messages"), int) and isinstance(cur.get("n_messages"), int) \
                 and cur["n_messages"] > prev["n_messages"]
@@ -57,8 +59,11 @@ def analyse(lines) -> dict:
                 by_component[c] += 1
             if not diff:
                 by_component["none_identified"] += 1
+        with_pairs += (kept + changed) > before
     return {"sessions": len(sessions), "rows": sum(n for n, _ in per_session), "per_session": sorted(per_session),
             "growing_pairs": kept + changed, "key_kept": kept, "key_changed": changed,
+            "sessions_with_pairs": with_pairs,
+            "key_kept_ratio": round(kept / (kept + changed), 4) if kept + changed else None,
             "changed_component": {c: by_component.get(c, 0) for c in (*COMPONENTS, "none_identified")},
             "excluded_no_session": excluded["no_session"], "excluded_not_main_thread": excluded["not_main_thread"]}
 
@@ -78,6 +83,8 @@ def main(argv: list[str]) -> int:
     print(f"consecutive_pairs_n_messages_grew: {r['growing_pairs']}")
     print(f"  key_kept: {r['key_kept']}")
     print(f"  key_changed: {r['key_changed']}")
+    print(f"  key_kept_ratio: {r['key_kept_ratio']}")
+    print(f"sessions_with_pairs: {r['sessions_with_pairs']}")
     for c, n in r["changed_component"].items():
         print(f"  changed_by_{c}: {n}")
     return 0
