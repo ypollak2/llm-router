@@ -217,3 +217,27 @@ def test_estimate_payload_tokens_never_raises_on_odd_values():
     # json.dumps(..., default=str) covers this; the sum-of-str() fallback
     # exists for whatever that still can't handle. Either way: no raise.
     assert lcg.estimate_payload_tokens(payload) > 0
+
+
+# Deep enough to raise on CPython 3.11, 3.13 and 3.14: 3.11 raises at 5000, but 3.13 and 3.14 (C-stack based
+# limits) serialize 5000 levels fine and raise at 100000 (measured locally 2026-11-10, n=1 run per version).
+TOO_DEEP = 100_000
+
+
+def _deep(levels: int) -> dict:
+    node: dict = {}
+    for _ in range(levels):
+        node = {"k": node}
+    return {"messages": node}
+
+
+def test_estimate_payload_tokens_raises_unmeasurable_on_a_too_deep_payload():
+    """ESTREC-1: json.dumps raised RecursionError (uncaught); the str() fallback recurses too. No number is invented."""
+    with pytest.raises(lcg.Unmeasurable):
+        lcg.estimate_payload_tokens(_deep(TOO_DEEP))
+
+
+def test_check_overflow_refuses_a_too_deep_payload_and_never_prints_a_number():
+    with pytest.raises(lcg.ContextOverflow, match="unmeasurable") as ei:
+        lcg.check_overflow(_deep(TOO_DEEP), num_ctx=32768, site="t")
+    assert "estimated" not in str(ei.value)
