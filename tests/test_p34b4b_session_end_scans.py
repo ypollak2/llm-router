@@ -27,8 +27,18 @@ ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "src" / "llm_router" / "hooks" / "session-end.py"
 
 
-def _ts(minutes_ago: float) -> str:
-    return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%d %H:%M:%S")
+def _ts(minutes_ago: float, *, same_day: bool = False) -> str:
+    """UTC row timestamp ``minutes_ago`` before now. With ``same_day`` a row under a day old is
+    never placed before the start of the local day the reader's "today" window opens at, so a
+    run in the first minutes after midnight does not push it into yesterday (MIDNIGHT-1).
+    Tests that compare against a session start time keep the exact offset (same_day False)."""
+    now = datetime.now(timezone.utc)
+    at = now - timedelta(minutes=minutes_ago)
+    if same_day and minutes_ago < 24 * 60:
+        midnight = datetime.fromtimestamp(now.timestamp()).replace(
+            hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        at = max(at, midnight)
+    return at.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _load_hook(name: str):
@@ -45,7 +55,8 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _usage_db(home: Path, rows: list[tuple], *, session_id_column: bool = True) -> Path:
+def _usage_db(home: Path, rows: list[tuple], *, session_id_column: bool = True,
+              same_day: bool = False) -> Path:
     """rows: (minutes_ago, session_id, provider, model, complexity, in_tok, out_tok, cost, cache_hit)"""
     db = home / "usage.db"
     con = sqlite3.connect(db)
@@ -57,7 +68,7 @@ def _usage_db(home: Path, rows: list[tuple], *, session_id_column: bool = True) 
         f"is_simulated INTEGER DEFAULT 0{extra})")
     for ago, sid, provider, model, cx, i, o, cost, hit in rows:
         cols = "timestamp, task_type, model, provider, complexity, input_tokens, output_tokens, cost_usd, cache_hit"
-        vals = [_ts(ago), "query", model, provider, cx, i, o, cost, hit]
+        vals = [_ts(ago, same_day=same_day), "query", model, provider, cx, i, o, cost, hit]
         if session_id_column:
             cols += ", session_id"
             vals.append(sid)
@@ -83,7 +94,7 @@ def _decisions_db(home: Path, rows: list[dict]) -> Path:
         ago = d.pop("ago", 1)
         keys = ["timestamp", *d]
         con.execute(f"INSERT INTO routing_decisions ({','.join(keys)}) VALUES ({','.join('?' * len(keys))})",
-                    [_ts(ago), *d.values()])
+                    [_ts(ago, same_day=True), *d.values()])
     con.commit()
     con.close()
     return db
@@ -234,7 +245,8 @@ def test_session_metrics_compare_to_earlier_days(home):
 def test_cache_trend_carries_its_rows_and_window(home):
     _usage_db(home, [(5, "S", "ollama", "llama-x", "simple", 1, 1, 0.0, 1),
                      (6, "S", "ollama", "llama-x", "simple", 1, 1, 0.0, 0),
-                     (7, "S", "ollama", "llama-x", "simple", 1, 1, 0.0, None)])   # not recorded: out
+                     (7, "S", "ollama", "llama-x", "simple", 1, 1, 0.0, None)],   # not recorded: out
+              same_day=True)
     mod = _load_hook("session_end_b4b_cache")
     assert mod._query_daily_cache_trend() == [50.0]
     assert mod._CACHE_TREND_BASIS == "n=2 rows, 14d"
