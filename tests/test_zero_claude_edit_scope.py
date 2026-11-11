@@ -387,6 +387,8 @@ def _run(prompt: str, home: Path, repo_dir: Path, ollama_url: str | None, extra_
     env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "TMPDIR") if k in os.environ}
     env["HOME"] = str(home)
     env["LLM_ROUTER_HOME"] = str(home) + "/.llm-router"
+    # The hook imports llm_router: pin it to THIS tree, or an editable install of another checkout answers (ZCE-HOOKTEST-1).
+    env["PYTHONPATH"] = str(ROOT / "src")
     if ollama_url:
         env["LLM_ROUTER_OLLAMA_URL"] = ollama_url
         env["LLM_ROUTER_OLLAMA_MODEL"] = STUB_MODEL
