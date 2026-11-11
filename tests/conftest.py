@@ -1904,7 +1904,7 @@ def importing_a_submodule():
         mod = _s.modules.get(pkg_name)
         if mod is None:
             continue
-        for attr in [a for a in vars(mod) if a not in snapshot]:
+        for attr in [a for a in vars(mod).copy() if a not in snapshot]:
             sub = getattr(mod, attr, None)
             if getattr(sub, "__file__", "sentinel") is None:
                 try:
