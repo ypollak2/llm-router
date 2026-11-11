@@ -472,3 +472,31 @@ def test_gate_rejected_fresh_summary_is_also_evicted(monkeypatch):
     r = _gated_run(Counter(), store)
     assert r.row["gate_failed"] == 1 and r.row["store_writes"] >= 1
     assert not store.entries and not chunk_store.ChunkStore().entries
+
+
+def test_renumber_failure_keeps_the_stored_summary(monkeypatch):
+    """A kept chunk whose renumbered wrapper fails the re-check is NOT evicted: its raw summary passed the gate, only the
+    wrapper failed, so the next turn re-uses the stored summary (no map call for it) and rebuilds the wrapper."""
+    monkeypatch.setenv("LLM_ROUTER_SUMMARY_GATE", "1")
+    from llm_router.proxy import summary_gate
+    real_over, real_compose = summary_gate.over_budget, mr_summary._compose_gated
+    seen = {"n": 0}
+
+    def over(facts):  # the second chunk is skipped, so the kept chunk is renumbered "1 of 1"
+        seen["n"] += 1
+        return seen["n"] == 2 or real_over(facts)
+
+    def compose(text, facts, i, n, a, b):
+        final, miss, ok = real_compose(text, facts, i, n, a, b)
+        return final, miss, ok and n != 1  # wrapper-only failure: only the renumbered "1 of 1" call fails
+
+    call, store = Counter(), chunk_store.ChunkStore()
+    with monkeypatch.context() as m:
+        m.setattr(summary_gate, "over_budget", over)
+        m.setattr(mr_summary, "_compose_gated", compose)
+        r1 = _gated_run(call, store)
+    assert not r1.changed and r1.row["map_calls"] == 1 and len(store.entries) == 1  # the kept chunk's summary is stored
+    n = len(call.prompts)
+    r2 = _gated_run(call, chunk_store.ChunkStore())  # no patches: wrapper works again
+    assert r2.row["store_hits"] == 1 and r2.row["map_calls"] == r2.row["chunks"] - 1 == len(call.prompts) - n  # chunk 1 reused, only the rest mapped
+    assert r2.changed and r2.row["gate_failed"] == 0
