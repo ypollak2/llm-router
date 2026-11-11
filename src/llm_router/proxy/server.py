@@ -1747,6 +1747,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # classifier decision (filled below, before local_step). Additive keys.
             **cls_decide.static_fields(body, session_id_of(body), turn_k),
         }
+        if history_layout.shadow_enabled() and not history_layout.enabled():
+            try:  # P14 key-stability measurement: hashes and counts, the client's body before any rewrite
+                row["layout_shadow"] = history_layout.shadow_fields(body)
+            except Exception as exc:  # noqa: BLE001 - measurement only, never fails a request
+                failopen.record("LR-FO-PROXY-LAYOUT-SHADOW", exc)
         example_written = False
 
         def prefix_outcome(outcome):
