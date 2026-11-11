@@ -1686,12 +1686,23 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         is_messages = request.method == "POST" and request.url.path == "/v1/messages"
         if not is_messages:
             return await forward(request, raw, None, None)
+        unparsed_row = None
         try:
             body = json.loads(raw)
-        except (ValueError, RecursionError):  # ESTREC-1: nested past the parser's limit -> Claude, untouched
+        except RecursionError:
+            # ESTREC-1/2: nested past the parser's limit -> Claude, untouched. The body cannot be read, so the row
+            # carries only what is known; without it the forwarded turn had no ledger row (ESTREC-2).
+            body = None
+            unparsed_row = {
+                "ts": time.time(), "session_id": None, "msg_id": None, "stream": None, "requested_model": None,
+                "auth": ledger.auth_kind(request.headers), "decision": ledger.DECISION_FORWARDED,
+                "reason": local_mode.REASON_PROMPT_UNMEASURABLE, "detail": "payload nested too deeply to measure",
+                "added_latency_s": 0.0,
+            }
+        except ValueError:
             body = None
         if not isinstance(body, dict):
-            return await forward(request, raw, None, None)
+            return await forward(request, raw, None, unparsed_row)
 
         ov = None
         stripped_body = None

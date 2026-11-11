@@ -23,6 +23,7 @@ from llm_router.local_agent import capability as cap
 from llm_router.proxy import history_mask, ledger, local_mode
 from llm_router.proxy import server as ps
 from llm_router.proxy.translate import from_ollama
+from llm_router.token_estimate import Unmeasurable
 
 FIXTURE = Path(__file__).parent / "fixtures" / "proxy" / "continuation_request.json"
 MODEL = "ollama/fake:1"
@@ -1183,10 +1184,12 @@ def _raw_with_deep_tool_schema(levels: int) -> str:
     return json.dumps(body).replace('"@@"', '{"k":' * levels + "1" + "}" * levels)
 
 
-@pytest.mark.parametrize("levels", [100_000, 5000, 500])
+@pytest.mark.parametrize("levels", [500, 950, 990, 2000, 5000, 100_000])
 async def test_a_deeply_nested_request_goes_to_claude_and_never_crashes(env, levels):
-    """ESTREC-1 through the whole proxy: 5000 deep fails json.loads (was a 500); 500 deep parses and failed in
-    the estimators (was reason backend_error). Both are forwarded to Claude, none is served locally."""
+    """ESTREC-1/2 through the whole proxy, a depth sweep (the depth json.loads gives up at depends on the
+    interpreter and the stack): a body json.loads cannot parse is forwarded untouched, one that parses and fails in
+    the estimators is forwarded by the local step. None is served locally, none is a 500, each writes ONE row
+    with reason prompt_unmeasurable (ESTREC-2: from 950 up the forwarded turn wrote no row)."""
     headers = {"authorization": "Bearer sk-ant-oat01-" + "Zq9" * 20, "anthropic-version": "2023-06-01",
                "content-type": "application/json"}
     app = env.app(Backend(_ollama("", [_call("Bash", {"command": "ls"})])))
@@ -1194,10 +1197,40 @@ async def test_a_deeply_nested_request_goes_to_claude_and_never_crashes(env, lev
                                  base_url="http://127.0.0.1:8787") as c:
         r = await c.post("/v1/messages?beta=true", content=_raw_with_deep_tool_schema(levels), headers=headers)
     assert r.status_code == 200 and len(env.up.requests) == 1
-    if levels == 500:
-        (row,) = env.rows()
-        assert row["decision"] == "fallback" and row["reason"] == local_mode.REASON_PROMPT_UNMEASURABLE
-        assert "1000000000" not in json.dumps(row)
+    (row,) = env.rows()  # ESTREC-2: exactly one row at every depth
+    # "forwarded": json.loads failed, local was never tried; "fallback": it parsed and the local step refused.
+    assert row["decision"] in ("forwarded", "fallback") and row["reason"] == local_mode.REASON_PROMPT_UNMEASURABLE
+    assert "1000000000" not in json.dumps(row)
+
+
+@pytest.mark.parametrize("exc", [Unmeasurable("too deep"), RecursionError("too deep")])
+async def test_a_step_that_cannot_be_measured_inside_the_local_step_goes_to_claude(env, monkeypatch, exc):
+    """ESTREC-1 F1: the except in ``run_local_step`` (a raise out of ``local_step``, not out of ``try_serve``)."""
+    def boom(*_a, **_k):
+        raise exc
+
+    monkeypatch.setattr(local_mode, "decide_local", boom)
+    backend = Backend(_ollama("x"))
+    r = await _post(env.app(backend), _first_call())
+    assert r.status_code == 200 and len(env.up.requests) == 1 and backend.calls == []
+    (row,) = env.rows()
+    assert row["decision"] == ledger.DECISION_FORWARDED and row["reason"] == local_mode.REASON_PROMPT_UNMEASURABLE
+    assert row["detail"] == "payload nested too deeply to measure"
+
+
+async def test_a_forced_local_step_that_cannot_be_measured_is_refused_not_sent_to_claude(env, monkeypatch):
+    def boom(*_a, **_k):
+        raise Unmeasurable("too deep")
+
+    monkeypatch.setattr(local_mode, "decide_local", boom)
+    body = _first_call()
+    body["messages"][0]["content"] = [{"type": "text", "text": "local: list the files"}]
+    backend = Backend(_ollama("x"))
+    r = await _post(env.app(backend), body)
+    assert r.status_code == 200 and env.up.requests == [] and backend.calls == []
+    (row,) = env.rows()
+    assert row["decision"] == ledger.DECISION_SERVED and row["reason"] == local_mode.REASON_PROMPT_UNMEASURABLE
+    assert row["prefix_outcome"] == f"refused:{local_mode.REASON_PROMPT_UNMEASURABLE}"
 
 
 async def test_an_id_less_backend_reply_is_served_with_an_id_and_a_ledger_row(env):
