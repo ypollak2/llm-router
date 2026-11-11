@@ -1904,7 +1904,7 @@ def importing_a_submodule():
         mod = _s.modules.get(pkg_name)
         if mod is None:
             continue
-        for attr in [a for a in vars(mod) if a not in snapshot]:
+        for attr in [a for a in vars(mod).copy() if a not in snapshot]:
             sub = getattr(mod, attr, None)
             if getattr(sub, "__file__", "sentinel") is None:
                 try:
@@ -1932,8 +1932,10 @@ def _module_state_fingerprint():
         pkg = sys.modules.get(pkg_name)
         if pkg is None:
             continue
+        # VARS-RACE-1: copy first. dict.copy() runs in C under the GIL, so a thread a previous test left
+        # running cannot import a submodule into the package mid-loop ("dictionary changed size").
         attrs[pkg_name] = frozenset(
-            k for k, v in vars(pkg).items()
+            k for k, v in vars(pkg).copy().items()
             if isinstance(v, type(sys)) and not k.startswith("__")
         )
     return mods, attrs
