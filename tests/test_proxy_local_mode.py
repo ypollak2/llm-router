@@ -1200,6 +1200,16 @@ async def test_a_deeply_nested_request_goes_to_claude_and_never_crashes(env, lev
     (row,) = env.rows()  # ESTREC-2: exactly one row at every depth
     # "forwarded": json.loads failed, local was never tried; "fallback": it parsed and the local step refused.
     assert row["decision"] in ("forwarded", "fallback") and row["reason"] == local_mode.REASON_PROMPT_UNMEASURABLE
+    # Each decision must come from its own path (review REVIEW-ESTRECF-903): the unparsed row knows nothing from the
+    # body, a parsed one does. Ends with a fixed outcome on every interpreter: 500 parses, 100k never does.
+    if row["decision"] == "forwarded":
+        assert row["requested_model"] is None and row["detail"] == "payload nested too deeply to measure"
+    else:
+        assert row["requested_model"] == _first_call()["model"]
+    if levels == 500:
+        assert row["decision"] == "fallback"
+    if levels == 100_000:
+        assert row["decision"] == "forwarded"
     assert "1000000000" not in json.dumps(row)
 
 
