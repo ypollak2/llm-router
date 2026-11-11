@@ -134,6 +134,9 @@ def test_stability_script_on_a_synthetic_ledger(tmp_path, capsys):
     assert r["changed_component"] == {"system": 1, "tools": 1, "first_human": 0, "first_reply": 0,
                                       "none_identified": 0}
     assert (r["excluded_no_session"], r["excluded_not_main_thread"]) == (1, 1)
+    assert (r["sessions_with_pairs"], r["key_kept_ratio"]) == (2, 0.3333)
+    assert sc.analyse([])["key_kept_ratio"] is None and sc.analyse([])["sessions_with_pairs"] == 0
     assert sc.main(["x", str(p)]) == 0
     out = capsys.readouterr().out
     assert "key_changed: 2" in out and "k1" not in out
+    assert "sessions_with_pairs: 2" in out and "key_kept_ratio: 0.3333" in out
