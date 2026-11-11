@@ -6,7 +6,7 @@ import json
 import re
 
 from llm_router import failopen
-from llm_router.proxy import history_layout
+from llm_router.proxy import history_layout, prefix_hash
 from tests import test_proxy_off_golden as g
 
 MARKER = "ZQXMARKER7731"
@@ -31,6 +31,9 @@ async def _run(tmp_path, monkeypatch, shadow, bodies=None, name="continuation_se
             mp.setenv("LLM_ROUTER_PROXY_LAYOUT_SHADOW", "1")
 
     monkeypatch.setitem(g.__dict__, "_clean_env", clean_then_set)
+    # The prefix tracker is process-wide: a second run of the same body would see the first as its previous turn
+    # (appended_only True instead of None), so every run starts fresh, as in test_proxy_off_golden.
+    prefix_hash.TRACKER._last.clear()
     try:
         return await g._run_case(tmp_path, monkeypatch, "_shadow", None)
     finally:
