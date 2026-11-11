@@ -1932,8 +1932,10 @@ def _module_state_fingerprint():
         pkg = sys.modules.get(pkg_name)
         if pkg is None:
             continue
+        # VARS-RACE-1: copy first. dict.copy() runs in C under the GIL, so a thread a previous test left
+        # running cannot import a submodule into the package mid-loop ("dictionary changed size").
         attrs[pkg_name] = frozenset(
-            k for k, v in vars(pkg).items()
+            k for k, v in vars(pkg).copy().items()
             if isinstance(v, type(sys)) and not k.startswith("__")
         )
     return mods, attrs
