@@ -22,4 +22,16 @@ status: fixed in `fix/midnight-1` (test-only; no production change)
   chosen so the local clock read a given minute after midnight (n=1 run per clock setting,
   source: this PR's `TZ=XXX<offset>` runs). Before the fix: 5 of 19 failed at local 00:00 and
   1 of 19 (cache trend) at local 00:05. After: 19 of 19 passed at each of 6 clock settings
-  (00:00 to 00:30). To re-check, set `TZ` so `date` prints a minute just after midnight.
+  (00:00 to 00:30). The independent review (`~/.rsi/research/primary-plan/v16/coord/REVIEW-MIDNIGHT-902-20261111.md`)
+  reproduced it: old file 5 failed at local 00:00:20, 1 failed at 00:05:30; new file 19 of 19 at
+  00:00:00, 00:00:01, 00:00:20, 01:00, 12:00, 23:59:30 and 23:59:58. To re-check, run the file with
+  a `TZ` that puts the local clock at 00:00:20 (POSIX `TZ` offsets are west of UTC, so `XXXhh:mm:ss`
+  means local = UTC minus that offset):
+
+  ```bash
+  TZ=$(python3 -c 'import time;s=int(time.time())%86400;d=(s-20)%86400;h,r=divmod(d,3600);print(f"XXX{h:02d}:{r//60:02d}:{r%60:02d}")') \
+    python -m pytest -q tests/test_p34b4b_session_end_scans.py
+  ```
+
+  `TZ=<that value> date +%T` prints `00:00:20`. Run it within a few seconds of computing the
+  value, or the clock moves past the window.
