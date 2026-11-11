@@ -3,9 +3,11 @@
 
 Usage: python scripts/p14_key_stability.py LEDGER.jsonl
 
-Prints COUNTS ONLY (no session ids, no row contents): per session the rows that carry ``layout_shadow`` and
-their distinct keys; for consecutive rows of one session where ``n_messages`` grew, how many kept the key and
-how many changed; for the changed ones, which component hash changed.
+Prints COUNTS ONLY (no session ids, no row contents): per session the main-thread rows that carry
+``layout_shadow`` and their distinct keys; for consecutive main-thread rows of one session (ordered by ``ts``)
+where ``n_messages`` grew, how many kept the key and how many changed; for the changed ones, which component
+hash changed. Sub-agent rows (``main_thread`` not true) and rows with no session id are counted and left out of
+the pairs: a sub-agent shares the session id but not the first message, so it would read as a key change.
 """
 from __future__ import annotations
 
@@ -18,14 +20,24 @@ COMPONENTS = ("system", "tools", "first_human", "first_reply")
 
 def analyse(lines) -> dict:
     sessions: dict = {}
-    for line in lines:
+    excluded = Counter()
+    for i, line in enumerate(lines):
         try:
             row = json.loads(line)
         except ValueError:
             continue
         shadow = row.get("layout_shadow") if isinstance(row, dict) else None
-        if isinstance(shadow, dict):
-            sessions.setdefault(row.get("session_id"), []).append(shadow)
+        if not isinstance(shadow, dict):
+            continue
+        if row.get("session_id") is None:
+            excluded["no_session"] += 1
+        elif shadow.get("main_thread") is not True:
+            excluded["not_main_thread"] += 1
+        else:
+            ts = row.get("ts")
+            # rows are written when a call finishes, so file order is not request order: sort by request start
+            sessions.setdefault(row["session_id"], []).append((ts if isinstance(ts, (int, float)) else float("inf"), i, shadow))
+    sessions = {sid: [s for _, _, s in sorted(rows, key=lambda t: t[:2])] for sid, rows in sessions.items()}
     kept = changed = 0
     by_component: Counter = Counter()
     per_session = []
@@ -47,7 +59,8 @@ def analyse(lines) -> dict:
                 by_component["none_identified"] += 1
     return {"sessions": len(sessions), "rows": sum(n for n, _ in per_session), "per_session": sorted(per_session),
             "growing_pairs": kept + changed, "key_kept": kept, "key_changed": changed,
-            "changed_component": {c: by_component.get(c, 0) for c in (*COMPONENTS, "none_identified")}}
+            "changed_component": {c: by_component.get(c, 0) for c in (*COMPONENTS, "none_identified")},
+            "excluded_no_session": excluded["no_session"], "excluded_not_main_thread": excluded["not_main_thread"]}
 
 
 def main(argv: list[str]) -> int:
@@ -58,6 +71,8 @@ def main(argv: list[str]) -> int:
         r = analyse(fh)
     print(f"sessions_with_layout_shadow: {r['sessions']}")
     print(f"rows_with_layout_shadow: {r['rows']}")
+    print(f"excluded_no_session: {r['excluded_no_session']}")
+    print(f"excluded_not_main_thread: {r['excluded_not_main_thread']}")
     for n, k in r["per_session"]:
         print(f"session: rows={n} distinct_keys={k}")
     print(f"consecutive_pairs_n_messages_grew: {r['growing_pairs']}")

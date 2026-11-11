@@ -48,7 +48,7 @@ async def test_flag_on_shape_and_no_text(tmp_path, monkeypatch):
     row = rec["ledger"][0]
     s = row["layout_shadow"]
     body = _body()
-    assert set(s) == {"key", "system", "tools", "first_human", "first_reply", "n_messages", "n_tools"}
+    assert set(s) == {"key", "system", "tools", "first_human", "first_reply", "n_messages", "n_tools", "main_thread"}
     assert s["key"] == history_layout.conv_key(body)
     for k in ("key", "system", "tools", "first_human", "first_reply"):
         assert HEX16.match(s[k]), k
@@ -112,12 +112,16 @@ def test_components_attribute_a_key_change():
 def test_stability_script_on_a_synthetic_ledger(tmp_path, capsys):
     from scripts import p14_key_stability as sc
 
-    def row(sid, key, n, system="s", tools="t", fh="h", fr="r"):
-        return {"session_id": sid, "layout_shadow": {"key": key, "system": system, "tools": tools,
-                "first_human": fh, "first_reply": fr, "n_messages": n, "n_tools": 3}}
+    def row(sid, key, n, system="s", tools="t", fh="h", fr="r", ts=0.0, main=True):
+        return {"session_id": sid, "ts": ts, "layout_shadow": {"key": key, "system": system, "tools": tools,
+                "first_human": fh, "first_reply": fr, "n_messages": n, "n_tools": 3, "main_thread": main}}
 
-    rows = [row("A", "k1", 3), row("A", "k1", 5), row("A", "k2", 7, tools="t2"), row("A", "k2", 7),
-            row("B", "k9", 1), row("B", "k8", 3, system="s2"), {"session_id": "C"}, {"session_id": "A"}]
+    # A's rows are written out of request order (ts), a sub-agent row with its own first message sits between
+    # them, and a session-less row is present: none of these may count as a key change.
+    rows = [row("A", "k1", 5, ts=2), row("A", "k1", 3, ts=1), row("A", "sub", 1, fh="h2", ts=2.5, main=False),
+            row("A", "k2", 7, tools="t2", ts=3), row("A", "k2", 7, ts=4),
+            row("B", "k9", 1, ts=1), row("B", "k8", 3, system="s2", ts=2), row(None, "kx", 9, ts=1),
+            {"session_id": "C"}, {"session_id": "A"}]
     p = tmp_path / "l.jsonl"
     p.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
     r = sc.analyse(p.read_text().splitlines())
@@ -126,6 +130,7 @@ def test_stability_script_on_a_synthetic_ledger(tmp_path, capsys):
     assert (r["growing_pairs"], r["key_kept"], r["key_changed"]) == (3, 1, 2)
     assert r["changed_component"] == {"system": 1, "tools": 1, "first_human": 0, "first_reply": 0,
                                       "none_identified": 0}
+    assert (r["excluded_no_session"], r["excluded_not_main_thread"]) == (1, 1)
     assert sc.main(["x", str(p)]) == 0
     out = capsys.readouterr().out
     assert "key_changed: 2" in out and "k1" not in out

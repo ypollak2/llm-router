@@ -59,7 +59,7 @@ from contextvars import ContextVar
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from llm_router.proxy import mr_summary
+from llm_router.proxy import mr_summary, steps
 from llm_router.proxy.steps import non_system, session_id_of
 from llm_router.token_estimate import est_tokens
 
@@ -110,6 +110,9 @@ def shadow_fields(body: dict) -> dict:
         "first_reply": sig(msgs[1]) if len(msgs) > 1 else None,
         "n_messages": len(msgs),
         "n_tools": len(tools),
+        # The script compares main-thread turns only: a sub-agent shares the session id but has its own first
+        # message, so mixing it in reads as a key change (review REVIEW-KEYSHADOW-905).
+        "main_thread": steps.is_main_thread(body),
     }
 
 
