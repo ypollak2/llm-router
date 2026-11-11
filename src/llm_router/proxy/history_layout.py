@@ -91,6 +91,28 @@ def enabled() -> bool:
     return os.environ.get("LLM_ROUTER_PROXY_LAYOUT", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def shadow_enabled() -> bool:
+    """``LLM_ROUTER_PROXY_LAYOUT_SHADOW``: log-only key-stability measurement (default off)."""
+    return os.environ.get("LLM_ROUTER_PROXY_LAYOUT_SHADOW", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def shadow_fields(body: dict) -> dict:
+    """Hashes and counts only, never text: ``conv_key`` and the components it is built from, so a key change
+    can be attributed to the system prompt, the tool names, the first human message or the first reply."""
+    msgs = non_system(body.get("messages") or [])
+    human = bool(msgs) and msgs[0].get("role") == "user" and _human(msgs[0])
+    tools = [t for t in body.get("tools") or [] if isinstance(t, dict)]
+    return {
+        "key": conv_key(body),
+        "system": sig(_system_text(body.get("system"))),
+        "tools": sig(sorted(str(t.get("name")) for t in tools)),
+        "first_human": sig(split_head(msgs[0])[0]) if human else None,
+        "first_reply": sig(msgs[1]) if len(msgs) > 1 else None,
+        "n_messages": len(msgs),
+        "n_tools": len(tools),
+    }
+
+
 def k_turns() -> int:
     raw = os.environ.get("LLM_ROUTER_PROXY_LAYOUT_K", "").strip()
     try:
