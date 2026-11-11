@@ -86,7 +86,7 @@ def test_monotonic_case_is_not_flagged() -> None:
 def test_label_ignores_what_the_router_chose() -> None:
     """A router field in the cell must not influence the label."""
     matrix = {"t1": cell(mid=True, premium=True)}
-    matrix["t1"]["local"]["router_selected"] = True  # noqa: the label must not care
+    matrix["t1"]["local"]["router_selected"] = True  # the label must not care
     labels, _ = derive(matrix, TIER_ORDER)
     assert labels["t1"]["cheapest_acceptable_model"] == "mid"
 

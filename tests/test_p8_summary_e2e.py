@@ -12,8 +12,10 @@ the only caller of MR, refuses every trim but "none", the only trim that is not 
 What CAN sit beside the MR summaries is ``proxy.okf_context.attach`` (server.py, ``_build_send``, after MR): a
 follow-up prompt may get one prior-turn session block (session_store, <=300 tokens) in the SYSTEM prompt. It is
 not the rolling summary. Gates: LLM_ROUTER_CONTEXT_INJECTION (default on), a git cwd in the system prompt, a
-reply-shaped newest prompt, recorded session events, and room: with the default 5000-token OKF ceiling an
-MR-reduced body leaves none (reason "no_room"), so no block; only with LLM_ROUTER_OKF_BY_WINDOW on is there room,
+reply-shaped newest prompt, recorded session events, and room. With the default 5000-token OKF ceiling, room needs
+the MR-reduced send under about 4800 tokens; MR leaves a body near its cap, far above that, so in practice there is
+no room (reason "no_room") and no block. The test pins this for one body shape (the p9 session, ~20k after MR), not
+for every body: a deployment with a small cap could leave room. With LLM_ROUTER_OKF_BY_WINDOW on there is room,
 and then exactly one such block and the MR summaries share the request (tests below pin both).
 """
 from __future__ import annotations
