@@ -104,15 +104,16 @@ _QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# An explicit "not yet" negation ("do not modify anything yet", "before you
-# change anything, first ...") makes the edit verb a NON-request: the turn
-# asks to read/investigate first. "anything else" is a scope limiter on a
-# real edit ("fix a.py, don't change anything else"), so it is excluded.
+# A TEMPORAL or PREPARATORY negation ("do not modify anything yet", "before
+# you change anything, first ...") makes the edit verb a NON-request: the turn
+# asks to read/investigate first. Scope limiters ("don't change anything
+# else", "never touch any file outside src") are not matched: they qualify a
+# real edit.
 _NEGATED_EDIT_RE = re.compile(
-    r"\b(?:do\s+not|don'?t|dont|never)\s+(?:\w+\s+)?(?:" + "|".join(_EDIT_VERBS) + r"|edit|touch|write)"
-    r"\s+(?:anything|any\s+files?|any\s+code)\b(?!\s+else)"
+    r"\b(?:do\s+not|don'?t|dont|never)\s+(?:" + "|".join(_EDIT_VERBS) + r"|edit|touch|write)"
+    r"\s+anything\s+(?:yet|for\s+now|until)\b"
     r"|\bbefore\s+(?:you\s+)?(?:modif(?:y|ying)|chang(?:e|ing)|edit(?:ing)?|touch(?:ing)?|"
-    r"updat(?:e|ing)|writ(?:e|ing)|fix(?:ing)?)\s+anything\b",
+    r"writ(?:e|ing))\s+anything\b",
     re.IGNORECASE,
 )
 

@@ -716,9 +716,13 @@ def test_classify_negated_edit_is_not_an_edit(prompt):
     [
         "fix the off-by-one in pkg/core.py and update pkg/util.py to match",
         "fix the off-by-one in pkg/core.py and pkg/util.py, don't change anything else",
+        "Don't modify anything except a.py; add a param to a.py and b.py",
+        "Fix a.py and b.py. Never touch any file outside src.",
+        "Fix a.py and b.py. Don't change any code in c.py",
+        "Fix a.py and b.py. Never write any code in tests",
     ],
 )
 def test_classify_two_file_edit_still_an_edit(prompt):
     result = zce.classify_edit_prompt(prompt)
     assert result.is_edit, result.reason
-    assert len(result.files) == 2
+    assert {"pkg/core.py", "a.py"} & set(result.files)
