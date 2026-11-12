@@ -101,6 +101,7 @@ KILL_SWITCH_NAME = "local_agent_kill"
 # Ledger reasons written by this mode (in addition to the existing ones).
 REASON_KILL_SWITCH = "kill_switch"
 REASON_PINNED_CLAUDE = "pinned_claude"
+REASON_CLAUDE_MARKER = "claude_marker"  # PR-A: the conversation's first user message carries CLAUDE_MARKER
 REASON_STARTED_ELSEWHERE = "conversation_started_on_claude"
 REASON_MEDIA = "media_present"
 REASON_PROMPT_CAP = "prompt_over_cap"
@@ -222,6 +223,28 @@ def is_agent_turn(body: dict) -> bool:
 from llm_router.token_estimate import est_tokens  # noqa: E402  (one formula, shared)
 
 
+#: PR-A: with ``LLM_ROUTER_CLAUDE_MARKER`` on, a conversation whose FIRST user message contains this exact token
+#: is never served locally (reason ``claude_marker``). Per conversation: only that message is looked at.
+CLAUDE_MARKER = "[[llm-router:claude-only]]"
+
+
+def claude_marker_on() -> bool:
+    return os.environ.get("LLM_ROUTER_CLAUDE_MARKER", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def has_claude_marker(body: dict) -> bool:
+    """True when the first user message (string or text blocks) contains :data:`CLAUDE_MARKER`."""
+    for m in body.get("messages") or []:
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            return CLAUDE_MARKER in c
+        return any(isinstance(b, dict) and b.get("type") == "text" and CLAUDE_MARKER in (b.get("text") or "")
+                   for b in _blocks(c))
+    return False
+
+
 def estimate_prompt_tokens(payload: dict) -> int:
     return est_tokens(payload)
 
@@ -326,6 +349,8 @@ def decide_local(body: dict, session: LocalSession) -> LocalDecision:
     live state (backend, quality breaker)."""
     if session.kill_switch:
         return LocalDecision(False, REASON_KILL_SWITCH)
+    if claude_marker_on() and has_claude_marker(body):
+        return LocalDecision(False, REASON_CLAUDE_MARKER)
     if session.exempt:
         return LocalDecision(False, REASON_EXEMPT_SESSION, session.exempt)
     if session.pinned == PIN_CLAUDE:
