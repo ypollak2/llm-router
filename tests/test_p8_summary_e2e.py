@@ -14,10 +14,13 @@ follow-up prompt may get one prior-turn session block (session_store, <=300 toke
 not the rolling summary. Gates: LLM_ROUTER_CONTEXT_INJECTION (default on), a git cwd in the system prompt, a
 reply-shaped newest prompt, recorded session events, and room. With the default 5000-token OKF ceiling, room needs
 the MR-reduced send under about 4800 tokens (room = min(1500, ceiling - estimate), at least MIN_ROOM_TOKENS 200).
-MR only runs on a body over its cap (25k by default) and leaves it near that cap, so there is no room
-(reason "no_room") and no block. The test pins this for one body shape, the p9 session after MR; it does not
-measure every body. With LLM_ROUTER_OKF_BY_WINDOW on there is room,
-and then exactly one such block and the MR summaries share the request (tests below pin both).
+MR only runs on a body over its cap (25k by default); what it leaves is not bounded below by construction
+(a small cap or a very short system prompt could leave room). What is shown: for the one body shape of
+test_followup_with_mr_default_gets_no_okf_block (the p9 session after MR) the default ceiling leaves no room (reason
+"no_room") and no block; the review of PR #897 measured tokens_after 22778, 18372, 20774 and 21690 on four MR
+shapes, all far above 4800, but no test pins those. With LLM_ROUTER_OKF_BY_WINDOW on there is room, and then exactly
+one such block and the MR summaries share the request (tests below pin both). That block does not repeat what the
+request carries verbatim: tests/test_okf_mr_dedup.py measures this on four shapes.
 """
 from __future__ import annotations
 

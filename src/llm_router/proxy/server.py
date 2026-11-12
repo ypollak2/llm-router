@@ -669,7 +669,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         okf_cap = min(OKF_ATTACH_TIMEOUT_S, _budget_left(t0, step_budget_s))
         try:
             send, row["okf"] = await asyncio.wait_for(asyncio.to_thread(
-                okf_context.attach, send, body, ceiling_tokens=okf_ceiling_tokens, fits=okf_fit),
+                okf_context.attach, send, body, ceiling_tokens=okf_ceiling_tokens, fits=okf_fit,
+                dedupe_session=okf_on),
                 timeout=okf_cap)
         except asyncio.TimeoutError as exc:
             if okf_cap < OKF_ATTACH_TIMEOUT_S:

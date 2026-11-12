@@ -955,6 +955,31 @@ def _format_record(rec: dict[str, Any]) -> str:
     return str(content)
 
 
+#: Shortest probe (chars, whitespace-collapsed) that may count an event as already in the request.
+_COVER_MIN_CHARS = 12
+#: Longest probe taken from an event: its start, and the start of its result after " -> ".
+_COVER_PROBE_CHARS = 80
+
+
+def _squash(text: str) -> str:
+    return " ".join(str(text).split())
+
+
+def _is_covered(rec: dict[str, Any], covered: str) -> bool:
+    """True when *rec*'s own text is already in *covered* (a whitespace-squashed request text).
+
+    Two probes, each the first ``_COVER_PROBE_CHARS`` chars: the event's content, and what follows
+    `` -> `` in it (a hook-recorded ``Tool(input) -> result`` event, whose result is carried by the
+    request's ``tool_result`` block while the ``Tool(input)`` rendering is not). A probe shorter than
+    ``_COVER_MIN_CHARS`` never counts, so a one-word event is not dropped for appearing somewhere.
+    """
+    content = _squash(rec.get("content", ""))
+    probes = [content[:_COVER_PROBE_CHARS]]
+    if " -> " in content:
+        probes.append(content.split(" -> ", 1)[1][:_COVER_PROBE_CHARS])
+    return any(len(p) >= _COVER_MIN_CHARS and p in covered for p in probes)
+
+
 def _keywords(text: str) -> set[str]:
     return {
         w for w in _WORD_RE.findall(text.lower())
@@ -970,8 +995,13 @@ def build_session_context(
     query: str | None = None,
     target_provider: str | None = None,
     project_root: str | None = None,
+    covered_text: str | None = None,
 ) -> str:
     """Assemble a compact, sentinel-wrapped context block for *session_id*.
+
+    `covered_text` (None = off, the default) is the text of the request the block will join. An event
+    whose own text is already in it (``_is_covered``) is dropped from the block after the events are
+    chosen, so the block adds only what the request does not carry; the slot it held is not refilled.
 
     `project_root` names the project the CALLER is asking about. Without it the
     bucket is derived from this process's cwd, which for the MCP server is $HOME
@@ -1011,6 +1041,9 @@ def build_session_context(
                     keep_ids.add(id(rec))
 
         ordered = [rec for rec in records if id(rec) in keep_ids]
+        if covered_text:
+            squashed = _squash(covered_text)
+            ordered = [rec for rec in ordered if not _is_covered(rec, squashed)]
         lines = [_format_record(rec) for rec in ordered]
         text = "\n".join(ln for ln in lines if ln.strip())
         if not text:
