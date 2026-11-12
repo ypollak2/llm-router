@@ -955,6 +955,176 @@ def _format_record(rec: dict[str, Any]) -> str:
     return str(content)
 
 
+#: Shortest text (chars, whitespace-collapsed) that may count an event as already in the request.
+_COVER_MIN_CHARS = 12
+#: Shortest decoded payload of a JSON-shaped result that may count (it is a fragment of a larger object).
+_COVER_DECODED_MIN_CHARS = 40
+#: How much of a hook-recorded call's input must be on the wire (the hook stores at most 200 chars of it).
+_COVER_INPUT_CHARS = 60
+_CALL_EVENT = re.compile(r"^[^(]*\((.*)\) -> (.*)$", re.S)
+_CALL_OPEN = re.compile(r"^[^(]*\(")
+_ARROW = ") -> "
+
+
+def _plausible_input(inp: str) -> bool:
+    """Whether *inp* can be the stored input of a hook event: a PREFIX of one JSON object.
+
+    The hook stores ``json.dumps(tool_input)`` cut at 200 or 600 chars and then compacts the whole event
+    (whitespace collapse, long-code truncation), so the cut length is not a signal. What is: the text starts
+    ``{"``, never closes more than it opened, and if the object closes it closes at the very last character.
+    Anything after a closed object is the shape of a wrong split (real input, `` ) -> ``, plain result text that
+    runs on to a fake inner arrow). A tolerant scan: strings and escapes are tracked, so a ``}`` inside a string
+    does not close the object, and an unclosed (truncated) prefix is plausible.
+
+    Residual: a TRUNCATED real input followed by a plain-text result that holds a literal ``) -> {"stdout"...``
+    cannot be told from a real dict result. Plain-text results are about 1.4% of real events.
+    """
+    if not inp.startswith('{"'):
+        return False
+    depth, in_str, esc = 0, False, False
+    for i, ch in enumerate(inp):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth < 0:
+                return False
+            if depth == 0:
+                return i == len(inp) - 1
+    return True
+
+
+def _split_call(content: str) -> tuple[str, str] | None:
+    """``(input, result)`` of a hook-recorded ``Tool(input) -> result`` event, or None.
+
+    The hook writes a dict result as ``json.dumps`` (it starts ``{"``), so the split is the FIRST `` ) -> ``
+    whose remainder starts that way: a result may contain `` ) -> `` itself (about 11% of real events), and so
+    may an input, which is why neither the first nor the last arrow is taken blindly. The input part must also
+    be a plausible hook-stored input (``_plausible_input``): a plain-text result that merely contains
+    ``) -> {"stdout": ...`` is not split there, because its "input" would run on past a closed object. With no
+    accepted arrow the result is plain text and the last arrow splits it, as before.
+    """
+    opened = _CALL_OPEN.match(content)
+    if not opened:
+        return None
+    k = content.find(_ARROW, opened.end())
+    while k >= 0:
+        if content.startswith('{"', k + len(_ARROW)) and _plausible_input(content[opened.end():k]):
+            return content[opened.end():k], content[k + len(_ARROW):]
+        k = content.find(_ARROW, k + 1)
+    plain = _CALL_EVENT.match(content)
+    if not plain:
+        return None
+    if plain.group(2).startswith('{"') and not _plausible_input(plain.group(1)):
+        return None  # a dict-looking tail behind an implausible input is a fragment of a text result
+    return plain.group(1), plain.group(2)
+
+
+#: The keys whose string value is the text the request carries as the tool result: Bash ``stdout`` and the
+#: ``content`` of Grep / Read / Write. Measured on 212 real hook logs (2026-11-12): 98.6% of stored tool_call
+#: results are JSON-encoded objects, and these two keys lead the large majority of them.
+_PAYLOAD_KEYS = re.compile(r'"(?:stdout|content)":\s*"')
+_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _payload_text(result: str) -> str | None:
+    """The decoded text of the first ``stdout`` / ``content`` string in a JSON-encoded tool result, or None.
+
+    The hook stores ``json.dumps(tool_response)`` cut at 500 or 1800 chars, so the string is usually cut
+    mid-way and ``json.loads`` fails. This reads the string literal by hand: it unescapes what is complete
+    and drops a trailing half escape, so the text it returns is always a prefix of the real payload.
+    """
+    m = _PAYLOAD_KEYS.search(result)
+    if not m:
+        return None
+    out: list[str] = []
+    i, n = m.end(), len(result)
+    while i < n:
+        ch = result[i]
+        if ch == '"':
+            break
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= n:
+            break  # cut right after a backslash
+        nxt = result[i + 1]
+        if nxt == "u":
+            hexa = result[i + 2:i + 6]
+            if len(hexa) < 4 or any(c not in "0123456789abcdefABCDEF" for c in hexa):
+                break  # cut inside a \uXXXX (or not an escape at all)
+            code = int(hexa, 16)
+            i += 6
+            if 0xD800 <= code < 0xDC00:  # a surrogate pair is one character
+                low = result[i:i + 6]
+                if low[:2] == "\\u" and len(low) == 6:
+                    try:
+                        lo = int(low[2:], 16)
+                    except ValueError:
+                        break
+                    if 0xDC00 <= lo < 0xE000:
+                        code = 0x10000 + ((code - 0xD800) << 10) + (lo - 0xDC00)
+                        i += 6
+                    else:
+                        break
+                else:
+                    break
+            out.append(chr(code))
+            continue
+        if nxt not in _ESCAPES:
+            break
+        out.append(_ESCAPES[nxt])
+        i += 2
+    return "".join(out)
+
+
+def _squash(text: str) -> str:
+    return " ".join(str(text).split())
+
+
+def _result_covered(res: str, covered: str) -> bool:
+    if res.startswith("{"):
+        text = _payload_text(res)
+        if text is not None:
+            text = _squash(text)
+            return len(text) >= _COVER_DECODED_MIN_CHARS and text in covered
+    return len(res) >= _COVER_MIN_CHARS and res in covered
+
+
+def _is_covered(rec: dict[str, Any], covered: str) -> bool:
+    """True when *rec* is already in *covered* (a whitespace-squashed request text).
+
+    A hook-recorded ``Tool(input) -> result`` event is covered only when its result is on the wire AND the
+    start of the same call's input is too. The result is the whole stored text for a plain-text result; for a
+    JSON-encoded one (98.6% of real events) it is the decoded ``stdout`` / ``content`` string (``_payload_text``),
+    which must be at least ``_COVER_DECODED_MIN_CHARS`` long. The hook keeps a prefix of the real result, so
+    the real result contains it. Any other event is covered when its whole text is on the wire. A text shorter
+    than its minimum never counts, so a one-word event is not dropped for appearing somewhere.
+
+    Residual risk: the SAME command run twice with output that agrees through the stored prefix. If the earlier
+    run is on the wire and the later one is not, the later event is dropped as a repeat. Results that differ
+    inside the prefix, or calls with different input, are kept. A result the decoder cannot read (Read's
+    line-numbered file text, Edit, Glob) is never covered: the event stays. Linear in ``len(covered)`` per event.
+    """
+    content = _squash(rec.get("content", ""))
+    call = _split_call(content)
+    if call:
+        inp, res = call
+        return (_result_covered(res, covered)
+                and bool(inp[:_COVER_INPUT_CHARS]) and inp[:_COVER_INPUT_CHARS] in covered)
+    return len(content) >= _COVER_MIN_CHARS and content in covered
+
+
 def _keywords(text: str) -> set[str]:
     return {
         w for w in _WORD_RE.findall(text.lower())
@@ -970,8 +1140,13 @@ def build_session_context(
     query: str | None = None,
     target_provider: str | None = None,
     project_root: str | None = None,
+    covered_text: str | None = None,
 ) -> str:
     """Assemble a compact, sentinel-wrapped context block for *session_id*.
+
+    `covered_text` (None = off, the default) is the text of the request the block will join. An event
+    whose own text is already in it (``_is_covered``) is dropped from the block after the events are
+    chosen, so the block adds only what the request does not carry; the slot it held is not refilled.
 
     `project_root` names the project the CALLER is asking about. Without it the
     bucket is derived from this process's cwd, which for the MCP server is $HOME
@@ -1011,6 +1186,9 @@ def build_session_context(
                     keep_ids.add(id(rec))
 
         ordered = [rec for rec in records if id(rec) in keep_ids]
+        if covered_text:
+            squashed = _squash(covered_text)
+            ordered = [rec for rec in ordered if not _is_covered(rec, squashed)]
         lines = [_format_record(rec) for rec in ordered]
         text = "\n".join(ln for ln in lines if ln.strip())
         if not text:

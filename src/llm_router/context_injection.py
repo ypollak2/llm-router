@@ -165,7 +165,8 @@ def inject(prompt: str, *, root: str | None = None, limit: int | None = None,
            session_tokens: int = 1200,
            retrieval_sid: str | None = None,
            session_root: str | None = None,
-           reuse_repo_state: bool = False) -> str:
+           reuse_repo_state: bool = False,
+           session_covered_text: str | None = None) -> str:
     """Return *prompt* with relevant repo knowledge prepended, or unchanged.
 
     Fail-open in every direction: no knowledge, no match, a broken store or an
@@ -193,6 +194,9 @@ def inject(prompt: str, *, root: str | None = None, limit: int | None = None,
     `session_root` names the project whose session log to read. Left unset the
     log is looked up under this process's cwd, which is right for a hook running
     in the project and wrong for the MCP server (cwd=$HOME) and the proxy.
+
+    `session_covered_text` (None = off) is the text of the request the session block joins;
+    session events already in it are left out (`session_store.build_session_context`).
     """
     if not enabled() or not prompt:
         return prompt
@@ -275,7 +279,7 @@ def inject(prompt: str, *, root: str | None = None, limit: int | None = None,
         block = build_session_context(
             session_id, max_tokens=session_tokens, query=prompt,
             task_type=task_type, target_provider=target_provider,
-            project_root=session_root,
+            project_root=session_root, covered_text=session_covered_text,
         )
     except Exception:                                        # noqa: BLE001
         return body
@@ -288,7 +292,8 @@ def inject_system_prompt(system_prompt: str | None, objective: str,
                          limit: int | None = None,
                          target_provider: str | None = None,
                          session_tokens: int = 1200,
-                         session_root: str | None = None) -> str | None:
+                         session_root: str | None = None,
+                         session_covered_text: str | None = None) -> str | None:
     """Attach knowledge to a SYSTEM prompt instead of a user prompt.
 
     The agent loop and the CLI agents carry the task in a system prompt and the
@@ -303,7 +308,8 @@ def inject_system_prompt(system_prompt: str | None, objective: str,
         enriched = inject(objective, root=root, session_id=session_id, limit=limit,
                           target_provider=target_provider,
                           session_tokens=session_tokens,
-                          session_root=session_root)
+                          session_root=session_root,
+                          session_covered_text=session_covered_text)
         if enriched == objective:
             return system_prompt
         block = enriched[: enriched.index(objective)].strip() if objective in enriched else enriched

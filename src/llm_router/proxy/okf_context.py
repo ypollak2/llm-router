@@ -31,6 +31,7 @@ Four rules, each a way this could cost a call instead of helping one:
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -100,9 +101,35 @@ def _with_block(send: dict, block: str) -> dict:
     return dict(send, system=merged)
 
 
+def _request_text(send: dict) -> str:
+    """The text of *send*'s messages (not its system prompt): text blocks, tool inputs and tool results."""
+    parts: list[str] = []
+
+    def add(value) -> None:
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                add(item)
+        elif isinstance(value, dict):
+            kind = value.get("type")
+            if kind == "tool_use":
+                parts.append(json.dumps(value.get("input"), ensure_ascii=False, default=str))
+            elif kind == "tool_result":
+                add(value.get("content"))
+            else:
+                add(value.get("text"))
+
+    for message in send.get("messages") or []:
+        if isinstance(message, dict):
+            add(message.get("content"))
+    return "\n".join(parts)
+
+
 def attach(send: dict, original: dict, *,
            ceiling_tokens: int = DEFAULT_MAX_PROMPT_TOKENS,
-           fits: Callable[[dict], bool] | None = None) -> tuple[dict, dict]:
+           fits: Callable[[dict], bool] | None = None,
+           dedupe_session: bool = False) -> tuple[dict, dict]:
     """``(request_for_the_local_backend, info)``.
 
     *send* is the already-trimmed (or compacted) request; *original* is the
@@ -110,6 +137,12 @@ def attach(send: dict, original: dict, *,
     present. The returned request is a shallow copy with the block added to its
     system prompt, or *send* itself when nothing was added. *info* always says
     why, for the ledger.
+
+    *dedupe_session* (default False: the block is built exactly as before) leaves out of the prior-turn
+    session block every event whose text *send* already carries verbatim. The hook records the same tool
+    calls and results the request holds, and the three newest events are by construction the ones in its
+    verbatim tail, so beside MR summaries the block would repeat the tail. Events the request lost to
+    summarisation are not covered, so they stay.
     """
     from llm_router import context_injection, failopen
 
@@ -140,6 +173,7 @@ def attach(send: dict, original: dict, *,
         if context_injection.is_followup(query):
             sid = session_id_of(original)
 
+        covered = _request_text(send) if sid and dedupe_session else None
         info["reason"] = REASON_NO_MATCH
         block = None
         for limit in _LIMITS:
@@ -147,7 +181,7 @@ def attach(send: dict, original: dict, *,
                 block = context_injection.inject_system_prompt(
                     None, query, root=root, limit=limit, session_id=sid,
                     target_provider="local", session_tokens=SESSION_BLOCK_TOKENS,
-                    session_root=root)
+                    session_root=root, session_covered_text=covered)
             else:
                 block = context_injection.inject_system_prompt(
                     None, query, root=root, limit=limit)
