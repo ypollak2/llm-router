@@ -24,8 +24,15 @@ from pathlib import Path
 
 import pytest
 
+import llm_router
 from llm_router import capped_log, failopen, hook_latency as hl
 from llm_router.commands import kpi
+
+
+def _src_pythonpath() -> str:
+    """PYTHONPATH for scrubbed-env subprocesses: the code under test, not the venv's editable install."""
+    src = str(Path(llm_router.__file__).resolve().parents[1])
+    return os.pathsep.join(p for p in (src, os.environ.get("PYTHONPATH", "")) if p)
 
 REPO = Path(__file__).resolve().parent.parent
 HOOKS = REPO / "src" / "llm_router" / "hooks"
@@ -472,7 +479,7 @@ _PAYLOADS = {
 def _run_hook(name, tmp_path):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"],
+    env = {"PYTHONPATH": _src_pythonpath(), "PATH": "/usr/bin:/bin", "HOME": str(home), "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"],
            "LLM_ROUTER_ENFORCE": "smart", "LANG": "en_US.UTF-8"}
     return subprocess.run([sys.executable, str(HOOKS / f"{name}.py")],
                           input=json.dumps(_PAYLOADS[name]).encode(), env=env,
@@ -619,7 +626,7 @@ def _run_auto_route(tmp_path, prompt):
     payload = dict(_PAYLOADS["auto-route"], prompt=prompt)
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"],
+    env = {"PYTHONPATH": _src_pythonpath(), "PATH": "/usr/bin:/bin", "HOME": str(home), "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"],
            "LLM_ROUTER_ENFORCE": "smart", "LANG": "en_US.UTF-8"}
     proc = subprocess.run([sys.executable, str(HOOKS / "auto-route.py")], input=json.dumps(payload).encode(),
                           env=env, capture_output=True, timeout=120)
@@ -698,7 +705,7 @@ def test_importing_a_hook_as_a_module_arms_nothing(tmp_path):
         from llm_router import hook_latency
         print(hook_latency._pending)
     """)
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"]}
+    env = {"PYTHONPATH": _src_pythonpath(), "PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"]}
     proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, timeout=120)
     assert proc.returncode == 0, proc.stderr.decode()
     assert proc.stdout.decode().strip().splitlines()[-1] == "None"
@@ -815,7 +822,7 @@ def test_the_stanza_catches_a_broken_recorder_without_touching_stdout(tmp_path):
         import runpy
         runpy.run_path({str(HOOKS / "enforce-route.py")!r}, run_name="__main__")
     """)
-    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"]}
+    env = {"PYTHONPATH": _src_pythonpath(), "PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"]}
     proc = subprocess.run([sys.executable, "-c", code], input=json.dumps(_PAYLOADS["enforce-route"]).encode(),
                           env=env, capture_output=True, timeout=120)
     assert "hook latency not recorded (RuntimeError)" in proc.stderr.decode()
