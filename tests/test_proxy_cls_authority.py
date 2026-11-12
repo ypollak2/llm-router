@@ -375,5 +375,5 @@ def test_claude_marker_wins_over_a_local_verdict(tmp_path, monkeypatch):
     first = f"rename the helper {local_mode.CLAUDE_MARKER}"        # the marker must be in the FIRST user message
     e = pinned_env(tmp_path, turn_body([first]))
     row = second(e, turn_body([first, "and the other"]))
-    assert row["local_mode"]["reason"] == "pinned_claude" and row["cls_applied"] is False
+    assert row["local_mode"]["reason"] == _MARKER and row["cls_applied"] is False  # marker is checked before the pin: hard
     assert e.backend.calls == []
