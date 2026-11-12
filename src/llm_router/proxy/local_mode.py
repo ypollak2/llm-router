@@ -130,6 +130,7 @@ REASON_COLD_OVER_DEADLINE = "cold_over_deadline"  # P22: this turn only, never p
 REASON_PREFLIGHT_REFUSED = "preflight_refused"  # combined mode only: local serving off for the process lifetime
 EXEMPT_COORDINATOR = "coordinator_session"
 EXEMPT_SUBAGENT = "subagent_thread"
+EXEMPT_COORDINATOR_MAIN = "exempt_coordinator_main"  # PR-D: a coordinator session's main thread only
 
 #: D-455: which exempt classes refuse local serving. Read per request from this variable.
 EXEMPT_POLICY_ENV = "LLM_ROUTER_LOCAL_EXEMPT"
@@ -140,8 +141,12 @@ def exempt_policy(raw: str | None = None) -> tuple[str, bool, bool, str | None]:
     """``(effective, coordinator_exempt, subagent_exempt, invalid)`` for ``raw`` (default: the env var).
 
     Case-insensitive, whitespace tolerated. Unset or empty is the default (both exempt). A value that is
-    not ``none`` or a comma list of ``coordinator`` / ``subagent`` falls back to the default and is
-    returned in ``invalid`` so the row can record it. KPI classification does not read this."""
+    not ``none`` or a comma list of ``coordinator`` / ``coordinator_main`` / ``subagent`` falls back to the
+    default and is returned in ``invalid`` so the row can record it. ``coordinator_main`` (PR-D) exempts only
+    the main thread of a coordinator session; it cannot be combined with ``coordinator`` (that would be
+    ambiguous: invalid). The tuple shape is unchanged: ``coordinator_exempt`` is True only for the whole-session
+    ``coordinator`` token; ``coordinator_main`` shows in ``effective`` (``coordinator_main_exempt(effective)``).
+    KPI classification does not read this."""
     if raw is None:
         raw = os.environ.get(EXEMPT_POLICY_ENV)
     text = (raw or "").strip().lower()
@@ -150,10 +155,18 @@ def exempt_policy(raw: str | None = None) -> tuple[str, bool, bool, str | None]:
     tokens = [t.strip() for t in text.split(",")]
     if tokens == ["none"]:
         return "none", False, False, None
-    if tokens and all(t in ("coordinator", "subagent") for t in tokens):
-        coord, sub = "coordinator" in tokens, "subagent" in tokens
-        return ",".join(n for n, on in (("coordinator", coord), ("subagent", sub)) if on), coord, sub, None
+    if (tokens and all(t in ("coordinator", "coordinator_main", "subagent") for t in tokens)
+            and not ("coordinator" in tokens and "coordinator_main" in tokens)):
+        coord, main, sub = "coordinator" in tokens, "coordinator_main" in tokens, "subagent" in tokens
+        return (",".join(n for n, on in (("coordinator", coord), ("coordinator_main", main), ("subagent", sub)) if on),
+                coord, sub, None)
     return EXEMPT_POLICY_DEFAULT, True, True, (raw or "").strip()[:80]
+
+
+def coordinator_main_exempt(effective: str) -> bool:
+    """True when ``exempt_policy()[0]`` holds the ``coordinator_main`` token (PR-D)."""
+    return "coordinator_main" in effective.split(",")
+
 
 PIN_LOCAL = "local"
 PIN_CLAUDE = "claude"
@@ -317,14 +330,17 @@ def exempt_reason(body: dict, session_id: str | None,
     Nothing is served locally while the file cannot be read; organic sessions are unaffected while it can.
 
     D-455: ``policy`` (``exempt_policy()``, read from ``LLM_ROUTER_LOCAL_EXEMPT`` when None) switches each
-    class off. The overrides file is read, and the fail-closed rule applies, only while coordinators are
-    exempt; with ``subagent`` or ``none`` an unreadable file refuses nothing."""
+    class off. PR-D: the ``coordinator_main`` token returns ``EXEMPT_COORDINATOR_MAIN`` for a coordinator
+    session's non-sub-agent call; its sub-agent calls fall to the ``subagent`` token (served locally without it).
+    The overrides file is read, and the fail-closed rule applies, only while coordinators are
+    exempt (``coordinator`` or ``coordinator_main``); with ``subagent`` or ``none`` an unreadable file refuses nothing."""
     from llm_router import session_kind
     from llm_router.proxy.steps import is_main_thread, is_subagent_request
 
-    _, coord_exempt, sub_exempt, _ = policy if policy is not None else exempt_policy()
+    effective, coord_exempt, sub_exempt, _ = policy if policy is not None else exempt_policy()
+    main_exempt = coordinator_main_exempt(effective)  # PR-D
     problem = None
-    if coord_exempt:
+    if coord_exempt or main_exempt:
         try:
             problem = session_kind.overrides_problem()
             kind = session_kind.override_of(session_id)
@@ -335,7 +351,18 @@ def exempt_reason(body: dict, session_id: str | None,
             # status can be established, so NO session is served locally.
             return (problem if problem == "missing" else "overrides_unreadable"), problem
         if kind is not None and kind != session_kind.KIND_ORGANIC:
-            return EXEMPT_COORDINATOR, problem
+            if coord_exempt:
+                return EXEMPT_COORDINATOR, problem
+            # PR-D: coordinator_main exempts the session's MAIN thread only. Same evidence as the sub-agent
+            # branch below; an unknown thread (None) counts as main and stays exempt (fail closed toward Claude).
+            # Known leak (accepted, fails open toward local): a main thread with no Agent/Task launcher in its tools,
+            # or a sub-agent marker in its system prompt, reads as not-main (steps.is_main_thread) and is NOT exempt.
+            try:
+                is_sub = is_subagent_request(body) or is_main_thread(body, parent_main) is False
+            except Exception:  # noqa: BLE001 - unreadable evidence: treat as main, stay on Claude
+                is_sub = False
+            if not is_sub:
+                return EXEMPT_COORDINATOR_MAIN, problem
     if not sub_exempt:
         return None, problem
     try:
