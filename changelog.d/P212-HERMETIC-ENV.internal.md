@@ -1,0 +1,1 @@
+The Pi CI smoke test (`tests/test_p212_pi_ci_smoke.py`) now puts the tree under test on the child process `PYTHONPATH`, so a local run no longer imports the venv's editable install from another checkout. Test-only change.

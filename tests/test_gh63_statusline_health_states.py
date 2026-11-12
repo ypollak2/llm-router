@@ -44,6 +44,8 @@ from pathlib import Path
 
 import pytest
 
+import llm_router
+
 _SCRIPT = (
     Path(__file__).resolve().parent.parent
     / "src" / "llm_router" / "hooks" / "statusline-command.sh"
@@ -138,6 +140,8 @@ def _run_health(
         os.utime(usage_json, (stale_time, stale_time))
 
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    src = str(Path(llm_router.__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (src, os.environ.get("PYTHONPATH", "")) if p)
     for k in _PROVIDER_KEYS:
         env.pop(k, None)  # ensure a clean slate regardless of the host's own env
     if provider_env:

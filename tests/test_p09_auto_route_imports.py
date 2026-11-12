@@ -21,6 +21,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import llm_router
+
 HOOK = Path(__file__).parent.parent / "src" / "llm_router" / "hooks" / "auto-route.py"
 
 _PROBE = """
@@ -37,6 +39,8 @@ _HEAVY = ["llm_router.profiles", "llm_router.model_aliases", "yaml", "llm_router
 def test_importing_the_hook_loads_neither_profiles_nor_config(tmp_path):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
            "LLM_ROUTER_HOME": str(tmp_path / "state")}
+    src = str(Path(llm_router.__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (src, os.environ.get("PYTHONPATH", "")) if p)
     (tmp_path / "state").mkdir()
     code = _PROBE.format(hook=str(HOOK), mods=_HEAVY)
     proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, timeout=120)
