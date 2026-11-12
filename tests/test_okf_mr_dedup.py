@@ -329,3 +329,47 @@ def test_a_plain_text_result_keeps_the_last_arrow_split():
     assert _split_call("Grep(pattern) -> found a) -> b in file") == ("pattern) -> found a", "b in file")
     assert _split_call("Bash(ls) -> output") == ("ls", "output")
     assert _split_call("no call here") is None
+
+
+def test_a_plain_text_result_holding_a_fake_dict_arrow_is_not_split_there():
+    """The reviewer's case: a plain-text result that contains ``) -> {"stdout": ...``. Split at that inner arrow, its
+    input is 60+ chars ending mid-text, and a wire that happens to hold those chars and the fake payload passes the
+    anchor for a result that is not the call's own."""
+    from llm_router.session_store import _split_call
+
+    content = 'Bash({"command": "ls"}) -> print(f' + "a" * 70 + ') -> {"stdout": "' + HEAD80 + 'x"}'
+    assert _split_call(content) is None
+    on_wire = _squash('{"command": "ls"}) -> print(f' + "a" * 70 + "\n" + HEAD80 + "x")  # holds the 60-char anchor and the payload
+    assert not _is_covered({"content": content}, on_wire)
+
+
+@pytest.mark.parametrize("cap", [200, 600])
+def test_an_input_cut_at_exactly_a_hook_cap_still_splits_at_the_dict(cap):
+    from llm_router.session_store import _split_call
+
+    inp = json.dumps({"command": "x" * 900})[:cap]  # a cut input does not end with "}"
+    assert not inp.endswith("}") and len(inp) == cap
+    got = _split_call(f'Bash({inp}) -> {{"stdout": "some output here"}}')
+    assert got == (inp, '{"stdout": "some output here"}')
+
+
+def test_a_normal_brace_ended_input_splits_at_the_dict():
+    from llm_router.session_store import _split_call
+
+    assert _split_call('Bash({"command": "ls"}) -> {"stdout": "a b"}') == ('{"command": "ls"}', '{"stdout": "a b"}')
+
+
+def test_the_input_caps_are_the_hooks_own():
+    import importlib.util
+    from pathlib import Path
+
+    from llm_router.session_store import HOOK_INPUT_CAPS
+
+    path = Path(session_store.__file__).parent / "hooks" / "context-capture.py"
+    spec = importlib.util.spec_from_file_location("context_capture_for_caps", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    names = ["NotAHighSignalToolName", *sorted(mod._HIGH_SIGNAL)]
+    caps = {mod._capture_budget(n)[0] for n in names}
+    assert len(mod._HIGH_SIGNAL) >= 1  # premise: the 600 branch is really exercised
+    assert caps == set(HOOK_INPUT_CAPS), caps

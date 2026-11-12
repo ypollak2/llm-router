@@ -966,24 +966,42 @@ _CALL_OPEN = re.compile(r"^[^(]*\(")
 _ARROW = ") -> "
 
 
+#: Lengths the hook cuts a call's stored input to (``json.dumps(tool_input)[:cap]``). The hook is a standalone
+#: script and cannot be imported from here; tests/test_okf_mr_dedup.py pins this tuple to its ``_capture_budget``.
+HOOK_INPUT_CAPS = (200, 600)
+
+
+def _plausible_input(inp: str) -> bool:
+    """Whether *inp* can be a hook-stored input: complete JSON ends ``}``, a cut one is exactly a cap long."""
+    return inp.endswith("}") or len(inp) in HOOK_INPUT_CAPS
+
+
 def _split_call(content: str) -> tuple[str, str] | None:
     """``(input, result)`` of a hook-recorded ``Tool(input) -> result`` event, or None.
 
     The hook writes a dict result as ``json.dumps`` (it starts ``{"``), so the split is the FIRST `` ) -> ``
     whose remainder starts that way: a result may contain `` ) -> `` itself (about 11% of real events), and so
-    may an input, which is why neither the first nor the last arrow is taken blindly. With no such arrow the
-    result is plain text and the last arrow splits it, as before.
+    may an input, which is why neither the first nor the last arrow is taken blindly. The input part must also
+    be a plausible hook-stored input (``_plausible_input``): a plain-text result that merely contains
+    ``) -> {"stdout": ...`` is not split there, because its "input" would end mid-text at no cap length. With no
+    accepted arrow the result is plain text and the last arrow splits it, as before.
     """
     opened = _CALL_OPEN.match(content)
     if not opened:
         return None
     k = content.find(_ARROW, opened.end())
     while k >= 0:
-        if content.startswith('{"', k + len(_ARROW)):
+        if content.startswith('{"', k + len(_ARROW)) and _plausible_input(content[opened.end():k]):
             return content[opened.end():k], content[k + len(_ARROW):]
         k = content.find(_ARROW, k + 1)
     plain = _CALL_EVENT.match(content)
-    return (plain.group(1), plain.group(2)) if plain else None
+    if not plain:
+        return None
+    if plain.group(2).startswith('{"') and not _plausible_input(plain.group(1)):
+        return None  # a dict-looking tail behind an implausible input is a fragment of a text result
+    return plain.group(1), plain.group(2)
+
+
 #: The keys whose string value is the text the request carries as the tool result: Bash ``stdout`` and the
 #: ``content`` of Grep / Read / Write. Measured on 212 real hook logs (2026-11-12): 98.6% of stored tool_call
 #: results are JSON-encoded objects, and these two keys lead the large majority of them.
