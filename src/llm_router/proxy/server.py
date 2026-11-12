@@ -503,6 +503,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     # ``--serve local-agent`` (proxy.local_mode); None means off, and then nothing
     # below that mentions ``lm`` runs.
     turn_decisions = cls_decide.TurnDecisionStore()  # NS-A1: memory only, record only
+    cls_elig_decisions = cls_decide.TurnDecisionStore()  # PR-B: eligible-call verdicts, never a veto
     lm = None
     if cfg.local_with_tiers and (cfg.serve != local_mode.SERVE_LOCAL_AGENT or tier_policy is None):
         raise ValueError("--local-with-tiers needs --serve local-agent and --tiers on|conversation")
@@ -1094,11 +1095,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             unpin_try = reduced_est <= cap
         cap_payload = payload if cap_body is None else await asyncio.to_thread(
             to_ollama, cap_body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
-        def decide(cap_pl):
+        def decide(cap_pl, cls_local=False, rules_only=False):
+            # rules_only (PR-B): the input rules alone, as if there were no pin, exempt session or veto.
             return local_mode.decide_local(body, local_mode.LocalSession(
-                key=key, pinned=None if unpin_try else pinned, kill_switch=lm.killed(),
+                key=key, pinned=None if unpin_try or rules_only else pinned, kill_switch=lm.killed(),
                 backend_healthy=not health.is_open(cfg.model), breaker_closed=breaker_ok, breaker_detail=breaker_detail,
-                payload=cap_pl, verdict=None if force else cls_decide.veto_of(row), exempt=exempt))
+                payload=cap_pl, verdict=None if force or rules_only else cls_decide.veto_of(row),
+                exempt=None if rules_only else exempt, cls_local=cls_local))
 
         decision = decide(cap_payload)
         layout_event = None
@@ -1128,6 +1131,28 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 payload = cap_payload = await asyncio.to_thread(
                     to_ollama, body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
                 decision = decide(cap_payload)
+        cls_flip = False
+        if not force and (cls_decide.eligible_shadow_on() or cls_decide.authority_positive()):
+            # PR-B: a call the input rules allow, or refuse only for a pin / exempt session, gets a classifier
+            # verdict (recorded; budgeted, a timeout proceeds with the rules). Under AUTHORITY=positive a decided
+            # ``local`` verdict waives the one SOFT refusal: a plain conversation pin (not a structural pin, not
+            # started_elsewhere). Hard limits (kill switch, exempt, media, prompt cap, backend, breaker, veto)
+            # are untouched: the re-decision runs every one of them.
+            soft_pin = (decision.reason == local_mode.REASON_PINNED_CLAUDE and not started_elsewhere
+                        and lm.pin_reason_of(key) not in local_mode.STRUCTURAL_REASONS)
+            if (decision.local or soft_pin or decision.reason == local_mode.REASON_EXEMPT_SESSION) and (
+                    decision.local or decide(cap_payload, rules_only=True).local):
+                cv = await cls_decide.eligible_verdict(key_body or body, row, cls_elig_decisions,
+                                                       parent_main_of(key_body or body))
+                if cls_decide.eligible_shadow_on():
+                    row.update(cls_elig_verdict=cv["tier"], cls_elig_ms=cv["ms"],
+                               cls_elig_ok=cv["decided"], cls_elig_source=cv["source"])
+                if (soft_pin and cls_decide.authority_positive() and cv["decided"] and cv["tier"] == "local"
+                        and not await asyncio.to_thread(cls_decide.proxy_lane_fails)):
+                    flipped = decide(cap_payload, cls_local=True)
+                    if flipped.local:
+                        decision, cls_flip = flipped, True
+                        row["cls_applied"], row["cls_source"] = True, cv["source"]
         if decision.local and cap_guard_reconcile_on():
             from llm_router.local_context_guard import overflow_estimate
             over = await asyncio.to_thread(overflow_estimate, payload,
@@ -1146,12 +1171,18 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if unpin_try and decision.local and lm.unpin_over_cap(key):
             stored = pinned = None
             unpin_row = {"reason": "reduced_fits", "reduced_est": reduced_est, "cap": cap}
+        if cls_flip and not decision.local:  # a later hard guard (cold / prompt guard) won: the verdict changed nothing
+            row["cls_applied"], row["cls_source"] = False, "rules"
         vetoed = decision.reason == local_mode.REASON_CLASSIFIER_VETO
         if vetoed:
             row["cls_applied"] = True
+            if cls_decide.authority_positive():
+                row["cls_source"] = row.get("cls_turn_source") or "rules"  # PR-B: the verdict's source, either way
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
+        if cls_flip and decision.local:
+            row["local_mode"]["cls_authority"] = "pin_waived"
         if cold_row is not None:
             row["local_mode"]["cold_guard"] = {k: v for k, v in cold_row.items() if k != "detail"}
         if unpin_row is not None:

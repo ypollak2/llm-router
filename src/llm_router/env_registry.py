@@ -542,6 +542,11 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_CLASSIFIER_ALLOW_REMOTE": ("llm_router", "local_privacy.py", 1),
     "LLM_ROUTER_LOCAL_CLASSIFIER": ("llm_router", "local_classifier.py", 1),
     "LLM_ROUTER_LOCAL_CLASSIFIER_TIMEOUT_MS": ("llm_router", "local_classifier.py", 1),
+    # PR-B: the classifier may decide local (all default off).
+    "LLM_ROUTER_CLASSIFIER_SINGLE_MODEL": ("llm_router", "proxy/cls_decide.py", 1),
+    "LLM_ROUTER_CLASSIFIER_ELIGIBLE_SHADOW": ("llm_router", "proxy/cls_decide.py", 1),
+    "LLM_ROUTER_CLASSIFIER_AUTHORITY": ("llm_router", "proxy/cls_decide.py", 1),
+    "LLM_ROUTER_CLASSIFIER_BUDGET_S": ("llm_router", "proxy/cls_decide.py", 1),
     # The classifier's own Ollama alias (M1.4): other callers load qwen3.5 at a different
     # num_ctx, and a shared name would reload the runner back and forth.
     "LLM_ROUTER_CLASSIFIER_MODEL": ("llm_router", "local_classifier.py", 1),
