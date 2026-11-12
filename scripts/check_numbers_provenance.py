@@ -214,7 +214,7 @@ def git_ignored(root: Path, rels: list[str]) -> set[str]:
         return set()
     try:
         done = subprocess.run(["git", "-C", str(root), "check-ignore", "-z", "--stdin"], input="\0".join(rels),
-                              capture_output=True, text=True, timeout=60)
+                              capture_output=True, encoding="utf-8", errors="surrogateescape", timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"numbers-provenance: git check-ignore unavailable ({type(exc).__name__}); "
               "git-ignored files are scanned too", file=sys.stderr)
