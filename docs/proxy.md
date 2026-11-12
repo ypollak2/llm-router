@@ -330,6 +330,8 @@ switch, so every call of an exempt conversation says `exempt_session`. If the ov
 
 **Exemption switch (D-455).** `LLM_ROUTER_LOCAL_EXEMPT`, read on every request, picks which exempt classes above refuse local serving: `coordinator,subagent` (the default, also used when unset, empty or invalid), `coordinator`, `subagent` or `none` (case-insensitive, whitespace ignored). A class not listed is served locally like an organic main thread. The overrides file is read, and the fail-closed rule applies, only while coordinators are exempt; with `subagent` or `none` an unreadable file refuses nothing. Every combined-mode row records `local_mode.exempt_policy` (the effective value; an invalid value adds `local_mode.exempt_policy_invalid`), and the start-up banner prints it. The switch changes serving only: coordinator sessions stay non-organic in every KPI read (`session_kind_overrides.json` is unchanged for that). Order is unchanged: kill switch, exempt, pin.
 
+**Claude marker (`LLM_ROUTER_CLAUDE_MARKER`, default off).** When on, `decide_local` refuses with reason `claude_marker` (ledger `local_mode.detail`/reason only, no text) any conversation whose first user message contains the exact token `[[llm-router:claude-only]]`; checked right after the kill switch, before exemption and pin; a marker in a later message does not count.
+
 **Combined with tiers (`--local-with-tiers`, D-447).** `--serve local-agent --local-with-tiers --tiers conversation
 [--tier-policy FILE]` serves a turn locally when `decide_local` allows it (exemption, the per-turn classifier veto and
 the conversation pin all apply), exactly as above, with no trim for that request. Every other turn (vetoed,
