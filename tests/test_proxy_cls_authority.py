@@ -366,13 +366,14 @@ def test_assemble_runs_inside_the_budget(env, monkeypatch):
 _MARKER = getattr(local_mode, "REASON_CLAUDE_MARKER", None)
 
 
-@pytest.mark.skipif(_MARKER is None, reason="PR #914 (claude marker) not on this base; activates when it lands")
+@pytest.mark.skipif(_MARKER is None or not hasattr(local_mode, "CLAUDE_MARKER"),
+                    reason="PR #914 (claude marker) not on this base; activates when it lands")
 def test_claude_marker_wins_over_a_local_verdict(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_CLAUDE_MARKER", "on")
     flags(monkeypatch, shadow=True, authority=True)
     FakeClassifier(monkeypatch, tier="local")
-    e = pinned_env(tmp_path)
-    from tests.test_proxy_claude_marker import MARKER_TEXT  # noqa: F401  (name per #914; adjust when it lands)
-    body = turn_body(["rename the helper", MARKER_TEXT])
-    row = second(e, body)
-    assert row["cls_applied"] is False and e.backend.calls == []
+    first = f"rename the helper {local_mode.CLAUDE_MARKER}"        # the marker must be in the FIRST user message
+    e = pinned_env(tmp_path, turn_body([first]))
+    row = second(e, turn_body([first, "and the other"]))
+    assert row["local_mode"]["reason"] == "pinned_claude" and row["cls_applied"] is False
+    assert e.backend.calls == []
