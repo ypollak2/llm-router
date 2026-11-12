@@ -516,6 +516,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_ZERO_CLAUDE_VERIFY": ("llm_router", "local_agent/verify.py", 1),
     # Plan 3.7 (warm.py): keep the zero-Claude edit model resident, fail fast cold.
     "LLM_ROUTER_LOCAL_KEEP_ALIVE": ("llm_router", "warm.py", 1),
+    # Bounded idle time for the shared one-model runner (unset = -1, never expire).
+    "LLM_ROUTER_SHARED_KEEP_ALIVE": ("llm_router", "toolkit/adapters/ollama.py", 1),
     # P2 local-usage plan: shadow-only would-be "local" tier (log only, never routes).
     "LLM_ROUTER_LOCAL_TIER": ("llm_router", "local_tier.py", 1),
     # P1.6 engine core: decide() cache mode sqlite|memory|off (default sqlite), and the L3 / calibration
