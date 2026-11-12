@@ -350,7 +350,7 @@ def _upstream_error_type(body: bytes) -> str | None:
     try:
         data = json.loads(body[:4096])
         t = data["error"]["type"]
-    except (ValueError, KeyError, TypeError):
+    except Exception:  # noqa: BLE001 - e.g. RecursionError on deeply nested JSON; never raise into the relay
         return None
     return t if isinstance(t, str) else None
 

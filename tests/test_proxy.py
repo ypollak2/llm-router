@@ -411,6 +411,29 @@ def test_upstream_error_type_parses_only_first_4kb():
     assert ps._upstream_error_type(b"[]") is None
 
 
+def test_upstream_error_type_never_raises_on_deeply_nested_json():
+    # json.loads(b"[" * 4096) raises RecursionError, which is not a ValueError.
+    assert ps._upstream_error_type(b"[" * 4096) is None
+
+
+async def test_finish_error_row_carries_error_type_only(tmp_path):
+    # Mixed history + 400 that is NOT a thinking rejection -> _finish_error path.
+    err = json.dumps({"type": "error", "error": {"type": "invalid_request_error",
+                                                 "message": "SECRET message text"}}).encode()
+    up = Upstream([(400, err)])
+    body = _req()
+    served, _ = from_ollama(_ollama("", [_call("Bash", {"command": "ls"})]), body)
+    body["messages"].insert(-1, {"role": "assistant", "content": served["content"]})
+    body["messages"].insert(-1, {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": served["content"][0]["id"], "content": "a.py"}]})
+    r = await _post(_app(tmp_path, up, steps=frozenset()), body)
+    assert r.status_code == 400 and len(up.requests) == 1  # no thinking retry
+    (row,) = _rows(tmp_path)
+    assert row["mixed_history"] is True and not row.get("thinking_retry")
+    assert row["upstream_status"] == 400 and row["upstream_error_type"] == "invalid_request_error"
+    assert "SECRET" not in json.dumps(row)
+
+
 async def test_other_paths_pass_through_without_a_ledger_row(tmp_path):
     up = Upstream([(200, b'{"ok": true}')])
     app = _app(tmp_path, up)
