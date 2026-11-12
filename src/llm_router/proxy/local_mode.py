@@ -333,6 +333,8 @@ def exempt_reason(body: dict, session_id: str | None,
                 return EXEMPT_COORDINATOR, problem
             # PR-D: coordinator_main exempts the session's MAIN thread only. Same evidence as the sub-agent
             # branch below; an unknown thread (None) counts as main and stays exempt (fail closed toward Claude).
+            # Known leak (accepted, fails open toward local): a main thread with no Agent/Task launcher in its tools,
+            # or a sub-agent marker in its system prompt, reads as not-main (steps.is_main_thread) and is NOT exempt.
             try:
                 is_sub = is_subagent_request(body) or is_main_thread(body, parent_main) is False
             except Exception:  # noqa: BLE001 - unreadable evidence: treat as main, stay on Claude
