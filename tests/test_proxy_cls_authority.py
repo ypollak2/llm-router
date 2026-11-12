@@ -41,9 +41,11 @@ def _clean(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-def pinned_env(tmp_path, first=None):
+def pinned_env(tmp_path, first=None, backend=None):
     """Turn 1 refused by the kill switch (a plain, non-structural pin to Claude); the caller posts turn 2."""
     e = Env(tmp_path)
+    if backend is not None:
+        e.app = e.build(backend)
     e.kill.write_text("x")
     e.post(first or turn_body(["rename the helper"]))
     e.kill.unlink()
@@ -208,14 +210,14 @@ def test_hard_kill_switch_wins(tmp_path, monkeypatch):
     assert e.backend.calls == []
 
 
-def test_hard_exempt_session_wins_even_though_it_is_recorded(tmp_path, monkeypatch):
+def test_hard_exempt_session_wins_and_asks_for_no_verdict(tmp_path, monkeypatch):
     flags(monkeypatch, shadow=True, authority=True)
-    FakeClassifier(monkeypatch, tier="local")
+    fake = FakeClassifier(monkeypatch, tier="local")
     e = pinned_env(tmp_path)
     monkeypatch.setattr(local_mode, "exempt_reason", lambda *a, **k: (local_mode.EXEMPT_COORDINATOR, None))
     row = second(e)
     assert row["local_mode"]["reason"] == "exempt_session" and row["cls_applied"] is False
-    assert row["cls_elig_verdict"] == "local" and e.backend.calls == []   # recorded (pin/exempt-only refusal), not applied
+    assert fake.calls == [] and "cls_elig_verdict" not in row and e.backend.calls == []   # a verdict could not be used
 
 
 def test_hard_media_wins(tmp_path, monkeypatch):
@@ -309,3 +311,68 @@ def test_single_model_unset_leaves_active_unchanged(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_DECISION_MODEL", "nimble:9b")
     monkeypatch.delenv("LLM_ROUTER_LOCAL_MODEL")
     assert cls_decide.active() is True
+
+
+# -- review follow-ups ---------------------------------------------------------------------
+
+
+def test_a_failed_flipped_step_is_not_retried_local_on_the_next_continuation(tmp_path, monkeypatch):
+    from tests.test_proxy_local_mode import Backend, _ollama
+
+    flags(monkeypatch, authority=True)
+    fake = FakeClassifier(monkeypatch, tier="local")
+    e = pinned_env(tmp_path, backend=Backend(_ollama("", [{"function": {"name": "Nope", "arguments": {}}}])))
+    e.post(turn_body(["rename the helper", "and the other"]))                                # flips, fails, pins claude
+    e.post(turn_body(["rename the helper", "and the other"], loops=1))                       # same human turn
+    flip, cont = e.rows()[-2:]
+    assert flip["cls_applied"] is True and flip["decision"] == ledger.DECISION_FALLBACK
+    assert cont["local_mode"]["reason"] == "pinned_claude" and cont["cls_applied"] is False
+    assert len(e.backend.calls) == 1                                                         # not retried
+    # a NEW human turn is classified afresh (and may flip again)
+    e.post(turn_body(["rename the helper", "and the other", "third"]))
+    assert len(fake.calls) == 2 and e.rows()[-1]["cls_applied"] is True
+
+
+def test_authority_only_makes_no_call_on_an_already_local_call(env, monkeypatch):
+    flags(monkeypatch, authority=True)
+    fake = FakeClassifier(monkeypatch, tier="local")
+    env.post(turn_body(["rename the helper"]))
+    assert env.rows()[-1]["decision"] == ledger.DECISION_SERVED and fake.calls == []
+
+
+def test_no_call_for_an_exempt_session(tmp_path, monkeypatch):
+    flags(monkeypatch, shadow=True, authority=True)
+    fake = FakeClassifier(monkeypatch, tier="local")
+    monkeypatch.setattr(local_mode, "exempt_reason", lambda *a, **k: (local_mode.EXEMPT_COORDINATOR, None))
+    e = Env(tmp_path)
+    e.post(turn_body(["rename the helper"]))
+    row = e.rows()[-1]
+    assert row["local_mode"]["reason"] == "exempt_session" and fake.calls == [] and "cls_elig_source" not in row
+
+
+def test_assemble_runs_inside_the_budget(env, monkeypatch):
+    import time as _t
+    flags(monkeypatch, shadow=True, budget=0.2)
+    FakeClassifier(monkeypatch, tier="local")
+
+    def slow(*a, **k):
+        _t.sleep(1.0)
+
+    monkeypatch.setattr(cls_decide, "assemble", slow)
+    env.post(turn_body(["rename the helper"]))
+    assert env.rows()[-1]["cls_elig_source"] == "timeout"
+
+
+_MARKER = getattr(local_mode, "REASON_CLAUDE_MARKER", None)
+
+
+@pytest.mark.skipif(_MARKER is None, reason="PR #914 (claude marker) not on this base; activates when it lands")
+def test_claude_marker_wins_over_a_local_verdict(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_MARKER", "on")
+    flags(monkeypatch, shadow=True, authority=True)
+    FakeClassifier(monkeypatch, tier="local")
+    e = pinned_env(tmp_path)
+    from tests.test_proxy_claude_marker import MARKER_TEXT  # noqa: F401  (name per #914; adjust when it lands)
+    body = turn_body(["rename the helper", MARKER_TEXT])
+    row = second(e, body)
+    assert row["cls_applied"] is False and e.backend.calls == []

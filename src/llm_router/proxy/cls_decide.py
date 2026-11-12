@@ -357,6 +357,16 @@ async def _decide(body, row, store, lm_on, override, parent_main, key=None) -> N
 # -- eligible-call verdict (LLM_ROUTER_CLASSIFIER_ELIGIBLE_SHADOW / _AUTHORITY) -----------------
 
 
+S_FAILED = "failed_local"
+
+
+def mark_failed(store: TurnDecisionStore, row: dict) -> None:
+    """A local step the classifier flipped failed: the rest of this human turn gets no verdict (so no second flip);
+    the next human turn has another key and is classified afresh."""
+    key = (row.get("session_id") or "", row.get("cls_turn_idx"), row.get("cls_turn_sha"))
+    store.put(key, {"tier": None, "source": S_FAILED, "ms": 0.0, "decided": False})
+
+
 async def eligible_verdict(body: dict, row: dict, store: TurnDecisionStore, parent_main: bool | None = None) -> dict:
     """``{tier, source, ms, decided}`` for this call's human turn. Reuses the verdict ``decide_turn`` already
     made; else asks the classifier within :func:`budget_s` (a timeout proceeds with the rules) and keeps the
@@ -364,12 +374,15 @@ async def eligible_verdict(body: dict, row: dict, store: TurnDecisionStore, pare
     this verdict is never a veto. Never raises."""
     out = {"tier": None, "source": S_NONE, "ms": None, "decided": False}
     try:
+        key = (row.get("session_id") or "", row.get("cls_turn_idx"), row.get("cls_turn_sha"))
+        failed = store.get(key)
+        if failed is not None and failed.get("source") == S_FAILED:
+            return dict(failed)
         if row.get("cls_turn_decided") is True:
             return {"tier": row.get("cls_turn_tier"), "source": row.get("cls_turn_source"),
                     "ms": row.get("cls_turn_ms"), "decided": True}
         if not row.get("supported"):
             return out
-        key = (row.get("session_id") or "", row.get("cls_turn_idx"), row.get("cls_turn_sha"))
         stored = store.get(key)
         if stored is not None:
             return dict(stored, source=S_INHERIT, ms=0.0)
@@ -380,12 +393,16 @@ async def eligible_verdict(body: dict, row: dict, store: TurnDecisionStore, pare
             return out
         budget = budget_s()
         t0 = time.monotonic()
-        assembled = await asyncio.to_thread(assemble, {"messages": list(body.get("messages") or []),
-                                                       "system": body.get("system")})
-        try:
-            verdict = await asyncio.wait_for(local_classifier.classify_async(
+        snapshot = {"messages": list(body.get("messages") or []), "system": body.get("system")}
+
+        async def one():
+            assembled = await asyncio.to_thread(assemble, snapshot)
+            return await local_classifier.classify_async(
                 assembled, session_id=row.get("session_id"), text_sha=row.get("cls_turn_sha") or "",
-                timeout_s=budget), timeout=budget)
+                timeout_s=budget)
+
+        try:
+            verdict = await asyncio.wait_for(one(), timeout=budget)  # assemble is inside the budget too
             source, tier = verdict.source, verdict.tier
         except asyncio.TimeoutError:
             source, tier = "timeout", None

@@ -1140,11 +1140,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # are untouched: the re-decision runs every one of them.
             soft_pin = (decision.reason == local_mode.REASON_PINNED_CLAUDE and not started_elsewhere
                         and lm.pin_reason_of(key) not in local_mode.STRUCTURAL_REASONS)
-            if (decision.local or soft_pin or decision.reason == local_mode.REASON_EXEMPT_SESSION) and (
-                    decision.local or decide(cap_payload, rules_only=True).local):
+            shadow_on = cls_decide.eligible_shadow_on()
+            # A verdict is asked for only where it can be used: recorded (shadow: allowed or pin-refused call) or
+            # applied (authority: a soft pin). Exempt sessions never use one; an already-local call needs none
+            # in authority-only mode.
+            wanted = (shadow_on and (decision.local or decision.reason == local_mode.REASON_PINNED_CLAUDE)) or (
+                cls_decide.authority_positive() and soft_pin)
+            if wanted and (decision.local or decide(cap_payload, rules_only=True).local):
                 cv = await cls_decide.eligible_verdict(key_body or body, row, cls_elig_decisions,
                                                        parent_main_of(key_body or body))
-                if cls_decide.eligible_shadow_on():
+                if shadow_on:
                     row.update(cls_elig_verdict=cv["tier"], cls_elig_ms=cv["ms"],
                                cls_elig_ok=cv["decided"], cls_elig_source=cv["source"])
                 if (soft_pin and cls_decide.authority_positive() and cv["decided"] and cv["tier"] == "local"
@@ -1235,6 +1240,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return message
             if force:
                 return refuse_local(row, row.get("reason") or "validation")
+            if cls_flip:
+                # PR-B: a step the classifier flipped to local failed. The pin below is a plain one, so without
+                # this the turn's next continuation would inherit the stored ``local`` verdict and retry local.
+                cls_decide.mark_failed(cls_elig_decisions, row)
             # A failed local step: this step goes to Claude and the conversation
             # stays there (one logged move, never back and forth). NS-A2 residual, kept on
             # purpose: see the cls_decide module doc.

@@ -405,6 +405,8 @@ canary mode; until it exists it behaves as `shadow`.
   proxy keeps prompt text. A turn with a secret pattern in it is skipped, router banners are cut out, and the
   labeller deletes entries after 7 days or once labelled. The ledger and the shadow records stay hash-only.
 
+  Classifier decides local (all default off, `--serve local-agent`): `LLM_ROUTER_CLASSIFIER_SINGLE_MODEL=1` lets the one `LLM_ROUTER_LOCAL_MODEL` be the decision model (needs `LLM_ROUTER_LOCAL_CLASSIFIER=on`); `LLM_ROUTER_CLASSIFIER_ELIGIBLE_SHADOW=1` records `cls_elig_*` on calls the input rules allow; `LLM_ROUTER_CLASSIFIER_AUTHORITY=positive` lets a decided `local` verdict waive a plain conversation pin only (kill switch, exempt, media, prompt cap, backend, breaker, claude marker and the claude veto still win; a flipped step that fails is not retried that turn); `LLM_ROUTER_CLASSIFIER_BUDGET_S` bounds the verdict, default the classifier timeout (2.0 s).
+
 ## Classifier in the hooks: one verdict per prompt and per Agent spawn (`LLM_ROUTER_LOCAL_CLASSIFIER=shadow|on`)
 
 The proxy seam above only sees sessions that route through the proxy, and nothing read its verdict. The hooks now
