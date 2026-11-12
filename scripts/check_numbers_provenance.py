@@ -213,9 +213,11 @@ def git_ignored(root: Path, rels: list[str]) -> set[str]:
     if not rels:
         return set()
     try:
-        done = subprocess.run(["git", "-C", str(root), "check-ignore", "-z", "--stdin"], input="\0".join(rels),
-                              capture_output=True, encoding="utf-8", errors="surrogateescape", timeout=60)
-    except (OSError, subprocess.SubprocessError) as exc:
+        # bytes in, bytes out: os.fsencode/os.fsdecode round-trip the names exactly as the directory walk
+        # produced them, whatever the filesystem encoding (a UTF-8 decode would not match under LANG=C on Linux).
+        done = subprocess.run(["git", "-C", str(root), "check-ignore", "-z", "--stdin"],
+                              input=b"\0".join(os.fsencode(r) for r in rels), capture_output=True, timeout=60)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         print(f"numbers-provenance: git check-ignore unavailable ({type(exc).__name__}); "
               "git-ignored files are scanned too", file=sys.stderr)
         return set()
@@ -223,7 +225,7 @@ def git_ignored(root: Path, rels: list[str]) -> set[str]:
         print(f"numbers-provenance: git check-ignore exited {done.returncode} (not a git work tree?); "
               "git-ignored files are scanned too", file=sys.stderr)
         return set()
-    return {p for p in done.stdout.split("\0") if p}
+    return {os.fsdecode(p) for p in done.stdout.split(b"\0") if p}
 
 
 def scan_tree(root: Path):
