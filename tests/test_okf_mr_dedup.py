@@ -343,14 +343,22 @@ def test_a_plain_text_result_holding_a_fake_dict_arrow_is_not_split_there():
     assert not _is_covered({"content": content}, on_wire)
 
 
-@pytest.mark.parametrize("cap", [200, 600])
-def test_an_input_cut_at_exactly_a_hook_cap_still_splits_at_the_dict(cap):
+@pytest.mark.parametrize("cut", [30, 61, 200, 233, 600])
+def test_a_truncated_input_of_any_length_still_splits_at_the_dict(cut):
     from llm_router.session_store import _split_call
 
-    inp = json.dumps({"command": "x" * 900})[:cap]  # a cut input does not end with "}"
-    assert not inp.endswith("}") and len(inp) == cap
+    inp = json.dumps({"command": "x" * 900})[:cut]  # a cut input: unclosed
+    assert not inp.endswith("}")
     got = _split_call(f'Bash({inp}) -> {{"stdout": "some output here"}}')
     assert got == (inp, '{"stdout": "some output here"}')
+
+
+def test_a_whitespace_collapsed_truncated_input_still_splits_at_the_dict():
+    from llm_router.session_store import _split_call
+
+    inp = _squash(json.dumps({"command": "echo      a    b      c " + "y" * 300})[:200])  # collapsed: not 200 long
+    assert len(inp) < 200
+    assert _split_call(f'Bash({inp}) -> {{"stdout": "some output here"}}') == (inp, '{"stdout": "some output here"}')
 
 
 def test_a_normal_brace_ended_input_splits_at_the_dict():
@@ -359,17 +367,18 @@ def test_a_normal_brace_ended_input_splits_at_the_dict():
     assert _split_call('Bash({"command": "ls"}) -> {"stdout": "a b"}') == ('{"command": "ls"}', '{"stdout": "a b"}')
 
 
-def test_the_input_caps_are_the_hooks_own():
-    import importlib.util
-    from pathlib import Path
+def test_a_brace_inside_a_json_string_does_not_close_the_object():
+    from llm_router.session_store import _plausible_input
 
-    from llm_router.session_store import HOOK_INPUT_CAPS
+    assert _plausible_input('{"command": "echo } ] done", "n": 1')  # truncated, the } is text
+    assert _plausible_input('{"command": "echo } ] done"}')
+    assert not _plausible_input('{"command": "echo } done"} trailing text')  # closed, then more
 
-    path = Path(session_store.__file__).parent / "hooks" / "context-capture.py"
-    spec = importlib.util.spec_from_file_location("context_capture_for_caps", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    names = ["NotAHighSignalToolName", *sorted(mod._HIGH_SIGNAL)]
-    caps = {mod._capture_budget(n)[0] for n in names}
-    assert len(mod._HIGH_SIGNAL) >= 1  # premise: the 600 branch is really exercised
-    assert caps == set(HOOK_INPUT_CAPS), caps
+
+def test_escaped_quotes_are_handled():
+    from llm_router.session_store import _plausible_input
+
+    assert _plausible_input('{"command": "say \\"hi}\\" now')  # the \" does not end the string, the } is text
+    assert not _plausible_input('{"command": "say \\"hi\\""} then more text')
+    assert not _plausible_input("not json at all")
+    assert not _plausible_input('{"a": 1}}')  # more closes than opens

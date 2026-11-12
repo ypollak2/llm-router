@@ -966,14 +966,41 @@ _CALL_OPEN = re.compile(r"^[^(]*\(")
 _ARROW = ") -> "
 
 
-#: Lengths the hook cuts a call's stored input to (``json.dumps(tool_input)[:cap]``). The hook is a standalone
-#: script and cannot be imported from here; tests/test_okf_mr_dedup.py pins this tuple to its ``_capture_budget``.
-HOOK_INPUT_CAPS = (200, 600)
-
-
 def _plausible_input(inp: str) -> bool:
-    """Whether *inp* can be a hook-stored input: complete JSON ends ``}``, a cut one is exactly a cap long."""
-    return inp.endswith("}") or len(inp) in HOOK_INPUT_CAPS
+    """Whether *inp* can be the stored input of a hook event: a PREFIX of one JSON object.
+
+    The hook stores ``json.dumps(tool_input)`` cut at 200 or 600 chars and then compacts the whole event
+    (whitespace collapse, long-code truncation), so the cut length is not a signal. What is: the text starts
+    ``{"``, never closes more than it opened, and if the object closes it closes at the very last character.
+    Anything after a closed object is the shape of a wrong split (real input, `` ) -> ``, plain result text that
+    runs on to a fake inner arrow). A tolerant scan: strings and escapes are tracked, so a ``}`` inside a string
+    does not close the object, and an unclosed (truncated) prefix is plausible.
+
+    Residual: a TRUNCATED real input followed by a plain-text result that holds a literal ``) -> {"stdout"...``
+    cannot be told from a real dict result. Plain-text results are about 1.4% of real events.
+    """
+    if not inp.startswith('{"'):
+        return False
+    depth, in_str, esc = 0, False, False
+    for i, ch in enumerate(inp):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth < 0:
+                return False
+            if depth == 0:
+                return i == len(inp) - 1
+    return True
 
 
 def _split_call(content: str) -> tuple[str, str] | None:
@@ -983,7 +1010,7 @@ def _split_call(content: str) -> tuple[str, str] | None:
     whose remainder starts that way: a result may contain `` ) -> `` itself (about 11% of real events), and so
     may an input, which is why neither the first nor the last arrow is taken blindly. The input part must also
     be a plausible hook-stored input (``_plausible_input``): a plain-text result that merely contains
-    ``) -> {"stdout": ...`` is not split there, because its "input" would end mid-text at no cap length. With no
+    ``) -> {"stdout": ...`` is not split there, because its "input" would run on past a closed object. With no
     accepted arrow the result is plain text and the last arrow splits it, as before.
     """
     opened = _CALL_OPEN.match(content)
