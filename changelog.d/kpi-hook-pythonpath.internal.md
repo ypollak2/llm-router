@@ -1,0 +1,1 @@
+- `tests/test_kpi_definitions.py`: the prompt-hook subprocess now gets `PYTHONPATH` set to the src of the `llm_router` the test process imported, so it no longer imports a stale editable install (5 local failures; CI was unaffected).

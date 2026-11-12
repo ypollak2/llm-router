@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+import llm_router
 from llm_router import northstar as ns
 from llm_router import paths, session_kind, usage_outcome
 from llm_router.commands import kpi
@@ -858,6 +859,9 @@ def _hook(tmp_path, payload: dict) -> Path:
     home.mkdir(exist_ok=True)
     env = {"PATH": os.environ.get("PATH", ""), "HOME": str(home), "LLM_ROUTER_HOME": str(home / ".llm-router"),
            "LLM_ROUTER_ENFORCE": "off", "LLM_ROUTER_ZERO_CLAUDE": "0"}
+    # Hermetic: import the llm_router under test, not whatever editable install the venv points at.
+    src = str(Path(llm_router.__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (src, os.environ.get("PYTHONPATH", "")) if p)
     subprocess.run([sys.executable, str(hook)], input=json.dumps(payload).encode(), capture_output=True,
                    env=env, timeout=90)
     return home / ".llm-router"
