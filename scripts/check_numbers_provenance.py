@@ -207,17 +207,25 @@ def analyse_unit(unit: str, root: Path | None = None, rel: str = ""):
 
 def git_ignored(root: Path, rels: list[str]) -> set[str]:
     """Paths git ignores under `root` (generated files, e.g. the suite's docs/SCENARIO_REPORT.md, are not
-    published claims). Outside a git work tree, or if git fails, nothing is ignored."""
+    published claims). Outside a git work tree, or if git fails, nothing is ignored (fail-safe: more is
+    scanned, never less) and a one-line note goes to stderr. NUL-separated (-z), so names with newlines or
+    non-ASCII characters match exactly."""
     if not rels:
         return set()
     try:
-        done = subprocess.run(["git", "-C", str(root), "check-ignore", "--stdin"], input="\n".join(rels),
-                              capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
+        # bytes in, bytes out: os.fsencode/os.fsdecode round-trip the names exactly as the directory walk
+        # produced them, whatever the filesystem encoding (a UTF-8 decode would not match under LANG=C on Linux).
+        done = subprocess.run(["git", "-C", str(root), "check-ignore", "-z", "--stdin"],
+                              input=b"\0".join(os.fsencode(r) for r in rels), capture_output=True, timeout=60)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"numbers-provenance: git check-ignore unavailable ({type(exc).__name__}); "
+              "git-ignored files are scanned too", file=sys.stderr)
         return set()
     if done.returncode not in (0, 1):  # 1 = none ignored; 128 = not a git work tree
+        print(f"numbers-provenance: git check-ignore exited {done.returncode} (not a git work tree?); "
+              "git-ignored files are scanned too", file=sys.stderr)
         return set()
-    return set(done.stdout.splitlines())
+    return {os.fsdecode(p) for p in done.stdout.split(b"\0") if p}
 
 
 def scan_tree(root: Path):
