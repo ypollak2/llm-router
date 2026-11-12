@@ -287,7 +287,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_CLAUDE_MARKER": ("llm_router", "proxy/local_mode.py", 1),
     # D-455: which exempt classes refuse local serving (proxy/local_mode.py, read per request
     # through EXEMPT_POLICY_ENV): "coordinator,subagent" (default; also unset/empty/invalid),
-    # "coordinator", "subagent" or "none"; case-insensitive.
+    # "coordinator", "coordinator_main" (PR-D; main thread of a coordinator session only; not with
+    # "coordinator"), "subagent" or "none"; case-insensitive.
     "LLM_ROUTER_LOCAL_EXEMPT": ("llm_router", "proxy/local_mode.py", 1),
     # Opt-in SHADOW mode (proxy/local_shadow.py): off (default) or on.
     "LLM_ROUTER_PROXY_LOCAL_GATE": ("llm_router", "proxy/server.py", 1),
