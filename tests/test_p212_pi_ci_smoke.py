@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pytest
 
+import llm_router
+
 REQUIRE = os.environ.get("PI_SMOKE_REQUIRED", "") not in ("", "0", "false", "no")
 PI = shutil.which("pi")
 EXPECTED_TOOLS = {"llm_route", "llm_edit", "llm", "llm_act"}  # a subset; the server may add more
@@ -51,6 +53,8 @@ def run(tmp_path_factory):
         # every Ollama base-URL variable the installer or router reads, pointed at a dead port
         **{k: "http://127.0.0.1:9" for k in ("OLLAMA_HOST", "OLLAMA_URL", "OLLAMA_BASE_URL", "OLLAMA_API_BASE", "OLLAMA_BASE")},
         "NO_COLOR": "1",
+        # the child must import the tree under test, not whatever the venv's editable install points at
+        "PYTHONPATH": os.pathsep.join(p for p in (str(Path(llm_router.__file__).resolve().parents[1]), os.environ.get("PYTHONPATH", "")) if p),
     }
     assert Path(shutil.which("llm-router", path=env["PATH"]) or "").exists(), "llm-router not on the child PATH"
     install = subprocess.run(["llm-router", "install", "--auto", "--no-plugin"], env=env, cwd=home,
