@@ -369,6 +369,71 @@ async def test_pass_through_forwards_auth_unchanged_and_relays_stream(tmp_path):
     assert row["usage"]["output_tokens"] == 42
 
 
+async def test_429_row_records_error_type_only(tmp_path):
+    body_429 = b'{"type":"error","error":{"type":"rate_limit_error","message":"SECRET message text"}}'
+    app = _app(tmp_path, Upstream([(429, body_429)]), steps=frozenset())
+    r = await _post(app, _first_call())
+    assert r.status_code == 429
+    (row,) = _rows(tmp_path)
+    assert row["upstream_status"] == 429 and row["upstream_error_type"] == "rate_limit_error"
+    assert "SECRET" not in json.dumps(row)
+
+
+async def test_unparseable_error_body_gives_null_type(tmp_path):
+    app = _app(tmp_path, Upstream([(500, b"<html>bad gateway</html>")]), steps=frozenset())
+    await _post(app, _first_call())
+    (row,) = _rows(tmp_path)
+    assert row["upstream_status"] == 500 and row["upstream_error_type"] is None
+
+
+async def test_404_logs_method_path_status_and_type(tmp_path, capfd):
+    body_404 = b'{"type":"error","error":{"type":"not_found_error","message":"SECRET model"}}'
+    app = _app(tmp_path, Upstream([(404, body_404)]), steps=frozenset())
+    await _post(app, _first_call())
+    err = capfd.readouterr().err
+    assert "llm-router proxy: upstream 404 POST /v1/messages" in err
+    assert "SECRET" not in err
+    (row,) = _rows(tmp_path)
+    assert row["upstream_error_type"] == "not_found_error"
+
+
+async def test_200_row_has_no_error_type_field(tmp_path):
+    app = _app(tmp_path, Upstream(), steps=frozenset())
+    await _post(app, _first_call())
+    (row,) = _rows(tmp_path)
+    assert row["upstream_status"] == 200 and "upstream_error_type" not in row
+
+
+def test_upstream_error_type_parses_only_first_4kb():
+    big = b'{"pad":"' + b"x" * 5000 + b'","error":{"type":"late"}}'
+    assert ps._upstream_error_type(big) is None
+    assert ps._upstream_error_type(b'{"error":{"type":7}}') is None
+    assert ps._upstream_error_type(b"[]") is None
+
+
+def test_upstream_error_type_never_raises_on_deeply_nested_json():
+    # json.loads(b"[" * 4096) raises RecursionError, which is not a ValueError.
+    assert ps._upstream_error_type(b"[" * 4096) is None
+
+
+async def test_finish_error_row_carries_error_type_only(tmp_path):
+    # Mixed history + 400 that is NOT a thinking rejection -> _finish_error path.
+    err = json.dumps({"type": "error", "error": {"type": "invalid_request_error",
+                                                 "message": "SECRET message text"}}).encode()
+    up = Upstream([(400, err)])
+    body = _req()
+    served, _ = from_ollama(_ollama("", [_call("Bash", {"command": "ls"})]), body)
+    body["messages"].insert(-1, {"role": "assistant", "content": served["content"]})
+    body["messages"].insert(-1, {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": served["content"][0]["id"], "content": "a.py"}]})
+    r = await _post(_app(tmp_path, up, steps=frozenset()), body)
+    assert r.status_code == 400 and len(up.requests) == 1  # no thinking retry
+    (row,) = _rows(tmp_path)
+    assert row["mixed_history"] is True and not row.get("thinking_retry")
+    assert row["upstream_status"] == 400 and row["upstream_error_type"] == "invalid_request_error"
+    assert "SECRET" not in json.dumps(row)
+
+
 async def test_other_paths_pass_through_without_a_ledger_row(tmp_path):
     up = Upstream([(200, b'{"ok": true}')])
     app = _app(tmp_path, up)

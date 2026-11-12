@@ -343,6 +343,18 @@ def parse_steps(raw: str) -> frozenset:
     return frozenset(names)
 
 
+def _upstream_error_type(body: bytes) -> str | None:
+    """``error.type`` of an Anthropic error body (first 4 KB parsed), or None.
+
+    The type string only, never the message text (D-281)."""
+    try:
+        data = json.loads(body[:4096])
+        t = data["error"]["type"]
+    except Exception:  # noqa: BLE001 - e.g. RecursionError on deeply nested JSON; never raise into the relay
+        return None
+    return t if isinstance(t, str) else None
+
+
 def _error_json(message: str) -> bytes:
     return json.dumps({"type": "error", "error": {"type": "api_error", "message": message}}).encode()
 
@@ -1580,6 +1592,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                         if k.lower() not in _HOP | {"content-encoding", "content-length"}}
         if row is not None:
             row["upstream_status"] = up.status_code
+        if up.status_code == 404:
+            # Method, path and status only: never the body (D-281).
+            sys.stderr.write(f"llm-router proxy: upstream 404 {request.method} {request.url.path}\n")
+            sys.stderr.flush()
 
         async def relay():
             buf = bytearray()
@@ -1598,6 +1614,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 if row is not None:
                     row["upstream_latency_s"] = round(time.monotonic() - t0, 3)
                     _record_usage(row, bytes(buf), up.headers.get("content-type", ""))
+                    if up.status_code != 200:
+                        row["upstream_error_type"] = _upstream_error_type(bytes(buf))
                     if on_usage is not None and up.status_code == 200:
                         on_usage(row.get("usage"))
                     write(row)
@@ -1622,6 +1640,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
     def _finish_error(status: int, content: bytes, headers, row: dict, t0: float):
         row["upstream_status"] = status
+        if status != 200:
+            row["upstream_error_type"] = _upstream_error_type(content)
         row["upstream_latency_s"] = round(time.monotonic() - t0, 3)
         write(row)
         keep = {k: v for k, v in headers.items() if k.lower() not in _HOP | {"content-encoding", "content-length"}}
