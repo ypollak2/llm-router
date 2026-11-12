@@ -3,6 +3,7 @@ release_clock are unchanged."""
 from __future__ import annotations
 
 import json
+import re
 
 from llm_router import daily_offload as do
 from tests.test_s1fix_synthetic_streak import DAY, NOW, QUALITY, _rows, home  # noqa: F401
@@ -91,16 +92,31 @@ def test_run_daily_reports_coordinated_fields_and_streak_is_unchanged(home, tmp_
     for o in (plain[0], over[0]):
         assert {"coordinated_action", "coordinated_turn"} <= set(o)
     assert plain[0]["coordinated_action"]["n"] == 0
-    assert over[0]["coordinated_action"]["n"] > 0   # turns stay 0: non-manifest rows have no transcript turns
+    assert plain[0]["coordinated_turn"]["n"] == 0
+    assert over[0]["coordinated_action"]["n"] > 0
+    assert over[0]["coordinated_turn"]["n"] == 0   # non-manifest rows have no transcript turns
     for k in ("organic_action", "organic_turn", "release_clock_action", "release_clock_turn"):
         assert _dump(over[0][k]) == _dump(plain[0][k])
     assert _dump(streak_over) == _dump(streak_plain)
 
 
-def test_run_daily_text_line_labels_coordinated(home, capsys):  # noqa: F811
-    _write_overrides(home, {"coo-0"})
-    inp = do.Inputs(_rows("org") + _rows("coo"), [], [], [], QUALITY, _kind_of)
-    assert do.run_daily(date=str(DAY), backfill=0, force=False, partial=False, manifest=None,
+def _run_text(capsys, rows, force=False):
+    inp = do.Inputs(rows, [], [], [], QUALITY, _kind_of)
+    assert do.run_daily(date=str(DAY), backfill=0, force=force, partial=False, manifest=None,
                         inputs=inp, now=NOW) == 0
-    assert "COORDINATED sessions, not organic (D-407)" in capsys.readouterr().out
+    return capsys.readouterr().out
 
+
+def _coord_action_text(out):
+    assert do.COORD_LABEL in out
+    return re.search(r"COORDINATED sessions, not organic \(D-407\): action ([^ ]+ ?[^ ]*?)  turn", out).group(1)
+
+
+def test_run_daily_text_line_labels_coordinated(home, capsys):  # noqa: F811
+    rows = _rows("org") + _rows("coo")
+    # the line is always printed; without an override the coordinated action count is 0
+    assert _coord_action_text(_run_text(capsys, rows)) == "unmeasured n=0"
+    _write_overrides(home, {f"coo-{i}" for i in range(3)})
+    got = _coord_action_text(_run_text(capsys, rows, force=True))
+    assert got != "unmeasured n=0"                               # override: coordinated n > 0 reaches the text
+    assert re.fullmatch(r"(\d+/\d+=\S+|unmeasured n=[1-9]\d*)", got), got
