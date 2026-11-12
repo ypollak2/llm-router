@@ -285,6 +285,10 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # PR-A: off (default) | on. Conversations whose first user message holds "[[llm-router:claude-only]]"
     # are never served locally (reason claude_marker; proxy/local_mode.py, per request).
     "LLM_ROUTER_CLAUDE_MARKER": ("llm_router", "proxy/local_mode.py", 1),
+    # PR-C: unset (default) | turn. turn: a fallback pin lasts one human turn; after
+    # LLM_ROUTER_PIN_TURN_MAX_FALLBACKS (default 3) fallbacks it is sticky (reason pinned_sticky).
+    "LLM_ROUTER_PIN_SCOPE": ("llm_router", "proxy/local_mode.py", 1),
+    "LLM_ROUTER_PIN_TURN_MAX_FALLBACKS": ("llm_router", "proxy/local_mode.py", 1),
     # D-455: which exempt classes refuse local serving (proxy/local_mode.py, read per request
     # through EXEMPT_POLICY_ENV): "coordinator,subagent" (default; also unset/empty/invalid),
     # "coordinator", "subagent" or "none"; case-insensitive.

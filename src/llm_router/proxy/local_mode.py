@@ -102,6 +102,13 @@ KILL_SWITCH_NAME = "local_agent_kill"
 REASON_KILL_SWITCH = "kill_switch"
 REASON_PINNED_CLAUDE = "pinned_claude"
 REASON_CLAUDE_MARKER = "claude_marker"  # PR-A: the conversation's first user message carries CLAUDE_MARKER
+#: PR-C (LLM_ROUTER_PIN_SCOPE=turn): the D-442 fallback pin covers the rest of the CURRENT human turn only. HARD for
+#: its turn: the classifier authority (PR-B) does not waive it, so a failed step is not retried that turn.
+REASON_PINNED_TURN = "pinned_turn"
+#: PR-C: after LLM_ROUTER_PIN_TURN_MAX_FALLBACKS fallbacks in one conversation the pin is sticky again. HARD, for good:
+#: not ``pinned_claude``, so it is never the one SOFT rule the classifier authority may override.
+REASON_PINNED_STICKY = "pinned_sticky"
+HARD_PIN_REASONS = frozenset({REASON_PINNED_TURN, REASON_PINNED_STICKY})
 REASON_STARTED_ELSEWHERE = "conversation_started_on_claude"
 REASON_MEDIA = "media_present"
 REASON_PROMPT_CAP = "prompt_over_cap"
@@ -278,6 +285,21 @@ class LocalSession:
     #: PR-B (LLM_ROUTER_CLASSIFIER_AUTHORITY=positive): a decided ``local`` verdict waives the conversation pin
     #: (the one SOFT rule) for this turn. Every other rule still applies. Default False: unchanged.
     cls_local: bool = False
+    #: PR-C: why the stored claude pin exists (``LocalModeState.pin_reason_of``). Only a HARD_PIN_REASONS value matters here.
+    pin_reason: str | None = None
+
+
+def pin_scope_turn_on() -> bool:
+    """``LLM_ROUTER_PIN_SCOPE=turn``: a fallback pin lasts one human turn. Unset (default) or anything else: sticky as before."""
+    return os.environ.get("LLM_ROUTER_PIN_SCOPE", "").strip().lower() == "turn"
+
+
+def pin_turn_max_fallbacks() -> int:
+    """``LLM_ROUTER_PIN_TURN_MAX_FALLBACKS`` (default 3, minimum 1; invalid is the default)."""
+    try:
+        return max(1, int(os.environ.get("LLM_ROUTER_PIN_TURN_MAX_FALLBACKS", "").strip() or 3))
+    except ValueError:
+        return 3
 
 
 def exempt_reason(body: dict, session_id: str | None,
@@ -356,6 +378,8 @@ def decide_local(body: dict, session: LocalSession) -> LocalDecision:
         return LocalDecision(False, REASON_CLAUDE_MARKER)
     if session.exempt:
         return LocalDecision(False, REASON_EXEMPT_SESSION, session.exempt)
+    if session.pinned == PIN_CLAUDE and session.pin_reason in HARD_PIN_REASONS:
+        return LocalDecision(False, session.pin_reason)  # PR-C: a verdict (cls_local) never waives these
     if session.pinned == PIN_CLAUDE and not session.cls_local:
         return LocalDecision(False, REASON_PINNED_CLAUDE)
     if has_media(body):
@@ -401,6 +425,39 @@ class LocalModeState:
         # NS-A2: conversations whose first turn this process saw and the classifier vetoed.
         # A veto stores no pin, so without this the next call would read ``started_elsewhere``.
         self.seen_keys: OrderedDict[str, bool] = OrderedDict()
+        # PR-C (LLM_ROUTER_PIN_SCOPE=turn): the human-turn index a ``pinned_turn`` pin was set in, and the
+        # number of fallback pins a conversation has had. Memory only, bounded like the pins.
+        self.turn_pins: dict[str, int] = {}
+        self.fallback_counts: OrderedDict[str, int] = OrderedDict()
+
+    def note_fallback(self, key: str) -> int:
+        """PR-C: count one failed local step of this conversation; returns the new count."""
+        n = self.fallback_counts.get(key, 0) + 1
+        self.fallback_counts[key] = n
+        self.fallback_counts.move_to_end(key)
+        while len(self.fallback_counts) > self.max_pins:
+            self.fallback_counts.popitem(last=False)
+        return n
+
+    def set_turn_pin(self, key: str, turn_idx: int) -> None:
+        """PR-C: pin to Claude for human turn ``turn_idx`` only."""
+        self.set_pin(key, PIN_CLAUDE, REASON_PINNED_TURN)
+        self.turn_pins[key] = turn_idx
+        while len(self.turn_pins) > self.max_pins:
+            self.turn_pins.pop(next(iter(self.turn_pins)))
+
+    def expire_turn_pin(self, key: str, turn_idx: int | None) -> bool:
+        """PR-C: lift a ``pinned_turn`` pin when the conversation is on a later human turn. True when lifted. Any
+        other pin, an unknown current turn, or the same turn: nothing changes. The conversation is marked seen,
+        so it is not read as ``conversation_started_on_claude``."""
+        if (turn_idx is None or self.pins.get(key) != PIN_CLAUDE or self.pin_reasons.get(key) != REASON_PINNED_TURN
+                or self.turn_pins.get(key) in (None, turn_idx)):
+            return False
+        del self.pins[key]
+        self.pin_reasons.pop(key, None)
+        self.turn_pins.pop(key, None)
+        self.mark_seen(key)
+        return True
 
     def mark_seen(self, key: str) -> None:
         self.seen_keys[key] = True
