@@ -275,6 +275,9 @@ class LocalSession:
     verdict: str | None = None
     #: NS-L (D-448): ``exempt_reason(...)``'s detail (coordinator_session / subagent_thread), or None.
     exempt: str | None = None
+    #: PR-B (LLM_ROUTER_CLASSIFIER_AUTHORITY=positive): a decided ``local`` verdict waives the conversation pin
+    #: (the one SOFT rule) for this turn. Every other rule still applies. Default False: unchanged.
+    cls_local: bool = False
 
 
 def exempt_reason(body: dict, session_id: str | None,
@@ -353,7 +356,7 @@ def decide_local(body: dict, session: LocalSession) -> LocalDecision:
         return LocalDecision(False, REASON_CLAUDE_MARKER)
     if session.exempt:
         return LocalDecision(False, REASON_EXEMPT_SESSION, session.exempt)
-    if session.pinned == PIN_CLAUDE:
+    if session.pinned == PIN_CLAUDE and not session.cls_local:
         return LocalDecision(False, REASON_PINNED_CLAUDE)
     if has_media(body):
         return LocalDecision(False, REASON_MEDIA, "image or document in the conversation")

@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import time
 from collections import OrderedDict
 
@@ -193,10 +194,45 @@ def static_fields(body: dict, session_id: str | None, key: tuple | None = None) 
     return out
 
 
+def single_model_on() -> bool:
+    """``LLM_ROUTER_CLASSIFIER_SINGLE_MODEL=1``: the one configured local model is the decision model."""
+    return os.environ.get("LLM_ROUTER_CLASSIFIER_SINGLE_MODEL", "").strip() == "1"
+
+
+def eligible_shadow_on() -> bool:
+    """``LLM_ROUTER_CLASSIFIER_ELIGIBLE_SHADOW=1``: a verdict is recorded on every local-eligible call."""
+    return os.environ.get("LLM_ROUTER_CLASSIFIER_ELIGIBLE_SHADOW", "").strip() == "1"
+
+
+def authority_positive() -> bool:
+    """``LLM_ROUTER_CLASSIFIER_AUTHORITY=positive``: a decided ``local`` verdict may override a SOFT rules refusal."""
+    return os.environ.get("LLM_ROUTER_CLASSIFIER_AUTHORITY", "").strip().lower() == "positive"
+
+
+def budget_s() -> float:
+    """``LLM_ROUTER_CLASSIFIER_BUDGET_S`` seconds one eligible-call verdict may take; unset or invalid is the
+    classifier's own budget (``local_classifier._timeout_s``, 2.0 s by default), so the default is unchanged."""
+    try:
+        v = float(os.environ.get("LLM_ROUTER_CLASSIFIER_BUDGET_S", ""))
+        if v > 0:
+            return min(v, 30.0)
+    except ValueError:
+        pass
+    return local_classifier._timeout_s()
+
+
 def active() -> bool:
     """The classifier runs inline only when the decision model is configured and the door
-    mode is ``on`` (``shadow`` and ``off`` make no inline call)."""
-    return door_verdict._decision_model_configured() and door_verdict.mode() == "on"
+    mode is ``on`` (``shadow`` and ``off`` make no inline call). With ``single_model_on()`` the one
+    configured local model counts as the decision model, when ``LLM_ROUTER_LOCAL_CLASSIFIER=on`` is set
+    explicitly (there is no default-on for it)."""
+    if door_verdict._decision_model_configured() and door_verdict.mode() == "on":
+        return True
+    if not single_model_on():
+        return False
+    from llm_router.toolkit.adapters.ollama import get_local_model
+
+    return bool(get_local_model()) and local_classifier.mode() == "on"
 
 
 def proxy_lane_fails() -> bool:
@@ -316,3 +352,67 @@ async def _decide(body, row, store, lm_on, override, parent_main, key=None) -> N
     store.put(key, dict(decision_id=did, source=verdict.source, reason=reason, decided=ok, tier=tier))
     _set(row, source=verdict.source, reason=reason, decided=ok, decision=did, tier=tier)
     row["cls_turn_ms"] = round((time.monotonic() - t0) * 1000.0, 1)
+
+
+# -- eligible-call verdict (LLM_ROUTER_CLASSIFIER_ELIGIBLE_SHADOW / _AUTHORITY) -----------------
+
+
+S_FAILED = "failed_local"
+
+
+def mark_failed(store: TurnDecisionStore, row: dict) -> None:
+    """A local step the classifier flipped failed: the rest of this human turn gets no verdict (so no second flip);
+    the next human turn has another key and is classified afresh."""
+    key = (row.get("session_id") or "", row.get("cls_turn_idx"), row.get("cls_turn_sha"))
+    store.put(key, {"tier": None, "source": S_FAILED, "ms": 0.0, "decided": False})
+
+
+async def eligible_verdict(body: dict, row: dict, store: TurnDecisionStore, parent_main: bool | None = None) -> dict:
+    """``{tier, source, ms, decided}`` for this call's human turn. Reuses the verdict ``decide_turn`` already
+    made; else asks the classifier within :func:`budget_s` (a timeout proceeds with the rules) and keeps the
+    answer in ``store`` so the turn's continuations pay nothing. ``store`` is separate from the veto store:
+    this verdict is never a veto. Never raises."""
+    out = {"tier": None, "source": S_NONE, "ms": None, "decided": False}
+    try:
+        key = (row.get("session_id") or "", row.get("cls_turn_idx"), row.get("cls_turn_sha"))
+        failed = store.get(key)
+        if failed is not None and failed.get("source") == S_FAILED:
+            return dict(failed)
+        if row.get("cls_turn_decided") is True:
+            return {"tier": row.get("cls_turn_tier"), "source": row.get("cls_turn_source"),
+                    "ms": row.get("cls_turn_ms"), "decided": True}
+        if not row.get("supported"):
+            return out
+        stored = store.get(key)
+        if stored is not None:
+            return dict(stored, source=S_INHERIT, ms=0.0)
+        if turn_origin(body, parent_main) not in HUMAN_ORIGINS:
+            return out
+        text = newest_human_text(body)
+        if not text.strip() or door_verdict._holds_secret(text):
+            return out
+        budget = budget_s()
+        t0 = time.monotonic()
+        snapshot = {"messages": list(body.get("messages") or []), "system": body.get("system")}
+
+        async def one():
+            assembled = await asyncio.to_thread(assemble, snapshot)
+            return await local_classifier.classify_async(
+                assembled, session_id=row.get("session_id"), text_sha=row.get("cls_turn_sha") or "",
+                timeout_s=budget)
+
+        try:
+            verdict = await asyncio.wait_for(one(), timeout=budget)  # assemble is inside the budget too
+            source, tier = verdict.source, verdict.tier
+        except asyncio.TimeoutError:
+            source, tier = "timeout", None
+        ok = source in DECIDED_SOURCES and tier is not None
+        out = {"tier": tier if ok else None, "source": source,
+               "ms": round((time.monotonic() - t0) * 1000.0, 1), "decided": ok}
+        store.put(key, dict(out))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a recording must never cost a call
+        failopen.record("LR-FO-PROXY-CLS-DECIDE", exc)
+        out = {"tier": None, "source": "error", "ms": None, "decided": False}
+    return out
