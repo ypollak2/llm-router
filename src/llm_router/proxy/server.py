@@ -1066,6 +1066,18 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         key = conversation_key(key_body or body, row.get("session_id"))
         # A `local:` step is decided as if pinned local, but the stored pin is
         # left alone: the prefix forces this one step, never the conversation.
+        turn_idx = None
+        pin_cleared = False
+        if not force and local_mode.pin_scope_turn_on():
+            # PR-C: the turn index #915 records (``cls_decide.turn_idx``, row ``cls_turn_idx``). A fallback pin of an
+            # earlier human turn is lifted here, before the pin is read, so local may be tried again.
+            turn_idx = row.get("cls_turn_idx")
+            if turn_idx is None:
+                try:
+                    turn_idx = cls_decide.turn_idx(key_body or body)
+                except Exception:  # noqa: BLE001 - never costs a call; an unknown turn lifts nothing
+                    turn_idx = None
+            pin_cleared = lm.expire_turn_pin(key, turn_idx)
         stored = lm.pin_of(key)
         pinned = local_mode.PIN_LOCAL if force else stored
         started_elsewhere = not force and pinned is None and not is_first_call(body) and not lm.seen(key)
@@ -1101,7 +1113,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 key=key, pinned=None if unpin_try or rules_only else pinned, kill_switch=lm.killed(),
                 backend_healthy=not health.is_open(cfg.model), breaker_closed=breaker_ok, breaker_detail=breaker_detail,
                 payload=cap_pl, verdict=None if force or rules_only else cls_decide.veto_of(row),
-                exempt=None if rules_only else exempt, cls_local=cls_local))
+                exempt=None if rules_only else exempt, cls_local=cls_local, pin_reason=lm.pin_reason_of(key)))
 
         decision = decide(cap_payload)
         layout_event = None
@@ -1186,6 +1198,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
+        if pin_cleared:
+            row["local_mode"]["pin_cleared"] = "new_turn"  # PR-C: only with LLM_ROUTER_PIN_SCOPE=turn
         if cls_flip and decision.local:
             row["local_mode"]["cls_authority"] = "pin_waived"
         if cold_row is not None:
@@ -1251,7 +1265,21 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     and row.get("loop_guard_trigger") == TRIGGER_CAP):
                 row["pin_skipped"] = "loop_guard_cap"
             else:
-                lm.set_pin(key, local_mode.PIN_CLAUDE)
+                if local_mode.pin_scope_turn_on():
+                    # PR-C: this turn only; after N fallbacks in the conversation, sticky under a reason of its own.
+                    n_fb = lm.note_fallback(key)
+                    if n_fb >= local_mode.pin_turn_max_fallbacks():
+                        lm.set_pin(key, local_mode.PIN_CLAUDE, local_mode.REASON_PINNED_STICKY)
+                        scope = "sticky"
+                    elif turn_idx is not None:
+                        lm.set_turn_pin(key, turn_idx)
+                        scope = "turn"
+                    else:  # the turn is unknown: keep today's plain pin rather than guess a boundary
+                        lm.set_pin(key, local_mode.PIN_CLAUDE)
+                        scope = "sticky_unknown_turn"
+                    row["local_mode"]["pin_scope"], row["local_mode"]["pin_fallbacks"] = scope, n_fb
+                else:
+                    lm.set_pin(key, local_mode.PIN_CLAUDE)
                 row["local_mode"]["pin_change"] = "local->claude"
             reason = row.get("reason") or "validation"
         else:
