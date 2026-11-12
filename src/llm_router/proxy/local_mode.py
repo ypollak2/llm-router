@@ -427,7 +427,7 @@ class LocalModeState:
         self.seen_keys: OrderedDict[str, bool] = OrderedDict()
         # PR-C (LLM_ROUTER_PIN_SCOPE=turn): the human-turn index a ``pinned_turn`` pin was set in, and the
         # number of fallback pins a conversation has had. Memory only, bounded like the pins.
-        self.turn_pins: dict[str, int] = {}
+        self.turn_pins: OrderedDict[str, int] = OrderedDict()
         self.fallback_counts: OrderedDict[str, int] = OrderedDict()
 
     def note_fallback(self, key: str) -> int:
@@ -443,15 +443,23 @@ class LocalModeState:
         """PR-C: pin to Claude for human turn ``turn_idx`` only."""
         self.set_pin(key, PIN_CLAUDE, REASON_PINNED_TURN)
         self.turn_pins[key] = turn_idx
+        self.turn_pins.move_to_end(key)
         while len(self.turn_pins) > self.max_pins:
-            self.turn_pins.pop(next(iter(self.turn_pins)))
+            self.turn_pins.popitem(last=False)
 
     def expire_turn_pin(self, key: str, turn_idx: int | None) -> bool:
-        """PR-C: lift a ``pinned_turn`` pin when the conversation is on a later human turn. True when lifted. Any
-        other pin, an unknown current turn, or the same turn: nothing changes. The conversation is marked seen,
-        so it is not read as ``conversation_started_on_claude``."""
-        if (turn_idx is None or self.pins.get(key) != PIN_CLAUDE or self.pin_reasons.get(key) != REASON_PINNED_TURN
-                or self.turn_pins.get(key) in (None, turn_idx)):
+        """PR-C: lift a ``pinned_turn`` pin when the conversation is on a STRICTLY later human turn (a lower index,
+        e.g. after a client compaction, lifts nothing). True when lifted. Any other pin or an unknown current turn:
+        nothing changes. A ``pinned_turn`` pin whose turn entry was evicted degrades to the plain pin (today's
+        soft ``pinned_claude``), never to a permanent hard one. The conversation is marked seen, so a lifted pin is
+        not read as ``conversation_started_on_claude``."""
+        if self.pins.get(key) != PIN_CLAUDE or self.pin_reasons.get(key) != REASON_PINNED_TURN:
+            return False
+        stored = self.turn_pins.get(key)
+        if stored is None:
+            self.pin_reasons.pop(key, None)
+            return False
+        if turn_idx is None or turn_idx <= stored:
             return False
         del self.pins[key]
         self.pin_reasons.pop(key, None)
@@ -484,6 +492,7 @@ class LocalModeState:
         while len(self.pins) > self.max_pins:
             old, _ = self.pins.popitem(last=False)
             self.pin_reasons.pop(old, None)
+            self.turn_pins.pop(old, None)
 
     def pin_reason_of(self, key: str) -> str | None:
         return self.pin_reasons.get(key)

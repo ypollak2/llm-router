@@ -132,16 +132,54 @@ def test_other_pins_are_untouched(tmp_path, monkeypatch):
     assert e.backend.calls == [] and not any(k in r["local_mode"] for r in rows for k in FIELDS)
 
 
-def test_a_structural_pin_is_untouched(tmp_path, monkeypatch):
+@pytest.mark.parametrize("scope", [None, "turn"])
+def test_a_structural_pin_is_untouched(tmp_path, monkeypatch, scope):
+    """The SAME conversation (same first message, image kept) a second time: the media pin reads ``pinned_claude``,
+    exactly as with the flag off, and no PR-C field or reason appears."""
     from tests.test_proxy_local_mode import _with_image
-    monkeypatch.setenv("LLM_ROUTER_PIN_SCOPE", "turn")
+    if scope:
+        monkeypatch.setenv("LLM_ROUTER_PIN_SCOPE", scope)
     e = Env(tmp_path)
     e.post(_with_image(turn_body([P1])))
-    e.post(turn_body([P1, P2]))
+    e.post(_with_image(turn_body([P1], loops=1)))
     rows = e.rows()
-    assert rows[0]["local_mode"]["reason"] == "media_present"
-    assert rows[1]["local_mode"]["reason"] in ("pinned_claude", "conversation_started_on_claude")  # today's, not PR-C's
-    assert e.backend.calls == [] and not any(k in r["local_mode"] for r in rows for k in FIELDS)
+    assert [r["local_mode"]["reason"] for r in rows] == ["media_present", "pinned_claude"]
+    assert rows[1]["local_mode"]["pin"] == "claude" and e.backend.calls == []
+    assert not any(k in r["local_mode"] for r in rows for k in FIELDS)
+
+
+def test_a_lower_turn_index_does_not_lift_the_pin(tmp_path, monkeypatch):
+    """A compaction can lower the human-turn count: only a strictly LATER turn lifts the pin."""
+    e = turn_env(tmp_path, monkeypatch)
+    e.post(turn_body([P1, P2]))                                       # fails on turn index 2 -> turn pin
+    e.post(turn_body([P2]))                                           # index 1 (fewer human messages): same key? either way, no lift
+    rows = e.rows()
+    assert "pin_cleared" not in rows[-1]["local_mode"]
+    lm = local_mode.LocalModeState(kill_path=tmp_path / "k")
+    lm.set_turn_pin("c", 5)
+    assert lm.expire_turn_pin("c", 4) is False and lm.expire_turn_pin("c", 5) is False
+    assert lm.pin_of("c") == local_mode.PIN_CLAUDE and lm.pin_reason_of("c") == local_mode.REASON_PINNED_TURN
+    assert lm.expire_turn_pin("c", 6) is True and lm.pin_of("c") is None
+
+
+def test_an_evicted_turn_entry_degrades_to_the_plain_pin_not_a_permanent_hard_one(tmp_path):
+    lm = local_mode.LocalModeState(kill_path=tmp_path / "k", max_pins=2)
+    lm.set_turn_pin("a", 1)
+    del lm.turn_pins["a"]                                             # the entry is gone, the pin remains
+    assert lm.expire_turn_pin("a", 1) is False
+    assert lm.pin_of("a") == local_mode.PIN_CLAUDE and lm.pin_reason_of("a") is None   # plain, soft: today's behaviour
+    d = local_mode.decide_local(turn_body([P1]), local_mode.LocalSession(
+        pinned=local_mode.PIN_CLAUDE, pin_reason=lm.pin_reason_of("a"), cls_local=True))
+    assert d.local is True                                            # the classifier authority may waive it again
+
+
+def test_pins_and_turn_pins_are_bounded_the_same_way(tmp_path):
+    lm = local_mode.LocalModeState(kill_path=tmp_path / "k", max_pins=2)
+    lm.set_turn_pin("a", 1)
+    lm.set_turn_pin("b", 1)
+    lm.set_turn_pin("a", 2)                                           # touch a: b is now the oldest
+    lm.set_turn_pin("c", 1)                                           # evicts b from pins AND turn_pins
+    assert set(lm.pins) == {"a", "c"} and set(lm.turn_pins) == {"a", "c"}
 
 
 # -- with the classifier authority (#915) ------------------------------------------------
