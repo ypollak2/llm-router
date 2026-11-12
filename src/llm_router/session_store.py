@@ -955,10 +955,11 @@ def _format_record(rec: dict[str, Any]) -> str:
     return str(content)
 
 
-#: Shortest probe (chars, whitespace-collapsed) that may count an event as already in the request.
+#: Shortest text (chars, whitespace-collapsed) that may count an event as already in the request.
 _COVER_MIN_CHARS = 12
-#: Longest probe taken from an event: its start, and the start of its result after " -> ".
-_COVER_PROBE_CHARS = 80
+#: How much of a hook-recorded call's input must be on the wire (the hook stores at most 200 chars of it).
+_COVER_INPUT_CHARS = 60
+_CALL_EVENT = re.compile(r"^[^(]*\((.*)\) -> (.*)$", re.S)
 
 
 def _squash(text: str) -> str:
@@ -966,18 +967,22 @@ def _squash(text: str) -> str:
 
 
 def _is_covered(rec: dict[str, Any], covered: str) -> bool:
-    """True when *rec*'s own text is already in *covered* (a whitespace-squashed request text).
+    """True when *rec* is already in *covered* (a whitespace-squashed request text).
 
-    Two probes, each the first ``_COVER_PROBE_CHARS`` chars: the event's content, and what follows
-    `` -> `` in it (a hook-recorded ``Tool(input) -> result`` event, whose result is carried by the
-    request's ``tool_result`` block while the ``Tool(input)`` rendering is not). A probe shorter than
-    ``_COVER_MIN_CHARS`` never counts, so a one-word event is not dropped for appearing somewhere.
+    A hook-recorded ``Tool(input) -> result`` event is covered only when its WHOLE stored result is on the
+    wire (the hook keeps a prefix of the real result, so the real result contains it) AND the start of the
+    same call's input is too: another call that happens to return the same first lines does not cover it, and
+    nor does a result that differs later. Any other event is covered when its whole text is on the wire.
+    A text shorter than ``_COVER_MIN_CHARS`` never counts, so a one-word event is not dropped for appearing
+    somewhere. Linear in ``len(covered)`` per event.
     """
     content = _squash(rec.get("content", ""))
-    probes = [content[:_COVER_PROBE_CHARS]]
-    if " -> " in content:
-        probes.append(content.split(" -> ", 1)[1][:_COVER_PROBE_CHARS])
-    return any(len(p) >= _COVER_MIN_CHARS and p in covered for p in probes)
+    call = _CALL_EVENT.match(content)
+    if call:
+        inp, res = call.group(1), call.group(2)
+        return (len(res) >= _COVER_MIN_CHARS and res in covered
+                and bool(inp[:_COVER_INPUT_CHARS]) and inp[:_COVER_INPUT_CHARS] in covered)
+    return len(content) >= _COVER_MIN_CHARS and content in covered
 
 
 def _keywords(text: str) -> set[str]:

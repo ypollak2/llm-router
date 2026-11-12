@@ -81,6 +81,8 @@ def _plain(sent: dict) -> str:
 
     for m in sent["messages"]:
         add(m.get("content"))
+        for call in m.get("tool_calls") or []:  # the Ollama payload carries a call's input here
+            parts.append(json.dumps((call.get("function") or {}).get("arguments"), ensure_ascii=False))
     return "\n".join(str(p) for p in parts)
 
 
@@ -156,7 +158,26 @@ async def test_dedupe_off_keeps_the_block_as_it_was(env, home, monkeypatch):  # 
 
 def test_a_short_event_is_never_counted_as_covered():
     assert not _is_covered({"content": "do it"}, _squash("please do it now, then do it again"))
-    assert _is_covered({"content": "Bash({}) -> r1 row 0 val=7919 r1 row 1 val=7950"}, _squash("x r1 row 0 val=7919\nr1 row 1 val=7950 y"))
+    assert _is_covered({"content": 'Bash({"command": "ls -la"}) -> r1 row 0 val=7919 r1 row 1 val=7950'},
+                       _squash('x {"command": "ls -la"} r1 row 0 val=7919\nr1 row 1 val=7950 y'))
+
+
+HEAD80 = "No matches found in the repository for this pattern, searched under src and tests: "  # 80+ chars shared
+
+
+def test_a_different_call_with_the_same_result_prefix_does_not_cover_an_event():
+    assert len(HEAD80) >= 80
+    on_wire = _squash('{"pattern": "alpha"} ' + HEAD80 + "0 files (alpha)")
+    other = {"content": f'Grep({{"pattern": "beta"}}) -> {HEAD80}0 files (beta)'}
+    assert not _is_covered(other, on_wire)
+    same = {"content": f'Grep({{"pattern": "alpha"}}) -> {HEAD80}0 files (alpha)'}
+    assert _is_covered(same, on_wire)  # control: the call that IS on the wire is covered
+
+
+def test_results_that_differ_only_after_char_80_are_not_covered():
+    on_wire = _squash('{"pattern": "alpha"} ' + HEAD80 + "0 files (alpha)")
+    differs = {"content": f'Grep({{"pattern": "alpha"}}) -> {HEAD80}7 files (alpha)'}  # same call, same 80 chars, other tail
+    assert not _is_covered(differs, on_wire)
 
 
 def test_an_event_lost_to_summarisation_stays(home, monkeypatch):  # noqa: F811
@@ -166,9 +187,46 @@ def test_an_event_lost_to_summarisation_stays(home, monkeypatch):  # noqa: F811
     session_store.record_event(sid, "tool_call", "Read(a.py) -> alpha widget parser body " + "a" * 40, role="tool", tool="Read")
     for i in range(3):
         session_store.record_event(sid, "tool_call", f"Bash(ls {i}) -> newest listing number {i} " + "b" * 40, role="tool", tool="Bash")
-    covered = "newest listing number 0 " + "b" * 40 + "\nnewest listing number 1 " + "b" * 40 + "\nnewest listing number 2 " + "b" * 40
+    covered = "".join(f"ls {i} newest listing number {i} " + "b" * 40 + "\n" for i in range(3))
     kw = dict(max_tokens=1500, query="widget parser", project_root=str(home))
     plain = session_store.build_session_context(sid, **kw)
     deduped = session_store.build_session_context(sid, covered_text=covered, **kw)
     assert "alpha widget parser" in plain and "newest listing number 2" in plain  # premise: all four are chosen
     assert "alpha widget parser" in deduped and "newest listing number" not in deduped
+
+
+def test_a_dropped_slot_is_not_refilled_by_an_older_event(home, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_SESSIONS_PATH", str(home / "sessions.db"))
+    monkeypatch.chdir(home)
+    sid = "dedupe-norefill"
+    session_store.record_event(sid, "tool_call", "Read(old.py) -> zebra unrelated older listing " + "z" * 40, role="tool", tool="Read")
+    for i in range(3):
+        session_store.record_event(sid, "tool_call", f"Bash(ls {i}) -> newest listing number {i} " + "b" * 40, role="tool", tool="Bash")
+    covered = "".join(f"ls {i} newest listing number {i} " + "b" * 40 + "\n" for i in range(3))
+    kw = dict(max_tokens=1500, query="widget parser", project_root=str(home))
+    plain = session_store.build_session_context(sid, **kw)
+    assert "newest listing number 0" in plain and "zebra" not in plain  # premise: the older event is not selected
+    deduped = session_store.build_session_context(sid, covered_text=covered, **kw)
+    assert "zebra" not in deduped and "newest listing number" not in deduped
+
+
+@pytest.mark.timing
+def test_request_text_and_cover_check_stay_fast_on_a_large_payload():
+    import time
+
+    big = "x" * 9_000
+    msgs = []
+    for i in range(300):  # about 5 MB of messages: 300 tool_use inputs and 300 results
+        msgs.append({"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "Bash",
+                                                       "input": {"command": f"cat f{i}.py " + big}}]})
+        msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": f"r{i} " + big}]})
+    events = [{"content": f'Bash({json.dumps(msgs[2 * i]["content"][0]["input"])[:200]}) -> r{i} xxxxxxxxxxxxxxxx'}
+              for i in range(0, 300, 10)]  # the hook stores at most 200 chars of a call's input
+    t0 = time.monotonic()
+    text = okf_context._request_text({"messages": msgs})
+    covered = _squash(text)
+    hits = sum(_is_covered(e, covered) for e in events)
+    elapsed = time.monotonic() - t0
+    assert len(text) > 2_500_000  # premise: the payload is as large as claimed
+    assert hits == len(events), hits  # premise: every probe really searched and matched
+    assert elapsed < 2.0, elapsed
