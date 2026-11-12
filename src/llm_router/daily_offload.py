@@ -336,6 +336,9 @@ def compute_day(day: Date, inputs: Inputs, *, now: float | None = None,
             return "synthetic"
         # D-407: a session the owner reclassified through session_kind_overrides.json as non-organic
         # (coordinator-agent sessions, D-335/D-399) is reported on its own line, never in organic or release_clock.
+        # Order matters: a session whose override kind is organic resolves as organic first (above); a session
+        # that is both manifest-listed and overridden stays "synthetic" (checked above),
+        # so release_clock never changes; every non-organic override kind (research, harness, ...) lands here.
         return "coordinated" if sk.override_of(sid) is not None else "other"
 
     def in_day(x: dict) -> bool:
