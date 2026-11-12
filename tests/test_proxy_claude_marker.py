@@ -46,3 +46,28 @@ def test_marker_beats_exempt_and_pin_but_not_kill(monkeypatch):
     s = local_mode.LocalSession(exempt="subagent_thread", pinned=local_mode.PIN_CLAUDE)
     assert local_mode.decide_local(b, s).reason == "claude_marker"
     assert local_mode.decide_local(b, local_mode.LocalSession(kill_switch=True)).reason == "kill_switch"
+
+
+def test_first_user_message_need_not_be_messages_0(monkeypatch):
+    monkeypatch.setenv(ENV, "1")
+    body = {"messages": [{"role": "assistant", "content": "hi"}, {"role": "user", "content": M}]}
+    assert _decide(body).reason == local_mode.REASON_CLAUDE_MARKER
+
+
+def test_first_user_message_with_tool_result_blocks_first(monkeypatch):
+    monkeypatch.setenv(ENV, "1")
+    blocks = [{"type": "tool_result", "tool_use_id": "t", "content": f"x {M}"}, {"type": "text", "text": M}]
+    assert _decide(_body(blocks)).reason == local_mode.REASON_CLAUDE_MARKER
+    only_result = [{"type": "tool_result", "tool_use_id": "t", "content": M}]
+    assert _decide(_body(only_result)).reason != local_mode.REASON_CLAUDE_MARKER
+
+
+def test_compaction_changes_the_conversation_key_so_no_pin_can_cover_it(monkeypatch):
+    """Documents the residual leak: the pin key hashes the first message, so a history whose marked
+    first message is gone is a different conversation and the marker is not seen."""
+    from llm_router.proxy.cache_cost import conversation_key
+    monkeypatch.setenv(ENV, "1")
+    marked = _body(f"task {M}", "next")
+    compacted = {"messages": [{"role": "user", "content": "summary of earlier work"}]}
+    assert conversation_key(marked, "s") != conversation_key(compacted, "s")
+    assert _decide(compacted).reason != local_mode.REASON_CLAUDE_MARKER
