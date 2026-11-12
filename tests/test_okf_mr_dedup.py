@@ -47,7 +47,7 @@ FORMATS = ("dict", "text")
 
 def _stored(fmt: str, text: str) -> str:
     """The result as the hook stores it, cut at 500 chars. ``dict``: ``json.dumps`` of a Bash ``tool_response``
-    (98.6% of 32,184 real tool_call events, count from the 212 hook logs of 2026-11-12); ``text``: the bare string."""
+    (98.6% of the tool_call events whose `) -> ` split my regex found in the 212 hook logs of 2026-11-12, n=32,184 on that regex; the logs grow, so treat it as a ratio, not a total); ``text``: the bare string."""
     if fmt == "text":
         return text[:500]
     return json.dumps({"stdout": text, "stderr": "", "interrupted": False, "isImage": False})[:500]
@@ -303,3 +303,29 @@ def test_dict_result_that_differs_inside_the_stored_prefix_is_not_covered():
 
 def test_dict_result_with_a_short_payload_is_never_covered():
     assert not _is_covered(_dict_event("echo ok", "ok"), _wire_of("echo ok", "ok"))
+
+
+def test_a_dict_result_containing_the_arrow_is_covered_when_it_is_on_the_wire():
+    out = "step one ok) -> step two ok\nthe build finished with no errors at all, " + HEAD80
+    ev = _dict_event("make test", out)
+    assert ") -> " in ev["content"].split(") -> ", 1)[1]  # premise: the stored result holds an arrow itself
+    assert _is_covered(ev, _wire_of("make test", out))
+
+
+def test_an_input_containing_the_arrow_plus_a_dict_result_splits_at_the_dict():
+    from llm_router.session_store import _split_call
+
+    cmd = "echo 'a) -> b'"
+    out = "plain output line that is long enough to be a real payload ok"
+    ev = _dict_event(cmd, out)
+    inp, res = _split_call(_squash(ev["content"]))
+    assert inp == json.dumps({"command": cmd}) and res.startswith('{"stdout": "plain output')
+    assert _is_covered(ev, _wire_of(cmd, out))
+
+
+def test_a_plain_text_result_keeps_the_last_arrow_split():
+    from llm_router.session_store import _split_call
+
+    assert _split_call("Grep(pattern) -> found a) -> b in file") == ("pattern) -> found a", "b in file")
+    assert _split_call("Bash(ls) -> output") == ("ls", "output")
+    assert _split_call("no call here") is None

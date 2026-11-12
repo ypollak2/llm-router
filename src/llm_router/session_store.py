@@ -962,6 +962,28 @@ _COVER_DECODED_MIN_CHARS = 40
 #: How much of a hook-recorded call's input must be on the wire (the hook stores at most 200 chars of it).
 _COVER_INPUT_CHARS = 60
 _CALL_EVENT = re.compile(r"^[^(]*\((.*)\) -> (.*)$", re.S)
+_CALL_OPEN = re.compile(r"^[^(]*\(")
+_ARROW = ") -> "
+
+
+def _split_call(content: str) -> tuple[str, str] | None:
+    """``(input, result)`` of a hook-recorded ``Tool(input) -> result`` event, or None.
+
+    The hook writes a dict result as ``json.dumps`` (it starts ``{"``), so the split is the FIRST `` ) -> ``
+    whose remainder starts that way: a result may contain `` ) -> `` itself (about 11% of real events), and so
+    may an input, which is why neither the first nor the last arrow is taken blindly. With no such arrow the
+    result is plain text and the last arrow splits it, as before.
+    """
+    opened = _CALL_OPEN.match(content)
+    if not opened:
+        return None
+    k = content.find(_ARROW, opened.end())
+    while k >= 0:
+        if content.startswith('{"', k + len(_ARROW)):
+            return content[opened.end():k], content[k + len(_ARROW):]
+        k = content.find(_ARROW, k + 1)
+    plain = _CALL_EVENT.match(content)
+    return (plain.group(1), plain.group(2)) if plain else None
 #: The keys whose string value is the text the request carries as the tool result: Bash ``stdout`` and the
 #: ``content`` of Grep / Read / Write. Measured on 212 real hook logs (2026-11-12): 98.6% of stored tool_call
 #: results are JSON-encoded objects, and these two keys lead the large majority of them.
@@ -1050,9 +1072,9 @@ def _is_covered(rec: dict[str, Any], covered: str) -> bool:
     line-numbered file text, Edit, Glob) is never covered: the event stays. Linear in ``len(covered)`` per event.
     """
     content = _squash(rec.get("content", ""))
-    call = _CALL_EVENT.match(content)
+    call = _split_call(content)
     if call:
-        inp, res = call.group(1), call.group(2)
+        inp, res = call
         return (_result_covered(res, covered)
                 and bool(inp[:_COVER_INPUT_CHARS]) and inp[:_COVER_INPUT_CHARS] in covered)
     return len(content) >= _COVER_MIN_CHARS and content in covered
