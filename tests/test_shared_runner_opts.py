@@ -181,3 +181,94 @@ def test_proxy_warns_when_num_ctx_differs_from_table(caplog):
     with caplog.at_level("WARNING"):
         ProxyConfig(model=f"ollama/{MODEL}", num_ctx=32768)
     assert "thrash" not in caplog.text
+
+
+# ---- LLM_ROUTER_SHARED_KEEP_ALIVE: bounded idle time for the shared runner -------------------
+
+def _all_paths(monkeypatch):
+    """keep_alive each shared-runner path would send, as {path: value} (no network)."""
+    from llm_router import decision_classifier as dc
+    from llm_router import local_classifier as lc
+    from llm_router import warm
+    from llm_router.hooks import direct_executor as de
+    from llm_router.proxy.backends import OllamaBackend
+    from llm_router.proxy.server import ProxyConfig
+    from llm_router.toolkit.adapters import ollama as oa
+    from llm_router.toolkit.adapters.ollama import shared_runner_opts
+    monkeypatch.setattr(oa, "check_resident", lambda *a, **k: None)
+    monkeypatch.setattr(oa, "ensure_fits", lambda *a, **k: None)
+    out = {
+        "helper": shared_runner_opts(MODEL)[1],
+        "edit_keep_alive": warm.edit_keep_alive(MODEL),
+        "warmup_payload": warm.warmup_payload(MODEL)["keep_alive"],
+        "classifier": lc._keep_alive_for(MODEL),
+        "classifier_payload": lc._payload(MODEL, lc.Assembled("c", "x"))["keep_alive"],
+        "decision_classifier": dc.payload(MODEL, "x")["keep_alive"],
+        "proxy_backend": OllamaBackend(f"ollama/{MODEL}", None, base_url="http://x", keep_alive=600).keep_alive,
+        "proxy_config": ProxyConfig(model=f"ollama/{MODEL}").keep_alive,
+    }
+    sent = []
+
+    def fake(req, *a, **k):
+        sent.append(json.loads(req.data))
+        raise OSError("stop")
+    with patch.object(urllib.request, "urlopen", fake):
+        de.call_ollama("hi", MODEL, 4, keep_alive=600)
+        try:
+            from llm_router import context_summary as cs
+            cs._generate(MODEL, "hi")
+        except OSError:
+            pass
+    out["direct_executor"], out["context_summary"] = sent[0]["keep_alive"], sent[1]["keep_alive"]
+    return out
+
+
+def test_shared_keep_alive_unset_is_minus_one_everywhere(one_model, monkeypatch, open_url_via_urlopen):
+    monkeypatch.delenv("LLM_ROUTER_SHARED_KEEP_ALIVE", raising=False)
+    got = _all_paths(monkeypatch)
+    assert set(got.values()) == {-1}, got
+
+
+def test_shared_keep_alive_two_hours_everywhere(one_model, monkeypatch, open_url_via_urlopen):
+    monkeypatch.setenv("LLM_ROUTER_SHARED_KEEP_ALIVE", "2h")
+    got = _all_paths(monkeypatch)
+    assert set(got.values()) == {"2h"}, got
+
+
+def test_shared_keep_alive_seconds_is_int(one_model, monkeypatch):
+    from llm_router.toolkit.adapters.ollama import shared_runner_opts
+    monkeypatch.setenv("LLM_ROUTER_SHARED_KEEP_ALIVE", "7200")
+    assert shared_runner_opts(MODEL)[1] == 7200
+    monkeypatch.setenv("LLM_ROUTER_SHARED_KEEP_ALIVE", "-1")
+    assert shared_runner_opts(MODEL)[1] == -1
+
+
+def test_shared_keep_alive_other_model_untouched(one_model, monkeypatch):
+    from llm_router import warm
+    monkeypatch.setenv("LLM_ROUTER_SHARED_KEEP_ALIVE", "2h")
+    assert warm.edit_keep_alive("other:7b") == 300      # LOCAL_KEEP_ALIVE still rules non-shared models
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "0s", "0h", "abc", "2 hours", "1.5", "h", "-2h"])
+def test_shared_keep_alive_invalid_falls_back_to_minus_one_and_warns(bad, one_model, monkeypatch, caplog):
+    from llm_router.toolkit.adapters import ollama as oa
+    oa._SHARED_KA_WARNED.discard(bad)
+    monkeypatch.setenv("LLM_ROUTER_SHARED_KEEP_ALIVE", bad)
+    with caplog.at_level("WARNING"):
+        assert oa.shared_runner_opts(MODEL)[1] == -1
+    assert "LLM_ROUTER_SHARED_KEEP_ALIVE" in caplog.text
+
+
+def test_shared_keep_alive_keeps_reload_window_pinned(one_model, monkeypatch):
+    """A reload after expiry asks for the raised window: num_ctx is independent of keep_alive on every path."""
+    from llm_router import local_classifier as lc
+    from llm_router import warm
+    from llm_router.toolkit.adapters.ollama import shared_runner_opts
+    monkeypatch.setenv("LLM_ROUTER_WINDOW_STEP", "131072")
+    monkeypatch.delenv("LLM_ROUTER_SHARED_KEEP_ALIVE", raising=False)
+    pinned = (shared_runner_opts(MODEL)[0], warm.warmup_payload(MODEL)["options"]["num_ctx"],
+              lc._payload(MODEL, lc.Assembled("c", "x"))["options"]["num_ctx"])
+    monkeypatch.setenv("LLM_ROUTER_SHARED_KEEP_ALIVE", "2h")
+    bounded = (shared_runner_opts(MODEL)[0], warm.warmup_payload(MODEL)["options"]["num_ctx"],
+               lc._payload(MODEL, lc.Assembled("c", "x"))["options"]["num_ctx"])
+    assert pinned == bounded == (131072, 131072, 131072)

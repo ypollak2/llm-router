@@ -37,7 +37,39 @@ def default_num_ctx(model: str | None) -> int:
     return _table_num_ctx(model)
 
 
-def shared_runner_opts(model: str | None) -> tuple[int, int] | None:
+_SHARED_KA_DURATION = re.compile(r"(?:\d+(?:\.\d+)?(?:ns|us|\u00b5s|ms|s|m|h))+")
+_SHARED_KA_WARNED: set[str] = set()
+
+
+def shared_keep_alive() -> int | str:
+    """``keep_alive`` the shared runner is sent: -1 (forever) unless ``LLM_ROUTER_SHARED_KEEP_ALIVE`` is set.
+
+    Set, it is an Ollama duration (``"2h"``, ``"90m"``) or an integer in seconds. 0 and negatives
+    other than -1 are rejected (0 would unload the model after every call). An invalid value is
+    NOT raised (this runs on every hot path): it logs one warning and falls back to -1, today's
+    behaviour. Every shared-runner call site gets this through :func:`shared_runner_opts`, so one
+    path left at -1 cannot keep the model alive (each request resets the timer)."""
+    raw = os.environ.get("LLM_ROUTER_SHARED_KEEP_ALIVE", "").strip()
+    if not raw:
+        return -1
+    value: int | str | None = None
+    try:
+        n = int(raw)
+        value = n if (n > 0 or n == -1) else None
+    except ValueError:
+        if _SHARED_KA_DURATION.fullmatch(raw) and re.search(r"[1-9]", raw):
+            value = raw
+    if value is None:
+        if raw not in _SHARED_KA_WARNED:
+            _SHARED_KA_WARNED.add(raw)
+            logging.getLogger(__name__).warning(
+                "LLM_ROUTER_SHARED_KEEP_ALIVE=%r is invalid (want an Ollama duration like '2h', "
+                "seconds > 0, or -1); using -1 (never expire)", raw)
+        return -1
+    return value
+
+
+def shared_runner_opts(model: str | None) -> tuple[int, int | str] | None:
     """``(num_ctx, keep_alive)`` every caller must send for *model*, or None.
 
     Set only when ``LLM_ROUTER_LOCAL_MODEL`` is set and equals *model* (``ollama/`` prefix
@@ -45,13 +77,15 @@ def shared_runner_opts(model: str | None) -> tuple[int, int] | None:
     evicts the proxy's runner while a short keep_alive expires it (docs/bugs/CLSCTX-1.md). So
     under the one-model policy the proxy's window wins over every other override
     (the ``local_models`` table value, which every process derives alike; the env is not
-    consulted) and keep_alive is -1."""
+    consulted) and keep_alive is :func:`shared_keep_alive` (-1 unless
+    ``LLM_ROUTER_SHARED_KEEP_ALIVE`` sets a bound). num_ctx does not depend on keep_alive, so a
+    reload after expiry asks for the same window as the pinned runner."""
     one = get_local_model()
     name = (model or "").strip()
     name = name.split("/", 1)[1] if name.startswith("ollama/") else name
     if not one or not name or not _same_name(name, one):
         return None
-    return default_num_ctx(name), -1
+    return default_num_ctx(name), shared_keep_alive()
 
 
 def num_ctx(model: str | None = None) -> int | None:
