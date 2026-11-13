@@ -21,7 +21,7 @@ release when either holds:
 
 2. **The corrected used rate drops below the previous release's recorded
    value** (``used / attempted`` from the headline, compared as recorded, no
-   tolerance). The history lives in ``docs/measurements/outcome_audit_history.json``
+   tolerance unless ``--tolerance-alpha`` is given, see ``dropped``). The history lives in ``docs/measurements/outcome_audit_history.json``
    (summary numbers only, no transcript text). The first run, with no
    history, records a baseline and passes. A re-run of a release compares
    against the release before it and replaces its own entry.
@@ -74,6 +74,7 @@ import importlib.util
 import json
 import sys
 from datetime import datetime, timezone
+from statistics import NormalDist
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -140,6 +141,36 @@ def check_leaks(rows: list[dict], summary: dict) -> list[str]:
     return problems
 
 
+def dropped(used: int, n: int, base_used: int, base_n: int, rate: float, base_rate: float,
+            alpha: float = 0.0) -> bool:
+    """Is the current used rate a real drop from the baseline's?
+
+    ``alpha == 0`` (default) is the original point comparison ``rate < base_rate``,
+    no tolerance, decisions identical to before.
+
+    ``alpha > 0``: one-sided pooled two-proportion z-test (Fleiss, Levin & Paik,
+    *Statistical Methods for Rates and Proportions*, 3rd ed., sec. 4.2; the
+    z-test of H0: p1 = p2 against H1: p1 < p2):
+
+        p_pool = (k1 + k2) / (n1 + n2)
+        z = (k1/n1 - k2/n2) / sqrt(p_pool * (1 - p_pool) * (1/n1 + 1/n2))
+
+    with k1/n1 the current run and k2/n2 the baseline. It is a drop only when
+    ``rate < base_rate`` and the one-sided p-value ``Phi(z)`` is <= ``alpha``,
+    i.e. the fall is larger than sampling noise at that level. Both samples'
+    noise is counted (the baseline is itself a sample).
+    """
+    if not rate < base_rate:
+        return False
+    if alpha <= 0:
+        return True
+    pool = (used + base_used) / (n + base_n)
+    var = pool * (1 - pool) * (1 / n + 1 / base_n)
+    if var <= 0:
+        return True
+    return NormalDist().cdf((rate - base_rate) / var ** 0.5) <= alpha
+
+
 def audit_version(obj: dict) -> int:
     """The audit version an artifact summary or a history entry was scored with; an
     entry from before versions were recorded is version 1."""
@@ -168,7 +199,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--force-baseline", default=None, metavar="REASON",
                     help="replace the baseline already recorded for this release and audit version with this run's "
                          "artifact (default: a re-run never replaces it); the old values and the reason are recorded")
+    ap.add_argument("--tolerance-alpha", type=float, default=0.0, metavar="ALPHA",
+                    help="fail a drop only when it is beyond sampling noise: one-sided two-proportion z-test at this "
+                         "significance level (e.g. 0.05). Default 0 = fail any drop, as before")
     args = ap.parse_args(argv)
+    if not 0.0 <= args.tolerance_alpha < 1.0:
+        ap.error("--tolerance-alpha must be in [0, 1)")
+    alpha = args.tolerance_alpha
 
     release = args.release or _A.current_release()
     art = args.artifact_dir or _A.default_artifact_dir()
@@ -234,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"outcome gate: PASS — this artifact (sha256 {sha[:12]}) is the recorded v{cur_v} baseline of {release}: "
                   f"{used}/{n} = {100 * rate:.3f}%; nothing to record")
             return 0
-        if rate < own["used_rate"]:
+        if dropped(used, n, own["used"], own["attempted"], rate, own["used_rate"], alpha):
             print(f"outcome gate: FAIL — used rate {used}/{n} = {100 * rate:.3f}% dropped below {recorded}; "
                   f"a different artifact (sha256 {sha[:12]}, recorded {str(own.get('artifact_sha256'))[:12]}). "
                   f"The recorded baseline was NOT replaced; --force-baseline \"<reason>\" replaces it deliberately.")
@@ -255,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     elif same:
         prev = same[-1]
-        if rate < prev["used_rate"]:
+        if dropped(used, n, prev["used"], prev["attempted"], rate, prev["used_rate"], alpha):
             print(f"outcome gate: FAIL — used rate {used}/{n} = {100 * rate:.3f}% dropped below "
                   f"{prev['release']}'s recorded {100 * prev['used_rate']:.3f}% "
                   f"({prev['used']}/{prev['attempted']})")
@@ -282,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
                   f"Nothing was written to {args.history}.")
             return 1
         if args.cross_version == "compare":
-            if rate < prev["used_rate"]:
+            if dropped(used, n, prev["used"], prev["attempted"], rate, prev["used_rate"], alpha):
                 print(f"outcome gate: FAIL (CROSS-VERSION, v{prev_v} -> v{cur_v}, not like for like) — used rate "
                       f"{used}/{n} = {100 * rate:.3f}% dropped below {prev['release']}'s {100 * prev['used_rate']:.3f}%")
                 return 1
