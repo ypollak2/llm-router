@@ -279,7 +279,7 @@ def seed_usage_json() -> Path:
                 return path  # real data already present — never clobber it
         except (json.JSONDecodeError, OSError):
             pass
-    tmp = path.with_suffix(".json.tmp")
+    tmp = path.with_suffix(f".json.{os.getpid()}.tmp")  # unique: a stale 0644 temp is never reopened
     with state_files.open_private(tmp, "w") as fh:
         fh.write(
             json.dumps(

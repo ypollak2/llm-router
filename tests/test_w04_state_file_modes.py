@@ -806,3 +806,34 @@ def test_atomic_writers_create_0600(home, writer):
     assert p.is_file(), p
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
     assert not list(p.parent.glob("*.tmp")), "temp file left behind"
+
+
+@pytest.mark.parametrize(
+    "writer,name",
+    [(_write_usage_seed, "usage.json"), (_write_quality_breaker, "quality_breaker.json")],
+    ids=["usage_seed", "quality_breaker"],
+)
+def test_preexisting_0644_destination_ends_0600(home, writer, name):
+    dest = writer()  # first write locates the destination (a pending usage seed is rewritten)
+    os.chmod(dest, 0o644)
+    old = os.umask(0o022)
+    try:
+        p = writer()
+    finally:
+        os.umask(old)
+    assert p == dest and stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
+def test_stale_0644_usage_tmp_leaves_no_wider_mode(home):
+    first = _write_usage_seed()
+    stale = first.with_suffix(f".json.{os.getpid()}.tmp")  # the temp name this process would use
+    first.unlink()
+    stale.write_text("stale")
+    os.chmod(stale, 0o644)
+    old = os.umask(0o022)
+    try:
+        p = _write_usage_seed()
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert json.loads(p.read_text())["pending"] is True

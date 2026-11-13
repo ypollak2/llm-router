@@ -497,6 +497,7 @@ def _read_cache(now: float | None = None) -> tuple[str | None, float | None]:
 
 def _write_cache(line: str) -> None:
     """Atomically replace the cache. Never raises."""
+    tmp = None
     try:
         path = _cache_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -506,6 +507,11 @@ def _write_cache(line: str) -> None:
             json.dump({"ts": time.time(), "key": _cache_key(), "status": line}, f)
         os.replace(tmp, path)
     except Exception:  # noqa: BLE001 -- the next refresh tries again
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         return
 
 
