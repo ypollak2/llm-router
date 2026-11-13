@@ -572,3 +572,98 @@ def test_through_the_release_script_a_rerun_needs_no_flag_and_a_worse_one_cannot
     assert rc == 1 and "dropped below" in out and "NOT replaced" in out, out
     assert hist.read_bytes() == recorded
 
+
+
+# --- --tolerance-alpha: a drop must exceed sampling noise (default 0 = unchanged) ---
+
+def _old_drop(k1, n1, k2, n2):
+    return k1 / n1 < k2 / n2          # the point comparison the gate had before
+
+
+def test_alpha_zero_decides_exactly_like_the_old_point_comparison():
+    grid = [(k1, n1, k2, n2) for n1 in (50, 100, 873) for n2 in (50, 100, 873)
+            for k1 in range(0, n1 + 1, max(1, n1 // 25)) for k2 in range(0, n2 + 1, max(1, n2 // 25))]
+    assert len(grid) > 1000
+    for k1, n1, k2, n2 in grid:
+        assert G.dropped(k1, n1, k2, n2, k1 / n1, k2 / n2) == _old_drop(k1, n1, k2, n2)
+        assert G.dropped(k1, n1, k2, n2, k1 / n1, k2 / n2, 0.0) == _old_drop(k1, n1, k2, n2)
+
+
+def test_alpha_never_fails_something_the_point_comparison_passes():
+    for k1 in range(0, 101, 5):
+        for k2 in range(0, 101, 5):
+            if not _old_drop(k1, 100, k2, 100):
+                assert not G.dropped(k1, 100, k2, 100, k1 / 100, k2 / 100, 0.05)
+
+
+def test_a_one_point_dip_passes_with_alpha_and_fails_without(tmp_path, capsys):
+    history = {"releases": [{"release": "1.0.0", "used_rate": 0.50, "used": 50, "attempted": 100}]}
+    rows = _rows(49, 100)
+    rc, _ = _run(tmp_path, rows, _summary(rows, "1.1.0"), "1.1.0", history)
+    assert rc == 1, capsys.readouterr().out
+    rc, _ = _run(tmp_path, rows, _summary(rows, "1.1.0"), "1.1.0", history, extra=["--tolerance-alpha", "0.05"])
+    assert rc == 0, capsys.readouterr().out
+
+
+def test_a_big_drop_still_fails_with_alpha(tmp_path, capsys):
+    history = {"releases": [{"release": "1.0.0", "used_rate": 0.50, "used": 50, "attempted": 100}]}
+    rows = _rows(30, 100)
+    rc, _ = _run(tmp_path, rows, _summary(rows, "1.1.0"), "1.1.0", history, extra=["--tolerance-alpha", "0.05"])
+    assert rc == 1 and "dropped below" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("bad", ["1.5", "-0.1", "1.0", "nan"])
+def test_alpha_out_of_range_is_rejected(bad):
+    with pytest.raises(SystemExit):
+        G.main(["--tolerance-alpha", bad])
+
+
+def test_tolerance_pass_says_so_and_records_alpha(tmp_path, capsys):
+    history = {"releases": [{"release": "1.0.0", "used_rate": 0.50, "used": 50, "attempted": 100}]}
+    rows = _rows(49, 100)
+    rc, hist = _run(tmp_path, rows, _summary(rows, "1.1.0"), "1.1.0", history, extra=["--tolerance-alpha", "0.05"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "PASS" in out and ">=" not in out.split("PASS", 1)[1]
+    assert "within tolerance (one-sided p=0.4" in out and "alpha=0.05" in out
+    assert json.loads(hist.read_text())["releases"][-1]["tolerance_alpha"] == 0.05
+
+
+def test_alpha_zero_output_and_row_have_no_tolerance_text(tmp_path, capsys):
+    history = {"releases": [{"release": "1.0.0", "used_rate": 0.02, "used": 2, "attempted": 100}]}
+    rows = _rows(3, 100)
+    rc, hist = _run(tmp_path, rows, _summary(rows, "1.1.0"), "1.1.0", history)
+    out = capsys.readouterr().out
+    assert rc == 0 and "tolerance" not in out and ">= 1.0.0's 2.000%" in out
+    assert "tolerance_alpha" not in json.loads(hist.read_text())["releases"][-1]
+
+
+SIM_SEED, SIM_TRIALS, ALPHA = 20261113, 20000, 0.05
+
+
+def _sim(p_base, p_cur, n, alpha):
+    import random
+    rng = random.Random(SIM_SEED)
+    fails = 0
+    for _ in range(SIM_TRIALS):
+        k2 = sum(rng.random() < p_base for _ in range(n))
+        k1 = sum(rng.random() < p_cur for _ in range(n))
+        fails += G.dropped(k1, n, k2, n, k1 / n, k2 / n, alpha)
+    return fails / SIM_TRIALS
+
+
+@pytest.mark.parametrize("p", [0.5, 0.8])
+def test_simulated_false_fail_rate_drops_to_about_alpha(p):
+    n = 100                                                 # the n of the gate's own tests
+    old, new = _sim(p, p, n, 0.0), _sim(p, p, n, ALPHA)
+    print(f"false-fail p={p} n={n} trials={SIM_TRIALS} seed={SIM_SEED}: alpha=0 {old:.4f}  alpha={ALPHA} {new:.4f}")
+    assert old > 0.35                                       # the point comparison fails ~45% of equal releases
+    assert new <= ALPHA + 0.02
+
+
+@pytest.mark.parametrize("p,n,floor", [(0.5, 100, 0.35), (0.8, 100, 0.40), (0.5, 873, 0.95), (0.8, 873, 0.95)])
+def test_simulated_power_against_a_ten_point_drop(p, n, floor):
+    # At n=100 a 10-point drop is only ~41-49% detectable (both samples are noisy); at n=873 (15.4.0's n) ~99%.
+    power = _sim(p, p - 0.10, n, ALPHA)
+    print(f"power p={p}->{p - 0.10:.1f} n={n} trials={SIM_TRIALS} seed={SIM_SEED} alpha={ALPHA}: {power:.4f}")
+    assert power > floor
