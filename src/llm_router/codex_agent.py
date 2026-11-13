@@ -140,6 +140,8 @@ _LAST_PROBE_TS: float = 0.0
 #: ``curl``, ``git push`` and ``gh pr merge``. A CLI that does not list the flag is not started at all.
 IGNORE_RULES_FLAG = "--ignore-rules"
 _IGNORE_RULES_RX = re.compile(r"(?<![\w-])--ignore-rules(?![\w-])")
+#: ANSI escape sequences (CSI and OSC). Coloured help splits ``--ignore-rules`` with escapes and the match misses it.
+_ANSI_RX = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _RULES_PROBE_TIMEOUT_S = 15.0
 _RULES_REPROBE_S = 60.0
 #: binary path -> whether ``<binary> exec --help`` lists the flag. A definitive answer is kept for the life of the process.
@@ -154,12 +156,16 @@ def _probe_ignore_rules(binary: str) -> bool | None:
 
     from llm_router.safe_subprocess import get_safe_env
 
+    # CLICOLOR_FORCE=1 in the caller's env makes the CLI colour its help even when piped; probe plain text.
+    env = get_safe_env()
+    env.pop("CLICOLOR_FORCE", None)
+    env["NO_COLOR"] = "1"
     try:
         proc = subprocess.run([binary, "exec", "--help"], capture_output=True, text=True, stdin=subprocess.DEVNULL,
-                              timeout=_RULES_PROBE_TIMEOUT_S, env=get_safe_env(), check=False)
+                              timeout=_RULES_PROBE_TIMEOUT_S, env=env, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
-    text = (proc.stdout or "") + (proc.stderr or "")
+    text = _ANSI_RX.sub("", (proc.stdout or "") + (proc.stderr or ""))
     if proc.returncode != 0 or not text.strip():
         return None
     return bool(_IGNORE_RULES_RX.search(text))
