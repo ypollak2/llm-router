@@ -57,7 +57,12 @@ fi
 echo "✅ Found PyPI credentials"
 
 # Get version
-VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+# (no tomllib: python3 may be < 3.11, e.g. macOS /usr/bin/python3 is 3.9)
+VERSION=$(awk '/^\[/{p=($0=="[project]")} p && /^version[[:space:]]*=/{gsub(/^[^"\x27]*["\x27]|["\x27].*$/,""); print; exit}' pyproject.toml)
+if [[ ! "$VERSION" =~ ^[0-9][0-9A-Za-z.+-]*$ ]]; then
+    echo "❌ Error: could not read a valid [project] version from pyproject.toml (got: '$VERSION')"
+    exit 1
+fi
 echo "📦 Publishing version: $VERSION"
 
 # Clean and build
