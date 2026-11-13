@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 12
+# llm_router-hook-version: 13
 """UserPromptSubmit hook — enhanced savings + routing status bar.
 
 Displays a two-mode status line:
@@ -501,7 +501,8 @@ def _write_cache(line: str) -> None:
         path = _cache_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        # 0600 at creation (SEC-S7); os.open keeps this standalone hook free of package imports
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
             json.dump({"ts": time.time(), "key": _cache_key(), "status": line}, f)
         os.replace(tmp, path)
     except Exception:  # noqa: BLE001 -- the next refresh tries again

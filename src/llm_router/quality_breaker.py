@@ -82,7 +82,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
-from llm_router import paths, session_kind
+from llm_router import paths, session_kind, state_files
 
 STATE_FILE = "quality_breaker.json"
 
@@ -217,7 +217,8 @@ def _write_state(state: dict) -> bool:
         # ``quality_breaker.tmp`` could replace each other's half-written file.
         tmp = p.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         try:
-            tmp.write_text(json.dumps(state), encoding="utf-8")
+            with state_files.open_private(tmp, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(state))
             tmp.replace(p)
         except Exception:
             tmp.unlink(missing_ok=True)

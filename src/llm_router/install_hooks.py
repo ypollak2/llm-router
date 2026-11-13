@@ -25,7 +25,7 @@ from llm_router.text_job_bind import PLACEHOLDER
 from llm_router.text_job_bind.limits import HOOK_TIMEOUT_SEC as _TEXT_JOB_BIND_HOOK_TIMEOUT_SEC
 from llm_router.tool_surface import localize  # CHZ-SURF-01
 
-from llm_router import paths
+from llm_router import paths, state_files
 
 
 def is_frozen() -> bool:
@@ -280,16 +280,17 @@ def seed_usage_json() -> Path:
         except (json.JSONDecodeError, OSError):
             pass
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(
-        json.dumps(
-            {
-                "pending": True,
-                "seeded_at": time.time(),
-                "note": "placeholder written by `llm-router install`; "
-                "replaced on the first usage refresh",
-            }
+    with state_files.open_private(tmp, "w") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "pending": True,
+                    "seeded_at": time.time(),
+                    "note": "placeholder written by `llm-router install`; "
+                    "replaced on the first usage refresh",
+                }
+            )
         )
-    )
     os.replace(tmp, path)
     return path
 
