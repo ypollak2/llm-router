@@ -612,9 +612,30 @@ def test_a_big_drop_still_fails_with_alpha(tmp_path, capsys):
     assert rc == 1 and "dropped below" in capsys.readouterr().out
 
 
-def test_alpha_out_of_range_is_rejected(tmp_path):
+@pytest.mark.parametrize("bad", ["1.5", "-0.1", "1.0", "nan"])
+def test_alpha_out_of_range_is_rejected(bad):
     with pytest.raises(SystemExit):
-        G.main(["--tolerance-alpha", "1.5"])
+        G.main(["--tolerance-alpha", bad])
+
+
+def test_tolerance_pass_says_so_and_records_alpha(tmp_path, capsys):
+    history = {"releases": [{"release": "1.0.0", "used_rate": 0.50, "used": 50, "attempted": 100}]}
+    rows = _rows(49, 100)
+    rc, hist = _run(tmp_path, rows, _summary(rows, "1.1.0"), "1.1.0", history, extra=["--tolerance-alpha", "0.05"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "PASS" in out and ">=" not in out.split("PASS", 1)[1]
+    assert "within tolerance (one-sided p=0.4" in out and "alpha=0.05" in out
+    assert json.loads(hist.read_text())["releases"][-1]["tolerance_alpha"] == 0.05
+
+
+def test_alpha_zero_output_and_row_have_no_tolerance_text(tmp_path, capsys):
+    history = {"releases": [{"release": "1.0.0", "used_rate": 0.02, "used": 2, "attempted": 100}]}
+    rows = _rows(3, 100)
+    rc, hist = _run(tmp_path, rows, _summary(rows, "1.1.0"), "1.1.0", history)
+    out = capsys.readouterr().out
+    assert rc == 0 and "tolerance" not in out and ">= 1.0.0's 2.000%" in out
+    assert "tolerance_alpha" not in json.loads(hist.read_text())["releases"][-1]
 
 
 SIM_SEED, SIM_TRIALS, ALPHA = 20261113, 20000, 0.05

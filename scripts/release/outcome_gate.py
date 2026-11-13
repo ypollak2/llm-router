@@ -21,7 +21,8 @@ release when either holds:
 
 2. **The corrected used rate drops below the previous release's recorded
    value** (``used / attempted`` from the headline, compared as recorded, no
-   tolerance unless ``--tolerance-alpha`` is given, see ``dropped``). The history lives in ``docs/measurements/outcome_audit_history.json``
+   tolerance unless ``--tolerance-alpha`` is given, see ``dropped``). The history
+   lives in ``docs/measurements/outcome_audit_history.json``
    (summary numbers only, no transcript text). The first run, with no
    history, records a baseline and passes. A re-run of a release compares
    against the release before it and replaces its own entry.
@@ -74,8 +75,8 @@ import importlib.util
 import json
 import sys
 from datetime import datetime, timezone
-from statistics import NormalDist
 from pathlib import Path
+from statistics import NormalDist
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HISTORY = ROOT / "docs" / "measurements" / "outcome_audit_history.json"
@@ -164,11 +165,27 @@ def dropped(used: int, n: int, base_used: int, base_n: int, rate: float, base_ra
         return False
     if alpha <= 0:
         return True
+    p = _drop_p_value(used, n, base_used, base_n, rate, base_rate)
+    return p is None or p <= alpha
+
+
+def _drop_p_value(used: int, n: int, base_used: int, base_n: int, rate: float, base_rate: float):
+    """One-sided p-value ``Phi(z)`` of ``dropped`` (None when the pooled variance is 0)."""
     pool = (used + base_used) / (n + base_n)
     var = pool * (1 - pool) * (1 / n + 1 / base_n)
     if var <= 0:
-        return True
-    return NormalDist().cdf((rate - base_rate) / var ** 0.5) <= alpha
+        return None
+    return NormalDist().cdf((rate - base_rate) / var ** 0.5)
+
+
+def _relation(used: int, n: int, base_used: int, base_n: int, rate: float, base_rate: float,
+              alpha: float) -> str:
+    """The word between a passing rate and its baseline: ``>=`` (always, when alpha is 0), or, for a
+    lower rate that passed only because of the tolerance, a statement saying so with p and alpha."""
+    if alpha <= 0 or not rate < base_rate:
+        return ">="
+    p = _drop_p_value(used, n, base_used, base_n, rate, base_rate)
+    return f"is BELOW but within tolerance (one-sided p={p:.4f} > alpha={alpha:g}) of"
 
 
 def audit_version(obj: dict) -> int:
@@ -243,6 +260,9 @@ def main(argv: list[str] | None = None) -> int:
               f"({(summary.get('not_applicable') or {}).get('by_signal')}); "
               f"used rate with them counted as attempted: "
               f"{100 * (summary.get('not_applicable') or {}).get('used_rate_if_included', 0):.3f}%")
+    if alpha > 0:
+        print(f"outcome gate: tolerance on: a drop fails only if the one-sided two-proportion z-test gives "
+              f"p <= alpha={alpha:g}")
     history = _load_history(args.history)
     releases = history["releases"]
     idx = next((i for i, e in enumerate(releases) if e.get("release") == release), None)
@@ -256,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
              "recorded_at": datetime.now(timezone.utc).isoformat(), "artifact_sha256": sha}
     if na:
         entry["not_applicable"] = na
+    if alpha > 0:
+        entry["tolerance_alpha"] = alpha
     # The BASELINE of an audit version is its earliest entry (the first run, or the rebaseline that began it).
     # A re-run of that release is compared with it and never replaces it; a later release keeps the older rule:
     # a re-run is compared with the release before it and replaces its own entry.
@@ -276,7 +298,8 @@ def main(argv: list[str] | None = None) -> int:
                   f"a different artifact (sha256 {sha[:12]}, recorded {str(own.get('artifact_sha256'))[:12]}). "
                   f"The recorded baseline was NOT replaced; --force-baseline \"<reason>\" replaces it deliberately.")
             return 1
-        print(f"outcome gate: PASS — used rate {used}/{n} = {100 * rate:.3f}% >= {recorded}; a different artifact "
+        print(f"outcome gate: PASS — used rate {used}/{n} = {100 * rate:.3f}% "
+              f"{_relation(used, n, own['used'], own['attempted'], rate, own['used_rate'], alpha)} {recorded}; a different artifact "
               f"(sha256 {sha[:12]}, recorded {str(own.get('artifact_sha256'))[:12]}), so the recorded baseline was "
               f"kept, not replaced (--force-baseline \"<reason>\" replaces it)")
         return 0
@@ -297,8 +320,9 @@ def main(argv: list[str] | None = None) -> int:
                   f"{prev['release']}'s recorded {100 * prev['used_rate']:.3f}% "
                   f"({prev['used']}/{prev['attempted']})")
             return 1
+        rel = _relation(used, n, prev["used"], prev["attempted"], rate, prev["used_rate"], alpha)
         print(f"outcome gate: PASS — used rate {used}/{n} = {100 * rate:.3f}% "
-              f">= {prev['release']}'s {100 * prev['used_rate']:.3f}%")
+              f"{rel} {prev['release']}'s {100 * prev['used_rate']:.3f}%")
     elif earlier:
         prev = earlier[-1]
         prev_v = audit_version(prev)
@@ -323,8 +347,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"outcome gate: FAIL (CROSS-VERSION, v{prev_v} -> v{cur_v}, not like for like) — used rate "
                       f"{used}/{n} = {100 * rate:.3f}% dropped below {prev['release']}'s {100 * prev['used_rate']:.3f}%")
                 return 1
+            rel = _relation(used, n, prev["used"], prev["attempted"], rate, prev["used_rate"], alpha)
             print(f"outcome gate: PASS (CROSS-VERSION, v{prev_v} -> v{cur_v}, not like for like) — used rate "
-                  f"{used}/{n} = {100 * rate:.3f}% >= {prev['release']}'s {100 * prev['used_rate']:.3f}%")
+                  f"{used}/{n} = {100 * rate:.3f}% {rel} {prev['release']}'s {100 * prev['used_rate']:.3f}%")
         else:
             print(f"outcome gate: PASS (REBASELINED, v{prev_v} -> v{cur_v}, NOT compared) — used rate "
                   f"{used}/{n} = {100 * rate:.3f}% is now the v{cur_v} baseline; "
