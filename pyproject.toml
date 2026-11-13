@@ -163,6 +163,8 @@ exclude = [
     # llm_router.agents.session is also in server._CRITICAL_MODULES, so the
     # server refuses to start rather than degrading.
     "/agents/",
+    "/audit/",
+    "/architecture/",
     "/demo/",
     "/docs/",
     "/research/",
