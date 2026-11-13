@@ -21,6 +21,7 @@ import sys
 import time
 import types
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -30,6 +31,15 @@ from llm_router.codex_agent import CodexResult
 from llm_router.health import HealthTracker
 from llm_router.router import route_and_call
 from llm_router.types import RoutingProfile, TaskType
+
+
+def _child_pythonpath() -> str:
+    """Source tree under test first, so a child process imports the same code
+    as this one instead of the venv's editable install (which may point at a
+    different checkout)."""
+    src = str(Path(__file__).resolve().parent.parent / "src")
+    existing = os.environ.get("PYTHONPATH")
+    return os.pathsep.join([src, existing]) if existing else src
 
 HOUR = 3600
 
@@ -189,6 +199,7 @@ class TestPersistence:
             "USERPROFILE": os.environ["HOME"],
             "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"],
             "LLM_ROUTER_PROVIDER_RESET_PATH": str(provider_reset._state_file()),
+            "PYTHONPATH": _child_pythonpath(),
         }
         script = (
             "import time; from llm_router import provider_reset as p; "
@@ -216,6 +227,7 @@ class TestPersistence:
             "USERPROFILE": os.environ["HOME"],
             "LLM_ROUTER_HOME": os.environ["LLM_ROUTER_HOME"],
             "LLM_ROUTER_PROVIDER_RESET_PATH": str(provider_reset._state_file()),
+            "PYTHONPATH": _child_pythonpath(),
         }
         script = (
             "import sys, time; from llm_router import provider_reset as p; "
