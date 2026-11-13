@@ -98,6 +98,25 @@ def test_sdist_contains_no_working_tree_state(tmp_path):
 
 
 @pytest.mark.slow
+def test_sdist_ships_no_internal_audit_or_architecture_notes(tmp_path):
+    """/audit/ (73 files) and /architecture/ (17) are internal working notes that
+    were missing from the exclude list and shipped. Matches top-level dirs only
+    (the first path component after the sdist root)."""
+    sdist = _build_sdist(tmp_path)
+    with tarfile.open(sdist) as tf:
+        names = tf.getnames()
+    assert any(n.endswith("/pyproject.toml") for n in names), "empty sdist"
+    offenders = [
+        n for n in names
+        if n.split("/")[1:2] in (["audit"], ["architecture"])
+    ]
+    assert not offenders, (
+        f"sdist ships internal notes: {sorted(offenders)[:5]} ({len(offenders)} files). "
+        "Exclude /audit/ and /architecture/ in [tool.hatch.build.targets.sdist]."
+    )
+
+
+@pytest.mark.slow
 def test_no_single_member_is_enormous(tmp_path):
     """The size ceiling catches the total; this catches the cause.
 
