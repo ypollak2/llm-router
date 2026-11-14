@@ -755,3 +755,85 @@ def test_ratchet_scan_is_not_empty_and_covers_hooks():
 if __name__ == "__main__":  # pragma: no cover
     if "--write" in sys.argv:
         _BASELINE.write_text(json.dumps(_raw_counts(), indent=1, sort_keys=True) + "\n")
+
+
+# -- SEC-S7: the four atomic tmp+replace writers create their file 0600 ---------------
+
+def _load_status_bar():
+    spec = importlib.util.spec_from_file_location("status_bar_s7", SRC / "hooks" / "status-bar.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _write_judge_summary():
+    from llm_router import judge_view
+
+    judge_view.refresh_cache(days=1)
+    return judge_view.cache_path()
+
+
+def _write_quality_breaker():
+    from llm_router import quality_breaker
+
+    assert quality_breaker._write_state({"a": 1})
+    return quality_breaker._state_path()
+
+
+def _write_status_bar_cache():
+    sb = _load_status_bar()
+    sb._write_cache("x")
+    return Path(sb._cache_path())
+
+
+def _write_usage_seed():
+    from llm_router import install_hooks
+
+    return install_hooks.seed_usage_json()
+
+
+@pytest.mark.parametrize(
+    "writer",
+    [_write_judge_summary, _write_quality_breaker, _write_status_bar_cache, _write_usage_seed],
+    ids=["judge_summary", "quality_breaker", "status_bar_cache", "usage_seed"],
+)
+def test_atomic_writers_create_0600(home, writer):
+    old = os.umask(0o022)
+    try:
+        p = writer()
+    finally:
+        os.umask(old)
+    assert p.is_file(), p
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert not list(p.parent.glob("*.tmp")), "temp file left behind"
+
+
+@pytest.mark.parametrize(
+    "writer,name",
+    [(_write_usage_seed, "usage.json"), (_write_quality_breaker, "quality_breaker.json")],
+    ids=["usage_seed", "quality_breaker"],
+)
+def test_preexisting_0644_destination_ends_0600(home, writer, name):
+    dest = writer()  # first write locates the destination (a pending usage seed is rewritten)
+    os.chmod(dest, 0o644)
+    old = os.umask(0o022)
+    try:
+        p = writer()
+    finally:
+        os.umask(old)
+    assert p == dest and stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
+def test_stale_0644_usage_tmp_leaves_no_wider_mode(home):
+    first = _write_usage_seed()
+    stale = first.with_suffix(f".json.{os.getpid()}.tmp")  # the temp name this process would use
+    first.unlink()
+    stale.write_text("stale")
+    os.chmod(stale, 0o644)
+    old = os.umask(0o022)
+    try:
+        p = _write_usage_seed()
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert json.loads(p.read_text())["pending"] is True

@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from llm_router import failopen, paths
+from llm_router import failopen, paths, state_files
 from llm_router.judge_select import same_model
 
 MIN_N = 50
@@ -302,7 +302,8 @@ def refresh_cache(days: float = DEFAULT_WINDOW_DAYS, *, now: float | None = None
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
-        tmp.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+        with state_files.open_private(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, sort_keys=True))
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)      # only a failed write or replace leaves the tmp file
