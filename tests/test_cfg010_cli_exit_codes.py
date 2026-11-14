@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 
 def _run(tmp_path, *argv):
     env = {"HOME": str(tmp_path), "LLM_ROUTER_HOME": str(tmp_path / ".llm-router"),
-           "PATH": "/usr/bin:/bin"}
+           "PATH": "/usr/bin:/bin",
+           # This checkout's source, not the venv's editable install (may be another checkout).
+           "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src")}
     return subprocess.run([sys.executable, "-m", "llm_router.cli", *argv],
                           capture_output=True, text=True, env=env, timeout=120)
 

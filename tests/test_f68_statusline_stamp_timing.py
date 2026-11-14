@@ -27,7 +27,7 @@ def _env(home: Path, bindir: Path, **extra) -> dict:
     # sys.executable's directory first: the timing child needs a python3 that imports llm_router.
     path = f"{bindir}:{Path(sys.executable).parent}:/usr/bin:/bin"
     return {"HOME": str(home), "PATH": path, "NO_COLOR": "1", "LANG": "en_US.UTF-8",
-            "LLM_ROUTER_SYNTHETIC": "1", **extra}
+            "LLM_ROUTER_SYNTHETIC": "1", "PYTHONPATH": str(REPO / "src"), **extra}
 
 
 def _run(home: Path, bindir: Path, **extra) -> str:
