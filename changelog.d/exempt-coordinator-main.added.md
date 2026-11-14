@@ -1,1 +1,0 @@
-- `LLM_ROUTER_LOCAL_EXEMPT=coordinator_main` (PR-D, default unchanged): keeps only the main thread of a coordinator session on Claude (ledger detail `exempt_coordinator_main`) while its sub-agents can be served locally. Valid alone or with `subagent`; combined with `coordinator` it is invalid and the default applies.
