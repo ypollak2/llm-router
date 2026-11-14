@@ -57,6 +57,18 @@ def _input_ok(inp, schema: dict | None) -> bool:
     return True
 
 
+def classify_upstream(err, reason) -> str:
+    """The r1 reason for a local attempt that failed before the gate ran. Reason codes only, never error text."""
+    e = str(err or "")
+    if e.startswith("unknown tool"):
+        return R1_UNKNOWN_TOOL
+    if e.startswith("tool args not JSON") or (reason or "validation") == "validation" and re.match(r"^\w+: ", e):
+        return R1_INVALID_INPUT
+    if e == "empty response":
+        return R1_EMPTY
+    return f"r1_other:{reason or 'validation'}"
+
+
 def check(message: dict | None, body: dict) -> tuple[bool, str | None]:
     """``(serve, reason)``; ``reason`` is None when served. Never raises."""
     try:

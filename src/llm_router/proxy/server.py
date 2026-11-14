@@ -870,13 +870,18 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row["backend_health"] = dict(row.get("backend_health") or {}, **tripped)
         elapsed = round(time.monotonic() - t0, 3)
         row["route_latency_s"] = elapsed
-        if r1_gate.enabled() and not err and message is not None and row.get("is_main_thread") is False:
+        r1_on = (r1_gate.enabled() and row.get("is_main_thread") is False
+                 and not (row.get("local_mode") or {}).get("forced"))  # a `local:` step is the user's: never refused by R1
+        if r1_on and not err and message is not None:
             # R1 (flag LLM_ROUTER_PROXY_R1_GATE): a SUB step's local reply is judged here, after generation and
             # before anything is delivered; a reject takes the ordinary local-failure fallback to Claude.
             r1_ok, r1_reason = r1_gate.check(message, body)
             row["r1_gate"], row["r1_reason"] = ("served" if r1_ok else "escalated"), r1_reason
             if not r1_ok:
                 message, err, reason = None, r1_reason, r1_reason
+                row["_r1_reject"] = True  # popped by _local_step: the gate routes per step, it never pins
+        elif r1_on and (err or message is None):
+            row["r1_gate"], row["r1_reason"] = "escalated", r1_gate.classify_upstream(err, reason)
         if err or message is None:
             if gate_decision is not None:
                 row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_FAILED)
@@ -890,6 +895,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # The candidate is real (passed validation) but repeats a recent
             # served step: served/avoided metrics must never see it.
             guard.reset(session_id)
+            if r1_on:
+                row["r1_gate"], row["r1_reason"] = "escalated", f"r1_other:{REASON_LOOP_GUARD}"
             if gate_decision is not None:
                 row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_REPEAT)
             row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
@@ -1245,6 +1252,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 if row_layout:
                     row["layout"] = row_layout
             message = await try_serve(body, row)
+            r1_reject = row.pop("_r1_reject", False)
             if cold_guard.enabled():
                 if message is None:
                     cold_guard.GUARD.clear()  # a failed or timed-out local call: the runner's state is unknown
@@ -1271,6 +1279,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if (loop_guard_cap_no_pin_on() and row.get("reason") == REASON_LOOP_GUARD
                     and row.get("loop_guard_trigger") == TRIGGER_CAP):
                 row["pin_skipped"] = "loop_guard_cap"
+            elif r1_reject:
+                row["pin_skipped"] = "r1_reject"  # this step only: no pin, no turn pin, no fallback count
             else:
                 if local_mode.pin_scope_turn_on():
                     # PR-C: this turn only; after N fallbacks in the conversation, sticky under a reason of its own.

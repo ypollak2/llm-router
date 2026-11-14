@@ -182,3 +182,83 @@ async def test_main_thread_steps_are_not_gated(env, monkeypatch):  # noqa: F811
     assert r.status_code == 200 and env.up.requests == []
     (row,) = env.rows()
     assert row["decision"] == "served" and "r1_gate" not in row
+
+
+# ── review folds: complete ledger, per-step routing, forced local exempt ─────
+
+
+def test_classify_upstream_maps_codes_and_never_leaks_error_text():
+    c = r1_gate.classify_upstream
+    assert c("unknown tool 'Nope'", "validation") == "r1_unknown_tool"
+    assert c("tool args not JSON for Bash", "validation") == "r1_invalid_input"
+    assert c("Bash: missing required 'command'", "validation") == "r1_invalid_input"
+    assert c("empty response", "validation") == "r1_empty"
+    assert c("truncated at num_predict", "validation") == "r1_other:validation"
+    assert c("boom SECRET-TEXT", "backend_error") == "r1_other:backend_error"
+    assert "SECRET" not in c("boom SECRET-TEXT", "backend_error")
+
+
+async def test_upstream_refusals_get_a_complete_r1_row(env, monkeypatch):  # noqa: F811
+    _on(monkeypatch)
+    for reply, code in ((_ollama("", [_call("Nope", {"x": 1})]), "r1_unknown_tool"),
+                        (_ollama("", [_call("Bash", {})]), "r1_invalid_input"),
+                        (_ollama(""), "r1_empty")):
+        env.ledger.unlink(missing_ok=True)
+        r = await _post(env.app(Backend(reply)), _sub_first())
+        assert r.status_code == 200
+        (row,) = env.rows()
+        assert (row["decision"], row["r1_gate"], row["r1_reason"]) == ("fallback", "escalated", code)
+
+
+async def test_backend_error_is_r1_other_with_reason_code_only(env, monkeypatch):  # noqa: F811
+    _on(monkeypatch)
+    r = await _post(env.app(Backend(exc=RuntimeError("SECRET-PARSER-ERROR-TEXT"))), _sub_first())
+    assert "SECRET-PARSER-ERROR-TEXT" not in r.text
+    (row,) = env.rows()
+    assert row["r1_gate"] == "escalated" and row["r1_reason"] == "r1_other:backend_error"
+    assert "SECRET-PARSER-ERROR-TEXT" not in json.dumps({k: v for k, v in row.items() if k.startswith("r1_")})
+
+
+async def test_an_r1_reject_does_not_pin_and_the_next_step_tries_local_again(env, monkeypatch):  # noqa: F811
+    _on(monkeypatch)
+    backend = Backend(_ollama("prose only"), _ollama("", [_call("Bash", {"command": "ls"})]))
+    app = env.app(backend)
+    await _post(app, _sub_first())
+    r = await _post(app, _sub_first())
+    assert len(backend.calls) == 2  # not pinned to Claude: the second step went local
+    assert [b["name"] for b in _served_blocks(r)] == ["Bash"]
+    rows = env.rows()
+    assert rows[0]["pin_skipped"] == "r1_reject" and "pin_change" not in rows[0]["local_mode"]
+    assert (rows[0]["decision"], rows[1]["decision"]) == ("fallback", "served")
+
+
+async def test_r1_rejects_do_not_count_toward_the_fallback_cap(env, monkeypatch):  # noqa: F811
+    _on(monkeypatch)
+    monkeypatch.setenv("LLM_ROUTER_PIN_SCOPE", "turn")
+    backend = Backend(_ollama("prose"))
+    app = env.app(backend)
+    for _ in range(5):
+        await _post(app, _sub_first())
+    assert len(backend.calls) == 5  # every step still tried local
+
+
+async def test_an_upstream_failure_still_pins_to_claude(env, monkeypatch):  # noqa: F811
+    _on(monkeypatch)
+    backend = Backend(_ollama("", [_call("Nope", {})]))
+    app = env.app(backend)
+    await _post(app, _sub_first())
+    await _post(app, _sub_first())
+    assert len(backend.calls) == 1 and env.rows()[1]["reason"] == "pinned_claude"
+
+
+async def test_a_forced_local_step_is_never_refused_by_r1(env, monkeypatch):  # noqa: F811
+    _on(monkeypatch)
+    body = _sub_first()
+    body["messages"][0]["content"] = "local: " + (body["messages"][0]["content"] if isinstance(
+        body["messages"][0]["content"], str) else "do the thing")
+    backend = Backend(_ollama("plain prose answer"))
+    r = await _post(env.app(backend), body)
+    assert r.status_code == 200 and env.up.requests == []
+    (row,) = env.rows()
+    assert row["local_mode"].get("forced") is True  # the prefix really took the forced path
+    assert row["decision"] == "served" and "r1_gate" not in row and "refused" not in str(row.get("prefix_outcome"))
