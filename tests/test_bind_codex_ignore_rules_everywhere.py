@@ -88,6 +88,13 @@ KNOWN_COMMAND_STRINGS = {("src/llm_router/tools/routing.py", "llm_select_agent")
 _COMMAND_RX = re.compile(r"^\s*(?:\S*/)?(?:codex|\{[^}]*codex[^}]*\})\s+exec\b", re.IGNORECASE)
 
 
+def _via_name(name: ast.Name) -> ast.Constant:
+    """A use of a module-level ``X = "exec"``: counts only behind a codex-named element, never by position alone."""
+    const = ast.copy_location(ast.Constant("exec"), name)
+    const.via_name = True  # type: ignore[attr-defined]
+    return const
+
+
 def _flat(elts: list[ast.expr]) -> list[ast.expr]:
     """Splice ``*[...]`` / ``*(...)`` of a literal into the sequence it sits in."""
     out: list[ast.expr] = []
@@ -109,7 +116,8 @@ def _is_codexish(e: ast.expr) -> bool:
 def _is_exec_argv(elts: list[ast.expr], positional: bool) -> bool:
     """``[<binary>, "exec", ...]`` in a list or tuple (``positional``: any binary), or ``"exec"`` anywhere later behind an
     element that names codex (``["env", "A=1", "codex", "exec"]``, ``create_subprocess_exec("codex", "exec", ...)``)."""
-    if positional and len(elts) >= 2 and isinstance(elts[1], ast.Constant) and elts[1].value == "exec":
+    if positional and len(elts) >= 2 and isinstance(elts[1], ast.Constant) and elts[1].value == "exec" \
+            and not getattr(elts[1], "via_name", False):
         return True
     return any(isinstance(e, ast.Constant) and e.value == "exec" and any(_is_codexish(x) for x in elts[:i])
                for i, e in enumerate(elts) if i >= 1)
@@ -137,6 +145,16 @@ class _Census(ast.NodeVisitor):
 
     def visit_Module(self, node) -> None:
         self._docstring(node)
+        # module-level ``SUB = "exec"``: read a use of SUB as the constant it holds
+        names = {t.id for n in node.body if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)
+                 and n.value.value == "exec" for t in n.targets if isinstance(t, ast.Name)}
+        for n in ast.walk(node):
+            for field, child in ast.iter_fields(n):
+                if isinstance(child, ast.Name) and child.id in names and isinstance(child.ctx, ast.Load):
+                    setattr(n, field, _via_name(child))
+                elif isinstance(child, list):
+                    child[:] = [_via_name(c) if isinstance(c, ast.Name) and c.id in names
+                                and isinstance(c.ctx, ast.Load) else c for c in child]
         self.generic_visit(node)
 
     def _where(self) -> str:
@@ -241,19 +259,19 @@ def test_a_help_query_starts_no_run():
         assert elts[1:] == ["'exec'", "'--help'"], f"{rel}:{where} is exempt as a help query but carries more: {elts}"
 
 
-#: Planted shapes (backlog item 7, past review #818 said the census missed 13 of 17). Each is one realistic way Python in
+#: Planted shapes (backlog item 7, the census missed 13 of 26 of these planted shapes before the fix; the 13-of-17 claim in review #818 cannot be checked, its corpus is not in the repo). Each is one realistic way Python in
 #: src/ could start ``codex exec``; the census must report it. The five xfail rows are the shapes an AST walk of a single
 #: expression cannot see (strict: if one starts passing, the marker goes). Data: the table in the PR description.
 PLANTED = [
     ('01_list_literal', 'import subprocess\ndef f(p):\n    subprocess.run(["codex", "exec", "--json", p])\n'),
-    ('02_list_plus', 'import subprocess\ndef f(p):\n    subprocess.run(["codex", "exec"] + ["--json", p])\n'),
+    ('02_list_plus_exec_in_head', 'import subprocess\ndef f(p):\n    subprocess.run(["codex", "exec"] + ["--json", p])\n'),
     ('03_binary_in_variable', 'import subprocess\ndef f(p, binp):\n    subprocess.run([binp, "exec", "--json", p])\n'),
     ('04_shlex_split_string', 'import shlex, subprocess\ndef f(p):\n    subprocess.run(shlex.split("codex exec --json " + p))\n'),
     ('05_popen', 'import subprocess\ndef f(p):\n    subprocess.Popen(["codex", "exec", p])\n'),
     ('06_check_output', 'import subprocess\ndef f(p):\n    return subprocess.check_output(["codex", "exec", p])\n'),
     ('07_asyncio_exec_positional', 'import asyncio\nasync def f(p):\n    await asyncio.create_subprocess_exec("codex", "exec", "--json", p)\n'),
     ('08_os_execvp', 'import os\ndef f(p):\n    os.execvp("codex", ["codex", "exec", p])\n'),
-    pytest.param('09_exec_in_variable', 'import subprocess\nSUB = "exec"\ndef f(p):\n    subprocess.run(["codex", SUB, p])\n', marks=pytest.mark.xfail(strict=True, reason='the subcommand sits in a variable: needs data flow, which an AST walk of one expression does not have')),
+    ('09_exec_in_variable', 'import subprocess\nSUB = "exec"\ndef f(p):\n    subprocess.run(["codex", SUB, p])\n'),
     ('10_tuple', 'import subprocess\ndef f(p):\n    subprocess.run(("codex", "exec", p))\n'),
     ('11_fstring_shell_true', 'import subprocess\ndef f(p):\n    subprocess.run(f"codex exec --json {p}", shell=True)\n'),
     ('12_fstring_binvar_shell', 'import subprocess\ndef f(codex_bin, p):\n    subprocess.run(f"{codex_bin} exec --json {p}", shell=True)\n'),
@@ -274,6 +292,10 @@ PLANTED = [
 ]
 #: Code that looks alike but starts no ``codex exec``: the census must stay quiet (an everything-matches detector passes all).
 BENIGN = [
+    "import asyncio\nasync def f():\n    await asyncio.create_subprocess_exec('git', 'exec', 'x')\n",
+    "import asyncio\nasync def f():\n    await asyncio.create_subprocess_exec('ls', '-l', 'exec')\n",
+    "def f(p):\n    return ['logging codex run'] + ['exec', p]\n",
+    "def f(p):\n    return ['codex-note'] + ['exec', p]\n",
     "import subprocess\ndef f():\n    subprocess.run(['git', 'status'])\n",
     "def f(data, path):\n    return compile(data, str(path), 'exec')\n",
     "def f(p):\n    return ['ls', '-l', p]\n",
