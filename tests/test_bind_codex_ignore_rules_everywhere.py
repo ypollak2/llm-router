@@ -95,6 +95,25 @@ def _via_name(name: ast.Name) -> ast.Constant:
     return const
 
 
+def _resolve_names(node: ast.AST, names: set[str]) -> None:
+    """Rewrite each Load of a module-level ``X = "exec"`` (or ``X: str = "exec"``) into the constant. Limits: only module-level
+    assignments are read (a constant set inside a function or class is not resolved), and a function that takes the name as a
+    parameter or assigns it locally keeps its own meaning, so it is left alone."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        names = names - {a.arg for a in ast.walk(node.args)
+                         if isinstance(a, ast.arg)} - {n.id for n in ast.walk(node)
+                                                       if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    for field, child in ast.iter_fields(node):
+        for i, c in enumerate(child if isinstance(child, list) else [child]):
+            if isinstance(c, ast.Name) and c.id in names and isinstance(c.ctx, ast.Load):
+                if isinstance(child, list):
+                    child[i] = _via_name(c)
+                else:
+                    setattr(node, field, _via_name(c))
+            elif isinstance(c, ast.AST):
+                _resolve_names(c, names)
+
+
 def _flat(elts: list[ast.expr]) -> list[ast.expr]:
     """Splice ``*[...]`` / ``*(...)`` of a literal into the sequence it sits in."""
     out: list[ast.expr] = []
@@ -145,16 +164,10 @@ class _Census(ast.NodeVisitor):
 
     def visit_Module(self, node) -> None:
         self._docstring(node)
-        # module-level ``SUB = "exec"``: read a use of SUB as the constant it holds
-        names = {t.id for n in node.body if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)
-                 and n.value.value == "exec" for t in n.targets if isinstance(t, ast.Name)}
-        for n in ast.walk(node):
-            for field, child in ast.iter_fields(n):
-                if isinstance(child, ast.Name) and child.id in names and isinstance(child.ctx, ast.Load):
-                    setattr(n, field, _via_name(child))
-                elif isinstance(child, list):
-                    child[:] = [_via_name(c) if isinstance(c, ast.Name) and c.id in names
-                                and isinstance(c.ctx, ast.Load) else c for c in child]
+        names = {t.id for n in node.body if isinstance(n, (ast.Assign, ast.AnnAssign)) and isinstance(n.value, ast.Constant)
+                 and n.value.value == "exec" for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
+                 if isinstance(t, ast.Name)}
+        _resolve_names(node, names)
         self.generic_visit(node)
 
     def _where(self) -> str:
@@ -259,7 +272,7 @@ def test_a_help_query_starts_no_run():
         assert elts[1:] == ["'exec'", "'--help'"], f"{rel}:{where} is exempt as a help query but carries more: {elts}"
 
 
-#: Planted shapes (backlog item 7, the census missed 13 of 26 of these planted shapes before the fix; the 13-of-17 claim in review #818 cannot be checked, its corpus is not in the repo). Each is one realistic way Python in
+#: Planted shapes (backlog item 7, the census missed 13 of 26 of these PLANTED cases when measured on origin/main ff82dcc4, before this change; the 13-of-17 claim in review #818 cannot be checked, its corpus is not in the repo). Each is one realistic way Python in
 #: src/ could start ``codex exec``; the census must report it. The five xfail rows are the shapes an AST walk of a single
 #: expression cannot see (strict: if one starts passing, the marker goes). Data: the table in the PR description.
 PLANTED = [
@@ -292,6 +305,8 @@ PLANTED = [
 ]
 #: Code that looks alike but starts no ``codex exec``: the census must stay quiet (an everything-matches detector passes all).
 BENIGN = [
+    'import subprocess\nSUB = "exec"\ndef f(SUB, p):\n    subprocess.run(["codex", SUB, p])\n',
+    'import subprocess\nSUB = "exec"\ndef f(p):\n    SUB = p.lower()\n    subprocess.run(["codex", SUB, p])\n',
     "import asyncio\nasync def f():\n    await asyncio.create_subprocess_exec('git', 'exec', 'x')\n",
     "import asyncio\nasync def f():\n    await asyncio.create_subprocess_exec('ls', '-l', 'exec')\n",
     "def f(p):\n    return ['logging codex run'] + ['exec', p]\n",
