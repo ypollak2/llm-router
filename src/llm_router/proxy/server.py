@@ -1269,7 +1269,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return message
             if force:
                 return refuse_local(row, row.get("reason") or "validation")
-            if cls_flip:
+            if cls_flip and not r1_reject:  # an R1 gate reject is this step's, never the turn's (it routes per step)
                 # PR-B: a step the classifier flipped to local failed. The pin below is a plain one, so without
                 # this the turn's next continuation would inherit the stored ``local`` verdict and retry local.
                 cls_decide.mark_failed(cls_elig_decisions, row)
@@ -2081,7 +2081,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         elif step_class(body, cfg.steps) is None:
             row["reason"] = "not_eligible"
         else:
-            message, early = await attempt_local(lambda: try_serve(local_body, row))
+            async def run_try_serve():
+                served = await try_serve(local_body, row)
+                row.pop("_r1_reject", None)  # the private reject mark never reaches the ledger row
+                return served
+
+            message, early = await attempt_local(run_try_serve)
             if early is not None:
                 return early
             if message is not None:

@@ -262,3 +262,66 @@ async def test_a_forced_local_step_is_never_refused_by_r1(env, monkeypatch):  # 
     (row,) = env.rows()
     assert row["local_mode"].get("forced") is True  # the prefix really took the forced path
     assert row["decision"] == "served" and "r1_gate" not in row and "refused" not in str(row.get("prefix_outcome"))
+
+
+# ── fold review 2: private mark never leaks; a gate reject does not mark the classifier turn failed ─────────
+
+
+async def test_no_private_r1_key_reaches_the_ledger_row_with_local_mode_off(tmp_path, monkeypatch):
+    import httpx
+
+    from llm_router.proxy import ledger
+    from llm_router.proxy import server as ps
+    from tests.test_proxy_local_mode import Upstream
+
+    async def _choose(*a, **k):
+        return {"task_type": "t", "complexity": "c", "chain_head": ["ollama/fake:1"], "model": "ollama/fake:1"}
+
+    monkeypatch.setattr(ps, "choose_model", _choose)  # the policy is stubbed: no router, no network
+    _on(monkeypatch)
+    led, up = tmp_path / "proxy_calls.jsonl", Upstream()
+    cfg = ps.ProxyConfig(upstream="http://127.0.0.1:9", ledger_path=led, model="ollama/fake:1", trim="none",
+                         hedge_s=None, warm_up=False, steps=frozenset({"continuation"}))  # serve off: lm is None
+    backend = Backend(_ollama("prose only"))
+    app = ps.build_app(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(up)),
+                       backend_factory=lambda m: backend)
+    body = _sub_first()
+    body["messages"] = _next_turn(body, {"content": [{"type": "tool_use", "id": "toolu_1", "name": "Read",
+                                                      "input": {"file_path": "/w/a.py"}}]})["messages"]
+    await _post(app, body)
+    rows = ledger.read_rows(led)
+    assert rows, "a ledger row was written"
+    assert not [k for r in rows for k in r if k.startswith("_")], [list(r) for r in rows]
+    assert len(backend.calls) == 1 and rows[0].get("r1_gate") == "escalated"  # the lm-off path ran and rejected
+
+
+def test_an_r1_reject_does_not_mark_the_classifier_turn_failed_but_upstream_does(tmp_path, monkeypatch):  # noqa: F811
+    from llm_router.proxy import cls_decide
+    from tests.test_proxy_cls_authority import flags
+    from tests.test_proxy_cls_decide import Env, FakeClassifier, turn_body
+    from tests.test_proxy_pin_per_turn import failing
+
+    marks = []
+    real = cls_decide.mark_failed
+    monkeypatch.setattr(cls_decide, "mark_failed", lambda store, row: (marks.append(1), real(store, row))[1])
+    _on(monkeypatch)
+    flags(monkeypatch, authority=True)
+    monkeypatch.setenv("LLM_ROUTER_PIN_SCOPE", "turn")
+    FakeClassifier(monkeypatch, tier="local")
+
+    def sub(b):
+        b["tools"] = [t for t in b["tools"] if t["name"] != "Agent"]
+        return b
+
+    for backend, expect in ((Backend(_ollama("prose")), 0), (failing(), 1)):
+        marks.clear()
+        e = Env(tmp_path / f"e{expect}") if (tmp_path / f"e{expect}").mkdir() is None else None
+        e.app = e.build(backend)
+        e.kill.write_text("x")
+        e.post(sub(turn_body(["rename the helper"])))
+        e.kill.unlink()
+        e.post(sub(turn_body(["rename the helper", "and the other"])))  # flips local, then fails
+        flip = e.rows()[-1]
+        assert flip["cls_applied"] is True and flip["decision"] == "fallback", flip.get("local_mode")
+        assert flip["is_main_thread"] is False
+        assert len(marks) == expect
