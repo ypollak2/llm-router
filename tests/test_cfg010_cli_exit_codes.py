@@ -9,15 +9,19 @@ success.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 
 def _run(tmp_path, *argv):
     env = {"HOME": str(tmp_path), "LLM_ROUTER_HOME": str(tmp_path / ".llm-router"),
-           "PATH": "/usr/bin:/bin"}
+           "PATH": "/usr/bin:/bin",
+           # The tree the parent imported llm_router from (src, or the wheel), not the venv editable install.
+           "PYTHONPATH": os.pathsep.join(p for p in (str(Path(__import__("llm_router").__file__).resolve().parent.parent), os.environ.get("PYTHONPATH")) if p)}
     return subprocess.run([sys.executable, "-m", "llm_router.cli", *argv],
                           capture_output=True, text=True, env=env, timeout=120)
 
