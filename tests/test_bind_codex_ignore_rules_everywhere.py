@@ -83,7 +83,63 @@ UNPROTECTED_ON_PURPOSE = {
 #: call site too, because the model runs it.
 KNOWN_COMMAND_STRINGS = {("src/llm_router/tools/routing.py", "llm_select_agent")}
 
-_COMMAND_RX = re.compile(r"^\s*(?:\S*/)?codex\s+exec\b")
+# A command line starts with the codex binary: the literal word, or an f-string placeholder whose expression names it
+# (``f"{codex_bin} exec ..."``; the census renders such a placeholder as ``{<expr>}``).
+_COMMAND_RX = re.compile(r"^\s*(?:\S*/)?(?:codex|\{[^}]*codex[^}]*\})\s+exec\b", re.IGNORECASE)
+
+
+def _via_name(name: ast.Name) -> ast.Constant:
+    """A use of a module-level ``X = "exec"``: counts only behind a codex-named element, never by position alone."""
+    const = ast.copy_location(ast.Constant("exec"), name)
+    const.via_name = True  # type: ignore[attr-defined]
+    return const
+
+
+def _resolve_names(node: ast.AST, names: set[str]) -> None:
+    """Rewrite each Load of a module-level ``X = "exec"`` (or ``X: str = "exec"``) into the constant. Limits: only module-level
+    assignments are read (a constant set inside a function or class is not resolved), and a function that takes the name as a
+    parameter or assigns it locally keeps its own meaning, so it is left alone."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        names = names - {a.arg for a in ast.walk(node.args)
+                         if isinstance(a, ast.arg)} - {n.id for n in ast.walk(node)
+                                                       if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    for field, child in ast.iter_fields(node):
+        for i, c in enumerate(child if isinstance(child, list) else [child]):
+            if isinstance(c, ast.Name) and c.id in names and isinstance(c.ctx, ast.Load):
+                if isinstance(child, list):
+                    child[i] = _via_name(c)
+                else:
+                    setattr(node, field, _via_name(c))
+            elif isinstance(c, ast.AST):
+                _resolve_names(c, names)
+
+
+def _flat(elts: list[ast.expr]) -> list[ast.expr]:
+    """Splice ``*[...]`` / ``*(...)`` of a literal into the sequence it sits in."""
+    out: list[ast.expr] = []
+    for e in elts:
+        if isinstance(e, ast.Starred) and isinstance(e.value, (ast.List, ast.Tuple)):
+            out += _flat(e.value.elts)
+        else:
+            out.append(e)
+    return out
+
+
+def _is_codexish(e: ast.expr) -> bool:
+    """The codex binary as a literal path (``codex``, ``/x/bin/codex``) or as any expression that names it (``codex_bin``)."""
+    if isinstance(e, ast.Constant):
+        return isinstance(e.value, str) and Path(e.value).name == "codex"
+    return "codex" in ast.unparse(e).lower()
+
+
+def _is_exec_argv(elts: list[ast.expr], positional: bool) -> bool:
+    """``[<binary>, "exec", ...]`` in a list or tuple (``positional``: any binary), or ``"exec"`` anywhere later behind an
+    element that names codex (``["env", "A=1", "codex", "exec"]``, ``create_subprocess_exec("codex", "exec", ...)``)."""
+    if positional and len(elts) >= 2 and isinstance(elts[1], ast.Constant) and elts[1].value == "exec" \
+            and not getattr(elts[1], "via_name", False):
+        return True
+    return any(isinstance(e, ast.Constant) and e.value == "exec" and any(_is_codexish(x) for x in elts[:i])
+               for i, e in enumerate(elts) if i >= 1)
 
 
 class _Census(ast.NodeVisitor):
@@ -108,20 +164,41 @@ class _Census(ast.NodeVisitor):
 
     def visit_Module(self, node) -> None:
         self._docstring(node)
+        names = {t.id for n in node.body if isinstance(n, (ast.Assign, ast.AnnAssign)) and isinstance(n.value, ast.Constant)
+                 and n.value.value == "exec" for t in (n.targets if isinstance(n, ast.Assign) else [n.target])
+                 if isinstance(t, ast.Name)}
+        _resolve_names(node, names)
         self.generic_visit(node)
 
     def _where(self) -> str:
         return ".".join(self.stack) or "<module>"
 
     def visit_List(self, node) -> None:
-        if len(node.elts) >= 2 and isinstance(node.elts[1], ast.Constant) and node.elts[1].value == "exec":
-            self.argv.append((self.rel, self._where(), node.lineno, node.elts))
+        elts = _flat(node.elts)
+        if _is_exec_argv(elts, positional=True):
+            self.argv.append((self.rel, self._where(), node.lineno, elts))
         self.generic_visit(node)
 
     visit_Tuple = visit_List
 
+    def visit_Call(self, node) -> None:  # asyncio.create_subprocess_exec("codex", "exec", ...): argv as positional arguments
+        elts = _flat(node.args)
+        if _is_exec_argv(elts, positional=False):
+            self.argv.append((self.rel, self._where(), node.lineno, elts))
+        self.generic_visit(node)
+
+    def visit_BinOp(self, node) -> None:  # ["codex"] + ["exec", ...]
+        if isinstance(node.op, ast.Add) and isinstance(node.left, (ast.List, ast.Tuple)) \
+                and isinstance(node.right, (ast.List, ast.Tuple)):
+            elts = _flat(node.left.elts) + _flat(node.right.elts)
+            if node.right.elts and _is_exec_argv(elts, positional=False) \
+                    and not _is_exec_argv(_flat(node.left.elts), positional=True) \
+                    and not _is_exec_argv(_flat(node.right.elts), positional=True):
+                self.argv.append((self.rel, self._where(), node.lineno, elts))
+        self.generic_visit(node)
+
     def visit_JoinedStr(self, node) -> None:  # an f-string: judge its literal text once, not each part
-        text = "".join(v.value if isinstance(v, ast.Constant) else "{}" for v in node.values)
+        text = "".join(v.value if isinstance(v, ast.Constant) else "{" + ast.unparse(v.value) + "}" for v in node.values)
         if _COMMAND_RX.match(text):
             self.strings.append((self.rel, self._where(), node.lineno, text))
 
@@ -130,16 +207,16 @@ class _Census(ast.NodeVisitor):
             self.strings.append((self.rel, self._where(), node.lineno, node.value))
 
 
-def _census():
+def _census(root: Path = REPO):
     argv, strings, scanned = [], [], 0
     for tree_dir in ("src", "scripts", "hooks"):
-        for path in sorted((REPO / tree_dir).rglob("*.py")):
-            rel = path.relative_to(REPO).as_posix()
-            if "__pycache__" in path.parts or any(p.startswith(".") for p in path.relative_to(REPO).parts):
+        for path in sorted((root / tree_dir).rglob("*.py")):
+            rel = path.relative_to(root).as_posix()
+            if "__pycache__" in path.parts or any(p.startswith(".") for p in path.relative_to(root).parts):
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             scanned += 1
-            if '"exec"' not in text and "codex exec" not in text and "codex  exec" not in text:
+            if "exec" not in text:  # a cheap prefilter; it must not depend on the quote style or on the f-string text
                 continue
             visitor = _Census(rel)
             visitor.visit(ast.parse(text, filename=rel))
@@ -193,6 +270,71 @@ def test_a_help_query_starts_no_run():
     assert len(helps) == 2, helps
     for rel, where, elts in helps:
         assert elts[1:] == ["'exec'", "'--help'"], f"{rel}:{where} is exempt as a help query but carries more: {elts}"
+
+
+#: Planted shapes (backlog item 7, the census missed 13 of 26 of these PLANTED cases when measured on origin/main ff82dcc4, before this change; the 13-of-17 claim in review #818 cannot be checked, its corpus is not in the repo). Each is one realistic way Python in
+#: src/ could start ``codex exec``; the census must report it. The five xfail rows are the shapes an AST walk of a single
+#: expression cannot see (strict: if one starts passing, the marker goes). Data: the table in the PR description.
+PLANTED = [
+    ('01_list_literal', 'import subprocess\ndef f(p):\n    subprocess.run(["codex", "exec", "--json", p])\n'),
+    ('02_list_plus_exec_in_head', 'import subprocess\ndef f(p):\n    subprocess.run(["codex", "exec"] + ["--json", p])\n'),
+    ('03_binary_in_variable', 'import subprocess\ndef f(p, binp):\n    subprocess.run([binp, "exec", "--json", p])\n'),
+    ('04_shlex_split_string', 'import shlex, subprocess\ndef f(p):\n    subprocess.run(shlex.split("codex exec --json " + p))\n'),
+    ('05_popen', 'import subprocess\ndef f(p):\n    subprocess.Popen(["codex", "exec", p])\n'),
+    ('06_check_output', 'import subprocess\ndef f(p):\n    return subprocess.check_output(["codex", "exec", p])\n'),
+    ('07_asyncio_exec_positional', 'import asyncio\nasync def f(p):\n    await asyncio.create_subprocess_exec("codex", "exec", "--json", p)\n'),
+    ('08_os_execvp', 'import os\ndef f(p):\n    os.execvp("codex", ["codex", "exec", p])\n'),
+    ('09_exec_in_variable', 'import subprocess\nSUB = "exec"\ndef f(p):\n    subprocess.run(["codex", SUB, p])\n'),
+    ('10_tuple', 'import subprocess\ndef f(p):\n    subprocess.run(("codex", "exec", p))\n'),
+    ('11_fstring_shell_true', 'import subprocess\ndef f(p):\n    subprocess.run(f"codex exec --json {p}", shell=True)\n'),
+    ('12_fstring_binvar_shell', 'import subprocess\ndef f(codex_bin, p):\n    subprocess.run(f"{codex_bin} exec --json {p}", shell=True)\n'),
+    pytest.param('13_helper_wrapper_args', 'import subprocess\ndef _run(*a):\n    return subprocess.run(["codex", *a])\ndef f(p):\n    _run("exec", p)\n', marks=pytest.mark.xfail(strict=True, reason="the subcommand reaches the argv through a wrapper's *args: needs call-graph data flow")),
+    ('14_alias_import', 'import subprocess as sp\ndef f(p):\n    sp.run(["codex", "exec", p])\n'),
+    ('15_which_resolved', 'import shutil, subprocess\ndef f(p):\n    b = shutil.which("codex")\n    subprocess.run([b, "exec", p])\n'),
+    ('16_single_quoted_exec', "import subprocess\ndef f(p):\n    subprocess.run(['codex', 'exec', p])\n"),
+    ('17_exec_not_second', 'import subprocess\ndef f(p):\n    subprocess.run(["codex", "-C", "/w", "exec", p])\n'),
+    ('18_env_prefix', 'import subprocess\ndef f(p):\n    subprocess.run(["env", "A=1", "codex", "exec", p])\n'),
+    pytest.param('19_append_exec', 'import subprocess\ndef f(p):\n    cmd = ["codex"]\n    cmd.append("exec")\n    subprocess.run(cmd)\n', marks=pytest.mark.xfail(strict=True, reason='argv built by .append(): needs data flow from the list to its later mutation')),
+    ('20_split_lists_concat', 'import subprocess\ndef f(p):\n    subprocess.run(["codex"] + ["exec", p])\n'),
+    ('21_star_unpack', 'import subprocess\ndef f(p):\n    subprocess.run(["codex", *["exec", p]])\n'),
+    ('22_join_list', 'import subprocess\ndef f(p):\n    subprocess.run(" ".join(["codex", "exec", p]), shell=True)\n'),
+    pytest.param('23_str_format', 'import subprocess\ndef f(p):\n    subprocess.run("codex {} --json".format("exec"), shell=True)\n', marks=pytest.mark.xfail(strict=True, reason='the subcommand is a .format() argument: the literal text never reads `codex exec`')),
+    pytest.param('24_percent_format', 'import subprocess\ndef f(p):\n    subprocess.run("codex %s --json" % "exec", shell=True)\n', marks=pytest.mark.xfail(strict=True, reason='the subcommand is a %-format argument: the literal text never reads `codex exec`')),
+    ('25_implicit_concat_string', 'import subprocess\ndef f(p):\n    subprocess.run("codex " "exec --json", shell=True)\n'),
+    ('26_path_constant_binary', 'import subprocess\ndef f(p):\n    subprocess.run(["/opt/homebrew/bin/codex", "exec", p])\n'),
+]
+#: Code that looks alike but starts no ``codex exec``: the census must stay quiet (an everything-matches detector passes all).
+BENIGN = [
+    'import subprocess\nSUB = "exec"\ndef f(SUB, p):\n    subprocess.run(["codex", SUB, p])\n',
+    'import subprocess\nSUB = "exec"\ndef f(p):\n    SUB = p.lower()\n    subprocess.run(["codex", SUB, p])\n',
+    "import asyncio\nasync def f():\n    await asyncio.create_subprocess_exec('git', 'exec', 'x')\n",
+    "import asyncio\nasync def f():\n    await asyncio.create_subprocess_exec('ls', '-l', 'exec')\n",
+    "def f(p):\n    return ['logging codex run'] + ['exec', p]\n",
+    "def f(p):\n    return ['codex-note'] + ['exec', p]\n",
+    "import subprocess\ndef f():\n    subprocess.run(['git', 'status'])\n",
+    "def f(data, path):\n    return compile(data, str(path), 'exec')\n",
+    "def f(p):\n    return ['ls', '-l', p]\n",
+    "import subprocess\ndef f(p):\n    subprocess.run(['codex', '--version'])\n",
+]
+
+
+def _census_of(tmp_path: Path, source: str):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "planted.py").write_text(source, encoding="utf-8")
+    argv, strings, _ = _census(tmp_path)
+    return argv, strings
+
+
+@pytest.mark.parametrize("name, source", PLANTED, ids=[(p.values if hasattr(p, "values") else p)[0] for p in PLANTED])
+def test_the_census_catches_each_planted_variant(name, source, tmp_path):
+    argv, strings = _census_of(tmp_path, source)
+    assert argv or strings, f"variant {name} starts `codex exec` and the census did not see it"
+
+
+@pytest.mark.parametrize("source", BENIGN)
+def test_the_census_ignores_code_that_starts_no_codex_exec(source, tmp_path):
+    argv, strings = _census_of(tmp_path, source)
+    assert not argv and not strings, (argv, strings)
 
 
 # ================================================================================================= 2. ARGV
