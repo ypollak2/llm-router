@@ -243,6 +243,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_DEADLINE_CAP_S": ("llm_router", "proxy/deadline.py", 1),
     "LLM_ROUTER_PREFILL_TOK_S": ("llm_router", "proxy/deadline.py", 1),
     "LLM_ROUTER_PROXY_KEEPALIVE": ("llm_router", "proxy/keepalive.py", 1),
+    "LLM_ROUTER_PROXY_R1_GATE": ("llm_router", "proxy/r1_gate.py", 1),
     "LLM_ROUTER_PROXY_KEEPALIVE_AFTER_S": ("llm_router", "proxy/keepalive.py", 1),
     "LLM_ROUTER_PROXY_KEEPALIVE_INTERVAL_S": ("llm_router", "proxy/keepalive.py", 1),
     "LLM_ROUTER_PROXY_MODEL": ("llm_router", "proxy/server.py", 1),

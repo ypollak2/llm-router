@@ -66,7 +66,7 @@ from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
 from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
 from llm_router.proxy import chunk_store, cls_decide, compact_worker, cold_guard, deadline, haiku_arm, haiku_guard, history_layout, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
-from llm_router.proxy import escalation
+from llm_router.proxy import escalation, r1_gate
 
 from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
@@ -870,6 +870,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row["backend_health"] = dict(row.get("backend_health") or {}, **tripped)
         elapsed = round(time.monotonic() - t0, 3)
         row["route_latency_s"] = elapsed
+        if r1_gate.enabled() and not err and message is not None and row.get("is_main_thread") is False:
+            # R1 (flag LLM_ROUTER_PROXY_R1_GATE): a SUB step's local reply is judged here, after generation and
+            # before anything is delivered; a reject takes the ordinary local-failure fallback to Claude.
+            r1_ok, r1_reason = r1_gate.check(message, body)
+            row["r1_gate"], row["r1_reason"] = ("served" if r1_ok else "escalated"), r1_reason
+            if not r1_ok:
+                message, err, reason = None, r1_reason, r1_reason
         if err or message is None:
             if gate_decision is not None:
                 row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_FAILED)
