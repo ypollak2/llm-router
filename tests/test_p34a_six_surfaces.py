@@ -162,7 +162,7 @@ async def six(home, tmp_path_factory):  # noqa: F811 -- pytest fixture name
 
     env = {"HOME": str(fake), "LLM_ROUTER_HOME": str(home), "TZ": TZNAME, "NO_COLOR": "1",
            "PATH": os.environ.get("PATH", ""), "LLM_ROUTER_STATUS_MODE": "full",
-           "PYTHONPATH": str(Path(__file__).resolve().parent.parent / "src")}
+           "PYTHONPATH": os.pathsep.join(p for p in (str(Path(__import__("llm_router").__file__).resolve().parent.parent), os.environ.get("PYTHONPATH")) if p)}
     return SimpleNamespace(home=home, db=db, env=env)
 
 
