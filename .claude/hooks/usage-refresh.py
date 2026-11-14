@@ -89,7 +89,9 @@ def _append_savings_log(tool_name: str) -> None:
 def main() -> None:
     payload = json.loads(sys.stdin.read())
 
-    tool_name = payload.get("toolName", "")
+    tool_name = payload.get("tool_name") or payload.get("toolName") or ""
+    if not isinstance(tool_name, str):
+        return
     if not tool_name.startswith("llm_"):
         return
 

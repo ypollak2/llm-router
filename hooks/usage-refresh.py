@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 7
+# llm_router-hook-version: 8
 """PostToolUse hook — usage refresh + periodic savings awareness.
 
 After any llm_* MCP tool call:
@@ -483,7 +483,12 @@ def main() -> None:
     if not isinstance(payload, dict):  # HOOKS-FAILOPEN-1: `[]`, `"x"`, `123` -> fail open like an empty payload
         sys.exit(0)
 
-    tool_name = payload.get("toolName", "")
+    # Claude Code sends snake_case `tool_name`; camelCase `toolName` is the fallback for
+    # other hosts (same key order as hook_payload._NAME_KEYS). The FULL name is kept here
+    # (hook_payload.tool_name() strips the MCP prefix, which the savings log records).
+    tool_name = payload.get("tool_name") or payload.get("toolName") or ""
+    if not isinstance(tool_name, str):
+        return
     # CHZ-SURF-01: accept the consolidated doors, not just the `llm_` prefix.
     # Under the DEFAULT tier the completion door is named exactly `llm`, which
     # fails a startswith("llm_") test — so every routed call was dropped here and
