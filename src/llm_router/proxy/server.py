@@ -94,6 +94,7 @@ from llm_router.proxy.loop_guard import (
     TRIGGER_REPEAT,
     LoopGuard,
 )
+from llm_router.proxy import local_alarm, obs_fields
 from llm_router.proxy.cache_cost import ReadOnlyStickiness, Stickiness, conversation_key
 from llm_router.proxy.steps import (
     STEP_CLASSES, classify_text, has_client_tools, is_first_call, is_thread_continue, newest_human_text, session_id_of,
@@ -505,6 +506,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     turn_decisions = cls_decide.TurnDecisionStore()  # NS-A1: memory only, record only
     cls_elig_decisions = cls_decide.TurnDecisionStore()  # PR-B: eligible-call verdicts, never a veto
     lm = None
+    alarm_box: list = [None]  # LLM_ROUTER_LOCAL_ALARM: the LocalAlarm, created on first use
     if cfg.local_with_tiers and (cfg.serve != local_mode.SERVE_LOCAL_AGENT or tier_policy is None):
         raise ValueError("--local-with-tiers needs --serve local-agent and --tiers on|conversation")
     if cfg.serve == local_mode.SERVE_LOCAL_AGENT:
@@ -2035,6 +2037,27 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             return StreamingResponse(stream(), media_type="text/event-stream",
                                      headers={"cache-control": "no-cache"})
 
+        async def observe_local_row(src_body, row, served):
+            """Serve-on rows only: the observability fields (proxy/obs_fields.py) and the local-serving alarm
+            (LLM_ROUTER_LOCAL_ALARM, off by default). Never fails the request."""
+            try:
+                obs_fields.add_fields(row, conversation_key(src_body, row.get("session_id")), lm, served, cfg.model)
+            except Exception as exc:  # noqa: BLE001 - observability never costs a call
+                failopen.record("LR-FO-PROXY-OBS-FIELDS", exc)
+            if not local_alarm.enabled():
+                return
+            try:
+                if alarm_box[0] is None:
+                    alarm_box[0] = local_alarm.LocalAlarm()
+                alarm = alarm_box[0]
+                alarm.note_step(obs_fields.is_candidate(row), served is not None and row.get("reason") is None)
+                if alarm.due():
+                    quality_open = not (await lm_breaker.allows(None))[0]
+                    alarm.maybe_evaluate(Path(lm.kill_path), health.tripped(cfg.model), quality_open)
+            except Exception:  # noqa: BLE001 - counted, never raised
+                if alarm_box[0] is not None:
+                    alarm_box[0].errors += 1
+
         if lm is not None and not bypass_local:
             async def run_local_step():
                 # P6: with masking applied, the cap is tested on the masked body only when the flag is on.
@@ -2067,6 +2090,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     if "est_prompt_tokens" in lmr:  # counts only: which estimate decided the cap, and both numbers
                         lmr["cap_estimate"] = "reduced" if reduced else "raw"
                         lmr["reduced_est_prompt_tokens"] = hm["est_prompt_tokens"]
+                await observe_local_row(body, row, served)
                 return served
 
             message, early = await attempt_local(run_local_step)

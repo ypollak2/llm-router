@@ -456,6 +456,14 @@ class LocalModeState:
         # number of fallback pins a conversation has had. Memory only, bounded like the pins.
         self.turn_pins: OrderedDict[str, int] = OrderedDict()
         self.fallback_counts: OrderedDict[str, int] = OrderedDict()
+        # Observability (proxy/obs_fields.py): why a conversation was pinned to Claude, and rows since. Memory only.
+        self.pin_obs: OrderedDict[str, dict] = OrderedDict()
+
+    def set_pin_obs(self, key: str, cause: str) -> None:
+        self.pin_obs[key] = {"cause": cause, "age": 0}
+        self.pin_obs.move_to_end(key)
+        while len(self.pin_obs) > self.max_pins:
+            self.pin_obs.popitem(last=False)
 
     def note_fallback(self, key: str) -> int:
         """PR-C: count one failed local step of this conversation; returns the new count."""

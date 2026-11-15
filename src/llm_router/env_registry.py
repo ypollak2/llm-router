@@ -277,6 +277,9 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW": ("llm_router", "proxy/server.py", 1),
     # Cap trip falls back one step without pinning the session to Claude (default off).
     "LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN": ("llm_router", "proxy/server.py", 1),
+    # Local-serving alarm (proxy/local_alarm.py), default off; population label for bench proxies (proxy/obs_fields.py).
+    "LLM_ROUTER_LOCAL_ALARM": ("llm_router", "proxy/local_alarm.py", 1),
+    "LLM_ROUTER_POP_LABEL": ("llm_router", "proxy/obs_fields.py", 1),
     # Backend-health breaker (proxy/backend_health.py): consecutive empty or
     # sub-second invalid replies before local serving pauses, and the pause.
     "LLM_ROUTER_PROXY_BACKEND_FAIL_N": ("llm_router", "proxy/server.py", 1),

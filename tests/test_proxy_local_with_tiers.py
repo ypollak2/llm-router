@@ -32,7 +32,7 @@ from tests.test_proxy_tiers import OPUS, SONNET, Upstream, _raw_policy, _sse  # 
 
 #: Keys only a local-agent row carries (or sets differently): they are the local step's own bookkeeping.
 LOCAL_KEYS = {"serve_mode", "local_mode", "egress", "reason", "detail", "cls_applied", "est_prompt_tokens", "size_bucket",
-              "history_mask"}
+              "history_mask", "conv", "pop", "pin_cause", "pin_age_steps"}  # last four: proxy/obs_fields.py
 
 
 @pytest.fixture(autouse=True)
