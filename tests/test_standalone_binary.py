@@ -157,8 +157,17 @@ def test_run_hook_fails_open(tmp_path, capsys):
 
 def test_workflow_covers_every_platform_we_claim():
     wf = WORKFLOW.read_text()
-    for target in ("macos-14", "macos-13", "ubuntu-latest", "windows-latest"):
+    # Exact matrix/runs-on lines, not bare labels: a retired label that survives
+    # only in a comment must not satisfy this (macos-14 was retired 2026-11-02 and
+    # cancelled the arm64 build of the v16.0.0 tag after 1 s).
+    for target in (
+        "- os: macos-15 ",
+        "runs-on: macos-15-intel",
+        "- os: ubuntu-latest",
+        "- os: windows-latest",
+    ):
         assert target in wf, f"no binary is built for {target}"
+    assert "os: macos-14" not in wf and "runs-on: macos-14" not in wf
 
 
 def test_workflow_smoke_tests_what_the_spike_got_wrong():

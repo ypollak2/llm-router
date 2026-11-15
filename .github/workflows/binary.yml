@@ -38,7 +38,7 @@ jobs:
       fail-fast: false        # one platform failing must not hide the others
       matrix:
         include:
-          - os: macos-14      # arm64
+          - os: macos-15      # arm64 (macos-14 images were retired 2026-11-02)
             asset: llm-router-macos-arm64
           - os: ubuntu-latest
             asset: llm-router-linux-x86_64
