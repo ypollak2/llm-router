@@ -487,7 +487,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     if cold_guard.enabled():
         cold_guard.GUARD.ttl_s = cold_guard.ttl_from_keep_alive(cfg.keep_alive)
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
-    guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
+    legacy_guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
     # Stops sending steps to a crashed local backend (proxy.backend_health).
     health = BackendHealth(cfg.backend_fail_n, cfg.backend_cooldown_s, clock=health_clock)
     # Claude-tier rewrite (opt-in). A bad policy file fails here, at startup,
@@ -516,6 +516,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                              "--local-with-tiers) and local-agent compaction off")
         lm = local_mode.LocalModeState(cfg.kill_switch, disabled=cfg.local_disabled)
         lm_breaker = la_capability.BreakerCache(fn=breaker_fn)
+    pinfix_guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window,
+                             max_states=lm.max_pins if lm is not None else 4096)
+    # Backstop counts consecutive treatment serves across siblings; any Claude step resets it.
+    session_guard = LoopGuard(pinfix_guard.max_consecutive * 4, 0, max_states=pinfix_guard.max_states)
     if cfg.shadow and (lm is not None or not (cfg.model or "").startswith("ollama/")):
         raise ValueError("--shadow on needs --model ollama/<tag> and --serve off (shadow never serves)")
     lane_gate = None
@@ -701,17 +705,21 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         _add_phase(row, "okf_attach", (time.perf_counter() - okf_t0) * 1000.0)
         return send
 
-    async def try_serve(body: dict, row: dict) -> dict | None:
+    async def try_serve(body: dict, row: dict, *, pinfix_key: str | None = None) -> dict | None:
         t0 = time.monotonic()
         session_id = row.get("session_id")
-        exhausted = guard.exhausted(session_id)
+        guard = pinfix_guard if pinfix_key is not None else legacy_guard
+        guard_key = pinfix_key if pinfix_key is not None else session_id
+        exhausted = guard.exhausted(guard_key)
+        if pinfix_key is not None and session_guard.exhausted(session_id) is not None:
+            exhausted = session_guard.exhausted(session_id)
         if exhausted is not None:
             # Forced fallback: this session already hit the consecutive-served
             # cap, so the streak is broken WITHOUT trying the backend at all.
             if loop_guard_cap_no_pin_on():
-                trigger = guard.cap_trip(session_id)  # flag on: remembers the window to spot a cycle
+                trigger = guard.cap_trip(guard_key)  # flag on: remembers the window to spot a cycle
             else:
-                guard.reset(session_id)
+                guard.reset(guard_key)
                 trigger = TRIGGER_CAP
             row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
                        detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3),
@@ -739,7 +747,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             else:
                 choice = await choose_model(classify_text(body), cfg.model, needs=needs)
         except Exception as exc:  # noqa: BLE001 - any policy failure forwards the call
-            guard.reset(session_id)
+            guard.reset(guard_key)
             row.update(decision=ledger.DECISION_FALLBACK, reason="policy_error",
                        detail=ledger.scrub_detail(f"{type(exc).__name__}: {exc}"))
             row["added_latency_s"] = round(time.monotonic() - t0, 3)
@@ -753,14 +761,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             gate_decision = await lane_gate.decide(body, row, choice, needs)
             row["local_gate"] = gate_decision.as_row()
             if not gate_decision.serve:
-                guard.reset(session_id)
+                guard.reset(guard_key)
                 row.update(decision=ledger.DECISION_FORWARDED, reason=gate_decision.reason,
                            added_latency_s=round(time.monotonic() - t0, 3))
                 return None
             choice = dict(choice, model=gate_decision.model)
             row["model"] = gate_decision.model
         if choice["model"] is None:
-            guard.reset(session_id)
+            guard.reset(guard_key)
             row.update(decision=ledger.DECISION_FORWARDED, reason="policy_kept")
             row["added_latency_s"] = round(time.monotonic() - t0, 3)
             return None
@@ -768,7 +776,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             gate = await local_agent.gate(body, cfg.steps, choice)
             row["local_agent"] = gate.as_row()
             if not gate.local:
-                guard.reset(session_id)
+                guard.reset(guard_key)
                 row.update(decision=ledger.DECISION_FORWARDED, reason=gate.reason)
                 row["added_latency_s"] = round(time.monotonic() - t0, 3)
                 return None
@@ -785,7 +793,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if not admitted:
                 # Skipped without an attempt (and before compaction's embedding
                 # call): the backend is known to be broken.
-                guard.reset(session_id)
+                guard.reset(guard_key)
                 row.update(decision=ledger.DECISION_FORWARDED, reason=REASON_BACKEND_UNHEALTHY,
                            added_latency_s=round(time.monotonic() - t0, 3))
                 return None
@@ -796,6 +804,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             left = _budget_left(t0, step_budget_s)
             if left <= 0:
                 raise asyncio.TimeoutError
+            if pinfix_key is not None:
+                row["_pinfix_attempted"] = True
             message, err, backend_usage = await asyncio.wait_for(
                 backend.complete(send, left), timeout=left)
             _note_prefix(row, body, backend_usage)
@@ -887,16 +897,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if err or message is None:
             if gate_decision is not None:
                 row["local_gate"] = dict(row["local_gate"], reason=local_gate.R_LOCAL_FAILED)
-            guard.reset(session_id)
+            guard.reset(guard_key)
             row.update(decision=ledger.DECISION_FALLBACK, reason=reason or "validation",
                        detail=ledger.scrub_detail(err or "no message"), added_latency_s=elapsed)
             return None
-        repeat_hit = guard.repeat_hit(session_id, message)
+        repeat_hit = guard.repeat_hit(guard_key, message)
         repeat = None if repeat_hit is None else f"repeat:{repeat_hit[0]}"
         if repeat is not None:
             # The candidate is real (passed validation) but repeats a recent
             # served step: served/avoided metrics must never see it.
-            guard.reset(session_id)
+            guard.reset(guard_key)
             if r1_on:
                 row["r1_gate"], row["r1_reason"] = "escalated", f"r1_other:{REASON_LOOP_GUARD}"
             if gate_decision is not None:
@@ -907,7 +917,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             return None
         if not message.get("id"):  # IDLESS-1: also covers a reply the edit protocol put in place of the first one
             message["id"] = new_msg_id()
-        guard.record_served(session_id, message, track_window=loop_guard_cap_no_pin_on())
+        guard.record_served(guard_key, message, track_window=loop_guard_cap_no_pin_on())
+        if pinfix_key is not None:
+            session_guard.record_served(session_id, message)
         if gate_decision is not None:
             lane_gate.note_served(session_id, gate_decision, message, row.get("session_kind"))
         if lm is not None:
@@ -1080,11 +1092,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             row.update(decision=ledger.DECISION_FORWARDED, reason=local_mode.REASON_NOT_ELIGIBLE)
             return None
         key = conversation_key(key_body or body, row.get("session_id"))
+        treatment = local_mode.pinfix_treatment(key)
+        # PINFIX wins over PIN_SCOPE=turn for treatment conversations.
         # A `local:` step is decided as if pinned local, but the stored pin is
         # left alone: the prefix forces this one step, never the conversation.
         turn_idx = None
         pin_cleared = False
-        if not force and local_mode.pin_scope_turn_on():
+        if not force and not treatment and local_mode.pin_scope_turn_on():
             # PR-C: the turn index #915 records (``cls_decide.turn_idx``, row ``cls_turn_idx``). A fallback pin of an
             # earlier human turn is lifted here, before the pin is read, so local may be tried again.
             turn_idx = row.get("cls_turn_idx")
@@ -1253,7 +1267,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row_layout = history_layout.take_stats(layout_key)
                 if row_layout:
                     row["layout"] = row_layout
-            message = await try_serve(body, row)
+            message = await try_serve(body, row, pinfix_key=key if treatment else None)
+            attempted = row.pop("_pinfix_attempted", False)
             r1_reject = row.pop("_r1_reject", False)
             if cold_guard.enabled():
                 if message is None:
@@ -1261,6 +1276,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 elif cold_guard.GUARD.seq == cold_seq:  # _note_prefix did not record the sent (post-trim) prefix
                     cold_guard.GUARD.note_resident(cold_guard.GUARD.observe(payload))
             if message is not None:
+                if treatment and not force:
+                    lm.pinfix_outcome(key, False)
                 if force:
                     row["prefix_outcome"] = "served_local"
                     if stored is None and is_first_call(body):
@@ -1278,7 +1295,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # A failed local step: this step goes to Claude and the conversation
             # stays there (one logged move, never back and forth). NS-A2 residual, kept on
             # purpose: see the cls_decide module doc.
-            if (loop_guard_cap_no_pin_on() and row.get("reason") == REASON_LOOP_GUARD
+            if treatment and not r1_reject:
+                # Gate forwards and pre-attempt refusals are neutral. Queue/memory
+                # refusals can also arise inside complete(), before generation starts.
+                failed = attempted and row.get("reason") not in {"local_queue_timeout", "memory_budget"}
+                cause = lm.pinfix_outcome(key, True) if failed else None
+                if cause is not None:
+                    lm.set_pin(key, local_mode.PIN_CLAUDE, local_mode.REASON_PINNED_STICKY)
+                    row["local_mode"]["pin_change"] = "local->claude"
+                    if cause == "fallback_ceiling":
+                        row["local_mode"]["pinfix_cause"] = cause
+            elif (loop_guard_cap_no_pin_on() and row.get("reason") == REASON_LOOP_GUARD
                     and row.get("loop_guard_trigger") == TRIGGER_CAP):
                 row["pin_skipped"] = "loop_guard_cap"
             elif r1_reject:
@@ -1306,7 +1333,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return refuse_local(row, decision.reason)
             reason = decision.reason
             row.update(decision=ledger.DECISION_FORWARDED, reason=reason, detail=decision.detail or None)
-            if vetoed or cold_row is not None:
+            if (vetoed or cold_row is not None or (treatment and reason in {
+                    local_mode.REASON_BACKEND_UNHEALTHY, "budget_exceeded", "local_queue_timeout",
+                    "memory_budget", local_mode.REASON_COLD_OVER_DEADLINE})):
                 # NS-A2: a veto is this turn's, never the conversation's. No pin; remember that the
                 # conversation was seen so its next call is not `started_elsewhere`.
                 lm.mark_seen(key)
@@ -1855,6 +1884,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # classifier decision (filled below, before local_step). Additive keys.
             **cls_decide.static_fields(body, session_id_of(body), turn_k),
         }
+        if lm is not None:
+            arm = local_mode.pinfix_arm(conversation_key(body, row.get("session_id")))
+            if arm is not None:
+                row["ab_arm"] = arm
         if history_layout.shadow_enabled() and not history_layout.enabled():
             try:  # P14 key-stability measurement: hashes and counts, the client's body before any rewrite
                 row["layout_shadow"] = history_layout.shadow_fields(body)
@@ -1911,6 +1944,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         local_body = None if bypass_local else mask_local_body(local_src, row)
 
         async def finish_forward():
+            # Only treatment serves populate this guard. A Claude step anywhere
+            # in the session (including a control sibling or explicit prefix) breaks its streak.
+            session_guard.reset(row.get("session_id"))
             on_reply = start_shadow(body, row, len(raw)) if shadow is not None else None
             if tier_policy is None:
                 return await forward(request, sent_raw, sent_body or body, row,
@@ -2041,7 +2077,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             """Serve-on rows only: the observability fields (proxy/obs_fields.py) and the local-serving alarm
             (LLM_ROUTER_LOCAL_ALARM, off by default). Never fails the request."""
             try:
-                obs_fields.add_fields(row, conversation_key(src_body, row.get("session_id")), lm, served, cfg.model)
+                key = conversation_key(src_body, row.get("session_id"))
+                obs_fields.add_fields(row, key, lm, served, cfg.model)
+                cause = (row.get("local_mode") or {}).get("pinfix_cause")
+                if cause is not None:
+                    lm.set_pin_obs(key, cause)
+                    row["pin_cause"] = cause
             except Exception as exc:  # noqa: BLE001 - observability never costs a call
                 failopen.record("LR-FO-PROXY-OBS-FIELDS", exc)
             if not local_alarm.enabled():
