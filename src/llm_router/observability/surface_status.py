@@ -410,7 +410,7 @@ def local_alarm_segment(now: Optional[float] = None) -> str:
     unsilenced alarm; else ``""``. An absent or unreadable file prints nothing and raises nothing."""
     try:
         now = time.time() if now is None else now
-        data = json.loads((_state_dir() / _LOCAL_ALARM_FILE).read_text())
+        data = json.loads((paths.llm_router_home() / _LOCAL_ALARM_FILE).read_text())  # where the proxy writes it
         if now - float(data["ts"]) > _LOCAL_ALARM_MAX_AGE_S or data.get("silenced") or not data.get("active"):
             return ""
         first = data["active"][0]

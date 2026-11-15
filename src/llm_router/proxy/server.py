@@ -2053,7 +2053,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 alarm.note_step(obs_fields.is_candidate(row), served is not None and row.get("reason") is None)
                 if alarm.due():
                     quality_open = not (await lm_breaker.allows(None))[0]
-                    alarm.maybe_evaluate(Path(lm.kill_path), health.tripped(cfg.model), quality_open)
+                    alarm.maybe_evaluate(Path(lm.kill_path), health.open_for(cfg.model), quality_open)
             except Exception:  # noqa: BLE001 - counted, never raised
                 if alarm_box[0] is not None:
                     alarm_box[0].errors += 1

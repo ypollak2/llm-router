@@ -151,10 +151,11 @@ class BackendHealth:
             return False
         return st.probing or (self.clock() - st.opened_at) < self.cooldown_s
 
-    def tripped(self, key: str) -> bool:
-        """True while the breaker is open, cooldown or not (``is_open`` is False once a probe is due)."""
+    def open_for(self, key: str) -> float | None:
+        """Seconds the breaker has been open, cooldown or not (``is_open`` is False once a probe is due); None
+        while closed."""
         st = self._states.get(key)
-        return st is not None and st.opened_at is not None
+        return None if st is None or st.opened_at is None else max(0.0, self.clock() - st.opened_at)
 
     async def admit(self, key: str, backend) -> tuple[bool, dict | None]:
         """``(send_the_step, ledger_info)``. ``(True, None)`` while closed."""

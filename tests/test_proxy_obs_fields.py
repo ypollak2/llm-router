@@ -81,6 +81,14 @@ def test_population_rules(monkeypatch):
     assert obs_fields.population({"session_kind": "organic", "is_main_thread": False}) == "organic_sub"
 
 
+
+def test_structural_refusals_are_not_alarm_candidates():
+    from llm_router.proxy import local_mode
+    assert obs_fields.is_candidate({"step_class": "turn_first", "local_mode": {"reason": "pinned_claude"}})
+    for reason in local_mode.STRUCTURAL_REASONS:
+        assert not obs_fields.is_candidate({"step_class": "turn_first", "local_mode": {"reason": reason}})
+
+
 async def test_off_mode_rows_have_none_of_the_new_fields(env, tmp_path):
     import httpx
     from llm_router.proxy import server as ps

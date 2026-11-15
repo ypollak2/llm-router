@@ -72,10 +72,10 @@ def add_fields(row: dict, key: str, lm, served, backend_model: str | None = None
 
 def is_candidate(row: dict) -> bool:
     """A step that reached the local decision as an eligible candidate: not forced, exempt, a side call, a
-    marker, a kill switch or a preflight refusal."""
+    marker, a kill switch, a preflight refusal or a structural refusal (``local_mode.STRUCTURAL_REASONS``)."""
     lmr = row.get("local_mode")
     if not isinstance(lmr, dict) or lmr.get("forced") or row.get("step_class") == STEP_SIDE_CALL:
         return False
     return lmr.get("reason") not in (local_mode.REASON_KILL_SWITCH, local_mode.REASON_CLAUDE_MARKER,
                                      local_mode.REASON_EXEMPT_SESSION, local_mode.REASON_PREFLIGHT_REFUSED,
-                                     local_mode.REASON_NOT_ELIGIBLE)
+                                     local_mode.REASON_NOT_ELIGIBLE, *local_mode.STRUCTURAL_REASONS)

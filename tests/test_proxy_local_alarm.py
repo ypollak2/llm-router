@@ -53,11 +53,11 @@ def test_kill_switch_raises_after_30_min_and_clears(tmp_path):
     kill.write_text("")
     os.utime(kill, (clk.t - 1700, clk.t - 1700))
     a = LocalAlarm(tmp_path, clock=clk)
-    assert a.evaluate(kill_path=kill, backend_open=False, quality_open=False) == []
+    assert a.evaluate(kill_path=kill, backend_open_s=None, quality_open=False) == []
     os.utime(kill, (clk.t - 1900, clk.t - 1900))
-    assert a.evaluate(kill_path=kill, backend_open=False, quality_open=False) == ["kill_switch"]
+    assert a.evaluate(kill_path=kill, backend_open_s=None, quality_open=False) == ["kill_switch"]
     kill.unlink()
-    assert a.evaluate(kill_path=kill, backend_open=False, quality_open=False) == []
+    assert a.evaluate(kill_path=kill, backend_open_s=None, quality_open=False) == []
     assert [(x["code"], x["event"]) for x in _log(tmp_path)] == [("kill_switch", "raise"), ("kill_switch", "clear")]
     assert _codes(tmp_path) == []
 
@@ -65,20 +65,28 @@ def test_kill_switch_raises_after_30_min_and_clears(tmp_path):
 def test_backend_breaker_after_15_min(tmp_path):
     clk = Clock()
     a = LocalAlarm(tmp_path, clock=clk)
-    assert a.evaluate(kill_path=None, backend_open=True, quality_open=False) == []
+    assert a.evaluate(kill_path=None, backend_open_s=0.0, quality_open=False) == []
     clk.t += 14 * 60
-    assert a.evaluate(kill_path=None, backend_open=True, quality_open=False) == []
+    assert a.evaluate(kill_path=None, backend_open_s=clk.t - 1_000_000.0, quality_open=False) == []
     clk.t += 2 * 60
-    assert a.evaluate(kill_path=None, backend_open=True, quality_open=False) == ["backend_breaker"]
+    assert a.evaluate(kill_path=None, backend_open_s=clk.t - 1_000_000.0, quality_open=False) == ["backend_breaker"]
     assert _state(tmp_path)["active"][0]["since"] == 1_000_000.0
-    assert a.evaluate(kill_path=None, backend_open=False, quality_open=False) == []
+    assert a.evaluate(kill_path=None, backend_open_s=None, quality_open=False) == []
     assert _log(tmp_path)[-1] == {"ts": clk.t, "code": "backend_breaker", "event": "clear"}
+
+
+def test_backend_breaker_open_before_first_evaluation(tmp_path):
+    # an idle proxy evaluates late: the age comes from the breaker, not from the first evaluation
+    clk = Clock()
+    a = LocalAlarm(tmp_path, clock=clk)
+    assert a.evaluate(kill_path=None, backend_open_s=20 * 60.0, quality_open=False) == ["backend_breaker"]
+    assert _state(tmp_path)["active"][0]["since"] == clk.t - 20 * 60
 
 
 def test_quality_breaker_immediate(tmp_path):
     a = LocalAlarm(tmp_path, clock=Clock())
-    assert a.evaluate(kill_path=None, backend_open=False, quality_open=True) == ["quality_breaker"]
-    assert a.evaluate(kill_path=None, backend_open=False, quality_open=False) == []
+    assert a.evaluate(kill_path=None, backend_open_s=None, quality_open=True) == ["quality_breaker"]
+    assert a.evaluate(kill_path=None, backend_open_s=None, quality_open=False) == []
 
 
 def test_no_local_needs_20_candidates_and_zero_served(tmp_path):
@@ -87,34 +95,34 @@ def test_no_local_needs_20_candidates_and_zero_served(tmp_path):
     for _ in range(19):
         a.note_step(True, False)
     a.note_step(False, False)  # not a candidate: does not count
-    assert a.evaluate(kill_path=None, backend_open=False, quality_open=False) == []
+    assert a.evaluate(kill_path=None, backend_open_s=None, quality_open=False) == []
     a.note_step(True, False)
-    assert a.evaluate(kill_path=None, backend_open=False, quality_open=False) == ["no_local"]
+    assert a.evaluate(kill_path=None, backend_open_s=None, quality_open=False) == ["no_local"]
     a.note_step(True, True)  # one served local clears it
-    assert a.evaluate(kill_path=None, backend_open=False, quality_open=False) == []
+    assert a.evaluate(kill_path=None, backend_open_s=None, quality_open=False) == []
     # the window is 60 min: old steps age out
     b = LocalAlarm(tmp_path / "b", clock=clk)
     for _ in range(25):
         b.note_step(True, False)
     clk.t += 3601
-    assert b.evaluate(kill_path=None, backend_open=False, quality_open=False) == []
+    assert b.evaluate(kill_path=None, backend_open_s=None, quality_open=False) == []
 
 
 def test_silenced_by_maintenance_file(tmp_path):
     clk = Clock()
     a = LocalAlarm(tmp_path, clock=clk)
     (tmp_path / "local_alarm_maintenance.json").write_text(json.dumps({"maintenance_until": clk.t + 60}))
-    a.evaluate(kill_path=None, backend_open=False, quality_open=True)
+    a.evaluate(kill_path=None, backend_open_s=None, quality_open=True)
     st = _state(tmp_path)
     assert st["silenced"] is True and _codes(tmp_path) == ["quality_breaker"]
     clk.t += 120
-    a.evaluate(kill_path=None, backend_open=False, quality_open=True)
+    a.evaluate(kill_path=None, backend_open_s=None, quality_open=True)
     assert _state(tmp_path)["silenced"] is False
 
 
 def test_files_are_0600_and_state_is_atomic(tmp_path):
     a = LocalAlarm(tmp_path, clock=Clock())
-    a.evaluate(kill_path=None, backend_open=False, quality_open=True)
+    a.evaluate(kill_path=None, backend_open_s=None, quality_open=True)
     assert _mode(tmp_path / "local_alarm.json") == 0o600 and _mode(tmp_path / "proxy_alarms.jsonl") == 0o600
     assert not list(tmp_path.glob("*.tmp"))
 
@@ -135,7 +143,8 @@ def test_evaluates_at_most_once_per_300s_and_swallows_errors(tmp_path):
 
 
 def test_status_segment(tmp_path, monkeypatch):
-    monkeypatch.setenv("LLM_ROUTER_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    monkeypatch.setenv("LLM_ROUTER_STATE_DIR", str(tmp_path / "elsewhere"))  # the alarm file is read from the home
     assert surface_status.local_alarm_segment(1000.0) == ""  # absent file
     path = tmp_path / "local_alarm.json"
     path.write_text(json.dumps({"ts": 1000.0, "active": [{"code": "no_local", "since": 1000.0 - 42 * 60}], "silenced": False}))

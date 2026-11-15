@@ -8,10 +8,10 @@ Alarm codes:
 
 ``kill_switch``     the kill-switch file has existed for more than ``KILL_AFTER_S``
 ``backend_breaker`` the backend health breaker has been open for more than ``BACKEND_AFTER_S``
-                    (measured from the first evaluation that saw it open)
+                    (measured from when the breaker opened, ``BackendHealth.open_for``)
 ``quality_breaker`` the quality breaker is open
 ``no_local``        in the last ``WINDOW_S`` there were >= ``NO_LOCAL_MIN`` eligible candidate steps and none was
-                    served local
+                    served local (structural refusals such as media or an over-cap prompt are not candidates)
 
 Files, all under the router home, mode 0600:
 ``local_alarm.json``  ``{ts, active: [{code, since}], silenced}``, written atomically
@@ -84,7 +84,6 @@ class LocalAlarm:
         self.clock = clock
         self.steps: deque[tuple[float, bool]] = deque()  # (ts, served) of eligible candidate steps
         self.since: dict[str, float] = {}  # active code -> when it started
-        self._backend_seen_open: float | None = None
         self._next_eval = 0.0
         self.errors = 0
 
@@ -99,8 +98,9 @@ class LocalAlarm:
         while len(self.steps) > _MAX_STEPS:
             self.steps.popleft()
 
-    def _conditions(self, now: float, kill_path: Path | None, backend_open: bool, quality_open: bool) -> dict[str, float]:
-        """Active codes -> since."""
+    def _conditions(self, now: float, kill_path: Path | None, backend_open_s: float | None,
+                    quality_open: bool) -> dict[str, float]:
+        """Active codes -> since. ``backend_open_s``: seconds the backend breaker has been open, None when closed."""
         active: dict[str, float] = {}
         if kill_path is not None:
             try:
@@ -109,13 +109,8 @@ class LocalAlarm:
                     active[KILL_SWITCH] = born
             except OSError:
                 pass
-        if backend_open:
-            if self._backend_seen_open is None:
-                self._backend_seen_open = now
-            if now - self._backend_seen_open > BACKEND_AFTER_S:
-                active[BACKEND_BREAKER] = self._backend_seen_open
-        else:
-            self._backend_seen_open = None
+        if backend_open_s is not None and backend_open_s > BACKEND_AFTER_S:
+            active[BACKEND_BREAKER] = self.since.get(BACKEND_BREAKER, now - backend_open_s)
         if quality_open:
             active[QUALITY_BREAKER] = self.since.get(QUALITY_BREAKER, now)
         while self.steps and now - self.steps[0][0] > WINDOW_S:
@@ -131,10 +126,10 @@ class LocalAlarm:
         except Exception:  # noqa: BLE001 - absent or unreadable means not in maintenance
             return False
 
-    def evaluate(self, *, kill_path: Path | None, backend_open: bool, quality_open: bool) -> list[str]:
+    def evaluate(self, *, kill_path: Path | None, backend_open_s: float | None, quality_open: bool) -> list[str]:
         """Compute, write ``local_alarm.json``, log transitions. Returns the active codes."""
         now = self.clock()
-        active = self._conditions(now, kill_path, backend_open, quality_open)
+        active = self._conditions(now, kill_path, backend_open_s, quality_open)
         home = self._dir()
         home.mkdir(parents=True, exist_ok=True)
         lines = [json.dumps({"ts": now, "code": c, "event": "raise"}) for c in active if c not in self.since]
@@ -150,14 +145,14 @@ class LocalAlarm:
     def due(self) -> bool:
         return self.clock() >= self._next_eval
 
-    def maybe_evaluate(self, kill_path: Path | None, backend_open: bool, quality_open: bool) -> bool:
+    def maybe_evaluate(self, kill_path: Path | None, backend_open_s: float | None, quality_open: bool) -> bool:
         """At most once per ``EVAL_EVERY_S``; never raises. True when an evaluation ran."""
         try:
             now = self.clock()
             if now < self._next_eval:
                 return False
             self._next_eval = now + EVAL_EVERY_S
-            self.evaluate(kill_path=kill_path, backend_open=backend_open, quality_open=quality_open)
+            self.evaluate(kill_path=kill_path, backend_open_s=backend_open_s, quality_open=quality_open)
             return True
         except Exception:  # noqa: BLE001 - an alarm never fails a request
             self.errors += 1
