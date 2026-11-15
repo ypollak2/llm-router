@@ -121,6 +121,35 @@ def test_ab_deterministic_balanced_and_conversation_stable(monkeypatch):
         assert conversation_key(turn_body(['same'], loops=i), 'session') == conversation_key(turn_body(['same']), 'session')
 
 
+@pytest.mark.parametrize('mode', ['ab', 'on', 'off', None], ids=['ab', 'on', 'off', 'unset'])
+def test_ledger_rows_carry_arm_only_in_ab(tmp_path, monkeypatch, mode):
+    if mode is None:
+        monkeypatch.delenv('LLM_ROUTER_PINFIX', raising=False)
+    else:
+        monkeypatch.setenv('LLM_ROUTER_PINFIX', mode)
+    e = Env(tmp_path)
+    keys, arms = set(), set()
+    for i in range(40):
+        prompt = f'ledger-arm-{i}'
+        body = turn_body([prompt])
+        key = conversation_key(body, '11111111-2222-3333-4444-555555555555')
+        keys.add(key)
+        drive(e, 3, prompt)
+        rows = e.rows()
+        assert len(rows) == (i + 1) * 3
+        conversation_rows = rows[i * 3:]
+        if mode == 'ab':
+            assert all(row.get('ab_arm') in {'T', 'C'} for row in conversation_rows)
+            row_arms = {row['ab_arm'] for row in conversation_rows}
+            assert row_arms == {local_mode.pinfix_arm(key)}
+            arms.update(row_arms)
+        else:
+            assert all('ab_arm' not in row for row in conversation_rows)
+    assert len(keys) == 40
+    if mode == 'ab':
+        assert arms == {'T', 'C'}
+
+
 def test_control_rows_equal_off_and_invalid(tmp_path, monkeypatch):
     monkeypatch.setenv('LLM_ROUTER_PINFIX', 'ab')
     prompt = next(f'c-{i}' for i in range(1000) if local_mode.pinfix_arm(
