@@ -156,9 +156,20 @@ def test_run_hook_fails_open(tmp_path, capsys):
 
 
 def test_workflow_covers_every_platform_we_claim():
-    wf = WORKFLOW.read_text()
-    for target in ("macos-14", "macos-13", "ubuntu-latest", "windows-latest"):
-        assert target in wf, f"no binary is built for {target}"
+    """Reads the parsed jobs, not the text: a retired label that survives only in
+    a comment must not satisfy this. macos-14 was retired on 2026-11-02 and
+    cancelled the arm64 build of the v16.0.0 tag after 1 s, which also skipped
+    the npm publish.
+    """
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+    runners = {leg["os"] for leg in jobs["build"]["strategy"]["matrix"]["include"]}
+    runners.add(jobs["build-macos-x86"]["runs-on"])
+    for target in ("macos-15", "macos-15-intel", "ubuntu-latest", "windows-latest"):
+        assert target in runners, f"no binary is built for {target}"
+    retired = {"macos-12", "macos-13", "macos-14"}
+    assert not runners & retired, f"retired runner label(s): {runners & retired}"
 
 
 def test_workflow_smoke_tests_what_the_spike_got_wrong():
