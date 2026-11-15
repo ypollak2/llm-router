@@ -83,7 +83,7 @@ def classify(err: str | None, reason: str | None, elapsed_s: float) -> str:
         return OUTCOME_OK
     if CRASH_SIGNATURE.search(err):
         return OUTCOME_CRASH
-    if err == "empty response" or elapsed_s < INVALID_MAX_S:
+    if err in {"empty response", "zero-line stream"} or elapsed_s < INVALID_MAX_S:
         return OUTCOME_FAIL
     return OUTCOME_OK  # a slow wrong answer: the model ran; the policy handles it
 
@@ -104,9 +104,11 @@ class BackendHealth:
     def __init__(self, fail_n: int = DEFAULT_FAIL_N, cooldown_s: float = DEFAULT_COOLDOWN_S, *,
                  probe_timeout_s: float = DEFAULT_PROBE_TIMEOUT_S,
                  clock: Callable[[], float] | None = None,
-                 warn: Callable[[str], None] | None = None) -> None:
+                 warn: Callable[[str], None] | None = None,
+                 fast_empty: bool = False) -> None:
         if fail_n < 0 or cooldown_s < 0:
             raise ValueError("backend fail_n and cooldown_s must be >= 0")
+        self.fast_empty = fast_empty
         self.fail_n = fail_n
         self.cooldown_s = cooldown_s
         self.probe_timeout_s = probe_timeout_s
@@ -132,6 +134,9 @@ class BackendHealth:
             return None
         st = self._get(key)
         outcome = classify(err, reason, elapsed_s)
+        if (self.fast_empty and err == "zero-line stream" and elapsed_s < INVALID_MAX_S
+                and reason not in _TIMEOUT_REASONS):
+            return self._open(key, st, "fast_empty", err)
         if outcome == OUTCOME_CRASH:
             return self._open(key, st, "crash_signature", err)
         if outcome == OUTCOME_FAIL:
