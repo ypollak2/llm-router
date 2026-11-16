@@ -401,6 +401,25 @@ def _supports_color() -> bool:
         return False
 
 
+_LOCAL_ALARM_FILE = "local_alarm.json"
+_LOCAL_ALARM_MAX_AGE_S = 900
+
+
+def local_alarm_segment(now: Optional[float] = None) -> str:
+    """``LOCAL DOWN no_local 42m`` when ``local_alarm.json`` is fresher than 15 min and holds an active,
+    unsilenced alarm; else ``""``. An absent or unreadable file prints nothing and raises nothing."""
+    try:
+        now = time.time() if now is None else now
+        data = json.loads((paths.llm_router_home() / _LOCAL_ALARM_FILE).read_text())  # where the proxy writes it
+        if now - float(data["ts"]) > _LOCAL_ALARM_MAX_AGE_S or data.get("silenced") or not data.get("active"):
+            return ""
+        first = data["active"][0]
+        minutes = max(0, int((now - float(first["since"])) // 60))
+        return f"LOCAL DOWN {str(first['code'])[:32]} {minutes}m"
+    except Exception:
+        return ""
+
+
 def compact_line(status: SurfaceStatus, color: Optional[bool] = None) -> str:
     """A one-line inline indicator suitable for hosts that print hook stdout.
 
@@ -436,6 +455,9 @@ def compact_line(status: SurfaceStatus, color: Optional[bool] = None) -> str:
     if status.health != HEALTH_OK:
         glyph += " " + c(status.health_reason, _HEALTH_COLOR.get(status.health, "dim"))
     parts.append(glyph)
+    alarm = local_alarm_segment()
+    if alarm:
+        parts.append(c(alarm, "red"))
 
     return " · ".join(parts)
 

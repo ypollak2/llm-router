@@ -46,7 +46,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
 REASON_LOOP_GUARD = "loop_guard"
@@ -101,21 +101,31 @@ class _SessionState:
 class LoopGuard:
     """Per-process, per-session loop tracking. One instance per proxy app."""
 
-    def __init__(self, max_consecutive: int | None = None, repeat_window: int | None = None):
+    def __init__(self, max_consecutive: int | None = None, repeat_window: int | None = None,
+                 max_states: int | None = None):
         self.max_consecutive = (_env_int("LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE", DEFAULT_MAX_CONSECUTIVE)
                                  if max_consecutive is None else max_consecutive)
         self.repeat_window = (_env_int("LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW", DEFAULT_REPEAT_WINDOW)
                                if repeat_window is None else repeat_window)
-        self._sessions: dict[str, _SessionState] = {}
+        self.max_states = max_states
+        self._sessions: dict[str, _SessionState] = OrderedDict()
         # hashes of the tool signatures of the last CYCLE_WINDOWS cap windows (flag on only)
-        self._prev_window: dict[str, deque] = {}
+        self._prev_window: dict[str, deque] = OrderedDict()
 
     def _state(self, session_id: str) -> _SessionState:
         st = self._sessions.get(session_id)
         if st is None:
             st = _SessionState(recent_tool_sigs=deque(maxlen=max(self.repeat_window, 1)))
             self._sessions[session_id] = st
+        if self.max_states is not None:
+            self._sessions.move_to_end(session_id)
+        self._bound(self._sessions)
         return st
+
+    def _bound(self, states) -> None:
+        if self.max_states is not None:
+            while len(states) > self.max_states:
+                states.popitem(last=False)
 
     def exhausted(self, session_id: str | None) -> str | None:
         """A fallback detail string when this session already hit the
@@ -192,4 +202,7 @@ class LoopGuard:
         if hist is None:
             hist = self._prev_window[session_id] = deque(maxlen=CYCLE_WINDOWS)
         hist.append(frozenset(cur))
+        if self.max_states is not None:
+            self._prev_window.move_to_end(session_id)
+        self._bound(self._prev_window)
         return TRIGGER_CAP
