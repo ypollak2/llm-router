@@ -12,6 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [16.0.1] - 2026-11-16
+
+### Added
+- Proxy ledger rows written while local serving is on gain `conv` (hashed conversation id), `pin_cause`, `pin_age_steps`, `served_model` and `pop` (population label; `LLM_ROUTER_POP_LABEL` overrides it for bench proxies). Rows of `--serve off` are unchanged.
+  - `loop_guard` rows always carry `loop_guard_trigger`, and a loop-guard pin is recorded as `pin_cause` `loop_guard:<trigger>`.
+  - New local-serving alarm, flag `LLM_ROUTER_LOCAL_ALARM`, default off. It raises `kill_switch` (kill switch present more than 30 min), `backend_breaker` (open more than 15 min), `quality_breaker` and `no_local` (at least 20 eligible steps in 60 min and 0 served locally); evaluated at most every 300 s from the request path. It writes `local_alarm.json` and `proxy_alarms.jsonl` (mode 0600) under the router home; `local_alarm_maintenance.json` silences alarms until a given time; the status line shows `LOCAL DOWN <code> <minutes>m` while an unsilenced alarm is fresh.
+
+### Fixed
+- The macOS arm64 standalone binary now builds on the `macos-15` runner image (#932); GitHub retired the `macos-14` image, which made the binary job of the 16.0.0 release fail.
+
+### Known issues and disclosures
+Each figure gives its n, UTC window and source. UNMET: measured and missed. NOT INFORMATIVE: the data miss the check's own minimum, so no pass or fail is called. NOT MEASURED: not run. LIMITATION: shipped behaviour with a known gap. The 16.0.0 disclosures below still apply to 16.0.1. `coord/` files are private evidence under `~/.rsi/research/primary-plan/v16/`; `rel16-main/` is the private release worktree in the same folder.
+- NOT MEASURED: P0.10-a (the 10-run live check) was not run for 16.0.0 and was not run for 16.0.1. Its harness requires the live install to be at the release SHA, and the live install was 11 commits behind it (owner decision D-489: skip and disclose). The last pass was 10 of 10 at e1774654 on 2026-11-07 (`coord/RC8-STEP7-20261114.md` line 48).
+- LIMITATION: the 16.0.0 release shipped to PyPI and GitHub Releases without the npm package and without the macOS arm64 binary, because the binary job failed on the retired `macos-14` image. On 2026-11-15 the `llm-routing` package on npm was at 15.4.0 and the v16.0.0 GitHub Release held 5 assets, none of them macOS arm64 (`npm view llm-routing version`; `gh release view v16.0.0 --json assets`). 16.0.1 is the first v16 release meant to carry both. `npm view llm-router` is a different, unrelated package and does not show this package.
+- UNMET: Codex agent-route delivered no result on 102 of 199 runs (blocked 58, failed 44), and 18 of 97 delegated units were bound, in the 30-day window 2026-10-15T23:59Z..2026-11-14T23:59Z, 7 organic sessions (`coord/PRV-rc8-20261114T223533Z.log` lines 108-109; window from `release-artifacts/outcome-audit/outcome_audit_16.0.0.summary.json` under `rel16-main/`, written by the same run at line 115). Counts only; no quality claim.
+- LIMITATION: the outcome-audit figure of the 2026-11-14 pre-release run is not comparable with the 2.141% (10 of 467 attempted units, 2026-10-04..2026-11-03) of the 16.0.0 entry below, because the two used different populations. It reads 13 used of 252 attempted units (5.159%; 7 organic sessions; 30-day window 2026-10-15T23:59Z..2026-11-14T23:59Z; `release-artifacts/outcome-audit/outcome_audit_16.0.0.jsonl`, sha256 prefix 1a125dd72c15; `coord/PRV-rc8-20261114T223533Z.log` line 120). The artifact behind the 16.0.0 figure was overwritten by this run, so it cannot be re-read.
+
 ## [16.0.0] - 2026-11-15
 
 ### Added
