@@ -1,0 +1,1 @@
+- Fix the proxy's local backend breaker ignoring a `budget_exceeded` step in which no stream line arrived from the backend: it now counts as a failure toward `fail_n` and opens the breaker; a step that received any line, and `hedge_timeout`, stay neutral.

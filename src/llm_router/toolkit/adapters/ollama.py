@@ -612,12 +612,13 @@ def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget
     trained = _trained_ctx(base_url, name)
     if trained:
         want_ctx = min(want_ctx, trained)      # Ollama clamps the request to the model's own window
-    # (1) already resident on that server: no new load, unless it was loaded with a smaller window than the one
-    # requested (a reload). Same-or-larger window, or an unreported one: nothing to add, never double counted.
+    # (1) already resident on that server: no new load, unless it was loaded with a different window than the one
+    # requested (Ollama keys a runner on num_ctx, so any difference is a reload; STALL-1). Same window, or an
+    # unreported one: nothing to add, never double counted.
     same = [(u, r, n) for u, r, n in rows if u == base_url and _same_name(n, name)]
     if same:
         have = same[0][1].get("context_length")
-        if not isinstance(have, (int, float)) or have >= want_ctx:
+        if not isinstance(have, (int, float)) or have == want_ctx:
             return None
         rows = [t for t in rows if t not in same]      # the reload replaces the resident copy: count it once
     if not _is_loopback(base_url):

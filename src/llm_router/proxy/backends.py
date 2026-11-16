@@ -57,6 +57,7 @@ from typing import Callable, Protocol
 from llm_router import local_models
 from llm_router.local_context_guard import DEFAULT_RESERVED_OUTPUT_TOKENS, check_overflow, check_truncated, effective_window, estimate_payload_tokens
 from llm_router.proxy import history_layout, prefix_hash
+from llm_router.proxy.backend_health import mark_stream_line
 from llm_router.proxy.steps import STEP_CONTINUATION, non_system, prev_tools
 from llm_router.proxy.translate import from_ollama, to_ollama
 from llm_router.token_estimate import est_tokens
@@ -407,10 +408,13 @@ class OllamaBackend:
                 except StopAsyncIteration:
                     first = ""
                 first_token_s = round(loop.time() - t0, 3)
+                if line_count:
+                    mark_stream_line()
                 if first.strip():
                     objs.append(json.loads(first))
                 async for line in lines:
                     line_count += 1
+                    mark_stream_line()
                     if line.strip():
                         objs.append(json.loads(line))
         finally:

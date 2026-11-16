@@ -16,7 +16,9 @@ long-lived process, so in-memory state is the whole truth):
             (:func:`classify`): a crash signature opens the breaker at once;
             ``fail_n`` consecutive failures (an empty reply, or any invalid
             reply in under ``INVALID_MAX_S``) open it; a working reply resets
-            the streak; a timeout (hedge or step budget) does neither.
+            the streak; a hedge timeout does neither, and neither does a step-budget
+            timeout that had received stream lines. A step-budget timeout with zero
+            stream lines counts as a failure (STALL-2).
 ``open``    no step is sent. The proxy forwards to Claude and the ledger row
             says ``reason = "backend_unhealthy"``. A one-line warning goes to
             stderr when it opens.
@@ -39,6 +41,7 @@ minute.
 
 from __future__ import annotations
 
+import contextvars
 import re
 import sys
 import time
@@ -74,11 +77,42 @@ CRASH_SIGNATURE = re.compile(
 
 _TIMEOUT_REASONS = frozenset({"hedge_timeout", "budget_exceeded"})
 
+_stream_lines_box: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
+    "_stream_lines_box", default=None
+)
 
-def classify(err: str | None, reason: str | None, elapsed_s: float) -> str:
-    """One backend outcome: ``ok`` | ``fail`` | ``crash`` | ``neutral``."""
-    if reason in _TIMEOUT_REASONS:
+
+def begin_stream_progress() -> list[int]:
+    """Install a fresh one-slot counter for the step about to call the backend and return it.
+
+    ``asyncio.wait_for`` runs the backend in a child task that copies the context, so the child shares
+    this list (a ContextVar value set in the child would never reach the caller). The caller reads
+    ``box[0]`` after a ``budget_exceeded``: 0 means no stream line arrived from the backend."""
+    box = [0]
+    _stream_lines_box.set(box)
+    return box
+
+
+def mark_stream_line() -> None:
+    """Called by a streaming backend for every line it receives; no-op outside a step."""
+    box = _stream_lines_box.get()
+    if box is not None:
+        box[0] += 1
+
+
+def classify(err: str | None, reason: str | None, elapsed_s: float, *, _box: list[int] | None = None) -> str:
+    """One backend outcome: ``ok`` | ``fail`` | ``crash`` | ``neutral``.
+
+    ``budget_exceeded``: ``_box`` (from :func:`begin_stream_progress`) tells whether any
+    stream line arrived from the backend before the budget expired. ``_box[0] == 0`` →
+    FAIL (feeds the breaker streak). Any line arrived → NEUTRAL. No box (the budget was
+    spent before the backend was called, so nothing was asked of it) → NEUTRAL.
+    ``hedge_timeout`` stays NEUTRAL.
+    """
+    if reason == "hedge_timeout":
         return OUTCOME_NEUTRAL
+    if reason == "budget_exceeded":
+        return OUTCOME_FAIL if _box is not None and _box[0] == 0 else OUTCOME_NEUTRAL
     if not err:
         return OUTCOME_OK
     if CRASH_SIGNATURE.search(err):
@@ -127,13 +161,14 @@ class BackendHealth:
                       f"{(detail or '')[:120]}); steps go to Claude for {self.cooldown_s:g}s, then a probe")
         return {"state": "tripped", "trigger": trigger}
 
-    def record(self, key: str, err: str | None, reason: str | None, elapsed_s: float) -> dict | None:
+    def record(self, key: str, err: str | None, reason: str | None, elapsed_s: float,
+               _box: list[int] | None = None) -> dict | None:
         """Record one backend outcome. Returns the trip record when this outcome
         opened the breaker, else ``None``."""
         if self.fail_n == 0:
             return None
         st = self._get(key)
-        outcome = classify(err, reason, elapsed_s)
+        outcome = classify(err, reason, elapsed_s, _box=_box)
         if (self.fast_empty and err == "zero-line stream" and elapsed_s < INVALID_MAX_S
                 and reason not in _TIMEOUT_REASONS):
             return self._open(key, st, "fast_empty", err)
