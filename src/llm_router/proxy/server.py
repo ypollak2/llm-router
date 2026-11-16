@@ -489,7 +489,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
     # Stops sending steps to a crashed local backend (proxy.backend_health).
-    health = BackendHealth(cfg.backend_fail_n, cfg.backend_cooldown_s, clock=health_clock)
+    from llm_router.proxy.backend_recycle import BackendRecycle, recycle_after_failed_probe, recycle_command
+
+    recycle_cmd = recycle_command()
+    recycler = BackendRecycle(recycle_cmd, clock=health_clock) if recycle_cmd else None
+    health = BackendHealth(cfg.backend_fail_n, cfg.backend_cooldown_s, clock=health_clock,
+                           fast_empty=bool(recycle_cmd))
     # Claude-tier rewrite (opt-in). A bad policy file fails here, at startup,
     # never per call.
     tier_policy = (ClaudeTierPolicy.load(cfg.tier_policy, conversation_level=(cfg.tiers == TIERS_CONVERSATION))
@@ -536,7 +541,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             return validate_ollama_url(cfg.ollama_url)
         return get_config().effective_ollama_base_url or "http://localhost:11434"
 
-    def make_backend(model: str):
+    def _make_backend(model: str):
         if backend_factory is not None:
             return backend_factory(model)
         for prefix, cls in BACKENDS.items():
@@ -548,6 +553,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 return cls(model, http, base_url=_ollama_url(), num_ctx=cfg.num_ctx,
                            hedge_s=cfg.hedge_s, keep_alive=cfg.keep_alive, **extra)
         raise ValueError(f"no backend for {model}")
+
+    def make_backend(model: str):
+        backend = _make_backend(model)
+        return recycler.wrap(backend) if recycler else backend
+
+    def recycle_event(result):
+        write({"ts": time.time(), "event": "backend_recycle", "backend_health": result})
 
     async def warm_up() -> dict:
         """One throwaway call so the first real step does not pay the cold
@@ -777,9 +789,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         step_budget_s = cfg.step_budget_s
         try:
             backend = make_backend(choice["model"])
-            if deadline.enabled():
-                step_budget_s = await _size_deadline(body, row, backend)
-            admitted, health_info = await health.admit(choice["model"], backend)
+            if recycler and recycler.task is not None and not recycler.task.done():
+                admitted, health_info = False, {"state": "open"}
+            else:
+                if deadline.enabled():
+                    step_budget_s = await _size_deadline(body, row, backend)
+                admitted, health_info = await health.admit(choice["model"], backend)
+                recycle_after_failed_probe(recycler, health_info, recycle_event)
             if health_info is not None:
                 row["backend_health"] = health_info
             if not admitted:
@@ -807,7 +823,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 reason = "validation"
             # The backend's own outcome and time, captured before the capability
             # check below reuses ``err`` and the edit protocol adds its own calls.
-            backend_outcome = (err, reason, time.monotonic() - backend_t0)
+            backend_outcome = (("zero-line stream", reason, backend_usage["zero_line_s"])
+                               if recycler and "zero_line_s" in backend_usage
+                               else (err, reason, time.monotonic() - backend_t0))
             if not err and message is not None:
                 # The hard rule: an edit from the raw tool-call loop is never
                 # served; it goes to the validated edit protocol or to Claude.
@@ -870,6 +888,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                                                        or (err, reason, time.monotonic() - backend_t0)))
             if tripped is not None:
                 row["backend_health"] = dict(row.get("backend_health") or {}, **tripped)
+                if recycler and tripped["trigger"] in {"fast_empty", "crash_signature"}:
+                    row["backend_health"].update(recycler.start(recycle_event) or {})
         elapsed = round(time.monotonic() - t0, 3)
         row["route_latency_s"] = elapsed
         r1_on = (r1_gate.enabled() and row.get("is_main_thread") is False
@@ -2153,7 +2173,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         except Exception as exc:  # noqa: BLE001
             from llm_router import failopen
             failopen.record("CHZ-FO-DISCOVERY-RESCAN-START", exc)
-        yield
+        try:
+            yield
+        finally:
+            if recycler is not None:
+                await recycler.aclose()
         if rescan_task is not None:
             rescan_task.cancel()
         if compact_task is not None:
@@ -2170,6 +2194,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
     methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"]
     app = Starlette(routes=[Route("/{path:path}", handle, methods=methods)], lifespan=lifespan)
+    app.state.recycler = recycler
     app.state.http = http
     app.state.warm_up = warm_up
     app.state.shadow = shadow

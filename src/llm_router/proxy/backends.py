@@ -381,6 +381,7 @@ class OllamaBackend:
         payload = await asyncio.to_thread(_prepare) if self.offload_cpu else _prepare()
         prefix_obs = prefix_hash.observe_payload(payload)  # hashes only; None on failure
         objs: list[dict] = []
+        line_count = 0
         first_token_s = None
         loop = asyncio.get_running_loop()
         q0 = loop.time()
@@ -397,6 +398,7 @@ class OllamaBackend:
                 lines = resp.aiter_lines()
                 try:
                     first = await asyncio.wait_for(lines.__anext__(), timeout=hedge_s)
+                    line_count += 1
                 except asyncio.TimeoutError:
                     if hedge_clamped:
                         raise asyncio.TimeoutError(
@@ -408,13 +410,18 @@ class OllamaBackend:
                 if first.strip():
                     objs.append(json.loads(first))
                 async for line in lines:
+                    line_count += 1
                     if line.strip():
                         objs.append(json.loads(line))
         finally:
             if adm is not None:
                 adm.release()
         if not objs:
-            return None, "empty response", {"first_token_s": first_token_s, **queue}
+            from llm_router.proxy.backend_recycle import recycle_command
+
+            signal = ({"zero_line_s": loop.time() - t0}
+                      if line_count == 0 and recycle_command() else {})
+            return None, "empty response", {"first_token_s": first_token_s, **queue, **signal}
         stream_error = next((o["error"] for o in objs if o.get("error")), None)
         if stream_error:
             # A runner failure mid-stream arrives as an ``error`` line; read as
