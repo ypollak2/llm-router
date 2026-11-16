@@ -220,6 +220,7 @@ MODEL_CLI = re.compile(r"codex|gemini|claude|judge_cmd", re.I)  # subprocess.* c
 SINK_FUNCS: dict[tuple[str, str, str], tuple[int, str, str]] = {
     ('model_evaluator.py', 'eval_codex_model', 'run_codex'): (1, 'fixed prompt', 'BenchmarkSuite prompt, no user text'),
     ('model_evaluator.py', 'eval_ollama_model', 'open_url'): (1, 'fixed prompt', 'BenchmarkSuite prompt to local Ollama'),
+    ('proxy/backend_recycle.py', 'BackendRecycle._run', 'create_subprocess_exec'): (1, 'probe', 'opt-in LLM_ROUTER_BACKEND_RECYCLE_CMD (#936): runs the owner-configured runner restart command as shlex argv, stdout/stderr discarded; no prompt or request text is passed'),
     ('tools/codex.py', 'llm_codex', 'run_codex'): (1, 'guarded', 'secret door present (#772 UN-04b): local_privacy.guard_cloud_cli before run_codex'),
     ('tools/gemini_cli.py', 'llm_gemini', 'run_gemini_cli'): (1, 'guarded', 'secret door present (#772 UN-04b): local_privacy.guard_cloud_cli before run_gemini_cli'),
     ('hooks/agent-route.py', '_try_direct_subagent', 'execute_agent'): (1, 'guarded', 'secret door present (#772 UN-04b): main() _secret_door runs before the direct, NS3 and CLI paths'),
