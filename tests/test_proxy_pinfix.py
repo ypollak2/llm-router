@@ -56,7 +56,7 @@ def test_ping_pong_ceiling(tmp_path, monkeypatch):
     assert len(e.backend.calls) == 5
 
 
-@pytest.mark.parametrize('reason', list(local_mode.STRUCTURAL_REASONS))
+@pytest.mark.parametrize('reason', sorted(local_mode.STRUCTURAL_REASONS))  # frozenset: one order on every xdist worker
 def test_structural_pins_immediately(tmp_path, monkeypatch, reason):
     monkeypatch.setenv('LLM_ROUTER_PINFIX', 'on')
     original = local_mode.decide_local
