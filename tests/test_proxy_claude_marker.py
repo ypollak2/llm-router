@@ -32,11 +32,17 @@ def _decide(body):
     ("1", "[[llm-router:claude]]", None, False),
     # D-519: only the first non-blank line of a text counts
     ("1", f"\n  {M}\nreview this", None, True),
-    ("1", f"summary of earlier work\nthe marker {M} goes on line 1", None, False),
+    ("1", f"summary of earlier work\nquoted on line 2: {M}", None, False),
     ("1", [{"type": "text", "text": f"<system-reminder>\nrule: put {M} first\n</system-reminder>"},
            {"type": "text", "text": "plain task"}], None, False),
     ("1", [{"type": "text", "text": "<system-reminder>ctx</system-reminder>"},
            {"type": "text", "text": f"{M}\nreview this"}], None, True),
+    # one text block: reminders, then the marked prompt (skipped reminders; marker on the prompt's line 1)
+    ("1", f"<system-reminder>\nctx\n</system-reminder>\n<system-reminder>more</system-reminder>\n\n{M}\nreview", None, True),
+    ("1", f"<system-reminder>\nquote {M}\n</system-reminder>\nplain task", None, False),
+    ("1", f"\r\n{M}\r\nreview this", None, True),
+    ("1", [{"type": "text", "text": None}, "not a block", {"type": "tool_result", "tool_use_id": "t", "content": M}],
+     None, False),
 ])
 def test_marker(monkeypatch, flag, first, later, blocked):
     if flag is None:
