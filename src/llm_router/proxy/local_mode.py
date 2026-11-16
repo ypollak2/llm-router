@@ -38,6 +38,7 @@ explicitly with a reason, never replaced by a placeholder.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -302,6 +303,32 @@ class LocalSession:
     pin_reason: str | None = None
 
 
+# Fixed experiment salt: stable across requests and proxy restarts.
+PINFIX_SALT = "llm-router-pinfix-v1:"
+
+
+def pinfix_arm(key: str) -> str | None:
+    """Only ``ab`` labels rows; ``on`` treats every conversation without a label."""
+    if os.environ.get("LLM_ROUTER_PINFIX", "").strip().lower() != "ab":
+        return None
+    return "T" if int(hashlib.sha256((PINFIX_SALT + key).encode()).hexdigest(), 16) % 100 < 50 else "C"
+
+
+def pinfix_treatment(key: str) -> bool:
+    return os.environ.get("LLM_ROUTER_PINFIX", "").strip().lower() == "on" or pinfix_arm(key) == "T"
+
+
+def pinfix_limits() -> tuple[int, int]:
+    def bounded(raw, default, maximum):
+        try:
+            value = int(raw)
+        except ValueError:
+            return default
+        return value if 1 <= value <= maximum else default
+    return (bounded(os.environ.get("LLM_ROUTER_PINFIX_K", ""), 3, 10),
+            bounded(os.environ.get("LLM_ROUTER_PINFIX_MAX_FALLBACKS", ""), 8, 50))
+
+
 def pin_scope_turn_on() -> bool:
     """``LLM_ROUTER_PIN_SCOPE=turn``: a fallback pin lasts one human turn. Unset (default) or anything else: sticky as before."""
     return os.environ.get("LLM_ROUTER_PIN_SCOPE", "").strip().lower() == "turn"
@@ -456,6 +483,26 @@ class LocalModeState:
         # number of fallback pins a conversation has had. Memory only, bounded like the pins.
         self.turn_pins: OrderedDict[str, int] = OrderedDict()
         self.fallback_counts: OrderedDict[str, int] = OrderedDict()
+        # Observability (proxy/obs_fields.py): why a conversation was pinned to Claude, and rows since. Memory only.
+        self.pin_obs: OrderedDict[str, dict] = OrderedDict()
+        self.pinfix_counts: OrderedDict[str, tuple[int, int]] = OrderedDict()
+
+    def pinfix_outcome(self, key: str, failed: bool) -> str | None:
+        """Bounded (streak, total); success never clears the lifetime ceiling."""
+        streak, total = self.pinfix_counts.get(key, (0, 0))
+        streak, total = (streak + 1, total + 1) if failed else (0, total)
+        self.pinfix_counts[key] = streak, total
+        self.pinfix_counts.move_to_end(key)
+        while len(self.pinfix_counts) > self.max_pins:
+            self.pinfix_counts.popitem(last=False)
+        k, ceiling = pinfix_limits()
+        return "fallback_ceiling" if total >= ceiling else "last_failure" if streak >= k else None
+
+    def set_pin_obs(self, key: str, cause: str) -> None:
+        self.pin_obs[key] = {"cause": cause, "age": 0}
+        self.pin_obs.move_to_end(key)
+        while len(self.pin_obs) > self.max_pins:
+            self.pin_obs.popitem(last=False)
 
     def note_fallback(self, key: str) -> int:
         """PR-C: count one failed local step of this conversation; returns the new count."""
