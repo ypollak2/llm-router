@@ -109,13 +109,20 @@ jobs:
         run: |
           VERSION="${TAG_REF#v}"
           uv venv /tmp/pypi-verify
+          # --refresh on every attempt: PyPI serves the simple index with
+          # Cache-Control max-age=600, so without it uv reuses the index it
+          # read on attempt 1 (before the upload was visible) for the whole
+          # 5-minute window. That is the most likely reason v16.0.1 failed
+          # this step although both files were on PyPI 2 s before attempt 1;
+          # the stderr tail below shows the real reason if it happens again.
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if uv pip install --python /tmp/pypi-verify/bin/python \
-                 --no-deps "llm-routing==${VERSION}" 2>/dev/null; then
+            if uv pip install --refresh --python /tmp/pypi-verify/bin/python \
+                 --no-deps "llm-routing==${VERSION}" 2>/tmp/pypi-verify.err; then
               echo "✅ llm-routing==${VERSION} installed from PyPI (attempt ${attempt})"
               exit 0
             fi
             echo "attempt ${attempt}: not resolvable yet, waiting 30s"
+            tail -n 3 /tmp/pypi-verify.err
             sleep 30
           done
           echo "ERROR: llm-routing==${VERSION} was not installable from PyPI"
