@@ -72,7 +72,8 @@ def generator_for(backend) -> capability.GenerateFn:
         t0 = time.monotonic()
         try:
             from llm_router.toolkit.adapters.ollama import ensure_fits
-            await asyncio.to_thread(ensure_fits, backend.model, backend.base_url, "local_agent.proxy_step.generate")
+            await asyncio.to_thread(ensure_fits, backend.model, backend.base_url,
+                                    "local_agent.proxy_step.generate", num_ctx=backend.num_ctx)
             # Constrain the reply to the edit-pairs schema (constrain.py); an
             # older server that refuses a schema ``format`` gets the request
             # again, unconstrained, exactly as it was sent before.

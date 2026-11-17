@@ -99,7 +99,8 @@ class OllamaCompleter:
             body["tools"] = tools
         try:
             from llm_router.toolkit.adapters.ollama import ensure_fits
-            ensure_fits(body["model"], self._base, "resolver.calibrate.chat")    # a calibration probe loads the model
+            # a calibration probe loads the model; judge it at the window it sends (None: the table value)
+            ensure_fits(body["model"], self._base, "resolver.calibrate.chat", num_ctx=int(num_ctx) if num_ctx else None)
         except Exception as exc:  # noqa: BLE001 - LocalModelConflict / MemoryBudgetExceeded: a refused probe
             if type(exc).__name__ in ("LocalModelConflict", "MemoryBudgetExceeded"):
                 return Reply(error=ERR_PROVIDER)

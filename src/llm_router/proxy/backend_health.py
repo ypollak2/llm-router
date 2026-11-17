@@ -78,8 +78,8 @@ CRASH_SIGNATURE = re.compile(
 
 _TIMEOUT_REASONS = frozenset({"hedge_timeout", "budget_exceeded"})
 
-_stream_lines_box: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
-    "_stream_lines_box", default=None
+_request_progress_box: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
+    "_request_progress_box", default=None
 )
 
 
@@ -90,27 +90,28 @@ PROGRESS_SENT = 0        # request sent; no response headers and no stream line 
 def begin_stream_progress() -> list[int]:
     """Install a fresh one-slot progress counter for the step about to call the backend and return it.
 
-    ``asyncio.wait_for`` runs the backend in a child task that copies the context. The child sees
-    the same list object, so its changes to the list reach the caller; a ContextVar value the child
-    set itself would not. Slot values: ``PROGRESS_NOT_SENT`` (-1) until the backend calls
+    Before Python 3.12 ``asyncio.wait_for`` runs the backend in a child task that copies the context;
+    on 3.12+ it awaits in the current task. Either way the shared list is correct: the backend sees the
+    same list object, so its changes reach the caller (a ContextVar value a child task set itself
+    would not). Slot values: ``PROGRESS_NOT_SENT`` (-1) until the backend calls
     :func:`mark_request_sent`; 0 once sent; then +1 for the response headers and +1 per stream line
     (:func:`mark_response_progress`). After a ``budget_exceeded``, ``box[0] == 0`` means the request
     was sent and nothing came back."""
     box = [PROGRESS_NOT_SENT]
-    _stream_lines_box.set(box)
+    _request_progress_box.set(box)
     return box
 
 
 def mark_request_sent() -> None:
     """A backend calls this immediately before it opens its request; no-op outside a step."""
-    box = _stream_lines_box.get()
+    box = _request_progress_box.get()
     if box is not None and box[0] < PROGRESS_SENT:
         box[0] = PROGRESS_SENT
 
 
 def mark_response_progress() -> None:
     """A backend calls this when response headers arrive and for every stream line; no-op outside a step."""
-    box = _stream_lines_box.get()
+    box = _request_progress_box.get()
     if box is not None:
         box[0] = max(box[0], PROGRESS_SENT) + 1
 

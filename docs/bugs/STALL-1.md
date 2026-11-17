@@ -17,8 +17,14 @@ status: fixed in `fix/window-budget-stall` (deploy: restart the proxy)
   budget before falling back.
 - **Fix W1.** `have != want_ctx` is a load, the same path as the existing `have < want_ctx` branch. A resident model at
   exactly the requested window, or one that reports no window, still adds nothing. The window compared is the one the
-  caller really sends: `OllamaBackend` passes its `num_ctx` to `ensure_fits(num_ctx=...)`; other callers still use the
-  `local_models` table value.
+  caller really sends: `OllamaBackend`, the proxy edit-protocol step (`local_agent/proxy_step.py`) and the calibration
+  completer (`resolver/calibrate.py`, when it sends an explicit `num_ctx`) pass the window they send to
+  `ensure_fits(num_ctx=...)`. No proxy-path caller sends a window that differs from the one it guards on. Callers that
+  still use the `local_models` table value: `backends.py:382` (sends the table window via `pack_overflow.py:226`),
+  `react.py:381`, `agent_loop.py:630`, `warm.py:232`, `session-start.py:1831`, `vision_registry.py:205`,
+  `sealer.py:104`, `compact.py:291`, `semantic_cache.py:453`, `semantic_classify.py:117` and `check_resident`
+  (`ollama.py:741`); the round-2 review found none of these sending a different window, but a new caller that does must
+  pass `num_ctx`.
 - **Intended behaviour.** A downward reload (resident larger than requested) is refused when free memory is short.
   That protects the shared runner from being reloaded at a smaller window by a side caller.
 - **Fix W2.** A `budget_exceeded` step in which the request was sent and neither response headers nor stream lines came
@@ -28,6 +34,10 @@ status: fixed in `fix/window-budget-stall` (deploy: restart the proxy)
   +1 per line (`mark_response_progress()`). Only 0 is a FAIL. Not sent (guard, prepare or queue ate the budget), headers
   or lines received, `hedge_timeout`, no counter, and a backend that never calls the markers all stay NEUTRAL. Rows for
   every other reason are unchanged.
+- **What "sent" covers (intended).** `mark_request_sent()` runs before connection-pool acquire and connect. So an
+  `httpx.PoolTimeout` or `ConnectTimeout`, or a request queued inside the runner (for example behind another client's
+  long generation) that returns no response headers within the step budget, also counts as a breaker failure. That is
+  intended: a runner that returns nothing within the step budget is the stall this fix addresses, whatever the reason.
 - **Test.** `tests/test_mem_guard_window_mismatch.py` (W1: 131072 resident / 32768 asked and 8192 / 32768 count a load;
   equal window and unreported window do not; explicit `num_ctx` beats the table) and
   `tests/test_proxy_budget_exceeded_breaker.py` (W2: classify table, `fail_n` silent timeouts open the breaker,
