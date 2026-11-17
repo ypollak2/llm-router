@@ -56,6 +56,19 @@ def test_a_resident_model_with_no_reported_window_is_not_a_load(monkeypatch):
     assert not any(u.endswith("/api/tags") for u in fake.calls)
 
 
+def test_the_callers_explicit_num_ctx_beats_the_table_value(monkeypatch):
+    """The table says 32768. A caller that really sends 131072 (the proxy's --num-ctx) is judged on that."""
+    from llm_router.toolkit.adapters import ollama as oa
+    Fake(monkeypatch, {"11434": [_resident(131072)]}, {TARGET: 20 * GB})
+    host(monkeypatch, 48.0, 6.0)
+    assert oa._verdict(TARGET, SMALL, None, "t", num_ctx=131072) is None          # same window: not a load
+    oa._PS_CACHE.clear()
+    with pytest.raises(oa.MemoryBudgetExceeded):
+        oa.ensure_fits(TARGET, SMALL, "t")                                         # table 32768 vs resident 131072
+    oa._PS_CACHE.clear()
+    oa.ensure_fits(TARGET, SMALL, "t", num_ctx=131072)                             # explicit: nothing to load
+
+
 def test_the_mismatch_verdict_is_the_same_path_as_a_larger_request(monkeypatch):
     """131072 resident, 32768 asked, and 8192 resident, 32768 asked, give the same refusal rule."""
     from llm_router.toolkit.adapters import ollama as oa

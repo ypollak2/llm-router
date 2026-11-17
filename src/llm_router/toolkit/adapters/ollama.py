@@ -583,7 +583,8 @@ def _servers(base_url: str) -> list[str]:
     return urls
 
 
-def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget: bool = True):
+def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget: bool = True,
+             num_ctx: int | None = None):
     """One evaluation of both rules. Returns None (fits / fail open) or ``(refusal, victim)`` where victim is
     ``(url, model)`` of the resident model eviction would drop, or None."""
     by_url: dict[str, list[dict]] = {}
@@ -608,7 +609,7 @@ def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget
     if not budget:      # LLM_ROUTER_MEM_GUARD=off: only the one-model rule above
         return None
     from llm_router import local_models
-    want_ctx = local_models.num_ctx(name)
+    want_ctx = num_ctx or local_models.num_ctx(name)      # the caller's real window when it passes one
     trained = _trained_ctx(base_url, name)
     if trained:
         want_ctx = min(want_ctx, trained)      # Ollama clamps the request to the model's own window
@@ -676,7 +677,7 @@ def _verdict(name: str, base_url: str, allowed: str | None, purpose: str, budget
 
 
 def ensure_fits(model: str | None, base_url: str | None = None, purpose: str = "", *,
-                deadline_s: float | None = None) -> None:
+                deadline_s: float | None = None, num_ctx: int | None = None) -> None:
     """THE choke point before any local model is loaded: raise :class:`LocalModelConflict` /
     :class:`MemoryBudgetExceeded` when loading ``model`` on ``base_url`` would not fit.
 
@@ -704,7 +705,7 @@ def ensure_fits(model: str | None, base_url: str | None = None, purpose: str = "
     name = _bare(model)
     url = (base_url or url_for_model(model)).rstrip("/")
     key = (name, url, allowed, on, _max_other_vram_gb(), _headroom(), _reserve_gib(0.0), _evict_mode(),
-           tuple(_servers(url)))
+           tuple(_servers(url)), num_ctx)
     now = time.monotonic()
     _prune(now)
     hit = _PS_CACHE.get(key)
@@ -712,7 +713,7 @@ def ensure_fits(model: str | None, base_url: str | None = None, purpose: str = "
         if hit[1] is not None:
             raise _clone(hit[1])
         return
-    result = _verdict(name, url, allowed, purpose, budget=on)
+    result = _verdict(name, url, allowed, purpose, budget=on, num_ctx=num_ctx)
     evicted = False
     if result is not None and on and _evict_mode() and result[1] is not None and _unload(*result[1]):
         evicted = True
@@ -723,7 +724,7 @@ def ensure_fits(model: str | None, base_url: str | None = None, purpose: str = "
                 hardware.clear_cache()
             except Exception:  # noqa: BLE001
                 pass
-            result = _verdict(name, url, allowed, purpose, budget=on)
+            result = _verdict(name, url, allowed, purpose, budget=on, num_ctx=num_ctx)
             if result is None:
                 break
     refusal = result[0] if result is not None else None

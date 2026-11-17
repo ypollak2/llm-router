@@ -17,8 +17,9 @@ long-lived process, so in-memory state is the whole truth):
             ``fail_n`` consecutive failures (an empty reply, or any invalid
             reply in under ``INVALID_MAX_S``) open it; a working reply resets
             the streak; a hedge timeout does neither, and neither does a step-budget
-            timeout that had received stream lines. A step-budget timeout with zero
-            stream lines counts as a failure (STALL-2).
+            timeout before the request was sent or after any response arrived. A
+            step-budget timeout in which the request was sent and no response headers
+            or stream lines came back counts as a failure (STALL-2).
 ``open``    no step is sent. The proxy forwards to Claude and the ledger row
             says ``reason = "backend_unhealthy"``. A one-line warning goes to
             stderr when it opens.
@@ -82,32 +83,45 @@ _stream_lines_box: contextvars.ContextVar[list[int] | None] = contextvars.Contex
 )
 
 
-def begin_stream_progress() -> list[int]:
-    """Install a fresh one-slot counter for the step about to call the backend and return it.
+PROGRESS_NOT_SENT = -1   # the backend has not yet sent the request (guard, prepare, queue)
+PROGRESS_SENT = 0        # request sent; no response headers and no stream line yet
 
-    ``asyncio.wait_for`` runs the backend in a child task that copies the context, so the child shares
-    this list (a ContextVar value set in the child would never reach the caller). The caller reads
-    ``box[0]`` after a ``budget_exceeded``: 0 means no stream line arrived from the backend."""
-    box = [0]
+
+def begin_stream_progress() -> list[int]:
+    """Install a fresh one-slot progress counter for the step about to call the backend and return it.
+
+    ``asyncio.wait_for`` runs the backend in a child task that copies the context. The child sees
+    the same list object, so its changes to the list reach the caller; a ContextVar value the child
+    set itself would not. Slot values: ``PROGRESS_NOT_SENT`` (-1) until the backend calls
+    :func:`mark_request_sent`; 0 once sent; then +1 for the response headers and +1 per stream line
+    (:func:`mark_response_progress`). After a ``budget_exceeded``, ``box[0] == 0`` means the request
+    was sent and nothing came back."""
+    box = [PROGRESS_NOT_SENT]
     _stream_lines_box.set(box)
     return box
 
 
-def mark_stream_line() -> None:
-    """Called by a streaming backend for every line it receives; no-op outside a step."""
+def mark_request_sent() -> None:
+    """A backend calls this immediately before it opens its request; no-op outside a step."""
+    box = _stream_lines_box.get()
+    if box is not None and box[0] < PROGRESS_SENT:
+        box[0] = PROGRESS_SENT
+
+
+def mark_response_progress() -> None:
+    """A backend calls this when response headers arrive and for every stream line; no-op outside a step."""
     box = _stream_lines_box.get()
     if box is not None:
-        box[0] += 1
+        box[0] = max(box[0], PROGRESS_SENT) + 1
 
 
 def classify(err: str | None, reason: str | None, elapsed_s: float, *, _box: list[int] | None = None) -> str:
     """One backend outcome: ``ok`` | ``fail`` | ``crash`` | ``neutral``.
 
-    ``budget_exceeded``: ``_box`` (from :func:`begin_stream_progress`) tells whether any
-    stream line arrived from the backend before the budget expired. ``_box[0] == 0`` →
-    FAIL (feeds the breaker streak). Any line arrived → NEUTRAL. No box (the budget was
-    spent before the backend was called, so nothing was asked of it) → NEUTRAL.
-    ``hedge_timeout`` stays NEUTRAL.
+    ``budget_exceeded``: ``_box`` (from :func:`begin_stream_progress`) says how far the backend got.
+    ``_box[0] == 0`` (request sent, no response headers, no line) → FAIL (feeds the streak). Not
+    sent (-1), headers or any line received (>0), or no box at all → NEUTRAL. ``hedge_timeout``
+    stays NEUTRAL.
     """
     if reason == "hedge_timeout":
         return OUTCOME_NEUTRAL
