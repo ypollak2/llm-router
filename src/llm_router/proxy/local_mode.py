@@ -244,8 +244,9 @@ def is_agent_turn(body: dict) -> bool:
 from llm_router.token_estimate import est_tokens  # noqa: E402  (one formula, shared)
 
 
-#: PR-A: with ``LLM_ROUTER_CLAUDE_MARKER`` on, a conversation whose FIRST user message contains this exact token
-#: is never served locally (reason ``claude_marker``). Per conversation: only that message is looked at.
+#: PR-A: with ``LLM_ROUTER_CLAUDE_MARKER`` on, a conversation whose FIRST user message carries this exact token
+#: on the first line of a text is never served locally (reason ``claude_marker``). Per conversation: only that
+#: message is looked at.
 CLAUDE_MARKER = "[[llm-router:claude-only]]"
 
 
@@ -253,15 +254,29 @@ def claude_marker_on() -> bool:
     return os.environ.get("LLM_ROUTER_CLAUDE_MARKER", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+#: Leading ``<system-reminder>`` sections a client may put in the same text as the prompt (D-519 review).
+_LEADING_REMINDERS = re.compile(r"\s*(?:<system-reminder>.*?</system-reminder>\s*)*", re.S)
+
+
+def _first_line(text: str) -> str:
+    """The first non-blank line of ``text`` after any leading system-reminder sections."""
+    return text[_LEADING_REMINDERS.match(text).end():].lstrip().split("\n", 1)[0]
+
+
 def has_claude_marker(body: dict) -> bool:
-    """True when the first user message (string or text blocks) contains :data:`CLAUDE_MARKER`."""
+    """True when the first user message carries :data:`CLAUDE_MARKER` anywhere on the first non-blank line of
+    its string content or of one of its text blocks (leading system-reminder sections skipped).
+
+    D-519: only the first line counts. A compaction summary that quotes the marker further down (2026-11-16:
+    1,856 coordinator calls read ``claude_marker`` that way) does not mark the conversation."""
     for m in body.get("messages") or []:
         if not isinstance(m, dict) or m.get("role") != "user":
             continue
         c = m.get("content")
         if isinstance(c, str):
-            return CLAUDE_MARKER in c
-        return any(isinstance(b, dict) and b.get("type") == "text" and CLAUDE_MARKER in (b.get("text") or "")
+            return CLAUDE_MARKER in _first_line(c)
+        return any(isinstance(b, dict) and b.get("type") == "text"
+                   and CLAUDE_MARKER in _first_line(b.get("text") or "")
                    for b in _blocks(c))
     return False
 
