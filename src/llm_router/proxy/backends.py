@@ -57,6 +57,7 @@ from typing import Callable, Protocol
 from llm_router import local_models
 from llm_router.local_context_guard import DEFAULT_RESERVED_OUTPUT_TOKENS, check_overflow, check_truncated, effective_window, estimate_payload_tokens
 from llm_router.proxy import history_layout, prefix_hash
+from llm_router.proxy.backend_health import mark_request_sent, mark_response_progress
 from llm_router.proxy.steps import STEP_CONTINUATION, non_system, prev_tools
 from llm_router.proxy.translate import from_ollama, to_ollama
 from llm_router.token_estimate import est_tokens
@@ -277,7 +278,12 @@ def apply_trims(body: dict, trims: list[Trim], *, target_window: int | None = No
 class Backend(Protocol):
     async def complete(self, body: dict, timeout_s: float,
                        priority: str = "interactive") -> tuple[dict | None, str | None, dict]:
-        """``(anthropic_message | None, error | None, backend_usage)``."""
+        """``(anthropic_message | None, error | None, backend_usage)``.
+
+        Marker contract (STALL-2): call ``backend_health.mark_request_sent()`` immediately before the request
+        goes out, and ``mark_response_progress()`` when response headers arrive and for every stream line. A
+        step-budget timeout counts against the breaker only if the request was sent and nothing came back; a
+        backend that never calls the markers is never counted for a budget timeout."""
 
 
 NUM_PREDICT_EASY = 200  # after Read / Bash / no tool: pick the obvious next action
@@ -351,7 +357,7 @@ class OllamaBackend:
         """Memory guard before this backend loads its model (``ensure_fits`` blocks, so it runs in a thread).
         Raises ``MemoryBudgetExceeded`` (a ``LocalModelConflict``); the caller treats it as a backend failure."""
         from llm_router.toolkit.adapters.ollama import ensure_fits
-        await asyncio.to_thread(ensure_fits, self.model, self.base_url, purpose)
+        await asyncio.to_thread(ensure_fits, self.model, self.base_url, purpose, num_ctx=self.num_ctx)
 
     async def complete(self, body: dict, timeout_s: float,
                        priority: str = "interactive") -> tuple[dict | None, str | None, dict]:
@@ -392,8 +398,10 @@ class OllamaBackend:
         # When the queue wait shrank the hedge, its expiry is the step budget running out, not a slow model.
         hedge_clamped = hedge_s != self.hedge_s
         try:
+            mark_request_sent()
             async with self.client.stream("POST", self.base_url + "/api/chat", json=payload,
                                           timeout=http_timeout_s) as resp:
+                mark_response_progress()      # headers arrived: a hedge or budget expiry from here is not a silent stall
                 await _raise_with_body(resp)
                 lines = resp.aiter_lines()
                 try:
@@ -407,10 +415,13 @@ class OllamaBackend:
                 except StopAsyncIteration:
                     first = ""
                 first_token_s = round(loop.time() - t0, 3)
+                if line_count:
+                    mark_response_progress()
                 if first.strip():
                     objs.append(json.loads(first))
                 async for line in lines:
                     line_count += 1
+                    mark_response_progress()
                     if line.strip():
                         objs.append(json.loads(line))
         finally:

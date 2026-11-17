@@ -287,7 +287,7 @@ def spy(monkeypatch):
     from llm_router.toolkit.adapters import ollama as oa
     seen: list[tuple] = []
 
-    def _refuse(model, base_url=None, purpose="", *, deadline_s=None):
+    def _refuse(model, base_url=None, purpose="", *, deadline_s=None, num_ctx=None):
         seen.append((model, base_url, purpose))
         raise oa.MemoryBudgetExceeded("sum", str(model), str(base_url), 1.0, 1.0, 1.0)
     monkeypatch.setattr(oa, "ensure_fits", _refuse)

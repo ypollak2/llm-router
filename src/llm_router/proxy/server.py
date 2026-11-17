@@ -73,6 +73,7 @@ from llm_router.proxy.backend_health import (
     DEFAULT_FAIL_N,
     REASON_BACKEND_UNHEALTHY,
     BackendHealth,
+    begin_stream_progress,
 )
 from llm_router.proxy.backends import (
     BACKENDS,
@@ -793,7 +794,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row["added_latency_s"] = round(time.monotonic() - t0, 3)
                 return None
         message, err, reason = None, None, None
-        backend_t0, backend_outcome = None, None
+        backend_t0, backend_outcome, stream_progress = None, None, None
         step_budget_s = cfg.step_budget_s
         try:
             backend = make_backend(choice["model"])
@@ -822,6 +823,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 raise asyncio.TimeoutError
             if pinfix_key is not None:
                 row["_pinfix_attempted"] = True
+            stream_progress = begin_stream_progress()
             message, err, backend_usage = await asyncio.wait_for(
                 backend.complete(send, left), timeout=left)
             _note_prefix(row, body, backend_usage)
@@ -894,8 +896,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         except Exception as exc:  # noqa: BLE001 - any backend failure is a counted fallback
             err, reason = f"{type(exc).__name__}: {exc}", "backend_error"
         if backend_t0 is not None:
-            tripped = health.record(choice["model"], *(backend_outcome
-                                                       or (err, reason, time.monotonic() - backend_t0)))
+            _bo = backend_outcome or (err, reason, time.monotonic() - backend_t0)
+            tripped = health.record(choice["model"], *_bo, _box=stream_progress)
             if tripped is not None:
                 row["backend_health"] = dict(row.get("backend_health") or {}, **tripped)
                 if recycler and tripped["trigger"] in {"fast_empty", "crash_signature"}:
