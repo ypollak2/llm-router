@@ -1185,7 +1185,7 @@ Measures whether the local model could answer Claude Code's auto-mode permission
   `permcheck_capture: "written" | "cap" | "error"` (an enum, no text), only when the flag is on. A capture error never
   fails the request. The write runs in a worker thread after the last reply chunk was relayed; the ledger row is
   written when it completes (so the enum is exact), and the client stream never waits on it. A stream that did not
-  finish (client disconnect) is not captured. A graceful proxy shutdown waits up to 5 s for pending captures; a crash
+  finish (client disconnect) is not captured. A graceful proxy shutdown waits for pending captures with a 5 s timeout; a crash
   or SIGKILL inside that window loses those candidates' whole ledger rows, so with the flag on, side-call row counts
   can be slightly low.
 - **OFF** (unset, empty, `0`, not an integer): no directory, no file, no extra ledger key.

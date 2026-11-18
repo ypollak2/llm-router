@@ -317,7 +317,9 @@ def main(argv: list[str] | None = None, *, now_fn=lambda: dt.datetime.now(dt.tim
         max_n=a.max_n, now_fn=now_fn))
     summary = summarise(results, n_captured=len(records), stopped=stopped)
     summary["config"] = {"model": model, "num_ctx": num_ctx, "timeout_s": a.timeout_s, "max_n": a.max_n}
-    Path(a.out).write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    from llm_router.state_files import open_private  # 0600, like the capture it summarises
+    with open_private(a.out, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
     return 0
 
