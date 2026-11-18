@@ -249,6 +249,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_MODEL": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_TRIM": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_MASK": ("llm_router", "proxy/history_mask.py", 1),
+    "LLM_ROUTER_PERMCHECK_CAPTURE": ("llm_router", "proxy/permcheck_capture.py", 1),
     "LLM_ROUTER_PROXY_CAP_AFTER_REDUCE": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_MR": ("llm_router", "proxy/mr_summary.py", 1),
     "LLM_ROUTER_PROXY_LAYOUT": ("llm_router", "proxy/history_layout.py", 1),
