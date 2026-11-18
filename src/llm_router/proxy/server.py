@@ -66,7 +66,7 @@ from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
 from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
 from llm_router.proxy import chunk_store, cls_decide, compact_worker, cold_guard, deadline, haiku_arm, haiku_guard, history_layout, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
-from llm_router.proxy import escalation, r1_gate
+from llm_router.proxy import escalation, permcheck_capture, r1_gate
 
 from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
@@ -1622,8 +1622,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
     async def forward(request: Request, raw: bytes, body: dict | None, row: dict | None, *,
                       original: tuple[bytes, dict] | None = None, on_retry=None, on_usage=None,
-                      on_reply=None, lane_feed=None):
-        """``original``: when ``raw`` is a tier-rewritten body, the client's own
+                      on_reply=None, lane_feed=None, permcheck_key: str | None = None):
+        """``permcheck_key`` (LLM_ROUTER_PERMCHECK_CAPTURE, D-532): the conversation key of a D-525 side call to
+        capture after its reply was relayed; None (always, when the flag is off) captures nothing.
+
+        ``original``: when ``raw`` is a tier-rewritten body, the client's own
         (bytes, body). A 4xx on the rewritten call (a parameter the target tier
         does not take, a model the account cannot use) is retried once with
         it, so a rewrite can never turn a working call into a failed one.
@@ -1707,7 +1710,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 if is_thinking_rejection(up.status_code, text):
                     await up.aclose()
                     row["thinking_retry"] = True
-                    up = await send(json.dumps(without_thinking(body)).encode())
+                    raw = json.dumps(without_thinking(body)).encode()  # the bytes of the final send (capture reads raw)
+                    up = await send(raw)
                 else:
                     await up.aclose()
                     if on_reply is not None:
@@ -1735,6 +1739,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             sys.stderr.write(f"llm-router proxy: upstream 404 {request.method} {request.url.path}\n")
             sys.stderr.flush()
 
+        async def _capture_then_write(row: dict, key: str, sent: bytes, reply: bytes) -> None:
+            try:
+                row[permcheck_capture.ROW_KEY] = await asyncio.to_thread(
+                    permcheck_capture.capture, row, key=key, raw=sent, status=200, reply=reply,
+                    latency_s=row.get("upstream_latency_s"))
+            except BaseException as exc:  # noqa: BLE001 -- the row must still be written; capture never fails a request
+                failopen.record("LR-FO-PROXY-PERMCHECK-CAPTURE", exc)
+                row[permcheck_capture.ROW_KEY] = permcheck_capture.ERROR
+            write(row)
+
         async def relay():
             buf = bytearray()
             finished = broke = False
@@ -1756,7 +1770,25 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                         row["upstream_error_type"] = _upstream_error_type(bytes(buf))
                     if on_usage is not None and up.status_code == 200:
                         on_usage(row.get("usage"))
-                    write(row)
+                    if permcheck_key is not None and up.status_code == 200 and finished:
+                        # Design (D-532 S1): the client stream never waits on capture disk I/O. The capture runs in a
+                        # worker thread from a background task, and THAT task writes the ledger row once the enum
+                        # (written/cap/error) is known, so the enum stays exact. Only a completed stream is captured:
+                        # a client disconnect (finished False) neither captures nor logs an error. ``raw`` is the body
+                        # of the final send (a thinking retry rebinds it), i.e. what was actually forwarded.
+                        # Assumption (review S-C): write()'s side effects (remember_thread, prefixes, cost) land after
+                        # the thread hop, and candidate rows can be out of request order. Side calls are permission
+                        # checks, not thread parents, so no later request in the session reads that state in the window.
+                        coro = _capture_then_write(row, permcheck_key, raw, bytes(buf))
+                        try:
+                            permcheck_capture.spawn(coro)
+                        except Exception as exc:  # noqa: BLE001 -- review S-B: a closing loop must not drop the row
+                            coro.close()
+                            failopen.record("LR-FO-PROXY-PERMCHECK-CAPTURE", exc)
+                            row[permcheck_capture.ROW_KEY] = permcheck_capture.ERROR
+                            write(row)
+                    else:
+                        write(row)
                 if lf is not None and (finished or broke):
                     # A client that went away mid-stream is neither (no verdict on Haiku).
                     try:
@@ -1965,6 +1997,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         local_src = stripped_body or body if force_local else body
         local_body = None if bypass_local else mask_local_body(local_src, row)
 
+        permcheck_key = None  # set only in the not_eligible branch below, only with the flag on (D-532)
+
         async def finish_forward():
             # Only treatment serves populate this guard. A Claude step anywhere
             # in the session (including a control sibling or explicit prefix) breaks its streak.
@@ -1972,13 +2006,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             on_reply = start_shadow(body, row, len(raw)) if shadow is not None else None
             if tier_policy is None:
                 return await forward(request, sent_raw, sent_body or body, row,
-                                     original=original, on_reply=on_reply)
+                                     original=original, on_reply=on_reply, permcheck_key=permcheck_key)
             decision = await decide_tier(body, row)
             if ov is not None and ov.name in user_prefixes.CLAUDE_TIER_PREFIXES:
                 prefix_outcome(f"tier:{row.get('tier') or body.get('model')}")
             if decision is None:
                 return await forward(request, sent_raw, sent_body or body, row,
-                                     original=original, on_reply=on_reply)
+                                     original=original, on_reply=on_reply, permcheck_key=permcheck_key)
             if (frontier is not None and row.get("tier_reason") == REASON_HAIKU_REWRITE
                     and decision.served_model != body.get("model")):
                 if row.get("lane_a_reason") == lane_a.R_SERVED:
@@ -1992,7 +2026,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
             if not decision.rewritten and decision.body_rewrite is None:
                 return await forward(request, sent_raw, sent_body or body, row, original=original,
-                                     on_usage=_on_usage, on_reply=on_reply)
+                                     on_usage=_on_usage, on_reply=on_reply, permcheck_key=permcheck_key)
             sent = dict(sent_body or body, model=decision.served_model)
             if decision.body_rewrite == REWRITE_HAIKU:
                 # Haiku 4.5 400s on `thinking.type: adaptive` and has no effort
@@ -2016,7 +2050,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     tier_policy.lane_a_unserved(body, row.get("session_id"))
 
             return await forward(request, json.dumps(sent).encode(), sent, row, original=(raw, body),
-                                 on_retry=_on_retry, on_usage=_on_usage, on_reply=on_reply, lane_feed=lane_feed)
+                                 on_retry=_on_retry, on_usage=_on_usage, on_reply=on_reply, lane_feed=lane_feed,
+                                 permcheck_key=permcheck_key)
 
         def serve_message(message):
             if force_local:
@@ -2167,6 +2202,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             row["reason"] = "routing_off"
         elif step_class(body, cfg.steps) is None:
             row["reason"] = "not_eligible"
+            if permcheck_capture.limit() and permcheck_capture.is_candidate(body, row):  # D-532: one flag read when off
+                permcheck_key = conversation_key(body, row.get("session_id"))
         else:
             async def run_try_serve():
                 served = await try_serve(local_body, row)
@@ -2213,14 +2250,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         try:  # D-205: periodic / on-change rediscovery without a restart
             from llm_router.discovery_rescan import rescan_loop
             rescan_task = asyncio.create_task(rescan_loop())
-        except Exception as exc:  # noqa: BLE001
-            from llm_router import failopen
+        except Exception as exc:  # noqa: BLE001 -- module-level failopen (a local import here unbinds it in the finally below)
             failopen.record("CHZ-FO-DISCOVERY-RESCAN-START", exc)
         try:
             yield
         finally:
             if recycler is not None:
                 await recycler.aclose()
+            try:  # review S-A: pending permission-check captures write their ledger rows before a graceful exit
+                await asyncio.wait_for(permcheck_capture.drain(), 5)
+            except Exception as exc:  # noqa: BLE001 -- shutdown goes on; a crash or SIGKILL can still lose rows (docs/proxy.md)
+                failopen.record("LR-FO-PROXY-PERMCHECK-CAPTURE", exc, detail="drain")
         if rescan_task is not None:
             rescan_task.cancel()
         if compact_task is not None:

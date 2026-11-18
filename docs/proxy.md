@@ -1171,6 +1171,30 @@ Directly motivated by the trial's one unacceptable answer:
 | `LLM_ROUTER_PROXY_LONG_PROMPT_WORDS` | `120` |
 | `LLM_ROUTER_PROXY_LONG_PROMPT_PARTS` | `3` |
 
+## Permission-check capture (`LLM_ROUTER_PERMCHECK_CAPTURE=<N>`, default OFF)
+
+Measures whether the local model could answer Claude Code's auto-mode permission checks. Nothing is served locally by it.
+
+- **What is captured.** Only the calls the ledger already labels `reason: not_eligible` with `step_class: side_call`
+  (non-streaming, no tools). Per call, one JSON line: ts, conversation key, the request body exactly as forwarded
+  upstream, Claude's reply content, upstream model, usage counts, upstream latency (ms).
+- **It stores full transcript text. Treat it as sensitive.** The request body holds the session's conversation.
+- **Where.** `$LLM_ROUTER_HOME/permcheck_capture/<UTC date>.jsonl` (default `~/.llm-router/...`). The directory is
+  created 0700 and each file 0600. A symlinked directory, or one that is not owner-only, is refused.
+- **Limits.** At most N records per proxy process and 200 MB in the directory. The ledger row carries
+  `permcheck_capture: "written" | "cap" | "error"` (an enum, no text), only when the flag is on. A capture error never
+  fails the request. The write runs in a worker thread after the last reply chunk was relayed; the ledger row is
+  written when it completes (so the enum is exact), and the client stream never waits on it. A stream that did not
+  finish (client disconnect) is not captured. A graceful proxy shutdown waits up to 5 s for pending captures; a crash
+  or SIGKILL inside that window loses those candidates' whole ledger rows, so with the flag on, side-call row counts
+  can be slightly low.
+- **OFF** (unset, empty, `0`, not an integer): no directory, no file, no extra ledger key.
+- **Replay.** `scripts/permcheck_replay.py` sends the captured requests to the resident local model and prints counts
+  only (never text). It refuses a model that is not resident, a window that differs from the resident one, and the
+  quiet slots 10:15-10:45Z and 16:15-16:45Z.
+- **Delete it** when the readout is done: remove the `permcheck_capture/` directory (for example in Finder, or with
+  `rm -r "$LLM_ROUTER_HOME/permcheck_capture"`), and unset the flag before the next proxy start.
+
 ## Routing prefixes
 
 A prompt that starts with `local:`, `claude:`, `opus:`, `sonnet:`, `haiku:` or `codex:` (case-insensitive; `native:` means `claude:`) forces where it runs. The prefix is read only at the start of the prompt, is stripped before the text is forwarded, and each forced choice appends a text-free row (`text_sha`, `forced`, `decided`, `door`, `ts`) to `~/.llm-router/examples.jsonl`. A prefix beats the classifier, stickiness, the Q&A-quiet policy and soft quota pressure; it does not beat `LLM_ROUTER_ENFORCE=off|shadow`, kill switches, admin `pinned_models`, hard stops (media, prompt cap, unhealthy backend, open breaker) or budget caps.
