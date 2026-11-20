@@ -77,7 +77,7 @@ def run_tests() -> bool:
     passed runs whose results were never read (same rule as release.sh, F2).
     """
     print("🔍 Running test suite...")
-    timeout_seconds = int(os.environ.get("VERIFY_TEST_TIMEOUT", "600"))
+    timeout_seconds = int(os.environ.get("VERIFY_TEST_TIMEOUT", "7200"))
 
     # v9.3.1 — align excludes with scripts/release/release.sh's pytest gate so verify
     # doesn't fail on tests release.sh deliberately skips (flaky integration
@@ -119,7 +119,8 @@ def run_tests() -> bool:
                 print(result.stdout[-2000:])
             return False
     except subprocess.TimeoutExpired:
-        print(f"❌ Tests: Test suite timed out ({timeout_seconds}s)")
+        print(f"❌ Tests: Test suite timed out ({timeout_seconds}s); a timeout is a failure.")
+        print(f"   If the suite is only slow, raise VERIFY_TEST_TIMEOUT (now {timeout_seconds}s).")
         return False
     except FileNotFoundError:
         print("❌ Tests: uv not found")

@@ -52,3 +52,23 @@ def test_control_exit_zero_still_passes(vr, monkeypatch):
 def test_control_nonzero_exit_still_fails(vr, monkeypatch):
     done = subprocess.CompletedProcess(["uv"], 1, stdout="1 failed\n", stderr="")
     assert _run_tests_with(vr, monkeypatch, done) is False
+
+
+def test_the_timeout_message_says_how_to_raise_the_limit(vr, monkeypatch, capsys):
+    monkeypatch.setenv("VERIFY_TEST_TIMEOUT", "123")
+    exc = subprocess.TimeoutExpired(cmd=["uv"], timeout=123)
+    assert _run_tests_with(vr, monkeypatch, exc) is False
+    assert "raise VERIFY_TEST_TIMEOUT (now 123s)" in capsys.readouterr().out
+
+
+def test_the_default_limit_matches_release_sh(vr, monkeypatch):
+    """release.sh (#942) allows 7200 s because the suite takes over an hour locally."""
+    monkeypatch.delenv("VERIFY_TEST_TIMEOUT", raising=False)
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+    monkeypatch.setattr(vr.subprocess, "run", fake_run)
+    assert vr.run_tests() is True
+    assert seen["timeout"] == 7200
