@@ -329,7 +329,7 @@ def test_fallback_leaves_the_commands_output_alone(perl_only):
 
 
 def test_a_hung_run_that_printed_100_percent_is_still_exit_124_with_the_marker_captured(perl_only):
-    """What step 2 depends on: `out=$(run_with_timeout ...) || code=$?`, then 124 + [100%] = pass."""
+    """run_with_timeout still reports 124 for a hung run; step 2 now fails it (test_verdict, PR-F F2)."""
     r = _run("""out=$(run_with_timeout 3 sh -c 'echo "[ 99%]"; echo "[100%]"; exec sleep 30' 2>&1)
 code=$?
 echo "code=$code"
@@ -486,12 +486,12 @@ def test_no_bare_python3_is_left_outside_the_interpreter_gate():
 
 # ── 4. the test step ──────────────────────────────────────────────────────────
 
-def test_the_test_step_uses_the_wrapper_and_keeps_its_124_rule():
+def test_the_test_step_uses_the_wrapper_and_judges_by_test_verdict():
     text = SH.read_text()
     assert '_test_output=$(run_with_timeout "$_test_timeout" uv run pytest tests/' in text
     assert "_test_output=$(timeout" not in text
-    # exit 124 with the pytest completion marker is still a pass
-    assert 'elif [ $_test_exit -eq 124 ] && echo "$_test_output" | grep -q "\\[100%\\]"; then' in text
+    # PR-F F2: exit 124 with the pytest completion marker is no longer a pass
+    assert 'grep -q "\\[100%\\]"' not in text
 
 
 def test_the_default_test_limit_covers_a_local_run_of_the_suite():
@@ -512,3 +512,48 @@ def test_step_four_runs_verify_sdist_clean_and_stops_the_release_when_it_fails()
     assert "LEAKED_FILES" not in text
     # and it runs before the tag is created
     assert text.index('verify_sdist_clean "$SDIST_FILE"') < text.index('git tag "v${current_version}"')
+
+
+# ── step-2 verdict (PR-F F2): a timeout fails; pass needs exit 0 and a junit file with tests that ran ──
+
+def _junit(tmp_path, tests=5, failures=0, errors=0, skipped=0):
+    path = tmp_path / "junit.xml"
+    path.write_text(
+        '<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests">'
+        f'<testsuite name="pytest" errors="{errors}" failures="{failures}" skipped="{skipped}" tests="{tests}">'
+        "</testsuite></testsuites>")
+    return path
+
+
+def _py_only(tmp_path):
+    """No uv on PATH, and python3 is this interpreter (>= 3.11), so project_python takes its python3 branch."""
+    d = tmp_path / "py"
+    d.mkdir(exist_ok=True)
+    (d / "python3").symlink_to(sys.executable)
+    return f"{d}:/usr/bin:/bin"
+
+
+@pytest.mark.parametrize("code, kw, ok, said", [
+    (0, {}, True, "junit: 5 tests, 5 ran, 0 failures, 0 errors, 0 skipped"),
+    (124, {}, False, "a timeout is a failure"),
+    (1, {}, False, "pytest exit 1"),
+    (0, {"tests": 0}, False, "0 ran"),
+    (0, {"tests": 3, "skipped": 3}, False, "0 ran"),
+    (0, {"failures": 1}, False, "1 failures"),
+    (0, {"errors": 2}, False, "2 errors"),
+])
+def test_step2_verdict(tmp_path, code, kw, ok, said):
+    r = _run(f'test_verdict {code} "{_junit(tmp_path, **kw)}"', path=_py_only(tmp_path))
+    assert (r.returncode == 0) is ok, r.stdout + r.stderr
+    assert said in r.stdout
+
+
+def test_step2_verdict_fails_without_a_junit_file(tmp_path):
+    r = _run(f'test_verdict 0 "{tmp_path / "missing.xml"}"', path=_py_only(tmp_path))
+    assert r.returncode == 1 and "no readable junit file" in r.stdout
+
+
+def test_step2_writes_the_junit_file_it_judges():
+    text = SH.read_text()
+    assert '--junitxml="$_junit"' in text
+    assert '_verdict=$(test_verdict "$_test_exit" "$_junit")' in text

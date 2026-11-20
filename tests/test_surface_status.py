@@ -292,9 +292,10 @@ def test_claude_code_absorbs_subagent(state_dir):
 
 
 # ── emit_indicator (channel writes, no real notifications) ───────────────────
-def test_emit_indicator_writes_line_and_title(state_dir):
+def test_emit_indicator_writes_line_and_title(state_dir, monkeypatch):
     import io
     now = 1_000_000.0
+    monkeypatch.setenv("LLM_ROUTER_INDICATOR", "on")   # the suite runs with it off (conftest, PR-F F3)
     _write_log(state_dir, [_rec(saved=0.03, ts=now - 30)])
     buf = io.StringIO()
     s = ss.emit_indicator("codex", now=now, notify=False, stream=buf)
@@ -312,6 +313,24 @@ def test_emit_indicator_respects_off_switch(state_dir, monkeypatch):
     buf = io.StringIO()
     ss.emit_indicator("codex", now=now, notify=False, stream=buf)
     assert buf.getvalue() == ""      # disabled → nothing written
+
+
+def test_suite_refuses_writes_to_the_controlling_terminal():
+    """PR-F F3: the conftest audit hook refuses before any syscall, so this holds with or without a tty."""
+    import os
+    with pytest.raises(PermissionError, match="PR-F F3"):
+        open("/dev/tty", "w")
+    with pytest.raises(PermissionError, match="PR-F F3"):
+        os.open("/dev/tty", os.O_WRONLY | os.O_NONBLOCK)
+    assert os.environ["LLM_ROUTER_INDICATOR"] == "off"   # inherited by the hook subprocesses
+
+
+def test_emit_indicator_without_a_stream_falls_back_to_stderr_under_the_guard(state_dir, monkeypatch, capsys):
+    now = 1_000_000.0
+    monkeypatch.setenv("LLM_ROUTER_INDICATOR", "on")
+    _write_log(state_dir, [_rec(ts=now - 30)])
+    ss.emit_indicator("codex", now=now, notify=False)
+    assert "hermes3:8b" in capsys.readouterr().err
 
 
 # ── token amounts (#token-indicators) ────────────────────────────────────────

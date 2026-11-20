@@ -129,6 +129,41 @@ run_with_timeout() {
     fi
 }
 
+# Step-2 verdict: test_verdict EXIT JUNIT_FILE. Prints one reason line; returns 0 only
+# when all three hold: pytest exited 0, the junit file parses, and in it at least one
+# test ran with 0 failures and 0 errors. Exit 124 (timeout) is a failure even after a
+# "[100%]" line: that old rule passed runs whose results were never read, and a run
+# that collected nothing also exited 0.
+test_verdict() {
+    local code=$1 junit=$2
+    if [ "$code" -eq 124 ]; then
+        echo "timed out (exit 124); a timeout is a failure"
+        return 1
+    fi
+    if [ "$code" -ne 0 ]; then
+        echo "pytest exit $code"
+        return 1
+    fi
+    project_python -c '
+import sys
+import xml.etree.ElementTree as ET
+try:
+    root = ET.parse(sys.argv[1]).getroot()
+except (OSError, ET.ParseError) as exc:
+    print("no readable junit file (" + type(exc).__name__ + ")")
+    sys.exit(1)
+t = f = e = s = 0
+for el in root.iter("testsuite"):
+    t += int(el.get("tests", 0))
+    f += int(el.get("failures", 0))
+    e += int(el.get("errors", 0))
+    s += int(el.get("skipped", 0))
+ran = t - s
+print("junit: %d tests, %d ran, %d failures, %d errors, %d skipped" % (t, ran, f, e, s))
+sys.exit(0 if ran > 0 and f == 0 and e == 0 else 1)
+' "$junit"
+}
+
 # Paths that must never be published: three grep -E patterns, each matched
 # case-insensitively against a line of `tar tzf <sdist>` (see sdist_leaks).
 #  * SDIST_BLOCK_RE: .env, CLAUDE.md and the .internal/ /research/ /deprecation/
@@ -291,10 +326,8 @@ main() {
     echo ""
 
     # Step 2: Run tests (core tests, skip known failures)
-    # Wrapped in run_with_timeout because pytest occasionally hangs in Py_FinalizeEx
-    # (asyncio event-loop teardown leak from background HTTP clients) AFTER
-    # all tests have passed. We treat exit code 124 (timeout) as success iff
-    # the output shows the "[100%]" pytest completion marker.
+    # Wrapped in run_with_timeout as a hang guard. Pass or fail comes from test_verdict:
+    # exit 0 plus the junit file. A timeout is a failure, also after "[100%]".
     log_info "Step 2/5: Running test suite (core tests, skipping pre-existing failures)..."
     # 7200 s: a hang guard, not a speed target. The local suite runs single-threaded
     # here and takes about 70 minutes on the maintainer's Mac (2026-11-03 dry run);
@@ -304,6 +337,8 @@ main() {
     local _test_timeout="${RELEASE_TEST_TIMEOUT:-7200}"
     local _test_output=""
     local _test_exit=0
+    local _junit
+    _junit=$(mktemp "${TMPDIR:-/tmp}/llm-router-release-junit.XXXXXX")
     # `|| _test_exit=$?` bypasses `set -e` on non-zero exit while capturing the code.
     _test_output=$(run_with_timeout "$_test_timeout" uv run pytest tests/ -q \
         --ignore=tests/test_agno_integration.py \
@@ -323,14 +358,20 @@ main() {
         --deselect=tests/test_cost.py::test_get_savings_by_task_type \
         -m "not slow" \
         --tb=line \
+        --junitxml="$_junit" \
         --disable-warnings 2>&1) || _test_exit=$?
     echo "$_test_output"
-    if [ $_test_exit -eq 0 ]; then
-        log_success "All tests passed"
-    elif [ $_test_exit -eq 124 ] && echo "$_test_output" | grep -q "\[100%\]"; then
-        log_success "All tests passed (Python shutdown hung after [100%]; killed by timeout — known asyncio teardown leak)"
+    local _verdict=""
+    local _verdict_rc=0
+    _verdict=$(test_verdict "$_test_exit" "$_junit") || _verdict_rc=$?
+    rm -f "$_junit"
+    if [ $_verdict_rc -eq 0 ]; then
+        log_success "All tests passed ($_verdict)"
     else
-        log_error "Tests failed (exit $_test_exit). Fix failures and try again."
+        log_error "Tests failed: $_verdict. Fix failures and try again."
+        if [ $_test_exit -eq 124 ]; then
+            log_error "If the suite is only slow, raise RELEASE_TEST_TIMEOUT (now ${_test_timeout}s)."
+        fi
         exit 1
     fi
     echo ""

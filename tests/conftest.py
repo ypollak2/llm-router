@@ -44,6 +44,33 @@ os.environ["LLM_ROUTER_MEM_GUARD"] = "off"
 # spawning itself must `monkeypatch.delenv("LLM_ROUTER_NO_DETACHED_SPAWN")` and fake Popen.
 os.environ["LLM_ROUTER_NO_DETACHED_SPAWN"] = "1"
 
+# PR-F F3 (2026-11-18): no test may write to the controlling terminal. The codex,
+# gemini and opencode post-tool hooks run as real subprocesses and end in
+# surface_status.emit_indicator, which opens /dev/tty, so the indicator was drawn
+# into the terminal running pytest (release.sh step 2 included). The flag is off for
+# the session and its children; a test of the indicator sets it "on" and passes its
+# own stream. The audit hook refuses an in-process write-open of /dev/tty with a
+# PermissionError, which surface_status._open_tty already maps to its stderr fallback.
+os.environ["LLM_ROUTER_INDICATOR"] = "off"
+_TTY_REFUSALS: list = []
+_TTY_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND
+
+
+def _refuse_tty_write(event: str, args: tuple) -> None:
+    if event != "open" or not args or not isinstance(args[0], (str, bytes, os.PathLike)):
+        return
+    if os.fsdecode(args[0]) != "/dev/tty":
+        return
+    mode = args[1] if len(args) > 1 else None
+    flags = args[2] if len(args) > 2 else 0
+    writes = any(c in mode for c in "wax+") if isinstance(mode, str) else bool((flags or 0) & _TTY_WRITE_FLAGS)
+    if writes:
+        _TTY_REFUSALS.append(args[0])
+        raise PermissionError("tests may not write to /dev/tty (see PR-F F3 in tests/conftest.py)")
+
+
+sys.addaudithook(_refuse_tty_write)
+
 # 2026-10-06: the operator's live usage.db held 294 fixture rows written that day
 # (see tests/_real_home_guard.py). LLM_ROUTER_HOME alone is advisory: code that
 # resolves `Path.home() / ".llm-router"` at import or call time ignores it, and a
