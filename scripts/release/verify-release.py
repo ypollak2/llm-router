@@ -73,14 +73,11 @@ def check_github(owner: str, repo: str, version: str) -> bool:
 def run_tests() -> bool:
     """Run full test suite.
 
-    Pytest occasionally hangs in Py_FinalizeEx (asyncio event-loop teardown
-    from background HTTP clients) AFTER all tests have passed. We capture
-    output and treat a TimeoutExpired as success iff the "[100%]" pytest
-    completion marker appears in the captured output — meaning all tests
-    finished, only Python shutdown is stuck.
+    A timeout is always a failure, even after the "[100%]" marker: that old rule
+    passed runs whose results were never read (same rule as release.sh, F2).
     """
     print("🔍 Running test suite...")
-    timeout_seconds = int(os.environ.get("VERIFY_TEST_TIMEOUT", "600"))
+    timeout_seconds = int(os.environ.get("VERIFY_TEST_TIMEOUT", "7200"))
 
     # v9.3.1 — align excludes with scripts/release/release.sh's pytest gate so verify
     # doesn't fail on tests release.sh deliberately skips (flaky integration
@@ -121,13 +118,9 @@ def run_tests() -> bool:
             if result.stdout:
                 print(result.stdout[-2000:])
             return False
-    except subprocess.TimeoutExpired as exc:
-        captured = (exc.stdout or b"").decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-        if "[100%]" in captured:
-            print(f"✅ Tests: All tests passed (Python shutdown hung after [100%]; "
-                  f"killed by {timeout_seconds}s timeout — known asyncio teardown leak)")
-            return True
-        print(f"❌ Tests: Test suite timed out ({timeout_seconds}s) before reaching [100%]")
+    except subprocess.TimeoutExpired:
+        print(f"❌ Tests: Test suite timed out ({timeout_seconds}s); a timeout is a failure.")
+        print(f"   If the suite is only slow, raise VERIFY_TEST_TIMEOUT (now {timeout_seconds}s).")
         return False
     except FileNotFoundError:
         print("❌ Tests: uv not found")
