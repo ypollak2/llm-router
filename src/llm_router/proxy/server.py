@@ -1033,11 +1033,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 store = chunk_store.ChunkStore()
 
             async def map_call(prompt: str, num_predict: int) -> str | None:
-                reply, _err, _usage = await backend.complete(
+                reply, backend_err, _usage = await backend.complete(
                     {"model": cfg.model, "messages": [{"role": "user", "content": prompt}],
                      "max_tokens": num_predict, "temperature": 0}, mr_summary.MAP_TIMEOUT_S)
                 if reply is None:
-                    progress["map_error_kind"] = mr_summary.error_kind(_err)  # kind only, never the text
+                    progress["map_error_kind"] = mr_summary.error_kind(backend_err)  # kind only, never the text
                     return None
                 return "".join(b.get("text", "") for b in reply.get("content") or [] if b.get("type") == "text")
 

@@ -65,14 +65,17 @@ def error_kind(err) -> str:
 
 
 def map_error_text(try_no: int, *, kind: str | None = None, exc: BaseException | None = None) -> str:
-    """``try=N kind=<error_kind>`` for a backend error, ``try=N exc=<ClassName>[ http=nnn]`` for a raise.
+    """``try=N kind=<error_kind>`` for a backend error (``unreported`` when the caller's map_call left no kind), ``try=N exc=<ClassName>[ http=nnn]`` for a raise.
     Class name and status digits only (the exception message is never copied); at most MAP_ERROR_MAX chars."""
     if exc is not None:
         name = re.sub(r"[^A-Za-z0-9_.]", "", type(exc).__name__)[:60]
+        status = getattr(getattr(exc, "response", None), "status_code", None)  # e.g. httpx.HTTPStatusError
         m = re.match(r"HTTP (\d{3})\b", str(exc))
-        out = f"try={try_no} exc={name}" + (f" http={m.group(1)}" if m else "")
+        code = f"{status:03d}"[:3] if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599 \
+            else (m.group(1) if m else None)
+        out = f"try={try_no} exc={name}" + (f" http={code}" if code else "")
     else:
-        out = f"try={try_no} kind={re.sub(r'[^a-z0-9_]', '', kind or 'no_reply')[:60]}"
+        out = f"try={try_no} kind={re.sub(r'[^a-z0-9_]', '', kind or 'unreported')[:60]}"
     return out[:MAP_ERROR_MAX]
 
 

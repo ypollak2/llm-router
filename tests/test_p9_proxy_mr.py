@@ -371,3 +371,32 @@ async def test_map_error_reports_second_try_and_never_leaks_content(monkeypatch)
     assert mr_summary.error_kind(None) == "no_reply"
     weird = type("Bad Name\n" + "Z" * 300, (Exception,), {})
     assert len(mr_summary.map_error_text(1, exc=weird("m"))) <= mr_summary.MAP_ERROR_MAX
+
+
+class _RunnerErrorBackend(MRBackend):
+    """Map calls come back as (None, "ollama error: <text>"): the backend-error path with runner text in it."""
+
+    async def complete(self, body, timeout_s):
+        if _is_map(body):
+            self.calls.append(body)
+            self.maps.append(body)
+            return None, "ollama error: SECRET runner text echoing the prompt", {}
+        return await super().complete(body, timeout_s)
+
+
+async def test_map_error_backend_error_text_never_reaches_the_ledger(env, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    app = env.app(_RunnerErrorBackend())
+    await _warm(app)
+    await _post(app, copy.deepcopy(_session()))
+    mr = env.rows()[-1]["mr_summary"]
+    assert mr["outcome"] == "map_failed" and mr["map_error"] == "try=1 kind=ollama_error"
+    assert "SECRET" not in json.dumps(env.rows()[-1])
+
+
+async def test_map_error_raise_with_response_status_and_unreported_kind():
+    class StatusErr(Exception):
+        response = type("R", (), {"status_code": 429})()
+
+    assert mr_summary.map_error_text(1, exc=StatusErr("Client error 'Too Many Requests' LEAK")) == "try=1 exc=StatusErr http=429"
+    assert mr_summary.map_error_text(1) == "try=1 kind=unreported"
