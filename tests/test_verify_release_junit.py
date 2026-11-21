@@ -189,3 +189,27 @@ def test_run_tests_removes_its_temp_junit_file(vr, monkeypatch):
     monkeypatch.setattr(vr.subprocess, "run", fake_run)
     assert vr.run_tests() is True
     assert not os.path.exists(seen["path"])
+
+
+def test_run_tests_removes_its_temp_junit_file_after_a_timeout(vr, monkeypatch, capsys):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["path"] = next(c for c in cmd if c.startswith("--junitxml=")).split("=", 1)[1]
+        assert os.path.exists(seen["path"])
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+    monkeypatch.setattr(vr.subprocess, "run", fake_run)
+    assert vr.run_tests() is False
+    assert "timed out" in capsys.readouterr().out
+    assert not os.path.exists(seen["path"])
+
+
+def test_a_failed_temp_file_removal_is_reported_not_swallowed(vr, monkeypatch, capsys):
+    def fake_unlink(path):
+        raise PermissionError("denied")
+    monkeypatch.setattr(vr.os, "unlink", fake_unlink)
+    _run_with_junit_nounlink = _run_with_junit  # fake pytest below writes via Path, not os.unlink
+    assert _run_with_junit_nounlink(vr, monkeypatch, CLEAN) is True
+    err = capsys.readouterr().err
+    assert "could not remove temp junit file" in err
+    assert "denied" in err

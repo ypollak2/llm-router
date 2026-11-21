@@ -102,6 +102,10 @@ def _run_tests_with_junit(timeout_seconds: int, junit_path: str) -> bool:
     Returns True only when exit is 0 and the junit file has >=1 test run
     with 0 failures and 0 errors.
     """
+    # v9.3.1 — align excludes with scripts/release/release.sh's pytest gate so verify
+    # doesn't fail on tests release.sh deliberately skips (flaky integration
+    # tests, network-dependent suites, etc.). Single source of truth would
+    # be ideal — for now both lists must be kept in sync manually.
     cmd = [
         "uv", "run", "pytest", "tests/", "-q",
         "--ignore=tests/test_agno_integration.py",
@@ -168,8 +172,8 @@ def run_tests() -> bool:
     finally:
         try:
             os.unlink(_junit_path)
-        except OSError:
-            pass
+        except OSError as exc:
+            print(f"warning: could not remove temp junit file {_junit_path}: {exc}", file=sys.stderr)
 
 
 def main():
