@@ -311,3 +311,63 @@ async def test_a_chunk_boundary_never_splits_tool_use_from_tool_result(monkeypat
         assert kept == body["messages"][len(body["messages"]) - len(kept):]  # a contiguous tail, nothing dropped inside it
         seen_chunks.append(res.row["chunks"])
     assert changed >= 5 and max(seen_chunks) >= 2  # the property was checked on real multi-chunk closures
+
+
+# ── map_error: why a map call failed (content-free) ─────────────────────────────────────────────────────────
+
+async def test_map_error_backend_error_path_names_kind_and_try(env, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    backend = MRBackend(map_reply="")  # from_ollama -> (None, "empty response"): backend error, no raise
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, copy.deepcopy(_session()))
+    mr = env.rows()[-1]["mr_summary"]
+    assert mr["outcome"] == "map_failed" and mr["map_error"] == "try=1 kind=empty_response"
+
+
+async def test_map_error_exception_path_names_class_only(env, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    backend = MRBackend(map_exc=RuntimeError("HTTP 503: SECRET-PROMPT-TEXT"))
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, copy.deepcopy(_session()))
+    mr = env.rows()[-1]["mr_summary"]
+    assert mr["outcome"] == "map_failed" and mr["map_error"] == "try=1 exc=RuntimeError http=503"
+    assert "SECRET" not in json.dumps(mr)
+
+
+async def test_no_map_error_on_success(env, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    backend = MRBackend()
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, copy.deepcopy(_session()))
+    mr = env.rows()[-1]["mr_summary"]
+    assert mr["outcome"] == "summarized" and "map_error" not in mr
+
+
+async def test_map_error_reports_second_try_and_never_leaks_content(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_MR_CHUNK_TARGET", "800")
+    res = None
+    for seed in range(40):  # a history with at least one closable chunk, so a map call is made
+        calls = []
+
+        async def second_try_fails(prompt, num_predict, calls=calls):
+            calls.append(1)
+            if len(calls) == 1:
+                return "not a valid summary"  # try 1: reply fails valid_summary, loop retries
+            raise ValueError("LEAK-" + prompt[:50])
+
+        res = await mr_summary.shorten(_random_history(random.Random(seed)), second_try_fails, cap=9000, est=est_tokens)
+        if res is not None and res.row["outcome"] == "map_failed":
+            break
+    assert res is not None and res.row["outcome"] == "map_failed", "no seed reached a map call"
+    assert res.row["map_error"] == "try=2 exc=ValueError"
+    for err in ("HTTP 500: LEAK-body", "ollama error: LEAK-runner text", "tool args not JSON for LEAK", "x" * 500):
+        kind = mr_summary.error_kind(err)
+        text = mr_summary.map_error_text(2, kind=kind)
+        assert "LEAK" not in text and "x" * 20 not in text and len(text) <= mr_summary.MAP_ERROR_MAX
+    assert mr_summary.error_kind("HTTP 500: LEAK") == "http_500" and mr_summary.error_kind("ollama error: z") == "ollama_error"
+    assert mr_summary.error_kind(None) == "no_reply"
+    weird = type("Bad Name\n" + "Z" * 300, (Exception,), {})
+    assert len(mr_summary.map_error_text(1, exc=weird("m"))) <= mr_summary.MAP_ERROR_MAX
