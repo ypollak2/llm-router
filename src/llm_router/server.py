@@ -34,7 +34,7 @@ from llm_router.config import get_config
 from llm_router.health import get_tracker
 from llm_router.logging import configure_logging, get_logger
 from llm_router.state import _check_tier, get_active_profile  # noqa: F401  (backward compat)
-from llm_router.tools import admin, agentic, agents, codex, consolidated, dashboard, fs, gemini_cli, local_task, media, pipeline, routing, setup, subscription, text
+from llm_router.tools import admin, agentic, agents, codex, consolidated, dashboard, fs, gemini_cli, local_task, media, pipeline, routing, setup, subscription, text, web_search
 
 # agoragentic is an OPTIONAL tool group, and the import says so.
 #
@@ -212,6 +212,7 @@ if agoragentic is not None:
 agents.register(mcp, _gate)  # v0.0.2 — agent-session tools (gated; consolidated keeps the rich two)
 agentic.register(mcp, _gate)  # agentic router — llm_delegate (gated; consolidated hides it behind llm_act)
 local_task.register(mcp, _gate)  # whole-task local execution — llm_local_task
+web_search.register(mcp)  # off unless LLM_ROUTER_WEB_SEARCH=on; bypasses the slim gate, carries alwaysLoad _meta
 consolidated.register(mcp, _gate)  # North Star P4 — 1.0 front-door aliases (llm_act; non-breaking)
 
 # ── Resources ────────────────────────────────────────────────────────────────
