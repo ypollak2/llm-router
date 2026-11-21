@@ -23,10 +23,23 @@ def vr():
     return module
 
 
+CLEAN_JUNIT = (
+    '<testsuites><testsuite name="t" tests="1" failures="0" errors="0" skipped="0">'
+    '<testcase name="a" classname="m"/></testsuite></testsuites>'
+)
+
+
+def _write_junit_from(cmd):
+    """Stand in for pytest: write a clean junit file at the --junitxml= path."""
+    path = next(c for c in cmd if c.startswith("--junitxml=")).split("=", 1)[1]
+    Path(path).write_text(CLEAN_JUNIT)
+
+
 def _run_tests_with(vr, monkeypatch, effect):
     def fake_run(cmd, **kwargs):
         if isinstance(effect, BaseException):
             raise effect
+        _write_junit_from(cmd)
         return effect
     monkeypatch.setattr(vr.subprocess, "run", fake_run)
     return vr.run_tests()
@@ -68,6 +81,7 @@ def test_the_default_limit_matches_release_sh(vr, monkeypatch):
 
     def fake_run(cmd, **kwargs):
         seen.update(kwargs)
+        _write_junit_from(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
     monkeypatch.setattr(vr.subprocess, "run", fake_run)
     assert vr.run_tests() is True

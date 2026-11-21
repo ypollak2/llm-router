@@ -5,8 +5,10 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import tomllib
@@ -70,15 +72,36 @@ def check_github(owner: str, repo: str, version: str) -> bool:
         return False
 
 
-def run_tests() -> bool:
-    """Run full test suite.
+def _junit_verdict(junit_path: str) -> tuple[bool, str]:
+    """Return (pass, reason) from a pytest junit XML file.
 
-    A timeout is always a failure, even after the "[100%]" marker: that old rule
-    passed runs whose results were never read (same rule as release.sh, F2).
+    Pass only when the file parses and contains at least one test run with
+    0 failures and 0 errors — a run that collected nothing is not a pass.
     """
-    print("🔍 Running test suite...")
-    timeout_seconds = int(os.environ.get("VERIFY_TEST_TIMEOUT", "7200"))
+    try:
+        root = ET.parse(junit_path).getroot()
+    except (OSError, ET.ParseError) as exc:
+        return False, f"no readable junit file ({type(exc).__name__})"
 
+    t = f = e = s = 0
+    for el in root.iter("testsuite"):
+        t += int(el.get("tests", 0))
+        f += int(el.get("failures", 0))
+        e += int(el.get("errors", 0))
+        s += int(el.get("skipped", 0))
+    ran = t - s
+    detail = f"junit: {t} tests, {ran} ran, {f} failures, {e} errors, {s} skipped"
+    if ran > 0 and f == 0 and e == 0:
+        return True, detail
+    return False, detail
+
+
+def _run_tests_with_junit(timeout_seconds: int, junit_path: str) -> bool:
+    """Run pytest with --junitxml and evaluate the result.
+
+    Returns True only when exit is 0 and the junit file has >=1 test run
+    with 0 failures and 0 errors.
+    """
     # v9.3.1 — align excludes with scripts/release/release.sh's pytest gate so verify
     # doesn't fail on tests release.sh deliberately skips (flaky integration
     # tests, network-dependent suites, etc.). Single source of truth would
@@ -101,7 +124,9 @@ def run_tests() -> bool:
         "--deselect=tests/test_cost.py::test_get_classifier_overhead",
         "--deselect=tests/test_cost.py::test_get_savings_by_task_type",
         "-m", "not slow",
-        "--tb=line", "--disable-warnings",
+        "--tb=line",
+        "--junitxml=" + junit_path,
+        "--disable-warnings",
     ]
     try:
         result = subprocess.run(
@@ -110,14 +135,17 @@ def run_tests() -> bool:
             capture_output=True,
             text=True,
         )
-        if result.returncode == 0:
-            print("✅ Tests: All tests passed")
-            return True
-        else:
+        if result.returncode != 0:
             print(f"❌ Tests: Some tests failed (exit code: {result.returncode})")
             if result.stdout:
                 print(result.stdout[-2000:])
             return False
+        pass_, reason = _junit_verdict(junit_path)
+        if pass_:
+            print(f"✅ Tests: All tests passed ({reason})")
+            return True
+        print(f"❌ Tests: {reason}")
+        return False
     except subprocess.TimeoutExpired:
         print(f"❌ Tests: Test suite timed out ({timeout_seconds}s); a timeout is a failure.")
         print(f"   If the suite is only slow, raise VERIFY_TEST_TIMEOUT (now {timeout_seconds}s).")
@@ -125,6 +153,27 @@ def run_tests() -> bool:
     except FileNotFoundError:
         print("❌ Tests: uv not found")
         return False
+
+
+def run_tests() -> bool:
+    """Run full test suite.
+
+    A timeout is always a failure, even after the "[100%]" marker: that old rule
+    passed runs whose results were never read (same rule as release.sh, F2).
+    Pass or fail comes from the junit file (release.sh F2).
+    """
+    print("🔍 Running test suite...")
+    timeout_seconds = int(os.environ.get("VERIFY_TEST_TIMEOUT", "7200"))
+
+    _junit_fd, _junit_path = tempfile.mkstemp(prefix="verify-release-junit-", suffix=".xml")
+    os.close(_junit_fd)
+    try:
+        return _run_tests_with_junit(timeout_seconds, _junit_path)
+    finally:
+        try:
+            os.unlink(_junit_path)
+        except OSError as exc:
+            print(f"warning: could not remove temp junit file {_junit_path}: {exc}", file=sys.stderr)
 
 
 def main():
