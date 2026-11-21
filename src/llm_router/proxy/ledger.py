@@ -61,6 +61,10 @@ Row fields:
                   when it acted: {state: tripped|open|recovered|trial, trigger,
                   retry_in_s, probe_ok, probe_detail, probe_s}
   detail          short scrubbed error text for a fallback
+  mr_summary.map_error  only when outcome is map_failed (P9): ``try=N kind=<http_nnn|empty_response|truncated|
+                  ollama_error|other|no_reply>`` when the backend returned an error, or ``try=N exc=<ClassName>
+                  [http=nnn]`` when the map call raised. Fixed vocabulary, class name and status digits only,
+                  <= 120 chars, never prompt or reply text. The background map (P18) does not write it.
   task_type, complexity, model      the policy's view and the serving model
   route_latency_s     time spent on the non-Claude attempt (served or not)
   upstream_latency_s  Anthropic time for a forwarded / fallback call

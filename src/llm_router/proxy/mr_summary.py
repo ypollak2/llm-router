@@ -45,6 +45,37 @@ MAP_TIMEOUT_S = 120.0
 MAP_TRIES = 2
 PROMPT_VERSION = "mr-map-v1"       # P10: part of every chunk-store key; bump on any change that alters map replies
 
+MAP_ERROR_MAX = 120                # ledger ``map_error`` length cap
+
+
+def error_kind(err) -> str:
+    """Content-free class of a ``backend.complete`` error string. The strings come from proxy/backends.py
+    (``empty response``, ``ollama error: <runner text>``, ``HTTP nnn: <body>``) and proxy/translate.py:from_ollama
+    (``truncated at num_predict``, tool-call errors that name a tool). Only a fixed vocabulary is returned, never
+    any of the text after the prefix, so a prompt or reply fragment echoed by a runner cannot reach the ledger."""
+    e = err if isinstance(err, str) else ""
+    m = re.match(r"HTTP (\d{3})\b", e)
+    if m:
+        return "http_" + m.group(1)
+    for prefix, kind in (("empty response", "empty_response"), ("truncated at num_predict", "truncated"),
+                         ("ollama error", "ollama_error")):
+        if e.startswith(prefix):
+            return kind
+    return "other" if e else "no_reply"
+
+
+def map_error_text(try_no: int, *, kind: str | None = None, exc: BaseException | None = None) -> str:
+    """``try=N kind=<error_kind>`` for a backend error, ``try=N exc=<ClassName>[ http=nnn]`` for a raise.
+    Class name and status digits only (the exception message is never copied); at most MAP_ERROR_MAX chars."""
+    if exc is not None:
+        name = re.sub(r"[^A-Za-z0-9_.]", "", type(exc).__name__)[:60]
+        m = re.match(r"HTTP (\d{3})\b", str(exc))
+        out = f"try={try_no} exc={name}" + (f" http={m.group(1)}" if m else "")
+    else:
+        out = f"try={try_no} kind={re.sub(r'[^a-z0-9_]', '', kind or 'no_reply')[:60]}"
+    return out[:MAP_ERROR_MAX]
+
+
 OUTCOME_SUMMARIZED = "summarized"
 OUTCOME_NO_CHUNKS = "no_closable_chunks"
 OUTCOME_CANNOT_FIT = "cannot_fit"
@@ -453,9 +484,12 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
                 progress["map_calls"] = row["map_calls"]
             try:
                 reply = await map_call(map_prompt(chunk), num_predict)
-            except Exception:  # noqa: BLE001 - any map failure is the documented fallback, never a 500
+            except Exception as exc:  # noqa: BLE001 - any map failure is the documented fallback, never a 500
+                row["map_error"] = map_error_text(_try + 1, exc=exc)
                 return refuse(OUTCOME_MAP_FAILED)
             if reply is None:
+                # the caller's map_call may leave the backend's error kind in progress["map_error_kind"]
+                row["map_error"] = map_error_text(_try + 1, kind=(progress or {}).get("map_error_kind"))
                 return refuse(OUTCOME_MAP_FAILED)
             reply = reply.strip()
             if valid_summary(reply):
