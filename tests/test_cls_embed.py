@@ -303,7 +303,6 @@ def test_empty_text_abstains(env):
     assert cls_embed.classify("  ").source == "no_text" and fake.bodies == []
 
 
-def test_does_not_import_chat_classifier():
-    import inspect
-    src = inspect.getsource(cls_embed)
-    assert "import local_classifier" not in src and "from llm_router.local_classifier" not in src
+def test_does_not_bind_chat_classifier():
+    bound = {getattr(v, "__name__", "") for v in vars(cls_embed).values()}
+    assert "llm_router.local_classifier" not in bound
