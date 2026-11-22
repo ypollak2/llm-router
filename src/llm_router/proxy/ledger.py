@@ -43,6 +43,11 @@ Row fields:
                   edit | exec | agent | web | other), null when not a
                   continuation. A Bash command is classified in memory and
                   never stored.
+  prev_tool_targets list (at most 8) of ``{name, h}`` per tool call the newest
+                  tool results answer: h is the first 12 hex of HMAC-SHA256
+                  (per-install salt, normalised file path or Bash command),
+                  null for other tools or an absent input. No raw path or
+                  command is stored (``proxy.prev_targets``; D3 redo signal).
   step_ineligible a label, not a gate: what in a continuation the serving model
                   could not honour faithfully: media | server_tool |
                   forced_tool_choice; null otherwise. media and

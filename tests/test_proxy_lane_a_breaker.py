@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from llm_router import complexity_knn, engine, session_kind
+from llm_router.proxy import prev_targets
 from llm_router.proxy import haiku_guard, lane_a, lane_a_breaker as lb, ledger
 from llm_router.proxy import tiers as pt
 from llm_router.proxy.cache_cost import Stickiness
@@ -623,6 +624,7 @@ async def test_lane_off_has_no_side_effects(tmp_path, monkeypatch):
         for p in list(root.rglob("*")):
             if p.is_file():
                 p.unlink()
+        prev_targets.reset_for_tests()  # the salt file was just deleted; every scenario recreates it
         policy = _policy(lane, complexity_knn=True)
         assert policy.lane_runtime is None or name in ("env_off", "env_unset")
         d = tmp_path / name

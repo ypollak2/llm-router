@@ -50,6 +50,7 @@ import re
 from typing import Callable
 
 from llm_router.groundtruth_sources import _CAVEAT, _INTERRUPT, HARNESS_TAGS
+from llm_router.proxy import prev_targets as _targets
 from llm_router.proxy import tool_classes
 
 STEP_CONTINUATION = "continuation"
@@ -323,13 +324,14 @@ def step_fields(body: dict, on_error: Callable[[Exception], None] | None = None,
     example ``has_served_turn``, ``session_id_of``) are not guarded here."""
     try:
         return {"step_class": step_kind(body, parent_main), "prev_tools": prev_tools(body),
-                "prev_tool_class": prev_tool_class(body), "step_ineligible": step_ineligible(body),
+                "prev_tool_class": prev_tool_class(body),
+                "prev_tool_targets": prev_tool_targets(body), "step_ineligible": step_ineligible(body),
                 "step_error": False}
     except Exception as exc:  # noqa: BLE001 - a labelling error must not fail the call
         if on_error is not None:
             on_error(exc)
         return {"step_class": STEP_UNKNOWN, "prev_tools": [], "prev_tool_class": None,
-                "step_ineligible": None, "step_error": True}
+                "prev_tool_targets": [], "step_ineligible": None, "step_error": True}
 
 
 def step_ineligible(body: dict) -> str | None:
@@ -372,6 +374,12 @@ def prev_tool_class(body: dict) -> str | None:
 def prev_tools(body: dict) -> list[str]:
     """Names of the tool calls the newest tool results answer (shape only)."""
     return [b.get("name", "") for b in _prev_tool_uses(body)]
+
+
+def prev_tool_targets(body: dict) -> list[dict]:
+    """``[{name, h}]`` per tool call the newest tool results answer: ``h`` is a salted
+    hash of the file path or Bash command (``proxy.prev_targets``), never the text."""
+    return _targets.prev_tool_targets(_prev_tool_uses(body))
 
 
 def _text_of(content) -> str:
