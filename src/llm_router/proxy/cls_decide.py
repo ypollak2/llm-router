@@ -367,8 +367,11 @@ def mark_failed(store: TurnDecisionStore, row: dict) -> None:
     store.put(key, {"tier": None, "source": S_FAILED, "ms": 0.0, "decided": False})
 
 
-async def eligible_verdict(body: dict, row: dict, store: TurnDecisionStore, parent_main: bool | None = None) -> dict:
-    """``{tier, source, ms, decided}`` for this call's human turn. Reuses the verdict ``decide_turn`` already
+async def eligible_verdict(body: dict, row: dict, store: TurnDecisionStore, parent_main: bool | None = None,
+                           *, embed: bool = False) -> dict:
+    """``{tier, source, ms, decided}`` for this call's human turn. ``embed=True`` (PR-7) swaps the backend for the
+    embedding classifier (:mod:`cls_embed_authority`: dedicated executor, hard ``wait_for``); a fresh answer then
+    also carries ``emb`` (the text-free ``cls_emb_*`` record), which is never stored. Reuses the verdict ``decide_turn`` already
     made; else asks the classifier within :func:`budget_s` (a timeout proceeds with the rules) and keeps the
     answer in ``store`` so the turn's continuations pay nothing. ``store`` is separate from the veto store:
     this verdict is never a veto. Never raises."""
@@ -378,7 +381,7 @@ async def eligible_verdict(body: dict, row: dict, store: TurnDecisionStore, pare
         failed = store.get(key)
         if failed is not None and failed.get("source") == S_FAILED:
             return dict(failed)
-        if row.get("cls_turn_decided") is True:
+        if row.get("cls_turn_decided") is True and not embed:  # embed authority listens to the embed head only
             return {"tier": row.get("cls_turn_tier"), "source": row.get("cls_turn_source"),
                     "ms": row.get("cls_turn_ms"), "decided": True}
         if not row.get("supported"):
@@ -391,9 +394,19 @@ async def eligible_verdict(body: dict, row: dict, store: TurnDecisionStore, pare
         text = newest_human_text(body)
         if not text.strip() or door_verdict._holds_secret(text):
             return out
+        snapshot = {"messages": list(body.get("messages") or []), "system": body.get("system")}
+        if embed:
+            from llm_router.proxy import cls_embed, cls_embed_authority
+            if not cls_embed_authority.allowed_row(row):
+                return out  # D-594: a permission check / side call is never classified for authority
+            ev = await cls_embed_authority.verdict_for(snapshot)
+            ok = ev.decided
+            out = {"tier": ev.tier if ok else None, "source": cls_embed.SRC_EMBED if ok else ev.source,
+                   "ms": ev.ms, "decided": ok}
+            store.put(key, dict(out))
+            return dict(out, emb=ev.as_record())
         budget = budget_s()
         t0 = time.monotonic()
-        snapshot = {"messages": list(body.get("messages") or []), "system": body.get("system")}
 
         async def one():
             assembled = await asyncio.to_thread(assemble, snapshot)

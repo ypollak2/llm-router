@@ -69,6 +69,8 @@ OFF = "off"
 SKIP_MARKER = "skipped_marker"
 SKIP_SIDE_CALL = "skipped_side_call"
 SKIP_NOT_HUMAN = "skipped_not_human_turn"
+SKIP_NO_TEXT = "skipped_no_text"
+SKIP_CLOSED = "skipped_closed"
 SKIP_KNOWN = "skipped_known"
 SKIP_NO_LOOP = "skipped_no_loop"
 SCHEDULED = "scheduled"
@@ -89,11 +91,14 @@ class _Lane:
 
 _lane: _Lane | None = None
 _lane_lock = threading.Lock()
+_closed = False  # F3: set by aclose(); a schedule after shutdown must not build a fresh lane (its threads would leak)
 
 
-def _get_lane() -> _Lane:
+def _get_lane() -> _Lane | None:
     global _lane
     with _lane_lock:
+        if _closed:
+            return None
         if _lane is None:
             _lane = _Lane()
         return _lane
@@ -102,9 +107,10 @@ def _get_lane() -> _Lane:
 async def aclose() -> None:
     """Shutdown: give pending tasks ``SHUTDOWN_WAIT_S`` to write their record, cancel the rest, stop the pools
     without waiting for a running embed (its own timeout ends it)."""
-    global _lane
+    global _lane, _closed
     with _lane_lock:
         lane, _lane = _lane, None
+        _closed = True
     if lane is None:
         return
     tasks = list(lane.tasks)
@@ -116,10 +122,18 @@ async def aclose() -> None:
     lane.rec_pool.shutdown(wait=False, cancel_futures=True)
 
 
+def reopen() -> None:
+    """Proxy start: a lane closed by an earlier shutdown in this process (tests) accepts work again."""
+    global _closed
+    with _lane_lock:
+        _closed = False
+
+
 def reset() -> None:  # tests (no loop running)
-    global _lane
+    global _lane, _closed
     with _lane_lock:
         lane, _lane = _lane, None
+        _closed = False
     if lane is not None:
         lane.pool.shutdown(wait=False, cancel_futures=True)
         lane.rec_pool.shutdown(wait=False, cancel_futures=True)
@@ -159,29 +173,39 @@ def _append(rec: dict, path: Path | None) -> None:
         failopen.record(FO_SHADOW, exc, detail="write")
 
 
-def _record(row: dict, decision, verdict: cls_embed.Verdict, *, late: bool, path: Path | None) -> None:
-    reason = getattr(decision, "reason", None)
+def _label(decision) -> str:
+    return "local" if getattr(decision, "local", False) else (getattr(decision, "reason", None) or "claude")
+
+
+def _record(row: dict, decision, verdict: cls_embed.Verdict, *, late: bool, path: Path | None,
+            rules_decision=None) -> None:
+    """``rules_decision`` is what the rules decided; ``final_decision`` what the call got. They differ only when
+    the authority flipped the call (F1): ``rules_decision`` is then the pre-flip decision, never the flipped one,
+    so G1/G3 still measure the rules and the classifier apart."""
+    final = _label(decision)
     rec = {"kind": KIND, "ts": row.get("ts"), "wrote_ts": time.time(), "session_id": row.get("session_id"),
            "text_sha": row.get("text_sha"), "msg_id": row.get("msg_id"), "pop": row.get("turn_origin"),
            "step_class": row.get("step_class"),
-           "rules_decision": "local" if getattr(decision, "local", False) else (reason or "claude"),
+           "rules_decision": _label(rules_decision) if rules_decision is not None else final,
+           "final_decision": final, "flipped": rules_decision is not None,
            "late": late}
     rec.update(verdict.as_record())
     _append(rec, path)
 
 
-def _record_drop(lane: _Lane, row: dict, decision, path: Path | None) -> None:
+def _record_drop(lane: _Lane, row: dict, decision, path: Path | None, rules_decision=None) -> None:
     try:
         _record(row, decision, cls_embed.Verdict(None, cls_embed.SRC_QUEUE_FULL, 0.0, queue_depth=MAX_PENDING),
-                late=False, path=path)
+                late=False, path=path, rules_decision=rules_decision)
     finally:
         with lane.lock:
             lane.drop_pending -= 1
 
 
-def schedule(body: dict, row: dict, decision, path: Path | None = None) -> str:
+def schedule(body: dict, row: dict, decision, path: Path | None = None, rules_decision=None) -> str:
     """Start the shadow verdict for this call and return at once. Never raises, never awaits, never changes
-    ``decision``. Call it after the rules have decided; flag off returns before anything is read. Only enum
+    ``decision``. Call it after the rules have decided AND after any classifier flip (``decision`` is the final one;
+    ``rules_decision`` is the pre-flip one, passed only when a flip happened, F1); flag off returns before anything is read. Only enum
     checks, a dict lookup and a task creation happen on the calling (event-loop) thread."""
     try:
         if not cls_embed.enabled():
@@ -196,7 +220,11 @@ def schedule(body: dict, row: dict, decision, path: Path | None = None) -> str:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return SKIP_NO_LOOP
+        if not row.get("text_sha"):
+            return SKIP_NO_TEXT  # F3: an empty turn has no dedupe key and nothing to embed
         lane = _get_lane()
+        if lane is None:
+            return SKIP_CLOSED
         key = (row.get("session_id") or "", row.get("text_sha") or "")
         now = time.monotonic()
         with lane.lock:
@@ -217,12 +245,12 @@ def schedule(body: dict, row: dict, decision, path: Path | None = None) -> str:
                 lane.drops_uncounted += 1
                 return DROPPED
         if full:
-            lane.rec_pool.submit(_record_drop, lane, dict(row), decision, path)  # a thread writes it
+            lane.rec_pool.submit(_record_drop, lane, dict(row), decision, path, rules_decision)  # a thread writes it
             return DROPPED
         msgs = body.get("messages") or []
         snapshot = {"messages": [dict(m) if isinstance(m, dict) else m for m in msgs[-MAX_SCAN_MESSAGES * 2:]],
                     "system": body.get("system")}
-        task = loop.create_task(_run(lane, snapshot, row, decision, now, path))
+        task = loop.create_task(_run(lane, snapshot, row, decision, now, path, rules_decision))
         lane.tasks.add(task)
         task.add_done_callback(lane.tasks.discard)
         return SCHEDULED
@@ -231,7 +259,8 @@ def schedule(body: dict, row: dict, decision, path: Path | None = None) -> str:
         return OFF
 
 
-async def _run(lane: _Lane, snapshot: dict, row: dict, decision, t0: float, path: Path | None) -> None:
+async def _run(lane: _Lane, snapshot: dict, row: dict, decision, t0: float, path: Path | None,
+               rules_decision=None) -> None:
     try:
         cf = lane.pool.submit(_job, snapshot)
     except RuntimeError:  # pool shut down
@@ -260,7 +289,8 @@ async def _run(lane: _Lane, snapshot: dict, row: dict, decision, t0: float, path
         verdict = cls_embed.Verdict(None, cls_embed.SRC_ERROR, round((time.monotonic() - t0) * 1000.0, 1))
         late = False
     try:
-        await asyncio.wrap_future(lane.rec_pool.submit(_record, row, decision, verdict, late=late, path=path))
+        await asyncio.wrap_future(lane.rec_pool.submit(_record, row, decision, verdict, late=late, path=path,
+                                                         rules_decision=rules_decision))
     except Exception as exc:  # noqa: BLE001
         failopen.record(FO_SHADOW, exc, detail="record")
 

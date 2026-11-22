@@ -281,8 +281,20 @@ def _post_embed(base: str, text: str, timeout: float) -> list[float] | None:
     payload = json.dumps({"model": model_name(), "input": text, "keep_alive": keep_alive()}).encode()
     req = urllib.request.Request(f"{base}/api/embed", data=payload, method="POST",
                                  headers={"Content-Type": "application/json"})
+    deadline = _clock() + timeout
     with local_privacy.open_url(req, base_url=base, timeout=timeout) as resp:
-        data = json.loads(resp.read())
+        # F2: ``timeout`` bounds each socket wait, not the whole read; a server that trickles bytes would hold
+        # this (non-daemon pool) thread past the budget. Read in chunks against one TOTAL deadline.
+        chunks: list[bytes] = []
+        pull = getattr(resp, "read1", resp.read)  # read1 returns what has arrived; read(n) waits for n bytes
+        while True:
+            chunk = pull(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if _clock() > deadline:
+                raise TimeoutError("embed read over deadline")
+        data = json.loads(b"".join(chunks))
     embs = data.get("embeddings")
     if isinstance(embs, list) and embs and isinstance(embs[0], list) and embs[0]:
         return [float(x) for x in embs[0]]

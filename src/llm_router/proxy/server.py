@@ -65,7 +65,7 @@ from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
 from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
-from llm_router.proxy import chunk_store, cls_decide, cls_embed, cls_embed_shadow, compact_worker, cold_guard, deadline, haiku_arm, haiku_guard, history_layout, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
+from llm_router.proxy import chunk_store, cls_decide, cls_embed, cls_embed_authority, cls_embed_shadow, compact_worker, cold_guard, deadline, haiku_arm, haiku_guard, history_layout, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
 from llm_router.proxy import escalation, permcheck_capture, r1_gate
 
 from llm_router.proxy.backend_health import (
@@ -1235,7 +1235,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                     to_ollama, body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
                 decision = decide(cap_payload)
         cls_flip = False
-        if not force and (cls_decide.eligible_shadow_on() or cls_decide.authority_positive()):
+        rules_decision = decision  # F1: what the rules decided, before any classifier flip (the shadow records both)
+        # PR-7: embed authority (own flag + kill file, default off). A verdict is asked for only on a soft pin
+        # refusal of an agent turn; it replaces the backend of the block below, nothing else in it.
+        embed_auth = not force and cls_embed_authority.active() and cls_embed_authority.allowed_row(row)
+        if not force and (cls_decide.eligible_shadow_on() or cls_decide.authority_positive() or embed_auth):
             # PR-B: a call the input rules allow, or refuse only for a pin / exempt session, gets a classifier
             # verdict (recorded; budgeted, a timeout proceeds with the rules). Under AUTHORITY=positive a decided
             # ``local`` verdict waives the one SOFT refusal: a plain conversation pin (not a structural pin, not
@@ -1244,18 +1248,21 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             soft_pin = (decision.reason == local_mode.REASON_PINNED_CLAUDE and not started_elsewhere
                         and lm.pin_reason_of(key) not in local_mode.STRUCTURAL_REASONS)
             shadow_on = cls_decide.eligible_shadow_on()
+            auth_on = cls_decide.authority_positive() or embed_auth
             # A verdict is asked for only where it can be used: recorded (shadow: allowed or pin-refused call) or
             # applied (authority: a soft pin). Exempt sessions never use one; an already-local call needs none
             # in authority-only mode.
             wanted = (shadow_on and (decision.local or decision.reason == local_mode.REASON_PINNED_CLAUDE)) or (
-                cls_decide.authority_positive() and soft_pin)
+                auth_on and soft_pin)
             if wanted and (decision.local or decide(cap_payload, rules_only=True).local):
                 cv = await cls_decide.eligible_verdict(key_body or body, row, cls_elig_decisions,
-                                                       parent_main_of(key_body or body))
+                                                       parent_main_of(key_body or body), embed=embed_auth)
+                if embed_auth and cv.get("emb"):
+                    row.update(cv["emb"])  # text-free numbers and codes (cls_emb_*)
                 if shadow_on:
                     row.update(cls_elig_verdict=cv["tier"], cls_elig_ms=cv["ms"],
                                cls_elig_ok=cv["decided"], cls_elig_source=cv["source"])
-                if (soft_pin and cls_decide.authority_positive() and cv["decided"] and cv["tier"] == "local"
+                if (soft_pin and auth_on and cv["decided"] and cv["tier"] == "local"
                         and not await asyncio.to_thread(cls_decide.proxy_lane_fails)):
                     flipped = decide(cap_payload, cls_local=True)
                     if flipped.local:
@@ -1289,7 +1296,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
-        cls_embed_shadow.schedule(key_body or body, row, decision)  # PR-4: flag off returns at once; never awaited
+        if embed_auth:  # PR-7 ledger field (absent with the flag off): did the classifier open this call?
+            row[cls_embed_authority.OPENED_FIELD] = bool(cls_flip and decision.local)
+            if row[cls_embed_authority.OPENED_FIELD]:
+                row[cls_embed_authority.OPENED_BY_FIELD] = cls_embed_authority.OPENED_BY
+        # PR-4 (+F1): flag off returns at once; never awaited. After the flip block: it records the rules' decision
+        # (pre-flip when a verdict flipped) AND the final one.
+        cls_embed_shadow.schedule(key_body or body, row, decision, rules_decision=rules_decision if cls_flip else None)
         if pin_cleared:
             row["local_mode"]["pin_cleared"] = "new_turn"  # PR-C: only with LLM_ROUTER_PIN_SCOPE=turn
         if cls_flip and decision.local:
@@ -2268,6 +2281,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # the model loads.
             task = asyncio.create_task(_run())
         embed_task = None
+        cls_embed_shadow.reopen()
+        cls_embed_authority.reopen()
         if cls_embed.enabled():  # PR-3: flag off (default), nothing here runs
             embed_task = asyncio.create_task(asyncio.to_thread(cls_embed.warm_up))
         # The Haiku guard (P0.11, D-20): runs now and hourly while the rewrite is
@@ -2315,6 +2330,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if embed_task is not None and not embed_task.done():
             embed_task.cancel()
         await cls_embed_shadow.aclose()
+        await cls_embed_authority.aclose()
         if guard_task is not None and not guard_task.done():
             guard_task.cancel()
         await cls_shadow.aclose()
