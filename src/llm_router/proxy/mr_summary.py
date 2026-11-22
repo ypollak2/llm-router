@@ -35,7 +35,7 @@ from llm_router.token_estimate import est_tokens
 #: Env-registered parameters LLM_ROUTER_MR_CHUNK_TARGET / _CLOSE_THRESHOLD / _MAP_NUM_PREDICT (defaults from PLAN-SUMMARY-SPEED-256K-20261110 section 4, row P9).
 DEFAULT_CHUNK_TARGET = 8_000       # est tokens of map input per chunk
 DEFAULT_CLOSE_THRESHOLD = 36_000   # est tokens the verbatim window is brought down to
-DEFAULT_MAP_NUM_PREDICT = 450      # body clipped to BODY_EST afterwards
+DEFAULT_MAP_NUM_PREDICT = 800      # body clipped to BODY_EST afterwards; 450 cut 2 of 2 replayed maps off (D-582b)
 W_CLOSE = 6                        # a chunk must lie wholly outside the last 6 units
 SUMMARY_CEIL = 300                 # est, wrapper included (PREREG-MR 2.4, AMEND3)
 BODY_EST = 270
@@ -485,14 +485,25 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
             row["map_calls"] += 1
             if progress is not None:
                 progress["map_calls"] = row["map_calls"]
+            if progress is not None:  # per-call values the caller's map_call may leave: never carried over from a prior call
+                progress.pop("map_error_kind", None)
+                progress.pop("map_output_tokens", None)
             try:
                 reply = await map_call(map_prompt(chunk), num_predict)
             except Exception as exc:  # noqa: BLE001 - any map failure is the documented fallback, never a 500
                 row["map_error"] = map_error_text(_try + 1, exc=exc)
                 return refuse(OUTCOME_MAP_FAILED)
+            out_tok = (progress or {}).get("map_output_tokens")
+            if isinstance(out_tok, int) and not isinstance(out_tok, bool) and out_tok >= 0:
+                row["map_output_tokens_sum"] = row.get("map_output_tokens_sum", 0) + out_tok
+                row["map_output_tokens_max"] = max(row.get("map_output_tokens_max", 0), out_tok)
             if reply is None:
                 # the caller's map_call may leave the backend's error kind in progress["map_error_kind"]
-                row["map_error"] = map_error_text(_try + 1, kind=(progress or {}).get("map_error_kind"))
+                kind = (progress or {}).get("map_error_kind")
+                if kind == "truncated":  # cut off at num_predict: same as an invalid reply (a try spent, then extractive)
+                    row["map_truncated"] = row.get("map_truncated", 0) + 1
+                    continue
+                row["map_error"] = map_error_text(_try + 1, kind=kind)
                 return refuse(OUTCOME_MAP_FAILED)
             reply = reply.strip()
             if valid_summary(reply):

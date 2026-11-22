@@ -65,6 +65,11 @@ Row fields:
                   ollama_error|other|no_reply>`` when the backend returned an error, or ``try=N exc=<ClassName>
                   [http=nnn]`` when the map call raised (status from the message or the exception's response.status_code). Fixed vocabulary, class name and status digits only,
                   <= 120 chars, never prompt or reply text. The background map (P18) does not write it.
+  mr_summary.map_truncated  P9, only when > 0: map tries whose reply was cut off at num_predict (kind truncated). A truncated try
+                  is treated like an invalid reply (it spends a try; two in a row give the extractive chunk), so it no longer ends the
+                  move with map_failed and writes no map_error. Number only.
+  mr_summary.map_output_tokens_max / map_output_tokens_sum  P9, when the backend reported them: the largest and the total
+                  backend output token count over this move's map calls (truncated ones included). Numbers only.
   task_type, complexity, model      the policy's view and the serving model
   route_latency_s     time spent on the non-Claude attempt (served or not)
   upstream_latency_s  Anthropic time for a forwarded / fallback call

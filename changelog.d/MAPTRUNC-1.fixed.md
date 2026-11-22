@@ -1,0 +1,1 @@
+- P9 map: a map reply cut off at num_predict now spends a try like an invalid reply (second try, then the extractive chunk) instead of ending the move with `map_failed`; `DEFAULT_MAP_NUM_PREDICT` 450 -> 800; ledger gains `mr_summary.map_truncated`, `map_output_tokens_max`, `map_output_tokens_sum`.
