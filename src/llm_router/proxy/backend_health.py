@@ -81,8 +81,15 @@ KIND_XML_PARSE = "xml_parse"
 KIND_HTTP_500 = "http_500"
 KIND_EMPTY_BODY = "empty_body"
 KIND_RUNNER_EMPTY_BURST = "runner_empty_burst"
+KIND_STEP_BUDGET = "step_budget_exceeded"
+KIND_HEDGE_TIMEOUT = "hedge_timeout"
+KIND_TRUNCATED = "truncated"
+KIND_UNKNOWN_TOOL = "unknown_tool"
+KIND_TOOL_ARGS_INVALID = "tool_args_invalid"
 KIND_OTHER = "other"
 #: Kinds where the runner itself is broken (the Metal backend stays failed until the runner reloads).
+#: Step budget, hedge timeout, truncation, unknown tool and bad tool args are not here: the runner
+#: answered, so a longer cooldown or a reload would fix nothing.
 RUNNER_KINDS = frozenset({KIND_RUNNER_OOM, KIND_RUNNER_COMPUTE, KIND_RUNNER_EMPTY_BURST})
 #: Unhealthy period for a broken runner when nothing reloads it: probing every 60 s only produced
 #: bursts of instant failures (2026-11-21 22:08-22:11Z: 134 of 136 chats were HTTP 200 with an empty body,
@@ -99,12 +106,24 @@ _OOM = re.compile(_OOM_PAT, re.IGNORECASE)      # same patterns as CRASH_SIGNATU
 _COMPUTE = re.compile(_COMPUTE_PAT, re.IGNORECASE)
 _XML = re.compile(r"xml syntax error", re.IGNORECASE)
 _HTTP_500 = re.compile(r"\bHTTP 500\b")
+# Anchored producers (server.py step budget, backends.py HedgeTimeout, translate.py from_ollama). They
+# match only the fixed prefix, so a model-chosen tool name in the rest of the text cannot steer the kind.
+_STEP_BUDGET = re.compile(r"^exceeded step budget\b")
+_HEDGE_TIMEOUT = re.compile(r"^no first token within\b")
+_TRUNCATED = re.compile(r"^truncated at num_predict$")
+_UNKNOWN_TOOL = re.compile(r"^unknown tool '")
+_TOOL_ARGS = re.compile(r"^tool args not JSON for\b")
 
 
 def error_kind(err: str | None) -> str | None:
     """Map a backend error string to one fixed-vocabulary kind (None when there is no error)."""
     if not err:
         return None
+    for pat, kind in ((_STEP_BUDGET, KIND_STEP_BUDGET), (_HEDGE_TIMEOUT, KIND_HEDGE_TIMEOUT),
+                      (_TRUNCATED, KIND_TRUNCATED), (_UNKNOWN_TOOL, KIND_UNKNOWN_TOOL),
+                      (_TOOL_ARGS, KIND_TOOL_ARGS_INVALID)):
+        if pat.search(err):      # first: these texts can carry a model-chosen tool name
+            return kind
     if _OOM.search(err):
         return KIND_RUNNER_OOM
     if _COMPUTE.search(err):
