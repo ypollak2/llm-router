@@ -444,7 +444,7 @@ async def test_two_truncated_tries_give_the_extractive_chunk_and_the_move_contin
 async def test_exception_after_a_truncated_try_still_ends_with_map_failed(monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_MR_CHUNK_TARGET", "800")
     res, _ = await _shorten_with([None, ValueError("x")])
-    assert res.row["outcome"] == "map_failed" and res.row["map_error"] == "try=2 exc=ValueError"
+    assert res.row["outcome"] == "map_failed" and res.row["map_error"] == "try=2 exc=ValueError" and res.row["map_truncated"] == 1
     res, _ = await _shorten_with([ValueError("x")])
     assert res.row["outcome"] == "map_failed" and res.row["map_error"] == "try=1 exc=ValueError" and "map_truncated" not in res.row
 
@@ -478,3 +478,26 @@ def test_default_map_num_predict_is_800(monkeypatch):
     assert mr_summary.DEFAULT_MAP_NUM_PREDICT == 800 and mr_summary.map_num_predict() == 800
     monkeypatch.setenv("LLM_ROUTER_MR_MAP_NUM_PREDICT", "450")
     assert mr_summary.map_num_predict() == 450
+
+
+async def test_stale_per_call_progress_values_are_not_carried_into_the_next_try(monkeypatch):
+    """Call 1 leaves kind=truncated and 800 tokens; call 2 returns a valid reply and leaves nothing. Without the per-try
+    pops, call 2 would still show the stale kind/tokens (counted again as an extra token sum / seen as truncated)."""
+    monkeypatch.setenv("LLM_ROUTER_MR_CHUNK_TARGET", "800")
+    for seed in range(40):
+        n, seen, progress = [0], [], {"map_calls": 0}
+
+        async def map_call(prompt, num_predict, n=n, seen=seen, progress=progress):
+            seen.append((progress.get("map_error_kind"), progress.get("map_output_tokens")))  # what is left on entry
+            n[0] += 1
+            if n[0] == 1:
+                progress["map_error_kind"], progress["map_output_tokens"] = "truncated", 800
+                return None
+            return SUMMARY  # a valid reply that leaves neither value
+
+        res = await mr_summary.shorten(_random_history(random.Random(seed)), map_call, cap=9000, est=est_tokens, progress=progress)
+        if progress["map_calls"]:
+            break
+    assert seen[0] == (None, None) and seen[1] == (None, None)  # try 2 starts clean
+    assert res.row["map_output_tokens_sum"] == 800 and res.row["map_truncated"] == 1  # the stale 800 was not re-counted
+    assert "map_error" not in res.row

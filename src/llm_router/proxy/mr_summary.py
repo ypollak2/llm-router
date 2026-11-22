@@ -485,7 +485,7 @@ async def shorten(body: dict, map_call: MapCall, *, cap: int, est: Callable[[dic
             row["map_calls"] += 1
             if progress is not None:
                 progress["map_calls"] = row["map_calls"]
-            if progress is not None:  # per-call values the caller's map_call may leave: never carried over from a prior call
+                # per-call values the caller's map_call may leave: never carried over from a prior call
                 progress.pop("map_error_kind", None)
                 progress.pop("map_output_tokens", None)
             try:
