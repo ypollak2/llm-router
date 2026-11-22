@@ -1302,7 +1302,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 row[cls_embed_authority.OPENED_BY_FIELD] = cls_embed_authority.OPENED_BY
         # PR-4 (+F1): flag off returns at once; never awaited. After the flip block: it records the rules' decision
         # (pre-flip when a verdict flipped) AND the final one.
-        cls_embed_shadow.schedule(key_body or body, row, decision, rules_decision=rules_decision if cls_flip else None)
+        cls_embed_shadow.schedule(key_body or body, row, decision, rules_decision=rules_decision if (cls_flip and decision.local) else None)
         if pin_cleared:
             row["local_mode"]["pin_cleared"] = "new_turn"  # PR-C: only with LLM_ROUTER_PIN_SCOPE=turn
         if cls_flip and decision.local:

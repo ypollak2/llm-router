@@ -48,7 +48,15 @@ def fx(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_CLS_EMBED_URL", fake.url)
     for k in ("LLM_ROUTER_CLASSIFIER_AUTHORITY", "LLM_ROUTER_CLASSIFIER_ELIGIBLE_SHADOW"):
         monkeypatch.delenv(k, raising=False)
-    yield SimpleNamespace(home=tmp_path, fake=fake, mp=monkeypatch)
+    calls: list = []
+    real_verdict_for = cls_embed_authority.verdict_for
+
+    async def spy(snapshot):
+        calls.append(1)
+        return await real_verdict_for(snapshot)
+
+    monkeypatch.setattr(cls_embed_authority, "verdict_for", spy)
+    yield SimpleNamespace(home=tmp_path, fake=fake, mp=monkeypatch, calls=calls, real_verdict_for=real_verdict_for)
     fake.close()
     cls_embed.reset_state()
     cls_embed_shadow.reset()
@@ -60,7 +68,9 @@ def on(fx):
 
 
 def no_embed_post(fx):
-    return not any(p.startswith("POST") for p in fx.fake.paths)
+    """True when the AUTHORITY path asked for no verdict (a spy on ``verdict_for``). The embed server's POST log is
+    not used: the shadow lane (server.py schedule) legitimately embeds the same turn and races any such check."""
+    return not fx.calls
 
 
 # -- authority off: identical decisions ----------------------------------------------------------------
@@ -349,7 +359,8 @@ def test_kill_file_mid_flight_abstains(fx):
     snap = {"messages": turn_body(["fix it"])["messages"], "system": None}
     state_path(cls_embed_authority.KILL_FILE).write_text("x")
     v = asyncio.run(cls_embed_authority.verdict_for(snap))
-    assert v.tier is None and v.source == cls_embed.SRC_KILLED and no_embed_post(fx)
+    assert v.tier is None and v.source == cls_embed.SRC_KILLED
+    assert not any(p.startswith("POST") for p in fx.fake.paths)  # direct call: no shadow lane in play
 
 
 # -- budget, executor, bounded exit (F2) ---------------------------------------------------------------
@@ -549,3 +560,58 @@ def test_f3_shadow_after_aclose_and_empty_text_are_skipped(fx):
 
     assert asyncio.run(go()) == (cls_embed_shadow.SKIP_NO_TEXT, cls_embed_shadow.SKIP_CLOSED)
     assert cls_embed_shadow._lane is None
+
+
+# -- review folds ----------------------------------------------------------------------------------------
+
+
+def test_s2_flip_refused_by_a_later_guard_records_flipped_false(fx, tmp_path):
+    on(fx)
+    fx.mp.setenv("LLM_ROUTER_CAP_GUARD_RECONCILE", "on")
+    e = pinned_env(tmp_path)
+    from llm_router import local_context_guard
+    fx.mp.setattr(local_context_guard, "overflow_estimate", lambda *a, **k: (10 ** 6, 1000))
+    cls_embed_shadow.reset()
+    _post_drain(e, turn_body(["rename the helper", "and the other"]))
+    assert fx.calls and e.rows()[-1]["cls_opened"] is False
+    (rec,) = _shadow_recs(fx.home)
+    assert rec["flipped"] is False and rec["final_decision"] == "prompt_over_guard"
+    assert rec["rules_decision"] == rec["final_decision"]
+
+
+def test_nit_a_embed_does_not_inherit_the_llm_classifiers_stored_verdict(fx):
+    on(fx)
+    body = turn_body(["rename the helper"])
+    store = cls_decide.TurnDecisionStore()
+    row = {"supported": True, "session_id": "s", "cls_turn_idx": 1, "cls_turn_sha": "x", "step_class": "turn_first"}
+    store.put(("s", 1, "x"), {"tier": "local", "source": "llm", "ms": 1.0, "decided": True})
+    fx.fake.vec = [0.0, 1.0]
+    out = asyncio.run(cls_decide.eligible_verdict(body, row, store, True, embed=True))
+    assert out["tier"] == "claude" or out["decided"] is True and out["tier"] != "local"
+    assert fx.calls  # the embed path ran instead of inheriting "llm: local"
+
+
+def test_nit_b_both_authorities_on_the_embed_head_wins(fx, tmp_path):
+    from tests.test_proxy_cls_decide import FakeClassifier
+    on(fx)
+    fx.mp.setenv("LLM_ROUTER_LOCAL_CLASSIFIER", "on")
+    fx.mp.setenv("LLM_ROUTER_CLASSIFIER_AUTHORITY", "positive")
+    llm = FakeClassifier(fx.mp, tier="local")
+    fx.fake.vec = [0.0, 1.0]  # embed says claude
+    row = second(pinned_env(tmp_path))
+    assert row["local_mode"]["reason"] == "pinned_claude" and row["cls_opened"] is False and llm.calls == []
+    fx.fake.vec = [1.0, 0.0]  # embed says local
+    row = second(pinned_env(tmp_path / "b" if (tmp_path / "b").mkdir() is None else tmp_path))
+    assert row["cls_opened"] is True and llm.calls == []
+
+
+@pytest.mark.timing
+def test_nit_c_a_blocking_read_is_bounded_by_the_time_left(fx):
+    srv = _Hang("trickle")
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(Exception):
+            cls_embed._post_embed(srv.url, "x", 0.3)
+        assert time.monotonic() - t0 < 0.9
+    finally:
+        srv.close()

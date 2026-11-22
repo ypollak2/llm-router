@@ -386,7 +386,8 @@ async def eligible_verdict(body: dict, row: dict, store: TurnDecisionStore, pare
                     "ms": row.get("cls_turn_ms"), "decided": True}
         if not row.get("supported"):
             return out
-        stored = store.get(key)
+        ekey = key + ("embed",) if embed else key  # an embed verdict never inherits the LLM classifier's, nor the reverse
+        stored = store.get(ekey)
         if stored is not None:
             return dict(stored, source=S_INHERIT, ms=0.0)
         if turn_origin(body, parent_main) not in HUMAN_ORIGINS:
@@ -403,7 +404,7 @@ async def eligible_verdict(body: dict, row: dict, store: TurnDecisionStore, pare
             ok = ev.decided
             out = {"tier": ev.tier if ok else None, "source": cls_embed.SRC_EMBED if ok else ev.source,
                    "ms": ev.ms, "decided": ok}
-            store.put(key, dict(out))
+            store.put(ekey, dict(out))
             return dict(out, emb=ev.as_record())
         budget = budget_s()
         t0 = time.monotonic()

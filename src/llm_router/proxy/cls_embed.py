@@ -287,7 +287,16 @@ def _post_embed(base: str, text: str, timeout: float) -> list[float] | None:
         # this (non-daemon pool) thread past the budget. Read in chunks against one TOTAL deadline.
         chunks: list[bytes] = []
         pull = getattr(resp, "read1", resp.read)  # read1 returns what has arrived; read(n) waits for n bytes
+        sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
         while True:
+            rem = deadline - _clock()
+            if rem <= 0:
+                raise TimeoutError("embed read over deadline")
+            if sock is not None:  # F2: one blocking read may wait at most the time left, not a fresh ``timeout``
+                try:
+                    sock.settimeout(max(rem, 0.001))
+                except OSError:
+                    pass
             chunk = pull(65536)
             if not chunk:
                 break

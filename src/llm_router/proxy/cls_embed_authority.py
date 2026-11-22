@@ -10,6 +10,9 @@ again: kill switch, ``claude_marker``, exempt session, hard pins, media, prompt 
 cap guard and the cold guard run after the flip and can still refuse. This module adds no refusal of its own to
 lift and has no way to lift one: it only answers "local", "claude" or abstain.
 
+Both authorities on (``LLM_ROUTER_CLASSIFIER_AUTHORITY=positive`` and this one): the embed head wins. It replaces
+the backend of the one flip block, so the LLM classifier is not asked and its stored verdicts are not inherited.
+
 Never local, by construction:
 
 * permission checks / ``not_eligible`` side calls: they never reach ``_local_step`` (tool-less), and
