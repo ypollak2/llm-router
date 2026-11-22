@@ -552,12 +552,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             return validate_ollama_url(cfg.ollama_url)
         return get_config().effective_ollama_base_url or "http://localhost:11434"
 
-    def _make_backend(model: str):
+    def _make_backend(model: str, num_predict: int | None = None):
         if backend_factory is not None:
             return backend_factory(model)
         for prefix, cls in BACKENDS.items():
             if model.startswith(prefix):
-                extra = ({"num_predict": local_mode.LOCAL_NUM_PREDICT}
+                extra = ({"num_predict": num_predict or local_mode.LOCAL_NUM_PREDICT}
                          if lm is not None or cfg.shadow else {})
                 if cfg.shadow:
                     extra["offload_cpu"] = True
@@ -565,8 +565,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                            hedge_s=cfg.hedge_s, keep_alive=cfg.keep_alive, **extra)
         raise ValueError(f"no backend for {model}")
 
-    def make_backend(model: str):
-        backend = _make_backend(model)
+    def make_backend(model: str, num_predict: int | None = None):
+        backend = _make_backend(model, num_predict)
         return recycler.wrap(backend) if recycler else backend
 
     def recycle_event(result):
@@ -803,7 +803,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         backend_t0, backend_outcome, stream_progress = None, None, None
         step_budget_s = cfg.step_budget_s
         try:
-            backend = make_backend(choice["model"])
+            # D-582a: 4096 for long organic main-thread continuations, else 2048; recorded on the row.
+            step_np = local_mode.num_predict_for_step(
+                row.get("session_kind"), row.get("is_main_thread"), row.get("step_class"),
+                row.get("est_prompt_tokens") or (row.get("local_mode") or {}).get("est_prompt_tokens"))
+            backend = make_backend(choice["model"], step_np if lm is not None else None)
+            if lm is not None:
+                row["num_predict"] = step_np
             if recycler and recycler.task is not None and not recycler.task.done():
                 admitted, health_info = False, {"state": "open"}
             else:
