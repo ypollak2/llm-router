@@ -34,7 +34,9 @@ async def test_fast_empty_threshold(elapsed):
     else:
         assert trip is None
         assert health.record("m", "zero-line stream", "validation", elapsed) is None
-        assert health.record("m", "zero-line stream", "validation", elapsed)["trigger"] == "consecutive_invalid"
+        # EKIND-1: a third instant (< 2 s) empty in the window is a runner_empty_burst; slower ones keep the streak rule.
+        want = "empty_burst" if elapsed < bh.EMPTY_BURST_MAX_ELAPSED_S else "consecutive_invalid"
+        assert health.record("m", "zero-line stream", "validation", elapsed)["trigger"] == want
 
 
 @pytest.mark.parametrize("enabled", [False, True])
