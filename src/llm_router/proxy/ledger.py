@@ -107,7 +107,7 @@ Claude-tier rewrite fields (only when the proxy runs with ``--tiers on`` or
   session_kind          organic | research | harness | headless, from the tag the
                         SessionStart hook persisted (llm_router.session_kind);
                         null = the session was never tagged. Tag only, never a filter.
-  num_predict           output-token cap sent for a locally served step (local-agent mode only; absent
+  num_predict           output-token cap sent for a locally attempted step (local-agent mode only; absent
                         otherwise): 4096 for an organic, main-thread continuation whose pre-send estimate
                         is above 60,000 tokens, else 2048 (``local_mode.num_predict_for_step``)
   tier_proposed         the policy table's tier for (task_type, complexity) BEFORE

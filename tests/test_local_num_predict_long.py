@@ -54,3 +54,62 @@ async def test_ledger_row_records_num_predict(env):  # noqa: F811
     (row,) = env.rows()
     assert row["num_predict"] == lm.LOCAL_NUM_PREDICT
 
+
+
+# --- integration: try_serve -> make_backend -> the constructed backend -------------------------------------
+
+import httpx  # noqa: E402
+
+from llm_router.proxy import server as ps  # noqa: E402
+from tests.test_proxy_local_mode import Breaker, _call, _next_turn, _served_blocks  # noqa: E402
+
+
+def _recording_backend(built: list):
+    class Recorded(Backend):
+        def __init__(self, model, http, **kw):
+            super().__init__(_ollama("", [_call("Read", {"file_path": "/work/repo/a.py"})]), _ollama("Done."))
+            built.append(kw.get("num_predict"))
+    return Recorded
+
+
+async def _serve(env, monkeypatch, *, kind, est, serve="local-agent"):  # noqa: F811
+    from llm_router import session_kind
+
+    built: list = []
+    monkeypatch.setattr(ps, "BACKENDS", {"ollama/": _recording_backend(built)})
+    monkeypatch.setattr(session_kind, "kind_of", lambda sid: kind)
+    monkeypatch.setattr(lm, "estimate_prompt_tokens", lambda payload: est)
+    monkeypatch.setattr(lm, "prompt_cap_tokens", lambda: 10**6)
+    cfg = ps.ProxyConfig(upstream="http://127.0.0.1:9", ledger_path=env.ledger, kill_switch=env.kill,
+                         model="ollama/fake:1", trim="none", serve=serve, hedge_s=None, warm_up=False)
+    app = ps.build_app(cfg, client=httpx.AsyncClient(transport=httpx.MockTransport(env.up)), breaker_fn=Breaker())
+    first = await _post(app, _first_call())
+    assert first.status_code == 200
+    r = await _post(app, dict(_next_turn(_first_call(), {"content": _served_blocks(first)}), stream=False))
+    assert r.status_code == 200
+    return built, env.rows()
+
+
+async def test_qualifying_step_builds_backend_with_4096_and_records_it(env, monkeypatch):  # noqa: F811
+    built, rows = await _serve(env, monkeypatch, kind="organic", est=BIG)
+    first, row = rows
+    assert first["step_class"] == "turn_first" and first["num_predict"] == 2048
+    assert row["step_class"] == "continuation" and row["is_main_thread"] is True
+    assert row["num_predict"] == 4096 and built == [2048, 4096]
+
+
+async def test_non_qualifying_control_builds_backend_with_2048(env, monkeypatch):  # noqa: F811
+    built, rows = await _serve(env, monkeypatch, kind="research", est=BIG)
+    assert rows[-1]["step_class"] == "continuation"
+    assert [r["num_predict"] for r in rows] == [2048, 2048] and built == [2048, 2048]
+
+
+async def test_boundary_estimate_control_builds_2048(env, monkeypatch):  # noqa: F811
+    built, rows = await _serve(env, monkeypatch, kind="organic", est=lm.LONG_PROMPT_EST)
+    assert rows[-1]["step_class"] == "continuation" and rows[-1]["num_predict"] == 2048 and built == [2048, 2048]
+
+
+async def test_num_predict_absent_when_local_mode_off(env, monkeypatch):  # noqa: F811
+    built, rows = await _serve(env, monkeypatch, kind="organic", est=BIG, serve="off")
+    assert rows and built == []   # nothing was served locally
+    assert all("num_predict" not in r for r in rows)
