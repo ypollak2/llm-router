@@ -72,7 +72,7 @@ def test_non_runner_error_keeps_the_plain_cooldown():
     clock, lines = Clock(), []
     h = bh.BackendHealth(clock=clock, warn=lines.append, runner_cooldown_s=300.0)
     for _ in range(3):
-        trip = h.record("m", "empty response", "validation", 0.1)
+        trip = h.record("m", "empty response", "validation", 5.0)
     assert trip == {"state": "tripped", "trigger": "consecutive_invalid"}
     assert h.error_kind_for("m") == bh.KIND_EMPTY_BODY and "60s" in lines[0]
     clock.t += 60
@@ -143,3 +143,70 @@ async def test_non_runner_error_does_not_request_a_reload(tmp_path, monkeypatch,
     row = _rows(tmp_path)[-1]
     assert "backend_error_kind" not in row and "recycle" not in (row.get("backend_health") or {})
     assert not marker.exists()
+
+
+def _empties(h, clock, n, gap, elapsed=0.1):
+    trip = None
+    for _ in range(n):
+        trip = h.record("m", "empty response", "validation", elapsed)
+        clock.t += gap
+    return trip
+
+
+def test_empty_burst_trips_as_a_runner_failure():
+    clock, lines = Clock(), []
+    h = bh.BackendHealth(clock=clock, warn=lines.append, runner_cooldown_s=300.0, fail_n=10)
+    assert _empties(h, clock, 2, 1) is None
+    trip = h.record("m", "empty response", "validation", 0.1)
+    assert trip == {"state": "tripped", "trigger": "empty_burst"}
+    assert h.error_kind_for("m") == bh.KIND_RUNNER_EMPTY_BURST
+    assert "kind=runner_empty_burst" in lines[0] and "300s" in lines[0]
+
+
+def test_two_instant_empties_do_not_trip():
+    clock = Clock()
+    h = bh.BackendHealth(clock=clock, warn=lambda _: None, runner_cooldown_s=300.0)
+    assert _empties(h, clock, 2, 1) is None and not h.is_open("m")
+
+
+def test_three_slow_empties_keep_todays_behaviour():
+    clock = Clock()
+    h = bh.BackendHealth(clock=clock, warn=lambda _: None, runner_cooldown_s=300.0)
+    trip = _empties(h, clock, 3, 1, elapsed=5.0)   # opens via the old streak, not the burst rule
+    assert trip == {"state": "tripped", "trigger": "consecutive_invalid"}
+    assert h.error_kind_for("m") == bh.KIND_EMPTY_BODY
+    clock.t += 60
+    assert not h.is_open("m")
+
+
+def test_burst_window_expires_and_a_good_reply_resets():
+    clock = Clock()
+    h = bh.BackendHealth(clock=clock, warn=lambda _: None, runner_cooldown_s=300.0, fail_n=10)
+    assert _empties(h, clock, 2, 11) is None          # gaps longer than the window
+    assert h.record("m", "empty response", "validation", 0.1) is None
+    clock.t += 1
+    assert h.record("m", None, None, 3.0) is None     # a working reply clears the run
+    assert _empties(h, clock, 2, 1) is None
+
+
+def test_200_empty_stream_alone_is_empty_body_with_the_plain_cooldown():
+    """Pins the limit: a lone empty reply carries no runner text, so it is not a runner kind."""
+    clock = Clock()
+    h = bh.BackendHealth(clock=clock, warn=lambda _: None, runner_cooldown_s=300.0)
+    for _ in range(3):
+        h.record("m", "empty response", "validation", 6.0)
+    assert h.error_kind_for("m") == bh.KIND_EMPTY_BODY
+    clock.t += 60
+    assert not h.is_open("m")
+
+
+async def test_failed_probe_updates_kind_but_runner_kind_is_sticky():
+    clock = Clock()
+    h = bh.BackendHealth(clock=clock, warn=lambda _: None, runner_cooldown_s=300.0)
+    h.record("m", "ollama error: Compute error", "validation", 0.1)
+    clock.t += 300
+    ok, info = await h.admit("m", FailingBackend("x"))
+    assert not ok and info["error_kind"] == bh.KIND_RUNNER_COMPUTE
+    assert h.is_open("m") and (clock.t - h._states["m"].opened_at) == 0
+    clock.t += 299
+    assert h.is_open("m")   # still the 300 s cooldown after the probe's bare 'Compute error'

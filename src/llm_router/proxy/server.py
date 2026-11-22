@@ -72,10 +72,10 @@ from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
     DEFAULT_FAIL_N,
     DEFAULT_RUNNER_COOLDOWN_S,
+    KIND_OTHER,
     REASON_BACKEND_UNHEALTHY,
     BackendHealth,
     begin_stream_progress,
-    KIND_OTHER,
     error_kind,
 )
 from llm_router.proxy.backends import (
@@ -907,7 +907,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if tripped is not None:
                 row["backend_health"] = dict(row.get("backend_health") or {}, **tripped,
                                              error_kind=health.error_kind_for(choice["model"]))
-                if recycler and tripped["trigger"] in {"fast_empty", "crash_signature"}:
+                if recycler and tripped["trigger"] in {"fast_empty", "crash_signature", "empty_burst"}:
                     row["backend_health"].update(recycler.start(recycle_event) or {})
         _kind = error_kind((backend_outcome or (err,))[0]) if backend_t0 is not None else None
         if _kind not in (None, KIND_OTHER):   # fixed vocabulary, never the runner text; "other" adds nothing to ``detail``

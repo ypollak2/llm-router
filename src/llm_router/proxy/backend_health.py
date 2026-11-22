@@ -67,14 +67,11 @@ OUTCOME_NEUTRAL = "neutral"
 
 # Text an Ollama / llama.cpp runner emits when the backend itself has failed,
 # as it reaches the client in an HTTP error body or a streamed ``error`` line.
-CRASH_SIGNATURE = re.compile(
-    r"compute error"
-    r"|command buffer \d+ failed"
-    r"|OutOfMemory"
-    r"|runner process (?:has )?(?:terminated|unexpectedly stopped|no longer running)"
-    r"|model runner has unexpectedly stopped",
-    re.IGNORECASE,
-)
+_OOM_PAT = r"command buffer \d+ failed|OutOfMemory|insufficient memory"
+_COMPUTE_PAT = (r"compute error"
+                r"|runner process (?:has )?(?:terminated|unexpectedly stopped|no longer running)"
+                r"|model runner has unexpectedly stopped")
+CRASH_SIGNATURE = re.compile(f"{_COMPUTE_PAT}|{_OOM_PAT}", re.IGNORECASE)
 
 # Fixed vocabulary for the ledger and the unhealthy log line. Matched from the error text, never copied
 # from it: runner text can echo prompt content (EKIND-1).
@@ -83,17 +80,23 @@ KIND_RUNNER_COMPUTE = "runner_compute_error"
 KIND_XML_PARSE = "xml_parse"
 KIND_HTTP_500 = "http_500"
 KIND_EMPTY_BODY = "empty_body"
+KIND_RUNNER_EMPTY_BURST = "runner_empty_burst"
 KIND_OTHER = "other"
 #: Kinds where the runner itself is broken (the Metal backend stays failed until the runner reloads).
-RUNNER_KINDS = frozenset({KIND_RUNNER_OOM, KIND_RUNNER_COMPUTE})
+RUNNER_KINDS = frozenset({KIND_RUNNER_OOM, KIND_RUNNER_COMPUTE, KIND_RUNNER_EMPTY_BURST})
 #: Unhealthy period for a broken runner when nothing reloads it: probing every 60 s only produced
-#: bursts of instant failures (2026-11-21 22:08-22:11Z, ~115 'Compute error' replies).
+#: bursts of instant failures (2026-11-21 22:08-22:11Z: 134 of 136 chats were HTTP 200 with an empty body,
+#: 2 were 500).
 DEFAULT_RUNNER_COOLDOWN_S = 300.0
+#: A runner that is failing answers empties at once. N consecutive empty replies, each back in under
+#: ``EMPTY_BURST_MAX_ELAPSED_S``, all within ``EMPTY_BURST_WINDOW_S``, are a runner failure
+#: (``runner_empty_burst``). One empty reply, or empties that took normal prefill time, are not.
+EMPTY_BURST_N = 3
+EMPTY_BURST_MAX_ELAPSED_S = 2.0
+EMPTY_BURST_WINDOW_S = 10.0
 
-_OOM = re.compile(r"OutOfMemory|insufficient memory|command buffer \d+ failed", re.IGNORECASE)
-_COMPUTE = re.compile(
-    r"compute error|runner process (?:has )?(?:terminated|unexpectedly stopped|no longer running)"
-    r"|model runner has unexpectedly stopped", re.IGNORECASE)
+_OOM = re.compile(_OOM_PAT, re.IGNORECASE)      # same patterns as CRASH_SIGNATURE: they cannot drift
+_COMPUTE = re.compile(_COMPUTE_PAT, re.IGNORECASE)
 _XML = re.compile(r"xml syntax error", re.IGNORECASE)
 _HTTP_500 = re.compile(r"\bHTTP 500\b")
 
@@ -184,6 +187,7 @@ class _State:
     trigger: str | None = None
     kind: str | None = None
     cooldown_s: float | None = None
+    empties: list | None = None
 
 
 def _stderr(line: str) -> None:
@@ -220,10 +224,10 @@ class BackendHealth:
         st = self._states.get(key)
         return None if st is None else st.kind
 
-    def _open(self, key: str, st: _State, trigger: str, detail: str | None) -> dict:
+    def _open(self, key: str, st: _State, trigger: str, detail: str | None, kind: str | None = None) -> dict:
         was_open = st.opened_at is not None
-        st.opened_at, st.trigger, st.streak = self.clock(), trigger, 0
-        st.kind = error_kind(detail) or KIND_OTHER
+        st.opened_at, st.trigger, st.streak, st.empties = self.clock(), trigger, 0, None
+        st.kind = kind or error_kind(detail) or KIND_OTHER
         longer = st.kind in RUNNER_KINDS and self.runner_cooldown_s is not None
         st.cooldown_s = max(self.runner_cooldown_s, self.cooldown_s) if longer else None
         if not was_open:
@@ -245,6 +249,14 @@ class BackendHealth:
             return self._open(key, st, "fast_empty", err)
         if outcome == OUTCOME_CRASH:
             return self._open(key, st, "crash_signature", err)
+        if (error_kind(err) == KIND_EMPTY_BODY and elapsed_s < EMPTY_BURST_MAX_ELAPSED_S
+                and reason not in _TIMEOUT_REASONS):
+            now = self.clock()
+            st.empties = [t for t in (st.empties or []) if now - t <= EMPTY_BURST_WINDOW_S] + [now]
+            if len(st.empties) >= EMPTY_BURST_N:
+                return self._open(key, st, "empty_burst", err, kind=KIND_RUNNER_EMPTY_BURST)
+        elif outcome != OUTCOME_NEUTRAL:
+            st.empties = None
         if outcome == OUTCOME_FAIL:
             st.streak += 1
             if st.streak >= self.fail_n:
@@ -296,8 +308,14 @@ class BackendHealth:
         info = {"probe_ok": ok, "probe_detail": scrub_detail(detail or ""),
                 "probe_s": round(self.clock() - t0, 3)}
         if ok:
-            st.opened_at, st.streak, st.trigger, st.kind, st.cooldown_s = None, 0, None, None, None
+            st.opened_at, st.streak, st.trigger, st.kind, st.cooldown_s, st.empties = None, 0, None, None, None, None
             self.warn(f"llm-router proxy: local backend {key} passed its health probe; serving resumes")
             return True, dict(info, state="recovered")
+        pk = error_kind(detail)
+        if pk in RUNNER_KINDS:
+            st.kind = pk
+            st.cooldown_s = max(self.runner_cooldown_s, self.cooldown_s) if self.runner_cooldown_s is not None else None
+        elif pk and st.kind not in RUNNER_KINDS:
+            st.kind = pk    # a runner kind is sticky: a bare 'empty reply' probe does not shorten its cooldown
         st.opened_at = self.clock()
         return False, dict(info, state="open", trigger=st.trigger, error_kind=st.kind)

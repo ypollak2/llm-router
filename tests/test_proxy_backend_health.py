@@ -100,13 +100,13 @@ def test_classify(err, reason, elapsed, expected):
 async def test_opens_after_n_consecutive_failures_and_a_success_resets_the_streak():
     clock = Clock()
     h = bh.BackendHealth(fail_n=3, cooldown_s=60, clock=clock, warn=lambda s: None)
-    h.record("m", "empty response", "validation", 0.1)
-    h.record("m", "empty response", "validation", 0.1)
+    h.record("m", "empty response", "validation", 5.0)
+    h.record("m", "empty response", "validation", 5.0)
     h.record("m", None, None, 2.0)  # a good reply in between: streak broken
-    h.record("m", "empty response", "validation", 0.1)
-    h.record("m", "empty response", "validation", 0.1)
+    h.record("m", "empty response", "validation", 5.0)
+    h.record("m", "empty response", "validation", 5.0)
     assert (await h.admit("m", CrashedBackend()))[0] is True
-    tripped = h.record("m", "empty response", "validation", 0.1)
+    tripped = h.record("m", "empty response", "validation", 5.0)
     assert tripped and tripped["state"] == "tripped" and tripped["trigger"] == "consecutive_invalid"
     ok, info = await h.admit("m", CrashedBackend())
     assert ok is False and info["state"] == "open"
