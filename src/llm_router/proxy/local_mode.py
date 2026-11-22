@@ -96,6 +96,24 @@ DEFAULT_STEP_BUDGET_S = 120.0
 #: the trimmed request; with the full prompt, 3 of 3 ``triple_read`` soak sessions had their
 #: first reply (three parallel Read calls) rejected as "truncated at num_predict" at 200.
 LOCAL_NUM_PREDICT = 2048
+#: Larger cap for long organic main-thread continuations (D-582a). 56/4,975 local attempts (1.13%, 11-07..11-21)
+#: were rejected "truncated at num_predict" at exactly 2,048 tokens; 55/56 were continuations, median prompt
+#: 74.6k est vs 45.4k (DIAG-TRUNCATION-20261121T2348Z). Used only when ``long_continuation`` holds.
+LOCAL_NUM_PREDICT_LONG = 4096
+#: Pre-send prompt estimate (est tokens) above which a long continuation gets ``LOCAL_NUM_PREDICT_LONG``.
+LONG_PROMPT_EST = 60_000
+
+
+def num_predict_for_step(session_kind: str | None, is_main_thread: bool | None, step_class: str | None,
+                         est_tokens: int | None) -> int:
+    """Output cap for one local step: ``LOCAL_NUM_PREDICT_LONG`` for an organic, main-thread continuation whose
+    estimate is above ``LONG_PROMPT_EST``; ``LOCAL_NUM_PREDICT`` for everything else (unknown fields included).
+    ``prompt_cap_tokens`` still subtracts only ``LOCAL_NUM_PREDICT``: the 0.9 safety factor (about 12.9k tokens of
+    the 131072 window) absorbs the extra 2,048, so the prompt cap is unchanged for these steps."""
+    if (session_kind == "organic" and is_main_thread is True and step_class == "continuation"
+            and isinstance(est_tokens, int) and not isinstance(est_tokens, bool) and est_tokens > LONG_PROMPT_EST):
+        return LOCAL_NUM_PREDICT_LONG
+    return LOCAL_NUM_PREDICT
 
 KILL_SWITCH_NAME = "local_agent_kill"
 
