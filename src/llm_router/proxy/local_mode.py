@@ -604,11 +604,12 @@ class LocalModeState:
     def pin_reason_of(self, key: str) -> str | None:
         return self.pin_reasons.get(key)
 
-    def unpin_over_cap(self, key: str) -> bool:
-        """P7: lift a ``prompt_over_cap`` claude pin, at most once per session. False (nothing changed)
-        for any other pin, no pin, or a session already unpinned once."""
+    def unpin_over_cap(self, key: str, once: bool = True) -> bool:
+        """Lift a ``prompt_over_cap`` claude pin. P7 (``once=True``): at most once per session. The under-cap
+        release (``once=False``) may repeat: each lift needs the turn to go local. False (nothing changed)
+        for any other pin, no pin, or (``once``) a session already unpinned once."""
         if (self.pins.get(key) != PIN_CLAUDE or self.pin_reasons.get(key) != REASON_PROMPT_CAP
-                or key in self.unpinned_once):
+                or (once and key in self.unpinned_once)):
             return False
         del self.pins[key]
         self.pin_reasons.pop(key, None)

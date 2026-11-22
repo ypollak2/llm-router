@@ -1043,17 +1043,16 @@ async def test_unpin_lifts_prompt_over_cap_pin_when_reduced_fits(env, monkeypatc
     assert len(backend.calls) == n_local + 1  # served locally again
     lm = env.rows()[-1]["local_mode"]
     assert lm["local"] is True and lm["pin"] == "local"  # unpinned, then pinned local again
-    assert lm["unpin"] == {"reason": "reduced_fits", "reduced_est": lm["est_prompt_tokens"],
+    assert lm["unpin"] == {"reason": "under_cap", "reduced_est": lm["est_prompt_tokens"],
                            "cap": local_mode.prompt_cap_tokens()}
     assert lm["unpin"]["reduced_est"] <= lm["unpin"]["cap"]
     assert "line of output" not in json.dumps(env.rows()[-1])  # counts only
 
 
 @pytest.mark.parametrize("flags", [
-    {"LLM_ROUTER_UNPIN": None, "LLM_ROUTER_PROXY_CAP_AFTER_REDUCE": "1", "LLM_ROUTER_PROXY_MASK": "1"},
     {"LLM_ROUTER_UNPIN": "1", "LLM_ROUTER_PROXY_CAP_AFTER_REDUCE": None, "LLM_ROUTER_PROXY_MASK": "1"},
     {"LLM_ROUTER_UNPIN": "1", "LLM_ROUTER_PROXY_CAP_AFTER_REDUCE": "1", "LLM_ROUTER_PROXY_MASK": None},
-], ids=["unpin_off", "cap_after_reduce_off", "masking_not_applied"])
+], ids=["cap_after_reduce_off", "masking_not_applied"])
 async def test_unpin_not_applied_when_a_condition_is_missing(env, monkeypatch, flags):
     backend = _backend()
     app = await _pin_over_cap(env, monkeypatch, backend)
@@ -1081,7 +1080,7 @@ def test_unpin_never_lifts_a_media_or_unreasoned_pin():
     assert not lm.unpin_over_cap("c")
 
 
-async def test_unpin_at_most_once_per_session(env, monkeypatch):
+async def test_p7_unpin_then_over_cap_again_then_fits_is_released_by_under_cap(env, monkeypatch):
     backend = _backend()
     app = await _pin_over_cap(env, monkeypatch, backend)
     monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
@@ -1095,14 +1094,14 @@ async def test_unpin_at_most_once_per_session(env, monkeypatch):
     assert row["reason"] == "prompt_over_cap" and row["local_mode"]["pin_change"] == "local->claude"
     monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", real_cap)
     n_local = len(backend.calls)
-    await _post(app, _long_history())  # now it would fit, but the one unpin is spent
-    assert len(backend.calls) == n_local
+    await _post(app, _long_history())  # fits again: the under-cap release (not the once-only P7 lift) frees it
+    assert len(backend.calls) == n_local + 1
     lm = env.rows()[-1]["local_mode"]
-    assert lm["reason"] == "pinned_claude" and "unpin" not in lm
+    assert lm["local"] is True and lm["unpin"]["reason"] == "under_cap"
 
 
 async def test_flag_off_ledger_rows_identical_whatever_the_unpin_state(env, monkeypatch):
-    """UNPIN unset vs explicitly off: the same decision rows (no unpin key), same pin store."""
+    """UNPIN unset vs explicitly off: the same decision rows (the under-cap release does not read the flag)."""
     rows = []
     for value in (None, "0"):
         env.ledger.unlink(missing_ok=True)
@@ -1115,9 +1114,64 @@ async def test_flag_off_ledger_rows_identical_whatever_the_unpin_state(env, monk
         monkeypatch.setenv("LLM_ROUTER_PROXY_CAP_AFTER_REDUCE", "1")
         await _post(app, _long_history())
         r = env.rows()[-1]["local_mode"]
-        assert "unpin" not in r
+        assert r["unpin"]["reason"] == "under_cap"  # released by size alone, whatever LLM_ROUTER_UNPIN says
         rows.append(r)
     assert rows[0] == rows[1]
+
+
+# -- under-cap release: a pin whose only cause is prompt_over_cap ends when the size is back under the cap ------
+
+
+async def _over_cap_pinned(env, monkeypatch, backend):
+    """Warm, then a turn over a (lowered) cap: the prompt_over_cap pin."""
+    for name in ("LLM_ROUTER_UNPIN", "LLM_ROUTER_PROXY_MASK", "LLM_ROUTER_PROXY_CAP_AFTER_REDUCE"):
+        monkeypatch.delenv(name, raising=False)
+    app = env.app(backend)
+    await _warm(app)
+    real_cap = local_mode.PROMPT_CAP_TOKENS
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", 200)
+    await _post(app, _long_history(result_chars=500))
+    row = env.rows()[-1]
+    assert row["reason"] == "prompt_over_cap" and row["local_mode"]["pin_change"] == "local->claude"
+    return app, real_cap
+
+
+async def test_over_cap_pin_released_when_back_under_cap(env, monkeypatch):
+    backend = _backend()
+    app, real_cap = await _over_cap_pinned(env, monkeypatch, backend)
+    n = len(backend.calls)
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", real_cap)  # e.g. after a compaction
+    await _post(app, _long_history(result_chars=500))
+    assert len(backend.calls) == n + 1  # eligible again and served locally
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["local"] is True and lm["pin"] == "local"
+    assert lm["unpin"]["reason"] == "under_cap"  # countable in the ledger
+    assert lm["unpin"]["reduced_est"] <= lm["unpin"]["cap"] == real_cap
+
+
+async def test_over_cap_pin_stays_while_still_over_cap(env, monkeypatch):
+    backend = _backend()
+    app, _ = await _over_cap_pinned(env, monkeypatch, backend)
+    n = len(backend.calls)
+    await _post(app, _long_history(result_chars=500))  # cap is still 200
+    assert len(backend.calls) == n
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "pinned_claude" and "unpin" not in lm
+
+
+async def test_failed_local_step_pin_is_not_released_by_size(env, monkeypatch):
+    for name in ("LLM_ROUTER_UNPIN", "LLM_ROUTER_PROXY_MASK", "LLM_ROUTER_PROXY_CAP_AFTER_REDUCE"):
+        monkeypatch.delenv(name, raising=False)
+    backend = _FailsAfterFirst(_ollama("", [_call("Bash", {"command": "ls"})]))
+    app = env.app(backend)
+    await _warm(app)
+    await _post(app, _long_history(result_chars=500))  # the local step fails: a plain claude pin
+    assert env.rows()[-1]["local_mode"]["pin_change"] == "local->claude"
+    n = len(backend.calls)
+    await _post(app, _long_history(result_chars=500))  # well under the cap, still pinned
+    assert len(backend.calls) == n
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "pinned_claude" and "unpin" not in lm
 
 
 async def _unpin_ready(env, monkeypatch, breaker=None):
@@ -1166,16 +1220,16 @@ async def test_kill_switch_and_exempt_turns_leave_the_unpin_unspent(env, monkeyp
     assert len(backend.calls) == n + 1 and "unpin" in env.rows()[-1]["local_mode"]
 
 
-async def test_unpin_needs_messages_actually_masked(env, monkeypatch):
+async def test_release_when_fits_does_not_need_masking(env, monkeypatch):
     app, backend = await _unpin_ready(env, monkeypatch)
     n = len(backend.calls)
-    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", 10**9)  # the body fits, so only the mask gate decides
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", 10**9)  # the body fits: size alone releases the pin
     stats = types.SimpleNamespace(masked=0, chars_saved=0, est_tokens_before=1, est_tokens_after=1)
     monkeypatch.setattr(history_mask, "mask_body", lambda body: (body, stats))
     await _post(app, _long_history())
     lm = env.rows()[-1]["local_mode"]
     assert env.rows()[-1]["history_mask"]["messages_masked"] == 0
-    assert len(backend.calls) == n and lm["reason"] == "pinned_claude" and "unpin" not in lm
+    assert len(backend.calls) == n + 1 and lm["local"] is True and lm["unpin"]["reason"] == "under_cap"
 
 
 def _raw_with_deep_tool_schema(levels: int) -> str:

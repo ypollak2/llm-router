@@ -1165,10 +1165,24 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         policy = local_mode.exempt_policy()  # D-455: LLM_ROUTER_LOCAL_EXEMPT, read per request
         exempt, overrides_problem = local_mode.exempt_reason(key_body or body, row.get("session_id"),
                                                                 parent_main_of(key_body or body), policy)
+        # Moved above the P7 block unchanged: the size the cap is tested on, also what the under-cap release reads.
+        cap_payload = payload if cap_body is None else await asyncio.to_thread(
+            to_ollama, cap_body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
         unpin_try = False
+        unpin_reason = "reduced_fits"
+        if (stored == local_mode.PIN_CLAUDE and not force and not exempt and not lm.killed()
+                and lm.pin_reason_of(key) == local_mode.REASON_PROMPT_CAP):
+            # A pin whose only cause is the prompt size (not a failed local step) is released as soon as the size the
+            # cap tests is back under the cap (DIAG-PIN-CAUSES-20261122: 127 of 556 pinned rows). The turn then takes
+            # the normal decision; the release is spent below only when it actually goes local.
+            reduced_est = await asyncio.to_thread(local_mode.estimate_prompt_tokens, cap_payload)
+            cap = local_mode.prompt_cap_tokens()
+            unpin_try = reduced_est <= cap
+            if unpin_try:
+                unpin_reason = "under_cap"
         # An absent count is "masking did not report", not zero masked: it never unpins.
         masked_n = (row.get("history_mask") or {}).get("messages_masked")
-        if (stored == local_mode.PIN_CLAUDE and not force and not exempt and not lm.killed()
+        if (not unpin_try and stored == local_mode.PIN_CLAUDE and not force and not exempt and not lm.killed()
                 and isinstance(masked_n, int) and masked_n > 0
                 and unpin_on() and cap_after_reduce_on()
                 and lm.pin_reason_of(key) == local_mode.REASON_PROMPT_CAP and key not in lm.unpinned_once):
@@ -1177,8 +1191,6 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             reduced_est = await asyncio.to_thread(local_mode.estimate_prompt_tokens, payload)
             cap = local_mode.prompt_cap_tokens()
             unpin_try = reduced_est <= cap
-        cap_payload = payload if cap_body is None else await asyncio.to_thread(
-            to_ollama, cap_body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
         def decide(cap_pl, cls_local=False, rules_only=False):
             # rules_only (PR-B): the input rules alone, as if there were no pin, exempt session or veto.
             return local_mode.decide_local(body, local_mode.LocalSession(
@@ -1257,9 +1269,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 decision = local_mode.LocalDecision(False, local_mode.REASON_COLD_OVER_DEADLINE,
                                                     cold_row["detail"], decision.est_tokens)
         unpin_row = None
-        if unpin_try and decision.local and lm.unpin_over_cap(key):
+        if unpin_try and decision.local and lm.unpin_over_cap(key, once=unpin_reason != "under_cap"):
             stored = pinned = None
-            unpin_row = {"reason": "reduced_fits", "reduced_est": reduced_est, "cap": cap}
+            unpin_row = {"reason": unpin_reason, "reduced_est": reduced_est, "cap": cap}
         if cls_flip and not decision.local:  # a later hard guard (cold / prompt guard) won: the verdict changed nothing
             row["cls_applied"], row["cls_source"] = False, "rules"
         vetoed = decision.reason == local_mode.REASON_CLASSIFIER_VETO
