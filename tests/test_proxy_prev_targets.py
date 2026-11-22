@@ -124,3 +124,66 @@ def test_performance_is_trivial():
     for _ in range(1000):
         steps.prev_tool_targets(body)
     assert (time.perf_counter() - t) / 1000 < 0.001  # < 1 ms per row
+
+
+def test_concurrent_creation_yields_one_salt(tmp_path):
+    import threading
+    home = tmp_path / "home"
+    path = home / pt.SALT_FILE
+    out, barrier = [], threading.Barrier(8)
+
+    def go():
+        barrier.wait()
+        out.append(pt._load_or_create(path))
+
+    ts = [threading.Thread(target=go) for _ in range(8)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert len(out) == 8 and None not in out and len(set(out)) == 1
+    assert out[0] == path.read_bytes()
+    assert [p.name for p in home.iterdir()] == [pt.SALT_FILE]  # no temp files left
+
+
+def test_concurrent_creation_across_processes(tmp_path):
+    import subprocess
+    import sys
+    home = tmp_path / "home"
+    code = ("import sys; from pathlib import Path; from llm_router.proxy import prev_targets as p;"
+            "sys.stdout.write(p._load_or_create(Path(sys.argv[1])).hex())")
+    procs = [subprocess.Popen([sys.executable, "-c", code, str(home / pt.SALT_FILE)],
+                              stdout=subprocess.PIPE, env=dict(os.environ)) for _ in range(4)]
+    outs = [p.communicate(timeout=60)[0] for p in procs]
+    assert all(p.returncode == 0 for p in procs) and len(set(outs)) == 1 and len(outs[0]) == 64
+
+
+def test_empty_file_recovers_once_a_valid_salt_appears_and_failure_is_not_cached(tmp_path, monkeypatch, caplog):
+    p = tmp_path / "home" / pt.SALT_FILE
+    p.parent.mkdir(parents=True)
+    p.write_bytes(b"")
+    os.chmod(p, 0o600)
+    now = [1000.0]
+    monkeypatch.setattr(pt.time, "monotonic", lambda: now[0])
+    with caplog.at_level("WARNING"):
+        assert pt.salt() is None
+        assert pt.salt() is None  # inside the retry window: no re-read, no second log line
+    assert len([r for r in caplog.records if "degraded" in r.getMessage()]) == 1
+    p.write_bytes(os.urandom(32))
+    assert pt.salt() is None  # still inside 60 s
+    now[0] += pt.RETRY_S + 1
+    got = pt.salt()
+    assert got == p.read_bytes()
+    assert pt.salt() == got  # now cached
+
+
+def test_short_write_is_handled(monkeypatch, tmp_path):
+    real = os.write
+    monkeypatch.setattr(pt.os, "write", lambda fd, data: real(fd, bytes(data)[:5]))
+    path = tmp_path / "home" / pt.SALT_FILE
+    got = pt._load_or_create(path)
+    assert got is not None and len(got) == 32 and path.read_bytes() == got
+
+
+def test_module_works_without_o_nofollow(monkeypatch):
+    monkeypatch.setattr(pt, "_NOFOLLOW", 0)
+    h = _h("Edit", {"file_path": "/a"})
+    assert h and h == _h("Edit", {"file_path": "/a"})

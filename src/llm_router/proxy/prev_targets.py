@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import posixpath
 import stat
 import threading
+import time
 from pathlib import Path
 
 from llm_router.paths import llm_router_home
@@ -40,15 +42,19 @@ MAX_TARGETS = 8
 _FILE_KEYS = {"edit": "file_path", "write": "file_path", "multiedit": "file_path",
               "read": "file_path", "notebookedit": "notebook_path"}
 
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # absent on some platforms (as local_check/runner.py)
+RETRY_S = 60.0  # a failed salt load is retried at most this often
+_log = logging.getLogger(__name__)
 _lock = threading.Lock()
-_cache: dict[str, bytes | None] = {}
+_cache: dict[str, bytes] = {}
+_failed_at: dict[str, float] = {}
 
 
 def _load_salt(path: Path) -> bytes | None:
+    """The salt in ``path``, or None when absent, empty, short, not a regular file or not
+    owner-only. Never creates."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except FileNotFoundError:
-        return _create_salt(path)
+        fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
     except OSError:
         return None
     try:
@@ -56,40 +62,81 @@ def _load_salt(path: Path) -> bytes | None:
         if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077:
             return None
         data = os.read(fd, SALT_BYTES + 1)
+    except OSError:
+        return None
     finally:
         os.close(fd)
     return data if len(data) == SALT_BYTES else None
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
 def _create_salt(path: Path) -> bytes | None:
+    """Write the salt to a 0600 temp file in the same dir, fsync, then ``os.link`` it to the final
+    name: the final file is never empty or partial. On EEXIST the winner's file is read."""
+    salt = os.urandom(SALT_BYTES)
+    tmp = path.with_name(f"{path.name}.tmp{os.getpid()}.{threading.get_ident()}.{os.urandom(4).hex()}")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    except FileExistsError:  # another process won the race
-        return _load_salt(path)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600)
+        try:
+            _write_all(fd, salt)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return _load_salt(path)
+        return salt
     except OSError:
         return None
-    salt = os.urandom(SALT_BYTES)
-    try:
-        os.write(fd, salt)
     finally:
-        os.close(fd)
-    return salt
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _load_or_create(path: Path) -> bytes | None:
+    if path.exists() or path.is_symlink():
+        return _load_salt(path)
+    return _create_salt(path)
 
 
 def salt() -> bytes | None:
-    """The per-install salt (cached per router home), or None when unavailable."""
+    """The per-install salt (cached per router home once loaded), or None when unavailable.
+    A failure is not cached for good: it is retried at most once per ``RETRY_S`` and logged
+    once (no salt bytes)."""
     path = llm_router_home() / SALT_FILE
     key = str(path)
     with _lock:
-        if key not in _cache:
-            _cache[key] = _load_salt(path)
-        return _cache[key]
+        if key in _cache:
+            return _cache[key]
+        now = time.monotonic()
+        last = _failed_at.get(key)
+        if last is not None and now - last < RETRY_S:
+            return None
+        got = _load_or_create(path)
+        if got is not None:
+            _cache[key] = got
+            _failed_at.pop(key, None)
+            return got
+        if last is None:
+            _log.warning("prev_tool_targets degraded: salt file unavailable or invalid; "
+                         "hashes are null until it loads (retry every %ds)", int(RETRY_S))
+        _failed_at[key] = now
+        return None
 
 
 def reset_for_tests() -> None:
     with _lock:
         _cache.clear()
+        _failed_at.clear()
 
 
 def normalise_command(command: str) -> str:
