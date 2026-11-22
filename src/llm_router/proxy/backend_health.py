@@ -87,9 +87,9 @@ KIND_TRUNCATED = "truncated"
 KIND_UNKNOWN_TOOL = "unknown_tool"
 KIND_TOOL_ARGS_INVALID = "tool_args_invalid"
 KIND_OTHER = "other"
-#: Kinds where the runner itself is broken. The five kinds above KIND_OTHER that are not in this set (step
-#: budget, hedge timeout, truncation, unknown tool, bad tool args) describe a slow or wrong reply from a
-#: runner that answered: a longer cooldown would not reload anything, so they keep the plain cooldown. (the Metal backend stays failed until the runner reloads).
+#: Kinds where the runner itself is broken (the Metal backend stays failed until the runner reloads).
+#: Step budget, hedge timeout, truncation, unknown tool and bad tool args are not here: the runner
+#: answered, so a longer cooldown or a reload would fix nothing.
 RUNNER_KINDS = frozenset({KIND_RUNNER_OOM, KIND_RUNNER_COMPUTE, KIND_RUNNER_EMPTY_BURST})
 #: Unhealthy period for a broken runner when nothing reloads it: probing every 60 s only produced
 #: bursts of instant failures (2026-11-21 22:08-22:11Z: 134 of 136 chats were HTTP 200 with an empty body,
