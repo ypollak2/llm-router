@@ -27,13 +27,6 @@ _RUN_PERF = os.environ.get("LLM_ROUTER_RUN_PERF") == "1"
 for _k in [k for k in os.environ if k.startswith("LLM_ROUTER_")]:
     del os.environ[_k]
 os.environ["LLM_ROUTER_HOME"] = _tempfile.mkdtemp(prefix="llm_router-suite-home-")
-# Test-order pollution (2026-11-22): tests/test_w11_secret_door_matrix.py does `import litellm` at module
-# level BEFORE `from llm_router import providers`, which is what sets LITELLM_MODE=PROD (providers.py:44). At
-# collection litellm then ran dotenv.load_dotenv(), an upward search from site-packages that found
-# ~/.llm-router/.env (venv under ~/.llm-router/live) and copied LLM_ROUTER_LOCAL_MODEL_URL etc. into
-# os.environ for every later test (test_warm_plan_3_7 then talked to the real local model server). Set it
-# here, after the LLM_ROUTER_* scrub and before any test module imports litellm.
-os.environ.setdefault("LITELLM_MODE", "PROD")
 # Importing llm_router.server starts the map re-discovery poller thread (30 s tick, probes
 # Ollama on 127.0.0.1:11434). Left on, it outlives its test and fires inside whichever test
 # runs next in the worker: it made test_synthetic_replay fail on CI only (violations

@@ -49,6 +49,16 @@ import pytest
 # Never start a real map poller or spawn a real map refresh from the test suite.
 os.environ.setdefault("LLM_ROUTER_MAP_REDISCOVERY", "0")
 
+# Test-order pollution (2026-11-22): tests/test_w11_secret_door_matrix.py does `import litellm` at module
+# level before `from llm_router import providers` (which sets LITELLM_MODE=PROD, providers.py:44).
+# litellm/__init__.py then runs dotenv.load_dotenv() (only when LITELLM_MODE is DEV, the default),
+# an upward search that can find an ancestor .env (e.g. ~/.llm-router/.env when the venv lives under
+# ~/.llm-router/live) and copy its variables into os.environ for every later test in the process:
+# test_warm_plan_3_7 then talked to a real local model server. Set here, not in tests/conftest.py,
+# because the upstream sync overwrites that file (see the module docstring).
+# Regression check: tests/test_litellm_mode_hermetic.py.
+os.environ.setdefault("LITELLM_MODE", "PROD")
+
 _EXCLUDED_MODULE_ROOTS = (
     "llm_router.enterprise",
     "llm_router.admin_api",
