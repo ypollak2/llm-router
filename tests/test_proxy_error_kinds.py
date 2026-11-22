@@ -164,7 +164,7 @@ async def test_reload_requested_once_then_rate_limited_for_ten_minutes(tmp_path,
 async def test_non_runner_error_does_not_request_a_reload(tmp_path, monkeypatch, command):  # noqa: F811
     cmd, marker = command
     monkeypatch.setenv("LLM_ROUTER_BACKEND_RECYCLE_CMD", cmd)
-    app = _app(tmp_path, FailingBackend("unknown tool 'llm'"), Clock())
+    app = _app(tmp_path, FailingBackend("Read: 'path' missing"), Clock())  # kind=other
     await _post(app, _req())
     row = _rows(tmp_path)[-1]
     assert "backend_error_kind" not in row and "recycle" not in (row.get("backend_health") or {})
