@@ -490,7 +490,9 @@
     },
     "auth": "oauth",
     "authority": "route",
+    "backend_error_kind": "runner_compute_error",
     "backend_health": {
+     "error_kind": "runner_compute_error",
      "state": "tripped",
      "trigger": "crash_signature"
     },

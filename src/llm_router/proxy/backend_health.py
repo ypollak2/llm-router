@@ -76,6 +76,45 @@ CRASH_SIGNATURE = re.compile(
     re.IGNORECASE,
 )
 
+# Fixed vocabulary for the ledger and the unhealthy log line. Matched from the error text, never copied
+# from it: runner text can echo prompt content (EKIND-1).
+KIND_RUNNER_OOM = "runner_oom"
+KIND_RUNNER_COMPUTE = "runner_compute_error"
+KIND_XML_PARSE = "xml_parse"
+KIND_HTTP_500 = "http_500"
+KIND_EMPTY_BODY = "empty_body"
+KIND_OTHER = "other"
+#: Kinds where the runner itself is broken (the Metal backend stays failed until the runner reloads).
+RUNNER_KINDS = frozenset({KIND_RUNNER_OOM, KIND_RUNNER_COMPUTE})
+#: Unhealthy period for a broken runner when nothing reloads it: probing every 60 s only produced
+#: bursts of instant failures (2026-11-21 22:08-22:11Z, ~115 'Compute error' replies).
+DEFAULT_RUNNER_COOLDOWN_S = 300.0
+
+_OOM = re.compile(r"OutOfMemory|insufficient memory|command buffer \d+ failed", re.IGNORECASE)
+_COMPUTE = re.compile(
+    r"compute error|runner process (?:has )?(?:terminated|unexpectedly stopped|no longer running)"
+    r"|model runner has unexpectedly stopped", re.IGNORECASE)
+_XML = re.compile(r"xml syntax error", re.IGNORECASE)
+_HTTP_500 = re.compile(r"\bHTTP 500\b")
+
+
+def error_kind(err: str | None) -> str | None:
+    """Map a backend error string to one fixed-vocabulary kind (None when there is no error)."""
+    if not err:
+        return None
+    if _OOM.search(err):
+        return KIND_RUNNER_OOM
+    if _COMPUTE.search(err):
+        return KIND_RUNNER_COMPUTE
+    if _XML.search(err):
+        return KIND_XML_PARSE
+    if _HTTP_500.search(err):
+        return KIND_HTTP_500
+    if err in {"empty response", "zero-line stream", "empty reply"}:
+        return KIND_EMPTY_BODY
+    return KIND_OTHER
+
+
 _TIMEOUT_REASONS = frozenset({"hedge_timeout", "budget_exceeded"})
 
 _request_progress_box: contextvars.ContextVar[list[int] | None] = contextvars.ContextVar(
@@ -143,6 +182,8 @@ class _State:
     opened_at: float | None = None
     probing: bool = False
     trigger: str | None = None
+    kind: str | None = None
+    cooldown_s: float | None = None
 
 
 def _stderr(line: str) -> None:
@@ -154,12 +195,15 @@ class BackendHealth:
                  probe_timeout_s: float = DEFAULT_PROBE_TIMEOUT_S,
                  clock: Callable[[], float] | None = None,
                  warn: Callable[[str], None] | None = None,
-                 fast_empty: bool = False) -> None:
+                 fast_empty: bool = False,
+                 runner_cooldown_s: float | None = None) -> None:
         if fail_n < 0 or cooldown_s < 0:
             raise ValueError("backend fail_n and cooldown_s must be >= 0")
         self.fast_empty = fast_empty
         self.fail_n = fail_n
         self.cooldown_s = cooldown_s
+        # Longer unhealthy period for runner_oom / runner_compute_error; None keeps the plain cooldown.
+        self.runner_cooldown_s = runner_cooldown_s
         self.probe_timeout_s = probe_timeout_s
         self.clock = clock or time.monotonic
         self.warn = warn or _stderr
@@ -168,12 +212,24 @@ class BackendHealth:
     def _get(self, key: str) -> _State:
         return self._states.setdefault(key, _State())
 
+    def _cooldown(self, st: _State) -> float:
+        return self.cooldown_s if st.cooldown_s is None else st.cooldown_s
+
+    def error_kind_for(self, key: str) -> str | None:
+        """Kind of the error that last opened the breaker for ``key`` (fixed vocabulary), else None."""
+        st = self._states.get(key)
+        return None if st is None else st.kind
+
     def _open(self, key: str, st: _State, trigger: str, detail: str | None) -> dict:
         was_open = st.opened_at is not None
         st.opened_at, st.trigger, st.streak = self.clock(), trigger, 0
+        st.kind = error_kind(detail) or KIND_OTHER
+        longer = st.kind in RUNNER_KINDS and self.runner_cooldown_s is not None
+        st.cooldown_s = max(self.runner_cooldown_s, self.cooldown_s) if longer else None
         if not was_open:
-            self.warn(f"llm-router proxy: local backend {key} marked unhealthy ({trigger}: "
-                      f"{(detail or '')[:120]}); steps go to Claude for {self.cooldown_s:g}s, then a probe")
+            # The kind, not the runner text: that can echo prompt content.
+            self.warn(f"llm-router proxy: local backend {key} marked unhealthy ({trigger}, kind={st.kind}); "
+                      f"steps go to Claude for {self._cooldown(st):g}s, then a probe")
         return {"state": "tripped", "trigger": trigger}
 
     def record(self, key: str, err: str | None, reason: str | None, elapsed_s: float,
@@ -204,7 +260,7 @@ class BackendHealth:
         st = self._states.get(key)
         if st is None or st.opened_at is None:
             return False
-        return st.probing or (self.clock() - st.opened_at) < self.cooldown_s
+        return st.probing or (self.clock() - st.opened_at) < self._cooldown(st)
 
     def open_for(self, key: str) -> float | None:
         """Seconds the breaker has been open, cooldown or not (``is_open`` is False once a probe is due); None
@@ -220,9 +276,9 @@ class BackendHealth:
         if st.opened_at is None:
             return True, None
         waited = self.clock() - st.opened_at
-        if waited < self.cooldown_s or st.probing:
-            return False, {"state": "open", "trigger": st.trigger,
-                           "retry_in_s": round(max(0.0, self.cooldown_s - waited), 1)}
+        if waited < self._cooldown(st) or st.probing:
+            return False, {"state": "open", "trigger": st.trigger, "error_kind": st.kind,
+                           "retry_in_s": round(max(0.0, self._cooldown(st) - waited), 1)}
         probe = getattr(backend, "probe", None)
         if probe is None:
             # Nothing cheap to ask: this step is the trial. Its outcome, via
@@ -240,8 +296,8 @@ class BackendHealth:
         info = {"probe_ok": ok, "probe_detail": scrub_detail(detail or ""),
                 "probe_s": round(self.clock() - t0, 3)}
         if ok:
-            st.opened_at, st.streak, st.trigger = None, 0, None
+            st.opened_at, st.streak, st.trigger, st.kind, st.cooldown_s = None, 0, None, None, None
             self.warn(f"llm-router proxy: local backend {key} passed its health probe; serving resumes")
             return True, dict(info, state="recovered")
         st.opened_at = self.clock()
-        return False, dict(info, state="open", trigger=st.trigger)
+        return False, dict(info, state="open", trigger=st.trigger, error_kind=st.kind)

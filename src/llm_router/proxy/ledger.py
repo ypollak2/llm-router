@@ -60,6 +60,10 @@ Row fields:
   backend_health  the backend-health breaker (``proxy.backend_health``), only
                   when it acted: {state: tripped|open|recovered|trial, trigger,
                   retry_in_s, probe_ok, probe_detail, probe_s}
+  backend_error_kind  why the backend attempt failed, fixed vocabulary only (never runner text): runner_oom |
+                  runner_compute_error | xml_parse | http_500 | empty_body; absent when it did not fail or the
+                  kind is ``other`` (the breaker info still says other).
+                  backend_health.error_kind is the same kind on the breaker's trip / open info.
   detail          short scrubbed error text for a fallback
   mr_summary.map_error  only when outcome is map_failed (P9): ``try=N kind=<http_nnn|empty_response|truncated|
                   ollama_error|other|no_reply>`` when the backend returned an error, or ``try=N exc=<ClassName>

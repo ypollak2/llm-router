@@ -71,9 +71,12 @@ from llm_router.proxy import escalation, permcheck_capture, r1_gate
 from llm_router.proxy.backend_health import (
     DEFAULT_COOLDOWN_S,
     DEFAULT_FAIL_N,
+    DEFAULT_RUNNER_COOLDOWN_S,
     REASON_BACKEND_UNHEALTHY,
     BackendHealth,
     begin_stream_progress,
+    KIND_OTHER,
+    error_kind,
 )
 from llm_router.proxy.backends import (
     BACKENDS,
@@ -495,7 +498,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     recycle_cmd = recycle_command()
     recycler = BackendRecycle(recycle_cmd, clock=health_clock) if recycle_cmd else None
     health = BackendHealth(cfg.backend_fail_n, cfg.backend_cooldown_s, clock=health_clock,
-                           fast_empty=bool(recycle_cmd))
+                           fast_empty=bool(recycle_cmd),
+                           # A broken runner (runner_oom / runner_compute_error) stays broken until reloaded: with
+                           # no recycle command nothing reloads it, so do not probe it every cooldown_s (EKIND-1).
+                           runner_cooldown_s=None if recycle_cmd else DEFAULT_RUNNER_COOLDOWN_S)
     # Claude-tier rewrite (opt-in). A bad policy file fails here, at startup,
     # never per call.
     tier_policy = (ClaudeTierPolicy.load(cfg.tier_policy, conversation_level=(cfg.tiers == TIERS_CONVERSATION))
@@ -899,9 +905,13 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             _bo = backend_outcome or (err, reason, time.monotonic() - backend_t0)
             tripped = health.record(choice["model"], *_bo, _box=stream_progress)
             if tripped is not None:
-                row["backend_health"] = dict(row.get("backend_health") or {}, **tripped)
+                row["backend_health"] = dict(row.get("backend_health") or {}, **tripped,
+                                             error_kind=health.error_kind_for(choice["model"]))
                 if recycler and tripped["trigger"] in {"fast_empty", "crash_signature"}:
                     row["backend_health"].update(recycler.start(recycle_event) or {})
+        _kind = error_kind((backend_outcome or (err,))[0]) if backend_t0 is not None else None
+        if _kind not in (None, KIND_OTHER):   # fixed vocabulary, never the runner text; "other" adds nothing to ``detail``
+            row["backend_error_kind"] = _kind
         elapsed = round(time.monotonic() - t0, 3)
         row["route_latency_s"] = elapsed
         r1_on = (r1_gate.enabled() and row.get("is_main_thread") is False
