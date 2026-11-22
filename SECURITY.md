@@ -113,6 +113,7 @@ the matrix (`NOT enforced` rows are disclosed on purpose, not fixed):
 | `shadow_frontier.py` | NOT enforced: log-only | Same: log-only. |
 | `control_plane/client.py` | NOT enforced: opt-in | Opt-in; `CPClient` has no caller in `src`; the heartbeat payload is the caller's. |
 | `local_check/judge.py` | NOT enforced: opt-in | Opt-in feature; text leaves by design when it is enabled. |
+| `search/backend.py` | NOT enforced: opt-in | Opt-in (`LLM_ROUTER_WEB_SEARCH=on`, off by default); the model's search query text goes to the configured SearXNG (`LLM_ROUTER_SEARXNG_URL`, default loopback), which forwards it to public search engines; no secret check, no secrets attached. |
 | `tools/agoragentic.py` | NOT enforced: opt-in | Opt-in (`LLM_ROUTER_AGORAGENTIC=on`, off by default); `agoragentic_execute` posts the task and input to agoragentic.com with no secret check. |
 | `judge_cascade.py::judge_inline` | NOT enforced: unreachable | Would send prompt and response to a Haiku judge with no check. No entry point reaches it (`test_judge_cascade_is_not_reachable`), so it is latent, not live. |
 | `ensemble.py::local_llm_classify` | local by construction | The classifier model is the discovered local Ollama model; `LLM_ROUTER_ENSEMBLE_PRIMARY` can name a cloud model, and then a secret prompt goes where you pointed it. |
