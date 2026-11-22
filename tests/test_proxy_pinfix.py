@@ -56,7 +56,9 @@ def test_ping_pong_ceiling(tmp_path, monkeypatch):
     assert len(e.backend.calls) == 5
 
 
-@pytest.mark.parametrize('reason', sorted(local_mode.STRUCTURAL_REASONS))  # frozenset: one order on every xdist worker
+# prompt_over_cap is left out: its pin is released once the real estimate is under the cap (this test fakes the refusal
+# on a small body), see tests/test_proxy_local_mode.py::test_over_cap_pin_released_when_back_under_cap.
+@pytest.mark.parametrize('reason', sorted(local_mode.STRUCTURAL_REASONS - {local_mode.REASON_PROMPT_CAP}))  # frozenset: one order on every xdist worker
 def test_structural_pins_immediately(tmp_path, monkeypatch, reason):
     monkeypatch.setenv('LLM_ROUTER_PINFIX', 'on')
     original = local_mode.decide_local

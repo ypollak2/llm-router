@@ -190,6 +190,11 @@ def coordinator_main_exempt(effective: str) -> bool:
 PIN_LOCAL = "local"
 PIN_CLAUDE = "claude"
 
+#: Under-cap releases of a ``prompt_over_cap`` pin per session; after this many the pin stays (bounds Claude<->local
+#: oscillation of a session hovering at the cap, each move re-pays the prompt cache). No hysteresis margin: it would
+#: halve the gain (115 under-cap pinned rows in 24 h, 64 of them at <= 0.9 x cap).
+UNDERCAP_RELEASES_MAX = 3
+
 #: Reasons that make a conversation permanently Claude's (the local path
 #: cannot ever take it back). Transient ones (kill switch, backend, breaker)
 #: forward the step only for a conversation already pinned local. A NEW
@@ -508,6 +513,7 @@ class LocalModeState:
         # pinned to Claude by ``started_elsewhere``, so no marker is needed across a restart).
         self.pin_reasons: dict[str, str] = {}
         self.unpinned_once: OrderedDict[str, bool] = OrderedDict()
+        self.undercap_releases: OrderedDict[str, int] = OrderedDict()  # releases used per session (<= UNDERCAP_RELEASES_MAX)
         self.pending: OrderedDict[str, dict] = OrderedDict()
         # NS-A2: conversations whose first turn this process saw and the classifier vetoed.
         # A veto stores no pin, so without this the next call would read ``started_elsewhere``.
@@ -604,12 +610,24 @@ class LocalModeState:
     def pin_reason_of(self, key: str) -> str | None:
         return self.pin_reasons.get(key)
 
-    def unpin_over_cap(self, key: str) -> bool:
-        """P7: lift a ``prompt_over_cap`` claude pin, at most once per session. False (nothing changed)
-        for any other pin, no pin, or a session already unpinned once."""
+    def undercap_release_left(self, key: str) -> bool:
+        used = self.undercap_releases.get(key)  # absent: no release spent yet, an explicit branch (not 0)
+        return used is None or used < UNDERCAP_RELEASES_MAX
+
+    def unpin_over_cap(self, key: str, once: bool = True) -> bool:
+        """Lift a ``prompt_over_cap`` claude pin. P7 (``once=True``): at most once per session. The under-cap
+        release (``once=False``) may repeat up to ``UNDERCAP_RELEASES_MAX`` times: each lift needs the turn to go local. False (nothing changed)
+        for any other pin, no pin, or (``once``) a session already unpinned once."""
         if (self.pins.get(key) != PIN_CLAUDE or self.pin_reasons.get(key) != REASON_PROMPT_CAP
-                or key in self.unpinned_once):
+                or (once and key in self.unpinned_once)
+                or (not once and not self.undercap_release_left(key))):
             return False
+        if not once:
+            used = self.undercap_releases.get(key)
+            self.undercap_releases[key] = 1 if used is None else used + 1
+            self.undercap_releases.move_to_end(key)
+            while len(self.undercap_releases) > self.max_pins:
+                self.undercap_releases.popitem(last=False)
         del self.pins[key]
         self.pin_reasons.pop(key, None)
         self.unpinned_once[key] = True
