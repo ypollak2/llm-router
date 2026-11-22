@@ -38,6 +38,7 @@ import pytest
 
 from llm_router.proxy import backends as pb
 from llm_router.proxy import ledger
+from llm_router.proxy import prev_targets
 from llm_router.proxy import server as ps
 
 FIXTURES = Path(__file__).parent / "fixtures" / "proxy"
@@ -253,6 +254,13 @@ async def _run_case(tmp_path, monkeypatch, name, serve_env):
     _clean_env(monkeypatch)
     if serve_env is not None:
         monkeypatch.setenv("LLM_ROUTER_PROXY_LOCAL_AGENT_MODE", serve_env)
+    # prev_tool_targets hashes need a known salt, or the golden would differ per run.
+    home = tmp_path / "golden_home"
+    home.mkdir()
+    (home / "prev_target_salt").write_bytes(bytes(range(32)))
+    os.chmod(home / "prev_target_salt", 0o600)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
+    prev_targets.reset_for_tests()
 
     async def _chain(text):
         return chain
