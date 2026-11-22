@@ -61,7 +61,8 @@ Row fields:
                   when it acted: {state: tripped|open|recovered|trial, trigger,
                   retry_in_s, probe_ok, probe_detail, probe_s}
   backend_error_kind  why the backend attempt failed, fixed vocabulary only (never runner text): runner_oom |
-                  runner_compute_error | xml_parse | http_500 | empty_body; absent when it did not fail or the
+                  runner_compute_error | xml_parse | http_500 | empty_body | step_budget_exceeded | hedge_timeout |
+                  truncated | unknown_tool | tool_args_invalid; absent when it did not fail or the
                   kind is ``other`` (the breaker info still says other).
                   backend_health.error_kind is the same kind on the breaker's trip / open info.
   detail          short scrubbed error text for a fallback
