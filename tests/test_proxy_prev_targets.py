@@ -117,6 +117,7 @@ def test_step_fields_error_path_has_empty_targets(monkeypatch):
     assert f["step_error"] is True and f["prev_tool_targets"] == [] and len(seen) == 1
 
 
+@pytest.mark.timing
 def test_performance_is_trivial():
     _h("Edit", {"file_path": "/warm"})
     body = _body([_use("Bash", {"command": "make test " * 50}) for _ in range(8)])

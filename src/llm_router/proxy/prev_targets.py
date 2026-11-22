@@ -23,6 +23,7 @@ carries the tool names). No raw path or command is returned or stored. The list 
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import os
@@ -32,6 +33,7 @@ import threading
 import time
 from pathlib import Path
 
+from llm_router import state_files
 from llm_router.paths import llm_router_home
 
 SALT_FILE = "prev_target_salt"
@@ -50,11 +52,17 @@ _retrying: set[str] = set()
 _logged: set[str] = set()
 
 
+def _record(*, detail: str, exc: BaseException | None = None) -> None:
+    from llm_router import failopen
+
+    failopen.record("LR-FO-PROXY-PREV-TARGETS-SALT", exc, detail=detail)  # never raises, no salt bytes
+
+
 def _load_salt(path: Path) -> bytes | None:
     """The salt in ``path``, or None when absent, empty, short, not a regular file or not
     owner-only. Never creates."""
     try:
-        fd = os.open(path, os.O_RDONLY | _NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | _NOFOLLOW, 0o600)  # read only; the mode is never used
     except OSError:
         return None
     try:
@@ -81,7 +89,7 @@ def _create_salt(path: Path) -> bytes | None:
     salt = os.urandom(SALT_BYTES)
     tmp = path.with_name(f"{path.name}.tmp{os.getpid()}.{threading.get_ident()}.{os.urandom(4).hex()}")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        state_files.private_dir(path.parent)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600)
         try:
             _write_all(fd, salt)
@@ -97,9 +105,10 @@ def _create_salt(path: Path) -> bytes | None:
         return None
     finally:
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+            with contextlib.suppress(FileNotFoundError):  # never created: nothing to remove
+                os.unlink(tmp)
+        except OSError as exc:
+            _record(detail="temp salt file could not be removed", exc=exc)
 
 
 def _load_or_create(path: Path) -> bytes | None:
@@ -139,13 +148,7 @@ def salt() -> bytes | None:
                 _failed_at[key] = time.monotonic()
                 _logged.add(key)
     if got is None and first_failure:
-        try:
-            from llm_router import failopen
-
-            failopen.record("LR-FO-PROXY-PREV-TARGETS-SALT",
-                            detail="salt file unavailable or invalid; hashes are null until it loads")
-        except Exception:  # noqa: BLE001 - accounting must not fail a request
-            pass
+        _record(detail="salt file unavailable or invalid; hashes are null until it loads")
     return got
 
 
