@@ -135,8 +135,8 @@ def test_not_eligible_row_and_secret_text_skipped(env):
     assert run(_sched_and_drain(body, row, LOCAL)) == cls_embed_shadow.SKIP_SIDE_CALL
     secret = "key sk-ant-api03-" + "Zq9xKd2LmP" * 5
     body, row = mk(secret)
-    assert run(_sched_and_drain(body, row, LOCAL)) == cls_embed_shadow.SKIP_SECRET
-    assert fake.bodies == []
+    assert run(_sched_and_drain(body, row, LOCAL)) == cls_embed_shadow.SCHEDULED  # the job decides, off the loop
+    assert fake.bodies == [] and recs(tmp) == []
 
 
 def test_one_embed_per_turn_dedup(env):
@@ -279,3 +279,77 @@ def test_proxy_side_call_and_marker_never_embed(tmp_path, monkeypatch, env):
     assert fake.bodies == [] and recs(home) == []
     _post_and_drain(e, turn_body(["control prompt with no marker"], loops=0))  # the control: this one does embed
     assert len(recs(home)) == 1
+
+
+def test_nothing_heavy_on_the_event_loop(env, monkeypatch):
+    """S1: the secret scan, the text read and every record write run on pool threads, never the loop thread."""
+    from llm_router import door_verdict
+    tmp, fake = env
+    seen = {}
+    real_scan, real_append = door_verdict._holds_secret, cls_embed_shadow._append
+    monkeypatch.setattr(door_verdict, "_holds_secret",
+                        lambda t: seen.setdefault("scan", threading.current_thread().name) and real_scan(t))
+    monkeypatch.setattr(cls_embed_shadow, "_append",
+                        lambda r, p: seen.setdefault("w" + r["cls_emb_source"], threading.current_thread().name)
+                        and real_append(r, p))
+    fake.delay = 0.5
+    monkeypatch.setenv("LLM_ROUTER_CLS_EMBED_BUDGET_MS", "100")
+
+    async def go():
+        main = threading.current_thread().name
+        for i in range(cls_embed_shadow.MAX_PENDING + 1):
+            body, row = mk(f"p{i}", sha=f"s{i}")
+            cls_embed_shadow.schedule(body, row, LOCAL)
+        await cls_embed_shadow.drain()
+        return main
+
+    main = run(go())
+    assert seen["scan"].startswith("cls-embed-shadow") and seen["scan"] != main
+    assert seen["wqueue_full"].startswith("cls-embed-shadow-rec")
+    assert seen["wtimeout"].startswith("cls-embed-shadow-rec")
+    time.sleep(0.6)
+
+
+def test_dedupe_window_resamples_and_dropped_turn_not_marked(env, monkeypatch):
+    tmp, fake = env
+    async def go():
+        body, row = mk("yes", sha="y")
+        assert cls_embed_shadow.schedule(body, row, LOCAL) == cls_embed_shadow.SCHEDULED
+        await cls_embed_shadow.drain()
+        assert cls_embed_shadow.schedule(body, dict(row), LOCAL) == cls_embed_shadow.SKIP_KNOWN
+        lane0 = cls_embed_shadow._lane  # ten minutes later the same short reply is sampled again
+        lane0.seen[("s1", "y")] -= cls_embed_shadow.DEDUPE_WINDOW_S + 1
+        assert cls_embed_shadow.schedule(body, dict(row), LOCAL) == cls_embed_shadow.SCHEDULED
+        await cls_embed_shadow.drain()
+        lane = cls_embed_shadow._lane
+        lane.pending = cls_embed_shadow.MAX_PENDING  # full lane
+        b2, r2 = mk("other", sha="o")
+        assert cls_embed_shadow.schedule(b2, r2, LOCAL) == cls_embed_shadow.DROPPED
+        assert ("s1", "o") not in lane.seen  # not marked: can be sampled on its next occurrence
+        lane.pending = 0
+        assert cls_embed_shadow.schedule(b2, dict(r2), LOCAL) == cls_embed_shadow.SCHEDULED
+        await cls_embed_shadow.drain()
+
+    run(go())
+    assert [r["cls_emb_source"] for r in recs(tmp)] == ["embed", "embed", "queue_full", "embed"]
+
+
+@pytest.mark.timing
+def test_rotation_at_size_cap_and_aclose_cancels_cleanly(env, monkeypatch):
+    tmp, fake = env
+    monkeypatch.setattr(cls_embed_shadow, "ROTATE_BYTES", 200)
+    for i in range(6):
+        cls_embed_shadow._append({"i": i, "pad": "x" * 100}, None)
+    assert (tmp / "cls_embed_shadow.jsonl.1").exists()
+    assert (tmp / "cls_embed_shadow.jsonl").stat().st_size < 400
+    fake.delay = 1.0
+
+    async def go():
+        body, row = mk()
+        cls_embed_shadow.schedule(body, row, LOCAL)
+        t0 = time.monotonic()
+        await cls_embed_shadow.aclose()
+        return time.monotonic() - t0
+
+    assert run(go()) < 2.0 and cls_embed_shadow._lane is None
+    time.sleep(1.1)

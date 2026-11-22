@@ -2314,7 +2314,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             task.cancel()
         if embed_task is not None and not embed_task.done():
             embed_task.cancel()
-        cls_embed_shadow.shutdown()
+        await cls_embed_shadow.aclose()
         if guard_task is not None and not guard_task.done():
             guard_task.cancel()
         await cls_shadow.aclose()
