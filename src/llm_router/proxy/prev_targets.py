@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import logging
 import os
 import posixpath
 import stat
@@ -44,10 +43,11 @@ _FILE_KEYS = {"edit": "file_path", "write": "file_path", "multiedit": "file_path
 
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # absent on some platforms (as local_check/runner.py)
 RETRY_S = 60.0  # a failed salt load is retried at most this often
-_log = logging.getLogger(__name__)
 _lock = threading.Lock()
 _cache: dict[str, bytes] = {}
 _failed_at: dict[str, float] = {}
+_retrying: set[str] = set()
+_logged: set[str] = set()
 
 
 def _load_salt(path: Path) -> bytes | None:
@@ -110,8 +110,11 @@ def _load_or_create(path: Path) -> bytes | None:
 
 def salt() -> bytes | None:
     """The per-install salt (cached per router home once loaded), or None when unavailable.
-    A failure is not cached for good: it is retried at most once per ``RETRY_S`` and logged
-    once (no salt bytes)."""
+
+    Steady state is one lock and one dict hit. File I/O never runs under the lock: after a
+    failure exactly one thread retries (at most once per ``RETRY_S``, flagged under the lock)
+    while the others return None at once. The first failure records one fail-open event
+    (``LR-FO-PROXY-PREV-TARGETS-SALT``, no salt bytes)."""
     path = llm_router_home() / SALT_FILE
     key = str(path)
     with _lock:
@@ -119,24 +122,39 @@ def salt() -> bytes | None:
             return _cache[key]
         now = time.monotonic()
         last = _failed_at.get(key)
-        if last is not None and now - last < RETRY_S:
+        if key in _retrying or (last is not None and now - last < RETRY_S):
             return None
+        _retrying.add(key)
+        first_failure = key not in _logged
+    got = None
+    try:
         got = _load_or_create(path)
-        if got is not None:
-            _cache[key] = got
-            _failed_at.pop(key, None)
-            return got
-        if last is None:
-            _log.warning("prev_tool_targets degraded: salt file unavailable or invalid; "
-                         "hashes are null until it loads (retry every %ds)", int(RETRY_S))
-        _failed_at[key] = now
-        return None
+    finally:
+        with _lock:
+            _retrying.discard(key)
+            if got is not None:
+                _cache[key] = got
+                _failed_at.pop(key, None)
+            else:
+                _failed_at[key] = time.monotonic()
+                _logged.add(key)
+    if got is None and first_failure:
+        try:
+            from llm_router import failopen
+
+            failopen.record("LR-FO-PROXY-PREV-TARGETS-SALT",
+                            detail="salt file unavailable or invalid; hashes are null until it loads")
+        except Exception:  # noqa: BLE001 - accounting must not fail a request
+            pass
+    return got
 
 
 def reset_for_tests() -> None:
     with _lock:
         _cache.clear()
         _failed_at.clear()
+        _retrying.clear()
+        _logged.clear()
 
 
 def normalise_command(command: str) -> str:

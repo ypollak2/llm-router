@@ -156,17 +156,20 @@ def test_concurrent_creation_across_processes(tmp_path):
     assert all(p.returncode == 0 for p in procs) and len(set(outs)) == 1 and len(outs[0]) == 64
 
 
-def test_empty_file_recovers_once_a_valid_salt_appears_and_failure_is_not_cached(tmp_path, monkeypatch, caplog):
+def test_recovers_after_the_operator_replaces_a_bad_file_and_failure_is_not_cached(tmp_path, monkeypatch):
     p = tmp_path / "home" / pt.SALT_FILE
     p.parent.mkdir(parents=True)
     p.write_bytes(b"")
     os.chmod(p, 0o600)
     now = [1000.0]
     monkeypatch.setattr(pt.time, "monotonic", lambda: now[0])
-    with caplog.at_level("WARNING"):
-        assert pt.salt() is None
-        assert pt.salt() is None  # inside the retry window: no re-read, no second log line
-    assert len([r for r in caplog.records if "degraded" in r.getMessage()]) == 1
+    from llm_router import failopen
+    codes = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, *, detail="": codes.append((code, detail)))
+    assert pt.salt() is None
+    assert pt.salt() is None  # inside the retry window: no re-read, no second event
+    assert [c for c, _ in codes] == ["LR-FO-PROXY-PREV-TARGETS-SALT"]
+    assert p.read_bytes() == b""  # a file we did not create is never overwritten
     p.write_bytes(os.urandom(32))
     assert pt.salt() is None  # still inside 60 s
     now[0] += pt.RETRY_S + 1
@@ -187,3 +190,37 @@ def test_module_works_without_o_nofollow(monkeypatch):
     monkeypatch.setattr(pt, "_NOFOLLOW", 0)
     h = _h("Edit", {"file_path": "/a"})
     assert h and h == _h("Edit", {"file_path": "/a"})
+
+
+def test_no_file_io_under_the_lock_and_one_retrier(tmp_path, monkeypatch):
+    import threading
+    seen = {"calls": 0, "locked": []}
+    gate, started = threading.Event(), threading.Event()
+    real = pt._load_or_create
+
+    def slow(path):
+        seen["calls"] += 1
+        seen["locked"].append(pt._lock.locked())
+        started.set()
+        gate.wait(5)
+        return real(path)
+
+    monkeypatch.setattr(pt, "_load_or_create", slow)
+    res = []
+    t = threading.Thread(target=lambda: res.append(pt.salt()))
+    t.start()
+    assert started.wait(5)
+    assert pt.salt() is None  # another thread does not wait and does not do I/O
+    gate.set()
+    t.join()
+    assert seen["calls"] == 1 and seen["locked"] == [False] and res[0] is not None
+
+
+def test_temp_file_is_unlinked_when_link_fails_otherwise(tmp_path, monkeypatch):
+    def boom(src, dst, *a, **k):
+        raise PermissionError("no link")
+
+    monkeypatch.setattr(pt.os, "link", boom)
+    home = tmp_path / "home"
+    assert pt._create_salt(home / pt.SALT_FILE) is None
+    assert list(home.iterdir()) == []
