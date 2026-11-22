@@ -65,7 +65,7 @@ from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
 from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
-from llm_router.proxy import chunk_store, cls_decide, cls_embed, compact_worker, cold_guard, deadline, haiku_arm, haiku_guard, history_layout, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
+from llm_router.proxy import chunk_store, cls_decide, cls_embed, cls_embed_shadow, compact_worker, cold_guard, deadline, haiku_arm, haiku_guard, history_layout, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
 from llm_router.proxy import escalation, permcheck_capture, r1_gate
 
 from llm_router.proxy.backend_health import (
@@ -1289,6 +1289,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if started_elsewhere and decision.reason == local_mode.REASON_PINNED_CLAUDE:
             decision = local_mode.LocalDecision(False, local_mode.REASON_STARTED_ELSEWHERE)
         row["local_mode"] = dict(decision.as_row(), pin=stored if force else pinned)
+        cls_embed_shadow.schedule(key_body or body, row, decision)  # PR-4: flag off returns at once; never awaited
         if pin_cleared:
             row["local_mode"]["pin_cleared"] = "new_turn"  # PR-C: only with LLM_ROUTER_PIN_SCOPE=turn
         if cls_flip and decision.local:
@@ -2313,6 +2314,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             task.cancel()
         if embed_task is not None and not embed_task.done():
             embed_task.cancel()
+        await cls_embed_shadow.aclose()
         if guard_task is not None and not guard_task.done():
             guard_task.cancel()
         await cls_shadow.aclose()
