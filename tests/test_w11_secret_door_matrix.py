@@ -291,6 +291,7 @@ SINK_FILES: dict[str, tuple[int, str, str]] = {
     'model_pull.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'ollama_watchdog.py': (3, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'proxy/backends.py': (3, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
+    'proxy/cls_embed.py': (1, 'local', "prompt text to a loopback Ollama embed server only (url_ok refuses non-loopback, the main model's server and :11435); off by default (LLM_ROUTER_CLS_EMBED); skips a private dispatch"),
     'proxy/failopen_shim.py': (3, 'proxy', "proxy class, owner-gated, log-only by D-28: replay_http replays the client request to Anthropic; claude_judge sends request context + reply to the claude CLI"),
     'proxy/server.py': (7, 'proxy', "proxy class, owner-gated, log-only by D-28: replay_http replays the client request to Anthropic; claude_judge sends request context + reply to the claude CLI"),
     'quickstart.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),

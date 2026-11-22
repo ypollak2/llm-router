@@ -65,7 +65,7 @@ from llm_router import authority, failopen, lane_a_shadow, local_models, prompt_
 from llm_router import prefixes as user_prefixes
 from llm_router.proxy import keepalive as proxy_keepalive
 from llm_router.proxy.keepalive import KEEPALIVE_WRITTEN
-from llm_router.proxy import chunk_store, cls_decide, compact_worker, cold_guard, deadline, haiku_arm, haiku_guard, history_layout, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
+from llm_router.proxy import chunk_store, cls_decide, cls_embed, compact_worker, cold_guard, deadline, haiku_arm, haiku_guard, history_layout, lane_a, ledger, llm_shadow, local_gate, local_mode, local_shadow, mr_summary, okf_context, prefix_hash
 from llm_router.proxy import escalation, permcheck_capture, r1_gate
 
 from llm_router.proxy.backend_health import (
@@ -2266,6 +2266,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             # In the background: the proxy serves (and hedges to Claude) while
             # the model loads.
             task = asyncio.create_task(_run())
+        embed_task = None
+        if cls_embed.enabled():  # PR-3: flag off (default), nothing here runs
+            embed_task = asyncio.create_task(asyncio.to_thread(cls_embed.warm_up))
         # The Haiku guard (P0.11, D-20): runs now and hourly while the rewrite is
         # on; a trip writes the override file and turns the live policy's
         # rewrite off. It never edits the YAML.
@@ -2308,6 +2311,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             compact_worker.clear()
         if task is not None and not task.done():
             task.cancel()
+        if embed_task is not None and not embed_task.done():
+            embed_task.cancel()
         if guard_task is not None and not guard_task.done():
             guard_task.cancel()
         await cls_shadow.aclose()
