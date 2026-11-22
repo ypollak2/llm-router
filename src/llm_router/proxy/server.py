@@ -468,6 +468,12 @@ def unpin_on() -> bool:
     return os.environ.get("LLM_ROUTER_UNPIN", "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def undercap_unpin_on() -> bool:
+    """LLM_ROUTER_UNDERCAP_UNPIN, default ON; ``0``/``off``/``false``/``no`` disables the under-cap release of a
+    ``prompt_over_cap`` pin (today's behaviour: the pin stays for the session)."""
+    return os.environ.get("LLM_ROUTER_UNDERCAP_UNPIN", "").strip().lower() not in ("0", "off", "false", "no")
+
+
 def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clock=None, breaker_fn=None,
               haiku_guard_run=None, local_gate_deps=None):
     """The Starlette app. ``client`` (an ``httpx.AsyncClient``),
@@ -1171,6 +1177,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         unpin_try = False
         unpin_reason = "reduced_fits"
         if (stored == local_mode.PIN_CLAUDE and not force and not exempt and not lm.killed()
+                and undercap_unpin_on() and lm.undercap_release_left(key)
                 and lm.pin_reason_of(key) == local_mode.REASON_PROMPT_CAP):
             # A pin whose only cause is the prompt size (not a failed local step) is released as soon as the size the
             # cap tests is back under the cap (DIAG-PIN-CAUSES-20261122: 127 of 556 pinned rows). The turn then takes

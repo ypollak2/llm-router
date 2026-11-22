@@ -1314,3 +1314,82 @@ async def test_an_id_less_backend_reply_is_served_with_an_id_and_a_ledger_row(en
     (row,) = env.rows()
     assert row["decision"] == "served" and row["msg_id"] == sent_id
 
+
+
+async def test_under_cap_release_is_bounded_per_session(env, monkeypatch):
+    backend = Backend(*[_ollama("", [_call("Bash", {"command": f"ls {i}"})]) for i in range(8)])
+    app, real_cap = await _over_cap_pinned(env, monkeypatch, backend)
+    for i in range(local_mode.UNDERCAP_RELEASES_MAX):  # releases 1..3: served locally, then over the cap again
+        n = len(backend.calls)
+        monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", real_cap)
+        await _post(app, _long_history(result_chars=500))
+        lm = env.rows()[-1]["local_mode"]
+        assert len(backend.calls) == n + 1 and lm["unpin"]["reason"] == "under_cap", i
+        monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", 200)
+        await _post(app, _long_history(result_chars=500))
+        assert env.rows()[-1]["reason"] == "prompt_over_cap"  # pinned again
+    n = len(backend.calls)
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", real_cap)
+    await _post(app, _long_history(result_chars=500))  # the 4th: the pin stays
+    lm = env.rows()[-1]["local_mode"]
+    assert len(backend.calls) == n and lm["reason"] == "pinned_claude" and "unpin" not in lm
+
+
+@pytest.mark.parametrize("value,released", [(None, True), ("1", True), ("0", False), ("off", False)])
+async def test_under_cap_release_flag(env, monkeypatch, value, released):
+    backend = _backend()
+    app, real_cap = await _over_cap_pinned(env, monkeypatch, backend)
+    if value is None:
+        monkeypatch.delenv("LLM_ROUTER_UNDERCAP_UNPIN", raising=False)
+    else:
+        monkeypatch.setenv("LLM_ROUTER_UNDERCAP_UNPIN", value)
+    n = len(backend.calls)
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", real_cap)
+    await _post(app, _long_history(result_chars=500))
+    lm = env.rows()[-1]["local_mode"]
+    if released:
+        assert len(backend.calls) == n + 1 and lm["unpin"]["reason"] == "under_cap"
+    else:
+        assert len(backend.calls) == n and lm["reason"] == "pinned_claude" and "unpin" not in lm
+
+
+async def test_under_cap_release_keeps_pin_when_kill_switch_or_exempt_refuses(env, monkeypatch):
+    backend = _backend()
+    app, real_cap = await _over_cap_pinned(env, monkeypatch, backend)
+    n = len(backend.calls)
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", real_cap)
+    env.kill.write_text("")
+    await _post(app, _long_history(result_chars=500))
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "kill_switch" and "unpin" not in lm
+    env.kill.unlink()
+    real = local_mode.exempt_reason
+    monkeypatch.setattr(local_mode, "exempt_reason", lambda *a, **k: (local_mode.EXEMPT_COORDINATOR, None))
+    await _post(app, _long_history(result_chars=500))
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "exempt_session" and "unpin" not in lm
+    assert len(backend.calls) == n
+    monkeypatch.setattr(local_mode, "exempt_reason", real)
+    await _post(app, _long_history(result_chars=500))  # the pin was never spent: now it is released
+    assert len(backend.calls) == n + 1 and env.rows()[-1]["local_mode"]["unpin"]["reason"] == "under_cap"
+
+
+async def test_under_cap_release_keeps_pin_when_breaker_or_veto_refuses(env, monkeypatch):
+    backend = _backend()
+    app, real_cap = await _over_cap_pinned(env, monkeypatch, backend)
+    n = len(backend.calls)
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", real_cap)
+    real_decide = local_mode.decide_local  # the quality breaker is open for one turn
+    monkeypatch.setattr(local_mode, "decide_local", lambda body, s: real_decide(
+        body, dataclasses.replace(s, breaker_closed=False, breaker_detail="test breaker")))
+    await _post(app, _long_history(result_chars=500))
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "breaker_open" and "unpin" not in lm
+    monkeypatch.setattr(local_mode, "decide_local", real_decide)
+    from llm_router.proxy import cls_decide
+    monkeypatch.setattr(cls_decide, "veto_of", lambda row: "veto_tier")
+    await _post(app, _long_history(result_chars=500))
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "classifier_veto" and "unpin" not in lm
+    assert len(backend.calls) == n
+    monkeypatch.undo()
