@@ -9,6 +9,7 @@ response body never appear in the error.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
 
@@ -17,6 +18,7 @@ import httpx
 DEFAULT_URL = "http://127.0.0.1:8888"
 TIMEOUT_S = 10.0
 MAX_RESULTS_CEILING = 10
+MAX_BODY_BYTES = 1 << 20  # 1 MiB, checked before json parsing
 
 
 class SearchError(Exception):
@@ -45,8 +47,9 @@ async def search(query: str, n: int = 5, *, client: httpx.AsyncClient | None = N
     http = client or httpx.AsyncClient(timeout=TIMEOUT_S)
     try:
         try:
-            resp = await http.get(f"{base_url()}/search", params={"q": query, "format": "json"})
-        except httpx.TimeoutException:
+            async with asyncio.timeout(TIMEOUT_S):  # total deadline; httpx's is per phase
+                resp = await http.get(f"{base_url()}/search", params={"q": query, "format": "json"})
+        except (httpx.TimeoutException, TimeoutError):
             raise SearchError("timeout") from None
         except httpx.ConnectError:
             raise SearchError("connect") from None
@@ -57,6 +60,8 @@ async def search(query: str, n: int = 5, *, client: httpx.AsyncClient | None = N
             await http.aclose()
     if resp.status_code != 200:
         raise SearchError(f"http_{resp.status_code}")
+    if len(resp.content) > MAX_BODY_BYTES:
+        raise SearchError("too_large")
     try:
         results = resp.json()["results"]
         if not isinstance(results, list):

@@ -152,3 +152,56 @@ def test_base_url_env(monkeypatch):
     assert backend.base_url() == "http://127.0.0.1:8888"
     monkeypatch.setenv("LLM_ROUTER_SEARXNG_URL", "http://127.0.0.1:9999/")
     assert backend.base_url() == "http://127.0.0.1:9999"
+
+
+def test_first_hit_always_emitted_even_if_huge():
+    out = ws.format_hits([backend.Hit("T" * 50000, "https://e.org/" + "u" * 50000, "s" * 50000),
+                          backend.Hit("b", "https://b.org", "b")])
+    assert out.startswith("1. TTT")
+    assert len(out) <= ws._MAX_CHARS
+
+
+def test_oversized_body_is_too_large():
+    big = {"results": [{"title": "t", "url": "https://a.org", "content": "x" * (backend.MAX_BODY_BYTES + 1)}]}
+    with pytest.raises(backend.SearchError) as ei:
+        _run(backend.search("q", 1, client=_fake(_json(big["results"]))))
+    assert ei.value.kind == "too_large"
+
+
+def test_total_deadline(monkeypatch):
+    monkeypatch.setattr(backend, "TIMEOUT_S", 0.2)
+
+    async def slow(req):
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={"results": []})
+    with pytest.raises(backend.SearchError) as ei:
+        _run(backend.search("q", 1, client=_fake(slow)))
+    assert ei.value.kind == "timeout"
+
+
+def test_real_server_wiring_default_slim(tmp_path):
+    """Real server module (subprocess, throwaway HOME): flag on adds exactly web_search."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    code = ("import asyncio,json,llm_router.server as s;"
+            "print('TOOLS='+json.dumps({t.name:t.model_dump(by_alias=True).get('_meta') "
+            "for t in asyncio.run(s.mcp.list_tools())}))")
+
+    def listing(flag):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("LLM_ROUTER_")}
+        env.update(HOME=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
+        if flag:
+            env["LLM_ROUTER_WEB_SEARCH"] = "on"
+        r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,
+                           text=True, timeout=120)
+        line = [x for x in r.stdout.splitlines() if x.startswith("TOOLS=")]
+        assert line, r.stderr[-500:]
+        return json.loads(line[0][6:])
+
+    off, on = listing(False), listing(True)
+    assert "web_search" not in off
+    assert on["web_search"] == {"anthropic/alwaysLoad": True}
+    assert set(on) - {"web_search"} == set(off)

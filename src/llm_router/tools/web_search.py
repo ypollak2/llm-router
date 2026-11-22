@@ -22,6 +22,8 @@ log = get_logger("llm_router.web_search")
 MAX_EST_TOKENS = 2000
 _MAX_CHARS = MAX_EST_TOKENS * 4  # estimate_tokens is chars // 4
 _SNIPPET_CHARS = 400
+_TITLE_CHARS = 200
+_URL_CHARS = 500
 ALWAYS_LOAD_META = {"anthropic/alwaysLoad": True}
 
 
@@ -29,16 +31,23 @@ def enabled() -> bool:
     return os.environ.get("LLM_ROUTER_WEB_SEARCH", "").strip().lower() in {"on", "1", "true", "yes"}
 
 
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
 def format_hits(hits: list[backend.Hit]) -> str:
-    """Numbered title / URL / snippet blocks, cut so the text stays <= MAX_EST_TOKENS."""
+    """Numbered title / URL / snippet blocks, cut so the text stays <= MAX_EST_TOKENS.
+
+    Title, URL and snippet are each clipped, so the first hit always fits.
+    """
     if not hits:
         return "0 results"
     out: list[str] = []
     used = 0
     for i, h in enumerate(hits, 1):
-        snippet = h.snippet if len(h.snippet) <= _SNIPPET_CHARS else h.snippet[: _SNIPPET_CHARS - 3] + "..."
-        block = f"{i}. {h.title}\n   {h.url}\n   {snippet}".rstrip()
-        if used + len(block) + 2 > _MAX_CHARS:
+        block = (f"{i}. {_clip(h.title, _TITLE_CHARS)}\n   {_clip(h.url, _URL_CHARS)}\n"
+                 f"   {_clip(h.snippet, _SNIPPET_CHARS)}").rstrip()
+        if out and used + len(block) + 2 > _MAX_CHARS:
             out.append(f"[truncated: {len(hits) - i + 1} more]")
             break
         out.append(block)
@@ -49,8 +58,7 @@ def format_hits(hits: list[backend.Hit]) -> str:
 async def web_search(query: str, max_results: int = 5) -> str:
     """Search the web (SearXNG). Returns title, URL and snippet per hit as plain text.
 
-    Use for current facts or documentation the model does not know. Read a page
-    with a fetch tool afterwards if a snippet is not enough.
+    Use for current facts or documentation the model does not know.
 
     Args:
         query: What to search for.
