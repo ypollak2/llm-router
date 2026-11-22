@@ -363,6 +363,42 @@ async def classify_async(text: str) -> Verdict:
 # -- warm-up --------------------------------------------------------------------------------------
 
 
+MAX_EMBED_MODEL_BYTES = 1 << 30  # refuse an embed model or a resident chat model above 1 GiB
+
+
+def _get_json(base: str, path: str, timeout: float = 2.0) -> dict:
+    """GET on the embed server only, direct, no proxy, no redirect (a redirect raises)."""
+    import urllib.request
+
+    from llm_router import local_privacy
+    fetch = local_privacy.direct_opener().open  # a network read, not a file open (the W0-4 raw-write scan)
+    with fetch(urllib.request.Request(f"{base}{path}"), timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def _small(size) -> bool:
+    """True only for a known size within the cap; an unknown size is not small."""
+    return isinstance(size, int) and not isinstance(size, bool) and size <= MAX_EMBED_MODEL_BYTES
+
+
+def _fits(base: str) -> str:
+    """READ-ONLY check on the embed server (``/api/ps`` + ``/api/tags``). Never loads, unloads or evicts, and
+    contacts no other server (``ensure_fits`` reads every known server and can unload the main model)."""
+    try:
+        name = model_name().split(":")[0]
+        tags = _get_json(base, "/api/tags").get("models") or []
+        mine = [m for m in tags if str(m.get("name", "")).split(":")[0] == name]
+        if not mine or not _small(mine[0].get("size")):
+            return "refused"
+        for m in _get_json(base, "/api/ps").get("models") or []:
+            if str(m.get("name", "")).split(":")[0] != name and not _small(m.get("size")):
+                return "refused"
+        return "ok"
+    except Exception as exc:  # noqa: BLE001 - unreadable: do not load
+        failopen.record(FO_WARM, exc, detail="fits")
+        return "refused"
+
+
 def warm_up() -> str:
     """Load the embed model once at proxy start (the cold first call is far over the budget) and hold it with
     ``keep_alive``. Returns a short status code; never raises. No-op unless enabled, not killed, URL allowed."""
@@ -374,12 +410,12 @@ def warm_up() -> str:
         base = embed_url()
         if not url_ok(base):
             return SRC_GUARD
-        try:  # the one choke point before any model load (memory budget, one-model rule)
-            from llm_router.toolkit.adapters.ollama import ensure_fits
-            ensure_fits(model_name(), base, "cls_embed.warm_up")
-        except Exception as exc:  # noqa: BLE001 - refused or unreadable: do not load
-            failopen.record(FO_WARM, exc, detail="ensure_fits")
-            return "refused"
+        head, why = load_head()
+        if head is None:
+            return why or SRC_NO_ARTIFACT  # nothing to classify with: pin no model
+        verdict = _fits(base)
+        if verdict != "ok":
+            return verdict
         _post_embed(base, "warm-up", WARM_TIMEOUT_S)
         return "ok"
     except Exception as exc:  # noqa: BLE001

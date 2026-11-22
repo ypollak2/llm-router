@@ -19,13 +19,29 @@ class _Fake:
     def __init__(self, vec=(1.0, 0.0), delay=0.0, status=200):
         self.vec, self.delay, self.status = list(vec), delay, status
         self.bodies: list[dict] = []
+        self.paths: list[str] = []
+        self.tags = [{"name": "nomic-embed-text:latest", "size": 274_000_000}]
+        self.ps: list = []
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):  # noqa: D102
                 pass
 
+            def do_GET(self):  # noqa: N802
+                outer.paths.append("GET " + self.path)
+                if self.path == "/redir":
+                    self.send_response(302)
+                    self.send_header("Location", "http://127.0.0.1:9/x")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.end_headers()
+                body = {"models": outer.tags if self.path == "/api/tags" else outer.ps}
+                self.wfile.write(json.dumps(body).encode())
+
             def do_POST(self):  # noqa: N802
+                outer.paths.append("POST " + self.path)
                 n = int(self.headers.get("Content-Length", 0))
                 outer.bodies.append(json.loads(self.rfile.read(n)))
                 time.sleep(outer.delay)
@@ -135,27 +151,64 @@ def test_timeout_abstains_within_budget(env, monkeypatch):
     assert time.monotonic() - t0 < 0.6
 
 
-def test_cold_first_call_over_budget_then_warm(env, monkeypatch):
+def test_cold_first_call_over_budget_then_warm(env):
     _, art, fake = env
     _artifact(art)
-    monkeypatch.setattr("llm_router.toolkit.adapters.ollama.ensure_fits", lambda *a, **k: None)
     fake.delay = 0.4  # cold load
     assert cls_embed.classify("x").source == "timeout"
     assert cls_embed.warm_up() == "ok"  # warm-up has its own long timeout
     fake.delay = 0.0
     assert cls_embed.classify("x").source == "embed"
-    assert fake.bodies[-2]["input"] == "warm-up"
+    assert any(b.get("input") == "warm-up" for b in fake.bodies)
 
 
-def test_warm_up_refused_by_ensure_fits(env, monkeypatch):
+def test_warm_up_never_evicts_or_leaves_embed_server(env, monkeypatch):
     _, art, fake = env
+    _artifact(art)
 
     def boom(*a, **k):
-        raise RuntimeError("no memory")
+        raise AssertionError("ensure_fits must not be called")
 
     monkeypatch.setattr("llm_router.toolkit.adapters.ollama.ensure_fits", boom)
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL", "big")
+    monkeypatch.setenv("LLM_ROUTER_MEM_ON_PRESSURE", "evict")
+    assert cls_embed.warm_up() == "ok"
+    assert sorted(set(fake.paths)) == ["GET /api/ps", "GET /api/tags", "POST /api/embed"]
+    assert all(b.get("keep_alive") != 0 and "prompt" not in b for b in fake.bodies)
+
+
+def test_warm_up_refuses_big_resident_or_big_embed_model(env):
+    _, art, fake = env
+    _artifact(art)
+    fake.ps = [{"name": "qwen:35b", "size": 30_000_000_000}]
     assert cls_embed.warm_up() == "refused"
-    assert fake.bodies == []
+    fake.ps = []
+    fake.tags = [{"name": "nomic-embed-text:latest", "size": 5_000_000_000}]
+    assert cls_embed.warm_up() == "refused"
+    fake.tags = []
+    assert cls_embed.warm_up() == "refused"
+    assert not any(p.startswith("POST") for p in fake.paths)
+
+
+def test_warm_up_skipped_without_artifact(env):
+    _, _, fake = env
+    assert cls_embed.warm_up() == "no_artifact" and fake.paths == []
+
+
+def test_warm_up_redirect_not_followed(env):
+    _, art, fake = env
+    _artifact(art)
+    with pytest.raises(Exception):
+        cls_embed._get_json(fake.url, "/redir")
+
+
+def test_env_override_to_11435_refused(env, monkeypatch):
+    _, art, fake = env
+    _artifact(art)
+    monkeypatch.setenv("LLM_ROUTER_CLS_EMBED_URL", "http://127.0.0.1:11435")
+    assert cls_embed.classify("x").source == "guard"
+    assert cls_embed.warm_up() == "guard"
+    assert fake.paths == []
 
 
 def test_warm_up_guard_and_kill(env, monkeypatch):
@@ -237,7 +290,9 @@ def test_no_text_in_verdict_or_failopen(env):
     vs.append(cls_embed.classify(CANARY))
     for v in vs:
         assert CANARY not in json.dumps(v.as_record()) and CANARY not in repr(v)
-    assert CANARY not in failopen.store_path().read_text() if failopen.store_path().exists() else True
+    store = failopen.store_path()
+    assert store.exists() and store.read_text().strip()  # errors were recorded, so the scan below is not vacuous
+    assert cls_embed.FO_EMBED in store.read_text() and CANARY not in store.read_text()
     assert set(vs[-1].as_record()) == {"cls_emb_tier", "cls_emb_source", "cls_emb_ms", "cls_emb_score",
                                        "cls_emb_margin", "cls_emb_artifact_sha", "cls_emb_queue_depth"}
 
