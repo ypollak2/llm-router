@@ -1036,6 +1036,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 reply, backend_err, _usage = await backend.complete(
                     {"model": cfg.model, "messages": [{"role": "user", "content": prompt}],
                      "max_tokens": num_predict, "temperature": 0}, mr_summary.MAP_TIMEOUT_S)
+                out = (_usage or {}).get("output_tokens")
+                if isinstance(out, int) and not isinstance(out, bool):
+                    progress["map_output_tokens"] = out  # a count only; shorten() reads and resets it per call
                 if reply is None:
                     progress["map_error_kind"] = mr_summary.error_kind(backend_err)  # kind only, never the text
                     return None

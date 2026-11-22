@@ -400,3 +400,104 @@ async def test_map_error_raise_with_response_status_and_unreported_kind():
 
     assert mr_summary.map_error_text(1, exc=StatusErr("Client error 'Too Many Requests' LEAK")) == "try=1 exc=StatusErr http=429"
     assert mr_summary.map_error_text(1) == "try=1 kind=unreported"
+
+
+# --- D-582b: a truncated map reply spends a try like an invalid one -------------------------------------------
+
+async def _shorten_with(replies, *, tokens=None):
+    """Run shorten() over a history with a closable chunk; ``replies`` is a list of str | None | Exception per map call."""
+    for seed in range(40):
+        seq, progress = list(replies), {"map_calls": 0}
+
+        async def map_call(prompt, num_predict, seq=seq, progress=progress):
+            r = seq.pop(0) if seq else SUMMARY
+            if tokens:
+                progress["map_output_tokens"] = tokens.pop(0) if tokens else 0
+            if isinstance(r, Exception):
+                raise r
+            if r is None:
+                progress["map_error_kind"] = "truncated"
+            return r
+
+        res = await mr_summary.shorten(_random_history(random.Random(seed)), map_call, cap=9000, est=est_tokens, progress=progress)
+        if progress["map_calls"]:
+            return res, progress
+    raise AssertionError("no seed reached a map call")
+
+
+async def test_truncated_first_try_then_valid_second_is_summarized(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_MR_CHUNK_TARGET", "800")
+    res, progress = await _shorten_with([None, SUMMARY], tokens=[800, 120])
+    assert res.row["outcome"] != "map_failed" and "map_error" not in res.row
+    assert res.row["map_truncated"] == 1 and "extractive_chunks" not in res.row
+    assert res.row["map_output_tokens_max"] == 800 and res.row["map_output_tokens_sum"] == 920
+
+
+async def test_two_truncated_tries_give_the_extractive_chunk_and_the_move_continues(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_MR_CHUNK_TARGET", "800")
+    res, progress = await _shorten_with([None, None])
+    assert res.row["outcome"] != "map_failed" and "map_error" not in res.row
+    assert res.row["map_truncated"] == 2 and res.row["extractive_chunks"] >= 1
+    assert progress["map_calls"] >= 2
+
+
+async def test_exception_after_a_truncated_try_still_ends_with_map_failed(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_MR_CHUNK_TARGET", "800")
+    res, _ = await _shorten_with([None, ValueError("x")])
+    assert res.row["outcome"] == "map_failed" and res.row["map_error"] == "try=2 exc=ValueError" and res.row["map_truncated"] == 1
+    res, _ = await _shorten_with([ValueError("x")])
+    assert res.row["outcome"] == "map_failed" and res.row["map_error"] == "try=1 exc=ValueError" and "map_truncated" not in res.row
+
+
+async def test_non_truncation_backend_error_still_ends_with_map_failed(monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_MR_CHUNK_TARGET", "800")
+    for seed in range(40):
+        progress = {"map_calls": 0}
+
+        async def map_call(prompt, num_predict, progress=progress):
+            progress["map_error_kind"] = "empty_response"
+            return None
+
+        res = await mr_summary.shorten(_random_history(random.Random(seed)), map_call, cap=9000, est=est_tokens, progress=progress)
+        if progress["map_calls"]:
+            break
+    assert res.row["outcome"] == "map_failed" and res.row["map_error"] == "try=1 kind=empty_response" and progress["map_calls"] == 1
+
+
+async def test_map_output_tokens_reach_the_ledger_row(env, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_PROXY_MR", "1")
+    app = env.app(MRBackend())
+    await _warm(app)
+    await _post(app, copy.deepcopy(_session()))
+    mr = env.rows()[-1]["mr_summary"]
+    assert mr["map_output_tokens_max"] == 2 and mr["map_output_tokens_sum"] == 2 * mr["map_calls"]
+
+
+def test_default_map_num_predict_is_800(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_MR_MAP_NUM_PREDICT", raising=False)
+    assert mr_summary.DEFAULT_MAP_NUM_PREDICT == 800 and mr_summary.map_num_predict() == 800
+    monkeypatch.setenv("LLM_ROUTER_MR_MAP_NUM_PREDICT", "450")
+    assert mr_summary.map_num_predict() == 450
+
+
+async def test_stale_per_call_progress_values_are_not_carried_into_the_next_try(monkeypatch):
+    """Call 1 leaves kind=truncated and 800 tokens; call 2 returns a valid reply and leaves nothing. Without the per-try
+    pops, call 2 would still show the stale kind/tokens (counted again as an extra token sum / seen as truncated)."""
+    monkeypatch.setenv("LLM_ROUTER_MR_CHUNK_TARGET", "800")
+    for seed in range(40):
+        n, seen, progress = [0], [], {"map_calls": 0}
+
+        async def map_call(prompt, num_predict, n=n, seen=seen, progress=progress):
+            seen.append((progress.get("map_error_kind"), progress.get("map_output_tokens")))  # what is left on entry
+            n[0] += 1
+            if n[0] == 1:
+                progress["map_error_kind"], progress["map_output_tokens"] = "truncated", 800
+                return None
+            return SUMMARY  # a valid reply that leaves neither value
+
+        res = await mr_summary.shorten(_random_history(random.Random(seed)), map_call, cap=9000, est=est_tokens, progress=progress)
+        if progress["map_calls"]:
+            break
+    assert seen[0] == (None, None) and seen[1] == (None, None)  # try 2 starts clean
+    assert res.row["map_output_tokens_sum"] == 800 and res.row["map_truncated"] == 1  # the stale 800 was not re-counted
+    assert "map_error" not in res.row
