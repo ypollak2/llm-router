@@ -301,6 +301,7 @@ SINK_FILES: dict[str, tuple[int, str, str]] = {
     'runtime_offer.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'safe_subprocess.py': (1, 'primitive', 'the CLI runner itself; every caller has its own row'),
     'sdk.py': (2, 'router door', 'reached only through route_and_call (_call_media / dispatch after the chain cut, or the SDK secret door)'),
+    'search/backend.py': (2, 'opt-in', "opt-in (LLM_ROUTER_WEB_SEARCH=on; the AsyncClient and its one GET); the model's search query text goes to the configured SearXNG (LLM_ROUTER_SEARXNG_URL, default loopback), which forwards it to public search engines; no secrets are attached and no secret check runs, not traced"),
     'semantic_cache.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
     'semantic_classify.py': (1, 'local', "prompt text to the configured Ollama base (open_url / OLLAMA_BASE_URL); a non-loopback base is the user's config and is refused on the secret door"),
     'service_manager.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
