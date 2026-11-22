@@ -611,7 +611,8 @@ class LocalModeState:
         return self.pin_reasons.get(key)
 
     def undercap_release_left(self, key: str) -> bool:
-        return self.undercap_releases.get(key, 0) < UNDERCAP_RELEASES_MAX
+        used = self.undercap_releases.get(key)  # absent: no release spent yet, an explicit branch (not 0)
+        return used is None or used < UNDERCAP_RELEASES_MAX
 
     def unpin_over_cap(self, key: str, once: bool = True) -> bool:
         """Lift a ``prompt_over_cap`` claude pin. P7 (``once=True``): at most once per session. The under-cap
@@ -622,7 +623,8 @@ class LocalModeState:
                 or (not once and not self.undercap_release_left(key))):
             return False
         if not once:
-            self.undercap_releases[key] = self.undercap_releases.get(key, 0) + 1
+            used = self.undercap_releases.get(key)
+            self.undercap_releases[key] = 1 if used is None else used + 1
             self.undercap_releases.move_to_end(key)
             while len(self.undercap_releases) > self.max_pins:
                 self.undercap_releases.popitem(last=False)
