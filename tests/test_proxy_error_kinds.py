@@ -25,7 +25,14 @@ SECRET = "SECRET-sk-9f8e7d6c5b4a-do-not-log"
     ("RuntimeError: HTTP 500: internal server error", bh.KIND_HTTP_500),
     ("empty response", bh.KIND_EMPTY_BODY),
     ("zero-line stream", bh.KIND_EMPTY_BODY),
-    ("unknown tool 'llm'", bh.KIND_OTHER),
+    ("unknown tool 'llm'", bh.KIND_UNKNOWN_TOOL),
+    ("exceeded step budget 147.5s", bh.KIND_STEP_BUDGET),
+    ("no first token within 8.0s", bh.KIND_HEDGE_TIMEOUT),
+    ("truncated at num_predict", bh.KIND_TRUNCATED),
+    ("tool args not JSON for Read", bh.KIND_TOOL_ARGS_INVALID),
+    ("unknown tool 'OutOfMemory'", bh.KIND_UNKNOWN_TOOL),   # a model-chosen name cannot steer it to a runner kind
+    ("something entirely new", bh.KIND_OTHER),
+    ("Read: 'path' missing", bh.KIND_OTHER),
     ("HTTP 404: model not found", bh.KIND_OTHER),
     (None, None),
     ("", None),
@@ -36,9 +43,28 @@ def test_error_kind_mapping(err, kind):
 
 def test_kind_is_from_a_closed_vocabulary_whatever_the_body_says():
     allowed = {bh.KIND_RUNNER_OOM, bh.KIND_RUNNER_COMPUTE, bh.KIND_XML_PARSE, bh.KIND_HTTP_500,
-               bh.KIND_EMPTY_BODY, bh.KIND_OTHER}
+               bh.KIND_EMPTY_BODY, bh.KIND_STEP_BUDGET, bh.KIND_HEDGE_TIMEOUT, bh.KIND_TRUNCATED,
+               bh.KIND_UNKNOWN_TOOL, bh.KIND_TOOL_ARGS_INVALID, bh.KIND_OTHER}
     for err in (f"HTTP 500: Compute error {SECRET}", f"ollama error: {SECRET}", SECRET):
         assert bh.error_kind(err) in allowed
+
+
+def test_new_kinds_are_not_runner_kinds():
+    # The runner answered (slow, cut off, or a wrong tool): a 300 s cooldown would reload nothing.
+    for k in (bh.KIND_STEP_BUDGET, bh.KIND_HEDGE_TIMEOUT, bh.KIND_TRUNCATED, bh.KIND_UNKNOWN_TOOL,
+              bh.KIND_TOOL_ARGS_INVALID, bh.KIND_OTHER):
+        assert k not in bh.RUNNER_KINDS
+
+
+def test_unhealthy_log_line_shows_the_step_budget_kind_not_other():
+    lines = []
+    h = bh.BackendHealth(fail_n=1, cooldown_s=60, clock=Clock(), warn=lines.append, runner_cooldown_s=300.0)
+    trip = h.record("m", "exceeded step budget 147.5s", "validation", 0.1)
+    assert trip and trip["trigger"] == "consecutive_invalid"
+    assert len(lines) == 1 and "kind=step_budget_exceeded" in lines[0] and "kind=other" not in lines[0]
+    assert "147.5" not in lines[0]                      # the text is not copied
+    assert h.error_kind_for("m") == bh.KIND_STEP_BUDGET
+    assert h._cooldown(h._get("m")) == 60               # plain cooldown, not the runner one
 
 
 class FailingBackend:
@@ -138,7 +164,7 @@ async def test_reload_requested_once_then_rate_limited_for_ten_minutes(tmp_path,
 async def test_non_runner_error_does_not_request_a_reload(tmp_path, monkeypatch, command):  # noqa: F811
     cmd, marker = command
     monkeypatch.setenv("LLM_ROUTER_BACKEND_RECYCLE_CMD", cmd)
-    app = _app(tmp_path, FailingBackend("unknown tool 'llm'"), Clock())
+    app = _app(tmp_path, FailingBackend("Read: 'path' missing"), Clock())  # kind=other
     await _post(app, _req())
     row = _rows(tmp_path)[-1]
     assert "backend_error_kind" not in row and "recycle" not in (row.get("backend_health") or {})

@@ -326,6 +326,7 @@
     "appended_only": null,
     "auth": "oauth",
     "authority": "route",
+    "backend_error_kind": "truncated",
     "backend_usage": {
      "context_truncated": false,
      "eval_s": 0.4,
@@ -876,6 +877,7 @@
     "appended_only": null,
     "auth": "oauth",
     "authority": "route",
+    "backend_error_kind": "unknown_tool",
     "backend_usage": {
      "context_truncated": false,
      "eval_s": 0.4,
