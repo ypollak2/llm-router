@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shlex
 import signal
 import subprocess
 import time
@@ -31,7 +32,18 @@ MAX_PER_HOUR = 3
 HOUR_S = 3600.0
 RELOAD_TIMEOUT_S = 120.0
 CMD_TIMEOUT_S = 10.0
-_CHILD_CMD = re.compile(r"llama-server|ollama runner|ollama\s+runner", re.IGNORECASE)
+
+
+def _is_runner_cmd(command: str) -> bool:
+    """True only when the executable (argv0 basename) is llama-server, or ``ollama runner ...``."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if not argv:
+        return False
+    exe = os.path.basename(argv[0])
+    return exe == "llama-server" or (exe == "ollama" and len(argv) > 1 and argv[1] == "runner")
 
 
 def enabled() -> bool:
@@ -77,6 +89,11 @@ class RunnerRecover:
         self.clock = clock or time.monotonic
         self.starts: list[float] = []
 
+    async def _snapshot(self, cp: str) -> tuple[str, str] | None:
+        out = (await self._run(["ps", "-o", "ppid=,command=", "-p", cp])).strip()
+        parts = out.split(None, 1)
+        return (parts[0], parts[1]) if len(parts) == 2 else None
+
     @staticmethod
     def _row(status: str, reason: str, t0: float, clock, **extra) -> dict:
         return {"recycle": status, "runner_recover": status, "reason": reason, "exit_code": None,
@@ -99,15 +116,20 @@ class RunnerRecover:
             r"^p(\d+)$", await self._run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"]), re.M)}
         if listeners != {pid}:
             return self._row("skipped", "listener_not_pidfile_pid", t0, self.clock)
-        children = []
+        children: dict[int, tuple[str, str]] = {}
         for cp in re.findall(r"\d+", await self._run(["pgrep", "-P", str(pid)])):
-            if _CHILD_CMD.search(await self._run(["ps", "-o", "command=", "-p", cp])):
-                children.append(int(cp))
+            snap = await self._snapshot(cp)
+            if snap and snap[0] == str(pid) and _is_runner_cmd(snap[1]):
+                children[int(cp)] = snap
         if not children:
             return self._row("skipped", "no_runner_child", t0, self.clock)
+        if not self.model or not self.num_ctx:   # S5: decided before any signal is sent
+            return self._row("skipped", "no_model", t0, self.clock)
         self.starts.append(t0)   # counts only attempts that reach the kill
         try:
-            for cp in children:
+            for cp, snap in children.items():
+                if await self._snapshot(str(cp)) != snap:   # S2: ppid or command changed since the scan
+                    return self._row("skipped", "child_changed", t0, self.clock)
                 self._kill(cp, signal.SIGTERM)
         except OSError:
             return self._row("failed", "kill_failed", t0, self.clock)
