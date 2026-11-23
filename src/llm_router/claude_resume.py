@@ -127,15 +127,14 @@ def plan(config: Any, model: str, scope_root: str | None, cwd: str,
         if now < _PAUSED.get(key, 0.0):
             return None, None
         _PAUSED.pop(key, None)
-        _BUSY.add(key)
         entry = _STORE.get(key)
-        if entry is None:
-            return key, None
-        ttl = float(_cfg(config, "llm_router_claude_offload_resume_ttl_s", 3300))
-        cap = int(_cfg(config, "llm_router_claude_offload_resume_max_ctx_tokens", 150_000))
-        if now - entry.last_used > ttl or entry.ctx_tokens >= cap:
-            _STORE.pop(key, None)
-            return key, None
+        if entry is not None:
+            ttl = float(_cfg(config, "llm_router_claude_offload_resume_ttl_s", 3300))
+            cap = int(_cfg(config, "llm_router_claude_offload_resume_max_ctx_tokens", 150_000))
+            if now - entry.last_used > ttl or entry.ctx_tokens >= cap:
+                _STORE.pop(key, None)
+                entry = None
+        _BUSY.add(key)      # last step before the return: nothing after this can raise
         return key, entry
     except Exception:                                        # noqa: BLE001
         return None, None

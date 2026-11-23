@@ -349,6 +349,7 @@ def routed(temp_db, mock_env, monkeypatch):
     monkeypatch.delenv("LLM_ROUTER_BLOCK_PROVIDERS", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "")
     monkeypatch.setenv("LLM_ROUTER_CLAUDE_SUBSCRIPTION", "true")
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_OFFLOAD_RESUME", "true")     # off by default: enable explicitly
     monkeypatch.setattr("llm_router.router.is_codex_available", lambda: False)
     monkeypatch.setattr("llm_router.router.is_gemini_cli_available", lambda: False)
     monkeypatch.setattr("llm_router.claude_usage.get_claude_pressure", lambda: 0.1)
@@ -527,3 +528,35 @@ async def test_usage_row_for_a_cli_offload_is_priced_with_1h_writes(temp_db):
     # only the cache-write component differs: 200k tokens at (2.0 - 1.25)x the baseline input rate
     assert rows["c-1h"] - rows["c-5m"] == pytest.approx(200_000 * inp * 0.75 / 1_000_000)
     assert rows["c-1h"] > rows["c-5m"] > 0
+
+
+def test_resume_is_off_by_default():
+    from llm_router.config import RouterConfig
+    assert RouterConfig.model_fields["llm_router_claude_offload_resume"].default is False
+    assert claude_resume.enabled(SimpleNamespace()) is False
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("boom"), asyncio.CancelledError()], ids=["raises", "cancelled"])
+@pytest.mark.asyncio
+async def test_router_releases_the_key_when_run_claude_raises_or_is_cancelled(routed, monkeypatch, exc):
+    import llm_router.router as rm
+    routed.replies += [_res(sid=SID, total=0.40), _res(sid=SID, total=0.46)]
+    await _call("first")
+    if not routed.sent:
+        pytest.skip("anthropic CLI branch was not selected by this harness")
+    inner = rm.run_claude
+
+    async def boom(prompt, **kw):
+        raise exc
+
+    monkeypatch.setattr(rm, "run_claude", boom)
+    with pytest.raises((Exception, asyncio.CancelledError)):
+        await _call("second")
+    assert claude_resume._BUSY == set()                        # not stuck in flight
+    # the session entry survived and its key is free, so the next plan() on it resumes. (Not a third
+    # routed call: a raising provider trips the health tracker and would hide the point.)
+    (key, entry), = claude_resume._STORE.items()
+    k2, e2 = claude_resume.plan(_cfg(), key[3], key[1], key[2], conversation=None)
+    assert k2 == key and e2 is entry and e2.session_id == SID
+    claude_resume.release(k2)
+    del inner

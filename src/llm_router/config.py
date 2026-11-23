@@ -302,13 +302,15 @@ class RouterConfig(BaseSettings):
     llm_router_claude_offload_max_pressure: float = 0.80
 
     # ── Claude offload: resume one CLI session per llm-router session ──
-    # True: repeated offloads in one llm-router session continue ONE `claude -p --resume`
-    # session, so the history is read from the prompt cache instead of re-written. A resumed
-    # turn sends only the new request (plus an explicit caller_context); session-accumulator
-    # entries other providers added since the session's last turn are NOT re-sent. False
-    # restores the old behaviour: every offload is a fresh call with the session buffer folded
-    # into one flat prompt. Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME.
-    llm_router_claude_offload_resume: bool = True
+    # Off by default (new behaviour ships off). True: repeated offloads in one llm-router
+    # session continue ONE `claude -p --resume` session, so the history is read from the prompt
+    # cache instead of re-written; the gain is quota and latency, not dollars on a flat-rate
+    # plan. A resumed turn sends only the new request (plus an explicit caller_context);
+    # session-accumulator entries other providers added since the session's last turn are NOT
+    # re-sent. Token fields on these usage rows change meaning (uncached input only). False:
+    # every offload is a fresh call with the session buffer folded into one flat prompt.
+    # Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME.
+    llm_router_claude_offload_resume: bool = False
     # A resumed session is dropped once idle longer than this. 3300 s sits under the 1-hour
     # cache TTL: a live probe 2026-11-23 (Sonnet, real CLI) wrote 47,035 cache tokens for
     # $0.188184 = $4.00/M, the 1-HOUR write price, so the CLI writes 1 h cache, not 5 min.
