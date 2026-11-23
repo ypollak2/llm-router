@@ -170,6 +170,56 @@ def _usage_of(doc: dict) -> dict[str, int] | None:
     return out
 
 
+_ISOLATED_CWD_WARNED: set[tuple[str, str]] = set()
+
+
+def isolated_cwd() -> tuple[str | None, str]:
+    """``(dir, reason)``: the neutral, empty, private cwd for an isolated offload.
+
+    ``<tmp>/llm-router-claude-offload-<uid>``, mode 0o700, never under $HOME (``project``
+    settings and CLAUDE.md resolve from the cwd, and from $HOME that pulls the user's
+    ~/.claude back in; enforced on the resolved path, so TMPDIR=$HOME/tmp is refused).
+    ``(None, reason)`` when it cannot be used safely (under $HOME, exists but is not a real
+    dir (a symlink counts as not a dir) owned by this uid, or is group/world-writable): the
+    caller then keeps today's cwd. The warning is logged once per process per reason.
+    """
+    import logging
+    import stat
+    import tempfile
+
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    path = os.path.join(tempfile.gettempdir(), f"llm-router-claude-offload-{uid}")
+    reason = ""
+    try:
+        home = os.path.realpath(os.path.expanduser("~"))
+        real = os.path.realpath(path)
+        if real == home or real.startswith(home.rstrip(os.sep) + os.sep):
+            reason = "under $HOME (project settings would resolve from ~/.claude)"
+        else:
+            try:
+                os.mkdir(path, 0o700)
+            except FileExistsError:
+                pass
+        st = os.lstat(path) if not reason else None
+        if st is None:
+            pass
+        elif not stat.S_ISDIR(st.st_mode):
+            reason = "exists but is not a directory"
+        elif hasattr(os, "getuid") and st.st_uid != uid:
+            reason = "owned by another uid"
+        elif st.st_mode & 0o022:
+            reason = "group/world-writable"
+    except OSError as exc:
+        reason = f"cannot create: {exc}"
+    if reason:
+        if (path, reason) not in _ISOLATED_CWD_WARNED:       # once per process, not per offload
+            _ISOLATED_CWD_WARNED.add((path, reason))
+            logging.getLogger(__name__).warning(
+                "claude offload isolation: neutral cwd %s unusable (%s); using the caller's cwd", path, reason)
+        return None, reason
+    return path, ""
+
+
 async def run_claude(
     prompt: str,
     model: str = "sonnet",
@@ -180,6 +230,8 @@ async def run_claude(
     resume_session_id: str | None = None,
     structured: bool = False,
     inject_context: bool = True,
+    isolate: bool = False,
+    subprocess_cwd: str | None = None,
 ) -> ClaudeResult:
     """Run a one-shot prompt through the `claude` CLI as a subprocess.
 
@@ -197,6 +249,14 @@ async def run_claude(
     ``total_cost_usd``. ``resume_session_id`` adds ``--resume <id>`` (the caller must use
     the same cwd as the session's first call). ``inject_context=False`` skips OKF/repo
     injection: a resumed session already holds it.
+
+    ``isolate`` adds ``--setting-sources project,local --strict-mcp-config``: the CLI then
+    skips the user's settings/hooks and every MCP server, whose per-call-varying output
+    otherwise defeats the prompt cache. A resumed call must pass the same value as the
+    call that created the session (``claude_resume`` keys on it).
+
+    ``subprocess_cwd`` overrides ONLY the directory the subprocess runs in (context scoping
+    still follows ``context_root`` / ``working_dir``); see ``isolated_cwd``.
     """
     from llm_router.safe_subprocess import get_safe_env
 
@@ -214,12 +274,14 @@ async def run_claude(
             model=model, exit_code=1, duration_sec=0.0,
         )
 
-    cwd = working_dir or os.getcwd()
+    cwd = subprocess_cwd or working_dir or os.getcwd()
     if timeout is None:
         timeout = int(os.environ.get("LLM_ROUTER_CLAUDE_TIMEOUT", "300"))
 
     args = [binary, "-p", prompt, "--output-format", "json" if structured else "text",
             "--model", _model_alias(model)]
+    if isolate:
+        args += ["--setting-sources", "project,local", "--strict-mcp-config"]
     if resume_session_id:
         args += ["--resume", resume_session_id]
 

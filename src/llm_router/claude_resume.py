@@ -76,11 +76,13 @@ def host_session_id() -> str | None:
         return None
 
 
-def make_key(model_alias: str, scope_root: str | None, cwd: str) -> tuple | None:
+def make_key(model_alias: str, scope_root: str | None, cwd: str, isolate: bool = False) -> tuple | None:
     sid = host_session_id()
     if not sid:
         return None
-    return (sid, scope_root or "", os.path.realpath(cwd), model_alias)
+    # ``isolate`` is part of the key: a session created with one flag set must never be
+    # resumed under the other (the CLI's settings/MCP load, hence the cached prefix, differ).
+    return (sid, scope_root or "", os.path.realpath(cwd), model_alias, bool(isolate))
 
 
 def resume_prompt(prompt: str, caller_context: str | None) -> str:
@@ -106,6 +108,10 @@ def enabled(config: Any) -> bool:
     return getattr(config, "llm_router_claude_offload_resume", False) is True
 
 
+def isolate_enabled(config: Any) -> bool:
+    return getattr(config, "llm_router_claude_offload_isolate", False) is True
+
+
 def plan(config: Any, model: str, scope_root: str | None, cwd: str,
          *, conversation: object | None, now: float | None = None) -> tuple[tuple | None, _Entry | None]:
     """``(key, entry)`` for this call. ``key`` None = do not use sessions; ``entry`` None = first turn.
@@ -121,7 +127,7 @@ def plan(config: Any, model: str, scope_root: str | None, cwd: str,
             return None, None
         now = time.monotonic() if now is None else now
         from llm_router.claude_agent import model_alias
-        key = make_key(model_alias(model), scope_root, cwd)
+        key = make_key(model_alias(model), scope_root, cwd, isolate_enabled(config))
         if key is None or key in _BUSY:
             return None, None
         paused_until = _PAUSED.get(key)
