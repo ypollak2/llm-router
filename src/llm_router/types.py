@@ -587,6 +587,9 @@ class LLMResponse:
     api_equivalent_cost_usd: float | None = None
     # True when this call continued an existing CLI session (``--resume``) instead of starting one.
     cli_session_resumed: bool = False
+    # True when ``cache_creation_input_tokens`` were written with the 1-hour TTL (2.0x input), as the
+    # Claude CLI does; cost.log_usage then prices them at that rate. False = the 5-minute rate.
+    cache_write_1h: bool = False
 
     def summary(self) -> str:
         """Format a compact one-line summary for logging and CLI display.

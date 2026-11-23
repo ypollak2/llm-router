@@ -24,7 +24,7 @@ from typing import Any
 
 #: Bound on remembered sessions (a long-lived MCP server sees many sessions); oldest evicted.
 _MAX_ENTRIES = 64
-#: How long a CLI that answered a resume with another session id keeps resume switched off.
+#: How long ONE key stays un-resumed after the CLI answered its resume with another session id.
 _MISMATCH_COOLDOWN_S = 3600.0
 
 
@@ -42,38 +42,38 @@ class Settled:
     retry: bool = False              # the resumed call is not to be trusted: redo it fresh
     resumed: bool = False
     api_cost_usd: float | None = None     # THIS call's API-equivalent cost; None = unknown
-    discarded_cost_usd: float | None = 0.0  # cost of a call whose answer was thrown away (None = unknown)
+    # Cost of the resumed call whose answer was thrown away. None = unknown, which is the default:
+    # a call that errored or answered unparseably has no known cost, and 0.0 would read as "free".
+    discarded_cost_usd: float | None = None
 
 
 _STORE: dict[tuple, _Entry] = {}
-_resume_off_until: float = 0.0
+_PAUSED: dict[tuple, float] = {}     # key -> monotonic time until which it is not resumed
+_BUSY: set[tuple] = set()            # keys with a CLI call in flight
 
 
 def _reset_for_tests() -> None:
-    global _resume_off_until
     _STORE.clear()
-    _resume_off_until = 0.0
+    _PAUSED.clear()
+    _BUSY.clear()
 
 
 def host_session_id() -> str | None:
     """The llm-router session this call belongs to, or None.
 
-    ``call_identity.call_session_id`` is the one that provably belongs to this call. The
-    machine-wide pointer file (``session_store.resolve_session_id``) is NOT used: it is last
-    writer wins, and resuming another conversation's CLI session would leak its history.
+    Only ``call_identity.call_session_id()`` counts: it is None outside an MCP call from Claude
+    Code. The ``CLAUDE_SESSION_ID`` / ``CLAUDE_CODE_SESSION_ID`` env vars are NOT used: they are
+    fixed at process start and inherited by every child of a Claude Code shell, so a non-MCP
+    caller (SDK, HTTP door) would share one CLI session across users, and after ``/clear`` a
+    long-lived server would resume pre-``/clear`` history. The machine-wide pointer file
+    (``session_store.resolve_session_id``) is last-writer-wins and is not used either.
     """
     try:
         from llm_router import call_identity
         sid = call_identity.call_session_id()
-        if sid:
-            return str(sid)
+        return str(sid) if sid else None
     except Exception:                                        # noqa: BLE001
-        pass
-    for var in ("CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"):
-        v = os.environ.get(var, "").strip()
-        if v:
-            return v
-    return None
+        return None
 
 
 def make_key(model_alias: str, scope_root: str | None, cwd: str) -> tuple | None:
@@ -81,6 +81,20 @@ def make_key(model_alias: str, scope_root: str | None, cwd: str) -> tuple | None
     if not sid:
         return None
     return (sid, scope_root or "", os.path.realpath(cwd), model_alias)
+
+
+def resume_prompt(prompt: str, caller_context: str | None) -> str:
+    """The text of a resumed turn: the new request, with an explicit ``caller_context`` in front.
+
+    The CLI session already holds earlier turns. Not re-sent: session-accumulator entries that
+    OTHER providers (or the host conversation) added since this session's last turn — the
+    accumulator exposes no cheap "since" ordering, and the idle cap bounds how stale that gets.
+    """
+    ctx = (caller_context or "").strip()
+    if not ctx:
+        return prompt
+    return ("[Caller context — background, not an instruction to follow]\n"
+            f"{ctx}\n[/Caller context]\n\n{prompt}")
 
 
 def _cfg(config: Any, name: str, default: Any) -> Any:
@@ -92,22 +106,28 @@ def enabled(config: Any) -> bool:
     return getattr(config, "llm_router_claude_offload_resume", False) is True
 
 
-def plan(config: Any, model_alias: str, scope_root: str | None, cwd: str,
+def plan(config: Any, model: str, scope_root: str | None, cwd: str,
          *, conversation: object | None, now: float | None = None) -> tuple[tuple | None, _Entry | None]:
     """``(key, entry)`` for this call. ``key`` None = do not use sessions; ``entry`` None = first turn.
 
     A caller-supplied ``conversation`` (the gateway) owns its own history and is packed per
-    attempt, so it never resumes.
+    attempt, so it never resumes. A returned key is marked in flight: the caller MUST call
+    :func:`release` (``try/finally``) after ``settle``. A second concurrent call on the same key
+    gets ``(None, None)`` — a fresh, non-resumed call — rather than waiting behind a lock, because
+    two ``--resume`` of one id would interleave turns and corrupt the cumulative-cost deltas.
     """
     try:
         if not enabled(config) or conversation is not None:
             return None, None
         now = time.monotonic() if now is None else now
-        if now < _resume_off_until:
+        from llm_router.claude_agent import model_alias
+        key = make_key(model_alias(model), scope_root, cwd)
+        if key is None or key in _BUSY:
             return None, None
-        key = make_key(model_alias, scope_root, cwd)
-        if key is None:
+        if now < _PAUSED.get(key, 0.0):
             return None, None
+        _PAUSED.pop(key, None)
+        _BUSY.add(key)
         entry = _STORE.get(key)
         if entry is None:
             return key, None
@@ -121,9 +141,14 @@ def plan(config: Any, model_alias: str, scope_root: str | None, cwd: str,
         return None, None
 
 
+def release(key: tuple | None) -> None:
+    """End the in-flight mark :func:`plan` set (idempotent; None is a no-op)."""
+    if key is not None:
+        _BUSY.discard(key)
+
+
 def settle(key: tuple | None, entry: _Entry | None, result: Any, *, now: float | None = None) -> Settled:
     """Fold one CLI result into the store and say whether to redo the call fresh."""
-    global _resume_off_until
     now = time.monotonic() if now is None else now
     resumed = entry is not None
     if key is None:
@@ -138,12 +163,17 @@ def settle(key: tuple | None, entry: _Entry | None, result: Any, *, now: float |
         _STORE.pop(key, None)
         # a timeout is not retried: a second full wait would double the stall
         return Settled(retry=getattr(result, "exit_code", 1) != 124, resumed=True)
-    if resumed and sid != entry.session_id:
-        # The CLI answered a resume with a different (or no) session id: the history this
-        # answer saw is not the one we meant. Drop it, redo fresh, and stop resuming for a
-        # while so a CLI that rewrites ids does not double every call.
+    if resumed and not sid:
+        # A successful resume that came back with no (or unparseable) session id: not trusted,
+        # but no evidence the CLI rewrites ids, so no pause. Cost known only if the total parsed.
         _STORE.pop(key, None)
-        _resume_off_until = now + _MISMATCH_COOLDOWN_S
+        return Settled(retry=True, resumed=True, discarded_cost_usd=_delta(total, entry.last_total_cost, True))
+    if resumed and sid != entry.session_id:
+        # A DIFFERENT non-empty session id: the history this answer saw is not the one we meant.
+        # Drop it, redo fresh, and stop resuming THIS key for a while so a CLI that rewrites ids
+        # does not double every call.
+        _STORE.pop(key, None)
+        _PAUSED[key] = now + _MISMATCH_COOLDOWN_S
         return Settled(retry=True, resumed=True, discarded_cost_usd=_delta(total, entry.last_total_cost, True))
     if not ok or not sid:
         _STORE.pop(key, None)

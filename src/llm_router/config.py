@@ -303,10 +303,11 @@ class RouterConfig(BaseSettings):
 
     # ── Claude offload: resume one CLI session per llm-router session ──
     # True: repeated offloads in one llm-router session continue ONE `claude -p --resume`
-    # session, so the history is read from the prompt cache (measured 2026-11-22, N=3 per
-    # arm: Opus $4.10 -> $0.62, Sonnet $0.42 -> $0.15). False restores the old behaviour:
-    # every offload is a fresh call with the session buffer folded into one flat prompt.
-    # Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME.
+    # session, so the history is read from the prompt cache instead of re-written. A resumed
+    # turn sends only the new request (plus an explicit caller_context); session-accumulator
+    # entries other providers added since the session's last turn are NOT re-sent. False
+    # restores the old behaviour: every offload is a fresh call with the session buffer folded
+    # into one flat prompt. Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME.
     llm_router_claude_offload_resume: bool = True
     # A resumed session is dropped once idle longer than this. 3300 s sits under the 1-hour
     # cache TTL: a live probe 2026-11-23 (Sonnet, real CLI) wrote 47,035 cache tokens for

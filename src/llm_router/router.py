@@ -60,7 +60,7 @@ from llm_router.redaction_routing import maybe_redact as _maybe_redact
 from llm_router.state import get_active_agent
 from llm_router.codex_agent import CODEX_MODELS, is_codex_available, run_codex
 from llm_router import claude_resume
-from llm_router.claude_agent import _model_alias, offload_available as claude_offload_available, run_claude
+from llm_router.claude_agent import offload_available as claude_offload_available, run_claude
 from llm_router.contract import build_contract
 from llm_router.gates import run_gates
 from llm_router.gemini_cli_agent import GEMINI_MODELS, is_gemini_cli_available, run_gemini_cli
@@ -3789,32 +3789,37 @@ async def _dispatch_model_loop(
                             await _notify(ctx, "info", f"⚡ claude: {text}")
                     _claude_scope_root = _cli_scope_root(scope_root)
                     _key, _entry = claude_resume.plan(
-                        config, _model_alias(model_name), _claude_scope_root, os.getcwd(),
+                        config, model_name, _claude_scope_root, os.getcwd(),
                         conversation=conversation)
                     _discarded: float | None = 0.0
-                    while True:
-                        # ONE call site. A resumed turn sends only the new request (the CLI
-                        # session already holds the history and the injected context). A fresh
-                        # turn folds the session buffer exactly as before. Pass 2 happens only
-                        # when settle() refuses a resumed answer, with the entry cleared.
-                        claude_result = await run_claude(
-                            prompt if _entry is not None else
-                            await _cli_prompt_with_context(prompt, "anthropic", caller_context, config, _claude_scope_root,
-                                                           conversation=conversation, context_door=context_door),
-                            model=model_name, on_event=_claude_on_event,
-                            # OKF-SCOPE-06: see the codex branch above.
-                            context_root=_claude_scope_root,
-                            resume_session_id=_entry.session_id if _entry is not None else None,
-                            # --output-format json: session id + per-call tokens for the ledger.
-                            structured=claude_resume.enabled(config),
-                            inject_context=_entry is None,
-                        )
-                        _settled = claude_resume.settle(_key, _entry, claude_result)
-                        if not _settled.retry:
-                            break
-                        _discarded = (None if _discarded is None or _settled.discarded_cost_usd is None
-                                      else _discarded + _settled.discarded_cost_usd)
-                        _entry = None
+                    try:
+                        while True:
+                            # ONE call site. A resumed turn sends only the new request (the CLI
+                            # session already holds the history and the injected context) plus
+                            # any explicit caller_context. A fresh turn folds the session buffer
+                            # exactly as before. Pass 2 happens only when settle() refuses a
+                            # resumed answer, with the entry cleared. The key stays in flight
+                            # until the finally below, so a concurrent call runs fresh.
+                            claude_result = await run_claude(
+                                claude_resume.resume_prompt(prompt, caller_context) if _entry is not None else
+                                await _cli_prompt_with_context(prompt, "anthropic", caller_context, config, _claude_scope_root,
+                                                               conversation=conversation, context_door=context_door),
+                                model=model_name, on_event=_claude_on_event,
+                                # OKF-SCOPE-06: see the codex branch above.
+                                context_root=_claude_scope_root,
+                                resume_session_id=_entry.session_id if _entry is not None else None,
+                                # --output-format json: session id + per-call tokens for the ledger.
+                                structured=claude_resume.enabled(config),
+                                inject_context=_entry is None,
+                            )
+                            _settled = claude_resume.settle(_key, _entry, claude_result)
+                            if not _settled.retry:
+                                break
+                            _discarded = (None if _discarded is None or _settled.discarded_cost_usd is None
+                                          else _discarded + _settled.discarded_cost_usd)
+                            _entry = None
+                    finally:
+                        claude_resume.release(_key)
                     if not claude_result.success:
                         # Same rationale as the Codex branch above: the chain
                         # error keeps only the first 200 chars, so parse the
@@ -3853,7 +3858,17 @@ async def _dispatch_model_loop(
                         api_equivalent_cost_usd=(None if _settled.api_cost_usd is None or _discarded is None
                                                  else _settled.api_cost_usd + _discarded),
                         cli_session_resumed=_settled.resumed,
+                        # The CLI writes its prompt cache with the 1-hour TTL (probe 2026-11-23:
+                        # $4.00/M on Sonnet 5.5 = 2.0x input); cost.log_usage prices on that.
+                        cache_write_1h=_cli_usage is not None,
                     )
+                    if _discarded != 0.0:
+                        # After a discarded retry the token fields are the FINAL call's only (a
+                        # failed call reports none); api_equivalent_cost_usd adds the discarded
+                        # call's cost when known and is None when it is not.
+                        log.info("claude offload: resumed answer discarded and redone fresh "
+                                 "(tokens are the final call's; discarded cost %s)",
+                                 "unknown" if _discarded is None else f"${_discarded:.6f}")
                 else:
                     response = await _call_text(
                         model, prompt, system_prompt, temperature, max_tokens, task_type,

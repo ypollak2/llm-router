@@ -163,7 +163,10 @@ def test_partial_usage_block_is_unknown_not_zero(cli):
 # -- claude_resume: plan / settle ------------------------------------------------------------------
 
 def _plan(cfg=None, model="opus", scope="/repo", cwd="/repo", conv=None, now=None):
-    return claude_resume.plan(cfg or _cfg(), model, scope, cwd, conversation=conv, now=now)
+    """plan() then release: these tests are sequential, one call at a time (see the busy tests)."""
+    key, entry = claude_resume.plan(cfg or _cfg(), model, scope, cwd, conversation=conv, now=now)
+    claude_resume.release(key)
+    return key, entry
 
 
 def test_second_call_resumes_and_cost_is_the_delta_of_the_cumulative_total():
@@ -221,8 +224,11 @@ def test_fallback_on_session_id_mismatch_discards_the_answer_and_pauses_resume()
     s = claude_resume.settle(key, e, _res(sid="other-session", total=0.48), now=1.0)
     assert s.retry is True
     assert s.discarded_cost_usd == pytest.approx(0.08)        # the thrown-away call still cost something
-    # A CLI that rewrites ids on resume would double every call: resume stays off for a while.
+    # A CLI that rewrites ids on resume would double every call: THIS key stays un-resumed for a
+    # while; another key (model) is unaffected.
     assert _plan(now=2.0) == (None, None)
+    k2, _ = _plan(model="sonnet", now=2.0)
+    assert k2 is not None
 
 
 def test_cap_by_age():
@@ -277,17 +283,59 @@ def test_fresh_call_without_a_key_still_reports_its_own_cost():
     assert claude_resume.settle(None, None, _res(rc=1, total=None)).api_cost_usd is None
 
 
-def test_host_session_id_ignores_the_machine_wide_pointer(monkeypatch):
+def test_host_session_id_uses_only_the_mcp_call_identity(monkeypatch):
     monkeypatch.undo()           # use the real function, not the fixture's stub
-    monkeypatch.delenv("CLAUDE_SESSION_ID", raising=False)
-    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     called = MagicMock(return_value="POINTER")
     monkeypatch.setattr("llm_router.session_store.resolve_session_id", called)
     monkeypatch.setattr("llm_router.call_identity.call_session_id", lambda: None)
+    # process-wide env ids are inherited by every child of a Claude Code shell: never a key
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "from-env")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "from-env-2")
     assert claude_resume.host_session_id() is None
     called.assert_not_called()
-    monkeypatch.setenv("CLAUDE_SESSION_ID", "from-env")
-    assert claude_resume.host_session_id() == "from-env"
+    assert claude_resume.make_key("opus", "/repo", "/repo") is None
+    cfg = _cfg()
+    assert claude_resume.plan(cfg, "opus", "/repo", "/repo", conversation=None) == (None, None)
+    monkeypatch.setattr("llm_router.call_identity.call_session_id", lambda: "mcp-sess")
+    assert claude_resume.host_session_id() == "mcp-sess"
+
+
+def test_concurrent_calls_on_one_key_second_runs_fresh():
+    k1, e1 = claude_resume.plan(_cfg(), "opus", "/repo", "/repo", conversation=None, now=0.0)
+    k2, e2 = claude_resume.plan(_cfg(), "opus", "/repo", "/repo", conversation=None, now=0.0)
+    assert k1 is not None and k2 is None and e2 is None       # second does not wait, does not resume
+    # an unkeyed fresh call never touches the stored entry
+    claude_resume.settle(k2, e2, _res(sid="other", total=0.9), now=0.0)
+    claude_resume.settle(k1, e1, _res(), now=0.0)
+    claude_resume.release(k1)
+    k3, e3 = claude_resume.plan(_cfg(), "opus", "/repo", "/repo", conversation=None, now=1.0)
+    assert e3 is not None and e3.session_id == SID
+    claude_resume.release(k3)
+
+
+def test_missing_session_id_on_resume_retries_fresh_without_pausing():
+    key, _ = _plan(now=0.0)
+    claude_resume.settle(key, None, _res(), now=0.0)
+    _, e = _plan(now=1.0)
+    s = claude_resume.settle(key, e, _res(sid=None, total=None), now=1.0)
+    assert s.retry is True and s.discarded_cost_usd is None    # unknown, not 0.0
+    k2, e2 = _plan(now=2.0)
+    assert k2 == key and e2 is None                            # entry dropped, key NOT paused
+
+
+def test_failed_resume_cost_is_unknown_not_zero():
+    key, _ = _plan(now=0.0)
+    claude_resume.settle(key, None, _res(), now=0.0)
+    _, e = _plan(now=1.0)
+    s = claude_resume.settle(key, e, _res(rc=1, sid=None, usage=None, total=None), now=1.0)
+    assert s.discarded_cost_usd is None
+
+
+def test_resume_prompt_prepends_caller_context_only_when_set():
+    assert claude_resume.resume_prompt("new", None) == "new"
+    assert claude_resume.resume_prompt("new", "  ") == "new"
+    out = claude_resume.resume_prompt("new", "use the v2 API")
+    assert out.endswith("new") and "use the v2 API" in out and out.index("v2") < out.index("new")
 
 
 # -- router dispatch: the real branch in router.py, with run_claude replaced ----------------------
@@ -372,7 +420,8 @@ async def test_router_redoes_a_failed_resume_fresh(routed):
     assert [c.resume_session_id for c in routed.sent] == [None, SID, None]
     assert routed.sent[2].prompt.startswith("<FOLDED HISTORY>") and routed.sent[2].inject_context is True
     assert r2.content == "recovered" and r2.cli_session_resumed is False
-    assert r2.api_equivalent_cost_usd == pytest.approx(0.43)
+    # the failed resume's cost is unknown, so the total is unknown: never an understated 0.43
+    assert r2.api_equivalent_cost_usd is None
 
 
 @pytest.mark.asyncio
@@ -390,3 +439,91 @@ async def test_router_flag_off_is_the_old_path(routed, monkeypatch):
     assert all(c.prompt.startswith("<FOLDED HISTORY>") for c in routed.sent)
     assert r.api_equivalent_cost_usd is None                   # unknown, not 0.0
     assert r.input_tokens >= 1                                  # old len//4 estimate
+
+
+@pytest.mark.asyncio
+async def test_router_resume_keeps_caller_context(routed):
+    routed.replies += [_res(sid=SID, total=0.40), _res(sid=SID, total=0.46)]
+    from llm_router.router import route_and_call
+    from llm_router.types import RoutingProfile, TaskType
+    await route_and_call(TaskType.CODE, "first", profile=RoutingProfile.BALANCED)
+    await route_and_call(TaskType.CODE, "second", profile=RoutingProfile.BALANCED,
+                         caller_context="the user pinned API v2")
+    if not routed.sent:
+        pytest.skip("anthropic CLI branch was not selected by this harness")
+    assert routed.sent[1].resume_session_id == SID
+    assert "the user pinned API v2" in routed.sent[1].prompt and routed.sent[1].prompt.endswith("second")
+
+
+@pytest.mark.asyncio
+async def test_router_concurrent_offloads_do_not_share_a_resume(routed):
+    # every reply carries SID, so a resumed call is never read as a mismatch whichever pops it
+    routed.replies += [_res(sid=SID, total=0.40), _res(sid=SID, total=0.46), _res(sid=SID, total=0.10)]
+    await _call("first")
+    gate = asyncio.Event()
+    inside = []
+
+    import llm_router.router as rm
+    inner = rm.run_claude
+
+    async def slow(prompt, **kw):
+        inside.append(prompt)            # both calls are past plan() (it runs before run_claude)
+        await gate.wait()
+        return await inner(prompt, **kw)
+
+    rm.run_claude = slow
+    try:
+        t1 = asyncio.create_task(_call("second"))
+        t2 = asyncio.create_task(_call("third"))
+        for _ in range(300):              # wait until BOTH are blocked inside run_claude
+            if len(inside) == 2:
+                break
+            await asyncio.sleep(0.05)
+        assert len(inside) == 2
+        gate.set()
+        await asyncio.gather(t1, t2)
+    finally:
+        rm.run_claude = inner
+    assert len(routed.sent) == 3
+    resumed = [c for c in routed.sent[1:] if c.resume_session_id]
+    assert len(resumed) == 1                                   # exactly one of the two resumes SID
+
+
+def test_log_usage_prices_cli_cache_writes_at_the_1h_rate():
+    from llm_router import cost, pricing
+    five = cost._claude_cost("claude-sonnet-5-5", 0, 0, cache_write_t=1_000_000)
+    hour = cost._claude_cost("claude-sonnet-5-5", 0, 0, cache_write_t=1_000_000, cache_write_1h=True)
+    inp = pricing.rates_per_m("claude-sonnet-5-5")["input"]
+    assert hour == pytest.approx(inp * 2.0) and five == pytest.approx(inp * 1.25)
+    # other components untouched, and the default (5-minute) path is unchanged
+    assert cost._claude_cost("claude-sonnet-5-5", 1_000_000, 0, cache_read_t=1_000_000, cache_write_1h=True) == \
+        cost._claude_cost("claude-sonnet-5-5", 1_000_000, 0, cache_read_t=1_000_000)
+
+
+@pytest.mark.asyncio
+async def test_usage_row_for_a_cli_offload_is_priced_with_1h_writes(temp_db):
+    """The usage row's potential_cost_usd uses the real tokens, with the 1h write rate only when flagged."""
+    import sqlite3
+    from llm_router import cost
+    from llm_router.config import get_config
+    from llm_router.types import LLMResponse, RoutingProfile, TaskType
+
+    def _resp(one_hour):
+        return LLMResponse(content="x", model="anthropic/sonnet", input_tokens=7, output_tokens=11,
+                           cost_usd=0.0, latency_ms=1.0, provider="anthropic",
+                           cache_creation_input_tokens=200_000, cache_read_input_tokens=300_000,
+                           cache_write_1h=one_hour)
+
+    await cost.log_usage(_resp(True), TaskType.CODE, RoutingProfile.BALANCED, correlation_id="c-1h")
+    await cost.log_usage(_resp(False), TaskType.CODE, RoutingProfile.BALANCED, correlation_id="c-5m")
+    con = sqlite3.connect(str(get_config().llm_router_db_path))
+    try:
+        rows = dict(con.execute("SELECT correlation_id, potential_cost_usd FROM usage").fetchall())
+    finally:
+        con.close()
+    assert set(rows) == {"c-1h", "c-5m"}
+    from llm_router import pricing
+    inp = pricing.rates_per_m(pricing.savings_baseline_model())["input"]
+    # only the cache-write component differs: 200k tokens at (2.0 - 1.25)x the baseline input rate
+    assert rows["c-1h"] - rows["c-5m"] == pytest.approx(200_000 * inp * 0.75 / 1_000_000)
+    assert rows["c-1h"] > rows["c-5m"] > 0

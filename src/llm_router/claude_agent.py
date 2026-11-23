@@ -107,7 +107,7 @@ def offload_available(config: object) -> bool:
     return get_claude_pressure() < cap
 
 
-def _model_alias(model: str) -> str:
+def model_alias(model: str) -> str:
     """Map a router model spec (e.g. ``anthropic/claude-opus-4-8``) to a CLI alias."""
     normalized = model.removeprefix("anthropic/").lower()
     if "opus" in normalized:
@@ -115,6 +115,9 @@ def _model_alias(model: str) -> str:
     if "haiku" in normalized:
         return "haiku"
     return "sonnet"
+
+
+_model_alias = model_alias  # kept: existing importers and tests use the private name
 
 
 @dataclass
