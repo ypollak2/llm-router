@@ -572,6 +572,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_CLS_EMBED_BUDGET_MS": ("llm_router", "proxy/cls_embed.py", 1),
     "LLM_ROUTER_CLS_EMBED_ARTIFACT": ("llm_router", "proxy/cls_embed.py", 1),
     "LLM_ROUTER_CLS_EMBED_KEEP_ALIVE": ("llm_router", "proxy/cls_embed.py", 1),
+    "LLM_ROUTER_CLS_EMBED_AUTHORITY": ("llm_router", "proxy/cls_embed_authority.py", 1),
     "LLM_ROUTER_CLASSIFIER_AUTHORITY": ("llm_router", "proxy/cls_decide.py", 1),
     "LLM_ROUTER_CLASSIFIER_BUDGET_S": ("llm_router", "proxy/cls_decide.py", 1),
     # The classifier's own Ollama alias (M1.4): other callers load qwen3.5 at a different
