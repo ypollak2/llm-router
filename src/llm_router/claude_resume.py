@@ -124,7 +124,8 @@ def plan(config: Any, model: str, scope_root: str | None, cwd: str,
         key = make_key(model_alias(model), scope_root, cwd)
         if key is None or key in _BUSY:
             return None, None
-        if now < _PAUSED.get(key, 0.0):
+        paused_until = _PAUSED.get(key)
+        if paused_until is not None and now < paused_until:
             return None, None
         _PAUSED.pop(key, None)
         entry = _STORE.get(key)
