@@ -131,6 +131,10 @@ HARD_PIN_REASONS = frozenset({REASON_PINNED_TURN, REASON_PINNED_STICKY})
 REASON_STARTED_ELSEWHERE = "conversation_started_on_claude"
 REASON_MEDIA = "media_present"
 REASON_PROMPT_CAP = "prompt_over_cap"
+#: Pin reasons the under-cap release (not the once-only P7 lift) may lift. ``REASON_STARTED_ELSEWHERE`` is stored as a
+#: pin reason only by the ``started_elsewhere`` branch (a process that never saw the conversation start, e.g. after a
+#: restart); a failed local step stores no reason or a pinned_turn/sticky one, so it is never in this set.
+UNDERCAP_RELEASABLE_REASONS = frozenset({REASON_PROMPT_CAP, REASON_STARTED_ELSEWHERE})
 #: LLM_ROUTER_CAP_GUARD_RECONCILE: under the cap, but the backend's window guard would refuse it.
 REASON_PROMPT_GUARD = "prompt_over_guard"
 REASON_PROMPT_UNMEASURABLE = "prompt_unmeasurable"  # ESTREC-1: nested past the recursion limit; no token count exists
@@ -618,7 +622,9 @@ class LocalModeState:
         """Lift a ``prompt_over_cap`` claude pin. P7 (``once=True``): at most once per session. The under-cap
         release (``once=False``) may repeat up to ``UNDERCAP_RELEASES_MAX`` times: each lift needs the turn to go local. False (nothing changed)
         for any other pin, no pin, or (``once``) a session already unpinned once."""
-        if (self.pins.get(key) != PIN_CLAUDE or self.pin_reasons.get(key) != REASON_PROMPT_CAP
+        reason = self.pin_reasons.get(key)
+        if (self.pins.get(key) != PIN_CLAUDE
+                or reason != REASON_PROMPT_CAP and (once or reason not in UNDERCAP_RELEASABLE_REASONS)
                 or (once and key in self.unpinned_once)
                 or (not once and not self.undercap_release_left(key))):
             return False

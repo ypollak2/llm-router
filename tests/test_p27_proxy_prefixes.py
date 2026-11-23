@@ -264,6 +264,7 @@ def turns(*texts):
 
 
 async def test_local_prefix_serves_one_step_and_the_claude_pin_holds(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_UNDERCAP_UNPIN", "0")  # these pin tests predate the size release of a restart pin
     post, seen, backend, _ = await door(tmp_path, monkeypatch, local=True)
     _, _, row = await post(turns("explain this", "and the next part"))  # never saw the start
     assert row["reason"] == "conversation_started_on_claude" and len(seen) == 1
@@ -276,6 +277,7 @@ async def test_local_prefix_serves_one_step_and_the_claude_pin_holds(tmp_path, m
 
 
 async def test_a_refused_local_step_leaves_no_local_pin(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_UNDERCAP_UNPIN", "0")  # these pin tests predate the size release of a restart pin
     post, seen, backend, _ = await door(tmp_path, monkeypatch, local=True)
     await post(turns("explain this", "and the next part"))  # pinned to Claude
     (tmp_path / "kill").touch()

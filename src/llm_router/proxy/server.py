@@ -1162,7 +1162,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         if started_elsewhere:
             # Never migrate a conversation already on Claude (or one this
             # process never saw the start of): its prompt cache lives there.
-            lm.set_pin(key, local_mode.PIN_CLAUDE)
+            # The reason is recorded: a restart forgot why the conversation was on Claude, and a pin with no reason
+            # is also what a failed local step leaves. Only this marker (not a bare pin) joins the under-cap release.
+            lm.set_pin(key, local_mode.PIN_CLAUDE, local_mode.REASON_STARTED_ELSEWHERE)
             pinned = local_mode.PIN_CLAUDE
         payload = to_ollama(body, cfg.model.split("/", 1)[1], num_ctx=cfg.num_ctx, max_predict=1)
         breaker_ok, breaker_detail = await lm_breaker.allows(None)
@@ -1178,9 +1180,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         unpin_reason = "reduced_fits"
         if (stored == local_mode.PIN_CLAUDE and not force and not exempt and not lm.killed()
                 and undercap_unpin_on() and lm.undercap_release_left(key)
-                and lm.pin_reason_of(key) == local_mode.REASON_PROMPT_CAP):
-            # A pin whose only cause is the prompt size (not a failed local step) is released as soon as the size the
-            # cap tests is back under the cap (DIAG-PIN-CAUSES-20261122: 127 of 556 pinned rows). The turn then takes
+                and lm.pin_reason_of(key) in local_mode.UNDERCAP_RELEASABLE_REASONS):
+            # A pin whose only cause is the prompt size, or a conversation this process never saw start (a restart
+            # forgot the cause), not a failed local step, is released as soon as the size the cap tests is back under the cap (DIAG-PIN-CAUSES-20261122: 127 of 556 pinned rows). The turn then takes
             # the normal decision; the release is spent below only when it actually goes local.
             reduced_est = await asyncio.to_thread(local_mode.estimate_prompt_tokens, cap_payload)
             cap = local_mode.prompt_cap_tokens()
