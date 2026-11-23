@@ -64,6 +64,14 @@ SEAT_ALIASES = {"anthropic": "claude", "claude": "claude", "codex": "codex", "ge
 AUTH_SUBSCRIPTION, AUTH_PAID = "oauth", "api_key"
 PROVIDER_SUBSCRIPTION = "subscription"
 REASON_SUBSCRIPTION = "claude_code_subscription"
+
+
+def _is_subscription_reason(reason: str | None) -> bool:
+    """``claude_code_subscription``, or that code plus a ``:<cause>`` suffix (cc-usage-track writes
+    ``claude_code_subscription:unknown_model:<why>`` for a sub-agent whose model it could not name:
+    still a subscription call, with no price)."""
+    return reason == REASON_SUBSCRIPTION or (
+        isinstance(reason, str) and reason.startswith(REASON_SUBSCRIPTION + ":"))
 CLASSES = ("local", "subscription", "paid", "unclassified")
 PROXY_LOCAL_LABEL = "ollama"
 PROXY_CLAUDE_LABEL = "anthropic"
@@ -445,7 +453,7 @@ def provider_class(provider: str, *, auth: str | None = None, reason: str | None
         return "subscription"
     if auth == AUTH_PAID:
         return "paid"
-    if provider == PROVIDER_SUBSCRIPTION or reason == REASON_SUBSCRIPTION:
+    if provider == PROVIDER_SUBSCRIPTION or _is_subscription_reason(reason):
         return "subscription"
     if provider in LOCAL_PROVIDERS:
         return "local"
@@ -479,7 +487,7 @@ def subscription_seat(provider: str, *, auth: str | None = None, reason: str | N
     router row for ``anthropic`` / ``claude``) or ``other`` (Codex, Gemini CLI: the seats the router
     delegates to). The Claude seat is the one the router tries to spend LESS of and the others the ones
     it wants to spend MORE of, so a surface that prints a mix never lets them share a bucket (W8, D-364)."""
-    if auth == AUTH_SUBSCRIPTION or provider == PROVIDER_SUBSCRIPTION or reason == REASON_SUBSCRIPTION:
+    if auth == AUTH_SUBSCRIPTION or provider == PROVIDER_SUBSCRIPTION or _is_subscription_reason(reason):
         return SEAT_CLAUDE
     return SEAT_CLAUDE if SEAT_ALIASES.get(provider) == "claude" else SEAT_OTHER
 

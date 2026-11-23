@@ -1,4 +1,4 @@
-# llm_router-hook-version: 8
+# llm_router-hook-version: 9
 """PostToolUse[Agent] hook — track Claude Code subscription model calls.
 
 Fires after every Agent subagent completes. Writes an estimated usage record
@@ -12,17 +12,39 @@ now orphaned and may be removed manually.
 
 Token estimation: input from prompt length, output from result length (chars/4).
 Cost: 0.0 — CC subscription is flat-rate, not per-call billed.
-Model mapping from subagent_type:
-  Explore, general-purpose  → claude-haiku-4-5-20251001  (lightweight)
-  Plan, Planner, architect   → claude-sonnet-4-6          (moderate)
-  code-*, feature-dev*       → claude-sonnet-4-6          (moderate)
-  everything else            → claude-sonnet-4-6          (default)
+
+Model: the one the sub-agent actually ran on. subagent_type does NOT choose it. Claude
+Code runs a sub-agent on, in this order, and so does ``_resolve_model``:
+  1. the model the host reports in ``tool_response`` (``resolvedModel``, else ``model``).
+     ASSUMED, not observed: ``resolvedModel`` is proven only in the transcript's
+     toolUseResult (3,132 of 3,132 records in a local scan), and no recorded PostToolUse
+     Agent payload carrying it exists (the repo fixture has none). Absent -> next step;
+  2. the Agent call's ``tool_input.model`` (alias sonnet/opus/haiku/fable, or a full id);
+     an explicit ``inherit`` goes straight to step 4, an absent value goes to step 3;
+  3. the ``model:`` frontmatter of the agent definition for subagent_type
+     (``<cwd>/.claude/agents/<type>.md``, then ``~/.claude/agents/<type>.md``);
+     no definition, no ``model:`` or ``inherit`` -> step 4;
+  4. the parent session's model: the latest real (not sidechain, not ``<synthetic>``)
+     assistant record in the tail of ``transcript_path``.
+A value that is present but not a Claude model id or alias ends the search as UNKNOWN: it
+is not "absent", and an older source must not stand in for it. Aliases come from
+``llm_router.pricing.claude_code_model``; prices from ``llm_router.pricing`` only.
+
+UNKNOWN is recorded, never guessed and never a zero. A sub-agent whose model is unknown,
+or has no price (today ``claude-fable-5-2``), is written as a row with the model ("unknown"
+when none), 0 tokens, NULL potential_cost_usd and NULL saved_usd, and reason
+``claude_code_subscription:unknown_model:<why>``. Every money reader sums saved_usd (NULL
+adds nothing) or prices tokens (0 adds nothing), so it cannot count as a saving, yet it
+stays in the call count. Rows already in the ledger are not rewritten.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
+import stat
 import sys
 from pathlib import Path
 
@@ -68,45 +90,14 @@ except ImportError:  # pragma: no cover — llm_router not importable from this 
     # inflate every savings figure derived from the row afterwards.
     _pricing = None  # type: ignore[assignment]
 
-# subagent_type → model actually used
-_MODEL_MAP = {
-    "Explore": "claude-haiku-4-5-20251001",
-    "general-purpose": "claude-haiku-4-5-20251001",
-    "Plan": "claude-sonnet-4-6",
-    "planner": "claude-sonnet-4-6",
-    "architect": "claude-sonnet-4-6",
-    "code-architect": "claude-sonnet-4-6",
-    "code-explorer": "claude-sonnet-4-6",
-    "code-reviewer": "claude-sonnet-4-6",
-    "feature-dev": "claude-sonnet-4-6",
-}
-_DEFAULT_MODEL = "claude-sonnet-4-6"
+# The baseline column names the family the row was priced at.
+_FAMILIES = ("haiku", "sonnet", "opus", "fable")
 
-# Lightweight Anthropic subagents are credited against Haiku as baseline.
-# Heavier ones (Plan, code-*, etc.) are credited against Sonnet. The dashboard
-# layer can still re-bucket if needed — this is the conservative default.
-_HAIKU_BASELINE_SUBAGENTS = {"Explore", "general-purpose"}
-_BASELINE_HAIKU = "haiku"
-_BASELINE_SONNET = "sonnet"
-
-# USD per token. Used for potential_cost_usd / saved_usd estimation.
-#
-# WP-03: derived from llm_router.pricing. Every one of the three literals here was
-# wrong — Haiku at $0.25/$1.25 (a rate no current Haiku has had), Sonnet frozen
-# at the pre-intro tier, and Opus at the retired $15/$75. Note the units: this
-# table is per *token*, every other table is per *million*, and the 1e-6 suffix
-# is the only thing distinguishing them. Deriving both from one source removes
-# the chance of pasting a per-million rate into a per-token table.
-_PRICED_MODELS = ("claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6")
-_PRICES: dict[str, tuple[float, float]] = (
-    {
-        _model: (_p.input / 1_000_000, _p.output / 1_000_000)
-        for _model in _PRICED_MODELS
-        if (_p := _pricing.price_for(_model)) is not None
-    }
-    if _pricing is not None
-    else {}
-)
+# No price table here: every price comes from llm_router.pricing at runtime.
+# The old _PRICED_MODELS / _PRICES table was a second opinion that the audit
+# flagged as a defect (WP-03).  Only the hook's guarded import path
+# (_pricing) is used to fetch prices, so a host without llm_router still
+# falls back to "no price → no row" rather than writing a stale rate.
 
 
 def _is_synthetic_run() -> bool:
@@ -144,12 +135,163 @@ def _db_path() -> Path:
     return _router_home() / "usage.db"
 
 
-def _infer_model(subagent_type: str) -> str:
-    return _MODEL_MAP.get(subagent_type, _DEFAULT_MODEL)
+_MAX_DEFINITION_BYTES = 8192
+_MAX_TRANSCRIPT_TAIL_BYTES = 262144
+_MODEL_ID = re.compile(r"claude-[a-z0-9][a-z0-9._-]{0,70}(\[1m\])?")
+
+# A model value is one of: ABSENT (no value), INHERIT (the word), a MODEL (an alias or a
+# full Claude id) or UNRECOGNIZED (present, but neither). The first two let the search go
+# on; the last stops it.
+_ABSENT, _INHERIT, _MODEL, _UNRECOGNIZED = "absent", "inherit", "model", "unrecognized"
 
 
-def _infer_baseline(subagent_type: str) -> str:
-    return _BASELINE_HAIKU if subagent_type in _HAIKU_BASELINE_SUBAGENTS else _BASELINE_SONNET
+def _classify(value: object) -> tuple[str, str | None]:
+    if not isinstance(value, str) or not value.strip():
+        return _ABSENT, None
+    v = value.strip().lower()
+    if v == "inherit":
+        return _INHERIT, None
+    alias = getattr(_pricing, "claude_code_model", None)
+    if alias is not None and (mapped := alias(v)) is not None:
+        return _MODEL, mapped
+    if _MODEL_ID.fullmatch(v):
+        return _MODEL, v
+    return _UNRECOGNIZED, None
+
+
+def _read_regular(path: str, limit: int, *, tail: bool = False) -> str:
+    """At most ``limit`` bytes of a REGULAR file (its end when ``tail``). Raises OSError or
+    ValueError (NUL in the path) for anything else; the caller turns that into "no value"."""
+    # Read-only (no O_CREAT); the 0o600 mode is inert here and tells the W0-4 state-write
+    # ratchet (tests/test_w04_state_file_modes.py) this call cannot create a wide file.
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0), 0o600)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError("not a regular file")
+        if tail and st.st_size > limit:
+            os.lseek(fd, st.st_size - limit, os.SEEK_SET)
+        return os.read(fd, limit).decode("utf-8", errors="replace")
+    finally:
+        os.close(fd)
+
+
+def _definition_model(subagent_type: object, cwd: object) -> tuple[str, str | None, str | None]:
+    """``(kind, model, note)`` from the ``model:`` frontmatter of the agent definition.
+
+    ``kind`` is absent when there is no usable definition or it sets no model (the agent
+    then inherits). The type is matched against a strict name pattern before it touches a
+    path; the file must resolve inside the agents directory (no symlink escape); the
+    project definition wins over the user one. Any read problem is absent plus a note.
+    """
+    if not isinstance(subagent_type, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", subagent_type):
+        return _ABSENT, None, None
+    dirs = []
+    if isinstance(cwd, str) and cwd.strip():
+        dirs.append(Path(cwd) / ".claude" / "agents")
+    dirs.append(Path.home() / ".claude" / "agents")
+    note = None
+    for d in dirs:
+        try:
+            root = os.path.realpath(d)
+            real = os.path.realpath(d / f"{subagent_type}.md")
+            if not os.path.exists(real):
+                continue
+            if os.path.commonpath([root, real]) != root:
+                note = "definition_outside_agents_dir"
+                continue
+            text = _read_regular(real, _MAX_DEFINITION_BYTES)
+        except (OSError, ValueError):
+            note = "definition_unreadable"
+            continue
+        lines = text.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return _ABSENT, None, note
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            m = re.match(r"model\s*:\s*[\"']?([^\"'#\s]+)", line)
+            if m:
+                kind, model = _classify(m.group(1))
+                return kind, model, note
+        return _ABSENT, None, note
+    return _ABSENT, None, note
+
+
+def _parent_model(transcript_path: object) -> tuple[str, str | None, str | None]:
+    """``(kind, model, note)`` of the latest real main-chain assistant record in the tail of
+    the parent transcript. Sidechain (sub-agent) records and ``<synthetic>`` ones are skipped;
+    if the latest real record names a model we do not recognise the answer is that, never an
+    older record's model."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return _ABSENT, None, "no_transcript_path"
+    try:
+        tail = _read_regular(transcript_path, _MAX_TRANSCRIPT_TAIL_BYTES, tail=True)
+    except (OSError, ValueError):
+        return _ABSENT, None, "transcript_unreadable"
+    for line in reversed(tail.splitlines()):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        msg = rec.get("message") if isinstance(rec, dict) else None
+        if not isinstance(msg, dict) or rec.get("type") != "assistant" or rec.get("isSidechain"):
+            continue
+        raw = msg.get("model")
+        if not isinstance(raw, str) or raw.strip().lower() in ("", "<synthetic>"):
+            continue
+        kind, model = _classify(raw)
+        return (kind, model, None) if kind in (_MODEL, _UNRECOGNIZED) else (_ABSENT, None, None)
+    return _ABSENT, None, "no_main_chain_assistant_record_in_tail"
+
+
+def _resolve_model(data: dict) -> tuple[str | None, str, str]:
+    """``(model, source, why)``: the model the sub-agent ran on and where it came from, or
+    ``(None, "none", <why unknown>)``. Never raises."""
+    try:
+        return _resolve_model_unsafe(data)
+    except Exception as exc:  # noqa: BLE001 -- the hook must not break Claude Code
+        return None, "none", f"resolver_error_{type(exc).__name__}"
+
+
+def _resolve_model_unsafe(data: dict) -> tuple[str | None, str, str]:
+    tool_input = data.get("tool_input")
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    tool_result = data.get("tool_response", data.get("tool_result"))
+    if isinstance(tool_result, dict):
+        for key in ("resolvedModel", "model"):
+            kind, model = _classify(tool_result.get(key))
+            if kind == _MODEL:
+                return model, "tool_response", ""
+            if kind == _UNRECOGNIZED:
+                return None, "tool_response", "unrecognized_model_in_tool_response"
+    kind, model = _classify(tool_input.get("model"))
+    if kind == _MODEL:
+        return model, "tool_input", ""
+    if kind == _UNRECOGNIZED:
+        return None, "tool_input", "unrecognized_model_in_tool_input"
+    notes: list[str] = []
+    if kind == _ABSENT:  # explicit inherit skips the definition: the call said "use the parent's"
+        kind, model, note = _definition_model(tool_input.get("subagent_type"), data.get("cwd"))
+        if note:
+            notes.append(note)
+        if kind == _MODEL:
+            return model, "definition", ""
+        if kind == _UNRECOGNIZED:
+            return None, "definition", "unrecognized_model_in_definition"
+    kind, model, note = _parent_model(data.get("transcript_path"))
+    if note:
+        notes.append(note)
+    if kind == _MODEL:
+        return model, "parent", ""
+    if kind == _UNRECOGNIZED:
+        return None, "parent", "unrecognized_parent_model"
+    return None, "none", "no_model_source" + "".join(f"_{n}" for n in notes)
+
+
+def _infer_baseline(model: str) -> str | None:
+    """Family the row is priced at: haiku, sonnet, opus or fable; None for any other id."""
+    return next((f for f in _FAMILIES if f in model), None)
 
 
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
@@ -157,14 +299,14 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float |
 
     Returns ``None`` when no price is available, which the caller must treat as
     "do not record", not as zero. See the guarded import at the top of the file.
+    A model with no price is NOT priced as some other model.
     """
-    if not _PRICES:
+    if _pricing is None:
         return None
-    rates = _PRICES.get(model) or _PRICES.get(_DEFAULT_MODEL)
-    if rates is None:
+    p = _pricing.price_for(model, prompt_tokens=input_tokens)
+    if p is None:
         return None
-    in_p, out_p = rates
-    return round(in_p * input_tokens + out_p * output_tokens, 8)
+    return round((p.input * input_tokens + p.output * output_tokens) / 1_000_000, 8)
 
 
 def _ensure_table(db: sqlite3.Connection) -> None:
@@ -245,8 +387,8 @@ def _ledger_session_id(value: object) -> str | None:
 
 
 def _log_to_db(
-    model: str,
-    baseline_model: str,
+    model: str | None,
+    why_unknown: str,
     input_tokens: int,
     output_tokens: int,
     latency_ms: float,
@@ -263,12 +405,19 @@ def _log_to_db(
             db.execute("PRAGMA busy_timeout = 5000")
             db.execute("PRAGMA journal_mode=WAL")
             _ensure_table(db)
-            potential = _estimate_cost(model, input_tokens, output_tokens)
+            potential = _estimate_cost(model, input_tokens, output_tokens) if model else None
+            reason = "claude_code_subscription"
+            baseline_model = _infer_baseline(model) if model else None
             if potential is None:
-                # No price source (see the guarded import). Skip the row rather
-                # than persist a 0.00 that later reads as a measured cost.
-                return
-            # cost_usd = 0 (subscription), so saved_usd = potential − 0 = potential.
+                # Unknown model, no price source (see the guarded import) or a model the
+                # registry does not price (claude-fable-5-2): an explicit UNKNOWN row. 0
+                # tokens and NULL money, so no reader can count it as a saving or as a
+                # measured zero cost; the call itself stays visible (see the docstring).
+                why = why_unknown or ("unpriced_model" if model else "no_model_source")
+                reason = "claude_code_subscription:unknown_model:" + re.sub(r"[^A-Za-z0-9_.:-]", "_", why)[:80]
+                baseline_model, input_tokens, output_tokens = None, 0, 0
+            # cost_usd = 0 (subscription), so saved_usd = potential − 0 = potential
+            # (NULL when unknown).
             saved = potential
             db.execute(
                 # C-02: the SECOND writer to `usage`. The audit named only
@@ -281,9 +430,9 @@ def _log_to_db(
                     baseline_model, potential_cost_usd, saved_usd, is_simulated,
                     session_id, reason, task_id, trace_id)
                    VALUES (?, 'cc', 'code', 'balanced', ?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?,
-                           'claude_code_subscription', ?, ?)""",
+                           ?, ?, ?)""",
                 (
-                    model,
+                    model or "unknown",
                     input_tokens,
                     output_tokens,
                     latency_ms,
@@ -293,6 +442,7 @@ def _log_to_db(
                     saved,
                     1 if _is_synthetic_run() else 0,
                     session_id or "unknown:hook",  # P0.8: never NULL; G3 counts unknown:* as missing
+                    reason,
                     *_task_ids(session_id),
                 ),
             )
@@ -364,7 +514,6 @@ def main() -> None:
     tool_input  = data.get("tool_input", {})
     tool_result = data.get("tool_response", data.get("tool_result", {}))
 
-    subagent_type = tool_input.get("subagent_type", "general-purpose")
     prompt        = tool_input.get("prompt", "")
     result_text   = ""
     if isinstance(tool_result, dict):
@@ -372,13 +521,14 @@ def main() -> None:
     elif isinstance(tool_result, str):
         result_text = tool_result
 
-    model         = _infer_model(subagent_type)
-    baseline      = _infer_baseline(subagent_type)
+    model, _source, why_unknown = _resolve_model(data)
+    if model is None:
+        print(f"llm-router: cc-usage-track model unknown ({why_unknown})", file=sys.stderr)
     input_tokens  = max(1, len(prompt) // 4)
     output_tokens = max(1, len(result_text) // 4)
     latency_ms    = data.get("duration_ms", 0.0)
 
-    _log_to_db(model, baseline, input_tokens, output_tokens, float(latency_ms), success=True,
+    _log_to_db(model, why_unknown, input_tokens, output_tokens, float(latency_ms), success=True,
                session_id=_ledger_session_id(data.get("session_id")))
     sys.exit(0)
 

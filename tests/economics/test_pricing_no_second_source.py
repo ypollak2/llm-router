@@ -94,7 +94,9 @@ def _load_script_module(name: str, rel: str):
 
 def _every_table_rate_for(model: str) -> dict[str, tuple[float, float]]:
     """(input, output) $/Mtok for ``model`` from every table that carries it."""
-    cc_usage = _load_script_module("_cc_usage_track", "llm_router/hooks/cc-usage-track.py")
+    # The hook no longer holds a rate table (it prices via llm_router.pricing); still
+    # import it so a hook that fails to load cannot pass this test silently.
+    _load_script_module("_cc_usage_track", "llm_router/hooks/cc-usage-track.py")
     canonical = pricing.price_for(model)
     found: dict[str, tuple[float, float]] = {
         "llm_router.pricing": (canonical.input, canonical.output),
@@ -116,13 +118,6 @@ def _every_table_rate_for(model: str) -> dict[str, tuple[float, float]]:
             found[f"savings_logger[{provider}/{name}]"] = savings_logger._PRICING_PER_MTOK[
                 (provider, name)
             ]
-
-    for name, (in_per_token, out_per_token) in cc_usage._PRICES.items():
-        if pricing.resolve(name) == pricing.resolve(model):
-            found[f"cc-usage-track[{name}]"] = (
-                in_per_token * 1_000_000,
-                out_per_token * 1_000_000,
-            )
 
     return found
 
