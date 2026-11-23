@@ -491,9 +491,12 @@ def test_after_aclose_no_new_lane_is_built(fx):
 # -- F1 / F3: shadow ordering and the canary ------------------------------------------------------------
 
 
-def _shadow_recs(home):
+def _shadow_recs(home, text_sha=None):
+    """Shadow records; with ``text_sha`` only that turn's. The setup call (turn 1 of ``pinned_env``) also schedules a
+    shadow record, which may land late, so a test picks its record by the turn it posted, never by count."""
     p = home / cls_embed_shadow.SHADOW_NAME
-    return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+    out = [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+    return [r for r in out if r["text_sha"] == text_sha] if text_sha else out
 
 
 def _post_drain(e, body):
@@ -511,7 +514,7 @@ def test_f1_flipped_call_records_both_rules_and_final_decision(fx, tmp_path):
     _post_drain(e, turn_body(["rename the helper", "and the other"]))
     row = e.rows()[-1]
     assert row["cls_opened"] is True
-    (rec,) = _shadow_recs(fx.home)
+    (rec,) = _shadow_recs(fx.home, e.rows()[-1]["text_sha"])
     assert rec["rules_decision"] == "pinned_claude" and rec["final_decision"] == "local" and rec["flipped"] is True
 
 
@@ -521,7 +524,7 @@ def test_f1_unflipped_call_records_equal_decisions(fx, tmp_path):
     e = pinned_env(tmp_path)
     cls_embed_shadow.reset()
     _post_drain(e, turn_body(["rename the helper", "and the other"]))
-    (rec,) = _shadow_recs(fx.home)
+    (rec,) = _shadow_recs(fx.home, e.rows()[-1]["text_sha"])
     assert rec["rules_decision"] == rec["final_decision"] == "pinned_claude" and rec["flipped"] is False
 
 
@@ -574,7 +577,7 @@ def test_s2_flip_refused_by_a_later_guard_records_flipped_false(fx, tmp_path):
     cls_embed_shadow.reset()
     _post_drain(e, turn_body(["rename the helper", "and the other"]))
     assert fx.calls and e.rows()[-1]["cls_opened"] is False
-    (rec,) = _shadow_recs(fx.home)
+    (rec,) = _shadow_recs(fx.home, e.rows()[-1]["text_sha"])
     assert rec["flipped"] is False and rec["final_decision"] == "prompt_over_guard"
     assert rec["rules_decision"] == rec["final_decision"]
 
