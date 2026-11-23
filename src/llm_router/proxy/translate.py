@@ -120,6 +120,8 @@ def to_ollama(body: dict, model: str, *, num_ctx: int, max_predict: int = 4096,
                      "num_predict": min(int(body.get("max_tokens") or max_predict), max_predict)}
     if isinstance(body.get("temperature"), (int, float)):
         options["temperature"] = body["temperature"]
+    if isinstance(body.get("seed"), int) and not isinstance(body["seed"], bool):
+        options["seed"] = body["seed"]   # set only by the xml_parse retry (proxy/server.py); Claude Code bodies carry none
     payload = {"model": model, "messages": to_ollama_messages(body),
                "tools": ollama_tools(body.get("tools") or []),
                "stream": stream, "think": False, "options": options}
