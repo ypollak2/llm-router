@@ -162,7 +162,9 @@ def _classify(value: object) -> tuple[str, str | None]:
 def _read_regular(path: str, limit: int, *, tail: bool = False) -> str:
     """At most ``limit`` bytes of a REGULAR file (its end when ``tail``). Raises OSError or
     ValueError (NUL in the path) for anything else; the caller turns that into "no value"."""
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    # Read-only (no O_CREAT); the 0o600 mode is inert here and tells the W0-4 state-write
+    # ratchet (tests/test_w04_state_file_modes.py) this call cannot create a wide file.
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0), 0o600)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
