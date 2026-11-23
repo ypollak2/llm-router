@@ -209,3 +209,34 @@ async def test_router_isolation_works_with_resume_off(routed, monkeypatch, tmp_r
     c = routed.sent[0]
     assert c.structured is False and c.resume_session_id is None
     assert c.isolate is True and c.subprocess_cwd == claude_agent.isolated_cwd()[0]
+
+
+def test_isolated_cwd_refuses_a_dir_under_home(tmp_path, monkeypatch, caplog):
+    import tempfile
+    home = tmp_path / "fakehome"
+    (home / "tmp").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(home / "tmp"))
+    claude_agent._ISOLATED_CWD_WARNED.clear()
+    got, reason = claude_agent.isolated_cwd()
+    assert got is None and "$HOME" in reason
+    assert not [p for p in (home / "tmp").iterdir()]            # nothing created under $HOME
+    assert "unusable" in caplog.text
+
+
+def test_isolated_cwd_refuses_a_symlink_in_place_of_the_dir(tmp_root):
+    claude_agent._ISOLATED_CWD_WARNED.clear()
+    target = tmp_root / "elsewhere"
+    target.mkdir(mode=0o700)
+    os.symlink(target, tmp_root / f"llm-router-claude-offload-{os.getuid()}")
+    got, reason = claude_agent.isolated_cwd()
+    assert got is None and "not a directory" in reason
+
+
+def test_isolated_cwd_warns_once_per_process(tmp_root, caplog):
+    claude_agent._ISOLATED_CWD_WARNED.clear()
+    path, _ = claude_agent.isolated_cwd()
+    os.chmod(path, 0o777)
+    for _ in range(3):
+        assert claude_agent.isolated_cwd()[0] is None
+    assert caplog.text.count("unusable") == 1

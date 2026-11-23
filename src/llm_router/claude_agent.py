@@ -170,13 +170,18 @@ def _usage_of(doc: dict) -> dict[str, int] | None:
     return out
 
 
+_ISOLATED_CWD_WARNED: set[tuple[str, str]] = set()
+
+
 def isolated_cwd() -> tuple[str | None, str]:
     """``(dir, reason)``: the neutral, empty, private cwd for an isolated offload.
 
     ``<tmp>/llm-router-claude-offload-<uid>``, mode 0o700, never under $HOME (``project``
     settings and CLAUDE.md resolve from the cwd, and from $HOME that pulls the user's
-    ~/.claude back in). ``(None, reason)`` when it cannot be used safely (exists but is not a
-    real dir owned by this uid, or is group/world-writable): the caller then keeps today's cwd.
+    ~/.claude back in; enforced on the resolved path, so TMPDIR=$HOME/tmp is refused).
+    ``(None, reason)`` when it cannot be used safely (under $HOME, exists but is not a real
+    dir (a symlink counts as not a dir) owned by this uid, or is group/world-writable): the
+    caller then keeps today's cwd. The warning is logged once per process per reason.
     """
     import logging
     import stat
@@ -186,12 +191,19 @@ def isolated_cwd() -> tuple[str | None, str]:
     path = os.path.join(tempfile.gettempdir(), f"llm-router-claude-offload-{uid}")
     reason = ""
     try:
-        try:
-            os.mkdir(path, 0o700)
-        except FileExistsError:
+        home = os.path.realpath(os.path.expanduser("~"))
+        real = os.path.realpath(path)
+        if real == home or real.startswith(home.rstrip(os.sep) + os.sep):
+            reason = "under $HOME (project settings would resolve from ~/.claude)"
+        else:
+            try:
+                os.mkdir(path, 0o700)
+            except FileExistsError:
+                pass
+        st = os.lstat(path) if not reason else None
+        if st is None:
             pass
-        st = os.lstat(path)
-        if not stat.S_ISDIR(st.st_mode):
+        elif not stat.S_ISDIR(st.st_mode):
             reason = "exists but is not a directory"
         elif hasattr(os, "getuid") and st.st_uid != uid:
             reason = "owned by another uid"
@@ -200,8 +212,10 @@ def isolated_cwd() -> tuple[str | None, str]:
     except OSError as exc:
         reason = f"cannot create: {exc}"
     if reason:
-        logging.getLogger(__name__).warning(
-            "claude offload isolation: neutral cwd %s unusable (%s); using the caller's cwd", path, reason)
+        if (path, reason) not in _ISOLATED_CWD_WARNED:       # once per process, not per offload
+            _ISOLATED_CWD_WARNED.add((path, reason))
+            logging.getLogger(__name__).warning(
+                "claude offload isolation: neutral cwd %s unusable (%s); using the caller's cwd", path, reason)
         return None, reason
     return path, ""
 
