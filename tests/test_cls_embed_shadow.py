@@ -186,18 +186,32 @@ def test_dedicated_executor_saturation_does_not_starve_default_executor(env, mon
     time.sleep(1.4)  # let the stuck workers end before the fixture closes the fake server
 
 
-@pytest.mark.timing
 def test_slot_frees_only_when_thread_ends(env, monkeypatch):
+    """The thread is held by an Event, not by a server delay: with a delay the thread ends at the embed socket
+    deadline, the same instant as the task's ``wait_for`` budget, so ``pending`` read after the drain could be 0
+    or 1 depending on load."""
     tmp, fake = env
-    fake.delay = 0.6
     monkeypatch.setenv("LLM_ROUTER_CLS_EMBED_BUDGET_MS", "100")
+    release, started = threading.Event(), threading.Event()
+
+    def held(text):
+        started.set()
+        release.wait(10)
+        return cls_embed.Verdict(None, cls_embed.SRC_ERROR, 0.0)
+
+    monkeypatch.setattr(cls_embed, "classify", held)
 
     async def go():
         body, row = mk()
         cls_embed_shadow.schedule(body, row, LOCAL)
-        await cls_embed_shadow.drain()          # task finished at the budget...
+        await cls_embed_shadow.drain()          # task finished at the budget (timeout record)...
+        assert started.is_set()
         during = cls_embed_shadow._lane.pending  # ...but the thread still holds its slot
-        await asyncio.sleep(0.8)
+        release.set()
+        for _ in range(500):                     # the slot frees when the thread ends (bounded poll, 5 s)
+            if cls_embed_shadow._lane.pending == 0:
+                break
+            await asyncio.sleep(0.01)
         return during, cls_embed_shadow._lane.pending
 
     during, after = run(go())
