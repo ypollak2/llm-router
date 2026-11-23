@@ -73,6 +73,7 @@ from llm_router.proxy.backend_health import (
     DEFAULT_FAIL_N,
     DEFAULT_RUNNER_COOLDOWN_S,
     KIND_OTHER,
+    KIND_XML_PARSE,
     REASON_BACKEND_UNHEALTHY,
     BackendHealth,
     begin_stream_progress,
@@ -842,8 +843,22 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if pinfix_key is not None:
                 row["_pinfix_attempted"] = True
             stream_progress = begin_stream_progress()
+            _t_try = time.monotonic()
             message, err, backend_usage = await asyncio.wait_for(
                 backend.complete(send, left), timeout=left)
+            _try_s = time.monotonic() - _t_try
+            if (err and error_kind(err) == KIND_XML_PARSE and message is None
+                    and _budget_left(t0, step_budget_s) > _try_s):
+                # Ollama could not parse the model's own tool-call XML (unclosed or mismatched tag): the
+                # sample is bad, the next one usually is not (O2 v2 pilot 1: 3 of 3 failing steps had one
+                # such reply, every other step served). One same-step retry, only when what is left of the
+                # step budget covers a second attempt of the same length; the budget is not extended and
+                # the reply still goes through every check below. A second failure falls back as before.
+                row["xml_retry"] = 1
+                left = _budget_left(t0, step_budget_s)
+                stream_progress = begin_stream_progress()
+                message, err, backend_usage = await asyncio.wait_for(
+                    backend.complete(send, left), timeout=left)
             _note_prefix(row, body, backend_usage)
             row["backend_usage"] = backend_usage
             if isinstance(message, dict) and not message.get("id"):

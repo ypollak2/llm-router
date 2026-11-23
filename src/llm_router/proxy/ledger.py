@@ -70,6 +70,8 @@ Row fields:
                   truncated | unknown_tool | tool_args_invalid; absent when it did not fail or the
                   kind is ``other`` (the breaker info still says other).
                   backend_health.error_kind is the same kind on the breaker's trip / open info.
+  xml_retry       1 only when the first local reply failed as xml_parse (Ollama could not parse the tool-call XML) and
+                  the step was retried once within its budget; the row's outcome is the retry's. Absent otherwise.
   detail          short scrubbed error text for a fallback
   mr_summary.map_error  only when outcome is map_failed (P9): ``try=N kind=<http_nnn|empty_response|truncated|
                   ollama_error|other|no_reply>`` when the backend returned an error, or ``try=N exc=<ClassName>
