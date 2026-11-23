@@ -117,13 +117,6 @@ def _every_table_rate_for(model: str) -> dict[str, tuple[float, float]]:
                 (provider, name)
             ]
 
-    for name, (in_per_token, out_per_token) in cc_usage._PRICES.items():
-        if pricing.resolve(name) == pricing.resolve(model):
-            found[f"cc-usage-track[{name}]"] = (
-                in_per_token * 1_000_000,
-                out_per_token * 1_000_000,
-            )
-
     return found
 
 

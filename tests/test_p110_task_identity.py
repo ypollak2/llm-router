@@ -266,7 +266,7 @@ def test_cc_usage_track_writes_task_and_trace(tmp_path, monkeypatch):
     sys.modules["_p110_cc_usage_track"] = hook
     spec.loader.exec_module(hook)
     payload = {"session_id": SID, "tool_name": "Agent",
-               "tool_input": {"subagent_type": "Explore", "prompt": "p" * 40},
+               "tool_input": {"subagent_type": "Explore", "model": "haiku", "prompt": "p" * 40},
                "tool_response": {"output": "r" * 40}, "duration_ms": 1200}
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
     with pytest.raises(SystemExit):

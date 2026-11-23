@@ -1,4 +1,4 @@
-# llm_router-hook-version: 8
+# llm_router-hook-version: 9
 """PostToolUse[Agent] hook — track Claude Code subscription model calls.
 
 Fires after every Agent subagent completes. Writes an estimated usage record
@@ -12,11 +12,20 @@ now orphaned and may be removed manually.
 
 Token estimation: input from prompt length, output from result length (chars/4).
 Cost: 0.0 — CC subscription is flat-rate, not per-call billed.
-Model mapping from subagent_type:
-  Explore, general-purpose  → claude-haiku-4-5-20251001  (lightweight)
-  Plan, Planner, architect   → claude-sonnet-4-6          (moderate)
-  code-*, feature-dev*       → claude-sonnet-4-6          (moderate)
-  everything else            → claude-sonnet-4-6          (default)
+
+Model: the one the sub-agent actually ran on. subagent_type does NOT choose it. Claude
+Code runs a sub-agent on, in this order, and so does ``_infer_model``:
+  1. the model the host reports in ``tool_response`` (``resolvedModel``, else ``model``);
+  2. the Agent call's ``tool_input.model`` (alias sonnet/opus/haiku/fable, or a full id);
+  3. the ``model:`` frontmatter of the agent definition for subagent_type
+     (``<cwd>/.claude/agents/<type>.md``, then ``~/.claude/agents/<type>.md``);
+  4. the parent session's model (last assistant message in ``transcript_path``).
+``inherit`` (or no value) at a step falls through to the next. When none of them names
+a model the model is UNKNOWN and NO ROW IS WRITTEN: guessing a model would credit a
+made-up counterfactual as savings. The same holds for a model with no price in
+``llm_router.pricing`` (today ``claude-fable-5-2``): no price, no row, never a 0.00.
+Aliases map to the current ids in ``_CURRENT_ALIASES``; prices come from
+``llm_router.pricing`` only. Rows already in the ledger are not rewritten.
 """
 
 from __future__ import annotations
@@ -68,45 +77,26 @@ except ImportError:  # pragma: no cover — llm_router not importable from this 
     # inflate every savings figure derived from the row afterwards.
     _pricing = None  # type: ignore[assignment]
 
-# subagent_type → model actually used
-_MODEL_MAP = {
-    "Explore": "claude-haiku-4-5-20251001",
-    "general-purpose": "claude-haiku-4-5-20251001",
-    "Plan": "claude-sonnet-4-6",
-    "planner": "claude-sonnet-4-6",
-    "architect": "claude-sonnet-4-6",
-    "code-architect": "claude-sonnet-4-6",
-    "code-explorer": "claude-sonnet-4-6",
-    "code-reviewer": "claude-sonnet-4-6",
-    "feature-dev": "claude-sonnet-4-6",
+# Claude Code's model aliases -> the current model ids (the Claude 5 family). The
+# registry's own aliases ("sonnet" -> claude-sonnet-5, "haiku" -> claude-haiku-4-5)
+# lag the current models, so they are not used here. An id with no price in
+# llm_router.pricing (claude-fable-5-2 today) is still named, and the row is then
+# skipped by _estimate_cost: the id is not invented away to a cheaper stand-in.
+_CURRENT_ALIASES = {
+    "opus": "claude-opus-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "haiku": "claude-haiku-5-5",
+    "fable": "claude-fable-5-2",
 }
-_DEFAULT_MODEL = "claude-sonnet-4-6"
 
-# Lightweight Anthropic subagents are credited against Haiku as baseline.
-# Heavier ones (Plan, code-*, etc.) are credited against Sonnet. The dashboard
-# layer can still re-bucket if needed — this is the conservative default.
-_HAIKU_BASELINE_SUBAGENTS = {"Explore", "general-purpose"}
-_BASELINE_HAIKU = "haiku"
-_BASELINE_SONNET = "sonnet"
+# The baseline column names the family the row was priced at.
+_FAMILIES = ("haiku", "sonnet", "opus", "fable")
 
-# USD per token. Used for potential_cost_usd / saved_usd estimation.
-#
-# WP-03: derived from llm_router.pricing. Every one of the three literals here was
-# wrong — Haiku at $0.25/$1.25 (a rate no current Haiku has had), Sonnet frozen
-# at the pre-intro tier, and Opus at the retired $15/$75. Note the units: this
-# table is per *token*, every other table is per *million*, and the 1e-6 suffix
-# is the only thing distinguishing them. Deriving both from one source removes
-# the chance of pasting a per-million rate into a per-token table.
-_PRICED_MODELS = ("claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6")
-_PRICES: dict[str, tuple[float, float]] = (
-    {
-        _model: (_p.input / 1_000_000, _p.output / 1_000_000)
-        for _model in _PRICED_MODELS
-        if (_p := _pricing.price_for(_model)) is not None
-    }
-    if _pricing is not None
-    else {}
-)
+# No price table here: every price comes from llm_router.pricing at runtime.
+# The old _PRICED_MODELS / _PRICES table was a second opinion that the audit
+# flagged as a defect (WP-03).  Only the hook's guarded import path
+# (_pricing) is used to fetch prices, so a host without llm_router still
+# falls back to "no price → no row" rather than writing a stale rate.
 
 
 def _is_synthetic_run() -> bool:
@@ -144,12 +134,96 @@ def _db_path() -> Path:
     return _router_home() / "usage.db"
 
 
-def _infer_model(subagent_type: str) -> str:
-    return _MODEL_MAP.get(subagent_type, _DEFAULT_MODEL)
+def _as_model(value: object) -> str | None:
+    """A model id from an alias ("sonnet") or a full id; None for ``inherit``/unknown text."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip().lower()
+    if not v or v == "inherit":
+        return None
+    if v in _CURRENT_ALIASES:
+        return _CURRENT_ALIASES[v]
+    if v.startswith("claude-") and len(v) <= 80:
+        return v
+    return None
 
 
-def _infer_baseline(subagent_type: str) -> str:
-    return _BASELINE_HAIKU if subagent_type in _HAIKU_BASELINE_SUBAGENTS else _BASELINE_SONNET
+def _definition_model(subagent_type: object, cwd: object) -> str | None:
+    """``model:`` frontmatter of the sub-agent's definition file, or None.
+
+    The type is matched against a strict name pattern before it touches a path.
+    The project definition wins over the user one, as in Claude Code.
+    """
+    import re as _re
+
+    if not isinstance(subagent_type, str) or not _re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", subagent_type):
+        return None
+    dirs = []
+    if isinstance(cwd, str) and cwd.strip():
+        dirs.append(Path(cwd) / ".claude" / "agents")
+    dirs.append(Path.home() / ".claude" / "agents")
+    for d in dirs:
+        try:
+            text = (d / f"{subagent_type}.md").read_text(encoding="utf-8", errors="replace")[:8192]
+        except OSError:
+            continue
+        lines = text.splitlines()
+        if not lines or lines[0].strip() != "---":
+            return None
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            m = _re.match(r"model\s*:\s*[\"']?([^\"'#\s]+)", line)
+            if m:
+                return _as_model(m.group(1))
+        return None  # the definition exists and sets no model: it inherits
+    return None
+
+
+def _parent_model(transcript_path: object) -> str | None:
+    """Model of the last assistant message in the parent session transcript, or None."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    try:
+        with open(transcript_path, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 262144))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        msg = rec.get("message") if isinstance(rec, dict) else None
+        if isinstance(msg, dict) and rec.get("type") == "assistant":
+            model = _as_model(msg.get("model"))
+            if model:
+                return model
+    return None
+
+
+def _infer_model(data: dict) -> str | None:
+    """The model the sub-agent ran on, or None when nothing in hand names it."""
+    tool_input = data.get("tool_input")
+    tool_input = tool_input if isinstance(tool_input, dict) else {}
+    tool_result = data.get("tool_response", data.get("tool_result"))
+    if isinstance(tool_result, dict):
+        for key in ("resolvedModel", "model"):
+            model = _as_model(tool_result.get(key))
+            if model:
+                return model
+    return (
+        _as_model(tool_input.get("model"))
+        or _definition_model(tool_input.get("subagent_type"), data.get("cwd"))
+        or _parent_model(data.get("transcript_path"))
+    )
+
+
+def _infer_baseline(model: str) -> str:
+    """Family the row is priced at: haiku, sonnet, opus or fable."""
+    return next((f for f in _FAMILIES if f in model), "sonnet")
 
 
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
@@ -157,14 +231,14 @@ def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float |
 
     Returns ``None`` when no price is available, which the caller must treat as
     "do not record", not as zero. See the guarded import at the top of the file.
+    A model with no price is NOT priced as some other model.
     """
-    if not _PRICES:
+    if _pricing is None:
         return None
-    rates = _PRICES.get(model) or _PRICES.get(_DEFAULT_MODEL)
-    if rates is None:
+    p = _pricing.price_for(model, prompt_tokens=input_tokens)
+    if p is None:
         return None
-    in_p, out_p = rates
-    return round(in_p * input_tokens + out_p * output_tokens, 8)
+    return round((p.input * input_tokens + p.output * output_tokens) / 1_000_000, 8)
 
 
 def _ensure_table(db: sqlite3.Connection) -> None:
@@ -265,7 +339,8 @@ def _log_to_db(
             _ensure_table(db)
             potential = _estimate_cost(model, input_tokens, output_tokens)
             if potential is None:
-                # No price source (see the guarded import). Skip the row rather
+                # No price: no price source (see the guarded import) or a model the
+                # registry does not price (claude-fable-5-2). Skip the row rather
                 # than persist a 0.00 that later reads as a measured cost.
                 return
             # cost_usd = 0 (subscription), so saved_usd = potential − 0 = potential.
@@ -364,7 +439,6 @@ def main() -> None:
     tool_input  = data.get("tool_input", {})
     tool_result = data.get("tool_response", data.get("tool_result", {}))
 
-    subagent_type = tool_input.get("subagent_type", "general-purpose")
     prompt        = tool_input.get("prompt", "")
     result_text   = ""
     if isinstance(tool_result, dict):
@@ -372,8 +446,10 @@ def main() -> None:
     elif isinstance(tool_result, str):
         result_text = tool_result
 
-    model         = _infer_model(subagent_type)
-    baseline      = _infer_baseline(subagent_type)
+    model         = _infer_model(data)
+    if model is None:
+        sys.exit(0)  # unknown model: no row (see the module docstring)
+    baseline      = _infer_baseline(model)
     input_tokens  = max(1, len(prompt) // 4)
     output_tokens = max(1, len(result_text) // 4)
     latency_ms    = data.get("duration_ms", 0.0)

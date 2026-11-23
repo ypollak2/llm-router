@@ -190,7 +190,7 @@ def test_cc_usage_track_writes_the_payload_session(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_ROUTER_HOME", str(home))
     hook = _load_hook("cc-usage-track.py", "_p08_cc_usage_track")
     payload = {"session_id": "9b1d7c2e-1111-4000-8000-000000000002", "tool_name": "Agent",
-               "tool_input": {"subagent_type": "Explore", "prompt": "p" * 40},
+               "tool_input": {"subagent_type": "Explore", "model": "haiku", "prompt": "p" * 40},
                "tool_response": {"output": "r" * 40}, "duration_ms": 1200}
     monkeypatch.setattr(sys, "stdin", __import__("io").StringIO(json.dumps(payload)))
     with pytest.raises(SystemExit):
