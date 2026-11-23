@@ -321,6 +321,14 @@ class RouterConfig(BaseSettings):
     # output of its last turn), so a long-lived session cannot grow into the context window.
     # Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME_MAX_CTX_TOKENS.
     llm_router_claude_offload_resume_max_ctx_tokens: int = 150_000
+    # True: the offload's `claude -p` runs with `--setting-sources project,local
+    # --strict-mcp-config`, i.e. without the user's settings/hooks and without MCP servers.
+    # A live probe 2026-11-23 (Sonnet) wrote 47,035 cache tokens for a ~6K-token prompt; the
+    # ~41K overhead (user hooks, MCP schemas) partly changes per call, so a resumed call
+    # re-wrote ~23-25K. Default False (= unchanged argv). The flag is part of the resume
+    # key, so toggling never resumes a session created under the other mode.
+    # Env: LLM_ROUTER_CLAUDE_OFFLOAD_ISOLATE.
+    llm_router_claude_offload_isolate: bool = False
 
     # ── Gemini Subscription (Google One AI Pro) (v9.0.1) ──
     # Set to True when using llm_router inside Gemini CLI with a subscription.

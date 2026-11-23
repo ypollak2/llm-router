@@ -3811,6 +3811,7 @@ async def _dispatch_model_loop(
                                 # --output-format json: session id + per-call tokens for the ledger.
                                 structured=claude_resume.enabled(config),
                                 inject_context=_entry is None,
+                                isolate=claude_resume.isolate_enabled(config),
                             )
                             _settled = claude_resume.settle(_key, _entry, claude_result)
                             if not _settled.retry:

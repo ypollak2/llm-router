@@ -180,6 +180,7 @@ async def run_claude(
     resume_session_id: str | None = None,
     structured: bool = False,
     inject_context: bool = True,
+    isolate: bool = False,
 ) -> ClaudeResult:
     """Run a one-shot prompt through the `claude` CLI as a subprocess.
 
@@ -197,6 +198,11 @@ async def run_claude(
     ``total_cost_usd``. ``resume_session_id`` adds ``--resume <id>`` (the caller must use
     the same cwd as the session's first call). ``inject_context=False`` skips OKF/repo
     injection: a resumed session already holds it.
+
+    ``isolate`` adds ``--setting-sources project,local --strict-mcp-config``: the CLI then
+    skips the user's settings/hooks and every MCP server, whose per-call-varying output
+    otherwise defeats the prompt cache. A resumed call must pass the same value as the
+    call that created the session (``claude_resume`` keys on it).
     """
     from llm_router.safe_subprocess import get_safe_env
 
@@ -220,6 +226,8 @@ async def run_claude(
 
     args = [binary, "-p", prompt, "--output-format", "json" if structured else "text",
             "--model", _model_alias(model)]
+    if isolate:
+        args += ["--setting-sources", "project,local", "--strict-mcp-config"]
     if resume_session_id:
         args += ["--resume", resume_session_id]
 
