@@ -227,7 +227,10 @@ async def test_side_calls_without_tools_are_forwarded_with_a_reason(env):
 # ── pinning ──────────────────────────────────────────────────────────────────
 
 
-async def test_a_conversation_the_proxy_did_not_see_start_is_never_taken_local(env):
+async def test_a_conversation_the_proxy_did_not_see_start_is_never_taken_local(env, monkeypatch):
+    # With the under-cap release off, as before pin-restart-undercap: the restart pin is then permanent.
+    # With it on, the same conversation is released once under the cap (test_restarted_started_elsewhere_*).
+    monkeypatch.setenv("LLM_ROUTER_UNDERCAP_UNPIN", "0")
     backend = Backend(_ollama("x"))
     app = env.app(backend)
     r = await _post(app, _main_thread(_req()))  # 3+ turns, never seen the first call
@@ -725,6 +728,7 @@ def _sub_first_call() -> dict:
 
 async def test_a_pinned_main_thread_does_not_pin_a_new_subagents_first_call(env, monkeypatch):
     monkeypatch.setenv(local_mode.EXEMPT_POLICY_ENV, "none")
+    monkeypatch.setenv("LLM_ROUTER_UNDERCAP_UNPIN", "0")  # this test is about key isolation, not the size release
     main = _main_thread(_req())
     main["messages"][0]["content"] = [{"type": "text", "text": _LONG_PREAMBLE}, {"type": "text", "text": "main brief"}]
     backend = Backend(_ollama("x"), _ollama("x"))
@@ -1393,3 +1397,116 @@ async def test_under_cap_release_keeps_pin_when_breaker_or_veto_refuses(env, mon
     assert lm["reason"] == "classifier_veto" and "unpin" not in lm
     assert len(backend.calls) == n
     monkeypatch.undo()
+
+
+# -- a restart forgets the pins: a conversation seen mid-way is pinned (started_elsewhere) and must still be
+# -- released by the under-cap rule (pin-restart-undercap; owner session f259176d: 0 of 23 under-cap rows released) --
+
+
+async def _restarted_pinned(env, backend):
+    """A fresh app (= restarted process, empty pins) gets a mid-conversation request UNDER the cap: started_elsewhere."""
+    app = env.app(backend)
+    await _post(app, _long_history(result_chars=500))
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "conversation_started_on_claude" and not backend.calls
+    return app
+
+
+async def test_restarted_started_elsewhere_pin_is_released_when_under_cap(env, monkeypatch):
+    for name in ("LLM_ROUTER_UNPIN", "LLM_ROUTER_PROXY_MASK", "LLM_ROUTER_PROXY_CAP_AFTER_REDUCE"):
+        monkeypatch.delenv(name, raising=False)
+    backend = _backend()
+    app = await _restarted_pinned(env, backend)
+    await _post(app, _long_history(result_chars=500))  # the next call of the same conversation
+    lm = env.rows()[-1]["local_mode"]
+    assert len(backend.calls) == 1 and lm["local"] is True and lm["unpin"]["reason"] == "under_cap"
+
+
+async def test_restarted_started_elsewhere_pin_stays_while_over_cap(env, monkeypatch):
+    backend = _backend()
+    app = await _restarted_pinned(env, backend)
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", 200)
+    await _post(app, _long_history(result_chars=500))
+    lm = env.rows()[-1]["local_mode"]
+    assert not backend.calls and lm["reason"] == "pinned_claude" and "unpin" not in lm
+
+
+async def test_restarted_failed_step_pin_is_never_released(env, monkeypatch):
+    """A restart-pinned conversation released once, then its local step fails: that pin has a cause that is not size."""
+    backend = _FailsAfterFirst(_ollama("", [_call("Bash", {"command": "ls"})]))
+    app = await _restarted_pinned(env, backend)
+    await _post(app, _long_history(result_chars=500))  # released, served: first backend call succeeds
+    await _post(app, _long_history(result_chars=500))  # the second backend call fails: plain claude pin
+    assert env.rows()[-1]["local_mode"]["pin_change"] == "local->claude"
+    n = len(backend.calls)
+    await _post(app, _long_history(result_chars=500))
+    lm = env.rows()[-1]["local_mode"]
+    assert len(backend.calls) == n and lm["reason"] == "pinned_claude" and "unpin" not in lm
+
+
+async def test_restarted_side_call_stays_on_claude(env):
+    backend = _backend()
+    app = env.app(backend)
+    for _ in range(2):
+        side = _long_history(result_chars=500)
+        side.pop("tools")  # a title / permission-check call carries no client tools
+        await _post(app, side)
+        row = env.rows()[-1]
+        assert row["decision"] == "forwarded" and row["reason"] == "not_eligible"
+    assert not backend.calls
+
+
+async def test_restarted_release_is_bounded_per_session(env, monkeypatch):
+    backend = Backend(*[_ollama("", [_call("Bash", {"command": f"ls {i}"})]) for i in range(8)])
+    app = await _restarted_pinned(env, backend)
+    real_cap = local_mode.PROMPT_CAP_TOKENS
+    for i in range(local_mode.UNDERCAP_RELEASES_MAX):
+        n = len(backend.calls)
+        monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", real_cap)
+        await _post(app, _long_history(result_chars=500))
+        assert len(backend.calls) == n + 1 and env.rows()[-1]["local_mode"]["unpin"]["reason"] == "under_cap", i
+        monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", 200)
+        await _post(app, _long_history(result_chars=500))  # over the cap again: a prompt_over_cap pin
+        assert env.rows()[-1]["reason"] == "prompt_over_cap"
+    n = len(backend.calls)
+    monkeypatch.setattr(local_mode, "PROMPT_CAP_TOKENS", real_cap)
+    await _post(app, _long_history(result_chars=500))
+    lm = env.rows()[-1]["local_mode"]
+    assert len(backend.calls) == n and lm["reason"] == "pinned_claude" and "unpin" not in lm
+
+
+@pytest.mark.parametrize("value", ["0", "off"])
+async def test_restarted_release_honours_the_kill_flag(env, monkeypatch, value):
+    backend = _backend()
+    app = await _restarted_pinned(env, backend)
+    monkeypatch.setenv("LLM_ROUTER_UNDERCAP_UNPIN", value)
+    await _post(app, _long_history(result_chars=500))
+    lm = env.rows()[-1]["local_mode"]
+    assert not backend.calls and lm["reason"] == "pinned_claude" and "unpin" not in lm
+
+
+async def test_restarted_release_keeps_pin_when_kill_switch_or_exempt_refuses(env, monkeypatch):
+    backend = _backend()
+    app = await _restarted_pinned(env, backend)
+    env.kill.write_text("")
+    await _post(app, _long_history(result_chars=500))
+    assert env.rows()[-1]["local_mode"]["reason"] == "kill_switch" and not backend.calls
+    env.kill.unlink()
+    real = local_mode.exempt_reason
+    monkeypatch.setattr(local_mode, "exempt_reason", lambda *a, **k: (local_mode.EXEMPT_COORDINATOR, None))
+    await _post(app, _long_history(result_chars=500))
+    lm = env.rows()[-1]["local_mode"]
+    assert lm["reason"] == "exempt_session" and "unpin" not in lm and not backend.calls
+    monkeypatch.setattr(local_mode, "exempt_reason", real)
+    await _post(app, _long_history(result_chars=500))  # never spent: released now
+    assert len(backend.calls) == 1 and env.rows()[-1]["local_mode"]["unpin"]["reason"] == "under_cap"
+
+
+def test_only_the_cap_and_restart_reasons_are_releasable_by_size():
+    lm = local_mode.LocalModeState(kill_path=Path("/nonexistent/kill"))
+    lm.set_pin("e", local_mode.PIN_CLAUDE, local_mode.REASON_STARTED_ELSEWHERE)
+    lm.set_pin("f", local_mode.PIN_CLAUDE)  # a failed local step: no reason
+    lm.set_pin("m", local_mode.PIN_CLAUDE, local_mode.REASON_MEDIA)
+    assert not any(lm.unpin_over_cap(k, once=False) for k in ("f", "m"))
+    assert not lm.unpin_over_cap("e", once=True)  # the once-only P7 lift stays prompt_over_cap only
+    assert lm.unpin_over_cap("e", once=False) and lm.pin_of("e") is None
