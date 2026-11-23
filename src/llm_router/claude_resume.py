@@ -111,7 +111,7 @@ def plan(config: Any, model_alias: str, scope_root: str | None, cwd: str,
         entry = _STORE.get(key)
         if entry is None:
             return key, None
-        ttl = float(_cfg(config, "llm_router_claude_offload_resume_ttl_s", 270))
+        ttl = float(_cfg(config, "llm_router_claude_offload_resume_ttl_s", 3300))
         cap = int(_cfg(config, "llm_router_claude_offload_resume_max_ctx_tokens", 150_000))
         if now - entry.last_used > ttl or entry.ctx_tokens >= cap:
             _STORE.pop(key, None)

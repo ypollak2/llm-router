@@ -308,10 +308,12 @@ class RouterConfig(BaseSettings):
     # every offload is a fresh call with the session buffer folded into one flat prompt.
     # Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME.
     llm_router_claude_offload_resume: bool = True
-    # A resumed session is dropped once idle longer than this. 270 s sits under the CLI's
-    # default 5-minute cache TTL: past it the history would be re-written, not read, so a
-    # resume only adds staleness. Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME_TTL_S.
-    llm_router_claude_offload_resume_ttl_s: int = 270
+    # A resumed session is dropped once idle longer than this. 3300 s sits under the 1-hour
+    # cache TTL: a live probe 2026-11-23 (Sonnet, real CLI) wrote 47,035 cache tokens for
+    # $0.188184 = $4.00/M, the 1-HOUR write price, so the CLI writes 1 h cache, not 5 min.
+    # Past the TTL the history would be re-written, not read, so a resume only adds
+    # staleness. Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME_TTL_S.
+    llm_router_claude_offload_resume_ttl_s: int = 3300
     # ...or once the session holds this many tokens (input + cache read + cache write +
     # output of its last turn), so a long-lived session cannot grow into the context window.
     # Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME_MAX_CTX_TOKENS.

@@ -85,7 +85,7 @@ def _clean_store(monkeypatch):
 
 
 def _cfg(**over):
-    base = dict(llm_router_claude_offload_resume=True, llm_router_claude_offload_resume_ttl_s=270,
+    base = dict(llm_router_claude_offload_resume=True, llm_router_claude_offload_resume_ttl_s=3300,
                 llm_router_claude_offload_resume_max_ctx_tokens=150_000)
     base.update(over)
     return SimpleNamespace(**base)
@@ -228,8 +228,8 @@ def test_fallback_on_session_id_mismatch_discards_the_answer_and_pauses_resume()
 def test_cap_by_age():
     key, _ = _plan(now=0.0)
     claude_resume.settle(key, None, _res(), now=0.0)
-    assert _plan(now=269.0)[1] is not None
-    assert _plan(now=271.0)[1] is None                        # > 270 s: the 5-min cache is gone
+    assert _plan(now=3299.0)[1] is not None
+    assert _plan(now=3301.0)[1] is None                       # > 3300 s: the 1 h cache is gone
 
 
 def test_cap_by_context_tokens():
