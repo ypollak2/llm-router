@@ -69,3 +69,37 @@ async def test_no_retry_when_the_budget_cannot_cover_a_second_try(tmp_path):
     row = _rows(tmp_path)[-1]
     assert b.calls == 1 and "xml_retry" not in row and row["decision"] == "fallback"
     assert row["backend_error_kind"] == "xml_parse"
+
+
+class OptsBackend(ScriptedBackend):
+    def __init__(self, errs):
+        super().__init__(errs)
+        self.bodies = []
+
+    async def complete(self, body, timeout_s):
+        self.bodies.append(body)
+        return await super().complete(body, timeout_s)
+
+
+@pytest.mark.usefixtures("policy")
+async def test_retry_changes_sampling_and_first_call_is_unchanged(tmp_path):
+    from llm_router.proxy.translate import to_ollama
+    b = OptsBackend([XML_ERR])
+    await _post(_app(tmp_path, b), _req())
+    first, second = b.bodies
+    assert "seed" not in first and "temperature" not in first
+    o1 = to_ollama(first, "m", num_ctx=1000)["options"]
+    o2 = to_ollama(second, "m", num_ctx=1000)["options"]
+    assert "seed" not in o1 and "temperature" not in o1
+    assert o2["temperature"] == 0.2 and o2["seed"] == 1729 and o1 != o2
+    assert _rows(tmp_path)[-1]["xml_retry_first_s"] >= 0
+
+
+@pytest.mark.usefixtures("policy")
+@pytest.mark.parametrize("val", ["0", "off", "false"])
+async def test_kill_flag_disables_the_retry(tmp_path, monkeypatch, val):
+    monkeypatch.setenv("LLM_ROUTER_XML_RETRY", val)
+    b = ScriptedBackend([XML_ERR])
+    await _post(_app(tmp_path, b), _req())
+    row = _rows(tmp_path)[-1]
+    assert b.calls == 1 and "xml_retry" not in row and row["backend_error_kind"] == "xml_parse"

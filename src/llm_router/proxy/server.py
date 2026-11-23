@@ -198,6 +198,15 @@ def identity_fields(session_id: str | None) -> dict:
     return {"task_id": task_id, "trace_id": trace_id}
 
 
+XML_RETRY_TEMPERATURE = 0.2
+XML_RETRY_SEED = 1729
+
+
+def xml_retry_enabled() -> bool:
+    """Same-step retry on an Ollama xml_parse failure; default on, ``LLM_ROUTER_XML_RETRY=0|off|false|no`` disables."""
+    return os.environ.get("LLM_ROUTER_XML_RETRY", "").strip().lower() not in ("0", "off", "false", "no")
+
+
 @dataclass
 class ProxyConfig:
     steps: frozenset = field(default_factory=lambda: frozenset({"continuation"}))
@@ -847,18 +856,22 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             message, err, backend_usage = await asyncio.wait_for(
                 backend.complete(send, left), timeout=left)
             _try_s = time.monotonic() - _t_try
-            if (err and error_kind(err) == KIND_XML_PARSE and message is None
+            if (err and error_kind(err) == KIND_XML_PARSE and message is None and xml_retry_enabled()
                     and _budget_left(t0, step_budget_s) > _try_s):
                 # Ollama could not parse the model's own tool-call XML (unclosed or mismatched tag): the
-                # sample is bad, the next one usually is not (O2 v2 pilot 1: 3 of 3 failing steps had one
-                # such reply, every other step served). One same-step retry, only when what is left of the
-                # step budget covers a second attempt of the same length; the budget is not extended and
-                # the reply still goes through every check below. A second failure falls back as before.
+                # sample is bad. O2 v2 pilot 1: 3 of 3 failing steps had one such reply, every other step
+                # served. A plain resend would repeat a deterministic failure (local calls carry no
+                # seed), so the retry changes the sampling: temperature XML_RETRY_TEMPERATURE and a fixed
+                # seed. One retry, only when what is left of the step budget covers a second attempt of
+                # the first one's length; the budget is not extended and the reply still goes through every
+                # check below. A second failure falls back as before. LLM_ROUTER_XML_RETRY=0 turns it off.
                 row["xml_retry"] = 1
+                row["xml_retry_first_s"] = round(_try_s, 3)
                 left = _budget_left(t0, step_budget_s)
                 stream_progress = begin_stream_progress()
                 message, err, backend_usage = await asyncio.wait_for(
-                    backend.complete(send, left), timeout=left)
+                    backend.complete(dict(send, temperature=XML_RETRY_TEMPERATURE, seed=XML_RETRY_SEED), left),
+                    timeout=left)
             _note_prefix(row, body, backend_usage)
             row["backend_usage"] = backend_usage
             if isinstance(message, dict) and not message.get("id"):
