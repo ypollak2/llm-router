@@ -22,8 +22,9 @@ def recycle_command() -> str:
 
 
 class BackendRecycle:
-    def __init__(self, command: str, *, clock=None) -> None:
+    def __init__(self, command: str, *, clock=None, action=None) -> None:
         self.command = command
+        self.action = action   # async callable -> result dict; used when no command is set (runner_recover)
         self.clock = clock or time.monotonic
         self.last_started = None
         self.task = None
@@ -51,7 +52,7 @@ class BackendRecycle:
 
     def start(self, emit) -> dict | None:
         """Schedule at most one owned task; the triggering request never waits."""
-        if not self.command:
+        if not (self.command or self.action):
             return None
         if (self.closed or (self.task is not None and not self.task.done())
                 or (self.last_started is not None
@@ -88,7 +89,7 @@ class BackendRecycle:
                 pass
 
     async def recycle(self) -> dict | None:
-        if not self.command:
+        if not (self.command or self.action):
             return None
         if not self.ready.is_set() or (self.last_started is not None
                 and self.clock() - self.last_started < RATE_LIMIT_S):
@@ -102,6 +103,8 @@ class BackendRecycle:
             except asyncio.TimeoutError:
                 return {"recycle": "skipped_inflight", "exit_code": None, "duration_s": 0.0}
             self.last_started = self.clock()
+            if not self.command:
+                return await self.action()
             return await self._run()
         finally:
             self.ready.set()
