@@ -61,6 +61,7 @@ from llm_router.state import get_active_agent
 from llm_router.codex_agent import CODEX_MODELS, is_codex_available, run_codex
 from llm_router import claude_resume
 from llm_router.claude_agent import offload_available as claude_offload_available, run_claude
+from llm_router.claude_agent import isolated_cwd as claude_agent_isolated_cwd
 from llm_router.contract import build_contract
 from llm_router.gates import run_gates
 from llm_router.gemini_cli_agent import GEMINI_MODELS, is_gemini_cli_available, run_gemini_cli
@@ -3788,8 +3789,13 @@ async def _dispatch_model_loop(
                         if text:
                             await _notify(ctx, "info", f"⚡ claude: {text}")
                     _claude_scope_root = _cli_scope_root(scope_root)
+                    _claude_isolate = claude_resume.isolate_enabled(config)
+                    # Isolated: the subprocess runs in a neutral empty dir (project settings and
+                    # CLAUDE.md resolve from the cwd); the resume key must carry that same dir.
+                    _claude_cwd = (claude_agent_isolated_cwd()[0] if _claude_isolate else None) or os.getcwd()
+                    _claude_moved = _claude_isolate and _claude_cwd != os.getcwd()
                     _key, _entry = claude_resume.plan(
-                        config, model_name, _claude_scope_root, os.getcwd(),
+                        config, model_name, _claude_scope_root, _claude_cwd,
                         conversation=conversation)
                     _discarded: float | None = 0.0
                     try:
@@ -3807,6 +3813,8 @@ async def _dispatch_model_loop(
                                 model=model_name, on_event=_claude_on_event,
                                 # OKF-SCOPE-06: see the codex branch above.
                                 context_root=_claude_scope_root,
+                                # Only the subprocess cwd moves; context scoping is untouched.
+                                **({"subprocess_cwd": _claude_cwd} if _claude_moved else {}),
                                 resume_session_id=_entry.session_id if _entry is not None else None,
                                 # --output-format json: session id + per-call tokens for the ledger.
                                 structured=claude_resume.enabled(config),

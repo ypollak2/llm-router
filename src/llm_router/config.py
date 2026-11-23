@@ -325,8 +325,14 @@ class RouterConfig(BaseSettings):
     # --strict-mcp-config`, i.e. without the user's settings/hooks and without MCP servers.
     # A live probe 2026-11-23 (Sonnet) wrote 47,035 cache tokens for a ~6K-token prompt; the
     # ~41K overhead (user hooks, MCP schemas) partly changes per call, so a resumed call
-    # re-wrote ~23-25K. Default False (= unchanged argv). The flag is part of the resume
-    # key, so toggling never resumes a session created under the other mode.
+    # re-wrote ~23-25K. Default False (= unchanged argv and cwd). The flag is part of the
+    # resume key, so toggling never resumes a session created under the other mode.
+    # Isolation ALSO runs the subprocess in an empty private dir
+    # (<tmp>/llm-router-claude-offload-<uid>, 0o700): `project` settings resolve from the cwd
+    # and from $HOME that re-loads ~/.claude. It REMOVES: user settings/hooks, MCP servers,
+    # CLAUDE.md files of the caller's cwd, and file access relative to the caller's cwd (tools
+    # stay on but see the empty dir). OKF/context injection stays scoped to the real project.
+    # If the dir is unusable the cwd is left as today (logged).
     # Env: LLM_ROUTER_CLAUDE_OFFLOAD_ISOLATE.
     llm_router_claude_offload_isolate: bool = False
 

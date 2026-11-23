@@ -170,6 +170,42 @@ def _usage_of(doc: dict) -> dict[str, int] | None:
     return out
 
 
+def isolated_cwd() -> tuple[str | None, str]:
+    """``(dir, reason)``: the neutral, empty, private cwd for an isolated offload.
+
+    ``<tmp>/llm-router-claude-offload-<uid>``, mode 0o700, never under $HOME (``project``
+    settings and CLAUDE.md resolve from the cwd, and from $HOME that pulls the user's
+    ~/.claude back in). ``(None, reason)`` when it cannot be used safely (exists but is not a
+    real dir owned by this uid, or is group/world-writable): the caller then keeps today's cwd.
+    """
+    import logging
+    import stat
+    import tempfile
+
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    path = os.path.join(tempfile.gettempdir(), f"llm-router-claude-offload-{uid}")
+    reason = ""
+    try:
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        st = os.lstat(path)
+        if not stat.S_ISDIR(st.st_mode):
+            reason = "exists but is not a directory"
+        elif hasattr(os, "getuid") and st.st_uid != uid:
+            reason = "owned by another uid"
+        elif st.st_mode & 0o022:
+            reason = "group/world-writable"
+    except OSError as exc:
+        reason = f"cannot create: {exc}"
+    if reason:
+        logging.getLogger(__name__).warning(
+            "claude offload isolation: neutral cwd %s unusable (%s); using the caller's cwd", path, reason)
+        return None, reason
+    return path, ""
+
+
 async def run_claude(
     prompt: str,
     model: str = "sonnet",
@@ -181,6 +217,7 @@ async def run_claude(
     structured: bool = False,
     inject_context: bool = True,
     isolate: bool = False,
+    subprocess_cwd: str | None = None,
 ) -> ClaudeResult:
     """Run a one-shot prompt through the `claude` CLI as a subprocess.
 
@@ -203,6 +240,9 @@ async def run_claude(
     skips the user's settings/hooks and every MCP server, whose per-call-varying output
     otherwise defeats the prompt cache. A resumed call must pass the same value as the
     call that created the session (``claude_resume`` keys on it).
+
+    ``subprocess_cwd`` overrides ONLY the directory the subprocess runs in (context scoping
+    still follows ``context_root`` / ``working_dir``); see ``isolated_cwd``.
     """
     from llm_router.safe_subprocess import get_safe_env
 
@@ -220,7 +260,7 @@ async def run_claude(
             model=model, exit_code=1, duration_sec=0.0,
         )
 
-    cwd = working_dir or os.getcwd()
+    cwd = subprocess_cwd or working_dir or os.getcwd()
     if timeout is None:
         timeout = int(os.environ.get("LLM_ROUTER_CLAUDE_TIMEOUT", "300"))
 

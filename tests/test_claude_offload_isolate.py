@@ -85,7 +85,127 @@ def test_resume_key_separates_by_isolation_mode(monkeypatch):
     key_off, entry = claude_resume.plan(off, "sonnet", "/r", "/r", conversation=None)
     assert entry is None
     claude_resume.settle(key_off, None, res)
-    assert claude_resume.plan(off, "sonnet", "/r", "/r", conversation=None)[1] is not None
+    claude_resume.release(key_off)                      # plan() marks a key in flight
+    key_off2, entry_off2 = claude_resume.plan(off, "sonnet", "/r", "/r", conversation=None)
+    assert entry_off2 is not None
+    claude_resume.release(key_off2)
     key_on, entry_on = claude_resume.plan(on, "sonnet", "/r", "/r", conversation=None)
     assert entry_on is None and key_on != key_off      # never resumes a session of the other mode
+    claude_resume.release(key_on)
     claude_resume._reset_for_tests()
+
+
+# -- neutral cwd -----------------------------------------------------------------------------------
+
+import os  # noqa: E402
+import stat  # noqa: E402
+
+from tests.test_claude_offload_resume import (  # noqa: E402,F401
+    SID as _SID, _call, _clean_store, _res, routed,
+)
+
+
+@pytest.fixture
+def tmp_root(tmp_path, monkeypatch):
+    import tempfile
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    return tmp_path
+
+
+def test_isolated_cwd_creates_private_dir(tmp_root):
+    path, reason = claude_agent.isolated_cwd()
+    assert reason == "" and path is not None and path.startswith(str(tmp_root))
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o700
+    assert claude_agent.isolated_cwd() == (path, "")            # idempotent
+
+
+def test_isolated_cwd_refuses_unsafe_dirs(tmp_root, caplog):
+    path, _ = claude_agent.isolated_cwd()
+    os.chmod(path, 0o777)
+    got, reason = claude_agent.isolated_cwd()
+    assert got is None and "writable" in reason
+    assert "unusable" in caplog.text
+    os.rmdir(path)
+    open(path, "w").close()                                    # a file in its place
+    got, reason = claude_agent.isolated_cwd()
+    assert got is None and "not a directory" in reason
+
+
+def test_subprocess_cwd_overrides_only_the_cwd(monkeypatch):
+    seen = {}
+
+    async def _exec(*args, **kwargs):
+        seen["cwd"] = kwargs["cwd"]
+        return _Proc(json.dumps({"result": "ok", "session_id": SID}).encode())
+
+    monkeypatch.setattr(claude_agent, "find_claude_binary", lambda: "/fake/claude")
+    monkeypatch.setattr(claude_agent.asyncio, "create_subprocess_exec", _exec)
+    monkeypatch.setattr("llm_router.safe_subprocess.get_safe_env", lambda: {})
+    asyncio.run(run_claude("hi", structured=True, inject_context=False, subprocess_cwd="/x/neutral"))
+    assert seen["cwd"] == "/x/neutral"
+    asyncio.run(run_claude("hi", structured=True, inject_context=False))
+    assert seen["cwd"] == os.getcwd()
+
+
+def _set_isolate(monkeypatch, on):
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_OFFLOAD_ISOLATE", "true" if on else "false")
+    import llm_router.config as config_module
+    config_module._config = None
+
+
+@pytest.mark.asyncio
+async def test_router_isolated_uses_neutral_cwd_for_fresh_resumed_and_retry(routed, monkeypatch, tmp_root):  # noqa: F811
+    _set_isolate(monkeypatch, True)
+    routed.replies += [_res(sid=_SID, total=0.40), _res(sid=_SID, total=0.46),
+                       _res(rc=1, sid=None, usage=None, total=None, content="API Error"),
+                       _res(sid="new-sid", total=0.43)]
+    await _call("one")
+    await _call("two")
+    await _call("three")
+    if not routed.sent:
+        pytest.skip("anthropic CLI branch was not selected by this harness")
+    neutral = claude_agent.isolated_cwd()[0]
+    assert [c.resume_session_id for c in routed.sent] == [None, _SID, _SID, None]   # fresh, resumed, failed resume, retry-fresh
+    assert all(c.isolate is True and c.subprocess_cwd == neutral for c in routed.sent)
+    assert all(getattr(c, "working_dir", None) is None for c in routed.sent)        # context scope untouched
+    key = next(iter(claude_resume._STORE))
+    assert key[2] == os.path.realpath(neutral) and key[4] is True
+
+
+@pytest.mark.asyncio
+async def test_router_isolated_unsafe_dir_falls_back_to_callers_cwd(routed, monkeypatch, tmp_root):  # noqa: F811
+    _set_isolate(monkeypatch, True)
+    path, _ = claude_agent.isolated_cwd()
+    os.chmod(path, 0o777)
+    routed.replies += [_res(sid=_SID, total=0.40)]
+    await _call("one")
+    if not routed.sent:
+        pytest.skip("anthropic CLI branch was not selected by this harness")
+    assert routed.sent[0].isolate is True and not hasattr(routed.sent[0], "subprocess_cwd")
+    assert next(iter(claude_resume._STORE))[2] == os.path.realpath(os.getcwd())
+
+
+@pytest.mark.asyncio
+async def test_router_flag_off_keeps_cwd(routed, monkeypatch, tmp_root):  # noqa: F811
+    _set_isolate(monkeypatch, False)
+    routed.replies += [_res(sid=_SID, total=0.40)]
+    await _call("one")
+    if not routed.sent:
+        pytest.skip("anthropic CLI branch was not selected by this harness")
+    c = routed.sent[0]
+    assert c.isolate is False and not hasattr(c, "subprocess_cwd") and getattr(c, "working_dir", None) is None
+    assert not [n for n in os.listdir(tmp_root) if n.startswith("llm-router-claude-offload")]
+    assert next(iter(claude_resume._STORE))[2] == os.path.realpath(os.getcwd())
+
+
+@pytest.mark.asyncio
+async def test_router_isolation_works_with_resume_off(routed, monkeypatch, tmp_root):  # noqa: F811
+    monkeypatch.setenv("LLM_ROUTER_CLAUDE_OFFLOAD_RESUME", "false")
+    _set_isolate(monkeypatch, True)
+    routed.replies += [ClaudeResult(content="a", model="x", exit_code=0, duration_sec=0.1)]
+    await _call("one")
+    if not routed.sent:
+        pytest.skip("anthropic CLI branch was not selected by this harness")
+    c = routed.sent[0]
+    assert c.structured is False and c.resume_session_id is None
+    assert c.isolate is True and c.subprocess_cwd == claude_agent.isolated_cwd()[0]
