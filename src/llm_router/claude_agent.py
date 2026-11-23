@@ -12,6 +12,7 @@ user's primary Claude Code work.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -106,7 +107,7 @@ def offload_available(config: object) -> bool:
     return get_claude_pressure() < cap
 
 
-def _model_alias(model: str) -> str:
+def model_alias(model: str) -> str:
     """Map a router model spec (e.g. ``anthropic/claude-opus-4-8``) to a CLI alias."""
     normalized = model.removeprefix("anthropic/").lower()
     if "opus" in normalized:
@@ -114,6 +115,9 @@ def _model_alias(model: str) -> str:
     if "haiku" in normalized:
         return "haiku"
     return "sonnet"
+
+
+_model_alias = model_alias  # kept: existing importers and tests use the private name
 
 
 @dataclass
@@ -126,10 +130,44 @@ class ClaudeResult:
     model: str
     exit_code: int
     duration_sec: float
+    # Filled only for a ``structured=True`` call whose stdout parsed as the CLI's
+    # ``--output-format json`` document. ``None`` means the CLI did not say; it is never 0.
+    session_id: str | None = None
+    # PER-CALL tokens: ``input`` (uncached), ``cache_read``, ``cache_write``, ``output``.
+    # ``None`` unless the CLI reported all four.
+    usage: dict[str, int] | None = None
+    # ``total_cost_usd`` exactly as reported. Under ``--resume`` it is CUMULATIVE for the
+    # session, so a per-call figure is a difference of two of these (``claude_resume``).
+    total_cost_usd: float | None = None
 
     @property
     def success(self) -> bool:
         return self.exit_code == 0
+
+
+def _parse_structured(raw: str) -> dict | None:
+    """The CLI's ``--output-format json`` document, or None when stdout is not one."""
+    try:
+        doc = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _usage_of(doc: dict) -> dict[str, int] | None:
+    """Per-call token counts from a CLI result document; None unless all four are real ints."""
+    u = doc.get("usage")
+    if not isinstance(u, dict):
+        return None
+    keys = (("input", "input_tokens"), ("cache_read", "cache_read_input_tokens"),
+            ("cache_write", "cache_creation_input_tokens"), ("output", "output_tokens"))
+    out: dict[str, int] = {}
+    for name, key in keys:
+        v = u.get(key)
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            return None          # a missing count is unknown, not zero
+        out[name] = v
+    return out
 
 
 async def run_claude(
@@ -139,6 +177,9 @@ async def run_claude(
     timeout: int | None = None,
     on_event: "Callable[[str, str], Awaitable[None]] | None" = None,
     context_root: str | None = None,
+    resume_session_id: str | None = None,
+    structured: bool = False,
+    inject_context: bool = True,
 ) -> ClaudeResult:
     """Run a one-shot prompt through the `claude` CLI as a subprocess.
 
@@ -151,14 +192,20 @@ async def run_claude(
     context injection independently of it (defaulting to ``working_dir`` when
     not given) — for a caller that knows the session's project scope but must
     not move where the ``claude`` subprocess actually runs.
+
+    ``structured`` runs ``--output-format json`` and fills ``session_id`` / ``usage`` /
+    ``total_cost_usd``. ``resume_session_id`` adds ``--resume <id>`` (the caller must use
+    the same cwd as the session's first call). ``inject_context=False`` skips OKF/repo
+    injection: a resumed session already holds it.
     """
     from llm_router.safe_subprocess import get_safe_env
 
-    try:
-        from llm_router.context_injection import inject
-        prompt = inject(prompt, root=context_root if context_root is not None else working_dir)
-    except Exception:                                        # noqa: BLE001
-        pass
+    if inject_context:
+        try:
+            from llm_router.context_injection import inject
+            prompt = inject(prompt, root=context_root if context_root is not None else working_dir)
+        except Exception:                                        # noqa: BLE001
+            pass
 
     binary = find_claude_binary()
     if not binary:
@@ -171,7 +218,10 @@ async def run_claude(
     if timeout is None:
         timeout = int(os.environ.get("LLM_ROUTER_CLAUDE_TIMEOUT", "300"))
 
-    args = [binary, "-p", prompt, "--output-format", "text", "--model", _model_alias(model)]
+    args = [binary, "-p", prompt, "--output-format", "json" if structured else "text",
+            "--model", _model_alias(model)]
+    if resume_session_id:
+        args += ["--resume", resume_session_id]
 
     start = time.monotonic()
     proc = None
@@ -213,7 +263,9 @@ async def run_claude(
             line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
             if line:
                 text_chunks.append(line)
-                if on_event is not None:
+                # A structured document is one JSON blob, not text to show; the result
+                # text is replayed to ``on_event`` below once it has been parsed.
+                if on_event is not None and not structured:
                     try:
                         await on_event("line", line[:120])
                     except Exception:
@@ -224,12 +276,37 @@ async def run_claude(
         duration = time.monotonic() - start
 
         output = "\n".join(text_chunks).strip()
+        exit_code = proc.returncode or 0
+        session_id = usage = total_cost = None
+        if structured:
+            doc = _parse_structured(output)
+            if doc is not None:
+                sid = doc.get("session_id")
+                session_id = sid if isinstance(sid, str) and sid else None
+                usage = _usage_of(doc)
+                tc = doc.get("total_cost_usd")
+                total_cost = float(tc) if isinstance(tc, (int, float)) and not isinstance(tc, bool) else None
+                result_text = doc.get("result")
+                output = result_text.strip() if isinstance(result_text, str) else ""
+                if doc.get("is_error") is True:
+                    # A refusal / API error reaches us as exit 0 + is_error. Failing the
+                    # call (and dropping the ids) lets the caller abandon the session.
+                    exit_code = exit_code or 1
+                    session_id = usage = total_cost = None
+                if on_event is not None:
+                    for line in output.splitlines():
+                        if line.strip():
+                            try:
+                                await on_event("line", line.rstrip()[:120])
+                            except Exception:
+                                pass
         if not output and stderr_buf:
             output = b"".join(stderr_buf).decode("utf-8", errors="replace").strip()
 
         return ClaudeResult(
             content=output, model=model,
-            exit_code=proc.returncode or 0, duration_sec=duration,
+            exit_code=exit_code, duration_sec=duration,
+            session_id=session_id, usage=usage, total_cost_usd=total_cost,
         )
     except asyncio.CancelledError:
         # D-154: a cancelled call (the MCP door's deadline, a client disconnect) must not

@@ -1471,6 +1471,7 @@ async def log_usage(
             response.output_tokens,
             cache_write_t=response.cache_creation_input_tokens,
             cache_read_t=response.cache_read_input_tokens,
+            cache_write_1h=getattr(response, "cache_write_1h", False) is True,
         )
         saved_usd = potential_cost_usd - cost_usd
 
@@ -2734,8 +2735,12 @@ def _claude_cost(
     *,
     cache_write_t: int = 0,
     cache_read_t: int = 0,
+    cache_write_1h: bool = False,
 ) -> float:
     """Compute the actual $ cost of a Claude API call using the 4-component formula.
+
+    ``cache_write_1h`` prices ``cache_write_t`` at the 1-hour-TTL write rate (the Claude CLI's)
+    instead of the 5-minute one. It is per call; the table's default is unchanged.
 
     Unknown models return 0.0 (graceful — non-Claude routes don't trip this).
 
@@ -2757,10 +2762,13 @@ def _claude_cost(
             rates = _pricing.rates_per_m(_resolved)
     if rates is None:
         return 0.0
+    write_rate = rates["cache_write"]
+    if cache_write_1h:
+        write_rate = rates["input"] * _pricing._CACHE_WRITE_1H_RATIO
     return (
         input_t       * rates["input"]       +
         output_t      * rates["output"]      +
-        cache_write_t * rates["cache_write"] +
+        cache_write_t * write_rate           +
         cache_read_t  * rates["cache_read"]
     ) / 1_000_000
 
