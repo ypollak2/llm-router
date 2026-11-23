@@ -580,6 +580,13 @@ class LLMResponse:
     # ``chain_attempts`` names the models; this says what happened to them, so a caller can tell a rescued timeout from
     # a rescued bad answer. Empty when nothing failed first. Additive: appended last so positional use is unchanged.
     chain_errors: list[tuple[str, str]] = field(default_factory=list)
+    # Claude CLI offload (subscription, flat rate): what this one call would have cost on the
+    # metered API, from the CLI's own ``total_cost_usd`` (a per-call delta under ``--resume``).
+    # It is NOT billed spend, so ``cost_usd`` stays 0.0 as for every other subscription CLI.
+    # None = not measured (never 0.0, which would read as "free"); only the Claude CLI sets it.
+    api_equivalent_cost_usd: float | None = None
+    # True when this call continued an existing CLI session (``--resume``) instead of starting one.
+    cli_session_resumed: bool = False
 
     def summary(self) -> str:
         """Format a compact one-line summary for logging and CLI display.

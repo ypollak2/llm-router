@@ -59,7 +59,8 @@ from llm_router.idempotency import get_store as _get_idempotency_store
 from llm_router.redaction_routing import maybe_redact as _maybe_redact
 from llm_router.state import get_active_agent
 from llm_router.codex_agent import CODEX_MODELS, is_codex_available, run_codex
-from llm_router.claude_agent import offload_available as claude_offload_available, run_claude
+from llm_router import claude_resume
+from llm_router.claude_agent import _model_alias, offload_available as claude_offload_available, run_claude
 from llm_router.contract import build_contract
 from llm_router.gates import run_gates
 from llm_router.gemini_cli_agent import GEMINI_MODELS, is_gemini_cli_available, run_gemini_cli
@@ -3787,13 +3788,33 @@ async def _dispatch_model_loop(
                         if text:
                             await _notify(ctx, "info", f"⚡ claude: {text}")
                     _claude_scope_root = _cli_scope_root(scope_root)
-                    claude_result = await run_claude(
-                        await _cli_prompt_with_context(prompt, "anthropic", caller_context, config, _claude_scope_root,
-                                                       conversation=conversation, context_door=context_door),
-                        model=model_name, on_event=_claude_on_event,
-                        # OKF-SCOPE-06: see the codex branch above.
-                        context_root=_claude_scope_root,
-                    )
+                    _key, _entry = claude_resume.plan(
+                        config, _model_alias(model_name), _claude_scope_root, os.getcwd(),
+                        conversation=conversation)
+                    _discarded: float | None = 0.0
+                    while True:
+                        # ONE call site. A resumed turn sends only the new request (the CLI
+                        # session already holds the history and the injected context). A fresh
+                        # turn folds the session buffer exactly as before. Pass 2 happens only
+                        # when settle() refuses a resumed answer, with the entry cleared.
+                        claude_result = await run_claude(
+                            prompt if _entry is not None else
+                            await _cli_prompt_with_context(prompt, "anthropic", caller_context, config, _claude_scope_root,
+                                                           conversation=conversation, context_door=context_door),
+                            model=model_name, on_event=_claude_on_event,
+                            # OKF-SCOPE-06: see the codex branch above.
+                            context_root=_claude_scope_root,
+                            resume_session_id=_entry.session_id if _entry is not None else None,
+                            # --output-format json: session id + per-call tokens for the ledger.
+                            structured=claude_resume.enabled(config),
+                            inject_context=_entry is None,
+                        )
+                        _settled = claude_resume.settle(_key, _entry, claude_result)
+                        if not _settled.retry:
+                            break
+                        _discarded = (None if _discarded is None or _settled.discarded_cost_usd is None
+                                      else _discarded + _settled.discarded_cost_usd)
+                        _entry = None
                     if not claude_result.success:
                         # Same rationale as the Codex branch above: the chain
                         # error keeps only the first 200 chars, so parse the
@@ -3812,6 +3833,11 @@ async def _dispatch_model_loop(
                         raise _err
                     in_tokens = max(1, (len(prompt) + _messages_chars(conversation)) // 4)
                     out_tokens = max(1, len(claude_result.content) // 4)
+                    # Use the CLI's own per-call usage when available.
+                    _cli_usage = getattr(claude_result, "usage", None)
+                    if _cli_usage is not None:
+                        in_tokens = _cli_usage.get("input", in_tokens)
+                        out_tokens = _cli_usage.get("output", out_tokens)
                     response = LLMResponse(
                         content=claude_result.content,
                         model=f"anthropic/{model_name}",
@@ -3820,6 +3846,13 @@ async def _dispatch_model_loop(
                         cost_usd=0.0,
                         latency_ms=claude_result.duration_sec * 1000,
                         provider="anthropic",
+                        cache_creation_input_tokens=_cli_usage.get("cache_write", 0) if _cli_usage else 0,
+                        cache_read_input_tokens=_cli_usage.get("cache_read", 0) if _cli_usage else 0,
+                        # What the call would cost on the metered API (incl. a discarded retry's);
+                        # None when the CLI did not report it. NOT billed: cost_usd stays 0.0.
+                        api_equivalent_cost_usd=(None if _settled.api_cost_usd is None or _discarded is None
+                                                 else _settled.api_cost_usd + _discarded),
+                        cli_session_resumed=_settled.resumed,
                     )
                 else:
                     response = await _call_text(

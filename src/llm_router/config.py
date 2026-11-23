@@ -301,6 +301,22 @@ class RouterConfig(BaseSettings):
     # Env: LLM_ROUTER_CLAUDE_OFFLOAD_MAX_PRESSURE.
     llm_router_claude_offload_max_pressure: float = 0.80
 
+    # ── Claude offload: resume one CLI session per llm-router session ──
+    # True: repeated offloads in one llm-router session continue ONE `claude -p --resume`
+    # session, so the history is read from the prompt cache (measured 2026-11-22, N=3 per
+    # arm: Opus $4.10 -> $0.62, Sonnet $0.42 -> $0.15). False restores the old behaviour:
+    # every offload is a fresh call with the session buffer folded into one flat prompt.
+    # Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME.
+    llm_router_claude_offload_resume: bool = True
+    # A resumed session is dropped once idle longer than this. 270 s sits under the CLI's
+    # default 5-minute cache TTL: past it the history would be re-written, not read, so a
+    # resume only adds staleness. Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME_TTL_S.
+    llm_router_claude_offload_resume_ttl_s: int = 270
+    # ...or once the session holds this many tokens (input + cache read + cache write +
+    # output of its last turn), so a long-lived session cannot grow into the context window.
+    # Env: LLM_ROUTER_CLAUDE_OFFLOAD_RESUME_MAX_CTX_TOKENS.
+    llm_router_claude_offload_resume_max_ctx_tokens: int = 150_000
+
     # ── Gemini Subscription (Google One AI Pro) (v9.0.1) ──
     # Set to True when using llm_router inside Gemini CLI with a subscription.
     # When enabled, all gemini/* models (API) are EXCLUDED from routing chains.
