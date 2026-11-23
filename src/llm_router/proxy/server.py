@@ -509,10 +509,17 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     legacy_guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
     # Stops sending steps to a crashed local backend (proxy.backend_health).
+    from llm_router.proxy import runner_recover
     from llm_router.proxy.backend_recycle import BackendRecycle, recycle_after_failed_probe, recycle_command
 
     recycle_cmd = recycle_command()
-    recycler = BackendRecycle(recycle_cmd, clock=health_clock) if recycle_cmd else None
+    recover_action = None
+    if not recycle_cmd and runner_recover.enabled() and runner_recover.pidfile_path():
+        recover_action = runner_recover.RunnerRecover(
+            runner_recover.pidfile_path(), lambda: _ollama_url(), cfg.model or "", cfg.num_ctx)
+    recycler = (BackendRecycle(recycle_cmd, clock=health_clock, action=recover_action)
+                if recycle_cmd or recover_action else None)
+    recycle_cmd = recycle_cmd or ("runner_recover" if recover_action else "")
     health = BackendHealth(cfg.backend_fail_n, cfg.backend_cooldown_s, clock=health_clock,
                            fast_empty=bool(recycle_cmd),
                            # A broken runner (runner_oom / runner_compute_error) stays broken until reloaded: with
