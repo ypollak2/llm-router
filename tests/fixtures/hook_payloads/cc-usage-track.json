@@ -8,8 +8,7 @@
   "tool_input": {
     "subagent_type": "Explore",
     "description": "Find hook latency writers",
-    "prompt": "List every file under src/llm_router that writes hook_latency.jsonl and say which function does the write. Report paths only.",
-    "model": "haiku"
+    "prompt": "List every file under src/llm_router that writes hook_latency.jsonl and say which function does the write. Report paths only."
   },
   "tool_response": {
     "content": [

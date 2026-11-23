@@ -68,6 +68,8 @@ __all__ = [
     "SAVINGS_BASELINE_MODEL",
     "savings_baseline_model",
     "savings_baseline_rates",
+    "CLAUDE_CODE_MODEL_ALIASES",
+    "claude_code_model",
 ]
 
 # Date the Anthropic rates below were last confirmed against published pricing.
@@ -376,6 +378,30 @@ _LONG_CONTEXT_AT_STANDARD_RATES: frozenset[str] = frozenset({
 # ~/.claude/projects (files modified in the 30 days to 2026-09-28) its value was
 # "not_available" (28,071) or "" (175) — never "us". A multiplier with no input
 # that ever triggers it would be untested code; add it when "us" is observed.
+
+
+# Claude Code's own model aliases (the Agent tool's `model` enum and the `model:`
+# frontmatter of an agent definition) -> the CURRENT model id of that family.
+# Scoped to "which model did Claude Code run when it was told `sonnet`", read by
+# hooks/cc-usage-track.py. It is NOT `_ALIASES` above: those are the router's
+# family shorthands, and they lag the current models ("sonnet" -> claude-sonnet-5,
+# "haiku" -> claude-haiku-4-5, "fable" -> claude-fable-5), so this map and that one
+# deliberately differ for sonnet, haiku and fable. tests/test_cc_usage_track.py pins
+# the one relationship that must hold: opus agrees, and every target here is a
+# known id or (claude-fable-5-2 today) a current model with no price, which
+# `price_for` answers with None rather than with a stand-in. Add the Fable 5.2
+# price here only from the published pricing page.
+CLAUDE_CODE_MODEL_ALIASES: dict[str, str] = {
+    "opus": "claude-opus-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "haiku": "claude-haiku-5-5",
+    "fable": "claude-fable-5-2",
+}
+
+
+def claude_code_model(alias: str) -> str | None:
+    """Current model id for a Claude Code alias ("sonnet"), or None if it is not one."""
+    return CLAUDE_CODE_MODEL_ALIASES.get((alias or "").strip().lower())
 
 
 def _normalize(model: str) -> str:

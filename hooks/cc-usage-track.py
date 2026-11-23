@@ -14,24 +14,37 @@ Token estimation: input from prompt length, output from result length (chars/4).
 Cost: 0.0 — CC subscription is flat-rate, not per-call billed.
 
 Model: the one the sub-agent actually ran on. subagent_type does NOT choose it. Claude
-Code runs a sub-agent on, in this order, and so does ``_infer_model``:
-  1. the model the host reports in ``tool_response`` (``resolvedModel``, else ``model``);
+Code runs a sub-agent on, in this order, and so does ``_resolve_model``:
+  1. the model the host reports in ``tool_response`` (``resolvedModel``, else ``model``).
+     ASSUMED, not observed: ``resolvedModel`` is proven only in the transcript's
+     toolUseResult (3,132 of 3,132 records in a local scan), and no recorded PostToolUse
+     Agent payload carrying it exists (the repo fixture has none). Absent -> next step;
   2. the Agent call's ``tool_input.model`` (alias sonnet/opus/haiku/fable, or a full id);
+     an explicit ``inherit`` goes straight to step 4, an absent value goes to step 3;
   3. the ``model:`` frontmatter of the agent definition for subagent_type
      (``<cwd>/.claude/agents/<type>.md``, then ``~/.claude/agents/<type>.md``);
-  4. the parent session's model (last assistant message in ``transcript_path``).
-``inherit`` (or no value) at a step falls through to the next. When none of them names
-a model the model is UNKNOWN and NO ROW IS WRITTEN: guessing a model would credit a
-made-up counterfactual as savings. The same holds for a model with no price in
-``llm_router.pricing`` (today ``claude-fable-5-2``): no price, no row, never a 0.00.
-Aliases map to the current ids in ``_CURRENT_ALIASES``; prices come from
-``llm_router.pricing`` only. Rows already in the ledger are not rewritten.
+     no definition, no ``model:`` or ``inherit`` -> step 4;
+  4. the parent session's model: the latest real (not sidechain, not ``<synthetic>``)
+     assistant record in the tail of ``transcript_path``.
+A value that is present but not a Claude model id or alias ends the search as UNKNOWN: it
+is not "absent", and an older source must not stand in for it. Aliases come from
+``llm_router.pricing.claude_code_model``; prices from ``llm_router.pricing`` only.
+
+UNKNOWN is recorded, never guessed and never a zero. A sub-agent whose model is unknown,
+or has no price (today ``claude-fable-5-2``), is written as a row with the model ("unknown"
+when none), 0 tokens, NULL potential_cost_usd and NULL saved_usd, and reason
+``claude_code_subscription:unknown_model:<why>``. Every money reader sums saved_usd (NULL
+adds nothing) or prices tokens (0 adds nothing), so it cannot count as a saving, yet it
+stays in the call count. Rows already in the ledger are not rewritten.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
 import sqlite3
+import stat
 import sys
 from pathlib import Path
 
@@ -76,18 +89,6 @@ except ImportError:  # pragma: no cover — llm_router not importable from this 
     # price this", and writing it to usage.db would understate every cost and
     # inflate every savings figure derived from the row afterwards.
     _pricing = None  # type: ignore[assignment]
-
-# Claude Code's model aliases -> the current model ids (the Claude 5 family). The
-# registry's own aliases ("sonnet" -> claude-sonnet-5, "haiku" -> claude-haiku-4-5)
-# lag the current models, so they are not used here. An id with no price in
-# llm_router.pricing (claude-fable-5-2 today) is still named, and the row is then
-# skipped by _estimate_cost: the id is not invented away to a cheaper stand-in.
-_CURRENT_ALIASES = {
-    "opus": "claude-opus-5-5",
-    "sonnet": "claude-sonnet-5-5",
-    "haiku": "claude-haiku-5-5",
-    "fable": "claude-fable-5-2",
-}
 
 # The baseline column names the family the row was priced at.
 _FAMILIES = ("haiku", "sonnet", "opus", "fable")
@@ -134,96 +135,161 @@ def _db_path() -> Path:
     return _router_home() / "usage.db"
 
 
-def _as_model(value: object) -> str | None:
-    """A model id from an alias ("sonnet") or a full id; None for ``inherit``/unknown text."""
-    if not isinstance(value, str):
-        return None
+_MAX_DEFINITION_BYTES = 8192
+_MAX_TRANSCRIPT_TAIL_BYTES = 262144
+_MODEL_ID = re.compile(r"claude-[a-z0-9][a-z0-9._-]{0,70}(\[1m\])?")
+
+# A model value is one of: ABSENT (no value), INHERIT (the word), a MODEL (an alias or a
+# full Claude id) or UNRECOGNIZED (present, but neither). The first two let the search go
+# on; the last stops it.
+_ABSENT, _INHERIT, _MODEL, _UNRECOGNIZED = "absent", "inherit", "model", "unrecognized"
+
+
+def _classify(value: object) -> tuple[str, str | None]:
+    if not isinstance(value, str) or not value.strip():
+        return _ABSENT, None
     v = value.strip().lower()
-    if not v or v == "inherit":
-        return None
-    if v in _CURRENT_ALIASES:
-        return _CURRENT_ALIASES[v]
-    if v.startswith("claude-") and len(v) <= 80:
-        return v
-    return None
+    if v == "inherit":
+        return _INHERIT, None
+    alias = getattr(_pricing, "claude_code_model", None)
+    if alias is not None and (mapped := alias(v)) is not None:
+        return _MODEL, mapped
+    if _MODEL_ID.fullmatch(v):
+        return _MODEL, v
+    return _UNRECOGNIZED, None
 
 
-def _definition_model(subagent_type: object, cwd: object) -> str | None:
-    """``model:`` frontmatter of the sub-agent's definition file, or None.
+def _read_regular(path: str, limit: int, *, tail: bool = False) -> str:
+    """At most ``limit`` bytes of a REGULAR file (its end when ``tail``). Raises OSError or
+    ValueError (NUL in the path) for anything else; the caller turns that into "no value"."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError("not a regular file")
+        if tail and st.st_size > limit:
+            os.lseek(fd, st.st_size - limit, os.SEEK_SET)
+        return os.read(fd, limit).decode("utf-8", errors="replace")
+    finally:
+        os.close(fd)
 
-    The type is matched against a strict name pattern before it touches a path.
-    The project definition wins over the user one, as in Claude Code.
+
+def _definition_model(subagent_type: object, cwd: object) -> tuple[str, str | None, str | None]:
+    """``(kind, model, note)`` from the ``model:`` frontmatter of the agent definition.
+
+    ``kind`` is absent when there is no usable definition or it sets no model (the agent
+    then inherits). The type is matched against a strict name pattern before it touches a
+    path; the file must resolve inside the agents directory (no symlink escape); the
+    project definition wins over the user one. Any read problem is absent plus a note.
     """
-    import re as _re
-
-    if not isinstance(subagent_type, str) or not _re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", subagent_type):
-        return None
+    if not isinstance(subagent_type, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", subagent_type):
+        return _ABSENT, None, None
     dirs = []
     if isinstance(cwd, str) and cwd.strip():
         dirs.append(Path(cwd) / ".claude" / "agents")
     dirs.append(Path.home() / ".claude" / "agents")
+    note = None
     for d in dirs:
         try:
-            text = (d / f"{subagent_type}.md").read_text(encoding="utf-8", errors="replace")[:8192]
-        except OSError:
+            root = os.path.realpath(d)
+            real = os.path.realpath(d / f"{subagent_type}.md")
+            if not os.path.exists(real):
+                continue
+            if os.path.commonpath([root, real]) != root:
+                note = "definition_outside_agents_dir"
+                continue
+            text = _read_regular(real, _MAX_DEFINITION_BYTES)
+        except (OSError, ValueError):
+            note = "definition_unreadable"
             continue
         lines = text.splitlines()
         if not lines or lines[0].strip() != "---":
-            return None
+            return _ABSENT, None, note
         for line in lines[1:]:
             if line.strip() == "---":
                 break
-            m = _re.match(r"model\s*:\s*[\"']?([^\"'#\s]+)", line)
+            m = re.match(r"model\s*:\s*[\"']?([^\"'#\s]+)", line)
             if m:
-                return _as_model(m.group(1))
-        return None  # the definition exists and sets no model: it inherits
-    return None
+                kind, model = _classify(m.group(1))
+                return kind, model, note
+        return _ABSENT, None, note
+    return _ABSENT, None, note
 
 
-def _parent_model(transcript_path: object) -> str | None:
-    """Model of the last assistant message in the parent session transcript, or None."""
+def _parent_model(transcript_path: object) -> tuple[str, str | None, str | None]:
+    """``(kind, model, note)`` of the latest real main-chain assistant record in the tail of
+    the parent transcript. Sidechain (sub-agent) records and ``<synthetic>`` ones are skipped;
+    if the latest real record names a model we do not recognise the answer is that, never an
+    older record's model."""
     if not isinstance(transcript_path, str) or not transcript_path:
-        return None
+        return _ABSENT, None, "no_transcript_path"
     try:
-        with open(transcript_path, "rb") as fh:
-            fh.seek(0, 2)
-            fh.seek(max(0, fh.tell() - 262144))
-            tail = fh.read().decode("utf-8", errors="replace")
-    except OSError:
-        return None
+        tail = _read_regular(transcript_path, _MAX_TRANSCRIPT_TAIL_BYTES, tail=True)
+    except (OSError, ValueError):
+        return _ABSENT, None, "transcript_unreadable"
     for line in reversed(tail.splitlines()):
         try:
             rec = json.loads(line)
         except ValueError:
             continue
         msg = rec.get("message") if isinstance(rec, dict) else None
-        if isinstance(msg, dict) and rec.get("type") == "assistant":
-            model = _as_model(msg.get("model"))
-            if model:
-                return model
-    return None
+        if not isinstance(msg, dict) or rec.get("type") != "assistant" or rec.get("isSidechain"):
+            continue
+        raw = msg.get("model")
+        if not isinstance(raw, str) or raw.strip().lower() in ("", "<synthetic>"):
+            continue
+        kind, model = _classify(raw)
+        return (kind, model, None) if kind in (_MODEL, _UNRECOGNIZED) else (_ABSENT, None, None)
+    return _ABSENT, None, "no_main_chain_assistant_record_in_tail"
 
 
-def _infer_model(data: dict) -> str | None:
-    """The model the sub-agent ran on, or None when nothing in hand names it."""
+def _resolve_model(data: dict) -> tuple[str | None, str, str]:
+    """``(model, source, why)``: the model the sub-agent ran on and where it came from, or
+    ``(None, "none", <why unknown>)``. Never raises."""
+    try:
+        return _resolve_model_unsafe(data)
+    except Exception as exc:  # noqa: BLE001 -- the hook must not break Claude Code
+        return None, "none", f"resolver_error_{type(exc).__name__}"
+
+
+def _resolve_model_unsafe(data: dict) -> tuple[str | None, str, str]:
     tool_input = data.get("tool_input")
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     tool_result = data.get("tool_response", data.get("tool_result"))
     if isinstance(tool_result, dict):
         for key in ("resolvedModel", "model"):
-            model = _as_model(tool_result.get(key))
-            if model:
-                return model
-    return (
-        _as_model(tool_input.get("model"))
-        or _definition_model(tool_input.get("subagent_type"), data.get("cwd"))
-        or _parent_model(data.get("transcript_path"))
-    )
+            kind, model = _classify(tool_result.get(key))
+            if kind == _MODEL:
+                return model, "tool_response", ""
+            if kind == _UNRECOGNIZED:
+                return None, "tool_response", "unrecognized_model_in_tool_response"
+    kind, model = _classify(tool_input.get("model"))
+    if kind == _MODEL:
+        return model, "tool_input", ""
+    if kind == _UNRECOGNIZED:
+        return None, "tool_input", "unrecognized_model_in_tool_input"
+    notes: list[str] = []
+    if kind == _ABSENT:  # explicit inherit skips the definition: the call said "use the parent's"
+        kind, model, note = _definition_model(tool_input.get("subagent_type"), data.get("cwd"))
+        if note:
+            notes.append(note)
+        if kind == _MODEL:
+            return model, "definition", ""
+        if kind == _UNRECOGNIZED:
+            return None, "definition", "unrecognized_model_in_definition"
+    kind, model, note = _parent_model(data.get("transcript_path"))
+    if note:
+        notes.append(note)
+    if kind == _MODEL:
+        return model, "parent", ""
+    if kind == _UNRECOGNIZED:
+        return None, "parent", "unrecognized_parent_model"
+    return None, "none", "no_model_source" + "".join(f"_{n}" for n in notes)
 
 
-def _infer_baseline(model: str) -> str:
-    """Family the row is priced at: haiku, sonnet, opus or fable."""
-    return next((f for f in _FAMILIES if f in model), "sonnet")
+def _infer_baseline(model: str) -> str | None:
+    """Family the row is priced at: haiku, sonnet, opus or fable; None for any other id."""
+    return next((f for f in _FAMILIES if f in model), None)
 
 
 def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
@@ -319,8 +385,8 @@ def _ledger_session_id(value: object) -> str | None:
 
 
 def _log_to_db(
-    model: str,
-    baseline_model: str,
+    model: str | None,
+    why_unknown: str,
     input_tokens: int,
     output_tokens: int,
     latency_ms: float,
@@ -337,13 +403,19 @@ def _log_to_db(
             db.execute("PRAGMA busy_timeout = 5000")
             db.execute("PRAGMA journal_mode=WAL")
             _ensure_table(db)
-            potential = _estimate_cost(model, input_tokens, output_tokens)
+            potential = _estimate_cost(model, input_tokens, output_tokens) if model else None
+            reason = "claude_code_subscription"
+            baseline_model = _infer_baseline(model) if model else None
             if potential is None:
-                # No price: no price source (see the guarded import) or a model the
-                # registry does not price (claude-fable-5-2). Skip the row rather
-                # than persist a 0.00 that later reads as a measured cost.
-                return
-            # cost_usd = 0 (subscription), so saved_usd = potential − 0 = potential.
+                # Unknown model, no price source (see the guarded import) or a model the
+                # registry does not price (claude-fable-5-2): an explicit UNKNOWN row. 0
+                # tokens and NULL money, so no reader can count it as a saving or as a
+                # measured zero cost; the call itself stays visible (see the docstring).
+                why = why_unknown or ("unpriced_model" if model else "no_model_source")
+                reason = "claude_code_subscription:unknown_model:" + re.sub(r"[^A-Za-z0-9_.:-]", "_", why)[:80]
+                baseline_model, input_tokens, output_tokens = None, 0, 0
+            # cost_usd = 0 (subscription), so saved_usd = potential − 0 = potential
+            # (NULL when unknown).
             saved = potential
             db.execute(
                 # C-02: the SECOND writer to `usage`. The audit named only
@@ -356,9 +428,9 @@ def _log_to_db(
                     baseline_model, potential_cost_usd, saved_usd, is_simulated,
                     session_id, reason, task_id, trace_id)
                    VALUES (?, 'cc', 'code', 'balanced', ?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?,
-                           'claude_code_subscription', ?, ?)""",
+                           ?, ?, ?)""",
                 (
-                    model,
+                    model or "unknown",
                     input_tokens,
                     output_tokens,
                     latency_ms,
@@ -368,6 +440,7 @@ def _log_to_db(
                     saved,
                     1 if _is_synthetic_run() else 0,
                     session_id or "unknown:hook",  # P0.8: never NULL; G3 counts unknown:* as missing
+                    reason,
                     *_task_ids(session_id),
                 ),
             )
@@ -446,15 +519,14 @@ def main() -> None:
     elif isinstance(tool_result, str):
         result_text = tool_result
 
-    model         = _infer_model(data)
+    model, _source, why_unknown = _resolve_model(data)
     if model is None:
-        sys.exit(0)  # unknown model: no row (see the module docstring)
-    baseline      = _infer_baseline(model)
+        print(f"llm-router: cc-usage-track model unknown ({why_unknown})", file=sys.stderr)
     input_tokens  = max(1, len(prompt) // 4)
     output_tokens = max(1, len(result_text) // 4)
     latency_ms    = data.get("duration_ms", 0.0)
 
-    _log_to_db(model, baseline, input_tokens, output_tokens, float(latency_ms), success=True,
+    _log_to_db(model, why_unknown, input_tokens, output_tokens, float(latency_ms), success=True,
                session_id=_ledger_session_id(data.get("session_id")))
     sys.exit(0)
 

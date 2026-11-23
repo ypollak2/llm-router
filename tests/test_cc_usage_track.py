@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sqlite3
 import sys
 from io import StringIO
@@ -170,6 +171,9 @@ def test_non_agent_tool_is_ignored(temp_home):
 
 # -- model resolution: the model that RAN, not one guessed from subagent_type -----------------------
 
+FIXTURES = Path(__file__).parent / "fixtures" / "hook_payloads"
+
+
 def _rows(temp_home: Path) -> list[dict]:
     db = temp_home / ".llm-router" / "usage.db"
     if not db.exists():
@@ -181,120 +185,278 @@ def _rows(temp_home: Path) -> list[dict]:
     return out
 
 
-def _price_per_token(model: str) -> tuple[float, float]:
-    from llm_router import pricing
+def _one(temp_home: Path) -> dict:
+    (row,) = _rows(temp_home)
+    return row
 
-    p = pricing.price_for(model)
-    assert p is not None, model
-    return p.input / 1e6, p.output / 1e6
+
+def _assert_unknown_row(row: dict, *, model: str = "unknown") -> None:
+    """The explicit UNKNOWN outcome: visible, but no money and no tokens for any reader to count."""
+    assert row["model"] == model
+    assert row["provider"] == "cc"
+    assert row["input_tokens"] == 0 and row["output_tokens"] == 0
+    assert row["potential_cost_usd"] is None and row["saved_usd"] is None
+    assert row["baseline_model"] is None or model != "unknown"
+    assert row["cost_usd"] == 0.0
+    assert row["reason"].startswith("claude_code_subscription:unknown_model:")
+
+
+def _transcript(temp_home: Path, *records: object, raw_tail: str = "") -> str:
+    path = temp_home / "t.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in records) + raw_tail)
+    return str(path)
+
+
+def _assistant(model: str, **extra) -> dict:
+    return {"type": "assistant", "message": {"model": model}, **extra}
+
+
+def test_recorded_fixture_has_no_model_so_the_unknown_path_is_covered(temp_home):
+    """The captured payload carries no model anywhere: an UNKNOWN row, not a guessed Sonnet."""
+    payload = json.loads((FIXTURES / "cc-usage-track.json").read_text())
+    assert "model" not in payload["tool_input"] and "resolvedModel" not in payload["tool_response"]
+    _run_hook_with_payload(payload, temp_home)
+    row = _one(temp_home)
+    _assert_unknown_row(row)
+    assert row["reason"].endswith("no_model_source_transcript_unreadable")
+
+
+def test_fixture_with_model_prices_the_row(temp_home):
+    payload = json.loads((FIXTURES / "cc-usage-track-with-model.json").read_text())
+    _run_hook_with_payload(payload, temp_home)
+    row = _one(temp_home)
+    assert row["model"] == "claude-haiku-5-5" and row["reason"] == "claude_code_subscription"
+    assert row["potential_cost_usd"] > 0
 
 
 @pytest.mark.parametrize(
     ("alias", "model"),
-    [
-        ("opus", "claude-opus-5-5"),
-        ("sonnet", "claude-sonnet-5-5"),
-        ("haiku", "claude-haiku-5-5"),
-    ],
+    [("opus", "claude-opus-5-5"), ("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-5-5")],
 )
 def test_tool_input_model_alias_maps_to_current_priced_model(temp_home, alias, model):
     """Explore is not Haiku: the Agent call's model parameter decides, at the registry price."""
-    payload = _agent_payload(subagent_type="Explore", model=alias)
-    _run_hook_with_payload(payload, temp_home)
-    (row,) = _rows(temp_home)
+    _run_hook_with_payload(_agent_payload(subagent_type="Explore", model=alias), temp_home)
+    row = _one(temp_home)
     assert row["model"] == model
-    in_p, out_p = _price_per_token(model)
+    from llm_router import pricing
+
+    p = pricing.price_for(model)
     assert row["potential_cost_usd"] == pytest.approx(
-        in_p * row["input_tokens"] + out_p * row["output_tokens"], rel=1e-6
-    )
+        (p.input * row["input_tokens"] + p.output * row["output_tokens"]) / 1e6, rel=1e-6)
+    assert row["saved_usd"] == row["potential_cost_usd"]
+
+
+def test_alias_map_lives_in_the_registry_and_its_targets_are_consistent():
+    from llm_router import pricing
+
+    assert pricing.claude_code_model("Opus") == pricing.resolve("opus") == "claude-opus-5-5"
+    assert pricing.claude_code_model("nonesuch") is None
+    for alias, target in pricing.CLAUDE_CODE_MODEL_ALIASES.items():
+        # a current model: priced, or (Fable 5.2) deliberately unpriced -- never priced as another
+        assert target.startswith("claude-" + alias)
+        priced = pricing.price_for(target)
+        assert priced is None or priced.model_id == pricing.resolve(target)
+    assert "claude-sonnet-5-5" in pricing.known_models() and "claude-haiku-5-5" in pricing.known_models()
 
 
 def test_tool_response_resolved_model_wins_over_tool_input(temp_home):
     payload = _agent_payload(model="haiku")
     payload["tool_response"]["resolvedModel"] = "claude-opus-5-5"
     _run_hook_with_payload(payload, temp_home)
-    (row,) = _rows(temp_home)
-    assert row["model"] == "claude-opus-5-5"
+    assert _one(temp_home)["model"] == "claude-opus-5-5"
+
+
+def test_unrecognized_resolved_model_is_unknown_not_a_fallthrough(temp_home):
+    payload = _agent_payload(model="haiku")
+    payload["tool_response"]["resolvedModel"] = "gpt-9"
+    _run_hook_with_payload(payload, temp_home)
+    row = _one(temp_home)
+    _assert_unknown_row(row)
+    assert row["reason"].endswith("unrecognized_model_in_tool_response")
+
+
+def _definition(temp_home: Path, name: str, model_line: str, base: Path | None = None) -> None:
+    agents = (base or temp_home) / ".claude" / "agents"
+    agents.mkdir(parents=True, exist_ok=True)
+    (agents / f"{name}.md").write_text(f"---\nname: {name}\n{model_line}\n---\nbody model: haiku\n")
 
 
 def test_agent_definition_frontmatter_model(temp_home):
-    agents = temp_home / ".claude" / "agents"
-    agents.mkdir(parents=True)
-    (agents / "reviewer.md").write_text("---\nname: reviewer\nmodel: opus\n---\nbody model: haiku\n")
+    _definition(temp_home, "reviewer", "model: opus")
     _run_hook_with_payload(_agent_payload(subagent_type="reviewer", model=None), temp_home)
-    (row,) = _rows(temp_home)
-    assert row["model"] == "claude-opus-5-5"
+    assert _one(temp_home)["model"] == "claude-opus-5-5"
 
 
 def test_project_definition_beats_user_definition(temp_home):
-    for base, model in ((temp_home / ".claude" / "agents", "haiku"), (temp_home / "proj" / ".claude" / "agents", "sonnet")):
-        base.mkdir(parents=True)
-        (base / "w.md").write_text(f"---\nmodel: {model}\n---\n")
+    _definition(temp_home, "w", "model: haiku")
+    _definition(temp_home, "w", "model: sonnet", base=temp_home / "proj")
     payload = _agent_payload(subagent_type="w", model=None)
     payload["cwd"] = str(temp_home / "proj")
     _run_hook_with_payload(payload, temp_home)
-    (row,) = _rows(temp_home)
-    assert row["model"] == "claude-sonnet-5-5"
+    assert _one(temp_home)["model"] == "claude-sonnet-5-5"
 
 
-def test_inherit_falls_through_to_the_parent_session_model(temp_home):
+def test_absent_model_consults_definition_but_explicit_inherit_goes_to_parent(temp_home):
+    _definition(temp_home, "d", "model: haiku")
+    tp = _transcript(temp_home, _assistant("claude-opus-5-5"))
+    for tool_model, expected in ((None, "claude-haiku-5-5"), ("inherit", "claude-opus-5-5")):
+        (temp_home / ".llm-router" / "usage.db").unlink(missing_ok=True)
+        payload = _agent_payload(subagent_type="d", model=tool_model)
+        payload["transcript_path"] = tp
+        _run_hook_with_payload(payload, temp_home)
+        assert _one(temp_home)["model"] == expected, tool_model
+
+
+def test_definition_inherit_or_no_model_line_goes_to_parent(temp_home):
+    _definition(temp_home, "i", "model: inherit")
+    _definition(temp_home, "n", "description: x")
+    tp = _transcript(temp_home, _assistant("claude-sonnet-5-5"))
+    for name in ("i", "n"):
+        (temp_home / ".llm-router" / "usage.db").unlink(missing_ok=True)
+        payload = _agent_payload(subagent_type=name, model=None)
+        payload["transcript_path"] = tp
+        _run_hook_with_payload(payload, temp_home)
+        assert _one(temp_home)["model"] == "claude-sonnet-5-5", name
+
+
+def test_unrecognized_definition_model_is_unknown(temp_home):
+    _definition(temp_home, "u", "model: banana")
+    _run_hook_with_payload(_agent_payload(subagent_type="u", model=None), temp_home)
+    row = _one(temp_home)
+    _assert_unknown_row(row)
+    assert row["reason"].endswith("unrecognized_model_in_definition")
+
+
+def test_parent_uses_last_main_chain_real_record_skipping_sidechain_and_synthetic(temp_home):
+    tp = _transcript(
+        temp_home,
+        _assistant("claude-haiku-5-5"),
+        _assistant("claude-opus-5-5"),                       # the latest REAL main-chain record
+        _assistant("claude-sonnet-5-5", isSidechain=True),   # a sub-agent's record: not the parent
+        _assistant("<synthetic>"),
+        {"type": "user", "message": {"content": "hi"}},
+        raw_tail="not json\n",
+    )
+    payload = _agent_payload(model="inherit")
+    payload["transcript_path"] = tp
+    _run_hook_with_payload(payload, temp_home)
+    assert _one(temp_home)["model"] == "claude-opus-5-5"
+
+
+def test_unrecognized_latest_parent_model_is_unknown_not_an_older_model(temp_home):
+    tp = _transcript(temp_home, _assistant("claude-haiku-5-5"), _assistant("mystery-model"))
+    payload = _agent_payload(model="inherit")
+    payload["transcript_path"] = tp
+    _run_hook_with_payload(payload, temp_home)
+    row = _one(temp_home)
+    _assert_unknown_row(row)
+    assert row["reason"].endswith("unrecognized_parent_model")
+
+
+def test_truncated_transcript_tail_without_a_complete_record_is_unknown(temp_home, monkeypatch):
+    big = temp_home / "big.jsonl"
+    big.write_text(json.dumps(_assistant("claude-opus-5-5")) + "\n" + "x" * 5000 + "\n")
+    mod = _load_hook()
+    monkeypatch.setattr(mod, "_MAX_TRANSCRIPT_TAIL_BYTES", 1000)  # the opus record is outside the tail
+    assert mod._parent_model(str(big))[0] == "absent"
+    big.write_text(json.dumps(_assistant("claude-opus-5-5"))[:30])  # cut mid-record
+    assert mod._parent_model(str(big))[0] == "absent"
+
+
+def test_reads_are_bounded_and_irregular_paths_never_raise(temp_home, monkeypatch):
+    mod = _load_hook()
+    monkeypatch.setattr(mod, "_MAX_DEFINITION_BYTES", 20)
+    _definition(temp_home, "long", "model: opus")  # the model line sits past byte 20
+    assert mod._definition_model("long", None)[0] == "absent"
+    assert mod._parent_model("a\x00b")[0] == "absent"                 # NUL in the path
+    assert mod._parent_model(str(temp_home))[0] == "absent"           # a directory
+    fifo = temp_home / "fifo"
+    os.mkfifo(fifo)
+    assert mod._parent_model(str(fifo))[0] == "absent"                # not a regular file, and no block
+    assert mod._definition_model("x\x00y", "a\x00b")[0] == "absent"
+    payload = _agent_payload(model="inherit")
+    payload["transcript_path"] = "a\x00b"
+    _run_hook_with_payload(payload, temp_home)
+    _assert_unknown_row(_one(temp_home))
+
+
+def test_definition_symlink_cannot_escape_the_agents_dir(temp_home):
+    outside = temp_home / "outside.md"
+    outside.write_text("---\nmodel: opus\n---\n")
     agents = temp_home / ".claude" / "agents"
     agents.mkdir(parents=True)
-    (agents / "inh.md").write_text("---\nmodel: inherit\n---\n")
-    transcript = temp_home / "t.jsonl"
-    transcript.write_text(
-        json.dumps({"type": "assistant", "message": {"model": "claude-haiku-5-5"}}) + "\n"
-        + json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n"
-        + json.dumps({"type": "assistant", "message": {"model": "claude-opus-5-5"}}) + "\n"
-        + "not json\n"
-    )
-    payload = _agent_payload(subagent_type="inh", model="inherit")
-    payload["transcript_path"] = str(transcript)
-    _run_hook_with_payload(payload, temp_home)
-    (row,) = _rows(temp_home)
-    assert row["model"] == "claude-opus-5-5"  # the LAST assistant message
+    (agents / "link.md").symlink_to(outside)
+    mod = _load_hook()
+    assert mod._definition_model("link", None)[0] == "absent"
+    assert mod._definition_model("../../outside", None)[0] == "absent"
 
 
-def test_unknown_model_writes_no_row(temp_home):
-    """No tool_response model, no tool_input model, no definition, no transcript: UNKNOWN.
-
-    Unknown is not a measured zero and not a favourable counterfactual, so nothing is
-    written -- a row would be counted by every savings figure."""
+def test_unknown_model_writes_a_visible_row_that_is_not_a_saving(temp_home):
     _run_hook_with_payload(_agent_payload(subagent_type="Explore", model=None), temp_home)
-    assert _rows(temp_home) == []
+    _assert_unknown_row(_one(temp_home))
 
 
-def test_inherit_with_no_parent_is_unknown_and_not_counted(temp_home):
-    _run_hook_with_payload(_agent_payload(model="inherit"), temp_home)
-    assert _rows(temp_home) == []
-
-
-def test_unpriced_current_model_writes_no_row(temp_home):
-    """Fable 5.2 is current but has no entry in llm_router.pricing: no row, and no
-    stand-in price from another model."""
+def test_unpriced_current_model_keeps_its_name_and_counts_no_money(temp_home):
+    """Fable 5.2 is current but unpriced in llm_router.pricing: a row naming it, no stand-in price."""
     from llm_router import pricing
 
     assert pricing.price_for("claude-fable-5-2") is None  # if this starts failing, price it and drop this test
     _run_hook_with_payload(_agent_payload(model="fable"), temp_home)
-    assert _rows(temp_home) == []
+    row = _one(temp_home)
+    _assert_unknown_row(row, model="claude-fable-5-2")
+    assert row["reason"].endswith("unpriced_model")
+    assert row["baseline_model"] is None
 
 
 def test_unknown_full_id_is_not_priced_as_something_else(temp_home):
     _run_hook_with_payload(_agent_payload(model="claude-nonesuch-9"), temp_home)
-    assert _rows(temp_home) == []
+    _assert_unknown_row(_one(temp_home), model="claude-nonesuch-9")
 
 
-def test_known_full_id_outside_the_default_table_uses_registry_price(temp_home):
+def test_known_full_id_outside_the_aliases_uses_registry_price(temp_home):
     _run_hook_with_payload(_agent_payload(model="claude-opus-4-8"), temp_home)
-    (row,) = _rows(temp_home)
-    assert row["model"] == "claude-opus-4-8"
-    assert row["potential_cost_usd"] > 0
+    row = _one(temp_home)
+    assert row["model"] == "claude-opus-4-8" and row["potential_cost_usd"] > 0
+
+
+def test_unknown_rows_add_nothing_to_any_money_reader(temp_home):
+    """Run the ledger's own readers over a known row plus an unknown one: only the known adds money."""
+    from llm_router import ledger_view
+
+    _run_hook_with_payload(_agent_payload(model="sonnet"), temp_home)
+    known = _rows(temp_home)[0]
+    _run_hook_with_payload(_agent_payload(model=None), temp_home)
+    unknown = _rows(temp_home)[1]
+    db = temp_home / ".llm-router" / "usage.db"
+    con = sqlite3.connect(str(db))
+    try:
+        total = con.execute("SELECT COUNT(*), SUM(saved_usd), SUM(potential_cost_usd), SUM(input_tokens) FROM usage").fetchone()
+    finally:
+        con.close()
+    assert total[0] == 2                                  # the unknown call stays visible
+    assert total[1] == pytest.approx(known["saved_usd"])  # NULL adds nothing
+    assert total[2] == pytest.approx(known["potential_cost_usd"])
+    assert total[3] == known["input_tokens"]              # 0 tokens: nothing for a token-priced reader
+    assert ledger_view.provider_class("cc", reason=unknown["reason"]) == "subscription"
+    assert ledger_view.subscription_seat("cc", reason=unknown["reason"]) == ledger_view.SEAT_CLAUDE
+
+
+def test_happy_path_writes_no_fail_open_record(temp_home, monkeypatch):
+    """A hook that fails open hides its own bugs (a NameError once looked like 'no row')."""
+    from llm_router import failopen
+
+    seen: list = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, *a, **k: seen.append((code, exc)))
+    _run_hook_with_payload(_agent_payload(model="opus"), temp_home)
+    _run_hook_with_payload(_agent_payload(model=None), temp_home)
+    assert seen == []
+    assert len(_rows(temp_home)) == 2
 
 
 def test_definition_name_cannot_escape_the_agents_dir(temp_home):
     (temp_home / "evil.md").write_text("---\nmodel: opus\n---\n")
     _run_hook_with_payload(_agent_payload(subagent_type="../../evil", model=None), temp_home)
-    assert _rows(temp_home) == []
+    _assert_unknown_row(_one(temp_home))
 
 
 def test_tests_write_only_to_the_temp_home(temp_home):
