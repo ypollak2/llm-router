@@ -110,6 +110,7 @@ _WRAP_FLAGS = {
     "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U"}, "doas": {"-u", "-C"}, "time": {"-f", "-o"},
     "nohup": set(), "setsid": set(), "exec": {"-a"}, "unbuffer": set(), "builtin": set(),
 }
+_RAW_CALL = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:[\w./@=-]+\s+){0,6}?(?:\S*/)?codex\s+(?:-\S+\s+)*exec\b")
 _SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 _NPX = {"npx", "bunx", "pnpx"}
 
@@ -227,6 +228,11 @@ def _shell_runs_codex_exec(text: str, aliases: dict[str, list[str]] | None = Non
     if "codex" not in text.lower() or "exec" not in text:
         return False
     aliases = {} if aliases is None else aliases
+    try:
+        shlex.split(text.replace("\n", " "))
+    except ValueError:  # unparseable (unbalanced quote): never let it hide a call, scan the raw text conservatively
+        if _RAW_CALL.search(text):
+            return True
     return any([_walk(c, aliases, depth) for c in _commands(text)])  # a list: every command runs, so aliases accumulate
 
 
@@ -260,6 +266,16 @@ def _is_command_text(text: str) -> bool:
     return bool(_COMMAND_RX.match(text)) or _shell_runs_codex_exec(text)
 
 
+def _fold_str(e: ast.expr) -> str | None:
+    """A string built only by ``+`` of string constants, folded; None if any part is not one."""
+    if isinstance(e, ast.Constant):
+        return e.value if isinstance(e.value, str) else None
+    if isinstance(e, ast.BinOp) and isinstance(e.op, ast.Add):
+        a, b = _fold_str(e.left), _fold_str(e.right)
+        return None if a is None or b is None else a + b
+    return None
+
+
 def _flat(elts: list[ast.expr]) -> list[ast.expr]:
     """Splice ``*[...]`` / ``*(...)`` of a literal into the sequence it sits in."""
     out: list[ast.expr] = []
@@ -290,7 +306,7 @@ def _is_exec_argv(elts: list[ast.expr], positional: bool) -> bool:
 
 class _Census(ast.NodeVisitor):
     def __init__(self, rel: str) -> None:
-        self.rel, self.stack, self.docs = rel, [], set()
+        self.rel, self.stack, self.docs, self.folded = rel, [], set(), set()
         self.argv: list[tuple[str, str, int, list[ast.expr]]] = []
         self.strings: list[tuple[str, str, int, str]] = []
 
@@ -344,7 +360,12 @@ class _Census(ast.NodeVisitor):
             self.argv.append((self.rel, self._where(), node.lineno, elts))
         self.generic_visit(node)
 
-    def visit_BinOp(self, node) -> None:  # ["codex"] + ["exec", ...]; "codex %s" % "exec"
+    def visit_BinOp(self, node) -> None:  # ["codex"] + ["exec", ...]; "codex %s" % "exec"; "codex " + "exec x"
+        if isinstance(node.op, ast.Add) and id(node) not in self.folded:
+            folded = _fold_str(node)
+            if folded is not None:
+                self.folded |= {id(n) for n in ast.walk(node)}
+                self._rendered(node, folded)
         if isinstance(node.op, ast.Mod) and isinstance(node.left, ast.Constant) and isinstance(node.left.value, str):
             r = node.right
             vals = tuple(e.value for e in r.elts) if isinstance(r, ast.Tuple) and all(isinstance(e, ast.Constant) for e in r.elts)                 else (r.value,) if isinstance(r, ast.Constant) else None
@@ -465,6 +486,8 @@ PLANTED = [
     ('22_join_list', 'import subprocess\ndef f(p):\n    subprocess.run(" ".join(["codex", "exec", p]), shell=True)\n'),
     ('23_str_format', 'import subprocess\ndef f(p):\n    subprocess.run("codex {} --json".format("exec"), shell=True)\n'),
     ('24_percent_format', 'import subprocess\ndef f(p):\n    subprocess.run("codex %s --json" % "exec", shell=True)\n'),
+    ('27_plus_concat_string', 'import subprocess\ndef f(p):\n    subprocess.run("codex " + "exec --json", shell=True)\n'),
+    ('28_nested_plus_concat', 'import subprocess\ndef f(p):\n    subprocess.run("co" + "dex " + "exec" + " x", shell=True)\n'),
     ('25_implicit_concat_string', 'import subprocess\ndef f(p):\n    subprocess.run("codex " "exec --json", shell=True)\n'),
     ('26_path_constant_binary', 'import subprocess\ndef f(p):\n    subprocess.run(["/opt/homebrew/bin/codex", "exec", p])\n'),
 ]
@@ -488,6 +511,7 @@ BENIGN = [
 #: _census_of on cfeb888e (the census as merged in #928): 5 of 48 positives found, 0 of 25 negatives flagged (n=48/25
 #: hand-written variants listed here, one run, no sampling).
 SHELL_POSITIVE = [
+ 'echo "hi; codex exec x', "echo 'a' | FOO=1 codex -m x exec 'unclosed", "true && nice codex exec \"p",
  "FOO=1 codex exec p", "FOO=1 BAR=2 codex exec p", "command codex exec p", "/opt/homebrew/bin/codex exec p",
  "npx @openai/codex exec p", "npx -y @openai/codex@latest exec p", "codex  exec p", "codex\texec p",
  "codex -m gpt-5 exec p", "codex -c model=x --color never exec p", "codex \\\n  exec p",
@@ -503,6 +527,7 @@ SHELL_POSITIVE = [
  "npm exec -- @openai/codex exec p", "# note\ncodex exec p",
 ]
 SHELL_NEGATIVE = [
+ 'echo "codex exec', "echo 'say codex exec", 'grep "x codex exec',
  "echo codex exec", "# codex exec p", "grep 'codex exec' file", 'git commit -m "codex exec"', "codex --version",
  "codex login", "printf 'codex exec\\n'", 'echo "run codex exec later"', "which codex", "cat codex-exec.md",
  'pgrep -f "codex exec"', "ps aux | grep codex | grep exec", "exec ls", "alias cx='codex --version'; cx",
