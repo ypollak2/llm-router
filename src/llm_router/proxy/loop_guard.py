@@ -50,6 +50,9 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
 REASON_LOOP_GUARD = "loop_guard"
+# Hand-off to Claude because a further local step would push the content blocks added since the last Claude
+# call past LLM_ROUTER_LOCAL_MAX_BLOCKS (see BlockCap). Not a failure: it never pins the session to Claude.
+REASON_CACHE_BLOCK_CAP = "cache_block_cap"
 # Which trigger tripped; the proxy reads this structured value (row["loop_guard_trigger"]), never the detail string.
 TRIGGER_CAP = "cap"
 TRIGGER_REPEAT = "repeat"
@@ -206,3 +209,68 @@ class LoopGuard:
             self._prev_window.move_to_end(session_id)
         self._bound(self._prev_window)
         return TRIGGER_CAP
+
+
+def local_max_blocks() -> int:
+    """LLM_ROUTER_LOCAL_MAX_BLOCKS: integer, unset/0/garbage = off (today's behaviour). The cap on content blocks
+    added to a conversation since the last Claude-served step. Anthropic's prompt-cache prefix lookup reaches only
+    ~20 blocks back from the client's breakpoint, so a local run that adds more makes the next Claude call re-write
+    the whole conversation (~/.rsi/research/primary-plan/v16/coord/realsave/CACHE-WRITE-RCA-20261125.md: 80% of
+    cache-write tokens on 39 post-local Claude rows were redundant). Suggested value 14; not defaulted."""
+    try:
+        raw = os.environ.get("LLM_ROUTER_LOCAL_MAX_BLOCKS")
+        if raw is None or not str(raw).strip():
+            return 0
+        return max(0, int(raw.strip()))
+    except ValueError:
+        return 0
+
+
+def incoming_blocks(body: dict) -> int:
+    """Content blocks the client added since the previous reply: the ``tool_result`` blocks of the final user
+    message. Structure only; no text is read or kept."""
+    msgs = body.get("messages") if isinstance(body, dict) else None
+    if not msgs or not isinstance(msgs[-1], dict) or msgs[-1].get("role") != "user":
+        return 0
+    content = msgs[-1].get("content")
+    if not isinstance(content, list):
+        return 0
+    return sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result")
+
+
+class BlockCap:
+    """Per-session count of content blocks since the last Claude-served step (assistant blocks served locally plus
+    the client's tool_result blocks). In memory, bounded; only session ids and integers."""
+
+    def __init__(self, max_states: int = 4096):
+        self._n: dict[str, int] = OrderedDict()
+        self.max_states = max_states
+
+    def pending(self, session_id: str | None, incoming: int) -> int:
+        n = self._n.get(session_id) if session_id else None
+        return (n if n is not None else 0) + incoming
+
+    def would_reach(self, session_id: str | None, incoming: int, cap: int) -> int | None:
+        """The pending count when serving one more local step (at least 1 assistant block) would reach ``cap``,
+        else ``None``."""
+        if cap <= 0 or not session_id:
+            return None
+        n = self.pending(session_id, incoming)
+        return n if n + 1 >= cap else None
+
+    def settle(self, session_id: str | None, incoming: int, served_blocks: int | None) -> int | None:
+        """A step finished. ``served_blocks`` is the block count when served locally, ``None`` when Claude takes
+        the call (the count resets). Returns the count to record on the row: blocks since the last Claude step
+        as that step's request saw them, plus the served ones."""
+        if not session_id:
+            return None
+        n = self.pending(session_id, incoming)
+        if served_blocks is None:
+            self._n.pop(session_id, None)
+            return n
+        n += served_blocks
+        self._n[session_id] = n
+        self._n.move_to_end(session_id)
+        while len(self._n) > self.max_states:
+            self._n.popitem(last=False)
+        return n
