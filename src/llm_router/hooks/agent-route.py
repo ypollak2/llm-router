@@ -2053,7 +2053,7 @@ def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None, 
     """
     import asyncio
 
-    global _codex_dispatched
+    global _codex_dispatched, _dispatched_real
     from llm_router.codex_agent import run_codex
 
     primary = _codex_agent_model()
@@ -2081,6 +2081,7 @@ def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None, 
         if getattr(res, "reason_code", "") in _REFUSED_BEFORE_START:
             _refund_refused_dispatch(str(res.reason_code))  # no process started: not a dispatch, not charged
             return res, "failed"
+        _dispatched_real = True
         if res and getattr(res, "success", False) and (res.content or "").strip():
             _note_codex_success(model)
             return res, "ok"
@@ -2122,6 +2123,9 @@ _REFUSED_BEFORE_START = frozenset({"meter_reserved", "binary_missing", "no_ignor
 #: Set by ``_run_codex_agent_inner`` when its last attempt was refused (value: the reason code), read by NS3 to refund
 #: the daily budget unit it took before dispatch.
 _last_refusal = ""
+#: True once a Codex call in this hook run really started (not refused). A later refusal (the gpt-5.5 fallback) then neither
+#: refunds the daily budget unit nor clears ``_codex_dispatched``: the first dispatch was real and stays charged.
+_dispatched_real = False
 
 
 def _release_reservation() -> None:
@@ -2180,7 +2184,8 @@ def _refund_refused_dispatch(reason_code: str) -> None:
     refusal itself is counted in ``agent_route_codex_refusals.json`` by ``_codex_refusal_count``. #818 N-C."""
     global _spent_token, _codex_dispatched, _last_refusal
     token, _spent_token = _spent_token, None
-    _codex_dispatched = False
+    if not _dispatched_real:
+        _codex_dispatched = False
     _last_refusal = reason_code
     if token is not None:
         try:
@@ -2207,6 +2212,7 @@ def _spend_window_slot() -> bool:
         return adm.allowed
     except Exception as exc:
         _failopen("CHZ-FO-AGENT-ROUTE-CODEX-WINDOW-SPEND", exc)
+        _spent_token = None  # no slot was taken: a later refusal must not release a previous attempt's token
         return True
 
 
@@ -2288,6 +2294,9 @@ def _try_cli_delegation(
     except Exception:
         return None
 
+    global _last_refusal, _dispatched_real
+    _last_refusal = ""
+    _dispatched_real = False
     timeout = _delegation_timeout()
     _scope_root = _delegation_scope_root(cwd)
     _benched_until = _codex_bench_gate()
@@ -2868,7 +2877,7 @@ def _try_codex_subagent_delegation(
     work (``_blocked_marker``) is NOT returned: it is logged ``codex_blocked``
     and None is returned, so the Agent call is allowed and Claude does the work.
     """
-    global _last_codex_model, _last_codex_saved_path, _last_codex_pruned, _last_refusal
+    global _last_codex_model, _last_codex_saved_path, _last_codex_pruned, _last_refusal, _dispatched_real
     _last_codex_saved_path = None
     _last_codex_pruned = 0
     # Documented carve-out (owner, 2026-10-02): unlike the local-model direct path and
@@ -3000,6 +3009,7 @@ def _try_codex_subagent_delegation(
     _codex_subagent_budget_increment()
 
     _last_refusal = ""
+    _dispatched_real = False
     try:
         res, status = _run_codex_agent(prompt, timeout, _delegation_scope_root(cwd), working_dir, sandbox)
     except Exception as e:
@@ -3012,8 +3022,9 @@ def _try_codex_subagent_delegation(
         )
         return None
 
-    if _last_refusal:  # refused before any process started (#818 N-C): give the budget unit back, count it apart
-        _codex_subagent_budget_refund()
+    if _last_refusal:  # refused before any process started (#818 N-C): count it apart; refund the budget unit unless an earlier call was real
+        if not _dispatched_real:
+            _codex_subagent_budget_refund()
         _codex_refusal_count(_last_refusal)
 
     if status != "ok":

@@ -108,3 +108,42 @@ def test_a_dispatched_success_is_still_charged(hook, monkeypatch):
     assert _daily() == 1
     assert codex_window.snapshot().used == 1
     assert _refusals() == {}
+
+
+def test_fallback_refused_after_a_real_first_dispatch_keeps_the_charge_and_the_canary(hook, monkeypatch):
+    """First model really dispatched ('model unavailable'), fallback refused: budget stays 1, canary is not released."""
+    from llm_router import codex_bench
+    monkeypatch.setenv("LLM_ROUTER_CODEX_AGENT_MODEL", "gpt-6-astra")
+    unavailable = CodexResult(content="model gpt-6-astra does not exist or you do not have access to it", model="gpt-6-astra",
+                              exit_code=1, duration_sec=0.3, reason_code="cli_error")
+    _Codex(monkeypatch, [unavailable, _refused("no_ignore_rules")])
+    released = []
+    monkeypatch.setattr(codex_bench, "release_canary", lambda claim: released.append(claim))
+    monkeypatch.setattr(hook, "_canary_claim", object())
+    assert hook._MODEL_UNAVAILABLE_RE.search(unavailable.content)
+    assert _ns3(hook) is None
+    assert _daily() == 1
+    assert released == []
+    assert _refusals()["count"] == 1
+    assert codex_window.snapshot().used == 1  # the real dispatch keeps its slot; the refused fallback's slot is back
+
+
+def test_a_failed_window_spend_clears_the_token_so_a_later_refusal_releases_nothing(hook, monkeypatch):
+    released = []
+    monkeypatch.setattr(codex_window, "release", lambda token, now=None: released.append(token))
+    hook._spent_token = 123.0  # the previous attempt's token
+    monkeypatch.setattr(codex_window, "reserve", lambda **k: (_ for _ in ()).throw(RuntimeError("lock gone")))
+    assert hook._spend_window_slot() is True
+    assert hook._spent_token is None
+    hook._refund_refused_dispatch("no_ignore_rules")
+    assert released == []
+
+
+def test_the_window_status_line_shows_refusals_before_start(hook, monkeypatch):
+    assert "refused" not in codex_window.status_line()
+    _Codex(monkeypatch, [_refused("no_ignore_rules"), _refused("binary_missing"), _refused("no_ignore_rules")])
+    for _ in range(3):
+        _ns3(hook)
+    line = codex_window.status_line()
+    assert "refused before start: 3 today (binary_missing 1, no_ignore_rules 2)" in line
+    assert line.startswith("codex: 0/")
