@@ -160,3 +160,60 @@ def test_summary_used_if_paraphrase_counted(monkeypatch):
     assert s["reissue_explicit"] == 1
     assert s["used_if_paraphrase_counted"] == {"used": 1, "attempted": 3}
     assert s["hits_total"] == 1
+
+
+# ── review fixes: last-turn draft, raising detector, quoted spans, "I meant" ─
+
+def _iso(ts: float) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def test_last_turn_draft_in_shadow_does_not_crash(monkeypatch):
+    """A draft in a session's final turn (no later human turn): reply_after returns len(records)."""
+    A = _audit()
+    sid = "10ea9ab2-8cdc-4058-b9f8-3a6543727978"
+    t = 1_800_000_000.0
+    sep = "─── DRAFT ───\nthe drafted answer text\n─── END ───"
+    recs = [
+        {"type": "user", "timestamp": _iso(t - 5), "message": {"content": "rename parse_row in lib/p.py"}},
+        {"type": "attachment", "timestamp": _iso(t), "attachment": {"type": "hook_additional_context", "content": [sep]}},
+        {"type": "assistant", "timestamp": _iso(t + 1), "message": {"content": [{"type": "text", "text": "done"}]}},
+    ]
+    s = A.index_session(A.Session(sid, recs, {}))
+    assert s.paraphrase_ctx(1, len(recs)) is None
+    rec = {"msgs": ["DIRECT SUCCESS"], "session8": sid[:8]}
+    for mode in ("off", "shadow"):
+        monkeypatch.setenv(R.FLAG, mode)
+        A.reset_paraphrase_shadow()
+        units = A._draft_units({sid: s}, {str(t): rec}, {}, t - 10, t + 10)
+        assert len(units) == 1
+    assert A._PARAPHRASE["checked"] == 0
+
+
+def test_raising_detector_never_breaks_a_label(monkeypatch):
+    A = _audit()
+    monkeypatch.setenv(R.FLAG, "shadow")
+    A.reset_paraphrase_shadow()
+    base = A.label_proxy([], 0, "in lib/p.py rename parse_row to read_row")
+
+    class Boom:
+        @staticmethod
+        def is_paraphrase_reask(*a, **k):
+            raise RuntimeError("boom")
+        extract_targets = staticmethod(lambda t: frozenset())
+
+    monkeypatch.setattr(A, "_load_script", lambda rel, name: Boom)
+    assert A.label_proxy([], 0, "in lib/p.py rename parse_row to read_row", paraphrase_ctx=CTX) == base
+    s = A.paraphrase_shadow_summary({}, [])
+    assert s["detector_unavailable"] == 1 and s["n_checked"] == 0 and s["hits_total"] == 0
+
+
+@pytest.mark.parametrize("nxt,expected", [
+    ("what does the log say 'that didn't work' mean in src/a.py", False),
+    ('what does "try again" mean in src/a.py', False),
+    ("didn't work, try again", True),
+    ("I meant the lexer, not the parser", True),
+])
+def test_quoted_spans_and_i_meant(nxt, expected):
+    assert R.is_paraphrase_reask("fix the parser", nxt, None, None, 5, 1)[0] is expected

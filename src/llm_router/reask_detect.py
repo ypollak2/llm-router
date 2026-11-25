@@ -8,7 +8,7 @@ It labels nothing: the release audit script calls it only when
 
 Rule: ``D or (C and A)``.
 
-* D  a correction phrase: ``redo_signal._CONTRADICTION_RE`` / ``_FAILURE_RE`` (imported, never edited),
+* D  a correction phrase (plus a local "I meant"; quoted spans are removed first): ``redo_signal._CONTRADICTION_RE`` / ``_FAILURE_RE`` (imported, never edited),
      on the next prompt with fenced code and ``>`` quote lines removed (``redo_signal._unquoted``), so a
      pasted error text does not count.
 * C  structure: both prompts name file paths, the next one names no path the previous did not, it does not
@@ -82,9 +82,16 @@ def overlap(a: str, b: str) -> float:
     return len(fa & fb) / len(fa | fb) if fa and fb else 0.0
 
 
+# A quoted span opens after start-of-text or a non-word char, so the apostrophe in "didn't" is no delimiter.
+_QUOTED_SPAN_RE = re.compile(r"(?<!\w)([\"'])(?:(?!\1(?!\w)).){1,200}?\1(?!\w)", re.DOTALL)
+_I_MEANT_RE = re.compile(r"\bi meant\b")
+
+
 def _is_correction(next_prompt: str) -> bool:
-    text = _unquoted(next_prompt.replace("’", "'")).lower()
-    return bool(_CONTRADICTION_RE.match(text[:80]) or _FAILURE_RE.search(text[:FAILURE_WINDOW]))
+    text = _unquoted(next_prompt.replace("\u2019", "'")).lower()
+    text = _QUOTED_SPAN_RE.sub(" ", text)
+    return bool(_CONTRADICTION_RE.match(text[:80]) or _FAILURE_RE.search(text[:FAILURE_WINDOW])
+                or _I_MEANT_RE.search(text[:FAILURE_WINDOW]))
 
 
 def is_paraphrase_reask(prev_prompt: str | None, next_prompt: str | None,

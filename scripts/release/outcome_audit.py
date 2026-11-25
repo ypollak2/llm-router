@@ -268,7 +268,7 @@ _SANDBOX_CWD = re.compile(r"^/(private/)?(tmp|var/folders)/")
 # no scripts/, so northstar lost them when installed). They are still loaded by
 # PATH, never imported as llm_router: that keeps llm_router/__init__ and every
 # product reader out of this process. tests/test_outcome_audit_import_boundary.py
-# allows exactly these two paths and pins that they import nothing from llm_router.
+# allows exactly these two paths (plus the shadow-only reask_detect.py, which is not pinned as a leaf) and pins that they import nothing from llm_router.
 
 def _load_script(rel: str, name: str):
     path = ROOT / rel
@@ -383,9 +383,14 @@ def _paraphrase_with_ctx(next_prompt_param: str):
                 return label
             _PARAPHRASE["checked"] += 1
             c = paraphrase_ctx
-            hit, reason = mod.is_paraphrase_reask(
-                c.get("prev_prompt"), nxt, mod.extract_targets(c.get("prev_prompt")),
-                mod.extract_targets(nxt), c.get("gap_s"), c.get("turns"))
+            try:
+                hit, reason = mod.is_paraphrase_reask(
+                    c.get("prev_prompt"), nxt, mod.extract_targets(c.get("prev_prompt")),
+                    mod.extract_targets(nxt), c.get("gap_s"), c.get("turns"))
+            except Exception:  # noqa: BLE001 - a shadow detector never breaks the audit or a label
+                _PARAPHRASE["checked"] -= 1
+                _PARAPHRASE["unavailable"] += 1
+                return label
             if hit:
                 _PARAPHRASE["hits"].append((reason, label[0]))
             return label
@@ -1008,8 +1013,8 @@ class Session:
             return None
         j = self.next_human(i) if j is None else j
         prev = max((k for k in self.human_idx if k < i), default=None)
-        if j is None or prev is None:
-            return None
+        if j is None or prev is None or not (0 <= j < len(self.records)):
+            return None  # no later human turn (reply_after returns len(records)): nothing to compare
         t0, t1 = _ts(self.records[prev]), _ts(self.records[j])
         return {"prev_prompt": self.human_text(prev),
                 "gap_s": (t1 - t0) if t0 is not None and t1 is not None else None,
