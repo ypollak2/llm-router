@@ -69,7 +69,8 @@ def _flush_pending_at_exit() -> None:
             state = _load_for_update(path)
             _merge_pending(state)
             tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-            tmp.write_text(json.dumps(state))
+            with open(tmp, "w", encoding="utf-8", opener=paths.private_opener) as fh:
+                fh.write(json.dumps(state))
             os.replace(tmp, path)
     except Exception as exc:
         failopen.record("CHZ-FO-JUDGE-SAMPLER", exc)
