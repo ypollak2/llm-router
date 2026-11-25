@@ -178,6 +178,71 @@ def test_a_window_is_na_until_the_pass_has_caught_up(env, monkeypatch):
     assert p["available"] is True and p["b_runs"] == 18
 
 
+def test_the_rollup_file_stays_bounded_as_closed_days_accumulate(env, tmp_path):
+    sizes = {}
+    for per_day in (3, 30):
+        e = dict(env, ledger=tmp_path / f"l{per_day}.jsonl", rollup=tmp_path / f"r{per_day}.json")
+        _ledger(e["ledger"], days=range(40, -1, -1), per_day=per_day)
+        sr.refresh(ledger=e["ledger"], rollup=e["rollup"], db_path=env["db"], now=NOW, budget_s=1000.0)
+        roll = sr.load(e["rollup"])
+        kept = sum(len(r["offs"]) for r in roll["days"].values() if r["offs"] is not None)
+        old = [d for d, r in roll["days"].items() if r["offs"] is None]
+        assert len(old) >= 36 and all(roll["days"][d]["sum"] is not None for d in old)
+        assert kept <= 5 * per_day * 5 + 5                              # only the youngest days keep offsets
+        sizes[per_day] = e["rollup"].stat().st_size
+    assert sizes[30] < sizes[3] * 2.5, sizes                            # 10x the rows, nowhere near 10x the file
+
+
+def test_a_late_row_for_an_old_closed_day_still_updates_it(env):
+    _ledger(env["ledger"], days=range(12, -1, -1), per_day=2)
+    _build(env)
+    day = sr.day_of(_day_ts(10, 1))
+    assert sr.load(env["rollup"])["days"][day]["offs"] is None          # old: no offsets kept
+    before = sr.load(env["rollup"])["days"][day]["sum"]
+    late = {"ts": _day_ts(10, 23), "session_id": "late", "decision": "forwarded", "reason": "tier",
+            "tier_reason": "simple", "requested_model": "claude-opus-5", "served_model": "claude-sonnet-5",
+            "usage": {"input_tokens": 100, "output_tokens": 300, "cache_read_input_tokens": 20_000}}
+    with open(env["ledger"], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(late) + "\n")
+    _build(env)
+    got = sr.load(env["rollup"])["days"][day]
+    assert got["offs"] is None
+    assert got["sum"]["rows"] == before["rows"] + 1 and got["sum"]["c_rewritten"] == before["c_rewritten"] + 1
+    assert got["sum"] == sr.summarize(_day_of_rows(env, day))             # a tier row is additive: equal to a full scan
+    # the window figure sees the same row before the refresher has indexed it (the unindexed tail)
+    with open(env["ledger"], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({**late, "ts": late["ts"] + 1}) + "\n")
+    p = sr.proxy_parts(lv.calendar_bounds(30, now=NOW), ledger=env["ledger"], rollup=env["rollup"], db_path=env["db"])
+    assert p["available"] and p["c_rewritten"] == sr.summarize(
+        [r for r in map(json.loads, open(env["ledger"])) if r["ts"] >= sr.day_start(sr.day_of(_day_ts(29, 1)))])["c_rewritten"]
+
+
+def test_a_same_inode_rewrite_that_grows_past_the_old_size_rebuilds(env):
+    _ledger(env["ledger"], days=(2, 1, 0), per_day=2)
+    _build(env)
+    old = sr.load(env["rollup"])
+    lines = open(env["ledger"], encoding="utf-8").read().splitlines(True)
+    ino = env["ledger"].stat().st_ino
+    second = json.loads(lines[1])
+    second["session_id"] = "rewritten-" + "x" * 50
+    with open(env["ledger"], "w", encoding="utf-8") as fh:                # same inode, same first row, bigger file
+        fh.write(lines[0] + json.dumps(second) + "\n" + "".join(lines[2:]) + "".join(lines))
+    assert env["ledger"].stat().st_ino == ino and env["ledger"].stat().st_size > old["size"]
+    assert json.loads(open(env["ledger"]).readline())["ts"] == old["first_ts"]
+    assert not sr.usable(old, env["ledger"])
+    assert _build(env)["reset"] is True
+
+
+def test_a_lost_lock_reports_caught_up_from_the_file(env):
+    from llm_router.file_lock import exclusive_lock
+
+    _ledger(env["ledger"], days=(2, 1, 0), per_day=2)
+    _build(env)
+    with exclusive_lock(env["rollup"].with_name(env["rollup"].name + ".lock"), timeout=0.0):
+        out = _build(env)
+    assert out["caught_up"] is True and out["built"] == 0
+
+
 # ── (d) rollup == full scan for closed days; incremental append ──────────────────────────────────
 
 def test_rollup_equals_full_scan_for_every_closed_day(env):
@@ -208,7 +273,7 @@ def test_a_new_closed_day_is_appended_and_old_days_are_not_rewritten(env):
     assert before["days"][today_key]["sum"] is None and after["days"][today_key]["sum"] is not None  # NOW's day closed
     for k, v in before["days"].items():
         if k != today_key:
-            assert after["days"][k] == v                                # nothing new for them: untouched
+            assert after["days"][k]["sum"] == v["sum"]                  # nothing new for them: untouched
 
 
 def test_history_is_na_until_the_rollup_is_built_then_whole_never_partial(env, monkeypatch):

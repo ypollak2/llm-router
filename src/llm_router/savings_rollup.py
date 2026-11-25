@@ -24,6 +24,7 @@ local-served part B, ``tier_stats`` for the tier part C). Rows whose ``trace_id`
 ``usage.db`` row (``ledger_view.a_trace_ids``) are dropped first."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -33,7 +34,7 @@ from pathlib import Path
 from llm_router import paths
 
 ROLLUP_NAME = "savings_rollup.json"
-SCHEMA = 2
+SCHEMA = 3
 _ZERO = {"b_net": 0.0, "b_runs": 0, "b_steps": 0, "b_unpriced": 0,
          "c_usd": 0.0, "c_rewritten": 0, "c_unpriced": 0, "dropped": 0, "rows": 0}
 
@@ -114,6 +115,22 @@ def _add(total: dict, part: dict) -> None:
 
 #: A window is unavailable while more than this many unindexed bytes trail the ledger's end.
 TAIL_MAX_BYTES = 16 * 1024 * 1024
+#: Row offsets are kept only for days younger than this many days (the file would otherwise grow by about
+#: 9 bytes per row forever and be rewritten whole on every refresh). An older closed day keeps its ``sum``
+#: alone; a LATE row for it is added incrementally as a one-row slice: exact for the tier part (C) and the
+#: counts, and for a late served row B is priced as its own run (+/- one run, like a run split at midnight).
+KEEP_OFFS_DAYS = 3
+HEAD_BYTES = 64 * 1024
+
+
+def head_hash(path, n: int) -> str | None:
+    """sha1 of the first ``n`` bytes of the ledger (None when it cannot be read): a same-inode rewrite that
+    grew past the old size keeps its first row but not its first 64 KB."""
+    try:
+        with ledger_path(path).open("rb") as fh:
+            return hashlib.sha1(fh.read(n)).hexdigest()
+    except OSError:
+        return None
 
 
 def _row_ts(row):
@@ -210,7 +227,10 @@ def usable(roll: dict | None, ledger=None) -> bool:
         st = ledger_path(ledger).stat()
     except OSError:
         return False
-    return st.st_ino == roll.get("ino") and st.st_size >= roll.get("size", 0)
+    if st.st_ino != roll.get("ino") or st.st_size < roll.get("size", 0):
+        return False
+    n = roll.get("head_len", 0)
+    return n == 0 or (st.st_size >= n and head_hash(ledger, n) == roll.get("head"))
 
 
 def _write(roll: dict, path=None) -> None:
@@ -247,7 +267,8 @@ def refresh(*, ledger=None, rollup=None, db_path=None, now: float | None = None,
     rp = rollup_path(rollup)
     with exclusive_lock(rp.with_name(rp.name + ".lock"), timeout=0.0) as locked:
         if not locked:
-            return idle
+            held = load(rollup)
+            return {**idle, "caught_up": bool(held and ident["size"] - held.get("offset", 0) <= 0)}
         roll = load(rollup)
         reset = False
         if not usable(roll, ledger) or roll.get("first_ts") != ident["first_ts"]:
@@ -255,11 +276,23 @@ def refresh(*, ledger=None, rollup=None, db_path=None, now: float | None = None,
             roll = {"v": SCHEMA, "offset": 0, "days": {}}
         t0 = time.monotonic()
         entries, nxt = read_from(ledger, roll["offset"], max_lines=pass_lines, deadline=t0 + budget_s / 2)
-        for off, ts, _row in entries:
-            rec = roll["days"].setdefault(day_of(ts), {"offs": [], "sum": None})
+        late: dict[str, list] = {}
+        for off, ts, row in entries:
+            d = day_of(ts)
+            rec = roll["days"].setdefault(d, {"offs": [], "sum": None})
+            if rec["offs"] is None:                # an old closed day keeps no offsets: add the late row to its sum
+                late.setdefault(d, []).append(row)
+                continue
             rec["offs"].append(off)
             rec["sum"] = None                      # a late row reopens its (closed) day
+        for d, rows in late.items():
+            part = summarize(rows, _drop(d, db_path, rows))
+            total = dict(roll["days"][d]["sum"] or _ZERO)
+            _add(total, part)
+            roll["days"][d]["sum"] = total
+        head_len = min(HEAD_BYTES, ident["size"])
         roll.update(offset=nxt, ino=ident["ino"], size=ident["size"], first_ts=ident["first_ts"],
+                    head_len=head_len, head=head_hash(ledger, head_len),
                     first_day=day_of(ident["first_ts"]), written_at=now)
         today = day_of(now)
         todo = sorted((d for d, r in roll["days"].items() if d < today and r["sum"] is None), reverse=True)
@@ -270,8 +303,13 @@ def refresh(*, ledger=None, rollup=None, db_path=None, now: float | None = None,
             rows = rows_at(ledger, roll["days"][d]["offs"])
             roll["days"][d]["sum"] = summarize(rows, _drop(d, db_path, rows))
             built += 1
-        _write(roll, rollup)
         caught = ident["size"] - nxt <= 0
+        if caught:                                 # never mid-pass: a day's later rows would then be "late" ones
+            horizon = day_of(now - KEEP_OFFS_DAYS * 86400.0)
+            for d, rec in roll["days"].items():
+                if d < horizon and rec["sum"] is not None and rec["offs"] is not None:
+                    rec["offs"] = None             # old and summarised: the sum alone is kept
+        _write(roll, rollup)
         return {"caught_up": caught, "built": built, "missing": len(todo) - built, "reset": reset}
 
 
@@ -318,6 +356,14 @@ def proxy_parts(bounds, *, ledger=None, rollup=None, db_path=None) -> dict:
             continue
         if full and d < day_of(until) and rec is not None and rec["sum"] is None and not extra:
             missing += 1                                # a closed day not summarised yet: wait for the refresher
+            continue
+        if rec is not None and rec["offs"] is None:
+            if not full:                            # an old day without offsets cannot be sliced by time
+                missing += 1
+                continue
+            total = dict(rec["sum"])                # sum + the unindexed late rows, as the refresher would add them
+            _add(total, summarize(extra, _drop(d, db_path, extra)))
+            _add(out, total)
             continue
         rows = (rows_at(ledger, rec["offs"]) if rec else []) + extra
         rows = [r for r in rows if (since is None or r["ts"] >= since) and r["ts"] <= until]
