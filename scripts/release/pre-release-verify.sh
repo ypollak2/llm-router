@@ -38,6 +38,10 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# Sampling-noise tolerance for the outcome gate (step 13), owner decision D-618:
+# a point comparison of two rates false-blocks same-rate releases.
+OUTCOME_TOLERANCE_ALPHA=0.05
+
 SKIP_QUALITY_REASON=""
 SKIP_OUTCOME_REASON=""
 OUTCOME_CROSS_VERSION=""
@@ -299,6 +303,7 @@ fi
 if [[ -n "$OUTCOME_CROSS_VERSION" ]]; then
     OUTCOME_ARGS+=(--cross-version "$OUTCOME_CROSS_VERSION")
 fi
+OUTCOME_ARGS+=(--tolerance-alpha "$OUTCOME_TOLERANCE_ALPHA")
 if ! uv run python scripts/release/outcome_gate.py "${OUTCOME_ARGS[@]}"; then
     echo -e "${RED}❌ Outcome gate failed${NC}"
     exit 1
