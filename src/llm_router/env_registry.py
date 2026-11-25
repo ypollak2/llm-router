@@ -291,6 +291,9 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PINFIX_K": ("llm_router", "proxy/local_mode.py", 1),
     "LLM_ROUTER_PINFIX_MAX_FALLBACKS": ("llm_router", "proxy/local_mode.py", 1),
     "LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN": ("llm_router", "proxy/server.py", 1),
+    # Cap on content blocks added since the last Claude step (suggested 14, off when unset/0): keeps the next
+    # Claude call inside the prompt cache's ~20-block lookback (proxy/loop_guard.py BlockCap).
+    "LLM_ROUTER_LOCAL_MAX_BLOCKS": ("llm_router", "proxy/loop_guard.py", 1),
     # Local-serving alarm (proxy/local_alarm.py), default off; population label for bench proxies (proxy/obs_fields.py).
     "LLM_ROUTER_LOCAL_ALARM": ("llm_router", "proxy/local_alarm.py", 1),
     "LLM_ROUTER_POP_LABEL": ("llm_router", "proxy/obs_fields.py", 1),

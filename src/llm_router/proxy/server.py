@@ -94,7 +94,11 @@ from llm_router.local_context_guard import ContextOverflow
 from llm_router.proxy.loop_guard import (
     DEFAULT_MAX_CONSECUTIVE,
     DEFAULT_REPEAT_WINDOW,
+    REASON_CACHE_BLOCK_CAP,
     REASON_LOOP_GUARD,
+    BlockCap,
+    incoming_blocks,
+    local_max_blocks,
     TRIGGER_CAP,
     TRIGGER_REPEAT,
     LoopGuard,
@@ -508,6 +512,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         cold_guard.GUARD.ttl_s = cold_guard.ttl_from_keep_alive(cfg.keep_alive)
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     legacy_guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
+    block_cap = BlockCap()  # LLM_ROUTER_LOCAL_MAX_BLOCKS; inert (never consulted) while the flag is off
     # Stops sending steps to a crashed local backend (proxy.backend_health).
     from llm_router.proxy import runner_recover
     from llm_router.proxy.backend_recycle import BackendRecycle, recycle_after_failed_probe, recycle_command
@@ -644,6 +649,11 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             prefixes.update(row)
         except Exception as exc:  # noqa: BLE001 - the ledger row matters more than its cost fields
             failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
+        blocks_key = row.pop("_blocks_key", None)
+        blocks_in = row.pop("_blocks_in", None)  # set only with LLM_ROUTER_LOCAL_MAX_BLOCKS on; never serialized
+        if blocks_in is not None and "blocks_since_claude" not in row:
+            served = len(row.get("served_blocks") or []) if row.get("decision") == ledger.DECISION_SERVED else None
+            row["blocks_since_claude"] = block_cap.settle(blocks_key, blocks_in, served)
         lane_a.ensure_fields(row)  # every continuation row, served or not, carries lane_a_reason/_conf
         row.pop(KEEPALIVE_WRITTEN, None)
         ledger.write_row(row, cfg.ledger_path)
@@ -766,6 +776,14 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
                        detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3),
                        loop_guard_trigger=trigger)
+            return None
+        blocks_in = row.get("_blocks_in")
+        blocks_pending = block_cap.would_reach(row.get("_blocks_key"), blocks_in if blocks_in is not None else 0, local_max_blocks())
+        if blocks_pending is not None:
+            # Hand off before the cache's ~20-block lookback is lost; the guard streak ends with the Claude step.
+            guard.reset(guard_key)
+            row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_CACHE_BLOCK_CAP,
+                       detail=f"cache_block_cap:{blocks_pending}", added_latency_s=round(time.monotonic() - t0, 3))
             return None
         try:
             from llm_router import capability_filter
@@ -1412,11 +1430,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 # refusals can also arise inside complete(), before generation starts.
                 failed = attempted and row.get("reason") not in {"local_queue_timeout", "memory_budget"}
                 cause = lm.pinfix_outcome(key, True) if failed else None
+                if row.get("reason") == REASON_CACHE_BLOCK_CAP:
+                    row["pin_skipped"] = "cache_block_cap"  # same ledger field as the control arm
                 if cause is not None:
                     lm.set_pin(key, local_mode.PIN_CLAUDE, local_mode.REASON_PINNED_STICKY)
                     row["local_mode"]["pin_change"] = "local->claude"
                     if cause == "fallback_ceiling":
                         row["local_mode"]["pinfix_cause"] = cause
+            elif row.get("reason") == REASON_CACHE_BLOCK_CAP:
+                row["pin_skipped"] = "cache_block_cap"  # a hand-off for the prompt cache, not a local failure
             elif (loop_guard_cap_no_pin_on() and row.get("reason") == REASON_LOOP_GUARD
                     and row.get("loop_guard_trigger") == TRIGGER_CAP):
                 row["pin_skipped"] = "loop_guard_cap"
@@ -2000,6 +2022,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             "stream": bool(body.get("stream")), "requested_model": body.get("model"),
             "auth": ledger.auth_kind(request.headers),
             "mixed_history": has_served_turn(body), "thinking_retry": False,
+            **({"_blocks_in": incoming_blocks(body),
+                "_blocks_key": conversation_key(body, session_id_of(body))} if local_max_blocks() else {}),
             # GE1: the kind of call (continuation / turn_first / subagent_first /
             # subagent_turn / harness_turn / side_call), the class of the tools its results answer, and why a
             # continuation could not be served faithfully. Serving eligibility is
