@@ -17,7 +17,7 @@ Counters live in ``judge_sampler.json`` in the router state dir:
 ``{door: {seen, picked, lock_skipped}}``, updated under the shared file lock
 with an atomic replace. O(1) per call. ``hook`` callers use a non-blocking
 lock: on contention the call is skipped, counted in ``lock_skipped`` (held in
-memory and flushed on the next locked update) and recorded via failopen.
+memory and flushed on the next locked update, or at interpreter exit) and recorded via failopen.
 
 Rate 0 keeps its historical meaning, "judge off". Any other value outside
 (0, 1] or non-numeric falls back to the default, recorded via failopen.
@@ -26,6 +26,7 @@ Rate 0 keeps its historical meaning, "judge off". Any other value outside
 from __future__ import annotations
 
 import hashlib
+import atexit
 import json
 import math
 import os
@@ -43,6 +44,35 @@ _BLOCKING_TIMEOUT_S = 2.0
 
 #: lock_skipped counts not yet persisted (the lock was the thing that failed).
 _pending_skips: dict[str, int] = {}
+_exit_flush_registered = False
+
+
+def _merge_pending(state: dict) -> None:
+    for skipped_door, n in _pending_skips.items():
+        state.setdefault(skipped_door, {})["lock_skipped"] = (
+            state.get(skipped_door, {}).get("lock_skipped", 0) + n
+        )
+    _pending_skips.clear()
+
+
+def _flush_pending_at_exit() -> None:
+    """A short-lived process (hook, CLI) that skipped on contention and never counted
+    again would drop its ``lock_skipped`` with the interpreter: the skip was seen by
+    nobody (seen+lock_skipped < calls). One last blocking attempt writes it down."""
+    if not _pending_skips:
+        return
+    try:
+        path = _state_path()
+        with exclusive_lock(path.with_name(path.name + ".lock"), timeout=_BLOCKING_TIMEOUT_S) as locked:
+            if not locked:
+                return
+            state = _load_for_update(path)
+            _merge_pending(state)
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(state))
+            os.replace(tmp, path)
+    except Exception as exc:
+        failopen.record("CHZ-FO-JUDGE-SAMPLER", exc)
 
 
 def normalize_door(door: str | None) -> str:
@@ -120,20 +150,20 @@ def pick(door: str | None) -> bool:
         return False
     d = normalize_door(door)
     timeout = 0.0 if d in _NONBLOCKING_DOORS else _BLOCKING_TIMEOUT_S
+    global _exit_flush_registered
     try:
         path = _state_path()
         status: dict = {}
         with exclusive_lock(path.with_name(path.name + ".lock"), timeout=timeout, status=status) as locked:
             if not locked:
                 _pending_skips[d] = _pending_skips.get(d, 0) + 1
+                if not _exit_flush_registered:
+                    atexit.register(_flush_pending_at_exit)
+                    _exit_flush_registered = True
                 failopen.record("CHZ-FO-JUDGE-SAMPLER-LOCK", None, detail=f"door={d} lock {status.get('state')}")
                 return False
             state = _load_for_update(path)
-            for skipped_door, n in _pending_skips.items():
-                state.setdefault(skipped_door, {})["lock_skipped"] = (
-                    state.get(skipped_door, {}).get("lock_skipped", 0) + n
-                )
-            _pending_skips.clear()
+            _merge_pending(state)
             c = state.setdefault(d, {})
             seen = c.get("seen", 0)
             hit = _is_pick(d, seen, rate)

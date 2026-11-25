@@ -74,7 +74,31 @@ def test_two_processes_lose_no_counts(home):
     procs = [subprocess.Popen([sys.executable, "-c", code]) for _ in range(2)]
     assert [p.wait(timeout=60) for p in procs] == [0, 0]
     c = judge_sampler.counters()["gateway"]
-    assert c["seen"] == 400 and c["picked"] == 40 and c["lock_skipped"] == 0
+    # No count may be LOST: a call that timed out on the lock is recorded as
+    # lock_skipped (flushed at exit), so seen + lock_skipped always equals calls.
+    assert c["seen"] + c["lock_skipped"] == 400
+    if c["lock_skipped"] == 0:
+        assert c["seen"] == 400 and c["picked"] == 40
+
+
+def test_lock_skip_in_short_lived_process_is_not_lost_at_exit(home):
+    """Deterministic: the child times out on a held lock and exits; its skip must reach disk."""
+    code = (
+        "from llm_router import judge_sampler as j\n"
+        "j._BLOCKING_TIMEOUT_S = 0.05\n"
+        "assert j.pick('gateway') is False\n"
+        "print('skipped', flush=True)\n"
+    )
+    with exclusive_lock(home / "judge_sampler.json.lock", timeout=0):
+        child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+        for line in child.stdout:  # failopen may log first; the pick timed out while we hold the lock
+            if line.strip() == "skipped":
+                break
+        else:
+            raise AssertionError("child never reported its skipped pick")
+    assert child.wait(timeout=60) == 0  # its exit-time flush now gets the lock
+    c = judge_sampler.counters()["gateway"]
+    assert c["lock_skipped"] == 1 and c.get("seen", 0) == 0
 
 
 def test_hook_lock_failure_fails_open_and_is_counted(home):
