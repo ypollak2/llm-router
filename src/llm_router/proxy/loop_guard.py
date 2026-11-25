@@ -238,9 +238,20 @@ def incoming_blocks(body: dict) -> int:
     return sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result")
 
 
+#: Assistant blocks reserved for the step being decided: the common local reply is text + tool_use (2). The
+#: reply size is unknown until the backend answers; a bigger reply (parallel tool calls) can still overshoot.
+RESERVED_REPLY_BLOCKS = 2
+
+
 class BlockCap:
-    """Per-session count of content blocks since the last Claude-served step (assistant blocks served locally plus
-    the client's tool_result blocks). In memory, bounded; only session ids and integers."""
+    """Count of content blocks since the last Claude-served step (assistant blocks served locally plus the
+    client's tool_result blocks), keyed by CONVERSATION (cache_cost.conversation_key), not session id: side calls
+    and sub-agents share the session id but have their own first message, so their non-served rows must not reset
+    the main thread's count. In memory, bounded; only keys and integers.
+
+    Not counted: Claude's own reply block(s) and the tool_result that answers them after a reset, so the real
+    lookback distance at the next Claude call runs about 1-2 blocks above the counter. A cap of 14 plus that
+    margin plus the reserved reply (RESERVED_REPLY_BLOCKS) stays under the ~20-block lookback."""
 
     def __init__(self, max_states: int = 4096):
         self._n: dict[str, int] = OrderedDict()
@@ -251,12 +262,12 @@ class BlockCap:
         return (n if n is not None else 0) + incoming
 
     def would_reach(self, session_id: str | None, incoming: int, cap: int) -> int | None:
-        """The pending count when serving one more local step (at least 1 assistant block) would reach ``cap``,
-        else ``None``."""
+        """The pending count when serving one more local step (RESERVED_REPLY_BLOCKS assistant blocks) would
+        reach ``cap``, else ``None``."""
         if cap <= 0 or not session_id:
             return None
         n = self.pending(session_id, incoming)
-        return n if n + 1 >= cap else None
+        return n if n + RESERVED_REPLY_BLOCKS >= cap else None
 
     def settle(self, session_id: str | None, incoming: int, served_blocks: int | None) -> int | None:
         """A step finished. ``served_blocks`` is the block count when served locally, ``None`` when Claude takes

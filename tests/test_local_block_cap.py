@@ -54,24 +54,46 @@ async def test_cap_14_hands_off_at_the_right_step_with_its_reason_and_resets(env
     backend, app = _app(env, monkeypatch, 14)
     await _drive(app, 7)
     rows = env.rows()
-    # blocks_since_claude: 2, 5, 8, 11, 14 -> at step 5 (rows[4]) pending=14, would reach cap=14 -> fallback
-    assert [r["decision"] for r in rows[:5]] == ["served"] * 5
-    assert [r["blocks_since_claude"] for r in rows[:5]] == [2, 5, 8, 11, 14]
-    assert (rows[5]["decision"], rows[5]["reason"]) == ("fallback", "cache_block_cap")
-    assert rows[5]["detail"] == "cache_block_cap:15" and rows[5]["blocks_since_claude"] == 15
-    assert rows[5]["pin_skipped"] == "cache_block_cap" and "pin_change" not in rows[5]["local_mode"]
-    assert len(backend.calls) == 6  # 5 served before the hand-off, none at it, 1 after
+    # 2-block replies (text + tool_use): blocks_since_claude 2, 5, 8, 11; step 5 has pending 12 and 12 + the
+    # 2 reserved reply blocks reaches 14 -> hand-off, so the Claude request carries 12, never more than the cap
+    assert [r["decision"] for r in rows[:4]] == ["served"] * 4
+    assert [r["blocks_since_claude"] for r in rows[:4]] == [2, 5, 8, 11]
+    assert (rows[4]["decision"], rows[4]["reason"]) == ("fallback", "cache_block_cap")
+    assert rows[4]["detail"] == "cache_block_cap:12" and rows[4]["blocks_since_claude"] == 12
+    assert rows[4]["pin_skipped"] == "cache_block_cap" and "pin_change" not in rows[4]["local_mode"]
+    assert all(r["blocks_since_claude"] <= 14 for r in rows)
+    assert len(backend.calls) == 6  # 4 served before the hand-off, none at it, 2 after
     # the counter reset after the Claude step: the next step is served locally again, counting from 0 + its own
-    assert rows[6]["decision"] == "served" and rows[6]["blocks_since_claude"] == 3
+    assert rows[5]["decision"] == "served" and rows[5]["blocks_since_claude"] == 3
+
+
+async def test_side_call_between_main_steps_does_not_reset_the_main_counter(env, monkeypatch):
+    backend, app = _app(env, monkeypatch, 14)
+    base, prev = _first_call(), None
+    side = {**_first_call(), "tools": []}
+    side["messages"] = [{"role": "user", "content": "write a title for this chat"}]
+    for i in range(5):
+        r = await _post(app, base if prev is None else _next_turn(base, prev))
+        blocks = _served_blocks(r)
+        prev = {"content": blocks} if blocks else prev
+        if i == 1:
+            await _post(app, side)  # same session id, other conversation, goes to Claude
+    rows = env.rows()
+    main = [r for r in rows if r.get("step_class") != "side_call"]
+    side_rows = [r for r in rows if r.get("step_class") == "side_call"]
+    assert len(side_rows) == 1 and side_rows[0]["decision"] != "served"
+    assert [r["blocks_since_claude"] for r in main[:4]] == [2, 5, 8, 11]  # not reset by the side call
+    assert (main[4]["decision"], main[4]["reason"]) == ("fallback", "cache_block_cap")
 
 
 def test_blockcap_counter_arithmetic():
     bc = BlockCap()
     assert bc.would_reach("s", 0, 14) is None
     assert bc.settle("s", 1, 2) == 3 and bc.settle("s", 1, 2) == 6
-    assert bc.would_reach("s", 1, 8) == 7  # pending 6 + 1 = 7; 7 + 1 >= 8
-    assert bc.would_reach("s", 1, 9) is None
-    assert bc.settle("s", 1, None) == 7  # a Claude step records what it faced ...
+    assert bc.would_reach("s", 1, 9) == 7  # pending 6 + 1 = 7; 7 + 2 reserved >= 9
+    assert bc.would_reach("s", 1, 10) is None
+    assert bc.settle("s", 1, 2) == 9 and bc.settle("k2", 1, 2) == 3 and bc.pending("s", 0) == 9  # keys are independent
+    assert bc.settle("s", 1, None) == 10  # a Claude step records what it faced (6 + 1 + 2 + 1) ...
     assert bc.pending("s", 0) == 0  # ... and resets
     assert bc.would_reach(None, 5, 3) is None and bc.would_reach("s", 5, 0) is None
 
