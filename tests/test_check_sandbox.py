@@ -761,7 +761,7 @@ def _wrap_linux(monkeypatch, root):
 
 
 @pytest.mark.parametrize("which", ["home", "parent"])
-def test_case_variant_root_of_home_refused(tmp_path, monkeypatch, which):
+def test_macos_case_variant_root_of_home_refused(tmp_path, monkeypatch, which):
     home = tmp_path / "Users" / "Me"
     home.mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
@@ -825,7 +825,7 @@ def test_private_alias_roots_refused(tmp_path, monkeypatch, root):
         _wrap_linux(monkeypatch, root)
 
 
-def test_symlink_to_private_var_refused(tmp_path, monkeypatch):
+def test_macos_symlink_to_private_var_refused(tmp_path, monkeypatch):
     if not Path("/private/var").is_dir():
         pytest.skip("no /private/var on this OS")
     monkeypatch.setenv("HOME", str(tmp_path / "h"))
