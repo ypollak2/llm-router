@@ -687,7 +687,7 @@ def test_root_covering_home_refused(tmp_path, monkeypatch, system, which):
     monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
     monkeypatch.setattr(sandbox, "_probe", lambda *a: "")
     root = {"home": home, "parent": home.parent, "root": Path("/")}[which]
-    with pytest.raises(sandbox.SandboxUnavailable, match="ROOT"):
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME"):
         sandbox.wrap([sys.executable], root)
 
 
@@ -817,3 +817,21 @@ def test_refusal_message_names_opt_out(tmp_path, monkeypatch):
     result = apply.llm_apply(json.dumps([dict(file="a.py", old_string="1", new_string="2")]), "python -m pytest", str(root))
     assert "no usable sandbox (probe failed deliberately)" in result
     assert "LLM_ROUTER_APPLY_SANDBOX=auto" in result
+
+
+@pytest.mark.parametrize("root", ["/tmp", "/var", "/etc", "/private", "/private/etc", "/private/var", "/private/tmp"])
+def test_private_alias_roots_refused(tmp_path, monkeypatch, root):
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
+        _wrap_linux(monkeypatch, root)
+
+
+def test_symlink_to_private_var_refused(tmp_path, monkeypatch):
+    if not Path("/private/var").is_dir():
+        pytest.skip("no /private/var on this OS")
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    link = tmp_path / "work" / "link"
+    link.parent.mkdir()
+    link.symlink_to("/private/var")
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
+        _wrap_linux(monkeypatch, link)

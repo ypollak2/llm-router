@@ -71,9 +71,15 @@ def _check_root(root):
     """
     import pwd
 
+    refusal = "root covers HOME or a system directory"
+    named = Path(os.path.abspath(os.fspath(root)))  # lexical: /etc stays /etc, no symlink followed
+    if len(named.parts) < 3:
+        raise SandboxUnavailable(f"{refusal}: {named}")
     path = Path(_path(root))
-    if len(path.parts) < 3:
-        raise SandboxUnavailable(f"root covers HOME or a system directory: {path}")
+    # macOS /etc, /var, /tmp resolve into /private: treat '/private' like '/'.
+    floor = 4 if len(path.parts) > 1 and path.parts[1].lower() == "private" else 3
+    if len(path.parts) < floor:
+        raise SandboxUnavailable(f"{refusal}: {path}")
     homes = {Path(_path(os.environ.get("HOME") or Path.home())),
              Path(_path(pwd.getpwuid(os.getuid()).pw_dir))}
     for home in homes:
@@ -295,8 +301,8 @@ def wrap(argv, root):
     backend = "/usr/bin/sandbox-exec" if system == "Darwin" else shutil.which("bwrap") if system == "Linux" else None
     if not backend:
         raise SandboxUnavailable("bwrap missing" if system == "Linux" else f"unsupported OS: {system}")
+    _check_root(root)  # before anything resolves or touches the directory
     root = _path(root)
-    _check_root(root)
     home = _path(os.environ.get("HOME", Path.home()))
     try:
         if system == "Linux":
