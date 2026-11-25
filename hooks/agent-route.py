@@ -2078,6 +2078,9 @@ def _run_codex_agent_inner(prompt: str, timeout: int, context_root: str | None, 
                                     working_dir=working_dir, sandbox=sandbox,
                                     **_caller_kwargs(run_codex)))  # D-373: the one caller the Plus meter is reserved for
         last = res
+        if getattr(res, "reason_code", "") in _REFUSED_BEFORE_START:
+            _refund_refused_dispatch(str(res.reason_code))  # no process started: not a dispatch, not charged
+            return res, "failed"
         if res and getattr(res, "success", False) and (res.content or "").strip():
             _note_codex_success(model)
             return res, "ok"
@@ -2110,6 +2113,15 @@ def _is_deep_reasoning(prompt: str) -> bool:
 #: as ``_delegation_started``).
 _held_reservation = False
 _held_token = None
+#: Token of the window slot the current Codex dispatch spent (``_spend_window_slot``); ``_refund_refused_dispatch``
+#: hands it back when ``run_codex`` refused before starting any process.
+_spent_token = None
+#: ``reason_code`` of a ``run_codex`` result that was REFUSED before any process started (``codex_agent.run_codex``:
+#: ``meter_reserved`` at the reserve guard, ``binary_missing``, ``no_ignore_rules``). Such an attempt is not charged.
+_REFUSED_BEFORE_START = frozenset({"meter_reserved", "binary_missing", "no_ignore_rules"})
+#: Set by ``_run_codex_agent_inner`` when its last attempt was refused (value: the reason code), read by NS3 to refund
+#: the daily budget unit it took before dispatch.
+_last_refusal = ""
 
 
 def _release_reservation() -> None:
@@ -2162,18 +2174,37 @@ def _codex_window_declines(path: str, prompt: str, subagent_type: str, task_type
     return True
 
 
+def _refund_refused_dispatch(reason_code: str) -> None:
+    """``run_codex`` refused before starting any process: hand back the window slot ``_spend_window_slot`` took, mark the
+    dispatch as not made (so a held canary slot also goes back), and remember the reason for NS3's budget refund. The
+    refusal itself is counted in ``agent_route_codex_refusals.json`` by ``_codex_refusal_count``. #818 N-C."""
+    global _spent_token, _codex_dispatched, _last_refusal
+    token, _spent_token = _spent_token, None
+    _codex_dispatched = False
+    _last_refusal = reason_code
+    if token is not None:
+        try:
+            from llm_router import codex_window
+            codex_window.release(token)
+        except Exception as exc:
+            _failopen("CHZ-FO-AGENT-ROUTE-CODEX-WINDOW-RELEASE", exc)
+
+
 def _spend_window_slot() -> bool:
     """Account one Codex dispatch. The first uses the slot reserved at admission;
     a later one (the gpt-5.5 fallback) reserves its own, refused only when the
     window is exhausted. Returns False when that dispatch must not happen."""
-    global _held_reservation, _held_token
+    global _held_reservation, _held_token, _spent_token
     if _held_reservation:
+        _spent_token = _held_token
         _held_reservation, _held_token = False, None
         return True
     try:
         from llm_router import codex_window
-        return codex_window.reserve(
-            complexity="complex", deep_reasoning=True, enforce_tier=False).allowed
+        adm = codex_window.reserve(
+            complexity="complex", deep_reasoning=True, enforce_tier=False)
+        _spent_token = adm.token if adm.allowed else None
+        return adm.allowed
     except Exception as exc:
         _failopen("CHZ-FO-AGENT-ROUTE-CODEX-WINDOW-SPEND", exc)
         return True
@@ -2277,6 +2308,8 @@ def _try_cli_delegation(
         if _codex_ok and is_codex_available():
             provider = "codex"
             res, status = _run_codex_agent(prompt, timeout, _scope_root, _work_dir, _sandbox)
+            if _last_refusal:  # refused before any process started: its window slot is back, count it apart
+                _codex_refusal_count(_last_refusal)
             if status != "ok":
                 _note_codex_failure("cli_delegation", status, res, subagent_type,
                                     task_type, complexity, session_id)
@@ -2438,6 +2471,50 @@ def _codex_subagent_budget_increment() -> None:
         f.parent.mkdir(parents=True, exist_ok=True)
         _priv_write_text(f, json.dumps(data))
     except OSError as exc:
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-NS3-CODEX-BUDGET-WRITE", exc)
+        except Exception:
+            pass
+
+
+def _codex_subagent_budget_refund() -> None:
+    """Take back the unit ``_codex_subagent_budget_increment`` charged for an attempt that was refused before any
+    process started. Never goes below 0, and does nothing if the counter rolled over to another UTC day meanwhile."""
+    f = _codex_subagent_budget_file()
+    today = datetime.now(timezone.utc).date().isoformat()
+    try:
+        data = json.loads(f.read_text())
+        if data.get("date") != today:
+            return
+        data["count"] = max(0, int(data.get("count", 0)) - 1)
+        _priv_write_text(f, json.dumps(data))
+    except (OSError, ValueError, TypeError) as exc:
+        try:
+            from llm_router import failopen
+            failopen.record("CHZ-FO-NS3-CODEX-BUDGET-WRITE", exc)
+        except Exception:
+            pass
+
+
+def _codex_refusal_count(reason_code: str) -> None:
+    """Count a refused attempt on its own (``agent_route_codex_refusals.json``: today's date, a total and a count per
+    reason), so refusals leave the budget and window alone without disappearing."""
+    f = _router_home() / "agent_route_codex_refusals.json"
+    today = datetime.now(timezone.utc).date().isoformat()
+    try:
+        try:
+            data = json.loads(f.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {}
+        if data.get("date") != today:
+            data = {"date": today, "count": 0, "by_reason": {}}
+        data["count"] = int(data.get("count", 0)) + 1
+        by = data.setdefault("by_reason", {})
+        by[reason_code] = int(by.get(reason_code, 0)) + 1
+        f.parent.mkdir(parents=True, exist_ok=True)
+        _priv_write_text(f, json.dumps(data))
+    except (OSError, ValueError, TypeError) as exc:
         try:
             from llm_router import failopen
             failopen.record("CHZ-FO-NS3-CODEX-BUDGET-WRITE", exc)
@@ -2791,7 +2868,7 @@ def _try_codex_subagent_delegation(
     work (``_blocked_marker``) is NOT returned: it is logged ``codex_blocked``
     and None is returned, so the Agent call is allowed and Claude does the work.
     """
-    global _last_codex_model, _last_codex_saved_path, _last_codex_pruned
+    global _last_codex_model, _last_codex_saved_path, _last_codex_pruned, _last_refusal
     _last_codex_saved_path = None
     _last_codex_pruned = 0
     # Documented carve-out (owner, 2026-10-02): unlike the local-model direct path and
@@ -2922,6 +2999,7 @@ def _try_codex_subagent_delegation(
     # Reserve budget before dispatch — see _codex_subagent_budget_increment docstring.
     _codex_subagent_budget_increment()
 
+    _last_refusal = ""
     try:
         res, status = _run_codex_agent(prompt, timeout, _delegation_scope_root(cwd), working_dir, sandbox)
     except Exception as e:
@@ -2933,6 +3011,10 @@ def _try_codex_subagent_delegation(
             reason_code="run_codex_raised",
         )
         return None
+
+    if _last_refusal:  # refused before any process started (#818 N-C): give the budget unit back, count it apart
+        _codex_subagent_budget_refund()
+        _codex_refusal_count(_last_refusal)
 
     if status != "ok":
         _note_codex_failure("ns3", status, res, subagent_type,
