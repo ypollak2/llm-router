@@ -844,6 +844,9 @@ def test_system_volume_roots_refused(tmp_path, monkeypatch, root):
 
 
 def test_data_volume_prefix_stripped_before_home_compare(tmp_path, monkeypatch):
+    # Isolates the /System/Volumes/Data strip only on Linux (no /System there, so the
+    # ancestor walk falls back to string compare). On macOS the samefile walk already
+    # refuses this case; the strip is defence in depth there.
     monkeypatch.setenv("HOME", "/System/Volumes/Data" + str(tmp_path / "h"))
     with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
         _wrap_linux(monkeypatch, tmp_path)
