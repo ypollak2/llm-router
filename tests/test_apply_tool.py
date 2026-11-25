@@ -947,7 +947,7 @@ def test_sandboxed_clean_pass_keeps_plain_status(repo, monkeypatch):
     result = call(repo, check="pytest")
     assert result.splitlines()[0] == "APPLIED_AND_PASSED"
     assert json.loads(result.splitlines()[2].split("] ", 1)[1]) == {
-        "sandboxed": True, "persistence_checked": True, "flagged_new_files": [], "outside_edits": []}
+        "sandboxed": True, "persistence_checked": True, "flagged_new_files": [], "outside_edits": [], "unverified": False}
 
 
 @pytest.mark.parametrize("name,mode", [("conftest.py", 0o644), ("Makefile", 0o644), (".envrc", 0o644),
@@ -1035,7 +1035,8 @@ def test_ignored_plants_are_reported(repo, monkeypatch):
     assert result.splitlines()[0] == "APPLIED_PASSED_NEW_FILES", result
     for name in (".envrc", "sitecustomize.py", ".venv/bin/run"):
         assert name in result
-    assert "data.txt" not in result  # ignored and not runnable: not listed
+    assert "data.txt" in result.split("changed beyond the edit set:")[1].splitlines()[0]  # listed, not flagged
+    assert "data.txt" not in result.split("executable/config files")[1].splitlines()[0]
 
 
 @pytest.mark.parametrize("rel", ["x.pth", "usercustomize.py", ".pre-commit-config.yaml", "Rakefile",
@@ -1047,15 +1048,36 @@ def test_extended_config_names_flagged(repo, monkeypatch, rel):
     assert result.splitlines()[0] == "APPLIED_PASSED_NEW_FILES" and rel in result, result
 
 
-def test_non_git_scan_reports_unavailable_not_clean(repo, monkeypatch):
-    """S6c: if the persistence scan cannot run it says so in the reply and the JSON line."""
+def test_baseline_over_budget_is_unavailable_not_clean(repo, monkeypatch):
+    """S6c: a tree too large for the BEFORE snapshot is reported as unchecked; status unchanged."""
     runner(repo, monkeypatch, "")
-    monkeypatch.setattr(apply, "_tree_state", lambda root: None)
+    monkeypatch.setattr(apply, "_SCAN_MAX_ENTRIES", 1)
+    (repo / "extra.txt").write_text("x")
     monkeypatch.setattr(apply, "_run_check", lambda *a, **k: (0, "check: sandboxed\nok", True))
     result = call(repo, check="pytest")
-    assert "persistence check unavailable" in result
+    assert result.splitlines()[0] == "APPLIED_AND_PASSED" and "persistence check unavailable" in result
     field = next(line for line in result.splitlines() if line.startswith("[llm_apply check] "))
     assert json.loads(field.split("] ", 1)[1])["persistence_checked"] is False
+
+
+def test_check_inflating_tree_past_budget_is_not_clean(repo, monkeypatch):
+    """S6 evasion: BEFORE fits the budget, the check floods the tree so AFTER cannot finish."""
+    runner(repo, monkeypatch, "")
+    monkeypatch.setattr(apply, "_SCAN_MAX_ENTRIES", 30)
+
+    def flood(argv, root, **kw):
+        for i in range(60):
+            (root / f"junk{i}.txt").write_text("x")
+        (root / "conftest.py").write_text("hidden among the junk\n")
+        return 0, "check: sandboxed\nok", True
+
+    monkeypatch.setattr(apply, "_run_check", flood)
+    result = call(repo, check="pytest")
+    assert result.splitlines()[0] == "APPLIED_PASSED_OUTSIDE_EDITS", result
+    assert "UNVERIFIED" in result
+    field = next(line for line in result.splitlines() if line.startswith("[llm_apply check] "))
+    parsed = json.loads(field.split("] ", 1)[1])
+    assert parsed["persistence_checked"] is False and parsed["unverified"] is True
 
 
 def test_tracked_file_modified_outside_edit_set_is_not_clean(repo, monkeypatch):
@@ -1067,35 +1089,37 @@ def test_tracked_file_modified_outside_edit_set_is_not_clean(repo, monkeypatch):
     _plant(monkeypatch, {"other.py": ("keep = 2\n", 0o644)})
     result = call(repo, check="pytest")
     assert result.splitlines()[0] == "APPLIED_PASSED_OUTSIDE_EDITS", result
-    assert "tracked files outside the edit set: other.py" in result
+    assert "existing files outside the edit set: other.py" in result
     field = next(line for line in result.splitlines() if line.startswith("[llm_apply check] "))
     assert json.loads(field.split("] ", 1)[1])["outside_edits"] == ["other.py"]
     assert result.splitlines()[1].startswith("[llm_apply credit] ")
 
 
-def test_scan_never_runs_repo_fsmonitor(repo, tmp_path):
-    """S6f: core.fsmonitor naming a command must not execute during the host-side scan."""
-    canary = tmp_path / "fsmonitor-ran"
+def test_scan_runs_no_process_filter_and_fsmonitor_canaries_stay_silent(repo, tmp_path, monkeypatch):
+    """No git (or any process) runs on the host during the scan: repo filter and fsmonitor never fire."""
+    filter_canary, fsm_canary = tmp_path / "filter-ran", tmp_path / "fsmonitor-ran"
     hook = tmp_path / "fsm.sh"
-    hook.write_text(f"#!/bin/sh\ntouch {canary}\nprintf '\\0'\n")
+    hook.write_text(f"#!/bin/sh\ntouch {fsm_canary}\nprintf '\\0'\n")
     hook.chmod(0o755)
+    (repo / ".gitattributes").write_text("a.txt filter=pwn\n")
+    (repo / "a.txt").write_text("aaaa\n")
+    _git(repo, "config", "filter.pwn.clean", f"touch {filter_canary}; cat")
     _git(repo, "config", "core.fsmonitor", str(hook))
-    # positive control: plain git (as the host user would run it) does execute the hook
-    subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True)
-    assert canary.exists(), "control: fsmonitor hook should run for a plain git status"
-    canary.unlink()
-    assert apply._tree_state(repo.resolve()) is not None
-    assert not canary.exists()
-
-
-def test_staged_rename_does_not_add_bogus_entry(repo):
-    """S6g: `R  new\0old\0` - the origin path is not an entry."""
-    (repo / "old.py").write_text("x = 1\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "init")
-    _git(repo, "mv", "old.py", "new.py")
-    state = apply._tree_state(repo.resolve())
-    names = {p.name for p in state}
-    assert "new.py" in names and "old.py" not in names
-    # a bogus entry parsed from the origin path would be built from "old.py"[3:] = ".py"
-    assert ".py" not in names and "y" not in names
+    for canary in (filter_canary, fsm_canary):
+        canary.unlink(missing_ok=True)
+    (repo / "a.txt").write_text("bbbb\n")  # same size, newer mtime: git must re-run the clean filter
+    subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True)
+    assert filter_canary.exists() and fsm_canary.exists(), "control: plain git status runs both"
+    for canary in (filter_canary, fsm_canary):
+        canary.unlink()
+    runner(repo, monkeypatch, "")
+    spawned = []
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(apply.subprocess, "Popen", lambda *a, **k: (spawned.append(a), real_popen(*a, **k))[1])
+    scan = apply._Scan(repo.resolve(), set())
+    (repo / "a.txt").write_text("cccc\n")
+    lines, info = scan.finish()
+    assert not spawned and not filter_canary.exists() and not fsm_canary.exists()
+    assert info["checked"] is True and info["outside"] == ["a.txt"]

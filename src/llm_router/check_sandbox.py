@@ -1,7 +1,7 @@
 """Contain only the check subprocess; never edit the application.
 
-Host-side git is never run by this module (apply_tool runs read-only `git status` with
-core.fsmonitor and hooks disabled, no pager, no index lock, to report what a check left).
+No host-side process runs for the persistence report either: apply_tool diffs pure-Python
+stat snapshots of ROOT (git status would run repo filters/fsmonitor on the host).
 
 macOS uses (allow default): deny-default breaks pytest on current macOS. Reads of
 /Volumes, /Users, /private/var/folders and /private/tmp are denied except ROOT,

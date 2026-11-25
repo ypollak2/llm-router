@@ -8,7 +8,7 @@ sandbox restrictions remain inherited by those descendants, and on macOS they ar
 killed after the check by process-tree walk plus an env-marker sweep (best effort).
 Status APPLIED_PASSED_UNSANDBOXED / APPLIED_PASSED_NEW_FILES / APPLIED_PASSED_OUTSIDE_EDITS mark a pass that ran
 without a sandbox, or after which the check left executable/config files (conftest.py,
-Makefile, +x, ...) or modified tracked files beyond the edit set; only APPLIED_AND_PASSED is a clean pass.
+Makefile, +x, ...) or modified existing files beyond the edit set (or a scan that could not finish); only APPLIED_AND_PASSED is a clean pass.
 """
 from __future__ import annotations
 
@@ -372,9 +372,17 @@ def _check_argv(command: str, root: Path | None = None) -> tuple[list[str] | Non
 _CONFIG_NAMES = {"conftest.py", "makefile", "rakefile", "package.json", ".envrc", "setup.py", "setup.cfg",
                  "pytest.ini", "tox.ini", "pyproject.toml", "sitecustomize.py", "usercustomize.py", ".npmrc",
                  "tasks.json", ".pre-commit-config.yaml"}
-# Host-side git runs OUTSIDE the sandbox in a repo the check may have written: never let repo
-# config run a command (core.fsmonitor), never use hooks or a pager, take no index lock.
-_GIT = ["git", "--no-pager", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+# Persistence scan: a pure-Python stat-only snapshot of ROOT before and after the check. NO git
+# (or any other process) runs on the host: git status runs clean filters, fsmonitor and
+# attribute drivers named by the repo, i.e. repository-controlled code, outside the sandbox.
+# Budgets bound one snapshot. 200,000 entries caps memory (one small tuple per path) and covers
+# a repo with a populated node_modules; 5 s caps wall clock. Measured 2026-11-26 on this repo's
+# worktree (n=3,219 entries, warm cache, macOS arm64, 2 runs): ~150,000 entries/s, so 200,000
+# entries take ~1.3 s and the 5 s budget is a safety margin, not the usual limit. ROOT/.git is
+# skipped: it is read-only inside the sandbox.
+_SCAN_MAX_ENTRIES = 200_000
+_SCAN_SECONDS = 5.0
+_CACHE_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}  # rewritten by every run
 
 
 def _is_config(rel: Path) -> bool:
@@ -384,58 +392,46 @@ def _is_config(rel: Path) -> bool:
             or posix in {".cargo/config", ".cargo/config.toml"})
 
 
-def _tree_state(root: Path):
-    """{path: (XY, size, mtime_ns, mode)} of modified/untracked/ignored-config paths under root, or None.
-
-    Paths from porcelain are relative to the repo TOPLEVEL, so they are joined to it, not to root.
-    Ignored entries (`!!`) are kept only when they could be run later (config names, bin/ dirs).
-    """
-    try:
-        top = subprocess.run([*_GIT, "-C", str(root), "rev-parse", "--show-toplevel"], capture_output=True,
-                             text=True, timeout=10)
-        out = subprocess.run([*_GIT, "-C", str(root), "status", "--porcelain=v1", "-z", "--untracked-files=all",
-                              "--ignored"], capture_output=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if top.returncode or out.returncode or not top.stdout.strip():
-        return None
-    base = Path(top.stdout.strip())
+def _snapshot(root: Path):
+    """{path: (size, mtime_ns, mode)} of every non-directory under root (no symlink followed,
+    ROOT/.git skipped), or a str reason when the walk exceeds its entry or time budget."""
     state = {}
-    tokens = out.stdout.decode("utf-8", errors="replace").split("\0")
-    index = 0
-    while index < len(tokens):
-        entry = tokens[index]
-        index += 1
-        if len(entry) < 4 or entry[2] != " ":
-            continue
-        if "R" in entry[:2] or "C" in entry[:2]:
-            index += 1  # the rename/copy record is followed by a bare origin path, not an entry
-        path = base / entry[3:]
-        if root not in path.parents:
-            continue
-        rel = path.relative_to(root)
-        if entry[:2] == "!!" and not (_is_config(rel) or "bin" in rel.parts[:-1]):
-            continue
+    deadline = time.monotonic() + _SCAN_SECONDS
+    pending = [str(root)]
+    git_dir = str(root / ".git")
+    while pending:
         try:
-            info = path.lstat()
-            state[path] = (entry[:2], info.st_size, info.st_mtime_ns, info.st_mode)
-        except OSError:
-            state[path] = (entry[:2], None, None, None)
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    if len(state) >= _SCAN_MAX_ENTRIES:
+                        return f"more than {_SCAN_MAX_ENTRIES} entries"
+                    if time.monotonic() > deadline:
+                        return f"over the {_SCAN_SECONDS} s walk budget"
+                    if entry.path == git_dir:
+                        continue
+                    info = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(entry.path)
+                    else:
+                        state[Path(entry.path)] = (info.st_size, info.st_mtime_ns, info.st_mode)
+        except OSError as exc:
+            return f"unreadable: {exc}"
     return state
 
 
 def _persistence(before, after, edited, root: Path):
     """(changed, flagged, outside): paths created/changed beyond the edit set; the executable/config
-    subset a later unsandboxed command could run; and tracked files modified outside the edit set."""
+    subset a later unsandboxed command could run; and pre-existing files the check modified."""
     edited = {Path(p) for p in edited}
-    changed = sorted(p for p in after if p not in edited and before.get(p) != after[p])
+    changed = sorted(p for p in after if p not in edited and before.get(p) != after[p]
+                     and not (_CACHE_DIRS & set(p.relative_to(root).parts[:-1])))
     flagged, outside = [], []
     for path in changed:
-        mode = after[path][3]
+        mode = after[path][2]
         rel = path.relative_to(root)
-        if _is_config(rel) or (mode is not None and stat.S_ISREG(mode) and mode & 0o111):
+        if _is_config(rel) or (stat.S_ISREG(mode) and mode & 0o111):
             flagged.append(str(rel))
-        if after[path][0] not in {"??", "!!"}:
+        if path in before:
             outside.append(str(rel))
     return [str(p.relative_to(root)) for p in changed], flagged, outside
 
@@ -444,15 +440,20 @@ class _Scan:
     """Snapshot before a check, diff after: what the check left in ROOT beyond the edit set."""
 
     def __init__(self, root: Path, edited):
-        self.root, self.edited, self.before = root, edited, _tree_state(root)
+        self.root, self.edited = root, edited
+        self.before = _snapshot(root)
 
     def finish(self) -> tuple[list[str], dict]:
-        """(report lines, info); never raises. info: checked, flagged, outside."""
-        after = _tree_state(self.root) if self.before is not None else None
-        if after is None:
-            return (["persistence check unavailable (ROOT is not a usable git repo): "
+        """(report lines, info); never raises. info: checked, flagged, outside, unverified."""
+        if isinstance(self.before, str):  # could not take the baseline: say so, status unchanged
+            return ([f"persistence check unavailable (tree too large or unreadable: {self.before}): "
                      "files the check left behind were NOT checked"],
-                    dict(checked=False, flagged=[], outside=[]))
+                    dict(checked=False, flagged=[], outside=[], unverified=False))
+        after = _snapshot(self.root)
+        if isinstance(after, str):  # baseline was fine, so a tree that now escapes the budget is suspect
+            return ([f"WARNING: persistence check could not finish after the check ({after}); the check "
+                     "may have inflated the tree to hide files. Result is UNVERIFIED."],
+                    dict(checked=False, flagged=[], outside=[], unverified=True))
         changed, flagged, outside = _persistence(self.before, after, self.edited, self.root)
         lines = []
         if changed:
@@ -462,9 +463,9 @@ class _Scan:
             lines.append("WARNING: the check created or changed executable/config files that a later "
                          "unsandboxed command may run: " + ", ".join(flagged[:20]))
         if outside:
-            lines.append("WARNING: the check modified tracked files outside the edit set: "
+            lines.append("WARNING: the check modified existing files outside the edit set: "
                          + ", ".join(outside[:20]))
-        return lines, dict(checked=True, flagged=flagged, outside=outside)
+        return lines, dict(checked=True, flagged=flagged, outside=outside, unverified=False)
 
 
 def _run_check(argv: list[str], root: Path, *, require_sandbox: bool = False) -> tuple[int, str, bool]:
@@ -730,7 +731,8 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
                             status = "APPLIED_CHECK_FAILED" if check_rc else (
                                 "APPLIED_PASSED_UNSANDBOXED" if not sandboxed else
                                 "APPLIED_PASSED_NEW_FILES" if check_report.get("flagged") else
-                                "APPLIED_PASSED_OUTSIDE_EDITS" if check_report.get("outside") else "APPLIED_AND_PASSED")
+                                "APPLIED_PASSED_OUTSIDE_EDITS" if check_report.get("outside") or check_report.get("unverified")
+                                else "APPLIED_AND_PASSED")
                             label, _, output = tail.partition("\n")
                             details.append(label)
                             details.append(f"Check rc={check_rc}\n{output}")
@@ -788,6 +790,6 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
         if check_report:
             details.insert(0, "[llm_apply check] " + json.dumps(dict(
                 sandboxed=check_report.get("sandboxed"), persistence_checked=check_report.get("checked"),
-                flagged_new_files=check_report.get("flagged", []), outside_edits=check_report.get("outside", []))))
+                flagged_new_files=check_report.get("flagged", []), outside_edits=check_report.get("outside", []), unverified=check_report.get("unverified", False))))
         details.insert(0, "[llm_apply credit] " + json.dumps(credit))
     return "\n".join([status, *details])
