@@ -42,6 +42,7 @@ per-model total can therefore differ from the headline by that much and no
 more.
 
 Usage:
+    llm-router savings                     — per-source history: today / 7d / 30d / since each source's first row
     llm-router savings-report              — full report (all time)
     llm-router savings-report --period week — weekly report
     llm-router savings-report --period day  — today only
@@ -154,6 +155,55 @@ def render_savings_report(period: str = "all") -> str:
     out.append("│        consumed by downstream agents/tools are not metered here.")
     out.append("╰" + "─" * 60 + "╯")
     return "\n".join(out)
+
+
+def render_history(now: float | None = None) -> str:
+    """Per-source saving history (D-614): today, 7 d and 30 d (local calendar days, today included) and
+    since each source's earliest row, each through ``ledger_view.combined_saved`` (the one figure the status
+    line prints). Every source row carries its n, its start date and the rows it excluded as unpriced.
+    A window the proxy rollup has not built yet prints ``n/a`` for the proxy sources and the total."""
+    import time as _time
+
+    from llm_router import ledger_view as lv
+
+    now = _time.time() if now is None else now
+    db, proxy = paths.state_path("usage.db"), paths.state_path("proxy_calls.jsonl")
+    rollup = paths.state_path("savings_rollup.json")
+    windows = (lv.resolve("today", now=now), lv.calendar_bounds(7, now=now), lv.calendar_bounds(30, now=now),
+               lv.resolve("lifetime", now=now))
+    out = ["Savings history (est. USD; each source from its own ledger; A = usage.db hook/MCP/delegation calls, "
+           "B = proxy local-served runs net of the re-cache write, C = proxy tier rewrites)"]
+    for b in windows:
+        fig, p = lv.combined_saved(b, db_path=db, proxy_path=proxy, rollup_path=rollup)
+        label = "since earliest row" if b.name == "lifetime" else b.label
+        out.append("")
+        out.append(f"== {label} ==")
+        up = p["proxy_available"]
+        why = f"n/a ({p['proxy_na_reason']})"
+        a, bb, c = p["A"], p["B"], p["C"]
+        rows = (
+            ("A hook/MCP/delegation", f"{lv._signed(a['usd'])}", f"n={a['n']:,} calls", a["excluded"], a["since"]),
+            ("B proxy local-served", f"{lv._signed(bb['usd'])}" if up else "n/a",
+             f"n={bb['n']:,} steps/{bb['runs']:,} runs" if up else why, bb["excluded"], bb["since"]),
+            ("C proxy tier rewrite", f"{lv._signed(c['usd'])}" if up else "n/a",
+             f"n={c['n']:,} rewritten" if up else why, c["excluded"], c["since"]),
+        )
+        for name, usd, n, excl, since in rows:
+            out.append(f"  {name:<24} {usd:>10}  {n:<28} unpriced/excluded: {excl:<5} first row: {since or 'n/a'}")
+        out.append(f"  {'combined':<24} {lv.render_saved(fig, p)}")
+        if bb.get("late_old_rows"):
+            out.append(f"  (B: {bb['late_old_rows']:,} served rows arrived for days older than 3 d and are priced as their "
+                       "own run: +/- about one run's net per row, |error| <= $0.05 on 5 samples, 2026-11-25)")
+        if a["verified_n"]:
+            out.append(f"  (verified, shown apart: ${a['verified_usd']:,.2f}, n={a['verified_n']:,})")
+        if p["dedup_dropped"]:
+            out.append(f"  (proxy rows already in usage.db, dropped: {p['dedup_dropped']:,})")
+    return "\n".join(out)
+
+
+def history_main(argv: list[str] | None = None) -> int:
+    print(render_history())
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
