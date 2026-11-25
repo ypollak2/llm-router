@@ -8,11 +8,12 @@ sandbox restrictions remain inherited by those descendants, and on macOS they ar
 killed after the check by process-tree walk plus an env-marker sweep (best effort).
 Status APPLIED_PASSED_UNSANDBOXED / APPLIED_PASSED_NEW_FILES / APPLIED_PASSED_OUTSIDE_EDITS mark a pass that ran
 without a sandbox, or after which the check left executable/config files (conftest.py,
-Makefile, +x, ...) or modified existing files beyond the edit set (or a scan that could not finish); only APPLIED_AND_PASSED is a clean pass.
+Makefile, +x, ...) or modified existing files beyond the edit set (or deleted, or a scan that could not finish); only APPLIED_AND_PASSED is a clean pass.
 """
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -376,20 +377,41 @@ _CONFIG_NAMES = {"conftest.py", "makefile", "rakefile", "package.json", ".envrc"
 # (or any other process) runs on the host: git status runs clean filters, fsmonitor and
 # attribute drivers named by the repo, i.e. repository-controlled code, outside the sandbox.
 # Budgets bound one snapshot. 200,000 entries caps memory (one small tuple per path) and covers
-# a repo with a populated node_modules; 5 s caps wall clock. Measured 2026-11-26 on this repo's
-# worktree (n=3,219 entries, warm cache, macOS arm64, 2 runs): ~150,000 entries/s, so 200,000
-# entries take ~1.3 s and the 5 s budget is a safety margin, not the usual limit. ROOT/.git is
+# a repo with a populated node_modules; 5 s caps wall clock. Measured 2026-11-25 on this repo's
+# worktree (n=3,219 entries, stat only, warm cache, macOS arm64, 2 runs): ~150,000 entries/s. The
+# 200,000 entries / 5 s figures are EXTRAPOLATED from that one small measurement, not measured at
+# that size, and content hashing (below) makes a big tree slower; over budget is reported, not hidden. ROOT/.git is
 # skipped: it is read-only inside the sandbox.
 _SCAN_MAX_ENTRIES = 200_000
 _SCAN_SECONDS = 5.0
-_CACHE_DIRS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}  # rewritten by every run
+_CACHE_DIRS = {".pytest_cache", ".mypy_cache", ".ruff_cache"}  # rewritten by every run; no code in them
+_HASH_MAX = 1024 * 1024  # content-hash files up to 1 MB, plus any config-named, executable or .pyc file
 
 
 def _is_config(rel: Path) -> bool:
     name = rel.name.lower()
     posix = rel.as_posix().lower()
     return (name in _CONFIG_NAMES or name.endswith(".pth") or posix.startswith(".github/workflows/")
-            or posix in {".cargo/config", ".cargo/config.toml"})
+            or name.endswith(".pyc") or posix in {".cargo/config", ".cargo/config.toml"})
+
+
+def _digest(path):
+    """sha256 of a regular file; O_NONBLOCK|O_NOFOLLOW so a swapped-in FIFO or link cannot hang or redirect us."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return "unreadable"
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return "not-regular"
+        h = hashlib.sha256()
+        while chunk := os.read(fd, 1 << 20):
+            h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return "unreadable"
+    finally:
+        os.close(fd)
 
 
 def _snapshot(root: Path):
@@ -413,7 +435,12 @@ def _snapshot(root: Path):
                     if stat.S_ISDIR(info.st_mode):
                         pending.append(entry.path)
                     else:
-                        state[Path(entry.path)] = (info.st_size, info.st_mtime_ns, info.st_mode)
+                        digest = None
+                        if stat.S_ISREG(info.st_mode) and (
+                                info.st_size <= _HASH_MAX or info.st_mode & 0o111
+                                or _is_config(Path(entry.name)) or entry.name.endswith(".pyc")):
+                            digest = _digest(entry.path)
+                        state[Path(entry.path)] = (info.st_size, info.st_mtime_ns, info.st_mode, digest)
         except OSError as exc:
             return f"unreadable: {exc}"
     return state
@@ -433,6 +460,9 @@ def _persistence(before, after, edited, root: Path):
             flagged.append(str(rel))
         if path in before:
             outside.append(str(rel))
+    for path in sorted(before.keys() - after.keys() - edited):
+        if not (_CACHE_DIRS & set(path.relative_to(root).parts[:-1])):
+            outside.append(f"{path.relative_to(root)} (deleted)")
     return [str(p.relative_to(root)) for p in changed], flagged, outside
 
 
@@ -446,9 +476,9 @@ class _Scan:
     def finish(self) -> tuple[list[str], dict]:
         """(report lines, info); never raises. info: checked, flagged, outside, unverified."""
         if isinstance(self.before, str):  # could not take the baseline: say so, status unchanged
-            return ([f"persistence check unavailable (tree too large or unreadable: {self.before}): "
-                     "files the check left behind were NOT checked"],
-                    dict(checked=False, flagged=[], outside=[], unverified=False))
+            return ([f"WARNING: persistence check unavailable (tree too large or unreadable: {self.before}): "
+                     "files the check left behind were NOT checked. Result is UNVERIFIED."],
+                    dict(checked=False, flagged=[], outside=[], unverified=True))
         after = _snapshot(self.root)
         if isinstance(after, str):  # baseline was fine, so a tree that now escapes the budget is suspect
             return ([f"WARNING: persistence check could not finish after the check ({after}); the check "
@@ -696,8 +726,10 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
             details.append("llm_apply is disabled; enable with LLM_ROUTER_APPLY=on.")
         else:
             root = Path(cwd or os.getcwd()).resolve(strict=True)
-            repo = subprocess.run(["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
-                                  capture_output=True, text=True, timeout=5)
+            repo = subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                                   "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+                                  capture_output=True, text=True, timeout=5,
+                                  env=check_sandbox.environment())  # no inherited GIT_* variables
             if repo.returncode or repo.stdout.strip() != "true":
                 details.append("cwd must be inside a git work tree.")
             else:

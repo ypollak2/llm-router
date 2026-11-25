@@ -75,6 +75,8 @@ def environment():
     env = {k: v for k, v in os.environ.items() if k in ENV_ALLOWLIST or k.startswith("LC_")}
     if current_marker():
         env[MARKER_VAR] = current_marker()
+    # A check must not leave .pyc files: a planted one runs on the next unsandboxed import.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env
 
 

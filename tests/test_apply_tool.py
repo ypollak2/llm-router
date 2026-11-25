@@ -1049,15 +1049,16 @@ def test_extended_config_names_flagged(repo, monkeypatch, rel):
 
 
 def test_baseline_over_budget_is_unavailable_not_clean(repo, monkeypatch):
-    """S6c: a tree too large for the BEFORE snapshot is reported as unchecked; status unchanged."""
+    """S6c: a tree too large for the BEFORE snapshot is never a clean pass."""
     runner(repo, monkeypatch, "")
     monkeypatch.setattr(apply, "_SCAN_MAX_ENTRIES", 1)
     (repo / "extra.txt").write_text("x")
     monkeypatch.setattr(apply, "_run_check", lambda *a, **k: (0, "check: sandboxed\nok", True))
     result = call(repo, check="pytest")
-    assert result.splitlines()[0] == "APPLIED_AND_PASSED" and "persistence check unavailable" in result
+    assert result.splitlines()[0] == "APPLIED_PASSED_OUTSIDE_EDITS" and "persistence check unavailable" in result
     field = next(line for line in result.splitlines() if line.startswith("[llm_apply check] "))
-    assert json.loads(field.split("] ", 1)[1])["persistence_checked"] is False
+    parsed = json.loads(field.split("] ", 1)[1])
+    assert parsed["persistence_checked"] is False and parsed["unverified"] is True
 
 
 def test_check_inflating_tree_past_budget_is_not_clean(repo, monkeypatch):
@@ -1123,3 +1124,72 @@ def test_scan_runs_no_process_filter_and_fsmonitor_canaries_stay_silent(repo, tm
     lines, info = scan.finish()
     assert not spawned and not filter_canary.exists() and not fsm_canary.exists()
     assert info["checked"] is True and info["outside"] == ["a.txt"]
+
+
+def test_planted_pyc_is_flagged(repo, monkeypatch):
+    """__pycache__ is no longer exempt: a planted .pyc runs on the next unsandboxed import."""
+    runner(repo, monkeypatch, "")
+    _plant(monkeypatch, {"pkg/__pycache__/a.cpython-312.pyc": ("x", 0o644)})
+    result = call(repo, check="pytest")
+    assert result.splitlines()[0] == "APPLIED_PASSED_NEW_FILES" and "a.cpython-312.pyc" in result, result
+
+
+def test_check_env_disables_bytecode_and_real_check_leaves_no_pyc(repo, monkeypatch):
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    assert apply.check_sandbox.environment()["PYTHONDONTWRITEBYTECODE"] == "1"
+    (repo / "mod.py").write_text("x = 1\n")
+    runner(repo, monkeypatch, "import sys\nsys.path.insert(0, '.')\nimport mod\nprint('dwb', sys.dont_write_bytecode)\n")
+    monkeypatch.setenv("LLM_ROUTER_APPLY_SANDBOX", "off")
+    result = call(repo, check="pytest")
+    assert "dwb True" in result and ".pyc" not in result and not list(repo.rglob("*.pyc")), result
+
+
+def test_forged_size_and_mtime_edit_is_reported(repo, monkeypatch):
+    """Stat-only is forgeable: same size, mtime restored. The content hash still differs."""
+    (repo / "conftest.py").write_text("a = 1\n")
+    runner(repo, monkeypatch, "")
+
+    def forge(argv, root, **kw):
+        path = root / "conftest.py"
+        info = path.stat()
+        path.write_text("b = 2\n")
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))
+        return 0, "check: sandboxed\nok", True
+
+    monkeypatch.setattr(apply, "_run_check", forge)
+    result = call(repo, check="pytest")
+    assert result.splitlines()[0] == "APPLIED_PASSED_NEW_FILES" and "conftest.py" in result, result
+    assert "existing files outside the edit set: conftest.py" in result
+
+
+def test_deleted_file_is_reported(repo, monkeypatch):
+    (repo / "test_keep.py").write_text("def test_a(): pass\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "init")
+    runner(repo, monkeypatch, "")
+
+    def delete(argv, root, **kw):
+        (root / "test_keep.py").unlink()
+        return 0, "check: sandboxed\nok", True
+
+    monkeypatch.setattr(apply, "_run_check", delete)
+    result = call(repo, check="pytest")
+    assert result.splitlines()[0] == "APPLIED_PASSED_OUTSIDE_EDITS", result
+    assert "test_keep.py (deleted)" in result
+
+
+def test_repo_probe_git_runs_without_fsmonitor_or_inherited_git_env(repo, tmp_path, monkeypatch):
+    canary = tmp_path / "fsm-ran"
+    hook = tmp_path / "fsm.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {canary}\nprintf '\\0'\n")
+    hook.chmod(0o755)
+    _git(repo, "config", "core.fsmonitor", str(hook))
+    seen = []
+    real = subprocess.run
+    monkeypatch.setattr(apply.subprocess, "run", lambda *a, **k: (seen.append((a, k)), real(*a, **k))[1])
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "nowhere"))
+    result = call(repo, check="")
+    assert result.splitlines()[0] == "APPLIED_NOT_CHECKED", result
+    probe = next(a[0] for a, k in seen if "--is-inside-work-tree" in a[0])
+    assert "core.fsmonitor=false" in probe and "core.hooksPath=/dev/null" in probe
+    assert all("GIT_DIR" not in k["env"] for a, k in seen if "--is-inside-work-tree" in a[0])
