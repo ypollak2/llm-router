@@ -5,7 +5,12 @@ outside HOME remain possible. The short Mach broker denylist is best-effort,
 not a complete XPC boundary. Descendants inherit confinement, but setsid can
 escape the caller's process-group teardown. This is not a VM/resource boundary.
 Executables and their interpreter installations must be trusted.
-The Linux backend is unverified on a real Linux host.
+The Linux backend (bubblewrap) is exercised on a real ubuntu-24.04 host by the
+CI job `linux-sandbox` (.github/workflows/ci.yml): every non-macOS test in
+tests/test_check_sandbox.py must run, and the job fails if any is skipped. The
+macOS behavioural tests (test_macos_*) are deselected there and run only locally.
+ROOT must not be HOME, an ancestor of HOME, or "/", and ROOT/.git is read-only
+inside the sandbox on both backends (a check cannot plant hooks or git config).
 """
 from __future__ import annotations
 
@@ -52,6 +57,18 @@ def _runtime_grant(path):
             or any(path == home or path in home.parents for home in homes)):
         raise SandboxUnavailable(f"runtime dir too broad: {path}")
     return str(path)
+
+
+def _check_root(root):
+    """Refuse a ROOT that would re-grant HOME (the allow ROOT rule outranks the HOME deny)."""
+    import pwd
+
+    path = Path(root)
+    homes = {Path(_path(os.environ.get("HOME") or Path.home())),
+             Path(_path(pwd.getpwuid(os.getuid()).pw_dir))}
+    broad = {Path(p).resolve() for p in ("/", "/Users", "/home")}
+    if path in broad or any(path == h or path in h.parents for h in homes):
+        raise SandboxUnavailable(f"ROOT is HOME, contains HOME or is a system root: {path}")
 
 
 def _inside(path, root):
@@ -226,6 +243,8 @@ _MAC_PROFILE = '''(version 1)
 (allow file-write* (subpath (param "ROOT")) (subpath (param "TEMP"))
     (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")
     (literal "/dev/urandom") (literal "/dev/random"))
+; Last match wins: keep .git read-only so a check cannot plant hooks or config.
+(deny file-write* (subpath (param "GIT")))
 (deny file-read-data (subpath (param "HOME")) (subpath (param "USER_HOME")))
 (allow file-read-data (subpath (param "ROOT")) (subpath (param "TEMP")) {runtime})
 (deny process-exec (literal "/usr/bin/open") (literal "/usr/bin/osascript")
@@ -262,6 +281,7 @@ def wrap(argv, root):
     if not backend:
         raise SandboxUnavailable("bwrap missing" if system == "Linux" else f"unsupported OS: {system}")
     root = _path(root)
+    _check_root(root)
     home = _path(os.environ.get("HOME", Path.home()))
     try:
         if system == "Linux":
@@ -280,7 +300,8 @@ def wrap(argv, root):
         if system == "Darwin":
             import pwd
 
-            params = {"ROOT": root, "HOME": home, "USER_HOME": _path(pwd.getpwuid(os.getuid()).pw_dir), "TEMP": scratch}
+            params = {"ROOT": root, "HOME": home, "USER_HOME": _path(pwd.getpwuid(os.getuid()).pw_dir), "TEMP": scratch,
+                      "GIT": root + "/.git"}
             params.update({f"R{i}": value for i, value in enumerate(runtimes)})
             rules = " ".join(f'(subpath (param "R{i}"))' for i in range(len(runtimes)))
             command = [backend]
@@ -307,7 +328,11 @@ def wrap(argv, root):
                     made.add(link)
                     command += ["--symlink", target, link]
             command += ["--dev", "/dev", "--proc", "/proc", "--bind", root, root,
-                        "--bind", scratch, scratch, "--chdir", root]
+                        "--bind", scratch, scratch]
+            if os.path.lexists(root + "/.git"):
+                # After the ROOT bind so it overrides it; a linked-worktree .git file works too.
+                command += ["--ro-bind", root + "/.git", root + "/.git"]
+            command += ["--chdir", root]
             for key, value in env.items():
                 command += ["--setenv", key, value]
             command += ["--", *argv]

@@ -662,3 +662,89 @@ def test_symlink_hops_follow_link_before_dotdot(tmp_path):
     assert str(tmp_path / "store/alias") in links
     # Positive control: the resolution lands where the OS resolves it.
     assert (tmp_path / "entry").resolve() == (runtime / "python").resolve()
+
+
+# --- fail-closed fixes M1-M4 (REVIEW-SANDBOX-SECURITY-20261125) ---
+
+def test_default_mode_is_require_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_APPLY_SANDBOX", raising=False)
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: None)
+    seen = []
+    monkeypatch.setattr(apply, "_execute_check", lambda *a: (seen.append(a), (0, "ok"))[1])
+    with pytest.raises(sandbox.SandboxUnavailable, match="bwrap missing"):
+        apply._run_check([sys.executable], tmp_path)
+    assert not seen
+
+
+@pytest.mark.parametrize("which", ["home", "parent", "root"])
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_root_covering_home_refused(tmp_path, monkeypatch, system, which):
+    home = tmp_path / "users" / "me"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(sandbox.platform, "system", lambda: system)
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "")
+    root = {"home": home, "parent": home.parent, "root": Path("/")}[which]
+    with pytest.raises(sandbox.SandboxUnavailable, match="ROOT"):
+        sandbox.wrap([sys.executable], root)
+
+
+def test_root_beside_home_allowed(tmp_path, monkeypatch):
+    home = tmp_path / "users" / "me"
+    root = tmp_path / "work" / "repo"
+    home.mkdir(parents=True)
+    root.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "")
+    argv, cleanup = sandbox.wrap([sys.executable], root)
+    cleanup()
+    assert str(root.resolve()) in argv
+
+
+def test_linux_git_dir_read_only_after_root_bind(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "")
+    (tmp_path / ".git").mkdir()
+    argv, cleanup = sandbox.wrap([sys.executable], tmp_path)
+    cleanup()
+    git = str(tmp_path.resolve()) + "/.git"
+    i = argv.index("--ro-bind", argv.index("--bind"))
+    assert argv[i:i + 3] == ["--ro-bind", git, git]
+    assert argv.index("--bind") < i
+
+
+def test_mac_profile_denies_git_writes_last(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "")
+    argv, cleanup = sandbox.wrap([sys.executable], tmp_path)
+    cleanup()
+    profile = argv[argv.index("-p") + 1]
+    assert f"GIT={tmp_path.resolve()}/.git" in argv
+    assert profile.index('(deny file-write* (subpath (param "GIT")))') > profile.index('(allow file-write* (subpath (param "ROOT"))')
+
+
+def test_macos_git_dir_write_denied_source_write_allowed(mac):
+    root, _ = mac
+    (root / ".git" / "hooks").mkdir(parents=True)
+    code = ("import pathlib\n"
+            "pathlib.Path('src.txt').write_text('ok')\n"
+            "for p in ('.git/hooks/pre-commit', '.git/config'):\n"
+            "    try:\n        pathlib.Path(p).write_text('x'); print('WROTE', p)\n"
+            "    except OSError: print('DENIED', p)\n")
+    argv, cleanup = sandbox.wrap([sys.executable, "-c", code], root)
+    try:
+        out = subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=60).stdout
+    finally:
+        cleanup()
+    assert "DENIED .git/hooks/pre-commit" in out and "DENIED .git/config" in out
+    assert (root / "src.txt").read_text() == "ok" and not (root / ".git/config").exists()
+
+
+def test_docstring_names_ci_job_not_unverified():
+    doc = sandbox.__doc__
+    assert "unverified" not in doc and "linux-sandbox" in doc

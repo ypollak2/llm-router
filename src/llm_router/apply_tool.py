@@ -362,7 +362,9 @@ def _check_argv(command: str, root: Path | None = None) -> tuple[list[str] | Non
 
 
 def _run_check(argv: list[str], root: Path, *, require_sandbox: bool = False) -> tuple[int, str, bool]:
-    mode = os.environ.get("LLM_ROUTER_APPLY_SANDBOX", "auto").strip().lower()
+    # Default "require": fail closed. "auto" (run unsandboxed when no backend) and
+    # "off" are explicit owner opt-outs; the unsandboxed label is in the reply.
+    mode = os.environ.get("LLM_ROUTER_APPLY_SANDBOX", "require").strip().lower()
     if mode not in {"auto", "require", "off"}:
         raise check_sandbox.SandboxUnavailable(f"invalid LLM_ROUTER_APPLY_SANDBOX: {mode}")
     sandboxed = False
