@@ -116,7 +116,7 @@ def _day_of_rows(env, day):
 
 
 def test_a_row_written_13_hours_after_its_day_ended_is_in_that_days_rollup(env):
-    rows = _ledger(env["ledger"], days=(3, 2, 1, 0), per_day=2)
+    _ledger(env["ledger"], days=(3, 2, 1, 0), per_day=2)
     _build(env)
     day = sr.day_of(_day_ts(2, 1))
     before = sr.load(env["rollup"])["days"][day]["sum"]
