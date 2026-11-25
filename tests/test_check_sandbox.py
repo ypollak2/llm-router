@@ -748,3 +748,72 @@ def test_macos_git_dir_write_denied_source_write_allowed(mac):
 def test_docstring_names_ci_job_not_unverified():
     doc = sandbox.__doc__
     assert "unverified" not in doc and "linux-sandbox" in doc
+
+
+# --- review round 2: identity-based ROOT check ---
+
+def _wrap_linux(monkeypatch, root):
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "")
+    return sandbox.wrap([sys.executable], root)
+
+
+@pytest.mark.parametrize("which", ["home", "parent"])
+def test_case_variant_root_of_home_refused(tmp_path, monkeypatch, which):
+    home = tmp_path / "Users" / "Me"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    target = home if which == "home" else home.parent
+    variant = Path(str(target.resolve()).swapcase())
+    if not variant.exists() or variant == target.resolve():
+        pytest.skip("case-sensitive filesystem: case variants name different directories")
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME"):
+        _wrap_linux(monkeypatch, variant)
+
+
+def test_relative_root_covering_home_refused(tmp_path, monkeypatch):
+    home = tmp_path / "a" / "b" / "me"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path / "a" / "b")
+    for rel in (".", "..", "me", "../b/me"):
+        with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME"):
+            _wrap_linux(monkeypatch, rel)
+
+
+def test_home_unset_falls_back_to_pw_dir(tmp_path, monkeypatch):
+    import pwd
+
+    monkeypatch.delenv("HOME", raising=False)
+    fake = tmp_path / "x" / "y" / "pwhome"
+    fake.mkdir(parents=True)
+    real = pwd.getpwuid(os.getuid())
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: type("P", (), {"pw_dir": str(fake)})())
+    monkeypatch.setattr(sandbox.Path, "home", classmethod(lambda cls: fake))
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME"):
+        _wrap_linux(monkeypatch, fake)
+    assert real  # keep the real entry referenced; nothing under the real home is touched
+
+
+@pytest.mark.parametrize("root", ["/usr", "/etc", "/opt", "/"])
+def test_system_roots_refused(tmp_path, monkeypatch, root):
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
+        _wrap_linux(monkeypatch, root)
+
+
+def test_refusal_message_names_opt_out(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_APPLY", "on")
+    monkeypatch.delenv("LLM_ROUTER_APPLY_SANDBOX", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "ledger"))
+    monkeypatch.setenv("PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "probe failed deliberately")
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "a.py").write_text("x = 1\n")
+    result = apply.llm_apply(json.dumps([dict(file="a.py", old_string="1", new_string="2")]), "python -m pytest", str(root))
+    assert "no usable sandbox (probe failed deliberately)" in result
+    assert "LLM_ROUTER_APPLY_SANDBOX=auto" in result

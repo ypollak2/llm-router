@@ -11,6 +11,9 @@ tests/test_check_sandbox.py must run, and the job fails if any is skipped. The
 macOS behavioural tests (test_macos_*) are deselected there and run only locally.
 ROOT must not be HOME, an ancestor of HOME, or "/", and ROOT/.git is read-only
 inside the sandbox on both backends (a check cannot plant hooks or git config).
+Known difference: when ROOT/.git does not exist, macOS denies creating it (the
+profile denies the path) while Linux allows it (nothing to ro-bind); wrap() never
+creates anything in the user's repository to hide that.
 """
 from __future__ import annotations
 
@@ -60,15 +63,27 @@ def _runtime_grant(path):
 
 
 def _check_root(root):
-    """Refuse a ROOT that would re-grant HOME (the allow ROOT rule outranks the HOME deny)."""
+    """Refuse a ROOT that would re-grant HOME (the allow ROOT rule outranks the HOME deny).
+
+    Compared by file identity, not by string: on case-insensitive APFS '/users/me'
+    names the same directory as '/Users/me'. Fewer than 2 path components
+    ('/', '/usr', '/etc', '/Users', '/home', '/opt', ...) is always refused.
+    """
     import pwd
 
-    path = Path(root)
+    path = Path(_path(root))
+    if len(path.parts) < 3:
+        raise SandboxUnavailable(f"root covers HOME or a system directory: {path}")
     homes = {Path(_path(os.environ.get("HOME") or Path.home())),
              Path(_path(pwd.getpwuid(os.getuid()).pw_dir))}
-    broad = {Path(p).resolve() for p in ("/", "/Users", "/home")}
-    if path in broad or any(path == h or path in h.parents for h in homes):
-        raise SandboxUnavailable(f"ROOT is HOME, contains HOME or is a system root: {path}")
+    for home in homes:
+        for ancestor in (home, *home.parents):
+            try:
+                same = os.path.samefile(path, ancestor)
+            except OSError:
+                same = path == ancestor
+            if same:
+                raise SandboxUnavailable(f"root covers HOME or a system directory: {path}")
 
 
 def _inside(path, root):

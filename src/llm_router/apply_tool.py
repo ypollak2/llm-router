@@ -599,7 +599,8 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
                             details.append(label)
                             details.append(f"Check rc={check_rc}\n{output}")
                         except check_sandbox.SandboxUnavailable as exc:
-                            details.append(f"check: NOT sandboxed ({exc}); Check not run: sandbox required or unavailable.")
+                            details.append(f"check: NOT sandboxed ({exc}); Check not run: no usable sandbox ({exc}); "
+                                           "set LLM_ROUTER_APPLY_SANDBOX=auto to allow unsandboxed checks")
                         except OSError as exc:
                             details.append(f"Check not run: {exc}")
                 repair_files = None
