@@ -230,9 +230,11 @@ def usable(roll: dict | None, ledger=None) -> bool:
         st = ledger_path(ledger).stat()
     except OSError:
         return False
-    if st.st_ino != roll.get("ino") or st.st_size < roll.get("size", 0):
+    size, n = roll.get("size"), roll.get("head_len")
+    if not isinstance(size, int) or not isinstance(n, int):   # absent = unknown: rebuild, never read as 0
         return False
-    n = roll.get("head_len", 0)
+    if st.st_ino != roll.get("ino") or st.st_size < size:
+        return False
     return n == 0 or (st.st_size >= n and head_hash(ledger, n) == roll.get("head"))
 
 
@@ -271,7 +273,8 @@ def refresh(*, ledger=None, rollup=None, db_path=None, now: float | None = None,
     with exclusive_lock(rp.with_name(rp.name + ".lock"), timeout=0.0) as locked:
         if not locked:
             held = load(rollup)
-            return {**idle, "caught_up": bool(held and ident["size"] - held.get("offset", 0) <= 0)}
+            off = held.get("offset") if held else None   # absent offset = unknown, so not caught up
+            return {**idle, "caught_up": isinstance(off, int) and ident["size"] - off <= 0}
         roll = load(rollup)
         reset = False
         if not usable(roll, ledger) or roll.get("first_ts") != ident["first_ts"]:
