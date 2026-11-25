@@ -667,3 +667,12 @@ def test_simulated_power_against_a_ten_point_drop(p, n, floor):
     power = _sim(p, p - 0.10, n, ALPHA)
     print(f"power p={p}->{p - 0.10:.1f} n={n} trials={SIM_TRIALS} seed={SIM_SEED} alpha={ALPHA}: {power:.4f}")
     assert power > floor
+
+
+@needs_bash
+def test_the_release_script_passes_the_default_tolerance_alpha_d618(tmp_path):
+    """D-618: step 13 always forwards --tolerance-alpha 0.05 (outcome_gate.py's own default stays 0.0)."""
+    rc, out, _ = _run_prv(tmp_path, {"releases": [V1_ENTRY]}, "--outcome-cross-version", "rebaseline")
+    assert rc == 0, out
+    assert out.split("GATE ARGS:")[1].splitlines()[0].split() == ["--cross-version", "rebaseline", "--tolerance-alpha", "0.05"]
+    assert "tolerance on" in out
