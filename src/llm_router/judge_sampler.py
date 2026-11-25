@@ -25,8 +25,8 @@ Rate 0 keeps its historical meaning, "judge off". Any other value outside
 
 from __future__ import annotations
 
-import hashlib
 import atexit
+import hashlib
 import json
 import math
 import os
@@ -55,6 +55,25 @@ def _merge_pending(state: dict) -> None:
     _pending_skips.clear()
 
 
+def _write_state(path, state: dict) -> None:
+    """Atomic replace through the private (0600) opener; the lock must be held."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8", opener=paths.private_opener) as fh:
+        fh.write(json.dumps(state))
+    os.replace(tmp, path)
+
+
+def _reset_in_child() -> None:
+    """A forked child must not re-flush the parent's pending skips (double count)."""
+    global _exit_flush_registered
+    _pending_skips.clear()
+    _exit_flush_registered = False
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_in_child)
+
+
 def _flush_pending_at_exit() -> None:
     """A short-lived process (hook, CLI) that skipped on contention and never counted
     again would drop its ``lock_skipped`` with the interpreter: the skip was seen by
@@ -65,13 +84,11 @@ def _flush_pending_at_exit() -> None:
         path = _state_path()
         with exclusive_lock(path.with_name(path.name + ".lock"), timeout=_BLOCKING_TIMEOUT_S) as locked:
             if not locked:
+                failopen.record("CHZ-FO-JUDGE-SAMPLER-LOCK", None, detail="exit flush: lock not acquired, skips dropped")
                 return
             state = _load_for_update(path)
             _merge_pending(state)
-            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-            with open(tmp, "w", encoding="utf-8", opener=paths.private_opener) as fh:
-                fh.write(json.dumps(state))
-            os.replace(tmp, path)
+            _write_state(path, state)
     except Exception as exc:
         failopen.record("CHZ-FO-JUDGE-SAMPLER", exc)
 
@@ -171,10 +188,8 @@ def pick(door: str | None) -> bool:
             c["seen"] = seen + 1
             c["picked"] = c.get("picked", 0) + (1 if hit else 0)
             c.setdefault("lock_skipped", 0)
-            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps(state))
-            os.replace(tmp, path)
+            _write_state(path, state)
             return hit
     except Exception as exc:
         failopen.record("CHZ-FO-JUDGE-SAMPLER", exc)
