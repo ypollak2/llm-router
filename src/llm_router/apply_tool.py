@@ -398,7 +398,7 @@ def _is_config(rel: Path) -> bool:
 def _digest(path):
     """sha256 of a regular file; O_NONBLOCK|O_NOFOLLOW so a swapped-in FIFO or link cannot hang or redirect us."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)   # read-only, no O_CREAT
     except OSError:
         return "unreadable"
     try:
