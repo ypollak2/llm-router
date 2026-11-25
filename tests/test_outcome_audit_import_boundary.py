@@ -41,6 +41,10 @@ SHARED_RULE_MODULES = frozenset({
     "src/llm_router/groundtruth_sources.py",
     "src/llm_router/edit_survival.py",
 })
+#: Shadow-only detector the audit path-loads when LLM_ROUTER_REASK_PARAPHRASE=shadow. NOT a stdlib leaf: it
+#: imports llm_router.redo_signal so the correction phrases have one source. A load failure disables the
+#: shadow block (outcome_audit._load_script returns None); it never changes a label.
+SHADOW_DETECTOR_MODULES = frozenset({"src/llm_router/reask_detect.py"})
 
 
 def _violations_in_src(root: pathlib.Path) -> list[str]:
@@ -73,7 +77,7 @@ def _product_imports(path: pathlib.Path) -> list[str]:
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             # a sys.path.insert(..., ".../src") or a path-load of a src/ module
             v = node.value.strip("/")
-            if v in SHARED_RULE_MODULES:
+            if v in SHARED_RULE_MODULES or v in SHADOW_DETECTOR_MODULES:
                 continue
             if v == "src" or v.startswith("src/llm_router"):
                 found.append(f"string {node.value!r}")
