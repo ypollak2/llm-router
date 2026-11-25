@@ -473,7 +473,9 @@ class MakeCaTests(unittest.TestCase):
 
     def test_renew_leaf_only(self):
         self.assertEqual(run_make_ca(self.home).returncode, 0)
-        rd = lambda p: open(p, "rb").read()
+        def rd(p):
+            with open(p, "rb") as f:
+                return f.read()
         ca0, key0, leaf0 = rd(f"{self.dir}/ca.crt"), rd(f"{self.kdir}/ca.key"), rd(f"{self.dir}/leaf.crt")
         r = run_make_ca(self.home, "--renew-leaf")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -516,7 +518,9 @@ class ShellScriptTests(unittest.TestCase):
     def test_rc_routed_and_unrouted(self):
         class H(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
             def log_message(self, *a): pass
         web = http.server.HTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=web.serve_forever, daemon=True).start()
@@ -557,7 +561,9 @@ class ShellScriptTests(unittest.TestCase):
     def _servers(self):
         class H(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                self.send_response(200); self.send_header("Content-Length", "0"); self.end_headers()
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
             def log_message(self, *a): pass
         web = http.server.HTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=web.serve_forever, daemon=True).start()
@@ -861,7 +867,6 @@ class WheelTest(unittest.TestCase):
         import zipfile
         import tempfile
         import subprocess
-        import sys
         repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with tempfile.TemporaryDirectory() as tmpdir:
             import shutil
