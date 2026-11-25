@@ -6,9 +6,9 @@ that user can already write the repository. Post-write path checks still reject
 relocation outside cwd. A descendant calling setsid() can escape group cleanup;
 sandbox restrictions remain inherited by those descendants, and on macOS they are
 killed after the check by process-tree walk plus an env-marker sweep (best effort).
-Status APPLIED_PASSED_UNSANDBOXED / APPLIED_PASSED_NEW_FILES mark a pass that ran
+Status APPLIED_PASSED_UNSANDBOXED / APPLIED_PASSED_NEW_FILES / APPLIED_PASSED_OUTSIDE_EDITS mark a pass that ran
 without a sandbox, or after which the check left executable/config files (conftest.py,
-Makefile, +x, ...) beyond the edit set; only APPLIED_AND_PASSED is a clean pass.
+Makefile, +x, ...) or modified tracked files beyond the edit set; only APPLIED_AND_PASSED is a clean pass.
 """
 from __future__ import annotations
 
@@ -32,7 +32,8 @@ from llm_router.edit import EditInstruction, check_syntax
 from llm_router.paths import llm_router_home, private_opener
 
 # A check that passed. The two suffixed statuses are not a clean pass: see the "[llm_apply check]" line.
-_PASSED = {"APPLIED_AND_PASSED", "APPLIED_PASSED_UNSANDBOXED", "APPLIED_PASSED_NEW_FILES"}
+_PASSED = {"APPLIED_AND_PASSED", "APPLIED_PASSED_UNSANDBOXED", "APPLIED_PASSED_NEW_FILES",
+           "APPLIED_PASSED_OUTSIDE_EDITS"}
 _HANDOFF = "Nothing more will be applied by this tool for this attempt. Make the remaining changes yourself with your edit tools, then run the check."
 _CHECK_TIMEOUT = 60
 _OUTPUT_CAP = 16 * 1024 * 1024  # bytes of check output kept on disk before the group is killed
@@ -368,24 +369,53 @@ def _check_argv(command: str, root: Path | None = None) -> tuple[list[str] | Non
     return argv, ""
 
 
-_CONFIG_NAMES = {"conftest.py", "makefile", "package.json", ".envrc", "setup.py", "setup.cfg", "pytest.ini",
-                 "tox.ini", "pyproject.toml", "sitecustomize.py", ".npmrc", "tasks.json"}
+_CONFIG_NAMES = {"conftest.py", "makefile", "rakefile", "package.json", ".envrc", "setup.py", "setup.cfg",
+                 "pytest.ini", "tox.ini", "pyproject.toml", "sitecustomize.py", "usercustomize.py", ".npmrc",
+                 "tasks.json", ".pre-commit-config.yaml"}
+# Host-side git runs OUTSIDE the sandbox in a repo the check may have written: never let repo
+# config run a command (core.fsmonitor), never use hooks or a pager, take no index lock.
+_GIT = ["git", "--no-pager", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"]
+
+
+def _is_config(rel: Path) -> bool:
+    name = rel.name.lower()
+    posix = rel.as_posix().lower()
+    return (name in _CONFIG_NAMES or name.endswith(".pth") or posix.startswith(".github/workflows/")
+            or posix in {".cargo/config", ".cargo/config.toml"})
 
 
 def _tree_state(root: Path):
-    """{path: fingerprint} of every path git reports as modified/untracked, or None (not a git tree)."""
+    """{path: (XY, size, mtime_ns, mode)} of modified/untracked/ignored-config paths under root, or None.
+
+    Paths from porcelain are relative to the repo TOPLEVEL, so they are joined to it, not to root.
+    Ignored entries (`!!`) are kept only when they could be run later (config names, bin/ dirs).
+    """
     try:
-        out = subprocess.run(["git", "-C", str(root), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-                             capture_output=True, timeout=30)
+        top = subprocess.run([*_GIT, "-C", str(root), "rev-parse", "--show-toplevel"], capture_output=True,
+                             text=True, timeout=10)
+        out = subprocess.run([*_GIT, "-C", str(root), "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                              "--ignored"], capture_output=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
-    if out.returncode:
+    if top.returncode or out.returncode or not top.stdout.strip():
         return None
+    base = Path(top.stdout.strip())
     state = {}
-    for entry in out.stdout.decode("utf-8", errors="replace").split("\0"):
-        if len(entry) < 4:
+    tokens = out.stdout.decode("utf-8", errors="replace").split("\0")
+    index = 0
+    while index < len(tokens):
+        entry = tokens[index]
+        index += 1
+        if len(entry) < 4 or entry[2] != " ":
             continue
-        path = root / entry[3:]
+        if "R" in entry[:2] or "C" in entry[:2]:
+            index += 1  # the rename/copy record is followed by a bare origin path, not an entry
+        path = base / entry[3:]
+        if root not in path.parents:
+            continue
+        rel = path.relative_to(root)
+        if entry[:2] == "!!" and not (_is_config(rel) or "bin" in rel.parts[:-1]):
+            continue
         try:
             info = path.lstat()
             state[path] = (entry[:2], info.st_size, info.st_mtime_ns, info.st_mode)
@@ -395,18 +425,19 @@ def _tree_state(root: Path):
 
 
 def _persistence(before, after, edited, root: Path):
-    """(changed, flagged): paths the check created/changed beyond the edit set, and the
-    executable or config subset a later unsandboxed command could run."""
+    """(changed, flagged, outside): paths created/changed beyond the edit set; the executable/config
+    subset a later unsandboxed command could run; and tracked files modified outside the edit set."""
     edited = {Path(p) for p in edited}
     changed = sorted(p for p in after if p not in edited and before.get(p) != after[p])
-    flagged = []
+    flagged, outside = [], []
     for path in changed:
         mode = after[path][3]
         rel = path.relative_to(root)
-        name = rel.name.lower()
-        if name in _CONFIG_NAMES or (mode is not None and stat.S_ISREG(mode) and mode & 0o111):
+        if _is_config(rel) or (mode is not None and stat.S_ISREG(mode) and mode & 0o111):
             flagged.append(str(rel))
-    return [str(p.relative_to(root)) for p in changed], flagged
+        if after[path][0] not in {"??", "!!"}:
+            outside.append(str(rel))
+    return [str(p.relative_to(root)) for p in changed], flagged, outside
 
 
 class _Scan:
@@ -415,12 +446,14 @@ class _Scan:
     def __init__(self, root: Path, edited):
         self.root, self.edited, self.before = root, edited, _tree_state(root)
 
-    def finish(self) -> tuple[list[str], list[str]]:
-        """(report lines, flagged executable/config paths); never raises."""
+    def finish(self) -> tuple[list[str], dict]:
+        """(report lines, info); never raises. info: checked, flagged, outside."""
         after = _tree_state(self.root) if self.before is not None else None
         if after is None:
-            return [], []
-        changed, flagged = _persistence(self.before, after, self.edited, self.root)
+            return (["persistence check unavailable (ROOT is not a usable git repo): "
+                     "files the check left behind were NOT checked"],
+                    dict(checked=False, flagged=[], outside=[]))
+        changed, flagged, outside = _persistence(self.before, after, self.edited, self.root)
         lines = []
         if changed:
             lines.append("changed beyond the edit set: " + ", ".join(changed[:20])
@@ -428,7 +461,10 @@ class _Scan:
         if flagged:
             lines.append("WARNING: the check created or changed executable/config files that a later "
                          "unsandboxed command may run: " + ", ".join(flagged[:20]))
-        return lines, flagged
+        if outside:
+            lines.append("WARNING: the check modified tracked files outside the edit set: "
+                         + ", ".join(outside[:20]))
+        return lines, dict(checked=True, flagged=flagged, outside=outside)
 
 
 def _run_check(argv: list[str], root: Path, *, require_sandbox: bool = False) -> tuple[int, str, bool]:
@@ -585,7 +621,7 @@ def _local_repair(root, argv, files, task, details, repair):
                 wrote = True
                 scan = _Scan(root, set(changed) | set(files))
                 rc, tail, sandboxed = _run_check(argv, root, require_sandbox=True)
-                scan_lines, _ = scan.finish()
+                scan_lines, _info = scan.finish()
                 repair.update(repair_check_rc=rc, repair_sandboxed=sandboxed)
                 details.append(f"Local repair check rc={rc}\n{tail}")
                 details.extend(scan_lines)
@@ -688,12 +724,13 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
                         try:
                             scan = _Scan(root, changed)
                             check_rc, tail, sandboxed = _run_check(argv, root)
-                            scan_lines, flagged = scan.finish()
-                            check_report.update(sandboxed=sandboxed, flagged=flagged)
+                            scan_lines, info = scan.finish()
+                            check_report.update(sandboxed=sandboxed, **info)
                             check_ran = True
                             status = "APPLIED_CHECK_FAILED" if check_rc else (
                                 "APPLIED_PASSED_UNSANDBOXED" if not sandboxed else
-                                "APPLIED_PASSED_NEW_FILES" if check_report.get("flagged") else "APPLIED_AND_PASSED")
+                                "APPLIED_PASSED_NEW_FILES" if check_report.get("flagged") else
+                                "APPLIED_PASSED_OUTSIDE_EDITS" if check_report.get("outside") else "APPLIED_AND_PASSED")
                             label, _, output = tail.partition("\n")
                             details.append(label)
                             details.append(f"Check rc={check_rc}\n{output}")
@@ -750,6 +787,7 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
     if enabled:
         if check_report:
             details.insert(0, "[llm_apply check] " + json.dumps(dict(
-                sandboxed=check_report.get("sandboxed"), flagged_new_files=check_report.get("flagged", []))))
+                sandboxed=check_report.get("sandboxed"), persistence_checked=check_report.get("checked"),
+                flagged_new_files=check_report.get("flagged", []), outside_edits=check_report.get("outside", []))))
         details.insert(0, "[llm_apply credit] " + json.dumps(credit))
     return "\n".join([status, *details])

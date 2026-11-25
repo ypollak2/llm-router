@@ -1,4 +1,7 @@
-"""Contain only the check subprocess, never edit application or host-side Git.
+"""Contain only the check subprocess; never edit the application.
+
+Host-side git is never run by this module (apply_tool runs read-only `git status` with
+core.fsmonitor and hooks disabled, no pager, no index lock, to report what a check left).
 
 macOS uses (allow default): deny-default breaks pytest on current macOS. Reads of
 /Volumes, /Users, /private/var/folders and /private/tmp are denied except ROOT,
@@ -11,9 +14,15 @@ the OS outside the sandbox, so there is no positive control). Descendants inheri
 confinement; apply_tool kills setsid() descendants after the check by pgrep -P walk
 and an env-marker sweep (best effort: SIP binaries hide their env, a hostile process
 can clear it). Resource limits (apply_tool, via check_sandbox.resource_limiter):
-RLIMIT_FSIZE 256 MB, RLIMIT_NPROC = this uid's process count + 128 (per-uid on
-macOS and Linux, so it also bounds the user's other processes while the check
-runs), 16 MB of captured output. No CPU/memory limit beyond the 60 s wall clock.
+RLIMIT_FSIZE 256 MB everywhere; RLIMIT_NPROC (macOS only) = this uid's process count
+at launch + 128. The limit is set in the check's own process tree, so it binds only that
+tree, not the user's other processes; the kernel compares it with the uid-wide count, so
+a snapshot that is stale by more than 128 new processes during the 60 s can fail a
+legitimate check's fork (a false CHECK_FAILED). Linux gets no NPROC limit: the kernel
+counts threads per uid there, which `ps` cannot match, and --unshare-pid plus
+--die-with-parent already bound the tree. 16 MB of captured output. Framework builds
+under HOME (Versions/X/Python, Resources) and npm <prefix>/etc/npmrc fall outside the
+bin/lib grants (S7) and are not readable by a check. No CPU/memory limit beyond the 60 s wall clock.
 Executables and their interpreter installations must be trusted.
 The Linux backend (bubblewrap) is exercised on a real ubuntu-24.04 host by the
 CI job `linux-sandbox` (.github/workflows/ci.yml): every non-macOS test in
@@ -74,9 +83,8 @@ NPROC_HEADROOM = 128              # RLIMIT_NPROC = this uid's current process co
 
 
 def _uid_process_count():
-    """Processes of this uid now. RLIMIT_NPROC is per-uid (not per-tree) on macOS and Linux:
-    the kernel compares the uid-wide count with the limit, so a bare small number would
-    stop every fork of the user's desktop, and a bare large one would not bound anything."""
+    """Processes of this uid now (macOS). The kernel compares the uid-wide count with the
+    process's own limit, so the limit must be this count plus headroom, not a bare number."""
     try:
         listing = subprocess.run(["/bin/ps", "-U", str(os.getuid()), "-o", "pid="],
                                  capture_output=True, text=True, timeout=5, check=True).stdout
@@ -86,15 +94,15 @@ def _uid_process_count():
 
 
 def resource_limiter():
-    """preexec_fn that bounds file size and the uid's process count in the check subprocess.
+    """preexec_fn that bounds file size (all OSes) and the uid-wide process count (macOS only).
 
-    Inherited through sandbox-exec and bwrap. Not a CPU/memory limit (60 s wall clock only).
-    Returns None when the process count is unavailable: FSIZE alone is then applied.
+    Inherited through sandbox-exec and bwrap; binds only the check's tree. Not a CPU/memory
+    limit (60 s wall clock only). Without a process count, FSIZE alone is applied.
     """
     import resource
 
     count = _uid_process_count()
-    nproc = count + NPROC_HEADROOM if count is not None else None
+    nproc = count + NPROC_HEADROOM if count is not None and platform.system() == "Darwin" else None
     fsize = FSIZE_BYTES
 
     def apply():

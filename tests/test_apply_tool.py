@@ -946,7 +946,8 @@ def test_sandboxed_clean_pass_keeps_plain_status(repo, monkeypatch):
     monkeypatch.setattr(apply, "_run_check", lambda *a, **k: (0, "check: sandboxed\nok", True))
     result = call(repo, check="pytest")
     assert result.splitlines()[0] == "APPLIED_AND_PASSED"
-    assert json.loads(result.splitlines()[2].split("] ", 1)[1]) == {"sandboxed": True, "flagged_new_files": []}
+    assert json.loads(result.splitlines()[2].split("] ", 1)[1]) == {
+        "sandboxed": True, "persistence_checked": True, "flagged_new_files": [], "outside_edits": []}
 
 
 @pytest.mark.parametrize("name,mode", [("conftest.py", 0o644), ("Makefile", 0o644), (".envrc", 0o644),
@@ -988,3 +989,113 @@ def test_macos_sandboxed_check_planting_conftest_is_reported(repo, monkeypatch):
     result = call(repo, check="pytest")
     assert result.splitlines()[0] == "APPLIED_PASSED_NEW_FILES", result
     assert "conftest.py" in result and (repo / "conftest.py").exists()
+
+
+def _git(repo, *args):
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True,
+                   capture_output=True)
+
+
+def _plant(monkeypatch, files):
+    """Replace _run_check by one that writes {relpath: (text, mode)} under the ROOT it is given."""
+    def planting(argv, root, **kw):
+        for rel, (text, mode) in files.items():
+            target = root / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text)
+            target.chmod(mode)
+        return 0, "check: sandboxed\nok", True
+    monkeypatch.setattr(apply, "_run_check", planting)
+
+
+def test_root_in_repo_subdirectory_uses_toplevel(repo, monkeypatch):
+    """S6a: ROOT=repo/pkg. Porcelain paths are toplevel-relative; edit set excluded, +x still seen."""
+    pkg = repo / "pkg"
+    pkg.mkdir()
+    (pkg / "b.py").write_text("value = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "init")
+    runner(repo, monkeypatch, "")
+    _plant(monkeypatch, {"tool.sh": ("echo planted\n", 0o755)})
+    result = call(pkg, [edit("b.py")], "pytest")
+    assert result.splitlines()[0] == "APPLIED_PASSED_NEW_FILES", result
+    assert "tool.sh" in result and "pkg/pkg" not in result
+    assert "changed beyond the edit set: tool.sh" in result  # b.py (the edit) is not listed
+
+
+def test_ignored_plants_are_reported(repo, monkeypatch):
+    """S6b: .envrc / sitecustomize.py / .venv/bin/x planted in gitignored paths are seen."""
+    (repo / ".gitignore").write_text(".envrc\nsitecustomize.py\n.venv/\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "init")
+    runner(repo, monkeypatch, "")
+    _plant(monkeypatch, {".envrc": ("x\n", 0o644), "sitecustomize.py": ("x\n", 0o644),
+                         ".venv/bin/run": ("x\n", 0o755), ".venv/lib/data.txt": ("x\n", 0o644)})
+    result = call(repo, check="pytest")
+    assert result.splitlines()[0] == "APPLIED_PASSED_NEW_FILES", result
+    for name in (".envrc", "sitecustomize.py", ".venv/bin/run"):
+        assert name in result
+    assert "data.txt" not in result  # ignored and not runnable: not listed
+
+
+@pytest.mark.parametrize("rel", ["x.pth", "usercustomize.py", ".pre-commit-config.yaml", "Rakefile",
+                                 ".github/workflows/ci.yml", ".cargo/config.toml", ".cargo/config"])
+def test_extended_config_names_flagged(repo, monkeypatch, rel):
+    runner(repo, monkeypatch, "")
+    _plant(monkeypatch, {rel: ("x\n", 0o644)})
+    result = call(repo, check="pytest")
+    assert result.splitlines()[0] == "APPLIED_PASSED_NEW_FILES" and rel in result, result
+
+
+def test_non_git_scan_reports_unavailable_not_clean(repo, monkeypatch):
+    """S6c: if the persistence scan cannot run it says so in the reply and the JSON line."""
+    runner(repo, monkeypatch, "")
+    monkeypatch.setattr(apply, "_tree_state", lambda root: None)
+    monkeypatch.setattr(apply, "_run_check", lambda *a, **k: (0, "check: sandboxed\nok", True))
+    result = call(repo, check="pytest")
+    assert "persistence check unavailable" in result
+    field = next(line for line in result.splitlines() if line.startswith("[llm_apply check] "))
+    assert json.loads(field.split("] ", 1)[1])["persistence_checked"] is False
+
+
+def test_tracked_file_modified_outside_edit_set_is_not_clean(repo, monkeypatch):
+    """S6d: modifying an existing tracked file that is not in the edit set gets its own status."""
+    (repo / "other.py").write_text("keep = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "init")
+    runner(repo, monkeypatch, "")
+    _plant(monkeypatch, {"other.py": ("keep = 2\n", 0o644)})
+    result = call(repo, check="pytest")
+    assert result.splitlines()[0] == "APPLIED_PASSED_OUTSIDE_EDITS", result
+    assert "tracked files outside the edit set: other.py" in result
+    field = next(line for line in result.splitlines() if line.startswith("[llm_apply check] "))
+    assert json.loads(field.split("] ", 1)[1])["outside_edits"] == ["other.py"]
+    assert result.splitlines()[1].startswith("[llm_apply credit] ")
+
+
+def test_scan_never_runs_repo_fsmonitor(repo, tmp_path):
+    """S6f: core.fsmonitor naming a command must not execute during the host-side scan."""
+    canary = tmp_path / "fsmonitor-ran"
+    hook = tmp_path / "fsm.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {canary}\nprintf '\\0'\n")
+    hook.chmod(0o755)
+    _git(repo, "config", "core.fsmonitor", str(hook))
+    # positive control: plain git (as the host user would run it) does execute the hook
+    subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True)
+    assert canary.exists(), "control: fsmonitor hook should run for a plain git status"
+    canary.unlink()
+    assert apply._tree_state(repo.resolve()) is not None
+    assert not canary.exists()
+
+
+def test_staged_rename_does_not_add_bogus_entry(repo):
+    """S6g: `R  new\0old\0` - the origin path is not an entry."""
+    (repo / "old.py").write_text("x = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "init")
+    _git(repo, "mv", "old.py", "new.py")
+    state = apply._tree_state(repo.resolve())
+    names = {p.name for p in state}
+    assert "new.py" in names and "old.py" not in names
+    # a bogus entry parsed from the origin path would be built from "old.py"[3:] = ".py"
+    assert ".py" not in names and "y" not in names

@@ -934,7 +934,7 @@ def test_fsize_limit_stops_disk_fill(tmp_path, monkeypatch):
     assert sandbox.FSIZE_BYTES == 2 * 1024 * 1024
 
 
-def test_nproc_limit_bounds_fork_canary(tmp_path, monkeypatch):
+def test_macos_nproc_limit_bounds_fork_canary(tmp_path, monkeypatch):
     """S3: bounded fork canary (<=200 children, killed at the end) hits EAGAIN under the per-uid cap."""
     count = sandbox._uid_process_count()
     assert count, "ps must report this uid's processes"
@@ -1069,3 +1069,18 @@ def test_macos_prefix_canary_unreadable_while_runtime_works(mac, tmp_path):
         cleanup()
     assert result.returncode == 0, result.stderr
     assert "DENIED" in result.stdout and "authToken" not in result.stdout
+
+
+def test_nproc_limit_is_macos_only(monkeypatch):
+    """S3: Linux counts threads per uid (ps counts processes), so only FSIZE is set there."""
+    import resource
+
+    calls = []
+    monkeypatch.setattr(resource, "setrlimit", lambda which, value: calls.append(which))
+    monkeypatch.setattr(sandbox, "_uid_process_count", lambda: 500)
+    for system, expect_nproc in (("Linux", False), ("Darwin", True)):
+        calls.clear()
+        monkeypatch.setattr(sandbox.platform, "system", lambda s=system: s)
+        sandbox.resource_limiter()()
+        assert (resource.RLIMIT_NPROC in calls) is expect_nproc
+        assert resource.RLIMIT_FSIZE in calls
