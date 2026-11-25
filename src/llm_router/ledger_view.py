@@ -982,6 +982,7 @@ def combined_saved(bounds: Bounds, *, db_path=None, proxy_path=None, rollup_path
               "verified_usd": round(mw.verified_usd, 6), "verified_n": mw.verified_calls,
               "duplicates": mw.duplicate_calls, "since": _earliest_day(db_path)},
         "B": {"usd": pp["b_net"], "n": pp["b_steps"], "runs": pp["b_runs"], "excluded": pp["b_unpriced"],
+              "late_old_rows": pp.get("late_old_rows", 0),
               "since": pp["first_day"]},
         "C": {"usd": pp["c_usd"], "n": pp["c_rewritten"], "excluded": pp["c_unpriced"],
               "since": pp["first_day"]},

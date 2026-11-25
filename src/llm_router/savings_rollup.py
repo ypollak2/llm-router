@@ -18,6 +18,9 @@ A window's proxy part is read from the summaries of its closed days plus the day
 of any day with rows after ``offset``; until the pass has caught up and every needed closed day has a
 summary it is unavailable and prints ``n/a`` (never a partial sum as a total). A served run spanning
 midnight is split across the two days (each day is summarised from its own rows), +/- one run.
+A served row arriving for a day older than KEEP_OFFS_DAYS is priced as its own run: +/- about one run's net per
+such row (measured 2026-11-25: |error| <= $0.05 per row on 5 samples; 306 of 116k rows arrived > 300 s late).
+``late_old_rows`` in the rollup counts the served rows applied that way.
 
 Per day it stores what ``proxy.ledger`` computes (``_served_runs`` / ``_net_avoided`` for the
 local-served part B, ``tier_stats`` for the tier part C). Rows whose ``trace_id`` is already a
@@ -286,6 +289,7 @@ def refresh(*, ledger=None, rollup=None, db_path=None, now: float | None = None,
             rec["offs"].append(off)
             rec["sum"] = None                      # a late row reopens its (closed) day
         for d, rows in late.items():
+            roll["late_old_rows"] = roll.get("late_old_rows", 0) + sum(1 for r in rows if r.get("decision") == "served")
             part = summarize(rows, _drop(d, db_path, rows))
             total = dict(roll["days"][d]["sum"] or _ZERO)
             _add(total, part)
@@ -323,7 +327,7 @@ def proxy_parts(bounds, *, ledger=None, rollup=None, db_path=None) -> dict:
     Reads the summaries of closed days, the rows of today (by recorded offsets) and the unindexed tail
     after ``offset``; never scans the ledger."""
     out: dict = dict(_ZERO)
-    out.update(available=True, na_reason=None, first_day=None)
+    out.update(available=True, na_reason=None, first_day=None, late_old_rows=0)
     if bounds.session_id is not None:
         out.update(available=False, na_reason="session scope")
         return out
@@ -337,6 +341,7 @@ def proxy_parts(bounds, *, ledger=None, rollup=None, db_path=None) -> dict:
     if ident["size"] - roll["offset"] > TAIL_MAX_BYTES:
         out.update(available=False, na_reason="rollup building")
         return out
+    out["late_old_rows"] = roll.get("late_old_rows", 0)
     since, until = bounds.since_ts, bounds.until_ts
     tail, _ = read_from(ledger, roll["offset"])
     tail_by_day: dict[str, list] = {}

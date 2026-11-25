@@ -217,6 +217,26 @@ def test_a_late_row_for_an_old_closed_day_still_updates_it(env):
         [r for r in map(json.loads, open(env["ledger"])) if r["ts"] >= sr.day_start(sr.day_of(_day_ts(29, 1)))])["c_rewritten"]
 
 
+def test_a_late_served_row_for_an_old_day_is_its_own_run(env):
+    _ledger(env["ledger"], days=range(12, -1, -1), per_day=2)
+    _build(env)
+    day = sr.day_of(_day_ts(10, 1))
+    roll = sr.load(env["rollup"])
+    before, late0 = roll["days"][day]["sum"], roll.get("late_old_rows", 0)
+    with open(env["ledger"], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": _day_ts(10, 22), "session_id": "late-served", "decision": "served",
+                             "step_class": "continuation", "requested_model": "claude-sonnet-5",
+                             "backend_usage": {"output_tokens": 200}}) + "\n")
+    _build(env)
+    roll = sr.load(env["rollup"])
+    got = roll["days"][day]["sum"]
+    assert roll["days"][day]["offs"] is None
+    assert got["b_runs"] == before["b_runs"] + 1 and got["b_steps"] == before["b_steps"] + 1
+    assert roll["late_old_rows"] == late0 + 1 == 1
+    p = sr.proxy_parts(lv.calendar_bounds(30, now=NOW), ledger=env["ledger"], rollup=env["rollup"], db_path=env["db"])
+    assert p["late_old_rows"] == 1
+
+
 def test_a_same_inode_rewrite_that_grows_past_the_old_size_rebuilds(env):
     _ledger(env["ledger"], days=(2, 1, 0), per_day=2)
     _build(env)

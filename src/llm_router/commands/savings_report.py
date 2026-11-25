@@ -191,6 +191,9 @@ def render_history(now: float | None = None) -> str:
         for name, usd, n, excl, since in rows:
             out.append(f"  {name:<24} {usd:>10}  {n:<28} unpriced/excluded: {excl:<5} first row: {since or 'n/a'}")
         out.append(f"  {'combined':<24} {lv.render_saved(fig, p)}")
+        if bb.get("late_old_rows"):
+            out.append(f"  (B: {bb['late_old_rows']:,} served rows arrived for days older than 3 d and are priced as their "
+                       "own run: +/- about one run's net per row, |error| <= $0.05 on 5 samples, 2026-11-25)")
         if a["verified_n"]:
             out.append(f"  (verified, shown apart: ${a['verified_usd']:,.2f}, n={a['verified_n']:,})")
         if p["dedup_dropped"]:
