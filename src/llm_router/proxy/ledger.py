@@ -481,23 +481,58 @@ def _served_runs(rows: list[dict]) -> list[tuple[list[dict], dict | None, dict |
     return runs
 
 
-def _net_avoided(rows: list[dict]) -> tuple[float, int]:
-    """``(net_avoided_usd, n)``, an UPPER BOUND over realized saving — see the
-    module docstring ("NET AVOIDED"). May be negative. ``n`` counts served
-    RUNS that were priceable (a known model on at least one step), not served
-    steps: a run of N consecutive served steps is priced ONCE, at its first
-    priceable step, because it is one point where a real Anthropic call was
-    deferred, not N — see the module docstring for why summing every step in
-    the run double/triple-counted the local model's own extra internal turns.
+#: A session needs at least this many control calls (forwarded calls that follow a forwarded
+#: call) before its own mean cache write is used as the baseline; fewer falls back to the
+#: window-wide mean. See coord/SAVINGS-ESTIMATOR-METHOD-20261125.md (D-612).
+BASELINE_MIN_CONTROL_CALLS = 5
 
-    Unknown usage (``usage`` recorded as null, see :func:`usage_unknown`) is NOT
-    excluded here, and reads as zero tokens in two places: a ``nxt`` row with
-    unknown usage adds no extra cache-write cost (this keeps the figure an upper
-    bound, never below the truth), and an unknown ``prefix`` row gives a zero
-    prefix context (which prices the counterfactual low). Both are deliberate,
-    labelled approximations of an upper bound, not measurements."""
+
+def _row_write_usd(row: dict) -> float | None:
+    """USD of the cache write of one forwarded/fallback row at its own model; ``None`` when its
+    usage is unknown (null) or the model is unpriced."""
+    if usage_unknown(row):
+        return None
+    u = normalize_usage(row.get("usage"))
+    return _price_tokens(row.get("served_model") or row.get("requested_model") or "",
+                         cache_creation_5m=u["cache_creation_5m"], cache_creation_1h=u["cache_creation_1h"])
+
+
+def _write_baselines(rows: list[dict]) -> tuple[dict[str, float], float | None]:
+    """``(per_session_mean, window_mean)`` of the cache-write USD of CONTROL calls: forwarded/
+    fallback rows whose immediately preceding row in the same session (``ts`` order) is also
+    forwarded/fallback, i.e. ordinary calls that did not follow a served run. A session appears
+    in the first dict only with >= :data:`BASELINE_MIN_CONTROL_CALLS` priced control calls;
+    ``window_mean`` is ``None`` when the window has no priced control call. Unknown-usage rows
+    are never controls. Method: coord/SAVINGS-ESTIMATOR-METHOD-20261125.md (D-612)."""
+    by_session: dict[str, list[dict]] = {}
+    for r in rows:
+        by_session.setdefault(r.get("session_id") or "", []).append(r)
+    per_session: dict[str, float] = {}
+    all_writes: list[float] = []
+    for sid, srows in by_session.items():
+        ordered = sorted(srows, key=lambda r: r.get("ts") or 0)
+        writes: list[float] = []
+        for prev, cur in zip(ordered, ordered[1:]):
+            if (prev.get("decision") in (DECISION_FORWARDED, DECISION_FALLBACK)
+                    and cur.get("decision") in (DECISION_FORWARDED, DECISION_FALLBACK)):
+                w = _row_write_usd(cur)
+                if w is not None:
+                    writes.append(w)
+        all_writes.extend(writes)
+        if len(writes) >= BASELINE_MIN_CONTROL_CALLS:
+            per_session[sid] = sum(writes) / len(writes)
+    return per_session, (sum(all_writes) / len(all_writes) if all_writes else None)
+
+
+def _net_avoided_detail(rows: list[dict]) -> dict:
+    """The work of :func:`_net_avoided`, with the exclusion counts. Keys: ``total``, ``n``,
+    ``excluded_unknown_usage`` (runs whose next real call has usage recorded as null: excluded,
+    never guessed), ``excluded_no_baseline`` (runs whose next call wrote cache but no control
+    call exists in the window to price an ordinary write: excluded, never guessed),
+    ``fallback_baseline_runs`` (counted runs priced with the window-wide baseline)."""
+    per_session, window_mean = _write_baselines(rows)
     total = 0.0
-    n = 0
+    n = excl_unknown = excl_nobase = fallback = 0
     for run, prefix, nxt in _served_runs(rows):
         prefix_u = normalize_usage(prefix.get("usage")) if prefix is not None else None
         prefix_ctx = (prefix_u["cache_read_input_tokens"] + prefix_u["cache_creation_input_tokens"]
@@ -515,15 +550,55 @@ def _net_avoided(rows: list[dict]) -> tuple[float, int]:
             break  # the run's first priceable step is the one deferred call.
         if run_would_have is None:
             continue
-        extra_write = 0.0
+        toll = 0.0
+        used_fallback = False
         if nxt is not None:
-            nxt_u = normalize_usage(nxt.get("usage"))
-            extra_write = _price_tokens(nxt.get("requested_model") or "",
-                                        cache_creation_5m=nxt_u["cache_creation_5m"],
-                                        cache_creation_1h=nxt_u["cache_creation_1h"]) or 0.0
-        total += run_would_have - extra_write
+            if usage_unknown(nxt):
+                excl_unknown += 1
+                continue
+            next_write = _row_write_usd(nxt)
+            if next_write is None:  # unpriced next call: excluded and counted, never read as 0
+                excl_unknown += 1
+                continue
+            if next_write > 0:
+                sid = nxt.get("session_id") or ""
+                if sid in per_session:
+                    baseline = per_session[sid]
+                elif window_mean is not None:
+                    baseline, used_fallback = window_mean, True
+                else:
+                    excl_nobase += 1
+                    continue
+                toll = max(0.0, next_write - baseline)
+        total += run_would_have - toll
         n += 1
-    return total, n
+        fallback += used_fallback
+    return {"total": total, "n": n, "excluded_unknown_usage": excl_unknown,
+            "excluded_no_baseline": excl_nobase, "fallback_baseline_runs": fallback}
+
+
+def _net_avoided(rows: list[dict]) -> tuple[float, int]:
+    """``(net_avoided_usd, n)``, an UPPER BOUND over realized saving — see the
+    module docstring ("NET AVOIDED"). May be negative. ``n`` counts served
+    RUNS that were priceable (a known model on at least one step), not served
+    steps: a run of N consecutive served steps is priced ONCE, at its first
+    priceable step, because it is one point where a real Anthropic call was
+    deferred, not N — see the module docstring for why summing every step in
+    the run double/triple-counted the local model's own extra internal turns.
+
+    Re-cache toll (D-612, coord/SAVINGS-ESTIMATOR-METHOD-20261125.md): the next real
+    call's cache write counts against the run only ABOVE what an ordinary call writes,
+    ``toll = max(0, next_write - baseline)``. ``baseline`` is the mean cache-write USD of
+    the session's control calls (forwarded calls that follow a forwarded call) when it
+    has >= :data:`BASELINE_MIN_CONTROL_CALLS`, else the window-wide mean. (The old rule
+    charged 100% of that write; on the live ledger 7 d to 2026-11-25 08:25Z the next call
+    after a served run wrote $0.0587 * 57.7% while a control call wrote a mean $0.0184,
+    n=1,099 vs n=10,621, proxy_calls.jsonl.) A run whose next call has null usage, or
+    whose next call wrote cache with no control call in the window to compare against, is
+    EXCLUDED, not guessed; use :func:`_net_avoided_detail` for those counts. An unknown
+    ``prefix`` row still gives a zero prefix context (prices the counterfactual low)."""
+    d = _net_avoided_detail(rows)
+    return d["total"], d["n"]
 
 
 def tier_counterfactual_cost(row: dict) -> float | None:
@@ -715,7 +790,8 @@ def stats(rows: list[dict]) -> dict:
     # ("NET AVOIDED"). An UPPER BOUND with its n, never a measured saving —
     # paired_realized_saving() is the only measured figure — and it may be
     # negative.
-    avoided, avoided_n = _net_avoided(rows)
+    avoided_d = _net_avoided_detail(rows)
+    avoided, avoided_n = avoided_d["total"], avoided_d["n"]
 
     def _cc(rs: list[dict]) -> list[float]:
         return [normalize_usage(r.get("usage"))["cache_creation_input_tokens"] for r in rs]
@@ -759,6 +835,8 @@ def stats(rows: list[dict]) -> dict:
             # UPPER BOUND, not a measured saving; may be negative — see the
             # module docstring ("NET AVOIDED") and paired_realized_saving().
             "net_avoided_usd": round(avoided, 4), "net_avoided_n": avoided_n,
+            "net_avoided_excluded_unknown_usage": avoided_d["excluded_unknown_usage"],
+            "net_avoided_excluded_no_baseline": avoided_d["excluded_no_baseline"],
             "cache_creation_median_after_served_turn": _median(_cc(mixed)), "after_served_n": len(mixed),
             "cache_creation_median_clean_history": _median(_cc(clean)), "clean_n": len(clean),
         },

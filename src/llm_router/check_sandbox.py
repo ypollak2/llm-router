@@ -5,7 +5,15 @@ outside HOME remain possible. The short Mach broker denylist is best-effort,
 not a complete XPC boundary. Descendants inherit confinement, but setsid can
 escape the caller's process-group teardown. This is not a VM/resource boundary.
 Executables and their interpreter installations must be trusted.
-The Linux backend is unverified on a real Linux host.
+The Linux backend (bubblewrap) is exercised on a real ubuntu-24.04 host by the
+CI job `linux-sandbox` (.github/workflows/ci.yml): every non-macOS test in
+tests/test_check_sandbox.py must run, and the job fails if any is skipped. The
+macOS behavioural tests (test_macos_*) are deselected there and run only locally.
+ROOT must not be HOME, an ancestor of HOME, or "/", and ROOT/.git is read-only
+inside the sandbox on both backends (a check cannot plant hooks or git config).
+Known difference: when ROOT/.git does not exist, macOS denies creating it (the
+profile denies the path) while Linux allows it (nothing to ro-bind); wrap() never
+creates anything in the user's repository to hide that.
 """
 from __future__ import annotations
 
@@ -52,6 +60,55 @@ def _runtime_grant(path):
             or any(path == home or path in home.parents for home in homes)):
         raise SandboxUnavailable(f"runtime dir too broad: {path}")
     return str(path)
+
+
+def _under_system(path):
+    """macOS /System (incl. /System/Volumes/Data, which firmlinks to /Users); case-insensitive."""
+    return len(path.parts) > 1 and path.parts[1].lower() == "system"
+
+
+def _strip_data_volume(path):
+    parts = path.parts
+    if [p.lower() for p in parts[1:4]] == ["system", "volumes", "data"]:
+        return Path("/", *parts[4:])
+    return path
+
+
+def _check_root(root):
+    """Refuse a ROOT that would re-grant HOME (the allow ROOT rule outranks the HOME deny).
+
+    Compared by file identity, not by string: on case-insensitive APFS '/users/me'
+    names the same directory as '/Users/me'. Fewer than 2 path components
+    ('/', '/usr', '/etc', '/Users', '/home', '/opt', ...) is always refused.
+    """
+    import pwd
+
+    refusal = "root covers HOME or a system directory"
+    named = Path(os.path.abspath(os.fspath(root)))  # lexical: /etc stays /etc, no symlink followed
+    if len(named.parts) < 3:
+        raise SandboxUnavailable(f"{refusal}: {named}")
+    if _under_system(named):
+        raise SandboxUnavailable(f"{refusal}: {named}")
+    path = Path(_path(root))
+    if _under_system(path):
+        raise SandboxUnavailable(f"{refusal}: {path}")
+    # macOS /etc, /var, /tmp resolve into /private: treat '/private' like '/'.
+    floor = 4 if len(path.parts) > 1 and path.parts[1].lower() == "private" else 3
+    if len(path.parts) < floor:
+        raise SandboxUnavailable(f"{refusal}: {path}")
+    homes = {Path(_path(os.environ.get("HOME") or Path.home())),
+             Path(_path(pwd.getpwuid(os.getuid()).pw_dir))}
+    bare = _strip_data_volume(path)
+    for home in homes:
+        if _inside(_strip_data_volume(home), bare):  # firmlink view of the same tree
+            raise SandboxUnavailable(f"{refusal}: {path}")
+        for ancestor in (home, *home.parents):
+            try:
+                same = os.path.samefile(path, ancestor)
+            except OSError:
+                same = path == ancestor
+            if same:
+                raise SandboxUnavailable(f"root covers HOME or a system directory: {path}")
 
 
 def _inside(path, root):
@@ -226,6 +283,8 @@ _MAC_PROFILE = '''(version 1)
 (allow file-write* (subpath (param "ROOT")) (subpath (param "TEMP"))
     (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")
     (literal "/dev/urandom") (literal "/dev/random"))
+; Last match wins: keep .git read-only so a check cannot plant hooks or config.
+(deny file-write* (subpath (param "GIT")))
 (deny file-read-data (subpath (param "HOME")) (subpath (param "USER_HOME")))
 (allow file-read-data (subpath (param "ROOT")) (subpath (param "TEMP")) {runtime})
 (deny process-exec (literal "/usr/bin/open") (literal "/usr/bin/osascript")
@@ -261,6 +320,7 @@ def wrap(argv, root):
     backend = "/usr/bin/sandbox-exec" if system == "Darwin" else shutil.which("bwrap") if system == "Linux" else None
     if not backend:
         raise SandboxUnavailable("bwrap missing" if system == "Linux" else f"unsupported OS: {system}")
+    _check_root(root)  # before anything resolves or touches the directory
     root = _path(root)
     home = _path(os.environ.get("HOME", Path.home()))
     try:
@@ -280,7 +340,8 @@ def wrap(argv, root):
         if system == "Darwin":
             import pwd
 
-            params = {"ROOT": root, "HOME": home, "USER_HOME": _path(pwd.getpwuid(os.getuid()).pw_dir), "TEMP": scratch}
+            params = {"ROOT": root, "HOME": home, "USER_HOME": _path(pwd.getpwuid(os.getuid()).pw_dir), "TEMP": scratch,
+                      "GIT": root + "/.git"}
             params.update({f"R{i}": value for i, value in enumerate(runtimes)})
             rules = " ".join(f'(subpath (param "R{i}"))' for i in range(len(runtimes)))
             command = [backend]
@@ -307,7 +368,11 @@ def wrap(argv, root):
                     made.add(link)
                     command += ["--symlink", target, link]
             command += ["--dev", "/dev", "--proc", "/proc", "--bind", root, root,
-                        "--bind", scratch, scratch, "--chdir", root]
+                        "--bind", scratch, scratch]
+            if os.path.lexists(root + "/.git"):
+                # After the ROOT bind so it overrides it; a linked-worktree .git file works too.
+                command += ["--ro-bind", root + "/.git", root + "/.git"]
+            command += ["--chdir", root]
             for key, value in env.items():
                 command += ["--setenv", key, value]
             command += ["--", *argv]

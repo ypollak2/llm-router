@@ -1,0 +1,48 @@
+{"group": "paraphrase", "label": true, "prev": "add a retry loop to src/app/client.py around the fetch call", "next": "around the fetch call in src/app/client.py add a retry loop", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "rename the helper parse_row in lib/parser.py to read_row", "next": "in lib/parser.py rename the parse_row helper to read_row", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "write unit tests for utils/dates.py covering leap years", "next": "covering leap years write unit tests for utils/dates.py", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "remove the unused imports from core/engine.py", "next": "from core/engine.py remove the unused imports", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "split the long function handle in server/routes.py into smaller ones", "next": "split server/routes.py handle function, the long one, into smaller ones", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "update the readme.md install section with the new pip command", "next": "the install section of readme.md needs the new pip command, update it", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "fix the crash in worker/queue.py when the list is empty", "next": "repair the crash in worker/queue.py when the list is empty", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "explain what the function load_config in cfg/loader.py does", "next": "describe what the function load_config in cfg/loader.py does", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "delete the old migration files in db/migrations.sql", "next": "remove the old migration files in db/migrations.sql", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "make the tests in tests/test_api.py faster by mocking the network", "next": "speed up the tests in tests/test_api.py by mocking the network", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "refactor main.py so the config is read once at startup", "next": "restructure main.py so the config is read one time at startup", "gap_s": 200, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "summarize the changes in changelog.md for the last release", "next": "give a summary of the changes in changelog.md for the last release", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "clean up the logging in app/log.py", "next": "I meant the log format in app/log.py, clean that up", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "look at the cache module", "next": "I meant the cache module in src/cache.py, look at that one, the cache module", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "change the timeout in config.yaml to thirty seconds", "next": "I meant change the timeout in config.yaml to thirty seconds, not the retry count", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "fix the import error in pkg/mod.py", "next": "that didn't work, the import error in pkg/mod.py is still there", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "add type hints to api/views.py", "next": "that is wrong, you changed the wrong thing", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "bump the version in setup.cfg", "next": "no, that's not what I asked for", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "make the build pass", "next": "still failing, try again", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "update the docs for the cli", "next": "you forgot the cli flags, please redo the docs", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "make the button blue in ui/button.css", "next": "it's not working, the button in ui/button.css is still gray", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "add a docstring to the function in util/text.py", "next": "you missed the second function in util/text.py", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "export the report as csv from reports/export.py", "next": "can you run it again, the csv export in reports/export.py failed", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "sort the table in view/table.js by date", "next": "that did not work, sort the table in view/table.js by date again", "gap_s": 400, "turns": 2}
+{"group": "hard_neg_new_target", "label": false, "prev": "add a retry loop to src/app/client.py around the fetch call", "next": "now do the same for src/app/server.py", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "rename the helper parse_row in lib/parser.py to read_row", "next": "also rename parse_col in lib/writer.py to write_col", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "write unit tests for utils/dates.py covering leap years", "next": "do the same for utils/money.py", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "remove the unused imports from core/engine.py", "next": "next, remove the unused imports from core/router.py", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "update the install section of readme.md with the new pip command", "next": "now the same for docs/guide.md", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "fix the crash in worker/queue.py when the list is empty", "next": "same fix for worker/pool.py please", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "add type hints to api/views.py", "next": "add type hints to api/models.py as well", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "delete the old migration files in db/migrations.sql", "next": "now do the same for the staging config in cfg/staging.yaml", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "speed up the tests in tests/test_api.py by mocking the network", "next": "other tests too: tests/test_db.py and tests/test_cli.py", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "make the button blue in ui/button.css", "next": "now make the link green in ui/link.css", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "add a docstring to the function in util/text.py", "next": "and then do the same thing for the other file util/num.py", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "summarize the changes in changelog.md for the last release", "next": "now do the same for the release before that", "gap_s": 60, "turns": 1}
+{"group": "neg_new_task", "label": false, "prev": "fix the crash in worker/queue.py when the list is empty", "next": "great, now commit it and open a pr", "gap_s": 60, "turns": 1}
+{"group": "neg_new_task", "label": false, "prev": "add type hints to api/views.py", "next": "thanks. what does the scheduler do at midnight?", "gap_s": 60, "turns": 1}
+{"group": "neg_new_task", "label": false, "prev": "write unit tests for utils/dates.py covering leap years", "next": "looks good, run the linter on the whole repo", "gap_s": 60, "turns": 1}
+{"group": "neg_new_task", "label": false, "prev": "rename the helper parse_row in lib/parser.py to read_row", "next": "ok, how do I deploy this to the staging server?", "gap_s": 60, "turns": 1}
+{"group": "neg_new_task", "label": false, "prev": "explain what load_config in cfg/loader.py does", "next": "what is the difference between a mutex and a semaphore", "gap_s": 60, "turns": 1}
+{"group": "neg_new_task", "label": false, "prev": "update the docs for the cli", "next": "create a release checklist for version two", "gap_s": 60, "turns": 1}
+{"group": "neg_new_task", "label": false, "prev": "refactor main.py so the config is read once at startup", "next": "can you check the weather api quota for us tomorrow", "gap_s": 60, "turns": 1}
+{"group": "neg_new_task", "label": false, "prev": "clean up the logging in app/log.py", "next": "draft an email to the team about the outage", "gap_s": 60, "turns": 1}
+{"group": "neg_quoted_error", "label": false, "prev": "run the tests in tests/test_api.py", "next": "here is the output:\n```\nERROR: test failed\nthat didn't work\nAssertionError: not working\n```\nwhy did it print this", "gap_s": 60, "turns": 1}
+{"group": "neg_quoted_error", "label": false, "prev": "build the project", "next": "> the build failed with a timeout\n> try again later\nwhat does that error mean", "gap_s": 60, "turns": 1}
+{"group": "neg_quoted_error", "label": false, "prev": "deploy to staging", "next": "```\nstill failing: connection refused\n```\nI pasted the log above, summarize the cause", "gap_s": 60, "turns": 1}
+{"group": "neg_quoted_error", "label": false, "prev": "check cfg/app.yaml", "next": "the docs say 'try again after 30 seconds' for rate limits, how is that configured", "gap_s": 60, "turns": 1}

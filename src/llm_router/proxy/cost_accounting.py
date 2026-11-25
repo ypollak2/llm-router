@@ -193,7 +193,10 @@ def proxy_session_cost(rows: list[dict], session_id: str | None = None,
         real += c
         for k in tokens:
             tokens[k] += u[k]
-    avoided, runs = ledger._net_avoided(rows)  # noqa: SLF001
+    det = ledger._net_avoided_detail(rows)  # noqa: SLF001
+    avoided, runs = det["total"], det["n"]
+    # D-612: runs dropped for null next-call usage or no control-call baseline in this window.
+    runs_excluded = det["excluded_unknown_usage"] + det["excluded_no_baseline"]
     tiers = ledger.tier_stats(rows)
     tier_saving = tiers["est_saving_usd"] if tiers else 0.0
     out = {
@@ -202,6 +205,7 @@ def proxy_session_cost(rows: list[dict], session_id: str | None = None,
         "reconciled": bool(rows) and all(row_complete(r) for r in rows),
         "real_anthropic_usd": round(real, 4), "anthropic_tokens": tokens,
         "est_avoided_usd": round(avoided + tier_saving, 4), "est_avoided_runs": runs,
+        "est_avoided_runs_excluded": runs_excluded,
         "est_avoided_label": "est.",
         "claude_code_total_cost_usd": None, "claude_code_total_cost_label": None,
     }

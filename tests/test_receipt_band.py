@@ -54,6 +54,19 @@ def test_a_turn_served_off_claude_is_a_receipt():
     assert r["saved_usd"] == pytest.approx(0.012, abs=1e-4)
 
 
+def test_a_turn_whose_next_call_wrote_cache_with_no_baseline_says_so():
+    """D-612: no control call in the window -> the run is excluded; saved is n/a, not a bare None."""
+    now = time.time() - 60
+    nxt = _fwd(now + 5)
+    nxt["usage"] = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 30_000,
+                    "cache_creation": {"ephemeral_1h_input_tokens": 30_000, "ephemeral_5m_input_tokens": 0}}
+    _rows([_fwd(now - 100), _served(now + 1), nxt])
+    r = rb.last_routed_turn(now, SESSION, until=now + 10)
+    assert r["routed"] is True and r["saved_usd"] is None
+    assert r["saved_excluded"] == 1 and r["saved_label"] == "n/a (no baseline)"
+
+
 def test_a_turn_not_served_off_claude_is_not_a_receipt():
     now = time.time() - 60
     _rows([_fwd(now - 100), _fwd(now + 1), _fwd(now + 2)])
