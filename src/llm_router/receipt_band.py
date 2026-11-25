@@ -84,7 +84,12 @@ def last_routed_turn(since: float, session_id: str | None = None,
     an = ledger.stats(before[-1:] + turn).get("anthropic") or {}
     saved = an.get("net_avoided_usd") if an.get("net_avoided_n") else None
     model = last.get("model") if isinstance(last.get("model"), str) else None
-    return {"routed": True, "key": key, "model": model, "cost_usd": cost, "saved_usd": saved}
+    # D-612: a run whose next call wrote cache with no control call in this small window to price an
+    # ordinary write is excluded, not guessed. Say so instead of a bare None.
+    excluded = (an.get("net_avoided_excluded_no_baseline") or 0) + (an.get("net_avoided_excluded_unknown_usage") or 0)
+    saved_label = "n/a (no baseline)" if saved is None and excluded else None
+    return {"routed": True, "key": key, "model": model, "cost_usd": cost, "saved_usd": saved,
+            "saved_excluded": excluded, "saved_label": saved_label}
 
 
 # ── feed (the /router pane) ──────────────────────────────────────────────────

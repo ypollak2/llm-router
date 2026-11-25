@@ -268,7 +268,7 @@ _SANDBOX_CWD = re.compile(r"^/(private/)?(tmp|var/folders)/")
 # no scripts/, so northstar lost them when installed). They are still loaded by
 # PATH, never imported as llm_router: that keeps llm_router/__init__ and every
 # product reader out of this process. tests/test_outcome_audit_import_boundary.py
-# allows exactly these two paths and pins that they import nothing from llm_router.
+# allows exactly these two paths (plus the shadow-only reask_detect.py, which is not pinned as a leaf) and pins that they import nothing from llm_router.
 
 def _load_script(rel: str, name: str):
     path = ROOT / rel
@@ -342,6 +342,83 @@ def _relayed(host_text: str | None) -> bool:
 
 def _is_reask(text: str | None) -> bool:
     return bool(text) and bool(_REASK_RE.match(text or ""))
+
+
+# ── paraphrase re-ask, SHADOW (LLM_ROUTER_REASK_PARAPHRASE=shadow) ───────────
+# The prefix test above misses a re-ask in other words. ``src/llm_router/reask_detect.py`` is the offline
+# detector. In shadow mode it runs NEXT TO ``_is_reask``: no label, signal or confidence changes, the hits only
+# feed the separate ``reissue_paraphrase_shadow`` summary block. Flag off (default): this code does nothing.
+PARAPHRASE_FLAG = "LLM_ROUTER_REASK_PARAPHRASE"
+_PARAPHRASE: dict = {"checked": 0, "unavailable": 0, "hits": []}  # hits: [(reason, label_returned)]
+
+
+def paraphrase_mode() -> str:
+    return "shadow" if (os.environ.get(PARAPHRASE_FLAG) or "off").strip().lower() == "shadow" else "off"
+
+
+def reset_paraphrase_shadow() -> None:
+    _PARAPHRASE.update(checked=0, unavailable=0, hits=[])
+
+
+def _paraphrase_with_ctx(next_prompt_param: str):
+    """Decorator for a ``label_*``: accepts ``paraphrase_ctx=`` (``Session.paraphrase_ctx``) and, in shadow mode
+    only, runs the detector on the next human prompt when ``_is_reask`` did not already call it a re-ask. The
+    returned label is the wrapped function's, untouched."""
+    def deco(fn):
+        import functools
+        import inspect
+        sig = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        def wrapper(*args, paraphrase_ctx=None, **kw):
+            label = fn(*args, **kw)
+            if paraphrase_ctx is None or paraphrase_mode() != "shadow":
+                return label
+            nxt = sig.bind(*args, **kw).arguments.get(next_prompt_param)
+            if not nxt or _is_reask(nxt):
+                return label
+            mod = _load_script("src/llm_router/reask_detect.py", "_oa_reask_detect")
+            if mod is None:
+                _PARAPHRASE["unavailable"] += 1
+                return label
+            _PARAPHRASE["checked"] += 1
+            c = paraphrase_ctx
+            try:
+                hit, reason = mod.is_paraphrase_reask(
+                    c.get("prev_prompt"), nxt, mod.extract_targets(c.get("prev_prompt")),
+                    mod.extract_targets(nxt), c.get("gap_s"), c.get("turns"))
+            except Exception:  # noqa: BLE001 - a shadow detector never breaks the audit or a label
+                _PARAPHRASE["checked"] -= 1
+                _PARAPHRASE["unavailable"] += 1
+                return label
+            if hit:
+                _PARAPHRASE["hits"].append((reason, label[0]))
+            return label
+        return wrapper
+    return deco
+
+
+_EXPLICIT_REASK_SIGNALS = frozenset({"explicit_reask", "proxy_explicit_reask", "relayed_then_reasked"})
+
+
+def paraphrase_shadow_summary(summary: dict, rows: list[dict]) -> dict | None:
+    """The shadow block for the summary, or None when the flag is off (the summary is then unchanged)."""
+    if paraphrase_mode() != "shadow":
+        return None
+    hits = _PARAPHRASE["hits"]
+    by_reason: dict[str, int] = {}
+    for reason, _lab in hits:
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    used = sum(r["label"] == "used" for r in rows)
+    used_hit = sum(lab == "used" for _r, lab in hits)
+    return {
+        "note": "shadow only: no label changed; hits are a separate band, not counted in headline",
+        "n_checked": _PARAPHRASE["checked"], "detector_unavailable": _PARAPHRASE["unavailable"],
+        "hits_total": len(hits), "hits": dict(sorted(by_reason.items())),
+        "reissue_explicit": sum(r["signal"] in _EXPLICIT_REASK_SIGNALS for r in rows),
+        "used_if_paraphrase_counted": {"used": used - used_hit,
+                                       "attempted": (summary.get("headline") or {}).get("attempted")},
+    }
 
 
 def extract_draft(attachment_text: str) -> str:
@@ -615,6 +692,7 @@ def is_hold_result(text: str | None) -> bool:
 Label = tuple[str, str, str]  # (label, signal, confidence)
 
 
+@_paraphrase_with_ctx("next_prompt")
 def label_draft(draft_text: str | None, host_text: str | None,
                 next_prompt: str | None, hook_verdict: str | None) -> Label:
     if not draft_text:
@@ -644,6 +722,7 @@ def label_draft(draft_text: str | None, host_text: str | None,
     return "unused", "draft_not_relayed", "high" if frac < AMBIGUOUS_FLOOR else "medium"
 
 
+@_paraphrase_with_ctx("next_prompt")
 def label_routed_mcp(result_text: str | None, is_error: bool, host_text: str | None,
                      host_did_work: bool, next_prompt: str | None) -> Label:
     if result_text is None:
@@ -739,6 +818,7 @@ def label_edit(applied: bool, with_blocks: list[str], host_edits: list[str],
     return "redone", "edit_host_rewrote", "medium" if file_exists else "low"
 
 
+@_paraphrase_with_ctx("next_prompt")
 def label_proxy(results: list[tuple[str, bool]] | None, n_tool_uses: int,
                 next_prompt: str | None) -> Label:
     if _is_reask(next_prompt):
@@ -926,6 +1006,20 @@ class Session:
         j = self.next_human(i)
         return self.human_text(j) if j is not None else None
 
+    def paraphrase_ctx(self, i: int, j: int | None = None) -> dict | None:
+        """Shadow-mode context for record i: the human prompt before i, the gap to the next human turn j
+        (default: the next one after i) and the human turns between. None unless the flag is ``shadow``."""
+        if paraphrase_mode() != "shadow":
+            return None
+        j = self.next_human(i) if j is None else j
+        prev = max((k for k in self.human_idx if k < i), default=None)
+        if j is None or prev is None or not (0 <= j < len(self.records)):
+            return None  # no later human turn (reply_after returns len(records)): nothing to compare
+        t0, t1 = _ts(self.records[prev]), _ts(self.records[j])
+        return {"prev_prompt": self.human_text(prev),
+                "gap_s": (t1 - t0) if t0 is not None and t1 is not None else None,
+                "turns": sum(1 for k in self.human_idx if prev < k <= j)}
+
     def index_at_or_after(self, ts: float, slack: float = 2.0) -> int | None:
         for i, rec in enumerate(self.records):
             t = _ts(rec)
@@ -1107,7 +1201,8 @@ def _draft_units(sessions, recs, verdicts, lo, hi) -> list[Unit]:
             at = s.index_at_or_after(ts)
         host, _uses, stop = s.reply_after(at) if at is not None else ("", [], None)
         nxt = s.human_text(stop) if stop is not None and stop < len(s.records) else None
-        label = label_draft(draft_text, host, nxt, verdict)
+        label = label_draft(draft_text, host, nxt, verdict,
+                            paraphrase_ctx=s.paraphrase_ctx(at, stop) if at is not None else None)
         units.append(Unit(kind, s.sid, ts, *label,
                           evidence={"routed": draft_text or "", "host": host}))
     return units
@@ -1178,7 +1273,8 @@ def _mcp_call_unit(s: Session, i: int, ts: float, tu: dict, ri: int | None, rb: 
         return unit(*label_local_task(res, follow))
     host, uses, _stop = s.reply_after(at, inputs=True)
     did_work = bool(host.strip()) or any(u.get("name") in _EDIT_TOOLS for u in uses)
-    label = label_routed_mcp(text, is_err, host, did_work, s.next_human_text(at))
+    label = label_routed_mcp(text, is_err, host, did_work, s.next_human_text(at),
+                             paraphrase_ctx=s.paraphrase_ctx(at))
     return unit(*label, routed=answer_body(text), host=host)
 
 
@@ -1253,7 +1349,8 @@ def _mcp_and_edit_units(sessions, edit_rows, lo, hi, stats: dict | None = None) 
             else:
                 did_work = bool(host.strip()) or any(u.get("name") in _EDIT_TOOLS for u in uses)
                 label = label_routed_mcp(_result_text(rb) if rb else None, bool(rb and rb.get("is_error")),
-                                         host, did_work, s.next_human_text(ri) if ri is not None else None)
+                                         host, did_work, s.next_human_text(ri) if ri is not None else None,
+                                         paraphrase_ctx=s.paraphrase_ctx(ri) if ri is not None else None)
             units.append(Unit("routed_mcp", s.sid, c_ts, *label))
     return units
 
@@ -1572,7 +1669,8 @@ def _proxy_units(sessions, proxy_rows, lo, hi) -> list[Unit]:
                 for b in _tool_results(r2):
                     if b.get("tool_use_id") in use_ids:
                         results.append((_result_text(b), bool(b.get("is_error"))))
-            label = label_proxy(results if use_ids else None, len(use_ids), s.next_human_text(i))
+            label = label_proxy(results if use_ids else None, len(use_ids), s.next_human_text(i),
+                                paraphrase_ctx=s.paraphrase_ctx(i))
             units.append(Unit("proxy", s.sid, ts, *label))
     return units
 
@@ -1934,6 +2032,7 @@ def run_audit(days: int = 30, projects_dir: Path | None = None, state_dir: Path 
               now: float | None = None, release: str = "unreleased",
               human_labels: Path | None = None, judge_model: str | None = None,
               judge_calibration: dict | None = None) -> tuple[list[dict], dict]:
+    reset_paraphrase_shadow()
     units, ctx = _collect(days, projects_dir or default_projects_dir(),
                           state_dir or default_state_dir(), now)
     return _finish(units, ctx, release, human_labels, judge_model, judge_calibration)
@@ -1945,6 +2044,9 @@ def _finish(units: list[Unit], ctx: dict, release: str, human_labels: Path | Non
     judge = _apply_judge(units, judge_model, judge_calibration)
     rows = [u.row() for u in units]
     summary = summarize(rows, ctx, release, judge, _prompts_with_used(units, ctx["sessions"]))
+    shadow = paraphrase_shadow_summary(summary, rows)
+    if shadow is not None:  # flag off: the summary is byte-identical to before
+        summary["reissue_paraphrase_shadow"] = shadow
     return rows, summary
 
 

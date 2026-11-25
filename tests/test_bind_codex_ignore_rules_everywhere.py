@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import re
+import shlex
 import sys
 import types
 from pathlib import Path
@@ -87,6 +88,153 @@ KNOWN_COMMAND_STRINGS = {("src/llm_router/tools/routing.py", "llm_select_agent")
 # (``f"{codex_bin} exec ..."``; the census renders such a placeholder as ``{<expr>}``).
 _COMMAND_RX = re.compile(r"^\s*(?:\S*/)?(?:codex|\{[^}]*codex[^}]*\})\s+exec\b", re.IGNORECASE)
 
+# ---- shell text: a command string that STARTS codex exec behind wrappers, env assignments, quoting, `bash -c` ------------
+# A regex on the text cannot tell `FOO=1 nice -n 5 codex exec p` (a launch) from `git commit -m "codex exec"` (a message), so
+# the text is tokenised the way a shell does and walked from the command position: wrappers and assignments are skipped, a
+# quoted word is one word, and only the word that sits in command position counts. Limits: no variable expansion (`$BIN exec`),
+# no heredoc bodies, no function bodies; a quoted `#` is read as a comment start.
+_NL = "⏎"  # a newline outside the shell's own quoting is a command separator; carried through shlex as a word
+_SEP = re.compile(r"^[;&|()]+$")
+_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
+_WHICH = re.compile(r"\$\(\s*(?:which|command\s+-v|type\s+-p)\s+\S*codex\S*\s*\)|`\s*(?:which|command\s+-v)\s+\S*codex\S*\s*`")
+_PLACEHOLDER = re.compile(r"\{[^{}\s]*\}")  # an f-string expression the census rendered as {<expr>}
+_CODEX_VALUE_FLAGS = {"-m", "--model", "-c", "--config", "-C", "--cd", "-p", "--profile", "-s", "--sandbox", "-a",
+                      "--ask-for-approval", "-i", "--image", "--add-dir", "--local-provider", "--color"}
+_RESERVED = {"{", "}", "!", "then", "do", "else", "if", "elif", "while", "until", "time", "builtin", "nohup", "setsid",
+             "exec", "unbuffer", "doas", "sudo"}
+#: wrapper -> flags that take the next word; sudo/doas/time/nohup/exec are in _RESERVED and also take flags (below)
+_WRAP_FLAGS = {
+    "env": {"-u", "--unset", "-C", "--chdir"}, "nice": {"-n", "--adjustment"}, "ionice": {"-c", "-n", "-p"},
+    "timeout": {"-k", "--kill-after", "-s", "--signal"}, "caffeinate": {"-t", "-w"}, "stdbuf": {"-i", "-o", "-e"},
+    "xargs": {"-I", "-n", "-P", "-L", "-s", "-d", "-a", "-E", "-J", "-R", "-S"}, "command": set(),
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-R", "-T", "-U"}, "doas": {"-u", "-C"}, "time": {"-f", "-o"},
+    "nohup": set(), "setsid": set(), "exec": {"-a"}, "unbuffer": set(), "builtin": set(),
+}
+_RAW_CALL = re.compile(r"(?:^|[;&|(\n])\s*(?:[A-Za-z_]\w*=\S*\s+)*(?:[\w./@=-]+\s+){0,6}?(?:\S*/)?codex\s+(?:-\S+\s+)*exec\b")
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+_NPX = {"npx", "bunx", "pnpx"}
+
+
+def _is_codex_word(w: str) -> bool:
+    return w.rsplit("/", 1)[-1] == "codex"
+
+
+def _commands(text: str) -> list[list[str]]:
+    """Split shell text into simple commands (lists of words)."""
+    text = _WHICH.sub("codex", re.sub(r"\\\r?\n", " ", text))
+    text = _PLACEHOLDER.sub(lambda m: "codex" if "codex" in m.group(0).lower() else "PLACEHOLDER", text)
+    text = text.replace("\n", " " + _NL + " ")
+    lex = shlex.shlex(text, posix=True, punctuation_chars=True)
+    lex.whitespace_split, lex.commenters = True, ""
+    try:
+        words = list(lex)
+    except ValueError:  # unbalanced quote: fall back to whitespace words
+        words = text.split()
+    cmds: list[list[str]] = [[]]
+    comment = False
+    for w in words:
+        if w == _NL:
+            comment = False
+            cmds.append([])
+        elif comment:
+            continue
+        elif w.startswith("#"):
+            comment = True
+        elif _SEP.match(w):
+            cmds.append([])
+        else:
+            cmds[-1].append(w)
+    return [c for c in cmds if c]
+
+
+def _after_flags(words: list[str], value_flags: set[str]) -> list[str]:
+    i = 0
+    while i < len(words) and words[i].startswith("-") and words[i] != "-":
+        w = words[i]
+        i += 2 if w in value_flags else 1
+    return words[i:]
+
+
+def _codex_runs_exec(words: list[str]) -> bool:
+    """The words after the codex binary: the first positional (after global flags) is the subcommand."""
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if w == "--":
+            i += 1
+        elif w.startswith("-"):
+            i += 2 if w in _CODEX_VALUE_FLAGS else 1
+        else:
+            return w == "exec"
+    return False
+
+
+def _walk(cmd: list[str], aliases: dict[str, list[str]], depth: int = 0) -> bool:
+    if depth > 8:
+        return False
+    cmd = list(cmd)
+    i = 0
+    while i < len(cmd):
+        w = cmd[i]
+        base = w.rsplit("/", 1)[-1]
+        if _ASSIGN.match(w):
+            i += 1
+        elif _is_codex_word(w):
+            return _codex_runs_exec(cmd[i + 1:])
+        elif base in aliases:
+            cmd = aliases.pop(base) + cmd[i + 1:]  # pop: an alias that names itself must not loop
+            i = 0
+        elif base == "alias":
+            hit = False
+            for a in cmd[i + 1:]:
+                name, eq, val = a.partition("=")
+                if eq:
+                    aliases[name] = [x for c in _commands(val) for x in c]
+                    hit = hit or _walk(aliases[name], {}, depth + 1)
+            return hit
+        elif base in {"{", "}", "!", "then", "do", "else", "if", "elif", "while", "until"}:
+            i += 1
+        elif base in _SHELLS:
+            rest = cmd[i + 1:]
+            for j, a in enumerate(rest):
+                if a.startswith("-") and not a.startswith("--") and "c" in a[1:] and j + 1 < len(rest):
+                    return _shell_runs_codex_exec(rest[j + 1].replace(_NL, "\n"), aliases, depth + 1)
+                if not a.startswith("-"):
+                    break
+            return False
+        elif base == "eval":
+            return _shell_runs_codex_exec(" ".join(cmd[i + 1:]), aliases, depth + 1)
+        elif base in _NPX or (base in {"npm", "pnpm", "yarn", "bun"} and cmd[i + 1:i + 2] and cmd[i + 1] in {"exec", "dlx", "x"}):
+            rest = cmd[i + 1:] if base in _NPX else cmd[i + 2:]
+            rest = _after_flags(rest, {"-p", "--package", "-c", "--call"})
+            if rest and re.sub(r"(?<=.)@[^@/]*$", "", rest[0]) in {"@openai/codex", "codex"}:
+                return _codex_runs_exec(rest[1:])
+            return False
+        elif base == "command" and any(f in cmd[i + 1:i + 3] for f in ("-v", "-V")):
+            return False
+        elif base in _WRAP_FLAGS:
+            rest = _after_flags(cmd[i + 1:], _WRAP_FLAGS[base])
+            if base == "timeout" and rest:
+                rest = rest[1:]  # the duration
+            cmd, i = rest, 0
+        else:
+            return False
+    return False
+
+
+def _shell_runs_codex_exec(text: str, aliases: dict[str, list[str]] | None = None, depth: int = 0) -> bool:
+    """True if some command in the shell text starts ``codex exec`` (a wrapper, env assignment, quoting, ``bash -c``, an alias
+    defined in the same text or ``$(which codex)`` in front of it does not hide it); text that only mentions it does not count."""
+    if "codex" not in text.lower() or "exec" not in text:
+        return False
+    aliases = {} if aliases is None else aliases
+    try:
+        shlex.split(text.replace("\n", " "))
+    except ValueError:  # unparseable (unbalanced quote): never let it hide a call, scan the raw text conservatively
+        if _RAW_CALL.search(text):
+            return True
+    return any([_walk(c, aliases, depth) for c in _commands(text)])  # a list: every command runs, so aliases accumulate
+
 
 def _via_name(name: ast.Name) -> ast.Constant:
     """A use of a module-level ``X = "exec"``: counts only behind a codex-named element, never by position alone."""
@@ -112,6 +260,20 @@ def _resolve_names(node: ast.AST, names: set[str]) -> None:
                     setattr(node, field, _via_name(c))
             elif isinstance(c, ast.AST):
                 _resolve_names(c, names)
+
+
+def _is_command_text(text: str) -> bool:
+    return bool(_COMMAND_RX.match(text)) or _shell_runs_codex_exec(text)
+
+
+def _fold_str(e: ast.expr) -> str | None:
+    """A string built only by ``+`` of string constants, folded; None if any part is not one."""
+    if isinstance(e, ast.Constant):
+        return e.value if isinstance(e.value, str) else None
+    if isinstance(e, ast.BinOp) and isinstance(e.op, ast.Add):
+        a, b = _fold_str(e.left), _fold_str(e.right)
+        return None if a is None or b is None else a + b
+    return None
 
 
 def _flat(elts: list[ast.expr]) -> list[ast.expr]:
@@ -144,7 +306,7 @@ def _is_exec_argv(elts: list[ast.expr], positional: bool) -> bool:
 
 class _Census(ast.NodeVisitor):
     def __init__(self, rel: str) -> None:
-        self.rel, self.stack, self.docs = rel, [], set()
+        self.rel, self.stack, self.docs, self.folded = rel, [], set(), set()
         self.argv: list[tuple[str, str, int, list[ast.expr]]] = []
         self.strings: list[tuple[str, str, int, str]] = []
 
@@ -181,13 +343,37 @@ class _Census(ast.NodeVisitor):
 
     visit_Tuple = visit_List
 
+    def _rendered(self, node, text: str) -> None:  # a command string built by "..." % x or "...".format(x) from constants
+        if _is_command_text(text):
+            self.strings.append((self.rel, self._where(), node.lineno, text))
+
     def visit_Call(self, node) -> None:  # asyncio.create_subprocess_exec("codex", "exec", ...): argv as positional arguments
+        f = node.func
+        if isinstance(f, ast.Attribute) and f.attr == "format" and isinstance(f.value, ast.Constant)                 and isinstance(f.value.value, str) and all(isinstance(a, ast.Constant) for a in node.args)                 and all(isinstance(k.value, ast.Constant) for k in node.keywords if k.arg):
+            try:
+                self._rendered(node, f.value.value.format(*[a.value for a in node.args],
+                                                          **{k.arg: k.value.value for k in node.keywords if k.arg}))
+            except (IndexError, KeyError, ValueError):
+                pass
         elts = _flat(node.args)
         if _is_exec_argv(elts, positional=False):
             self.argv.append((self.rel, self._where(), node.lineno, elts))
         self.generic_visit(node)
 
-    def visit_BinOp(self, node) -> None:  # ["codex"] + ["exec", ...]
+    def visit_BinOp(self, node) -> None:  # ["codex"] + ["exec", ...]; "codex %s" % "exec"; "codex " + "exec x"
+        if isinstance(node.op, ast.Add) and id(node) not in self.folded:
+            folded = _fold_str(node)
+            if folded is not None:
+                self.folded |= {id(n) for n in ast.walk(node)}
+                self._rendered(node, folded)
+        if isinstance(node.op, ast.Mod) and isinstance(node.left, ast.Constant) and isinstance(node.left.value, str):
+            r = node.right
+            vals = tuple(e.value for e in r.elts) if isinstance(r, ast.Tuple) and all(isinstance(e, ast.Constant) for e in r.elts)                 else (r.value,) if isinstance(r, ast.Constant) else None
+            if vals is not None:
+                try:
+                    self._rendered(node, node.left.value % vals)
+                except (TypeError, ValueError):
+                    pass
         if isinstance(node.op, ast.Add) and isinstance(node.left, (ast.List, ast.Tuple)) \
                 and isinstance(node.right, (ast.List, ast.Tuple)):
             elts = _flat(node.left.elts) + _flat(node.right.elts)
@@ -199,11 +385,11 @@ class _Census(ast.NodeVisitor):
 
     def visit_JoinedStr(self, node) -> None:  # an f-string: judge its literal text once, not each part
         text = "".join(v.value if isinstance(v, ast.Constant) else "{" + ast.unparse(v.value) + "}" for v in node.values)
-        if _COMMAND_RX.match(text):
+        if _is_command_text(text):
             self.strings.append((self.rel, self._where(), node.lineno, text))
 
     def visit_Constant(self, node) -> None:
-        if isinstance(node.value, str) and id(node) not in self.docs and _COMMAND_RX.match(node.value):
+        if isinstance(node.value, str) and id(node) not in self.docs and _is_command_text(node.value):
             self.strings.append((self.rel, self._where(), node.lineno, node.value))
 
 
@@ -273,7 +459,7 @@ def test_a_help_query_starts_no_run():
 
 
 #: Planted shapes (backlog item 7, the census missed 13 of 26 of these PLANTED cases when measured on origin/main ff82dcc4, before this change; the 13-of-17 claim in review #818 cannot be checked, its corpus is not in the repo). Each is one realistic way Python in
-#: src/ could start ``codex exec``; the census must report it. The five xfail rows are the shapes an AST walk of a single
+#: src/ could start ``codex exec``; the census must report it. The two xfail rows are the shapes an AST walk of a single
 #: expression cannot see (strict: if one starts passing, the marker goes). Data: the table in the PR description.
 PLANTED = [
     ('01_list_literal', 'import subprocess\ndef f(p):\n    subprocess.run(["codex", "exec", "--json", p])\n'),
@@ -298,8 +484,10 @@ PLANTED = [
     ('20_split_lists_concat', 'import subprocess\ndef f(p):\n    subprocess.run(["codex"] + ["exec", p])\n'),
     ('21_star_unpack', 'import subprocess\ndef f(p):\n    subprocess.run(["codex", *["exec", p]])\n'),
     ('22_join_list', 'import subprocess\ndef f(p):\n    subprocess.run(" ".join(["codex", "exec", p]), shell=True)\n'),
-    pytest.param('23_str_format', 'import subprocess\ndef f(p):\n    subprocess.run("codex {} --json".format("exec"), shell=True)\n', marks=pytest.mark.xfail(strict=True, reason='the subcommand is a .format() argument: the literal text never reads `codex exec`')),
-    pytest.param('24_percent_format', 'import subprocess\ndef f(p):\n    subprocess.run("codex %s --json" % "exec", shell=True)\n', marks=pytest.mark.xfail(strict=True, reason='the subcommand is a %-format argument: the literal text never reads `codex exec`')),
+    ('23_str_format', 'import subprocess\ndef f(p):\n    subprocess.run("codex {} --json".format("exec"), shell=True)\n'),
+    ('24_percent_format', 'import subprocess\ndef f(p):\n    subprocess.run("codex %s --json" % "exec", shell=True)\n'),
+    ('27_plus_concat_string', 'import subprocess\ndef f(p):\n    subprocess.run("codex " + "exec --json", shell=True)\n'),
+    ('28_nested_plus_concat', 'import subprocess\ndef f(p):\n    subprocess.run("co" + "dex " + "exec" + " x", shell=True)\n'),
     ('25_implicit_concat_string', 'import subprocess\ndef f(p):\n    subprocess.run("codex " "exec --json", shell=True)\n'),
     ('26_path_constant_binary', 'import subprocess\ndef f(p):\n    subprocess.run(["/opt/homebrew/bin/codex", "exec", p])\n'),
 ]
@@ -318,6 +506,37 @@ BENIGN = [
 ]
 
 
+#: Shell text (#818 SHOULD: the string rule read only strings that BEGIN with `codex exec`). Each is a command string a Python
+#: file could pass to a shell; SHELL_POSITIVE must be reported, SHELL_NEGATIVE only mentions or inspects codex. Measured through
+#: _census_of on cfeb888e (the census as merged in #928): 5 of 48 positives found, 0 of 25 negatives flagged (n=48/25
+#: hand-written variants listed here, one run, no sampling).
+SHELL_POSITIVE = [
+ 'echo "hi; codex exec x', "echo 'a' | FOO=1 codex -m x exec 'unclosed", "true && nice codex exec \"p",
+ "FOO=1 codex exec p", "FOO=1 BAR=2 codex exec p", "command codex exec p", "/opt/homebrew/bin/codex exec p",
+ "npx @openai/codex exec p", "npx -y @openai/codex@latest exec p", "codex  exec p", "codex\texec p",
+ "codex -m gpt-5 exec p", "codex -c model=x --color never exec p", "codex \\\n  exec p",
+ 'bash -c "codex exec p"', "sh -c 'FOO=1 codex exec p'", "$(which codex) exec p", "$(command -v codex) exec p",
+ "`which codex` exec p", "alias cx='codex exec'; cx p", "echo p | xargs codex exec", "echo p | xargs -I{} codex exec {}",
+ "env codex exec p", "env -i FOO=1 codex exec p", "nice codex exec p", "nice -n 5 codex exec p",
+ "timeout 60 codex exec p", "timeout -k 5 60 codex exec p", "caffeinate -i codex exec p",
+ "caffeinate -i -t 3600 codex exec p", "nohup codex exec p &", "cd /w && codex exec p", "true; codex exec p",
+ '"codex" "exec" p', "'codex' exec p", "time codex exec p", "sudo -u x codex exec p", "exec codex exec p",
+ "FOO=1 nice -n 5 timeout 60 env X=2 codex exec p", "ls\ncodex exec p", "echo ok || codex exec p",
+ "bash -lc 'cd /w && codex exec p'", 'zsh -c "nohup caffeinate -i codex exec p"', 'eval "codex exec p"',
+ "(codex exec p)", "{ codex exec p; }", "./codex exec p", "~/bin/codex exec p", "pnpm dlx @openai/codex exec p",
+ "npm exec -- @openai/codex exec p", "# note\ncodex exec p",
+]
+SHELL_NEGATIVE = [
+ 'echo "codex exec', "echo 'say codex exec", 'grep "x codex exec',
+ "echo codex exec", "# codex exec p", "grep 'codex exec' file", 'git commit -m "codex exec"', "codex --version",
+ "codex login", "printf 'codex exec\\n'", 'echo "run codex exec later"', "which codex", "cat codex-exec.md",
+ 'pgrep -f "codex exec"', "ps aux | grep codex | grep exec", "exec ls", "alias cx='codex --version'; cx",
+ "cd codex && ls exec", "npx @openai/codex --version", "codex mcp list", 'git log --grep="codex exec"',
+ 'FOO="codex exec" ls', 'bash -c "echo codex exec"', "sed -i 's/codex exec/x/' f", "timeout 60 sleep 3",
+ "command -v codex exec", "echo hi # codex exec p", "ls exec codex",
+]
+
+
 def _census_of(tmp_path: Path, source: str):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "planted.py").write_text(source, encoding="utf-8")
@@ -329,6 +548,18 @@ def _census_of(tmp_path: Path, source: str):
 def test_the_census_catches_each_planted_variant(name, source, tmp_path):
     argv, strings = _census_of(tmp_path, source)
     assert argv or strings, f"variant {name} starts `codex exec` and the census did not see it"
+
+
+@pytest.mark.parametrize("cmd", SHELL_POSITIVE, ids=[repr(c) for c in SHELL_POSITIVE])
+def test_the_census_catches_codex_exec_behind_shell_syntax(cmd, tmp_path):
+    argv, strings = _census_of(tmp_path, f"import subprocess\ndef f(p):\n    subprocess.run({cmd!r}, shell=True)\n")
+    assert strings, f"{cmd!r} starts `codex exec` and the census did not see it"
+
+
+@pytest.mark.parametrize("cmd", SHELL_NEGATIVE, ids=[repr(c) for c in SHELL_NEGATIVE])
+def test_the_census_ignores_shell_text_that_only_mentions_codex_exec(cmd, tmp_path):
+    argv, strings = _census_of(tmp_path, f"import subprocess\ndef f(p):\n    subprocess.run({cmd!r}, shell=True)\n")
+    assert not argv and not strings, (argv, strings)
 
 
 @pytest.mark.parametrize("source", BENIGN)
@@ -697,7 +928,7 @@ def test_a_missing_or_hung_binary_cannot_answer_and_counts_as_no(tmp_path, monke
 
 
 @pytest.mark.real_codex_probe
-def test_the_answer_is_asked_once_and_an_unanswered_probe_is_not_repeated_for_a_minute(monkeypatch):
+def test_the_answer_is_asked_once_and_an_unanswered_probe_is_not_repeated_for_a_minute(monkeypatch, tmp_path):
     asked = []
     answers = iter([None, True, False])
 
@@ -707,13 +938,16 @@ def test_the_answer_is_asked_once_and_an_unanswered_probe_is_not_repeated_for_a_
 
     monkeypatch.setattr(codex_agent, "_probe_ignore_rules", _probe)
     codex_agent._reset_codex_cache_for_tests()
-    b = "/x/codex"
+    # real files: a binary that cannot be stat'ed is refused without a probe (review of 2b53b07f)
+    b = str(tmp_path / "codex")
+    other = str(tmp_path / "codex2")
+    for f in (b, other):
+        Path(f).write_text("#!/bin/sh\n")
     assert codex_agent.codex_supports_ignore_rules(b) is False and asked == [b]      # could not answer: closed
     assert codex_agent.codex_supports_ignore_rules(b) is False and asked == [b]      # ... and not asked again now
     codex_agent._RULES_UNKNOWN_UNTIL[b] = 0.0                                        # a minute later
     assert codex_agent.codex_supports_ignore_rules(b) is True and asked == [b, b]
     assert codex_agent.codex_supports_ignore_rules(b) is True and asked == [b, b]    # a real answer is kept
-    other = "/y/codex"
     assert codex_agent.codex_supports_ignore_rules(other) is False and asked == [b, b, other]  # per binary
     assert codex_agent.codex_supports_ignore_rules(other) is False and asked == [b, b, other]
     codex_agent._reset_codex_cache_for_tests()

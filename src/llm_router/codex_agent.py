@@ -148,6 +148,42 @@ _RULES_REPROBE_S = 60.0
 _RULES_SUPPORT: dict[str, bool] = {}
 #: binary path -> monotonic time before which a probe that could not run (a hung or broken binary) is not repeated.
 _RULES_UNKNOWN_UNTIL: dict[str, float] = {}
+#: A definite False is kept this long, then asked again (an upgraded CLI is picked up without a restart; review N-D of #818).
+#: A True answer is not time-limited: it is dropped only when the binary changes (a downgrade or swap, review of 2b53b07f).
+_RULES_NEGATIVE_TTL_S = 600.0
+#: binary path -> (monotonic time of the answer, (st_mtime_ns, st_size) of the binary when it was asked). Every definite answer.
+_RULES_STAMP: dict[str, tuple[float, tuple[int, int]]] = {}
+
+
+def _binary_signature(binary: str) -> tuple[int, int] | None:
+    """(mtime_ns, size) of ``binary`` (symlinks followed), None when it cannot be stat'ed."""
+    try:
+        st = os.stat(binary)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _expire_stale(binary: str) -> None:
+    """Forget a definite answer for ``binary`` when the binary changed on disk (any answer), when it cannot be stat'ed (any
+    answer: a missing binary is not known to support the flag), or when a False is older than the TTL. A stat and a dict read:
+    no subprocess, safe on the event loop. The next :func:`codex_supports_ignore_rules` call then asks again."""
+    if binary not in _RULES_SUPPORT:
+        return
+    stamp = _RULES_STAMP.get(binary)
+    sig = _binary_signature(binary)
+    fresh = (stamp is not None and sig is not None and sig == stamp[1]
+             and (_RULES_SUPPORT[binary] is True or time.monotonic() - stamp[0] < _RULES_NEGATIVE_TTL_S))
+    if not fresh:
+        _RULES_SUPPORT.pop(binary, None)
+        _RULES_STAMP.pop(binary, None)
+
+
+def _known_not_unsupported(binary: str) -> bool:
+    """True unless ``binary`` is known to lack the flag. Availability only: the capability check and the run path refuse a
+    binary that cannot be stat'ed (see :func:`codex_supports_ignore_rules`), so a vanished binary is not started."""
+    _expire_stale(binary)
+    return _RULES_SUPPORT.get(binary) is not False
 
 
 def _probe_ignore_rules(binary: str) -> bool | None:
@@ -172,9 +208,16 @@ def _probe_ignore_rules(binary: str) -> bool | None:
 
 
 def codex_supports_ignore_rules(binary: str) -> bool:
-    """Whether ``binary`` lists ``--ignore-rules`` in ``exec --help``. Asked once per binary and remembered. A binary that
-    cannot answer counts as NOT supporting it (fail closed) and is not asked again for a minute, so a hung CLI costs one
-    probe and not one per call. Never raises."""
+    """Whether ``binary`` lists ``--ignore-rules`` in ``exec --help``. Asked once per binary and remembered, with the binary's
+    (mtime, size) at the time of the ask: a change drops the answer (True or False) and the next call asks again; a False
+    also expires after ``_RULES_NEGATIVE_TTL_S``. A binary that cannot be stat'ed answers False and is not cached. A binary
+    that cannot answer counts as NOT supporting it (fail closed) and is not asked again for a minute, so a hung CLI costs one
+    probe and not one per call. Concurrent callers after an expiry may each probe; the probe is idempotent, so that is
+    accepted. Never raises."""
+    _expire_stale(binary)  # a failed stat drops any earlier answer too
+    sig = _binary_signature(binary)
+    if sig is None:
+        return False
     known = _RULES_SUPPORT.get(binary)
     if known is not None:
         return known
@@ -186,6 +229,7 @@ def codex_supports_ignore_rules(binary: str) -> bool:
         _RULES_UNKNOWN_UNTIL[binary] = time.monotonic() + _RULES_REPROBE_S
         return False
     _RULES_SUPPORT[binary] = answer
+    _RULES_STAMP[binary] = (time.monotonic(), sig)  # the stat taken before the probe: a change during it re-asks
     return answer
 
 
@@ -212,7 +256,10 @@ def codex_unsupported_binary() -> str | None:
     """The Codex binary this process uses when it is KNOWN not to list ``--ignore-rules`` (so :func:`is_codex_available` is
     False for that reason and not because Codex is missing), else None. A dict read: no I/O, safe on the event loop."""
     path = _CODEX_BINARY_PATH
-    return path if path is not None and _RULES_SUPPORT.get(path) is False else None
+    if path is None:
+        return None
+    _expire_stale(path)
+    return path if _RULES_SUPPORT.get(path) is False else None
 
 
 def _initialize_codex_cache() -> None:
@@ -307,7 +354,8 @@ def is_codex_available() -> bool:
 
     # Fast path: positive cache. A CLI already found to lack --ignore-rules is not usable (BIND-8): a dict read, no I/O.
     if _CODEX_BINARY_PATH is not None:
-        return _RULES_SUPPORT.get(_CODEX_BINARY_PATH) is not False
+        # A stale False is dropped here (stat only); the run path's unprotected_refusal() re-asks, failing closed.
+        return _known_not_unsupported(_CODEX_BINARY_PATH)
 
     # Negative cache → rate-limited re-probe.
     now = time.monotonic()
@@ -325,7 +373,7 @@ def is_codex_available() -> bool:
             # Plugin probe failure is non-fatal; the binary alone is enough
             # to route through Codex.
             pass
-    return _CODEX_BINARY_PATH is not None and _RULES_SUPPORT.get(_CODEX_BINARY_PATH) is not False
+    return _CODEX_BINARY_PATH is not None and _known_not_unsupported(_CODEX_BINARY_PATH)
 
 
 def _reset_codex_cache_for_tests() -> None:
@@ -341,6 +389,7 @@ def _reset_codex_cache_for_tests() -> None:
     _LAST_PROBE_TS = 0.0
     _RULES_SUPPORT.clear()
     _RULES_UNKNOWN_UNTIL.clear()
+    _RULES_STAMP.clear()
 
 
 def is_codex_plugin_available() -> bool:

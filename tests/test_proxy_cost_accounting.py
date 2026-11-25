@@ -432,3 +432,19 @@ def test_kpi_o1_keeps_est_when_rows_are_legacy_or_unreconciled(kpi_env, monkeypa
                            "requested_model": MODEL, "upstream_status": 200})
     _write(rows)
     assert "reconciled:" not in kpi.compute_scorecard(days=7)["kpis"]["O1"]["value"]
+
+
+def test_proxy_session_cost_reports_runs_excluded_for_lack_of_a_baseline():
+    """D-612: a one-call window has no control call; the next call wrote cache, so the run is
+    excluded and the surface says so instead of silently showing fewer runs."""
+    rows = [ca.annotate(_fwd(msg="a", ts=1, usage=_usage(w1=0))), ca.annotate(_srv(msg="b", ts=2), 42_000),
+            ca.annotate(_fwd(msg="d", ts=3, usage=_usage(w1=30_000)))]
+    s = ca.proxy_session_cost(rows)
+    assert s["est_avoided_runs"] == 0 and s["est_avoided_runs_excluded"] == 1
+
+
+def test_proxy_session_cost_excluded_is_zero_when_nothing_is_dropped():
+    rows = [ca.annotate(_fwd(msg="a", ts=1)), ca.annotate(_srv(msg="b", ts=2), 42_000),
+            ca.annotate(_fwd(msg="d", ts=3, usage=_usage(w1=0)))]
+    s = ca.proxy_session_cost(rows)
+    assert s["est_avoided_runs"] == 1 and s["est_avoided_runs_excluded"] == 0

@@ -67,3 +67,14 @@ def test_sdist_does_not_ship_the_active_test_suite(built):
     with tarfile.open(sdist) as tar:
         leaked = [n for n in tar.getnames() if "/tests/" in n]
     assert not leaked, f"the SDIST ships the active test suite: {leaked[:5]}"
+
+
+@pytest.mark.slow
+def test_sdist_does_not_ship_docs_audit_architecture(built):
+    """docs/ leaked (296 files, 16.0.1) because .gitignore negations re-include it."""
+    _, sdist = built
+    with tarfile.open(sdist) as tar:
+        names = tar.getnames()
+    assert any("/src/llm_router/" in n for n in names), "empty sdist: check found nothing"
+    leaked = [n for n in names if any(f"/{d}/" in n for d in ("docs", "audit", "architecture"))]
+    assert not leaked, f"the SDIST ships {len(leaked)} internal doc files: {leaked[:5]}"
