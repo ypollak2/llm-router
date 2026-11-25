@@ -154,6 +154,16 @@ def offload_field(actions: list[dict] | None, session_id: str) -> dict:
             "why": None if sampled or not mine else "no quality-sampled lane"}
 
 
+def money_field(now: float) -> dict:
+    """The combined saving (``ledger_view.savings_line``: today plus the 30-day figure) as ``{"text": ...}``.
+    Same function, same paths as the money segment, so the two surfaces print one number."""
+    from llm_router import ledger_view as lv
+
+    return {"text": lv.savings_line(
+        now=now, db_path=paths.state_path("usage.db"), proxy_path=paths.state_path("proxy_calls.jsonl"),
+        rollup_path=paths.state_path("savings_rollup.json"))["text"]}
+
+
 def quota_field(now: float) -> dict:
     """Claude 5h from ONE ``usage.json`` poll (not a fallback, not pending, not stale) and Codex from the
     delegation window.
@@ -268,10 +278,11 @@ def render_line(f: dict) -> str:
     ql = f["quality"]
     quality = (_pct("quality", None if ql["rate"] is None else 100 * ql["rate"], ql["n"], ql["window"], "verdicts"))
     fig = lv.Figure.from_dict(f["saved"]) if f["saved"] else None
-    text = lv.show(fig, unit="subscription", quantity="work_hours", with_n=True)
-    why = fig.na_reason if fig and fig.na_reason else "n/a"
-    # a reason that is already "n/a (...)" is printed as is, not wrapped in a second n/a
-    saved = f"saved {text}" if text else (f"saved {why}" if why.startswith("n/a (") else f"saved n/a ({why})")
+    work = lv.show(fig, unit="subscription", quantity="work_hours", with_n=True)
+    # D-611/D-614: the saved field is the combined money figure (today + one 30d figure), the same text
+    # the money segment prints; work-hours are appended only when measured (n > 0), omitted at n = 0.
+    money = (f.get("money") or {}).get("text") or "saved n/a (money figure unavailable)"
+    saved = money + (f" · {work}" if work else "")
     parts = [router, offload, quota, quality, saved]
     j = f.get("judge")
     if j:
@@ -320,6 +331,7 @@ def build(session_id: str, now: float) -> dict:
             "codex": {"used": None, "budget": None, "window": "5h"}},
         "quality": quality,
         "saved": saved.to_dict() if saved is not None else None,
+        "money": _part("CHZ-FO-SNAP-MONEY", lambda: money_field(now)),
         "judge": _part("CHZ-FO-SNAP-JUDGE", _judge_field),
     }
     routing = _part("CHZ-FO-SNAP-ROUTING", lambda: _routing_field(session_id, now))

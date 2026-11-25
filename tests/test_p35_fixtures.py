@@ -297,8 +297,10 @@ async def test_statusline_prints_the_five_fields(p35):
     good, bad = VERDICTS["good"], VERDICTS["bad"]
     assert quality == f"quality {good / (good + bad):.0%} (n={good + bad} verdicts, 7d)", quality
     hours = TURNS_OFF_CLAUDE_TODAY * PP_PER_TURN / MEDIAN_PP          # 1.33: hand-derived above
-    assert saved == (f"saved ~{hours:.1f} work-hours (n={TURNS_OFF_CLAUDE_TODAY}, rate n={len(PP_PER_ACTIVE_HOUR)}, "
-                     "today)"), saved
+    # D-611: the money figure leads, the measured work-hours figure is appended (omitted at n = 0)
+    assert saved.startswith("saved "), saved
+    assert saved.endswith(f" · ~{hours:.1f} work-hours (n={TURNS_OFF_CLAUDE_TODAY}, rate n={len(PP_PER_ACTIVE_HOUR)}, "
+                          "today)"), saved
     for f in fields[1:]:           # every figure names its n and its window (the router field is a name, not a figure)
         assert "(n=" in f and re.search(r"\b(session|5h|7d|today)\b", f), f
 

@@ -363,6 +363,8 @@ def money_segment(state: str, now: float | None = None) -> dict[str, str]:
     if not os.path.isfile(os.path.join(state, "usage.db")):
         return {}
     try:
+        import pathlib
+
         from llm_router import ledger_view as lv
         from llm_router.dashboard_data import SPEND_FLOOR_USD
 
@@ -371,13 +373,21 @@ def money_segment(state: str, now: float | None = None) -> dict[str, str]:
             return {}
         figs = lw.figures()
         out: dict[str, str] = {}
-        for key, fig, unit, suffix, n_key in (
-                ("money", figs["saved_estimated"], "estimate", " est. saved", "money_n"),
-                ("money_m", figs["saved_measured"], "api", " verified saved", "money_m_n")):
-            text = lv.show(fig, unit=unit, quantity="usd")
-            if text is not None and fig.value >= SPEND_FLOOR_USD:
-                out[key], out[n_key] = text + suffix, str(fig.n)
-                out["money_win"] = fig.window
+        # D-611: the estimate is the COMBINED figure (usage.db + proxy local net + proxy tier), the
+        # same one the router line prints (ledger_view.savings_line); only a positive total is a
+        # "saved" figure here, a net <= 0 is printed once, as n/a, on the router line.
+        root = pathlib.Path(state)
+        sv = lv.savings_line(now=now, db_path=root / "usage.db", proxy_path=root / "proxy_calls.jsonl",
+                             rollup_path=root / "savings_rollup.json")
+        est = lv.Figure.from_dict(sv["today"])
+        if est.value is not None and est.value >= SPEND_FLOOR_USD and est.n:
+            out["money"], out["money_n"] = lv.show(est, unit="estimate", quantity="usd") + " est. saved", str(est.n)
+            out["money_win"] = est.window
+        fig = figs["saved_measured"]
+        text = lv.show(fig, unit="api", quantity="usd")
+        if text is not None and fig.value >= SPEND_FLOOR_USD:
+            out["money_m"], out["money_m_n"] = text + " verified saved", str(fig.n)
+            out["money_win"] = fig.window
         return out
     except Exception:  # noqa: BLE001 -- never break the line over a reporting figure
         return {}
@@ -697,6 +707,24 @@ def compute(state: str, transcript: str, model_id: str, env: dict[str, str] | No
     return {k: _clean(v) for k, v in seg.items()}
 
 
+def refresh_rollup(state: str, now: float) -> None:
+    """Bring ``savings_rollup.json`` (closed days of the proxy ledger, ``savings_rollup``) up to date.
+    The ONLY writer of that file besides tests: the render path never builds it. Time-boxed, so a
+    first build of a long ledger spreads over several refreshes (newest days first); any failure leaves
+    the history ``n/a`` and the line otherwise intact."""
+    try:
+        import pathlib
+
+        from llm_router import savings_rollup
+
+        root = pathlib.Path(state)
+        if (root / "proxy_calls.jsonl").is_file():
+            savings_rollup.refresh(ledger=root / "proxy_calls.jsonl", rollup=root / "savings_rollup.json",
+                                   db_path=root / "usage.db", now=now, budget_s=3.0)
+    except Exception:  # noqa: BLE001 -- reporting only
+        return
+
+
 def cache_file(state: str, session: str) -> str:
     return os.path.join(state, f"statusline_seg_{session}.kv")
 
@@ -750,6 +778,7 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(signal, "SIGALRM"):
         _arm_hard_stop(now)
     maybe_refresh_usage(state, now, dict(os.environ))
+    refresh_rollup(state, now)
     seg = compute(state, ns.transcript, ns.model, dict(os.environ), now, session,
                   int(ns.ctx_window) if ns.ctx_window.isdigit() else 0)
     append_history(state, now)
