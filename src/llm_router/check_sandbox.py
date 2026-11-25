@@ -62,6 +62,18 @@ def _runtime_grant(path):
     return str(path)
 
 
+def _under_system(path):
+    """macOS /System (incl. /System/Volumes/Data, which firmlinks to /Users); case-insensitive."""
+    return len(path.parts) > 1 and path.parts[1].lower() == "system"
+
+
+def _strip_data_volume(path):
+    parts = path.parts
+    if [p.lower() for p in parts[1:4]] == ["system", "volumes", "data"]:
+        return Path("/", *parts[4:])
+    return path
+
+
 def _check_root(root):
     """Refuse a ROOT that would re-grant HOME (the allow ROOT rule outranks the HOME deny).
 
@@ -75,14 +87,21 @@ def _check_root(root):
     named = Path(os.path.abspath(os.fspath(root)))  # lexical: /etc stays /etc, no symlink followed
     if len(named.parts) < 3:
         raise SandboxUnavailable(f"{refusal}: {named}")
+    if _under_system(named):
+        raise SandboxUnavailable(f"{refusal}: {named}")
     path = Path(_path(root))
+    if _under_system(path):
+        raise SandboxUnavailable(f"{refusal}: {path}")
     # macOS /etc, /var, /tmp resolve into /private: treat '/private' like '/'.
     floor = 4 if len(path.parts) > 1 and path.parts[1].lower() == "private" else 3
     if len(path.parts) < floor:
         raise SandboxUnavailable(f"{refusal}: {path}")
     homes = {Path(_path(os.environ.get("HOME") or Path.home())),
              Path(_path(pwd.getpwuid(os.getuid()).pw_dir))}
+    bare = _strip_data_volume(path)
     for home in homes:
+        if _inside(_strip_data_volume(home), bare):  # firmlink view of the same tree
+            raise SandboxUnavailable(f"{refusal}: {path}")
         for ancestor in (home, *home.parents):
             try:
                 same = os.path.samefile(path, ancestor)

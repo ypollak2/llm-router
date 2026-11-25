@@ -201,7 +201,8 @@ def test_unavailable_reply_and_ledger(tmp_path, monkeypatch, mode):
     seen = []
     monkeypatch.setattr(apply, "_execute_check", lambda *a: (seen.append(a), (0, "ok"))[1])
     result = apply.llm_apply(json.dumps([dict(file="a.py", old_string="1", new_string="2")]), "python -m pytest", str(root))
-    assert "check: NOT sandboxed (probe failed deliberately)" in result
+    assert "NOT sandboxed (probe failed deliberately)" in result if mode == "auto" else \
+        "Check not run: no usable sandbox (probe failed deliberately)" in result
     row = json.loads((tmp_path / "ledger/apply_ledger.jsonl").read_text())
     assert row["sandboxed"] is False
     assert row["check_ran"] == (mode == "auto") == bool(seen)
@@ -788,12 +789,10 @@ def test_home_unset_falls_back_to_pw_dir(tmp_path, monkeypatch):
     monkeypatch.delenv("HOME", raising=False)
     fake = tmp_path / "x" / "y" / "pwhome"
     fake.mkdir(parents=True)
-    real = pwd.getpwuid(os.getuid())
     monkeypatch.setattr(pwd, "getpwuid", lambda uid: type("P", (), {"pw_dir": str(fake)})())
-    monkeypatch.setattr(sandbox.Path, "home", classmethod(lambda cls: fake))
+    assert "HOME" not in os.environ
     with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME"):
         _wrap_linux(monkeypatch, fake)
-    assert real  # keep the real entry referenced; nothing under the real home is touched
 
 
 @pytest.mark.parametrize("root", ["/usr", "/etc", "/opt", "/"])
@@ -835,3 +834,25 @@ def test_symlink_to_private_var_refused(tmp_path, monkeypatch):
     link.symlink_to("/private/var")
     with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
         _wrap_linux(monkeypatch, link)
+
+
+@pytest.mark.parametrize("root", ["/System", "/System/Volumes", "/System/Volumes/Data", "/system/volumes/data"])
+def test_system_volume_roots_refused(tmp_path, monkeypatch, root):
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
+        _wrap_linux(monkeypatch, root)
+
+
+def test_data_volume_prefix_stripped_before_home_compare(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", "/System/Volumes/Data" + str(tmp_path / "h"))
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
+        _wrap_linux(monkeypatch, tmp_path)
+
+
+def test_normal_temp_repo_still_allowed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    argv, cleanup = _wrap_linux(monkeypatch, repo)
+    cleanup()
+    assert str(repo.resolve()) in argv
