@@ -556,7 +556,10 @@ def _net_avoided_detail(rows: list[dict]) -> dict:
             if usage_unknown(nxt):
                 excl_unknown += 1
                 continue
-            next_write = _row_write_usd(nxt) or 0.0
+            next_write = _row_write_usd(nxt)
+            if next_write is None:  # unpriced next call: excluded and counted, never read as 0
+                excl_unknown += 1
+                continue
             if next_write > 0:
                 sid = nxt.get("session_id") or ""
                 if sid in per_session:
