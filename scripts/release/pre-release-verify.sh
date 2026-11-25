@@ -278,6 +278,14 @@ if ! uv run python scripts/release/eval_gate.py compare \
 fi
 echo ""
 
+# 12c. fid_long_120 (D-352, owner D-619/D-620): REPORT-ONLY long-session retention numbers
+# (model-free, $0). Printed and stored every release; it never fails this script, is not in
+# release_evals/PIN.json and is not read by eval_gate.py. A failure to run only prints a note.
+echo "1️⃣2️⃣c fid_long_120 (REPORT-ONLY, never blocks)..."
+uv run python scripts/release/run_fid_long.py --out "release_evals/fid_long_${EVAL_SHA}.json" \
+    || echo -e "${YELLOW}fid_long_120 report did not run (report-only; the release is not blocked)${NC}"
+echo ""
+
 # 13. Outcome audit (Phase 0.1): was routed work actually USED? Reads the
 # owner's organic transcripts and ledgers read-only, labels every routed unit
 # used/corrected/redone/unused/unknown from content-bearing evidence only, and
