@@ -15,6 +15,8 @@ import threading
 import time
 import http.server
 import unittest
+
+import pytest
 from unittest import mock
 
 from llm_router import fwdproxy
@@ -854,17 +856,22 @@ class WheelTest(unittest.TestCase):
     """Verify the wheel contains the fwdproxy package and its scripts.
     Marked slow because it builds a wheel (offline, temp dir)."""
 
-    @unittest.skip("slow: builds a wheel")
+    @pytest.mark.slow
     def test_wheel_contains_fwdproxy(self):
         import zipfile
         import tempfile
         import subprocess
         import sys
-        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with tempfile.TemporaryDirectory() as tmpdir:
-            subprocess.run([sys.executable, "-m", "pip", "install", "uv"], check=True, capture_output=True)
-            subprocess.run(["uv", "build", "--wheel", "--offline", "-o", tmpdir, "."],
-                           check=True, cwd=repo, capture_output=True)
+            import shutil
+            uv = shutil.which("uv")
+            if uv is None:
+                pytest.skip("uv not on PATH; never install into the running interpreter")
+            r = subprocess.run([uv, "build", "--wheel", "-o", tmpdir, "."],
+                               cwd=repo, capture_output=True, text=True)
+            if r.returncode != 0:  # same convention as test_sdist_excludes_quarantined_tests
+                pytest.skip(f"uv build unavailable or failed: {r.stderr[-400:]}")
             whl = [f for f in os.listdir(tmpdir) if f.endswith(".whl")][0]
             names = {n for n in zipfile.ZipFile(os.path.join(tmpdir, whl)).namelist() if "fwdproxy" in n}
             expected = {
