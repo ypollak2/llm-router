@@ -934,6 +934,8 @@ def test_fsize_limit_stops_disk_fill(tmp_path, monkeypatch):
     assert sandbox.FSIZE_BYTES == 2 * 1024 * 1024
 
 
+@pytest.mark.timing
+@pytest.mark.skipif(platform.system() != "Darwin", reason="RLIMIT_NPROC is applied on macOS only (check_sandbox.py: Linux gets no NPROC limit)")
 def test_macos_nproc_limit_bounds_fork_canary(tmp_path, monkeypatch):
     """S3: bounded fork canary (<=200 children, killed at the end) hits EAGAIN under the per-uid cap."""
     count = sandbox._uid_process_count()
@@ -951,6 +953,7 @@ def test_macos_nproc_limit_bounds_fork_canary(tmp_path, monkeypatch):
     assert int(tail.split()[-1]) < 200 and __import__("time").monotonic() - started < 30
 
 
+@pytest.mark.timing
 def test_output_cap_kills_flooding_check(tmp_path, monkeypatch):
     """S3: captured output is capped (1 MB here, 16 MB shipped) and the group is killed."""
     monkeypatch.setattr(apply, "_OUTPUT_CAP", 1024 * 1024)
