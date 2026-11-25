@@ -10,6 +10,8 @@ See docs/fwdproxy.md for the security model.
 from __future__ import annotations
 
 import os
+
+from llm_router import paths
 import plistlib
 import shlex
 import shutil
@@ -103,8 +105,9 @@ def install(*, home: Path | None = None, system: str | None = None, runner=None,
     out.append(f"installed launcher {rc}")
     dest = service_file(home, system)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(render_service(home, system, python or sys.executable))
-    dest.chmod(0o600)
+    with open(dest, "w", encoding="utf-8", opener=paths.private_opener) as fh:   # 0600 at creation
+        fh.write(render_service(home, system, python or sys.executable))
+    dest.chmod(0o600)   # an existing file keeps its old mode under the opener
     out.append(f"wrote {dest}")
     if system == "darwin":
         uid = str(os.getuid())
