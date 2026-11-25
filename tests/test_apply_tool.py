@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import platform
 from pathlib import Path
 import subprocess
 import sys
@@ -467,7 +468,8 @@ def test_child_environment_scrub(repo, monkeypatch):
         if "env" in kwargs:
             assert all(key not in kwargs["env"] for key in keys)
             allowed = {"PATH", "HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR",
-                       "VIRTUAL_ENV", "PYTHONDONTWRITEBYTECODE", "CI", "NO_COLOR"}
+                       "VIRTUAL_ENV", "PYTHONDONTWRITEBYTECODE", "CI", "NO_COLOR",
+                       "LLM_CHECK_ID"}  # S4: per-run marker so teardown can find setsid() survivors
             assert all(key in allowed or key.startswith("LC_") for key in kwargs["env"])
             assert kwargs["env"]["CI"] == "true"
             assert kwargs["env"]["LC_MESSAGES"] == "C"
@@ -522,7 +524,7 @@ def test_attached_runner_overrides_not_run(repo, monkeypatch, command):
 def test_harmless_grouped_switches_still_run(repo, monkeypatch, command):
     runner(repo, monkeypatch, "")
     seen = []
-    monkeypatch.setattr(apply, "_run_check", lambda argv, root: (seen.append(argv), (0, "ok", False))[1])
+    monkeypatch.setattr(apply, "_run_check", lambda argv, root: (seen.append(argv), (0, "ok", True))[1])
     result = call(repo, check=command)
     assert seen, result
     assert result.startswith("APPLIED_AND_PASSED")
@@ -900,7 +902,7 @@ def test_credit_matrix(repo, monkeypatch, repair_setup, status, trigger, program
         edits[0] = edit(old="missing")
     check = "" if status == "APPLIED_NOT_CHECKED" else "pytest"
     if status == "APPLIED_AND_PASSED":
-        monkeypatch.setattr(apply, "_run_check", lambda *a, **k: (0, "check: test\npassed", False))
+        monkeypatch.setattr(apply, "_run_check", lambda *a, **k: (0, "check: test\npassed", True))
     elif status in {"REJECTED", "APPLIED_CHECK_FAILED"}:
         # Failed repair earns nothing, whether or not the program applied the batch.
         monkeypatch.setattr(repair_setup[0], "generate_edits", lambda *a, **k: (None, [], "failed"))
@@ -925,3 +927,64 @@ def test_credit_files_are_sorted_actual_changes(repo, monkeypatch):
     result = call(repo, [edit("z.py"), edit(), edit("unchanged.py", new="value = 1")], "pytest")
     credit = json.loads(result.splitlines()[1].split("] ", 1)[1])
     assert credit == {"program": 4, "local": 0, "files": sorted(str((repo / f).resolve()) for f in ("z.py", "a.py"))}
+
+
+def test_unsandboxed_pass_has_distinct_status_and_structured_field(repo, monkeypatch):
+    """S5: a pass that ran with LLM_ROUTER_APPLY_SANDBOX=off is not APPLIED_AND_PASSED."""
+    runner(repo, monkeypatch, "print('ok')\n")
+    monkeypatch.setenv("LLM_ROUTER_APPLY_SANDBOX", "off")
+    result = call(repo, check="pytest")
+    lines = result.splitlines()
+    assert lines[0] == "APPLIED_PASSED_UNSANDBOXED", result
+    field = next(line for line in lines if line.startswith("[llm_apply check] "))
+    assert json.loads(field.split("] ", 1)[1])["sandboxed"] is False
+    assert "NOT sandboxed" in result and rows()[0]["sandboxed"] is False
+
+
+def test_sandboxed_clean_pass_keeps_plain_status(repo, monkeypatch):
+    runner(repo, monkeypatch, "")
+    monkeypatch.setattr(apply, "_run_check", lambda *a, **k: (0, "check: sandboxed\nok", True))
+    result = call(repo, check="pytest")
+    assert result.splitlines()[0] == "APPLIED_AND_PASSED"
+    assert json.loads(result.splitlines()[2].split("] ", 1)[1]) == {"sandboxed": True, "flagged_new_files": []}
+
+
+@pytest.mark.parametrize("name,mode", [("conftest.py", 0o644), ("Makefile", 0o644), (".envrc", 0o644),
+                                       ("package.json", 0o644), ("run.sh", 0o755), ("setup.py", 0o644)])
+def test_check_planting_files_is_reported_not_silent_pass(repo, monkeypatch, name, mode):
+    """S6: a check that creates conftest.py / +x / config files outside the edit set is reported."""
+    runner(repo, monkeypatch, "")
+
+    def planting(argv, root, **kw):
+        (root / name).write_text("print('planted')\n")
+        (root / name).chmod(mode)
+        (root / "scratch.txt").write_text("harmless")
+        return 0, "check: sandboxed\nok", True
+
+    monkeypatch.setattr(apply, "_run_check", planting)
+    result = call(repo, check="pytest")
+    assert result.splitlines()[0] == "APPLIED_PASSED_NEW_FILES", result
+    assert "WARNING: the check created or changed executable/config files" in result and name in result
+    assert "scratch.txt" in result  # listed as changed beyond the edit set, not flagged
+    field = next(line for line in result.splitlines() if line.startswith("[llm_apply check] "))
+    assert json.loads(field.split("] ", 1)[1])["flagged_new_files"] == [name]
+    assert (repo / "a.py").read_text() == "value = 2\n"  # the edit itself is never reported
+
+
+def test_edit_set_files_are_not_reported(repo, monkeypatch):
+    runner(repo, monkeypatch, "")
+    monkeypatch.setattr(apply, "_run_check", lambda argv, root, **kw: (0, "check: sandboxed\nok", True))
+    result = call(repo, check="pytest")
+    assert "changed beyond" not in result and result.splitlines()[0] == "APPLIED_AND_PASSED"
+
+
+def test_macos_sandboxed_check_planting_conftest_is_reported(repo, monkeypatch):
+    """S6 end to end under the real sandbox: the check can write conftest.py in ROOT; it must be reported."""
+    if platform.system() != "Darwin":
+        pytest.skip("macOS sandbox-exec end-to-end")
+    code = "from pathlib import Path\nPath('conftest.py').write_text('x = 1\\n')\n"
+    runner(repo, monkeypatch, code)
+    monkeypatch.setenv("LLM_ROUTER_APPLY_SANDBOX", "require")
+    result = call(repo, check="pytest")
+    assert result.splitlines()[0] == "APPLIED_PASSED_NEW_FILES", result
+    assert "conftest.py" in result and (repo / "conftest.py").exists()

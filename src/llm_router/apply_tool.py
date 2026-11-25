@@ -4,7 +4,11 @@ Requires trusted PATH executables; check containment is configurable.
 Concurrent modification by another process of the same user is out of scope:
 that user can already write the repository. Post-write path checks still reject
 relocation outside cwd. A descendant calling setsid() can escape group cleanup;
-sandbox restrictions remain inherited by those descendants.
+sandbox restrictions remain inherited by those descendants, and on macOS they are
+killed after the check by process-tree walk plus an env-marker sweep (best effort).
+Status APPLIED_PASSED_UNSANDBOXED / APPLIED_PASSED_NEW_FILES mark a pass that ran
+without a sandbox, or after which the check left executable/config files (conftest.py,
+Makefile, +x, ...) beyond the edit set; only APPLIED_AND_PASSED is a clean pass.
 """
 from __future__ import annotations
 
@@ -27,8 +31,11 @@ from llm_router import check_sandbox
 from llm_router.edit import EditInstruction, check_syntax
 from llm_router.paths import llm_router_home, private_opener
 
+# A check that passed. The two suffixed statuses are not a clean pass: see the "[llm_apply check]" line.
+_PASSED = {"APPLIED_AND_PASSED", "APPLIED_PASSED_UNSANDBOXED", "APPLIED_PASSED_NEW_FILES"}
 _HANDOFF = "Nothing more will be applied by this tool for this attempt. Make the remaining changes yourself with your edit tools, then run the check."
 _CHECK_TIMEOUT = 60
+_OUTPUT_CAP = 16 * 1024 * 1024  # bytes of check output kept on disk before the group is killed
 _BLOCK = re.compile(
     r"^(?:FILE:[ \t]*(?P<file>[^\n]+)\nFIND:[ \t]*\n```[^\n]*\n(?P<find>(?:(?!^```[ \t]*$).)*?)^```[ \t]*\n"
     r"REPLACE:[ \t]*\n```[^\n]*\n(?P<repl>(?:(?!^```[ \t]*$).)*?)^```[ \t]*$"
@@ -361,6 +368,69 @@ def _check_argv(command: str, root: Path | None = None) -> tuple[list[str] | Non
     return argv, ""
 
 
+_CONFIG_NAMES = {"conftest.py", "makefile", "package.json", ".envrc", "setup.py", "setup.cfg", "pytest.ini",
+                 "tox.ini", "pyproject.toml", "sitecustomize.py", ".npmrc", "tasks.json"}
+
+
+def _tree_state(root: Path):
+    """{path: fingerprint} of every path git reports as modified/untracked, or None (not a git tree)."""
+    try:
+        out = subprocess.run(["git", "-C", str(root), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                             capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode:
+        return None
+    state = {}
+    for entry in out.stdout.decode("utf-8", errors="replace").split("\0"):
+        if len(entry) < 4:
+            continue
+        path = root / entry[3:]
+        try:
+            info = path.lstat()
+            state[path] = (entry[:2], info.st_size, info.st_mtime_ns, info.st_mode)
+        except OSError:
+            state[path] = (entry[:2], None, None, None)
+    return state
+
+
+def _persistence(before, after, edited, root: Path):
+    """(changed, flagged): paths the check created/changed beyond the edit set, and the
+    executable or config subset a later unsandboxed command could run."""
+    edited = {Path(p) for p in edited}
+    changed = sorted(p for p in after if p not in edited and before.get(p) != after[p])
+    flagged = []
+    for path in changed:
+        mode = after[path][3]
+        rel = path.relative_to(root)
+        name = rel.name.lower()
+        if name in _CONFIG_NAMES or (mode is not None and stat.S_ISREG(mode) and mode & 0o111):
+            flagged.append(str(rel))
+    return [str(p.relative_to(root)) for p in changed], flagged
+
+
+class _Scan:
+    """Snapshot before a check, diff after: what the check left in ROOT beyond the edit set."""
+
+    def __init__(self, root: Path, edited):
+        self.root, self.edited, self.before = root, edited, _tree_state(root)
+
+    def finish(self) -> tuple[list[str], list[str]]:
+        """(report lines, flagged executable/config paths); never raises."""
+        after = _tree_state(self.root) if self.before is not None else None
+        if after is None:
+            return [], []
+        changed, flagged = _persistence(self.before, after, self.edited, self.root)
+        lines = []
+        if changed:
+            lines.append("changed beyond the edit set: " + ", ".join(changed[:20])
+                         + (f" (+{len(changed) - 20} more)" if len(changed) > 20 else ""))
+        if flagged:
+            lines.append("WARNING: the check created or changed executable/config files that a later "
+                         "unsandboxed command may run: " + ", ".join(flagged[:20]))
+        return lines, flagged
+
+
 def _run_check(argv: list[str], root: Path, *, require_sandbox: bool = False) -> tuple[int, str, bool]:
     # Default "require": fail closed. "auto" (run unsandboxed when no backend) and
     # "off" are explicit owner opt-outs; the unsandboxed label is in the reply.
@@ -369,6 +439,7 @@ def _run_check(argv: list[str], root: Path, *, require_sandbox: bool = False) ->
         raise check_sandbox.SandboxUnavailable(f"invalid LLM_ROUTER_APPLY_SANDBOX: {mode}")
     sandboxed = False
     cleanup = None
+    check_sandbox.set_marker(uuid.uuid4().hex)  # read by environment(), wrap() and _execute_check()
     reason = "disabled by LLM_ROUTER_APPLY_SANDBOX=off"
     if require_sandbox or mode != "off":
         try:
@@ -376,6 +447,7 @@ def _run_check(argv: list[str], root: Path, *, require_sandbox: bool = False) ->
             sandboxed = True
         except check_sandbox.SandboxUnavailable as exc:
             if require_sandbox or mode == "require":
+                check_sandbox.set_marker(None)
                 raise
             reason = str(exc)
     label = (f"check: sandboxed ({check_sandbox.backend_name()})" if sandboxed
@@ -388,6 +460,7 @@ def _run_check(argv: list[str], root: Path, *, require_sandbox: bool = False) ->
             raise check_sandbox.SandboxUnavailable(f"sandbox failed to start: {exc}") from exc
         raise
     finally:
+        check_sandbox.set_marker(None)
         if cleanup is not None:
             cleanup()
 
@@ -395,14 +468,26 @@ def _run_check(argv: list[str], root: Path, *, require_sandbox: bool = False) ->
 def _execute_check(argv: list[str], root: Path) -> tuple[int, str]:
     # A temporary file avoids retaining unbounded runner output in memory.
     env = check_sandbox.environment()
+    marker = check_sandbox.current_marker()
     with tempfile.TemporaryFile() as output:
         process = subprocess.Popen(argv, cwd=root, stdin=subprocess.DEVNULL,
-                                   stdout=output, stderr=subprocess.STDOUT, start_new_session=True, env=env, close_fds=True)
-        timed_out = False
-        try:
-            process.wait(timeout=_CHECK_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+                                   stdout=output, stderr=subprocess.STDOUT, start_new_session=True, env=env, close_fds=True,
+                                   preexec_fn=check_sandbox.resource_limiter())
+        timed_out = flooded = False
+        deadline = time.monotonic() + _CHECK_TIMEOUT
+        while True:
+            try:
+                process.wait(timeout=min(0.2, max(0.0, deadline - time.monotonic())))
+                break
+            except subprocess.TimeoutExpired:
+                if os.fstat(output.fileno()).st_size > _OUTPUT_CAP:
+                    flooded = True
+                    break
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
+        # Before killpg: a still-live root lets the pgrep -P walk see its setsid() children.
+        known = check_sandbox.descendants(process.pid)
         survivors = False
         try:
             os.killpg(process.pid, 0)
@@ -414,14 +499,19 @@ def _execute_check(argv: list[str], root: Path) -> tuple[int, str]:
         except ProcessLookupError:
             pass
         process.wait()
+        detached = check_sandbox.kill_survivors(known, marker)
         output.seek(0, os.SEEK_END)
         output.seek(max(0, output.tell() - 6000))
         tail = output.read().decode("utf-8", errors="replace")[-1500:]
     if timed_out:
         tail = (tail + f"\nCheck timed out after {_CHECK_TIMEOUT} s; process group killed.")[-1500:]
+    if flooded:
+        tail = (tail + f"\nCheck output exceeded {_OUTPUT_CAP} bytes; process group killed.")[-1500:]
+    if detached:
+        tail = (tail + f"\nKilled {len(detached)} detached descendant process(es) after the check.")[-1500:]
     if survivors:
         tail = (tail + "\nProcess group member still alive after parent exit or timeout; process group killed.")[-1500:]
-    return (-9 if timed_out or survivors else process.returncode), tail
+    return (-9 if timed_out or survivors or flooded else process.returncode), tail
 
 
 def _repair_seconds() -> float:
@@ -493,9 +583,12 @@ def _local_repair(root, argv, files, task, details, repair):
             else:
                 _write_batch(root, originals, changed, identities)
                 wrote = True
+                scan = _Scan(root, set(changed) | set(files))
                 rc, tail, sandboxed = _run_check(argv, root, require_sandbox=True)
+                scan_lines, _ = scan.finish()
                 repair.update(repair_check_rc=rc, repair_sandboxed=sandboxed)
                 details.append(f"Local repair check rc={rc}\n{tail}")
+                details.extend(scan_lines)
                 if rc == 0:
                     repair["repair_files"] = sorted(map(str, changed))
                     repair["repair_passed"] = True
@@ -549,6 +642,7 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
     sandboxed = False
     check_rc = None
     details: list[str] = []
+    check_report: dict = {}
     enabled = os.environ.get("LLM_ROUTER_APPLY", "").strip().lower() in {"on", "1", "true", "yes"}
     repair = dict(repair_attempted=False, repair_passed=False, repair_model=None,
                   repair_s=None, repair_reason=None, repair_check_rc=None, repair_sandboxed=None)
@@ -592,12 +686,18 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
                         details.append(check_reason)
                     else:
                         try:
+                            scan = _Scan(root, changed)
                             check_rc, tail, sandboxed = _run_check(argv, root)
+                            scan_lines, flagged = scan.finish()
+                            check_report.update(sandboxed=sandboxed, flagged=flagged)
                             check_ran = True
-                            status = "APPLIED_AND_PASSED" if check_rc == 0 else "APPLIED_CHECK_FAILED"
+                            status = "APPLIED_CHECK_FAILED" if check_rc else (
+                                "APPLIED_PASSED_UNSANDBOXED" if not sandboxed else
+                                "APPLIED_PASSED_NEW_FILES" if check_report.get("flagged") else "APPLIED_AND_PASSED")
                             label, _, output = tail.partition("\n")
                             details.append(label)
                             details.append(f"Check rc={check_rc}\n{output}")
+                            details.extend(scan_lines)
                         except check_sandbox.SandboxUnavailable as exc:
                             details.append(f"Check not run: no usable sandbox ({exc}); "
                                            "set LLM_ROUTER_APPLY_SANDBOX=auto to allow unsandboxed checks")
@@ -628,7 +728,7 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
         details.append(str(exc))
     finally:
         changed_files.update(repair.pop("repair_files", []))
-        program_replaced = (n_blocks + 1 if status == "APPLIED_AND_PASSED" or (
+        program_replaced = (n_blocks + 1 if status in _PASSED or (
             status == "REPAIRED_BY_LOCAL_AND_PASSED" and repair_trigger == "B") else 0)
         local_replaced = int(status == "REPAIRED_BY_LOCAL_AND_PASSED")
         credit = dict(program=program_replaced, local=local_replaced, files=sorted(changed_files))
@@ -648,5 +748,8 @@ def llm_apply(edits: str, check: str = "", cwd: str = "") -> str:
     if status in {"REJECTED", "APPLIED_CHECK_FAILED"}:
         details.append(_HANDOFF)
     if enabled:
+        if check_report:
+            details.insert(0, "[llm_apply check] " + json.dumps(dict(
+                sandboxed=check_report.get("sandboxed"), flagged_new_files=check_report.get("flagged", []))))
         details.insert(0, "[llm_apply credit] " + json.dumps(credit))
     return "\n".join([status, *details])
