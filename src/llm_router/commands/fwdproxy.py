@@ -10,8 +10,10 @@ See docs/fwdproxy.md for the security model.
 from __future__ import annotations
 
 import os
+import plistlib
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -49,34 +51,21 @@ def service_file(home: Path, system: str) -> Path:
 
 
 def render_service(home: Path, system: str, python: str) -> str:
-    log_dir = home / ".llm-router" / "logs"
+    log_dir = str(home / ".llm-router" / "logs")
     if system == "darwin":
-        return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{python}</string>
-        <string>-I</string>
-        <string>-m</string>
-        <string>llm_router.fwdproxy</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>ThrottleInterval</key>
-    <integer>10</integer>
-    <key>StandardOutPath</key>
-    <string>{log_dir}/fwdproxy.out.log</string>
-    <key>StandardErrorPath</key>
-    <string>{log_dir}/fwdproxy.err.log</string>
-</dict>
-</plist>
-"""
+        plist = {
+            "Label": LABEL,
+            "ProgramArguments": [python, "-I", "-m", "llm_router.fwdproxy"],
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "ThrottleInterval": 10,
+            "StandardOutPath": f"{log_dir}/fwdproxy.out.log",
+            "StandardErrorPath": f"{log_dir}/fwdproxy.err.log",
+        }
+        return plistlib.dumps(plist, sort_keys=False).decode("utf-8")
+    # systemd unit: quote/escape every path (spaces; '%' -> '%%')
+    def esc(s: str) -> str:
+        return s.replace("%", "%%")
     return f"""[Unit]
 Description=llm-router forward proxy (Remote Control, beta)
 
@@ -84,8 +73,8 @@ Description=llm-router forward proxy (Remote Control, beta)
 ExecStart={shlex.quote(python)} -I -m llm_router.fwdproxy
 Restart=always
 RestartSec=10
-StandardOutput=append:{log_dir}/fwdproxy.out.log
-StandardError=append:{log_dir}/fwdproxy.err.log
+StandardOutput=append:{esc(log_dir)}/fwdproxy.out.log
+StandardError=append:{esc(log_dir)}/fwdproxy.err.log
 
 [Install]
 WantedBy=default.target
@@ -110,11 +99,12 @@ def install(*, home: Path | None = None, system: str | None = None, runner=None,
     (home / ".llm-router" / "logs").mkdir(parents=True, exist_ok=True)
     rc = bin_dir / "claude-rc"
     shutil.copyfile(_PKG / "claude-rc", rc)
-    rc.chmod(0o755)
+    rc.chmod(0o700)
     out.append(f"installed launcher {rc}")
     dest = service_file(home, system)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(render_service(home, system, python or sys.executable))
+    dest.chmod(0o600)
     out.append(f"wrote {dest}")
     if system == "darwin":
         uid = str(os.getuid())
@@ -149,10 +139,23 @@ def uninstall(*, home: Path | None = None, system: str | None = None, runner=Non
 def status(*, home: Path | None = None, system: str | None = None) -> list[str]:
     home, system = _home(home), _system(system)
     ca_dir = home / ".llm-router" / "fwd-ca"
+    ca_ok = (ca_dir / "ca.crt").is_file() and (ca_dir / "leaf.crt").is_file()
+    rc_ok = (home / ".llm-router" / "bin" / "claude-rc").is_file()
+    svc_ok = service_file(home, system).is_file()
+    # check the listener answers (TCP connect only; no bytes sent — logs PROBE)
+    port = int(os.environ.get("FWDPROXY_PORT", "8789") or 8789)
+    listener_ok = False
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=1)
+        s.close()
+        listener_ok = True
+    except OSError:
+        pass
     rows = [
-        ("CA + leaf", (ca_dir / "ca.crt").is_file() and (ca_dir / "leaf.crt").is_file()),
-        ("launcher claude-rc", (home / ".llm-router" / "bin" / "claude-rc").is_file()),
-        ("service file", service_file(home, system).is_file()),
+        ("CA + leaf", ca_ok),
+        ("launcher claude-rc", rc_ok),
+        ("service file", svc_ok),
+        (f"listener 127.0.0.1:{port}", listener_ok),
     ]
     return [f"{'yes' if ok else 'no ':3} {name}" for name, ok in rows]
 

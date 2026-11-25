@@ -13,12 +13,20 @@ Not recommended for production use until it has had clean live days on your mach
 ## Use
 
 ```
-llm-router fwdproxy ca          # one-time: local CA + leaf
-llm-router fwdproxy install     # installs ~/.llm-router/bin/claude-rc and starts the listener
-~/.llm-router/bin/claude-rc     # run Claude Code through it (same args as `claude`)
-llm-router fwdproxy status
-llm-router fwdproxy uninstall   # rollback
+llm-router fwdproxy ca [--renew-leaf|--force]   # one-time: local CA + leaf
+llm-router fwdproxy install                       # installs ~/.llm-router/bin/claude-rc and starts the listener
+~/.llm-router/bin/claude-rc                       # run Claude Code through it (same args as `claude`)
+llm-router fwdproxy status                        # also checks the listener on :8789 (TCP connect only)
+llm-router fwdproxy uninstall                     # rollback
 ```
+
+`ca` flags: `--renew-leaf` re-issues only the leaf from the existing CA (the leaf lasts 397 days);
+`--force` replaces both the CA and the leaf. With neither flag it refuses to overwrite an existing CA.
+
+Service files: macOS `~/Library/LaunchAgents/com.llm_router.fwdproxy.plist`; Linux
+`~/.config/systemd/user/llm-router-fwdproxy.service`. Both are written mode 0600 and the
+launcher `claude-rc` mode 0700, whatever the umask; paths with spaces, `&`, `<` or `%` are escaped.
+`status` makes a bare TCP connect to the listener (no bytes), which the proxy logs as `PROBE`.
 
 `claude-rc` fails open: if the forward proxy or the router proxy is not up it runs the real
 `claude` directly, unrouted, logs `fallback-direct-unrouted` to `~/.llm-router/wrapper.log`

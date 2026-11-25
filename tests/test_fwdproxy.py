@@ -789,7 +789,20 @@ class FwdProxyCommandTests(unittest.TestCase):
         self.assertIn("<string>/x/python</string>", text)
         self.assertTrue(os.access(os.path.join(self.home, ".llm-router/bin/claude-rc"), os.X_OK))
         self.assertTrue(any(c[:2] == ["launchctl", "bootstrap"] for c in self.calls), self.calls)
-        self.assertTrue(all(ln.startswith("yes") for ln in self.cmd.status(home=self.home, system="darwin")))
+        cport = closed_port()
+        with mock.patch.dict(os.environ, {"FWDPROXY_PORT": str(cport)}):
+            st = self.cmd.status(home=self.home, system="darwin")
+        self.assertTrue(all(ln.startswith("yes") for ln in st[:3]), st)
+        self.assertTrue(st[3].startswith("no") and "listener" in st[3], st)
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        with mock.patch.dict(os.environ, {"FWDPROXY_PORT": str(srv.getsockname()[1])}):
+            self.assertTrue(self.cmd.status(home=self.home, system="darwin")[3].startswith("yes"))
+        mode = lambda p: stat.S_IMODE(os.stat(p).st_mode)  # noqa: E731
+        self.assertEqual(mode(plist), 0o600)
+        self.assertEqual(mode(os.path.join(self.home, ".llm-router/bin/claude-rc")), 0o700)
         code, out = self.cmd.uninstall(home=self.home, system="darwin", runner=self.runner)
         self.assertEqual(code, 0, out)
         self.assertFalse(os.path.exists(plist))
@@ -806,6 +819,61 @@ class FwdProxyCommandTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("service start failed", out[-1])
 
+    def test_modes_are_independent_of_umask(self):
+        run_make_ca(self.home)
+        old = os.umask(0o000)
+        try:
+            self.cmd.install(home=self.home, system="linux", runner=self.runner, python="/x/python")
+        finally:
+            os.umask(old)
+        unit = os.path.join(self.home, ".config/systemd/user/llm-router-fwdproxy.service")
+        self.assertEqual(stat.S_IMODE(os.stat(unit).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.home, ".llm-router/bin/claude-rc")).st_mode), 0o700)
+
+    def test_plist_with_xml_special_chars_is_valid(self):
+        import plistlib
+        from pathlib import Path
+        home = Path("/tmp/a&b <c> \"d\"")
+        text = self.cmd.render_service(home, "darwin", "/py&thon/<x>/bin/python")
+        d = plistlib.loads(text.encode())
+        self.assertEqual(d["ProgramArguments"][0], "/py&thon/<x>/bin/python")
+        self.assertEqual(d["StandardOutPath"], f"{home}/.llm-router/logs/fwdproxy.out.log")
+
+    def test_systemd_unit_escapes_space_and_percent(self):
+        from pathlib import Path
+        text = self.cmd.render_service(Path("/home/a b%u"), "linux", "/opt/my py/bin/python")
+        self.assertIn("StandardOutput=append:/home/a b%%u/.llm-router/logs/fwdproxy.out.log", text)
+        self.assertIn("ExecStart='/opt/my py/bin/python' -I -m", text)
+
     def test_linux_unit_is_rendered(self):
         text = self.cmd.render_service(__import__("pathlib").Path(self.home), "linux", "/x/python")
         self.assertIn("ExecStart=/x/python -I -m llm_router.fwdproxy", text)
+
+
+class WheelTest(unittest.TestCase):
+    """Verify the wheel contains the fwdproxy package and its scripts.
+    Marked slow because it builds a wheel (offline, temp dir)."""
+
+    @unittest.skip("slow: builds a wheel")
+    def test_wheel_contains_fwdproxy(self):
+        import zipfile
+        import tempfile
+        import subprocess
+        import sys
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subprocess.run([sys.executable, "-m", "pip", "install", "uv"], check=True, capture_output=True)
+            subprocess.run(["uv", "build", "--wheel", "--offline", "-o", tmpdir, "."],
+                           check=True, cwd=repo, capture_output=True)
+            whl = [f for f in os.listdir(tmpdir) if f.endswith(".whl")][0]
+            names = {n for n in zipfile.ZipFile(os.path.join(tmpdir, whl)).namelist() if "fwdproxy" in n}
+            expected = {
+                "llm_router/commands/fwdproxy.py",
+                "llm_router/fwdproxy/__init__.py",
+                "llm_router/fwdproxy/__main__.py",
+                "llm_router/fwdproxy/claude-rc",
+                "llm_router/fwdproxy/make-ca.sh",
+                "llm_router/fwdproxy/rollback.sh",
+                "llm_router/fwdproxy/smoke.sh",
+            }
+            self.assertEqual(names, expected)
