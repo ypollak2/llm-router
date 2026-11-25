@@ -90,8 +90,12 @@ def env(tmp_path):
     return p
 
 
-def _build(env, budget=1000.0):
-    return sr.refresh(ledger=env["ledger"], rollup=env["rollup"], db_path=env["db"], now=NOW, budget_s=budget)
+def _sums(roll):
+    return {d: r["sum"] for d, r in roll["days"].items() if r["sum"] is not None}
+
+
+def _build(env, budget=1000.0, now=NOW):
+    return sr.refresh(ledger=env["ledger"], rollup=env["rollup"], db_path=env["db"], now=now, budget_s=budget)
 
 
 def _full_scan(env, since, until):
@@ -104,26 +108,74 @@ def _full_scan(env, since, until):
     return sr.summarize(rows)
 
 
-# ── (e) today by tail-seek == full scan, and it does not read the file ───────────────────────────
+# ── the ledger is NOT time-ordered: late rows, shuffled order, resume ──────────────────────────────
 
-def test_tail_seek_today_equals_full_scan_and_reads_a_fraction_of_the_file(env):
-    _ledger(env["ledger"], days=range(40, -1, -1), per_day=6)
-    today0 = sr.midnight(NOW)
-    st: dict = {}
-    got = sr.summarize(sr.read_rows(env["ledger"], today0, NOW, stats=st))
-    assert got == _full_scan(env, today0, NOW)
-    assert got["b_runs"] > 0 and got["rows"] > 0                       # the check found something to check
-    size = env["ledger"].stat().st_size
-    assert st["bytes_read"] < size / 10, (st, size)
+def _day_of_rows(env, day):
+    lo, hi = sr.day_start(day), sr.day_start(sr.next_day(day))
+    return [r for r in map(json.loads, open(env["ledger"])) if lo <= r["ts"] < hi]
 
 
-def test_tail_seek_finds_a_row_written_slightly_out_of_order(env):
-    rows = _ledger(env["ledger"], days=(2, 1, 0), per_day=2)
-    late = {"ts": sr.midnight(NOW) + 5.0, "session_id": "late", "decision": "forwarded", "requested_model": "claude-sonnet-5"}
-    with open(env["ledger"], "a", encoding="utf-8") as fh:             # written after rows that are 9 h later
+def test_a_row_written_13_hours_after_its_day_ended_is_in_that_days_rollup(env):
+    rows = _ledger(env["ledger"], days=(3, 2, 1, 0), per_day=2)
+    _build(env)
+    day = sr.day_of(_day_ts(2, 1))
+    before = sr.load(env["rollup"])["days"][day]["sum"]
+    late = {"ts": sr.day_start(sr.next_day(day)) - 600, "session_id": "late", "decision": "forwarded",
+            "requested_model": "claude-sonnet-5", "reason": "tier", "tier_reason": "simple",
+            "served_model": "claude-sonnet-5", "usage": {"input_tokens": 10, "output_tokens": 10}}
+    late["requested_model"] = "claude-opus-5"
+    with open(env["ledger"], "a", encoding="utf-8") as fh:        # written 13 h after the day ended, after later rows
         fh.write(json.dumps(late) + "\n")
-    got = sr.read_rows(env["ledger"], sr.midnight(NOW), NOW)
-    assert any(r["session_id"] == "late" for r in got) and len(got) == len([r for r in rows if r["ts"] >= sr.midnight(NOW)]) + 1
+    _build(env, now=sr.day_start(sr.next_day(day)) + 13 * 3600 + 86400)
+    got = sr.load(env["rollup"])["days"][day]["sum"]
+    assert got["rows"] == before["rows"] + 1 == len(_day_of_rows(env, day))
+    assert got == sr.summarize(_day_of_rows(env, day))
+
+
+def test_rollup_equals_full_scan_on_a_shuffled_ledger(env):
+    import random
+
+    rows = []
+    for d in (6, 5, 4, 3, 2, 1, 0):
+        for k in range(3):
+            rows += _cycle(_day_ts(d, 9 + k), f"s{d}-{k}", f"d{d}k{k}")
+    random.Random(7).shuffle(rows)
+    with open(env["ledger"], "w", encoding="utf-8") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in rows)
+    _build(env)
+    roll = sr.load(env["rollup"])
+    closed = [d for d in roll["days"] if d < sr.day_of(NOW)]
+    assert len(closed) == 6
+    for d in closed:
+        assert roll["days"][d]["sum"] == sr.summarize(_day_of_rows(env, d)), d
+
+
+def test_resume_across_budgeted_refreshes_equals_a_single_pass(env, tmp_path):
+    _ledger(env["ledger"], days=(4, 3, 2, 1, 0), per_day=3)
+    one = dict(env, rollup=tmp_path / "one.json")
+    sr.refresh(ledger=one["ledger"], rollup=one["rollup"], db_path=env["db"], now=NOW, budget_s=1000.0)
+    steps = 0
+    while True:
+        out = sr.refresh(ledger=env["ledger"], rollup=env["rollup"], db_path=env["db"], now=NOW,
+                         budget_s=1000.0, pass_lines=7)
+        steps += 1
+        if out["caught_up"] and out["missing"] == 0:
+            break
+        assert steps < 100
+    assert steps > 3                                              # it really was spread over several refreshes
+    a, b = sr.load(env["rollup"]), sr.load(one["rollup"])
+    assert a["days"] == b["days"] and a["offset"] == b["offset"] == env["ledger"].stat().st_size
+
+
+def test_a_window_is_na_until_the_pass_has_caught_up(env, monkeypatch):
+    _ledger(env["ledger"])
+    monkeypatch.setattr(sr, "TAIL_MAX_BYTES", 100)                    # a ledger this size counts as "far behind"
+    sr.refresh(ledger=env["ledger"], rollup=env["rollup"], db_path=env["db"], now=NOW, pass_lines=5)
+    p = sr.proxy_parts(lv.calendar_bounds(30, now=NOW), ledger=env["ledger"], rollup=env["rollup"], db_path=env["db"])
+    assert p["available"] is False and "rollup building" in p["na_reason"]
+    _build(env)
+    p = sr.proxy_parts(lv.calendar_bounds(30, now=NOW), ledger=env["ledger"], rollup=env["rollup"], db_path=env["db"])
+    assert p["available"] is True and p["b_runs"] == 18
 
 
 # ── (d) rollup == full scan for closed days; incremental append ──────────────────────────────────
@@ -133,12 +185,12 @@ def test_rollup_equals_full_scan_for_every_closed_day(env):
     _db(env["db"])
     out = _build(env)
     roll = sr.load(env["rollup"])
-    assert out["missing"] == 0 and len(roll["days"]) == 5              # days 5..1; today is open
+    assert out["missing"] == 0 and out["caught_up"] and len(_sums(roll)) == 5     # days 5..1; today is open
     for d in range(5, 0, -1):
         day = sr.day_of(_day_ts(d, 1))
         lo, hi = sr.day_start(day), sr.day_start(sr.next_day(day))
         want = sr.summarize([r for r in map(json.loads, open(env["ledger"])) if lo <= r["ts"] < hi])
-        assert roll["days"][day] == want, day
+        assert roll["days"][day]["sum"] == want, day
         assert want["b_runs"] == 3 and want["c_rewritten"] == 3          # not an empty comparison
 
 
@@ -153,20 +205,22 @@ def test_a_new_closed_day_is_appended_and_old_days_are_not_rewritten(env):
     sr.refresh(ledger=env["ledger"], rollup=env["rollup"], db_path=env["db"], now=later, budget_s=100.0)
     after = sr.load(env["rollup"])
     today_key = sr.day_of(NOW)
-    assert today_key in after["days"] and today_key not in before["days"]
+    assert before["days"][today_key]["sum"] is None and after["days"][today_key]["sum"] is not None  # NOW's day closed
     for k, v in before["days"].items():
-        assert after["days"][k] == v                                    # closed days immutable
+        if k != today_key:
+            assert after["days"][k] == v                                # nothing new for them: untouched
 
 
-def test_history_is_na_until_the_rollup_is_built_then_whole_never_partial(env):
+def test_history_is_na_until_the_rollup_is_built_then_whole_never_partial(env, monkeypatch):
+    monkeypatch.setattr(sr, "TAIL_MAX_BYTES", 100)
     _ledger(env["ledger"])
     _db(env["db"])
     b = lv.calendar_bounds(30, now=NOW)
     fig, parts = lv.combined_saved(b, db_path=env["db"], proxy_path=env["ledger"], rollup_path=env["rollup"])
     assert fig.value is None and "rollup building" in fig.na_reason
     assert lv.render_saved(fig, parts, short=True).startswith("30d n/a (rollup building")
-    _build(env, budget=0.0)                                             # one day (newest first), then stop
-    assert len(sr.load(env["rollup"])["days"]) == 1
+    sr.refresh(ledger=env["ledger"], rollup=env["rollup"], db_path=env["db"], now=NOW, budget_s=0.0, pass_lines=1000)
+    assert len(_sums(sr.load(env["rollup"]))) == 1                      # one summary (newest first), then stop
     fig, _ = lv.combined_saved(b, db_path=env["db"], proxy_path=env["ledger"], rollup_path=env["rollup"])
     assert fig.value is None                                            # 1 of 5 days: still n/a, not a partial total
     _build(env)
@@ -187,7 +241,7 @@ def test_rotated_ledger_rebuilds(env):
     out = _build(env)
     assert out["reset"] is True
     roll = sr.load(env["rollup"])
-    assert len(roll["days"]) == 2 and all(v["b_runs"] == 1 for v in roll["days"].values())
+    assert len(_sums(roll)) == 2 and all(v["b_runs"] == 1 for v in _sums(roll).values())
 
 
 def test_truncated_ledger_rebuilds(env):
@@ -219,7 +273,7 @@ def test_a_run_spanning_midnight_is_split_by_day(env):
     roll = sr.load(env["rollup"])
     d_before, d_after = sr.day_of(mid - 5), sr.day_of(mid + 5)
     assert whole["b_runs"] == 1
-    assert roll["days"][d_before]["b_runs"] == 1 and roll["days"][d_after]["b_runs"] == 1   # documented: +1 run
+    assert roll["days"][d_before]["sum"]["b_runs"] == 1 and roll["days"][d_after]["sum"]["b_runs"] == 1   # +1 run
 
 
 # ── (a) combined = A + B + C, each with its n ────────────────────────────────────────────────────
@@ -356,25 +410,23 @@ def test_rows_without_counterfactual_or_trace_id_price_the_same(env):
 
 # ── (h) the render path reads a bounded amount ───────────────────────────────────────────────────
 
-def test_warm_rollup_window_figure_never_reads_the_whole_ledger(env, monkeypatch):
+def test_warm_rollup_window_figure_reads_only_today_and_the_tail(env, monkeypatch):
     _ledger(env["ledger"], days=range(40, -1, -1), per_day=6)
     _db(env["db"])
     _build(env)
-    size = env["ledger"].stat().st_size
-    reads: list[int] = []
-    real = sr.read_rows
+    total = sum(1 for _ in open(env["ledger"]))
+    read: list[int] = []
+    real = sr.rows_at
 
-    def spy(path, since, until, **kw):
-        st: dict = {}
-        out = real(path, since, until, stats=st, **kw)
-        reads.append(st["bytes_read"])
-        return out
+    def spy(path, offsets):
+        read.append(len(offsets))
+        return real(path, offsets)
 
-    monkeypatch.setattr(sr, "read_rows", spy)
+    monkeypatch.setattr(sr, "rows_at", spy)
     fig, _ = lv.combined_saved(lv.calendar_bounds(30, now=NOW), db_path=env["db"], proxy_path=env["ledger"],
                                rollup_path=env["rollup"])
-    assert fig.value is not None and reads
-    assert sum(reads) < size / 10, (reads, size)
+    assert fig.value is not None and read                               # something was read, and it was today only
+    assert sum(read) <= total / 30, (read, total)
 
 
 # ── the history command ──────────────────────────────────────────────────────────────────────────
