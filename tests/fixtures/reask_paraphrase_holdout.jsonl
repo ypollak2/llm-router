@@ -1,0 +1,12 @@
+{"group": "paraphrase", "label": true, "prev": "add logging to the start function in svc/main.py", "next": "in svc/main.py add logging to the start function", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "replace the print calls in tools/run.py with logger calls", "next": "swap the print calls in tools/run.py for logger calls", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "generate a script that backs up data/store.db nightly", "next": "create a script that backs up data/store.db every night", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "I want pagination in api/list.py", "next": "that didn't do it, I want pagination in api/list.py", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "shorten the intro in docs/intro.md", "next": "I meant shorten the intro in docs/intro.md to two sentences, shorten it", "gap_s": 60, "turns": 1}
+{"group": "paraphrase", "label": true, "prev": "optimize the query in db/query.py", "next": "no, that's wrong, optimize the query in db/query.py", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "add logging to the start function in svc/main.py", "next": "now add it to svc/worker.py too", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "replace the print calls in tools/run.py with logger calls", "next": "same for tools/build.py", "gap_s": 60, "turns": 1}
+{"group": "hard_neg_new_target", "label": false, "prev": "shorten the intro in docs/intro.md", "next": "also shorten docs/outro.md", "gap_s": 60, "turns": 1}
+{"group": "neg_new_task", "label": false, "prev": "optimize the query in db/query.py", "next": "thanks, what index would you recommend for a large table", "gap_s": 60, "turns": 1}
+{"group": "neg_new_task", "label": false, "prev": "generate a script that backs up data/store.db nightly", "next": "ok next topic: summarize this week's priorities", "gap_s": 60, "turns": 1}
+{"group": "neg_quoted_error", "label": false, "prev": "run svc/main.py", "next": "```\nTraceback: it did not work\n```\nwhat is the root cause in the trace above", "gap_s": 60, "turns": 1}

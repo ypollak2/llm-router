@@ -254,6 +254,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     cur_v = audit_version(summary)
+    shadow = summary.get("reissue_paraphrase_shadow")
+    if shadow:  # informational only: the gate never reads this band
+        print(f"outcome gate: info — paraphrase re-ask shadow: {shadow.get('hits_total')} hit(s) of "
+              f"{shadow.get('n_checked')} checked, reissue_explicit {shadow.get('reissue_explicit')}, "
+              f"used_if_paraphrase_counted {shadow.get('used_if_paraphrase_counted')}; not gated")
     na = head.get("not_applicable", 0)
     if na:
         print(f"outcome gate: {na} unit(s) are not_applicable and outside the denominator "

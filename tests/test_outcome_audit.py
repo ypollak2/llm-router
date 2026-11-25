@@ -464,3 +464,21 @@ def test_ledgerless_llm_edit_call_is_judged_by_its_edits():
                                    "**Replace:**\n```\nold\n```\n**With:**\n```\n" + new + "\n```\n"})
     assert A._edit_files_in(result) == ["/no/such/file.md"]
     assert A._with_blocks_for(result, "/no/such/file.md") == [new]
+
+
+def _strip_clock(summary: dict) -> str:
+    return json.dumps({k: v for k, v in summary.items() if k != "generated_at"}, sort_keys=True)
+
+
+def test_paraphrase_flag_off_and_shadow_leave_rows_and_summary_unchanged(corpus, monkeypatch):
+    """LLM_ROUTER_REASK_PARAPHRASE: off (default) adds nothing; shadow changes no row and no existing summary key."""
+    projects, state, now = corpus
+    monkeypatch.delenv("LLM_ROUTER_REASK_PARAPHRASE", raising=False)
+    rows0, sum0 = A.run_audit(days=30, projects_dir=projects, state_dir=state, now=now)
+    assert "reissue_paraphrase_shadow" not in sum0
+    monkeypatch.setenv("LLM_ROUTER_REASK_PARAPHRASE", "shadow")
+    rows1, sum1 = A.run_audit(days=30, projects_dir=projects, state_dir=state, now=now)
+    assert rows1 == rows0
+    block = sum1.pop("reissue_paraphrase_shadow")
+    assert _strip_clock(sum1) == _strip_clock(sum0)
+    assert {"n_checked", "hits_total", "hits", "reissue_explicit", "used_if_paraphrase_counted"} <= set(block)
