@@ -697,7 +697,7 @@ def test_a_missing_or_hung_binary_cannot_answer_and_counts_as_no(tmp_path, monke
 
 
 @pytest.mark.real_codex_probe
-def test_the_answer_is_asked_once_and_an_unanswered_probe_is_not_repeated_for_a_minute(monkeypatch):
+def test_the_answer_is_asked_once_and_an_unanswered_probe_is_not_repeated_for_a_minute(monkeypatch, tmp_path):
     asked = []
     answers = iter([None, True, False])
 
@@ -707,13 +707,16 @@ def test_the_answer_is_asked_once_and_an_unanswered_probe_is_not_repeated_for_a_
 
     monkeypatch.setattr(codex_agent, "_probe_ignore_rules", _probe)
     codex_agent._reset_codex_cache_for_tests()
-    b = "/x/codex"
+    # real files: a binary that cannot be stat'ed is refused without a probe (review of 2b53b07f)
+    b = str(tmp_path / "codex")
+    other = str(tmp_path / "codex2")
+    for f in (b, other):
+        Path(f).write_text("#!/bin/sh\n")
     assert codex_agent.codex_supports_ignore_rules(b) is False and asked == [b]      # could not answer: closed
     assert codex_agent.codex_supports_ignore_rules(b) is False and asked == [b]      # ... and not asked again now
     codex_agent._RULES_UNKNOWN_UNTIL[b] = 0.0                                        # a minute later
     assert codex_agent.codex_supports_ignore_rules(b) is True and asked == [b, b]
     assert codex_agent.codex_supports_ignore_rules(b) is True and asked == [b, b]    # a real answer is kept
-    other = "/y/codex"
     assert codex_agent.codex_supports_ignore_rules(other) is False and asked == [b, b, other]  # per binary
     assert codex_agent.codex_supports_ignore_rules(other) is False and asked == [b, b, other]
     codex_agent._reset_codex_cache_for_tests()
