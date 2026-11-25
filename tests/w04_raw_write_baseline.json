@@ -61,7 +61,7 @@
  "install_manifest.py": 8,
  "integrations/litellm_budget.py": 2,
  "judge_hygiene.py": 2,
- "judge_sampler.py": 2,
+ "judge_sampler.py": 1,
  "judge_view.py": 1,
  "ledger_view.py": 1,
  "library/sealer.py": 1,
