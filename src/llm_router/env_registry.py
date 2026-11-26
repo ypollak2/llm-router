@@ -294,6 +294,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN": ("llm_router", "proxy/server.py", 1),
     # Cap on content blocks added since the last Claude step (suggested 14, off when unset/0): keeps the next
     # Claude call inside the prompt cache's ~20-block lookback (proxy/loop_guard.py BlockCap).
+    "LLM_ROUTER_HANDOVER_AT": ("llm_router", "hooks/status-bar.py", 1),
     "LLM_ROUTER_LOCAL_MAX_BLOCKS": ("llm_router", "proxy/loop_guard.py", 1),
     # Main-thread cap on consecutive local steps before a hand-back to Claude (suggested 5, off when unset/0;
     # proxy/loop_guard.py local_main_max_steps). Sub-agent threads keep the loop guard cap. Caveat: the legacy

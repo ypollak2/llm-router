@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# llm_router-hook-version: 13
+# llm_router-hook-version: 14
 """UserPromptSubmit hook — enhanced savings + routing status bar.
 
 Displays a two-mode status line:
@@ -578,6 +578,108 @@ def _should_show() -> bool:
     return count % every == 0
 
 
+# ── Hand-over at N tokens (LLM_ROUTER_HANDOVER_AT, off by default) ───────
+# The REAL context size is the last main-chain assistant record's usage in the session transcript
+# (input + cache_read + cache_creation input tokens; verified read-only on a live transcript, field
+# names only). At or above N the hook adds ONE line of additionalContext telling Claude to write a
+# hand-over file, at most once per _HANDOVER_EVERY prompts per session. Unset/0/invalid = off:
+# nothing is read or written and the output is byte-identical to before.
+_HANDOVER_EVERY = 10
+_HANDOVER_TAIL_BYTES = 1_048_576
+_HANDOVER_STATE = "handover_state.json"
+_HANDOVER_KEEP = 50
+_HANDOVER_TEXT = (
+    "CONTEXT HAND-OVER: this session's context has reached {size:,} tokens (limit {limit:,}). "
+    "Before anything else, write a hand-over file (absolute path under the project, e.g. HANDOVER-<date>.md) with: "
+    "the do-first action; decisions with IDs; open tasks with absolute paths; facts that are costly to rediscover "
+    "with n, window and source; running state (background jobs, crons, PRs); a pointer to the standing rules. "
+    "No secrets, no prompt text, under 1,500 words. Then tell the user to start a new session from that file."
+)
+
+
+def _handover_limit() -> int:
+    try:
+        return max(0, int(os.environ.get("LLM_ROUTER_HANDOVER_AT", "0").strip() or 0))
+    except ValueError:
+        return 0
+
+
+def _context_tokens(transcript_path: object) -> int | None:
+    """Context size from the tail of the transcript, or None. Reads only the usage dict."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    try:
+        import stat as _stat
+
+        fd = os.open(transcript_path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0), 0o600)
+        try:
+            st = os.fstat(fd)
+            if not _stat.S_ISREG(st.st_mode):
+                return None
+            if st.st_size > _HANDOVER_TAIL_BYTES:
+                os.lseek(fd, st.st_size - _HANDOVER_TAIL_BYTES, os.SEEK_SET)
+            tail = os.read(fd, _HANDOVER_TAIL_BYTES).decode("utf-8", errors="replace")
+        finally:
+            os.close(fd)
+        for line in reversed(tail.splitlines()):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or rec.get("type") != "assistant" or rec.get("isSidechain"):
+                continue
+            msg = rec.get("message")
+            usage = msg.get("usage") if isinstance(msg, dict) else None
+            if not isinstance(usage, dict):
+                continue
+            total = 0
+            for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+                val = usage.get(key)
+                if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+                    total += val
+            if total > 0:  # a zero record (synthetic) says nothing about the context
+                return total
+        return None
+    except Exception:  # noqa: BLE001 -- fail open: no size, no instruction
+        return None
+
+
+def _handover_context(payload: object) -> str | None:
+    """The one-line instruction when this prompt crosses the limit and the session has not been
+    told in the last ``_HANDOVER_EVERY`` prompts; else None. Never raises."""
+    limit = _handover_limit()
+    if limit <= 0 or not isinstance(payload, dict):
+        return None
+    try:
+        sid = payload.get("session_id")
+        size = _context_tokens(payload.get("transcript_path"))
+        if not isinstance(sid, str) or not sid or size is None:
+            return None
+        path = os.path.join(_state_dir(), _HANDOVER_STATE)
+        try:
+            with open(path, encoding="utf-8") as f:
+                state = json.load(f)
+            state = state if isinstance(state, dict) else {}
+        except Exception:  # noqa: BLE001 -- first run or damaged: start empty
+            state = {}
+        rec = state.get(sid) if isinstance(state.get(sid), dict) else {}
+        prompts = int(rec.get("prompts", 0)) + 1
+        last = rec.get("last")
+        fire = size >= limit and (not isinstance(last, int) or prompts - last >= _HANDOVER_EVERY)
+        state.pop(sid, None)
+        state[sid] = {"prompts": prompts, "last": prompts if fire else last}
+        while len(state) > _HANDOVER_KEEP:
+            state.pop(next(iter(state)))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(tmp, path)
+        return _HANDOVER_TEXT.format(size=size, limit=limit) if fire else None
+    except Exception:  # noqa: BLE001 -- fail open
+        return None
+
+
 # ── Entry point ────────────────────────────────────────────────────────────
 
 try:
@@ -637,7 +739,10 @@ def main() -> None:
     except Exception:  # noqa: BLE001 -- older llm_router: no session on the row
         pass
 
+    handover = _handover_context(payload)
     if not _should_show():
+        if handover:
+            _emit(None, handover)
         sys.exit(0)
 
     with _hl_phase("read_cache"):
@@ -647,13 +752,19 @@ def main() -> None:
             if _claim_refresh():
                 _spawn_refresh()
     if status is None or age is None or age > _CACHE_SERVE_MAX_AGE_S:
-        sys.exit(0)  # nothing current to show; the refresher fills it for next time
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "systemMessage": status,
-        }
-    }))
+        status = None  # nothing current to show; the refresher fills it for next time
+    if status is None and not handover:
+        sys.exit(0)
+    _emit(status, handover)
+
+
+def _emit(status: str | None, handover: str | None) -> None:
+    out: dict = {"hookEventName": "UserPromptSubmit"}
+    if status is not None:
+        out["systemMessage"] = status
+    if handover:
+        out["additionalContext"] = handover
+    print(json.dumps({"hookSpecificOutput": out}))
 
 
 def _entry(argv: list[str]) -> None:
