@@ -38,6 +38,11 @@ Row fields:
                   null for a continuation or side call); the character length
                   of the text the tier classifier reads. Null on a failure and
                   absent on rows written before the fix.
+  prev_tool_error true when a tool result in the newest user turn carries ``is_error``, false when none
+                  does, null when the call is not a continuation (flag only, D-626)
+  prev_tier_rewritten  true/false: the session's previous tier-decided Claude call was / was not a
+                  rewrite (served != requested); null for its first call or after a proxy restart
+                  (D-626: lets ``rewrite_quality`` compare what follows rewritten and other steps)
   prev_tools      names of the tool calls the newest tool results answer
   prev_tool_class ``proxy.tool_classes`` class of those calls (technical_op |
                   edit | exec | agent | web | other), null when not a
@@ -653,13 +658,39 @@ def tier_stats(rows: list[dict]) -> dict | None:
                   and not str(r["response_model"]).startswith(str(r.get("served_model")))]
     actual = counterfactual = 0.0
     priced = 0
+    # The same C figure split by what earned it (owner D-626): a rewrite (served != requested) is a model
+    # swap; any other priced tier row (a tier_switch on the requested model) is a cache cost, not a swap.
+    rw_n = rw_neg_n = 0
+    rw_neg_usd = rw_usd = 0.0
+    other_n, other_usd = 0, 0.0
+    pairs: dict[tuple[str, str], list] = {}
+    rw_unpriced = {"rewritten": 0, "usage_unknown": 0, "unknown_model": 0}
+    other_unpriced = {"usage_unknown": 0, "unknown_model": 0}
     for r in tiered:
+        is_rw = (r.get("served_model") or r.get("requested_model")) != r.get("requested_model")
         a, c = anthropic_cost(r), tier_counterfactual_cost(r)
         if a is None or c is None:
+            if is_rw:
+                rw_unpriced["rewritten"] += 1
+            bucket = rw_unpriced if is_rw else other_unpriced
+            bucket["usage_unknown" if usage_unknown(r) else "unknown_model"] += 1
             continue
         actual += a
         counterfactual += c
         priced += 1
+        d = c - a
+        if is_rw:
+            rw_n += 1
+            rw_usd += d
+            if d < 0:
+                rw_neg_n += 1
+                rw_neg_usd += d
+            pr = pairs.setdefault((str(r.get("requested_model")), str(r.get("served_model"))), [0, 0.0])
+            pr[0] += 1
+            pr[1] += d
+        else:
+            other_n += 1
+            other_usd += d
     switch_cost = [r["tier_switch_cost_usd"] for r in switches if isinstance(r.get("tier_switch_cost_usd"), (int, float))]
     # What the switched calls actually paid in cache writes (from Anthropic's
     # own usage), next to the estimate: the estimate assumes the whole prefix
@@ -691,6 +722,18 @@ def tier_stats(rows: list[dict]) -> dict | None:
         "est_counterfactual_requested_usd": round(counterfactual, 4),
         "est_saving_usd": round(counterfactual - actual, 4),
         "priced_n": priced,
+        # C by part: rewrites (model swaps) gross, every other priced tier row, and what stayed unpriced.
+        "rewrites_priced_n": rw_n, "rewrites_gross_usd": round(rw_usd, 4),
+        "rewrites_negative_n": rw_neg_n, "rewrites_negative_usd": round(rw_neg_usd, 4),
+        "nonrewrite_priced_n": other_n, "nonrewrite_usd": round(other_usd, 4),
+        "rewritten_unpriced": rw_unpriced["rewritten"],
+        "rewritten_unpriced_usage_unknown": rw_unpriced["usage_unknown"],
+        "rewritten_unpriced_unknown_model": rw_unpriced["unknown_model"],
+        "nonrewrite_unpriced_usage_unknown": other_unpriced["usage_unknown"],
+        "nonrewrite_unpriced_unknown_model": other_unpriced["unknown_model"],
+        "nonrewrite_unpriced": other_unpriced["usage_unknown"] + other_unpriced["unknown_model"],
+        "rewrite_pairs": [[f, t, v[0], round(v[1], 4)] for (f, t), v in
+                          sorted(pairs.items(), key=lambda kv: -kv[1][0])],
     }
 
 

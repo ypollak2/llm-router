@@ -976,6 +976,20 @@ def combined_saved(bounds: Bounds, *, db_path=None, proxy_path=None, rollup_path
     mw = money_window(bounds, db_path=db_path, timeout_s=timeout_s)
     pp = savings_rollup.proxy_parts(bounds, ledger=proxy_path, rollup=rollup_path, db_path=db_path)
     a_excl = _unpriced_rows(bounds, db_path)
+    # C by part (D-626), from the same rollup sums as C itself: C = rewrites gross + non-rewrite tier rows.
+    c_parts = None
+    if pp["available"]:
+        c_parts = {
+            "rewrites_n": pp["c_rw_priced"], "rewrites_gross": pp["c_rw_usd"],
+            "rewrites_negative_n": pp["c_rw_neg_n"], "rewrites_negative_usd": pp["c_rw_neg_usd"],
+            "tier_switch_cost": pp["c_other_usd"], "tier_switch_n": pp["c_other_n"],
+            "net": pp["c_usd"],
+            "rewrite_pairs": sorted(([k.split(">")[0], k.split(">")[1], v[0], round(v[1], 4)]
+                                     for k, v in pp["c_pairs"].items()), key=lambda x: -x[2]),
+            "unpriced_rewritten": pp["c_unpriced"],
+            "unpriced_other_usage_unknown": pp["c_unpriced_usage_unknown"],
+            "unpriced_other_unknown_model": pp["c_unpriced_unknown_model"],
+        }
     parts = {
         "window": bounds.label,
         "A": {"usd": round(mw.unverified_usd, 6), "n": mw.unverified_calls, "excluded": a_excl,
@@ -986,6 +1000,7 @@ def combined_saved(bounds: Bounds, *, db_path=None, proxy_path=None, rollup_path
               "since": pp["first_day"]},
         "C": {"usd": pp["c_usd"], "n": pp["c_rewritten"], "excluded": pp["c_unpriced"],
               "since": pp["first_day"]},
+        "C_parts": c_parts,
         "dedup_dropped": pp["dropped"],
         "proxy_available": pp["available"], "proxy_na_reason": pp["na_reason"],
     }

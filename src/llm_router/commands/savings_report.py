@@ -190,6 +190,17 @@ def render_history(now: float | None = None) -> str:
         )
         for name, usd, n, excl, since in rows:
             out.append(f"  {name:<24} {usd:>10}  {n:<28} unpriced/excluded: {excl:<5} first row: {since or 'n/a'}")
+        cp = p.get("C_parts") if up else None
+        if cp:   # C = rewrites gross + the other tier rows' cost (D-626); the figure above is unchanged
+            out.append(f"    C parts: rewrites gross {lv._signed(cp['rewrites_gross'])} (n={cp['rewrites_n']:,} priced) · "
+                       f"non-rewritten tier_switch cost {lv._signed(cp['tier_switch_cost'])} (n={cp['tier_switch_n']:,}) · "
+                       f"net {lv._signed(cp['net'])}")
+            out.append(f"    C rewrites below zero: n={cp['rewrites_negative_n']:,} {lv._signed(cp['rewrites_negative_usd'])} · "
+                       f"unpriced rewrites {cp['unpriced_rewritten']:,}; other tier rows unpriced: "
+                       f"usage unknown {cp['unpriced_other_usage_unknown']:,}, model not in price table "
+                       f"{cp['unpriced_other_unknown_model']:,}")
+            for f, t, n, usd in cp["rewrite_pairs"]:
+                out.append(f"    C pair {f} -> {t}: n={n:,} {lv._signed(usd)}")
         out.append(f"  {'combined':<24} {lv.render_saved(fig, p)}")
         if bb.get("late_old_rows"):
             out.append(f"  (B: {bb['late_old_rows']:,} served rows arrived for days older than 3 d and are priced as their "
@@ -201,7 +212,25 @@ def render_history(now: float | None = None) -> str:
     return "\n".join(out)
 
 
+def render_rewrite_quality(days: int = 30, now: float | None = None) -> str:
+    """``llm-router savings rewrite-quality [DAYS]``: what follows a tier-rewritten Claude call vs other
+    calls, per model pair (D-626). Read-only over the proxy ledger, counts and enums only."""
+    import time as _time
+
+    from llm_router import ledger_view as lv
+    from llm_router.proxy import rewrite_quality as rq
+
+    now = _time.time() if now is None else now
+    b = lv.calendar_bounds(days, now=now)
+    proxy = paths.state_path("proxy_calls.jsonl")
+    stats, n = rq.read_window(proxy, b)
+    return rq.render(stats, window=b.label, source="proxy_calls.jsonl", rows_in_window=n)
+
+
 def history_main(argv: list[str] | None = None) -> int:
+    if argv and argv[0] == "rewrite-quality":
+        print(render_rewrite_quality(int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 30))
+        return 0
     print(render_history())
     return 0
 

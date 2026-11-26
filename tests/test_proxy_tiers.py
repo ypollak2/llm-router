@@ -1258,3 +1258,16 @@ async def test_unknown_model_label_is_a_word_match_only(policy):
         d = policy.decide_unclassified(_req(model), SID, sticky)
         assert (d.reason, d.served_model, d.tier) == (pt.REASON_UNKNOWN_MODEL, model, label)
     assert policy.tier_of(HAIKU55) is None  # never a routing tier
+
+
+async def test_next_row_says_whether_the_previous_call_was_rewritten(tmp_path, moderate):
+    """D-626: ``prev_tier_rewritten`` is null on a session's first call, then False/True for what the
+    previous tier-decided call was (served != requested); ``prev_tool_error`` rides the step labels."""
+    up = Upstream()
+    app = _app(tmp_path, up)
+    assert (await _post(app, _first())).status_code == 200
+    assert (await _post(app, _req())).status_code == 200
+    first, second = _rows(tmp_path)
+    assert first["prev_tier_rewritten"] is None
+    assert second["prev_tier_rewritten"] is False          # the first call ran on the requested model
+    assert second["served_model"] != second["requested_model"] and "prev_tool_error" in second

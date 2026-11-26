@@ -1,4 +1,4 @@
-# llm_router-hook-version: 9
+# llm_router-hook-version: 10
 """PostToolUse[Agent] hook — track Claude Code subscription model calls.
 
 Fires after every Agent subagent completes. Writes an estimated usage record
@@ -31,7 +31,7 @@ is not "absent", and an older source must not stand in for it. Aliases come from
 ``llm_router.pricing.claude_code_model``; prices from ``llm_router.pricing`` only.
 
 UNKNOWN is recorded, never guessed and never a zero. A sub-agent whose model is unknown,
-or has no price (today ``claude-fable-5-2``), is written as a row with the model ("unknown"
+or has no price, is written as a row with the model ("unknown"
 when none), 0 tokens, NULL potential_cost_usd and NULL saved_usd, and reason
 ``claude_code_subscription:unknown_model:<why>``. Every money reader sums saved_usd (NULL
 adds nothing) or prices tokens (0 adds nothing), so it cannot count as a saving, yet it
@@ -410,7 +410,7 @@ def _log_to_db(
             baseline_model = _infer_baseline(model) if model else None
             if potential is None:
                 # Unknown model, no price source (see the guarded import) or a model the
-                # registry does not price (claude-fable-5-2): an explicit UNKNOWN row. 0
+                # registry does not price: an explicit UNKNOWN row. 0
                 # tokens and NULL money, so no reader can count it as a saving or as a
                 # measured zero cost; the call itself stays visible (see the docstring).
                 why = why_unknown or ("unpriced_model" if model else "no_model_source")
