@@ -99,3 +99,33 @@ def test_flag_truthy_values(monkeypatch, val):
     monkeypatch.setenv(FLAG, val)
     from llm_router.proxy.cache_cost import cold_cache_only
     assert cold_cache_only() is True
+
+
+async def test_note_error_is_recorded_not_swallowed_and_never_costs_the_call(monkeypatch):
+    from llm_router import failopen
+
+    monkeypatch.setenv(FLAG, "1")
+    seen: list = []
+    monkeypatch.setattr(failopen, "record", lambda code, exc=None, **kw: seen.append(code))
+
+    class Boom(Stickiness):
+        def note_served(self, *a, **k):
+            raise RuntimeError("x")
+
+    d = await _policy().decide(_body(*TURN3[:2], sid=SID), SID, Boom(), classify=_classify())
+    assert d.served_model == OPUS
+    assert seen == ["LR-FO-PROXY-TIER-COLD-NOTE"]
+
+
+def test_served_map_evicts_the_oldest_at_the_bound(monkeypatch):
+    from llm_router.proxy import cache_cost
+
+    monkeypatch.setattr(cache_cost, "_MAX_CONVERSATIONS", 4)
+    clock = Clock()
+    s = Stickiness(clock=clock)
+    for i in range(4):
+        clock.t += 1
+        s.note_served(f"k{i}", OPUS)
+    clock.t += 1
+    s.note_served("new", OPUS)
+    assert len(s._served) == 4 and "k0" not in s._served and "new" in s._served

@@ -47,8 +47,11 @@ def cold_cache_only() -> bool:
     """``LLM_ROUTER_TIER_COLD_CACHE_ONLY`` (default off): a tier rewrite of a PINNED model to a cheaper
     tier (the D-31 arm, Opus -> Haiku) runs only when the requested model's prompt cache for the
     conversation is cold; a warm cache keeps the requested model (reason ``tier_skip_warm_cache``).
-    Why: the rewrite writes the whole prefix again on the target model (owner D-643; 69 Opus->Haiku
-    rewrites, 30 d to 2026-11-26, 39 lose -$6.16, 29 win +$1.77, ledger tier_stats)."""
+    Why: the rewrite writes the whole prefix again on the target model (owner D-643; 77 Opus->Haiku
+    rewrites, 30 d to 2026-11-26, 46 lose -$7.81, ledger tier_stats estimate -$5.97 net).
+    With the flag on the arm is effectively disabled on pinned Opus (only first calls and calls
+    after > 1 h idle can be rewritten). Gated turns are logged ``arm_assignment=ineligible`` with
+    ``tier_arm_reason=tier_skip_warm_cache``: arm analyses MUST exclude those rows."""
     return os.environ.get("LLM_ROUTER_TIER_COLD_CACHE_ONLY", "").strip().lower() in ("1", "on", "true", "yes")
 
 

@@ -1210,8 +1210,10 @@ class ClaudeTierPolicy:
             if (cold_cache_only() and _canonical(decision.requested_model) in self.pinned
                     and _canonical(decision.served_model) == _canonical(decision.requested_model)):
                 sticky.note_served(conversation_key(body, session_id), decision.requested_model)
-        except Exception:  # noqa: BLE001 - bookkeeping must never cost a call
-            pass
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must never cost a call
+            from llm_router import failopen
+
+            failopen.record("LR-FO-PROXY-TIER-COLD-NOTE", exc)
 
     async def _decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                       classify, pressure: float | None, phases: _Phases | None = None,
