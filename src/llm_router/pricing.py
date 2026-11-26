@@ -241,7 +241,6 @@ _ANTHROPIC: dict[str, Price] = {
     # Claude Fable 5.2: $8/$10/$16/$0.20/$40 (pricing page, "Model pricing", 2026-11-26).
     # Cache hits and refreshes at 0.025x the base input price ($0.20).
     "claude-fable-5-2": Price("claude-fable-5-2", 8.00, 40.00, cache_read=0.20),
-    # Mythos 5.2 (limited availability): same rates as Fable 5.2.
     # "Fast mode pricing", re-checked 2026-09-29 against the raw .md: Opus 5.5
     # $8/$40; Opus 5 / Opus 4.8 $10/$50 — "Prompt caching multipliers apply on
     # top of fast mode pricing". So each keeps its base model's cache ratios:

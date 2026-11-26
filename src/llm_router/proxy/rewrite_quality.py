@@ -30,7 +30,8 @@ _CLAUDE = (L.DECISION_FORWARDED, L.DECISION_FALLBACK)
 LIMITS = ("Observational, not causal: rewrites are chosen by policy (sticky tier, quota pressure, session kind), so "
           "the two groups differ in task mix and session age. Tool-error rate counts only rows written since "
           "prev_tool_error existed (older rows are unknown, not 'no error'); redo = the same tool call on the same "
-          "target twice running, by salted hash.")
+          "target twice running, by salted hash. Rows are paired by session: parallel sub-agents that share a "
+          "session_id can interleave, so a next-step pairing may cross conversations.")
 
 
 def _targets_key(row: dict):
