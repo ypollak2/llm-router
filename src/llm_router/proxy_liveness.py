@@ -353,7 +353,8 @@ def ledger_silence(*, now: float | None = None, proxy_rows: list[dict] | None = 
         from llm_router.proxy import ledger as pl
 
         proxy_rows, _ = _tail_dicts(pl.ledger_path(), since)
-    stamps = [t for r in proxy_rows if (t := _ts(r)) is not None and t <= now_ts]
+    # lifecycle rows (``event``: backend_recycle) are not proxied calls; the tail path reads the raw file
+    stamps = [t for r in proxy_rows if not r.get("event") and (t := _ts(r)) is not None and t <= now_ts]
     n = sum(1 for t in stamps if t >= since)
     newest = max(stamps) if stamps else None
     if hook_rows is None:

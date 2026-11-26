@@ -164,7 +164,7 @@ async def test_no_model_or_ctx_skips_before_kill(pidfile, model, ctx):
 async def test_build_app_crash_signature_trip_runs_recover_action(tmp_path, monkeypatch, pidfile):
     """build_app -> a Compute-error reply trips the breaker -> the recover action runs once (fakes)."""
     from llm_router.proxy import server as ps
-    from tests.test_proxy import _post, _req, _rows
+    from tests.test_proxy import _post, _req
     from tests.test_proxy_backend_health import _app
 
     f = Fake()
@@ -193,7 +193,9 @@ async def test_build_app_crash_signature_trip_runs_recover_action(tmp_path, monk
     r = await _post(app, _req())
     assert r.status_code == 200   # Claude answered
     await asyncio.wait_for(app.state.recycler.task, 5)
-    rows = _rows(tmp_path)
+    from llm_router.proxy import ledger
+    # event rows are dropped by read_rows by default (fix/ledger-event-rows); this test asserts on one
+    rows = ledger.read_rows(tmp_path / "proxy_calls.jsonl", include_events=True)
     trip = [r for r in rows if r.get("backend_health", {}).get("trigger") == "crash_signature"]
     event = [r for r in rows if r.get("event") == "backend_recycle"]
     assert len(trip) == 1 and trip[0]["backend_health"]["recycle"] == "started"

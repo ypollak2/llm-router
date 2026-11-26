@@ -9,8 +9,14 @@ import pytest
 from llm_router.proxy import backend_health as bh
 from llm_router.proxy import backend_recycle as br
 from llm_router.proxy import backends as pb
-from tests.test_proxy import _call, _ollama, _post, _req, _rows
+from llm_router.proxy import ledger as _ledger
+from tests.test_proxy import _call, _ollama, _post, _req
 from tests.test_proxy_backend_health import Clock, _app, _ollama_client, policy  # noqa: F401
+
+
+def _rows(tmp_path):
+    """Every ledger row INCLUDING lifecycle (``event``) rows: these tests assert on the recycle rows."""
+    return _ledger.read_rows(tmp_path / "proxy_calls.jsonl", include_events=True)
 
 
 @pytest.fixture

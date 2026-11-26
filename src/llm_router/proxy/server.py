@@ -643,12 +643,15 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
 
     def write(row: dict) -> None:
         remember_thread(row)
-        # Real Anthropic spend per call (PR 8). Never lets accounting cost a row.
-        try:
-            cost_accounting.annotate(row, prefixes.get(row.get("session_id")))
-            prefixes.update(row)
-        except Exception as exc:  # noqa: BLE001 - the ledger row matters more than its cost fields
-            failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
+        # Event rows (lifecycle, health, alarms) must not get cost fields:
+        # annotate() sets served_by="anthropic" when decision != "served",
+        # which makes readers count them as Claude calls.
+        if not row.get("event"):
+            try:
+                cost_accounting.annotate(row, prefixes.get(row.get("session_id")))
+                prefixes.update(row)
+            except Exception as exc:  # noqa: BLE001 - the ledger row matters more than its cost fields
+                failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
         blocks_key = row.pop("_blocks_key", None)
         blocks_in = row.pop("_blocks_in", None)  # set only with LLM_ROUTER_LOCAL_MAX_BLOCKS on; never serialized
         if blocks_in is not None and "blocks_since_claude" not in row:

@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Lifecycle rows (``event`` key such as ``backend_recycle``) in the proxy ledger no longer count as Claude calls: ``server.write`` skips ``cost_accounting.annotate`` for them (they no longer get ``served_by="anthropic"`` and null cost), ``ledger.write_row`` skips ``ENGINE_FIELD_DEFAULTS`` and ``inventory_sig`` for them, and ``ledger.read_rows`` drops them by default (``include_events=False``), which also covers old rows already written with ``served_by="anthropic"``. Readers that open the file directly now skip them too: ``proxy_liveness.ledger_silence`` (a recycle row could turn a SILENT proxy into "ok") and ``ineligible_routes._read_proxy``. ``northstar`` already ignored them (it counts ``decision == "served"`` rows). Six such rows exist in the maintainer's ledger, all 2026-11-25.
+
 ## [16.0.1] - 2026-11-16
 
 ### Added
