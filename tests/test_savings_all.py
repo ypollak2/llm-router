@@ -426,7 +426,7 @@ def test_a_row_in_a_neighbour_day_marks_the_day_stale_and_a_refresh_rebuilds_it(
         fh.writelines(json.dumps(r) + "\n" for r in rows)
     _build(env)
     d0 = sr.day_of(mid - 5)
-    late = dict(rows[-1], ts=mid + 7200, session_id="a")           # one more day-after row, a control call of "a"
+    late = dict(rows[-1], ts=mid + 300, session_id="a")            # one more Claude row near midnight, a call of "a"
     late["usage"] = {"cache_read_input_tokens": 1, "cache_creation_input_tokens": 9_000,
                      "cache_creation": {"ephemeral_1h_input_tokens": 9_000, "ephemeral_5m_input_tokens": 0}}
     with open(env["ledger"], "a", encoding="utf-8") as fh:
@@ -603,3 +603,36 @@ def test_savings_history_lists_every_source_with_start_n_and_excluded(env, monke
     for needle in ("== today ==", "== 7d ==", "== 30d ==", "== since earliest row ==", "A hook/MCP/delegation",
                    "B proxy local-served", "C proxy tier rewrite", "unpriced/excluded:", "first row:", "combined"):
         assert needle in text, needle
+
+
+def test_a_stale_day_without_offsets_does_not_wedge_the_refresher(env):
+    """69c6a031: a stale day at the KEEP_OFFS_DAYS edge lost its offsets and the next refresh hit rows_at(None)."""
+    _ledger(env["ledger"], days=(6, 5, 4, 3, 2, 1, 0), per_day=1)
+    _build(env)
+    roll = sr.load(env["rollup"])
+    old = sorted(roll["days"])[1]
+    roll["days"][old]["offs"] = None
+    roll["days"][old]["stale"] = True
+    sr._write(roll, env["rollup"])
+    r = _build(env)                                   # must not raise TypeError
+    assert r["caught_up"] and "stale" not in sr.load(env["rollup"])["days"][old]
+
+
+def test_only_a_claude_row_near_the_shared_midnight_rebuilds_the_neighbour(env):
+    mid = sr.midnight(_day_ts(1, 12))
+    rows = _crossing_rows(mid)
+    with open(env["ledger"], "w", encoding="utf-8") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in rows)
+    _build(env)
+
+    def add(row):
+        with open(env["ledger"], "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+    base = {"session_id": "a", "decision": "forwarded", "requested_model": "claude-sonnet-5",
+            "usage": {"cache_read_input_tokens": 1}}
+    add(dict(base, ts=mid + 12 * 3600))                              # deep in the day: only its own day is rebuilt
+    assert _build(env)["built"] == 1
+    add(dict(base, ts=mid + 120, decision="served", backend_usage={"output_tokens": 1}))   # not a Claude call
+    assert _build(env)["built"] == 1
+    add(dict(base, ts=mid + 130))                                    # a Claude call 130 s after midnight: day before too
+    assert _build(env)["built"] == 2

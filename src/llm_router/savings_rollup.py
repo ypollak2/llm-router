@@ -25,8 +25,8 @@ a session with < 5 control calls in 3 days uses the 3-day mean of all sessions, 
 uses the window mean. That is the remaining difference between the per-day sum and one pass over the window.
 The render path (``proxy_parts``) reads no neighbour day: today, a partial day and a day without a stored sum
 are summarised from their own rows (a run is priced with no prefix from the day before).
-A day's summary depends on its neighbours, so a row landing in day X marks X-1 and X+1 ``stale`` (kept in use,
-rebuilt by the next refresh).
+A day's summary depends on its neighbours, so a Claude row landing within an hour (EDGE_S) of the midnight day X shares with X-1 or X+1 marks that day
+``stale`` (kept in use, rebuilt by the next refresh, offsets kept until then).
 A served row arriving for a day older than KEEP_OFFS_DAYS is priced as its own run: +/- about one run's net per
 such row (measured 2026-11-25: |error| <= $0.05 per row on 5 samples; 306 of 116k rows arrived > 300 s late).
 ``late_old_rows`` in the rollup counts the served rows applied that way.
@@ -167,6 +167,11 @@ TAIL_MAX_BYTES = 16 * 1024 * 1024
 #: counts, and for a late served row B is priced as its own run (+/- one run, like a run split at midnight).
 KEEP_OFFS_DAYS = 3
 HEAD_BYTES = 64 * 1024
+#: A row marks a neighbouring day ``stale`` only when it is a Claude call within this many seconds of the
+#: midnight they share (the only place it can be the next call of a run that started in the neighbour).
+#: Rows deeper in a day move the neighbour's baselines by a rounding amount and do not trigger a rebuild, so
+#: yesterday is rebuilt only while today's first hour is written, not on every refresh (review 2026-11-26).
+EDGE_S = 3600.0
 
 
 def head_hash(path, n: int) -> str | None:
@@ -346,10 +351,12 @@ def refresh(*, ledger=None, rollup=None, db_path=None, now: float | None = None,
                 continue
             rec["offs"].append(off)
             rec["sum"] = None                      # a late row reopens its (closed) day
-            for nd in (day_of(day_start(d) - 1.0), next_day(d)):
-                nb = roll["days"].get(nd)          # its neighbours' B reads this row as context (D-627)
-                if nb is not None and nb["sum"] is not None and nb["offs"] is not None:
-                    nb["stale"] = True
+            if row.get("decision") in ("forwarded", "fallback"):   # only a Claude call can be a run's next call
+                lo = day_start(d)
+                for nd, near in ((day_of(lo - 1.0), ts - lo < EDGE_S), (next_day(d), day_start(next_day(d)) - ts < EDGE_S)):
+                    nb = roll["days"].get(nd)      # a neighbour's B reads this row as context (D-627)
+                    if near and nb is not None and nb["sum"] is not None and nb["offs"] is not None:
+                        nb["stale"] = True
         for d, rows in late.items():
             roll["late_old_rows"] = roll.get("late_old_rows", 0) + sum(1 for r in rows if r.get("decision") == "served")
             part = summarize(rows, _drop(d, db_path, rows))
@@ -361,6 +368,9 @@ def refresh(*, ledger=None, rollup=None, db_path=None, now: float | None = None,
                     head_len=head_len, head=head_hash(ledger, head_len),
                     first_day=day_of(ident["first_ts"]), written_at=now)
         today = day_of(now)
+        for r in roll["days"].values():            # a stale day without offsets cannot be rebuilt: keep its sum
+            if r.get("stale") and r["offs"] is None:
+                r.pop("stale")
         todo = sorted((d for d, r in roll["days"].items()
                        if d < today and (r["sum"] is None or r.get("stale"))), reverse=True)
         built = 0
@@ -376,7 +386,8 @@ def refresh(*, ledger=None, rollup=None, db_path=None, now: float | None = None,
         if caught:                                 # never mid-pass: a day's later rows would then be "late" ones
             horizon = day_of(now - KEEP_OFFS_DAYS * 86400.0)
             for d, rec in roll["days"].items():
-                if d < horizon and rec["sum"] is not None and rec["offs"] is not None:
+                if (d < horizon and rec["sum"] is not None and rec["offs"] is not None
+                        and not rec.get("stale")):  # a stale day is rebuilt first, then its offsets go
                     rec["offs"] = None             # old and summarised: the sum alone is kept
         _write(roll, rollup)
         return {"caught_up": caught, "built": built, "missing": len(todo) - built, "reset": reset}
