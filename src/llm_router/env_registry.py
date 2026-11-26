@@ -293,6 +293,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN": ("llm_router", "proxy/server.py", 1),
     # Cap on content blocks added since the last Claude step (suggested 14, off when unset/0): keeps the next
     # Claude call inside the prompt cache's ~20-block lookback (proxy/loop_guard.py BlockCap).
+    "LLM_ROUTER_HANDOVER_AT": ("llm_router", "hooks/status-bar.py", 1),
     "LLM_ROUTER_LOCAL_MAX_BLOCKS": ("llm_router", "proxy/loop_guard.py", 1),
     # Local-serving alarm (proxy/local_alarm.py), default off; population label for bench proxies (proxy/obs_fields.py).
     "LLM_ROUTER_LOCAL_ALARM": ("llm_router", "proxy/local_alarm.py", 1),
@@ -616,7 +617,6 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_CP_ED25519_PRIVATE_KEY": ("provider_credential", "control_plane/signing.py", 1),
     "LLM_ROUTER_CP_SIDECAR_TOKEN": ("provider_credential", "control_plane/api.py", 1),
     "LLM_ROUTER_ESCALATE_MIN_PROMPT_TOKENS": ("provider_credential", "router.py", 1),
-    "LLM_ROUTER_HANDOVER_TOKENS": ("provider_credential", "hooks/status-bar.py", 1),  # a token COUNT; filed here because the name matches _TOKEN (same as ESCALATE_MIN_PROMPT_TOKENS)
     "LLM_ROUTER_HF_TOKENIZERS": ("provider_credential", "token_budget.py", 1),
     "LLM_ROUTER_PROJECT_ID": ("provider_credential", "session_store.py", 1),
     "LLM_ROUTER_PROJECT_ALLOWLIST": ("llm_router", "gateway.py", 1),

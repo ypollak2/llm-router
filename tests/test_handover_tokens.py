@@ -1,4 +1,4 @@
-"""LLM_ROUTER_HANDOVER_TOKENS: the status-bar hook asks for a hand-over file at N context tokens.
+"""LLM_ROUTER_HANDOVER_AT: the status-bar hook asks for a hand-over file at N context tokens.
 
 Context size = last main-chain assistant usage in the transcript tail (input + cache_read +
 cache_creation). Off by default; fails open; stdout is one JSON object or nothing.
@@ -36,7 +36,7 @@ def _load():
 def hook(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "state"))
-    monkeypatch.delenv("LLM_ROUTER_HANDOVER_TOKENS", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_HANDOVER_AT", raising=False)
     (tmp_path / "state").mkdir()
     return _load()
 
@@ -74,7 +74,7 @@ def _payload(tmp_path, total, sid="s1"):
 
 
 def test_149k_no_instruction_151k_once(hook, monkeypatch, tmp_path):
-    monkeypatch.setenv("LLM_ROUTER_HANDOVER_TOKENS", "150000")
+    monkeypatch.setenv("LLM_ROUTER_HANDOVER_AT", "150000")
     low = _run(hook, monkeypatch, _payload(tmp_path, 149_000))
     assert "additionalContext" not in low and "STATUS" in low
     high = _payload(tmp_path, 151_000)
@@ -86,14 +86,14 @@ def test_149k_no_instruction_151k_once(hook, monkeypatch, tmp_path):
 
 
 def test_fires_exactly_every_ten(hook, monkeypatch, tmp_path):
-    monkeypatch.setenv("LLM_ROUTER_HANDOVER_TOKENS", "150000")
+    monkeypatch.setenv("LLM_ROUTER_HANDOVER_AT", "150000")
     high = _payload(tmp_path, 160_000)
     fired = ["additionalContext" in _run(hook, monkeypatch, high) for _ in range(21)]
     assert [i for i, f in enumerate(fired) if f] == [0, 10, 20]
 
 
 def test_sessions_are_independent_and_state_is_private(hook, monkeypatch, tmp_path):
-    monkeypatch.setenv("LLM_ROUTER_HANDOVER_TOKENS", "150000")
+    monkeypatch.setenv("LLM_ROUTER_HANDOVER_AT", "150000")
     assert "additionalContext" in _run(hook, monkeypatch, _payload(tmp_path, 160_000, "a"))
     assert "additionalContext" in _run(hook, monkeypatch, _payload(tmp_path, 160_000, "b"))
     state = Path(hook._state_dir()) / "handover_state.json"
@@ -104,7 +104,7 @@ def test_sessions_are_independent_and_state_is_private(hook, monkeypatch, tmp_pa
 @pytest.mark.parametrize("value", [None, "0", "", "abc", "-5"])
 def test_flag_off_is_byte_identical(hook, monkeypatch, tmp_path, value):
     if value is not None:
-        monkeypatch.setenv("LLM_ROUTER_HANDOVER_TOKENS", value)
+        monkeypatch.setenv("LLM_ROUTER_HANDOVER_AT", value)
     out = _run(hook, monkeypatch, _payload(tmp_path, 900_000))
     assert out == json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                                      "systemMessage": "STATUS"}}) + "\n"
@@ -116,14 +116,14 @@ def test_flag_off_no_cache_prints_nothing(hook, monkeypatch, tmp_path):
 
 
 def test_instruction_without_status_cache(hook, monkeypatch, tmp_path):
-    monkeypatch.setenv("LLM_ROUTER_HANDOVER_TOKENS", "150000")
+    monkeypatch.setenv("LLM_ROUTER_HANDOVER_AT", "150000")
     out = json.loads(_run(hook, monkeypatch, _payload(tmp_path, 151_000), cache=False))["hookSpecificOutput"]
     assert "additionalContext" in out and "systemMessage" not in out
 
 
 @pytest.mark.parametrize("kind", ["absent", "garbage", "no_usage", "dir", "none_path", "sidechain_only"])
 def test_malformed_transcript_fails_open(hook, monkeypatch, tmp_path, kind):
-    monkeypatch.setenv("LLM_ROUTER_HANDOVER_TOKENS", "150000")
+    monkeypatch.setenv("LLM_ROUTER_HANDOVER_AT", "150000")
     tp = {"absent": str(tmp_path / "nope.jsonl"), "dir": str(tmp_path), "none_path": None}.get(kind)
     if kind == "garbage":
         (tmp_path / "g.jsonl").write_text("{not json\n\x00\xff\n")
@@ -140,7 +140,7 @@ def test_malformed_transcript_fails_open(hook, monkeypatch, tmp_path, kind):
 
 
 def test_non_dict_payload_fails_open(hook, monkeypatch):
-    monkeypatch.setenv("LLM_ROUTER_HANDOVER_TOKENS", "150000")
+    monkeypatch.setenv("LLM_ROUTER_HANDOVER_AT", "150000")
     assert "additionalContext" not in _run(hook, monkeypatch, ["x"])
 
 

@@ -578,7 +578,7 @@ def _should_show() -> bool:
     return count % every == 0
 
 
-# ── Hand-over at N tokens (LLM_ROUTER_HANDOVER_TOKENS, off by default) ───────
+# ── Hand-over at N tokens (LLM_ROUTER_HANDOVER_AT, off by default) ───────
 # The REAL context size is the last main-chain assistant record's usage in the session transcript
 # (input + cache_read + cache_creation input tokens; verified read-only on a live transcript, field
 # names only). At or above N the hook adds ONE line of additionalContext telling Claude to write a
@@ -599,7 +599,7 @@ _HANDOVER_TEXT = (
 
 def _handover_limit() -> int:
     try:
-        return max(0, int(os.environ.get("LLM_ROUTER_HANDOVER_TOKENS", "0").strip() or 0))
+        return max(0, int(os.environ.get("LLM_ROUTER_HANDOVER_AT", "0").strip() or 0))
     except ValueError:
         return 0
 
