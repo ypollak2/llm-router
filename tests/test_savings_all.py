@@ -339,9 +339,9 @@ def test_truncated_ledger_rebuilds(env):
     assert _build(env)["reset"] is True
 
 
-# ── (f) a run spanning midnight is split across the two days ────────────────────────────────────
+# ── (f) a run spanning midnight belongs to the day it starts in (D-627) ────────────────────────────────────
 
-def test_a_run_spanning_midnight_is_split_by_day(env):
+def test_a_run_spanning_midnight_is_counted_once_in_its_start_day(env):
     mid = sr.midnight(_day_ts(1, 12))                                   # midnight between day 2 and day 1
     rows = [
         {"ts": mid - 30, "session_id": "m", "decision": "forwarded", "requested_model": "claude-sonnet-5",
@@ -358,7 +358,85 @@ def test_a_run_spanning_midnight_is_split_by_day(env):
     roll = sr.load(env["rollup"])
     d_before, d_after = sr.day_of(mid - 5), sr.day_of(mid + 5)
     assert whole["b_runs"] == 1
-    assert roll["days"][d_before]["sum"]["b_runs"] == 1 and roll["days"][d_after]["sum"]["b_runs"] == 1   # +1 run
+    assert roll["days"][d_before]["sum"]["b_runs"] == 1 and roll["days"][d_after]["sum"]["b_runs"] == 0   # not +1 run
+
+
+def _crossing_rows(mid):
+    """Two sessions, each: control calls, a served run that starts before ``mid``, a next call AFTER ``mid``
+    that re-writes the cache. Per-day slices lost that toll (D-627)."""
+    def fwd(ts, sid, write=0, read=40_000):
+        u = {"cache_read_input_tokens": read}
+        if write:
+            u.update(cache_creation_input_tokens=write,
+                     cache_creation={"ephemeral_1h_input_tokens": write, "ephemeral_5m_input_tokens": 0})
+        return {"ts": ts, "session_id": sid, "decision": "forwarded", "requested_model": "claude-sonnet-5", "usage": u}
+
+    def served(ts, sid):
+        return {"ts": ts, "session_id": sid, "decision": "served", "step_class": "continuation",
+                "requested_model": "claude-sonnet-5", "backend_usage": {"output_tokens": 200}}
+    rows = []
+    for sid, off in (("a", 0), ("b", 600)):
+        for k in range(7):                                       # 7 control calls (write 1000) on both sides of mid
+            rows.append(fwd(mid - 7200 - off + k * 60, sid, write=1000))
+        rows += [served(mid - 60 - off, sid), served(mid - 50 - off, sid)]
+        rows.append(fwd(mid + 120 + off, sid, write=30_000))   # the next call is on the NEXT day
+        for k in range(7):
+            rows.append(fwd(mid + 3600 + off + k * 60, sid, write=1000))
+    return sorted(rows, key=lambda r: r["ts"])
+
+
+def test_per_day_b_sums_to_the_whole_window_estimator_across_midnight(env):
+    mid = sr.midnight(_day_ts(1, 12))
+    rows = _crossing_rows(mid)
+    with open(env["ledger"], "w", encoding="utf-8") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in rows)
+    whole = sr.summarize(rows)
+    assert whole["b_runs"] == 2
+    _build(env)
+    roll = sr.load(env["rollup"])
+    assert roll["v"] == sr.SCHEMA == 5
+    days = [sr.day_of(mid - 5), sr.day_of(mid + 5)]
+    assert sum(roll["days"][d]["sum"]["b_runs"] for d in days) == whole["b_runs"]
+    assert abs(sum(roll["days"][d]["sum"]["b_net"] for d in days) - whole["b_net"]) < 1e-9
+    # the old per-day slice (no neighbour context) loses the toll: it differs from the whole window
+    d0 = [r for r in rows if r["ts"] < mid]
+    assert abs(sr.summarize(d0)["b_net"] - roll["days"][days[0]]["sum"]["b_net"]) > 1e-6
+    # proxy_parts over the two full days reads the same numbers
+    b = lv.Bounds("x", "x", sr.day_start(days[0]), sr.day_start(sr.next_day(days[1])))
+    got = sr.proxy_parts(b, ledger=env["ledger"], rollup=env["rollup"], db_path=env["db"])
+    assert got["available"] and abs(got["b_net"] - whole["b_net"]) < 1e-9
+
+
+def test_baseline_is_the_three_day_context_not_the_slice(env):
+    """The rule: a day's baselines come from the rows of the day before, the day and the day after."""
+    mid = sr.midnight(_day_ts(1, 12))
+    rows = _crossing_rows(mid)
+    day_rows = [r for r in rows if r["ts"] < mid]
+    after = [r for r in rows if r["ts"] >= mid]
+    own = sr.summarize(day_rows)                                   # no context: 7 control calls per session
+    ctx = sr.summarize(day_rows, after=after)
+    assert ctx["b_runs"] == own["b_runs"] == 2
+    assert ctx["b_net"] < own["b_net"]                             # the toll of the next-day call is charged
+
+
+def test_a_row_in_a_neighbour_day_marks_the_day_stale_and_a_refresh_rebuilds_it(env):
+    mid = sr.midnight(_day_ts(1, 12))
+    rows = _crossing_rows(mid)
+    with open(env["ledger"], "w", encoding="utf-8") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in rows)
+    _build(env)
+    d0 = sr.day_of(mid - 5)
+    late = dict(rows[-1], ts=mid + 300, session_id="a")            # one more Claude row near midnight, a call of "a"
+    late["usage"] = {"cache_read_input_tokens": 1, "cache_creation_input_tokens": 9_000,
+                     "cache_creation": {"ephemeral_1h_input_tokens": 9_000, "ephemeral_5m_input_tokens": 0}}
+    with open(env["ledger"], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(late) + "\n")
+    _build(env)
+    roll = sr.load(env["rollup"])
+    assert "stale" not in roll["days"][d0] and roll["days"][d0]["sum"] is not None
+    whole = sr.summarize(rows + [late])
+    d1 = sr.day_of(mid + 5)
+    assert abs(sum(roll["days"][d]["sum"]["b_net"] for d in (d0, d1)) - whole["b_net"]) < 1e-9
 
 
 # ── (a) combined = A + B + C, each with its n ────────────────────────────────────────────────────
@@ -525,3 +603,36 @@ def test_savings_history_lists_every_source_with_start_n_and_excluded(env, monke
     for needle in ("== today ==", "== 7d ==", "== 30d ==", "== since earliest row ==", "A hook/MCP/delegation",
                    "B proxy local-served", "C proxy tier rewrite", "unpriced/excluded:", "first row:", "combined"):
         assert needle in text, needle
+
+
+def test_a_stale_day_without_offsets_does_not_wedge_the_refresher(env):
+    """69c6a031: a stale day at the KEEP_OFFS_DAYS edge lost its offsets and the next refresh hit rows_at(None)."""
+    _ledger(env["ledger"], days=(6, 5, 4, 3, 2, 1, 0), per_day=1)
+    _build(env)
+    roll = sr.load(env["rollup"])
+    old = sorted(roll["days"])[1]
+    roll["days"][old]["offs"] = None
+    roll["days"][old]["stale"] = True
+    sr._write(roll, env["rollup"])
+    r = _build(env)                                   # must not raise TypeError
+    assert r["caught_up"] and "stale" not in sr.load(env["rollup"])["days"][old]
+
+
+def test_only_a_claude_row_near_the_shared_midnight_rebuilds_the_neighbour(env):
+    mid = sr.midnight(_day_ts(1, 12))
+    rows = _crossing_rows(mid)
+    with open(env["ledger"], "w", encoding="utf-8") as fh:
+        fh.writelines(json.dumps(r) + "\n" for r in rows)
+    _build(env)
+
+    def add(row):
+        with open(env["ledger"], "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+    base = {"session_id": "a", "decision": "forwarded", "requested_model": "claude-sonnet-5",
+            "usage": {"cache_read_input_tokens": 1}}
+    add(dict(base, ts=mid + 12 * 3600))                              # deep in the day: only its own day is rebuilt
+    assert _build(env)["built"] == 1
+    add(dict(base, ts=mid + 120, decision="served", backend_usage={"output_tokens": 1}))   # not a Claude call
+    assert _build(env)["built"] == 1
+    add(dict(base, ts=mid + 130))                                    # a Claude call 130 s after midnight: day before too
+    assert _build(env)["built"] == 2

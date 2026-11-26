@@ -542,16 +542,22 @@ def _write_baselines(rows: list[dict]) -> tuple[dict[str, float], float | None]:
     return per_session, (sum(all_writes) / len(all_writes) if all_writes else None)
 
 
-def _net_avoided_detail(rows: list[dict]) -> dict:
+def _net_avoided_detail(rows: list[dict], only: "set[int] | None" = None) -> dict:
     """The work of :func:`_net_avoided`, with the exclusion counts. Keys: ``total``, ``n``,
     ``excluded_unknown_usage`` (runs whose next real call has usage recorded as null: excluded,
     never guessed), ``excluded_no_baseline`` (runs whose next call wrote cache but no control
     call exists in the window to price an ordinary write: excluded, never guessed),
-    ``fallback_baseline_runs`` (counted runs priced with the window-wide baseline)."""
+    ``fallback_baseline_runs`` (counted runs priced with the window-wide baseline).
+
+    ``only``: ``id()`` of rows; when given, only runs whose FIRST row is one of them are priced
+    (the baselines still come from all ``rows``). The savings rollup uses it to give a run, and the
+    toll of its next call, to the day the run starts in (D-627)."""
     per_session, window_mean = _write_baselines(rows)
     total = 0.0
     n = excl_unknown = excl_nobase = fallback = 0
     for run, prefix, nxt in _served_runs(rows):
+        if only is not None and id(run[0]) not in only:
+            continue
         prefix_u = normalize_usage(prefix.get("usage")) if prefix is not None else None
         prefix_ctx = (prefix_u["cache_read_input_tokens"] + prefix_u["cache_creation_input_tokens"]
                       if prefix_u is not None else 0)
