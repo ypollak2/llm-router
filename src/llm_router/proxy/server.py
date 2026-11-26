@@ -641,8 +641,25 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     def parent_main_of(body: dict) -> bool | None:
         return thread_main.get(thread_parent(body)) if is_thread_continue(body) else None
 
+    # D-626: was the PREVIOUS Claude call of this session a tier rewrite? One bool per session on the next
+    # row, so rewritten and non-rewritten steps can be compared by what follows them. Bounded; a miss
+    # (restart, first call) leaves the field null, never False.
+    last_rewritten: OrderedDict[str, bool] = OrderedDict()
+
+    def remember_rewrite(row: dict) -> None:
+        sid = row.get("session_id")
+        if row.get("event") or not isinstance(sid, str) or row.get("decision") not in (
+                ledger.DECISION_FORWARDED, ledger.DECISION_FALLBACK) or not row.get("tier_reason"):
+            return
+        row["prev_tier_rewritten"] = last_rewritten.get(sid)
+        last_rewritten[sid] = (row.get("served_model") or row.get("requested_model")) != row.get("requested_model")
+        last_rewritten.move_to_end(sid)
+        while len(last_rewritten) > _THREAD_MAIN_MAX:
+            last_rewritten.popitem(last=False)
+
     def write(row: dict) -> None:
         remember_thread(row)
+        remember_rewrite(row)
         # Event rows (lifecycle, health, alarms) must not get cost fields:
         # annotate() sets served_by="anthropic" when decision != "served",
         # which makes readers count them as Claude calls.

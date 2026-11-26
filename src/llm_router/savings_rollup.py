@@ -37,9 +37,16 @@ from pathlib import Path
 from llm_router import paths
 
 ROLLUP_NAME = "savings_rollup.json"
-SCHEMA = 3
+SCHEMA = 4   # 4: per-part C sums (rewrites gross / negative / pairs / other / unpriced split), D-626
 _ZERO = {"b_net": 0.0, "b_runs": 0, "b_steps": 0, "b_unpriced": 0,
-         "c_usd": 0.0, "c_rewritten": 0, "c_unpriced": 0, "dropped": 0, "rows": 0}
+         "c_usd": 0.0, "c_rewritten": 0,
+         "c_unpriced": 0,                  # REWRITTEN rows with no price (usage unknown, or a model not in pricing.py)
+         "c_unpriced_usage_unknown": 0,    # tier rows that are NOT rewrites, usage null: counted apart, never hidden
+         "c_unpriced_unknown_model": 0,    # tier rows that are NOT rewrites, model not in the price table
+         "c_rw_priced": 0, "c_rw_usd": 0.0, "c_rw_neg_n": 0, "c_rw_neg_usd": 0.0,
+         "c_other_n": 0, "c_other_usd": 0.0,
+         "dropped": 0, "rows": 0}
+_PAIRS = "c_pairs"   # {"from>to": [n, usd]}: a dict, merged key by key (not in _ZERO: it must not be shared)
 
 
 def rollup_path(path=None) -> Path:
@@ -101,17 +108,31 @@ def summarize(rows: list[dict], drop_trace: "set[str] | frozenset" = frozenset()
     out["b_runs"] = priced
     out["b_steps"] = sum(len(run) for run, _p, _n in runs)
     out["b_unpriced"] = len(runs) - priced
+    out[_PAIRS] = {}
     ts = L.tier_stats(kept)
     if ts:
         out["c_usd"] = ts["est_saving_usd"]
         out["c_rewritten"] = ts["rewritten"]
-        out["c_unpriced"] = ts["calls"] - ts["priced_n"]
+        # D-626: c_unpriced is the REWRITTEN rows without a price. It used to be ``calls - priced_n`` (every
+        # tier-decided row), which showed 627 on 30 d when 3 rewrites were unpriced (diag 2026-11-26).
+        out["c_unpriced"] = ts["rewritten_unpriced"]
+        out["c_unpriced_usage_unknown"] = ts["nonrewrite_unpriced_usage_unknown"]
+        out["c_unpriced_unknown_model"] = ts["nonrewrite_unpriced_unknown_model"]
+        out["c_rw_priced"], out["c_rw_usd"] = ts["rewrites_priced_n"], ts["rewrites_gross_usd"]
+        out["c_rw_neg_n"], out["c_rw_neg_usd"] = ts["rewrites_negative_n"], ts["rewrites_negative_usd"]
+        out["c_other_n"], out["c_other_usd"] = ts["nonrewrite_priced_n"], ts["nonrewrite_usd"]
+        out[_PAIRS] = {f"{f}>{t}": [n, usd] for f, t, n, usd in ts["rewrite_pairs"]}
     return out
 
 
 def _add(total: dict, part: dict) -> None:
     for k in _ZERO:
         total[k] = total.get(k, 0) + part.get(k, 0)
+    pairs = total.setdefault(_PAIRS, {})
+    for k, (n, usd) in (part.get(_PAIRS) or {}).items():
+        cur = pairs.setdefault(k, [0, 0.0])
+        cur[0] += n
+        cur[1] = round(cur[1] + usd, 6)
 
 
 # ── the rollup file ───────────────────────────────────────────────────────────
@@ -330,6 +351,7 @@ def proxy_parts(bounds, *, ledger=None, rollup=None, db_path=None) -> dict:
     Reads the summaries of closed days, the rows of today (by recorded offsets) and the unindexed tail
     after ``offset``; never scans the ledger."""
     out: dict = dict(_ZERO)
+    out[_PAIRS] = {}
     out.update(available=True, na_reason=None, first_day=None, late_old_rows=0)
     if bounds.session_id is not None:
         out.update(available=False, na_reason="session scope")
