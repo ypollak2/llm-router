@@ -295,7 +295,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # Claude call inside the prompt cache's ~20-block lookback (proxy/loop_guard.py BlockCap).
     "LLM_ROUTER_LOCAL_MAX_BLOCKS": ("llm_router", "proxy/loop_guard.py", 1),
     # Main-thread cap on consecutive local steps before a hand-back to Claude (suggested 5, off when unset/0;
-    # proxy/loop_guard.py local_main_max_steps). Sub-agent threads keep the loop guard cap.
+    # proxy/loop_guard.py local_main_max_steps). Sub-agent threads keep the loop guard cap. Caveat: the legacy
+    # guard's streak is keyed by session id and may include sub-agent steps; the PINFIX guard is per conversation.
     "LLM_ROUTER_LOCAL_MAIN_MAX_STEPS": ("llm_router", "proxy/loop_guard.py", 1),
     # Local-serving alarm (proxy/local_alarm.py), default off; population label for bench proxies (proxy/obs_fields.py).
     "LLM_ROUTER_LOCAL_ALARM": ("llm_router", "proxy/local_alarm.py", 1),

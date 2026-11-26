@@ -85,3 +85,14 @@ def test_parse(monkeypatch, raw, want):
     else:
         monkeypatch.setenv("LLM_ROUTER_LOCAL_MAIN_MAX_STEPS", raw)
     assert loop_guard.local_main_max_steps() == want
+
+
+async def test_pinfix_treatment_branch_hands_back_after_5_without_a_pin(env, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_PINFIX", "on")  # the live proxy runs PINFIX=on: per-conversation guard, treatment branch
+    backend, app = _app(env, monkeypatch, 5)
+    await _drive(app, 8, _first_call())
+    rows = env.rows()
+    assert [r["decision"] for r in rows[:5]] == ["served"] * 5
+    assert (rows[5]["decision"], rows[5]["reason"]) == ("fallback", "main_step_cap")
+    assert rows[5]["pin_skipped"] == "main_step_cap" and "pin_change" not in rows[5]["local_mode"]
+    assert rows[6]["decision"] == "served" and len(backend.calls) == 7
