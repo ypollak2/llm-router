@@ -17,7 +17,16 @@ changes, the ledger is smaller than when last read, or its first row's ts differ
 A window's proxy part is read from the summaries of its closed days plus the day rows of today and
 of any day with rows after ``offset``; until the pass has caught up and every needed closed day has a
 summary it is unavailable and prints ``n/a`` (never a partial sum as a total). A served run spanning
-midnight is split across the two days (each day is summarised from its own rows), +/- one run.
+midnight is attributed to the day it STARTS in, with the toll of its next Claude call even when that call is
+on the next day (D-627): a day's B is computed over the rows of the day before, the day and the day after,
+keeping the runs that start in the day. Baselines (the mean cache write of control calls, see
+``proxy.ledger._write_baselines``) therefore come from that three-day context, not from the whole window:
+a session with < 5 control calls in 3 days uses the 3-day mean of all sessions, where the whole-window estimator
+uses the window mean. That is the remaining difference between the per-day sum and one pass over the window.
+The render path (``proxy_parts``) reads no neighbour day: today, a partial day and a day without a stored sum
+are summarised from their own rows (a run is priced with no prefix from the day before).
+A day's summary depends on its neighbours, so a row landing in day X marks X-1 and X+1 ``stale`` (kept in use,
+rebuilt by the next refresh).
 A served row arriving for a day older than KEEP_OFFS_DAYS is priced as its own run: +/- about one run's net per
 such row (measured 2026-11-25: |error| <= $0.05 per row on 5 samples; 306 of 116k rows arrived > 300 s late).
 ``late_old_rows`` in the rollup counts the served rows applied that way.
@@ -37,7 +46,7 @@ from pathlib import Path
 from llm_router import paths
 
 ROLLUP_NAME = "savings_rollup.json"
-SCHEMA = 4   # 4: per-part C sums (rewrites gross / negative / pairs / other / unpriced split), D-626
+SCHEMA = 5   # 5: B per start day with day-neighbour context (D-627); 4: per-part C sums, D-626
 _ZERO = {"b_net": 0.0, "b_runs": 0, "b_steps": 0, "b_unpriced": 0,
          "c_usd": 0.0, "c_rewritten": 0,
          "c_unpriced": 0,                  # REWRITTEN rows with no price (usage unknown, or a model not in pricing.py)
@@ -87,23 +96,36 @@ def days_between(first: str, last: str) -> list[str]:
 
 # ── one slice of rows -> numbers ──────────────────────────────────────────────
 
-def summarize(rows: list[dict], drop_trace: "set[str] | frozenset" = frozenset()) -> dict:
+def summarize(rows: list[dict], drop_trace: "set[str] | frozenset" = frozenset(),
+              before: list[dict] = (), after: list[dict] = ()) -> dict:
     """The proxy figures of ``rows`` (one window slice), through ``proxy.ledger`` only:
     ``_served_runs`` / ``_net_avoided`` (B) and ``tier_stats`` (C). A row whose ``trace_id`` is in
-    ``drop_trace`` is a call ``usage.db`` already counts: dropped first."""
+    ``drop_trace`` is a call ``usage.db`` already counts: dropped first. ``before`` / ``after`` are the rows
+    of the neighbouring days (context only): B prices the runs that START in ``rows``, with prefix, next call
+    and baselines read over ``before + rows + after``; the C part and the counts use ``rows`` alone."""
     from llm_router.proxy import ledger as L
 
     from llm_router import ledger_view as lv
 
     # executed calls only (the same rows ``ledger_view.executed_rows`` counts): a refused ``local:`` prefix and
     # an upstream HTTP error are not calls anyone made, so they are neither a served step nor a prefix.
-    kept = [r for r in rows if lv._proxy_label(r) is not None
-            and not (r.get("trace_id") and r["trace_id"] in drop_trace)]
+    def _keep(rs):
+        return [r for r in rs if lv._proxy_label(r) is not None
+                and not (r.get("trace_id") and r["trace_id"] in drop_trace)]
+
+    kept = _keep(rows)
     out = dict(_ZERO)
     out["rows"] = len(kept)
     out["dropped"] = sum(1 for r in rows if r.get("trace_id") and r["trace_id"] in drop_trace)
-    runs = L._served_runs(kept)
-    net, priced = L._net_avoided(kept)
+    if before or after:
+        own = {id(r) for r in kept}
+        ctx = _keep(before) + kept + _keep(after)
+        runs = [t for t in L._served_runs(ctx) if id(t[0][0]) in own]
+        d = L._net_avoided_detail(ctx, only=own)
+    else:
+        runs = L._served_runs(kept)
+        d = L._net_avoided_detail(kept)
+    net, priced = d["total"], d["n"]
     out["b_net"] = round(net, 6)
     out["b_runs"] = priced
     out["b_steps"] = sum(len(run) for run, _p, _n in runs)
@@ -276,6 +298,18 @@ def _drop(day: str, db_path, rows: list[dict]):
     return lv.a_trace_ids(lv.Bounds(day, day, day_start(day), day_start(next_day(day))), db_path=db_path)
 
 
+def _context(ledger, roll: dict, day: str, db_path):
+    """``((rows_before, drop_before), (rows_after, drop_after))``: the indexed rows of the days next to
+    ``day``. A neighbour without offsets (an old day, or none) gives no context. Refresher only: the
+    render path (``proxy_parts``) never reads a neighbour day."""
+    out = []
+    for nd in (day_of(day_start(day) - 1.0), next_day(day)):
+        rec = roll["days"].get(nd)
+        rows = rows_at(ledger, rec["offs"]) if rec is not None and rec["offs"] else []
+        out.append((rows, _drop(nd, db_path, rows)))
+    return out[0], out[1]
+
+
 def refresh(*, ledger=None, rollup=None, db_path=None, now: float | None = None,
             budget_s: float = 3.0, pass_lines: int | None = None) -> dict:
     """Advance the rollup within ``budget_s`` seconds: first the forward pass from ``offset`` (bucketing every
@@ -312,6 +346,10 @@ def refresh(*, ledger=None, rollup=None, db_path=None, now: float | None = None,
                 continue
             rec["offs"].append(off)
             rec["sum"] = None                      # a late row reopens its (closed) day
+            for nd in (day_of(day_start(d) - 1.0), next_day(d)):
+                nb = roll["days"].get(nd)          # its neighbours' B reads this row as context (D-627)
+                if nb is not None and nb["sum"] is not None and nb["offs"] is not None:
+                    nb["stale"] = True
         for d, rows in late.items():
             roll["late_old_rows"] = roll.get("late_old_rows", 0) + sum(1 for r in rows if r.get("decision") == "served")
             part = summarize(rows, _drop(d, db_path, rows))
@@ -323,13 +361,16 @@ def refresh(*, ledger=None, rollup=None, db_path=None, now: float | None = None,
                     head_len=head_len, head=head_hash(ledger, head_len),
                     first_day=day_of(ident["first_ts"]), written_at=now)
         today = day_of(now)
-        todo = sorted((d for d, r in roll["days"].items() if d < today and r["sum"] is None), reverse=True)
+        todo = sorted((d for d, r in roll["days"].items()
+                       if d < today and (r["sum"] is None or r.get("stale"))), reverse=True)
         built = 0
         for d in todo:
             if built and time.monotonic() - t0 > budget_s:
                 break
             rows = rows_at(ledger, roll["days"][d]["offs"])
-            roll["days"][d]["sum"] = summarize(rows, _drop(d, db_path, rows))
+            before, after = _context(ledger, roll, d, db_path)
+            roll["days"][d]["sum"] = summarize(rows, _drop(d, db_path, rows) | before[1] | after[1], before[0], after[0])
+            roll["days"][d].pop("stale", None)
             built += 1
         caught = ident["size"] - nxt <= 0
         if caught:                                 # never mid-pass: a day's later rows would then be "late" ones
@@ -397,7 +438,7 @@ def proxy_parts(bounds, *, ledger=None, rollup=None, db_path=None) -> dict:
             continue
         rows = (rows_at(ledger, rec["offs"]) if rec else []) + extra
         rows = [r for r in rows if (since is None or r["ts"] >= since) and r["ts"] <= until]
-        _add(out, summarize(rows, _drop(d, db_path, rows)))
+        _add(out, summarize(rows, _drop(d, db_path, rows)))   # no neighbour context: the render path reads today only
     if missing:
         out.update(available=False, na_reason=f"rollup building ({missing} d)")
     return out
