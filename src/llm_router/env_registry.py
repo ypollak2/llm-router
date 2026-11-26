@@ -616,6 +616,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_CP_ED25519_PRIVATE_KEY": ("provider_credential", "control_plane/signing.py", 1),
     "LLM_ROUTER_CP_SIDECAR_TOKEN": ("provider_credential", "control_plane/api.py", 1),
     "LLM_ROUTER_ESCALATE_MIN_PROMPT_TOKENS": ("provider_credential", "router.py", 1),
+    "LLM_ROUTER_HANDOVER_TOKENS": ("provider_credential", "hooks/status-bar.py", 1),  # a token COUNT; filed here because the name matches _TOKEN (same as ESCALATE_MIN_PROMPT_TOKENS)
     "LLM_ROUTER_HF_TOKENIZERS": ("provider_credential", "token_budget.py", 1),
     "LLM_ROUTER_PROJECT_ID": ("provider_credential", "session_store.py", 1),
     "LLM_ROUTER_PROJECT_ALLOWLIST": ("llm_router", "gateway.py", 1),
