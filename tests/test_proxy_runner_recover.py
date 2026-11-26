@@ -164,7 +164,7 @@ async def test_no_model_or_ctx_skips_before_kill(pidfile, model, ctx):
 async def test_build_app_crash_signature_trip_runs_recover_action(tmp_path, monkeypatch, pidfile):
     """build_app -> a Compute-error reply trips the breaker -> the recover action runs once (fakes)."""
     from llm_router.proxy import server as ps
-    from tests.test_proxy import _post, _req, _rows
+    from tests.test_proxy import _post, _req
     from tests.test_proxy_backend_health import _app
 
     f = Fake()
