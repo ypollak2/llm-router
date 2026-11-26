@@ -333,15 +333,21 @@ ENGINE_FIELD_DEFAULTS = {"cls_layer": None, "cls_confidence": None, "cls_reason"
 
 def write_row(row: dict, path: Path | None = None) -> None:
     target = path or ledger_path()
-    for k, v in ENGINE_FIELD_DEFAULTS.items():
-        if row.get(k) is None:
-            row[k] = v
-    # W0-1: the proxy ledger stamps inventory_sig HERE, at write time, not at decision time; the
-    # signature is keyed on the map token so it lags the decision only if the map changed in between.
-    if row.get("inventory_sig") is None:
-        from llm_router import decision_stamp
+    # Event rows (lifecycle, health, alarms) must not get ENGINE_FIELD_DEFAULTS:
+    # cls_layer/policy fields are only meaningful for decision rows; inventory_sig
+    # is a routing-decision stamp. Without this guard, event rows get
+    # served_by=anthropic (via annotate) + ENGINE_FIELD_DEFAULTS, making them look
+    # like Claude calls to readers that count by served_by.
+    if not row.get("event"):
+        for k, v in ENGINE_FIELD_DEFAULTS.items():
+            if row.get(k) is None:
+                row[k] = v
+        # W0-1: the proxy ledger stamps inventory_sig HERE, at write time, not at decision time; the
+        # signature is keyed on the map token so it lags the decision only if the map changed in between.
+        if row.get("inventory_sig") is None:
+            from llm_router import decision_stamp
 
-        row["inventory_sig"] = decision_stamp.inventory_sig()
+            row["inventory_sig"] = decision_stamp.inventory_sig()
     try:
         state_files.private_dir(target.parent)
         with state_files.open_private(target, "a", encoding="utf-8") as fh:
@@ -354,8 +360,13 @@ def write_row(row: dict, path: Path | None = None) -> None:
 
 def read_rows(path: Path | None = None, days: float | None = None, *,
               slim_before: float | None = None,
-              slim_keep: Iterable[str] = ()) -> list[dict]:
+              slim_keep: Iterable[str] = (), include_events: bool = False) -> list[dict]:
     """The ledger rows, read one line at a time (never the whole file as one string).
+
+    A lifecycle row (truthy ``event``, e.g. ``backend_recycle``) is not a call, so it is dropped unless
+    ``include_events``. Ledgers written before this fix hold such rows with ``served_by="anthropic"``;
+    dropping them here, once, keeps every counting reader (``stats``, ``proxy_session_cost``, the
+    receipt, the liveness checks) from counting them as Claude calls. No production reader needs them.
 
     ``days`` drops rows older than the window. ``slim_before`` keeps every row but reduces one whose
     numeric ``ts`` is older than it to the keys in ``slim_keep`` (value copied, key present only when
@@ -376,6 +387,8 @@ def read_rows(path: Path | None = None, days: float | None = None, *,
             except ValueError:
                 continue
             if not isinstance(row, dict):
+                continue
+            if row.get("event") and not include_events:
                 continue
             ts = row.get("ts")
             # A row without a timestamp cannot be placed in a window: it is kept

@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Lifecycle rows (``event`` key such as ``backend_recycle``) in the proxy ledger no longer carry ``served_by`` cost fields: ``server.write`` skips ``cost_accounting.annotate`` for event rows, ``ledger.write_row`` skips ``ENGINE_FIELD_DEFAULTS`` and ``inventory_sig`` for event rows, and ``ledger.read_rows`` drops them by default so no counting reader (``stats``, ``proxy_session_cost``, the receipt, liveness checks, ``northstar``) counts them as Claude calls. Old-format event rows that already have ``served_by="anthropic"`` are filtered in ``read_rows`` (``include_events=False``). n=6 live event rows, all 2026-11-25, home proxy_calls.jsonl.
+
 ## [16.0.1] - 2026-11-16
 
 ### Added
