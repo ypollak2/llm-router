@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -40,6 +41,15 @@ from llm_router.proxy.steps import non_system
 
 DEFAULT_COLD_GAP_S = 3600.0
 _MAX_CONVERSATIONS = 4096
+
+
+def cold_cache_only() -> bool:
+    """``LLM_ROUTER_TIER_COLD_CACHE_ONLY`` (default off): a tier rewrite of a PINNED model to a cheaper
+    tier (the D-31 arm, Opus -> Haiku) runs only when the requested model's prompt cache for the
+    conversation is cold; a warm cache keeps the requested model (reason ``tier_skip_warm_cache``).
+    Why: the rewrite writes the whole prefix again on the target model (owner D-643; 69 Opus->Haiku
+    rewrites, 30 d to 2026-11-26, 39 lose -$6.16, 29 win +$1.77, ledger tier_stats)."""
+    return os.environ.get("LLM_ROUTER_TIER_COLD_CACHE_ONLY", "").strip().lower() in ("1", "on", "true", "yes")
 
 
 def _without_cache_control(node):
@@ -112,6 +122,12 @@ class ReadOnlyStickiness:
     def record_usage(self, *args, **kwargs) -> None:
         return None
 
+    def note_served(self, *args, **kwargs) -> None:
+        return None
+
+    def served_warm(self, *args, **kwargs):
+        return self._inner.served_warm(*args, **kwargs)
+
 
 class Stickiness:
     """Per-conversation memory of the last model served. Thread-safe; bounded."""
@@ -121,6 +137,29 @@ class Stickiness:
         self._clock = clock
         self._lock = threading.Lock()
         self._state: dict[str, ConvState] = {}
+        # key -> (model, ts) of the last call actually SERVED on that model, written for pinned
+        # conversations (which have no ConvState) so the cold-cache gate can read cache age.
+        self._served: dict[str, tuple[str, float]] = {}
+
+    def note_served(self, key: str, model: str | None) -> None:
+        """Remember that ``model`` served a call of conversation ``key`` now (it re-armed that
+        model's cache for the conversation, 1-hour TTL, refreshed on every read)."""
+        if not model:
+            return
+        with self._lock:
+            if len(self._served) >= _MAX_CONVERSATIONS and key not in self._served:
+                del self._served[min(self._served, key=lambda k: self._served[k][1])]
+            self._served[key] = (model, self._clock())
+
+    def served_warm(self, key: str, model: str | None, unseen_warm: bool) -> bool:
+        """Is ``model``'s cache for conversation ``key`` warm: its last served call was less than
+        ``cold_gap_s`` ago. A conversation not seen (proxy restart, or the model was not the last
+        one serving it) is ``unseen_warm`` (a mid-conversation call, as ``tiers`` treats UNSEEN)."""
+        with self._lock:
+            seen = self._served.get(key)
+        if seen is None or seen[0] != model:
+            return unseen_warm
+        return self._clock() - seen[1] < self.cold_gap_s
 
     def get(self, key: str) -> ConvState | None:
         with self._lock:
