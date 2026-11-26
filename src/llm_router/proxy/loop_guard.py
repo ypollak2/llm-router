@@ -53,6 +53,9 @@ REASON_LOOP_GUARD = "loop_guard"
 # Hand-off to Claude because a further local step would push the content blocks added since the last Claude
 # call past LLM_ROUTER_LOCAL_MAX_BLOCKS (see BlockCap). Not a failure: it never pins the session to Claude.
 REASON_CACHE_BLOCK_CAP = "cache_block_cap"
+# Hand-off to Claude because a MAIN-thread local run reached LLM_ROUTER_LOCAL_MAIN_MAX_STEPS consecutive local
+# steps (see local_main_max_steps). Not a failure: it never pins the session to Claude.
+REASON_MAIN_STEP_CAP = "main_step_cap"
 # Which trigger tripped; the proxy reads this structured value (row["loop_guard_trigger"]), never the detail string.
 TRIGGER_CAP = "cap"
 TRIGGER_REPEAT = "repeat"
@@ -141,6 +144,11 @@ class LoopGuard:
             return f"consecutive_served_exceeded:{n}"
         return None
 
+    def served_count(self, session_id: str | None) -> int:
+        """Consecutive local steps served in this session's current streak (0 when none)."""
+        st = self._sessions.get(session_id) if session_id else None
+        return st.consecutive_served if st is not None else 0
+
     def repeat_hit(self, session_id: str | None, message: dict) -> tuple[str, str] | None:
         """``(tool name, sha256[:10] of the repeated signature)`` when this served
         candidate repeats a recent one, else ``None``. The hash makes a repeat
@@ -219,6 +227,21 @@ def local_max_blocks() -> int:
     cache-write tokens on 39 post-local Claude rows were redundant). Suggested value 14; not defaulted."""
     try:
         raw = os.environ.get("LLM_ROUTER_LOCAL_MAX_BLOCKS")
+        if raw is None or not str(raw).strip():
+            return 0
+        return max(0, int(raw.strip()))
+    except ValueError:
+        return 0
+
+
+def local_main_max_steps() -> int:
+    """LLM_ROUTER_LOCAL_MAIN_MAX_STEPS: integer, unset/0/garbage = off (today's behaviour). On the MAIN thread a
+    local run is handed back to Claude after this many consecutive local steps (the effective cap is
+    min(loop guard cap, N)); sub-agent threads keep the loop guard cap. D-640: coord/design/
+    RESEARCH-FABLE-GAPS-QUALITY-20261126.md section C, returns to Claude after 6-8 local steps missed the prompt
+    cache 8 of 8 while runs of 5 or fewer hit 15 of 23. Suggested value 5; not defaulted."""
+    try:
+        raw = os.environ.get("LLM_ROUTER_LOCAL_MAIN_MAX_STEPS")
         if raw is None or not str(raw).strip():
             return 0
         return max(0, int(raw.strip()))

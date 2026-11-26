@@ -96,8 +96,10 @@ from llm_router.proxy.loop_guard import (
     DEFAULT_REPEAT_WINDOW,
     REASON_CACHE_BLOCK_CAP,
     REASON_LOOP_GUARD,
+    REASON_MAIN_STEP_CAP,
     BlockCap,
     incoming_blocks,
+    local_main_max_steps,
     local_max_blocks,
     TRIGGER_CAP,
     TRIGGER_REPEAT,
@@ -797,6 +799,16 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                        detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3),
                        loop_guard_trigger=trigger)
             return None
+        main_cap = local_main_max_steps()
+        if main_cap > 0 and row.get("is_main_thread") is True and guard.served_count(guard_key) >= main_cap:
+            # D-640: a main-thread local run ends at N steps so the return to Claude stays inside the prompt
+            # cache; the guard streak ends with the Claude step, and the hand-off never pins (see below).
+            n_run = guard.served_count(guard_key)
+            guard.reset(guard_key)
+            row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_MAIN_STEP_CAP,
+                       detail=f"main_step_cap:{n_run}", main_step_cap=n_run,
+                       added_latency_s=round(time.monotonic() - t0, 3))
+            return None
         blocks_in = row.get("_blocks_in")
         blocks_pending = block_cap.would_reach(row.get("_blocks_key"), blocks_in if blocks_in is not None else 0, local_max_blocks())
         if blocks_pending is not None:
@@ -1452,6 +1464,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 cause = lm.pinfix_outcome(key, True) if failed else None
                 if row.get("reason") == REASON_CACHE_BLOCK_CAP:
                     row["pin_skipped"] = "cache_block_cap"  # same ledger field as the control arm
+                elif row.get("reason") == REASON_MAIN_STEP_CAP:
+                    row["pin_skipped"] = "main_step_cap"
                 if cause is not None:
                     lm.set_pin(key, local_mode.PIN_CLAUDE, local_mode.REASON_PINNED_STICKY)
                     row["local_mode"]["pin_change"] = "local->claude"
@@ -1459,6 +1473,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                         row["local_mode"]["pinfix_cause"] = cause
             elif row.get("reason") == REASON_CACHE_BLOCK_CAP:
                 row["pin_skipped"] = "cache_block_cap"  # a hand-off for the prompt cache, not a local failure
+            elif row.get("reason") == REASON_MAIN_STEP_CAP:
+                row["pin_skipped"] = "main_step_cap"  # D-640 hand-off, not a local failure
             elif (loop_guard_cap_no_pin_on() and row.get("reason") == REASON_LOOP_GUARD
                     and row.get("loop_guard_trigger") == TRIGGER_CAP):
                 row["pin_skipped"] = "loop_guard_cap"
