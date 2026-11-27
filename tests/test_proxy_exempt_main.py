@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from llm_router.proxy import local_mode, steps
+from llm_router.proxy.cache_cost import conversation_key
 from tests.test_proxy_local_exempt_policy import _body  # noqa: F401
 from tests.test_proxy_local_with_tiers import (  # noqa: F401  (autouse fixtures and helpers)
     SID, clean_overrides, write_overrides,
@@ -132,3 +133,38 @@ def test_the_banner_names_the_policy(monkeypatch, tmp_path):
     monkeypatch.setenv(ENV, "main")
     text = "\n".join(local_mode.banner_lines(model="m", num_ctx=4096, kill_path=tmp_path / "k", killed=False))
     assert "exempt policy (LLM_ROUTER_LOCAL_EXEMPT): main" in text and "invalid value" not in text
+
+
+# Review S2 (coord/design/REVIEW-EXEMPT-MAIN-20261127.md): a main-thread refusal pins only the main thread's key.
+def _pin_msg(body, text):
+    body = dict(body)
+    body["messages"] = [{"role": "user", "content": text}]
+    return body
+
+
+def _pin_run(monkeypatch, main_text, sub_text):
+    monkeypatch.setenv(ENV, "main")
+    lm = local_mode.LocalModeState()
+    sid = "S"
+    main, sub = _pin_msg(_body("organic"), main_text), _pin_msg(_body("subagent"), sub_text)
+    km, ks = conversation_key(main, sid), conversation_key(sub, sid)
+    ex_m, _ = local_mode.exempt_reason(main, sid)
+    assert ex_m == NEW
+    dm = local_mode.decide_local(main, local_mode.LocalSession(key=km, pinned=lm.pin_of(km), exempt=ex_m))
+    assert not dm.local
+    lm.set_pin(km, local_mode.PIN_CLAUDE, None)   # what server.py does on a first refusal
+    ex_s, _ = local_mode.exempt_reason(sub, sid)
+    assert ex_s is None
+    return km, ks, local_mode.decide_local(sub, local_mode.LocalSession(
+        key=ks, pinned=lm.pin_of(ks), exempt=ex_s, backend_healthy=True, breaker_closed=True,
+        pin_reason=lm.pin_reason_of(ks)))
+
+
+def test_distinct_first_messages_sub_agent_not_pinned(monkeypatch, overrides):
+    km, ks, d = _pin_run(monkeypatch, "fix the bug", "Brief: look at tests")
+    assert km != ks and d.reason != local_mode.REASON_PINNED_CLAUDE
+
+
+def test_identical_first_message_shares_pin(monkeypatch, overrides):   # documents the residual (fork sub-agent)
+    km, ks, d = _pin_run(monkeypatch, "same text", "same text")
+    assert km == ks and d.reason == local_mode.REASON_PINNED_CLAUDE
