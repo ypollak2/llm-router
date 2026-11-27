@@ -280,7 +280,7 @@ async def test_cooldown_and_mismatched_child_still_hold_for_wide_trigger(pidfile
     assert rec.start(emitted.append)["recycle"] == "skipped_ratelimit"
 
 
-async def _wiring_app(tmp_path, monkeypatch, pidfile, flag):
+async def _wiring_app(tmp_path, monkeypatch, pidfile, flag, with_log=True):
     """build_app with a runner that answers slow empty replies (a healthy probe), fake kill/reload."""
     from llm_router.proxy import backend_health as bh
     from llm_router.proxy import server as ps
@@ -295,7 +295,10 @@ async def _wiring_app(tmp_path, monkeypatch, pidfile, flag):
     monkeypatch.setenv("LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY", flag)
     log = tmp_path / "server.log"
     log.write_bytes(OOM * 3)                       # an old wedge, before the proxy started
-    monkeypatch.setenv("LLM_ROUTER_RUNNER_LOG", str(log))
+    if with_log:
+        monkeypatch.setenv("LLM_ROUTER_RUNNER_LOG", str(log))
+    else:
+        monkeypatch.delenv("LLM_ROUTER_RUNNER_LOG", raising=False)
     monkeypatch.setattr(bh, "EMPTY_BURST_MAX_ELAPSED_S", 0.0)   # every empty reply counts as slow: no empty_burst
 
     async def _choose(text, pinned, **_kw):
@@ -360,4 +363,31 @@ async def test_build_app_slow_empty_trip_flag_off_never_repairs(tmp_path, monkey
         fh.write(OOM)
     t1 = await _trip(app, tmp_path, 0)
     assert "recycle" not in t1 and f.killed == []
+    await app.state.recycler.aclose()
+
+
+async def test_build_app_flag_on_without_log_warns_and_never_repairs(tmp_path, monkeypatch, pidfile, capsys):
+    """Review D-650 fold S1: no runner log -> start-up warning on stderr, and a slow-empty trip kills nothing."""
+    app, f, log, clock = await _wiring_app(tmp_path, monkeypatch, pidfile, "1", with_log=False)
+    assert "LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY=1 has no effect" in capsys.readouterr().err
+    with open(log, "ab") as fh:
+        fh.write(OOM)
+    t1 = await _trip(app, tmp_path, 0)
+    assert "recycle" not in t1 and f.killed == []
+    await app.state.recycler.aclose()
+
+
+async def test_build_app_failed_repair_leaves_oom_lines_for_the_next_trip(tmp_path, monkeypatch, pidfile):
+    """Review D-650 fold S2: a repair that does not end ok does not spend the OOM lines."""
+    app, f, log, clock = await _wiring_app(tmp_path, monkeypatch, pidfile, "1")
+    f.reload_ok = False                                     # kill happens, reload fails -> result not ok
+    with open(log, "ab") as fh:
+        fh.write(OOM)
+    t1 = await _trip(app, tmp_path, 0)
+    assert t1["recycle"] == "started"
+    await asyncio.wait_for(app.state.recycler.task, 5)
+    assert len(f.killed) == 1
+    clock.t += 3600                                         # past cooldown and the repair limit; no new OOM line
+    t2 = await _trip(app, tmp_path, 1)
+    assert t2["recycle"] == "started"                       # the unspent OOM line still corroborates
     await app.state.recycler.aclose()
