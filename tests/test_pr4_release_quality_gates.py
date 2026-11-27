@@ -15,8 +15,24 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import urllib.request
+
+import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _no_real_ollama(monkeypatch, tmp_path):
+    """No test in this file may reach a real Ollama: quality_gate's read-only
+    peer check (`_peer_memory_conflict`) runs in every `main()` call, so every
+    HTTP call fails here unless a test stubs the gate's helpers itself."""
+    def _refuse(*_a, **_k):
+        raise OSError("network disabled in tests")
+    monkeypatch.setattr(urllib.request, "urlopen", _refuse)
+    monkeypatch.delenv("LLM_ROUTER_LOCAL_MODEL_URL", raising=False)
+    monkeypatch.delenv("QUALITY_GATE_PEER_OLLAMA_URLS", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "router-home"))  # never the real .env
 
 
 def _load(rel_path: str, name: str):
@@ -374,3 +390,115 @@ def test_quality_gate_genuine_wrong_answer_still_reports_regression(monkeypatch,
     assert rc != 0, out
     assert "quality regression" in out.lower()
     assert "NO ANSWER" not in out
+
+
+# ── quality_gate.py: second Ollama server, GPU memory (2026-11-27 Metal OOM) ──
+#
+# qwen3.6:35b-a3b-coding (22.4 GB) resident on the router's :11435 plus
+# qwen3-coder:30b (18.6 GB) loaded by this gate's probe on :11434 = 40.9 GB of
+# 51.5 GB RAM: Metal OOM, empty probe answer, :11435 wedged. The check must
+# refuse BEFORE the probe loads anything.
+
+GB = 1_000_000_000
+RAM_48 = 51_539_607_552  # sysctl hw.memsize on the 48 GB Mac
+
+
+def _fake_ollama(gate, monkeypatch, *, here_ps=(), peer_ps=(), target_size=18_556_700_761,
+                 ram=RAM_48, peers=("http://127.0.0.1:11435",)):
+    peer_set = set(peers)
+
+    def _get_json(url):
+        if url.endswith("/api/ps"):
+            if url.startswith(gate.OLLAMA_BASE_URL):
+                return {"models": [{"name": n} for n in here_ps]}
+            if any(url.startswith(p) for p in peer_set):
+                return {"models": [{"name": n, "size": s} for n, s in peer_ps]}
+        if url == f"{gate.OLLAMA_BASE_URL}/api/tags":
+            return {"models": [{"name": gate.TARGET_MODEL, "size": target_size}]}
+        return None
+    monkeypatch.setattr(gate, "_get_json", _get_json)
+    monkeypatch.setattr(gate, "_peer_ollama_urls", lambda: list(peers))
+    monkeypatch.setattr(gate, "_physical_memory_bytes", lambda: ram)
+
+
+def test_peer_memory_conflict_reproduces_the_20261127_oom(monkeypatch):
+    gate = _load("scripts/release/quality_gate.py", "_qg_peer_oom")
+    _fake_ollama(gate, monkeypatch, peer_ps=[("qwen3.6:35b-a3b-coding", 22_384_570_530)])
+    msg = gate._peer_memory_conflict()
+    assert msg is not None
+    assert "qwen3.6:35b-a3b-coding" in msg and "40.9 GB" in msg and "51.5 GB" in msg
+
+
+def test_peer_memory_conflict_fits_on_a_bigger_machine(monkeypatch):
+    gate = _load("scripts/release/quality_gate.py", "_qg_peer_fits")
+    _fake_ollama(gate, monkeypatch, peer_ps=[("qwen3.6:35b-a3b-coding", 22_384_570_530)],
+                 ram=128 * GB)
+    assert gate._peer_memory_conflict() is None
+
+
+def test_peer_memory_conflict_none_when_peer_is_empty_or_target_already_loaded(monkeypatch):
+    gate = _load("scripts/release/quality_gate.py", "_qg_peer_empty")
+    _fake_ollama(gate, monkeypatch, peer_ps=[])
+    assert gate._peer_memory_conflict() is None
+    _fake_ollama(gate, monkeypatch, peer_ps=[("qwen3.6:35b-a3b-coding", 22_384_570_530)],
+                 here_ps=[gate.TARGET_MODEL])
+    assert gate._peer_memory_conflict() is None
+
+
+def test_peer_memory_conflict_undecided_prints_a_note(monkeypatch, capsys):
+    gate = _load("scripts/release/quality_gate.py", "_qg_peer_undecided")
+    _fake_ollama(gate, monkeypatch, peer_ps=[("qwen3.6:35b-a3b-coding", 22_384_570_530)],
+                 target_size=0)
+    assert gate._peer_memory_conflict() is None
+    assert "GPU-memory check undecided" in capsys.readouterr().out
+
+
+def test_peer_memory_conflict_none_without_peers(monkeypatch):
+    gate = _load("scripts/release/quality_gate.py", "_qg_no_peers")
+    _fake_ollama(gate, monkeypatch, peers=(), peer_ps=[("x", 40 * GB)])
+    assert gate._peer_memory_conflict() is None
+
+
+def test_peer_urls_from_env_state_env_and_extra_list(monkeypatch, tmp_path):
+    gate = _load("scripts/release/quality_gate.py", "_qg_peer_urls")
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
+    assert gate._peer_ollama_urls() == []
+    (tmp_path / ".env").write_text("FOO=1\nLLM_ROUTER_LOCAL_MODEL_URL='http://127.0.0.1:11435/'\n")
+    assert gate._peer_ollama_urls() == ["http://127.0.0.1:11435"]
+    monkeypatch.setenv("LLM_ROUTER_LOCAL_MODEL_URL", "http://localhost:11436")
+    monkeypatch.setenv("QUALITY_GATE_PEER_OLLAMA_URLS",
+                       f"http://localhost:11437, {gate.OLLAMA_BASE_URL}, http://127.0.0.1:11434")
+    assert gate._peer_ollama_urls() == ["http://localhost:11436", "http://localhost:11437"]
+
+
+def test_quality_gate_peer_overload_fails_loud_before_the_probe(monkeypatch, capsys):
+    gate = _load("scripts/release/quality_gate.py", "_qg_peer_main")
+    monkeypatch.setattr(gate, "is_ollama_available", lambda: True)
+    monkeypatch.setattr(gate, "_peer_memory_conflict", lambda: "loading X next to Y needs 41 GB")
+    probed = []
+    monkeypatch.setattr(gate, "_warm_up_probe", lambda: probed.append(1))
+    _mock_clean_pass(gate, monkeypatch)
+
+    rc = gate.main([])
+    err = capsys.readouterr().err
+
+    assert rc != 0
+    assert probed == []
+    assert "OVERRUN GPU memory" in err and "needs 41 GB" in err
+    assert "unmeasured quality change" in err
+
+
+def test_quality_gate_peer_overload_with_skip_flag_records_reason(monkeypatch, tmp_path, capsys):
+    gate = _load("scripts/release/quality_gate.py", "_qg_peer_skip")
+    monkeypatch.setattr(gate, "DIST_DIR", tmp_path)
+    monkeypatch.setattr(gate, "SKIP_NOTE_PATH", tmp_path / "QUALITY_SKIPPED.txt")
+    monkeypatch.setattr(gate, "is_ollama_available", lambda: True)
+    monkeypatch.setattr(gate, "_peer_memory_conflict", lambda: "needs 41 GB")
+    monkeypatch.setattr(gate, "_warm_up_probe", lambda: pytest.fail("probe must not run"))
+    _mock_clean_pass(gate, monkeypatch)
+
+    rc = gate.main(["--skip-quality", "runner pinned on :11435"])
+
+    assert rc == 0
+    note = (tmp_path / "QUALITY_SKIPPED.txt").read_text()
+    assert "runner pinned on :11435" in note and "OVERRUN GPU memory" in note

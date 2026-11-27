@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Release quality gate (`scripts/release/quality_gate.py`) no longer overloads GPU memory when a second Ollama server holds a model. Before its warm-up probe loads `qwen3-coder:30b` on :11434, it reads the resident models on `LLM_ROUTER_LOCAL_MODEL_URL` (plus `QUALITY_GATE_PEER_OLLAMA_URLS`). It refuses, fail-loud or via `--skip-quality`, when those models plus the target exceed 75% of RAM. 2026-11-27, 48 GB Mac: 22.4 GB on :11435 + 18.6 GB = 40.9 GB of 51.5 GB caused Metal OutOfMemory 3 times and wedged the :11435 runner (Ollama server log).
+
 ## [16.1.0] - 2026-11-27
 
 16.1.0 is a minor release of 49 commits since 16.0.1. It adds opt-in controls for local serving (main-thread exemption, step and cache-block caps, runner auto-recovery, an embedding classifier in shadow mode, a hand-over reminder at a context size, a tier-rewrite cache gate), makes the `llm_apply` check sandbox fail closed, and reworks how the status line and `llm-router savings` count savings. Most new flags default to off. Local serving still costs money and quality on the main thread in the measurements below; see Known issues and disclosures.
