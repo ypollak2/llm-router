@@ -203,3 +203,67 @@ async def test_build_app_crash_signature_trip_runs_recover_action(tmp_path, monk
     assert f.killed == [(60001, signal.SIGTERM)] and len(f.posts) == 1
     assert f.posts[0][1]["model"] == "fake:1"
     await app.state.recycler.aclose()
+
+
+# D-650: the wider trigger. Fakes only: tmp_path files stand in for the runner log; nothing is killed.
+OOM = b"ggml_metal: kIOGPUCommandBufferCallbackErrorOutOfMemory\n"
+
+
+def test_strong_triggers_always_recover_even_with_flag_off(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY", raising=False)
+    for t in ("fast_empty", "crash_signature", "empty_burst"):
+        assert rr.trip_wants_recover(t, None)
+
+
+def test_slow_empty_trip_needs_the_flag(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY", raising=False)
+    assert not rr.trip_wants_recover("consecutive_invalid", "empty_body")
+    monkeypatch.setenv("LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY", "1")
+    assert rr.trip_wants_recover("consecutive_invalid", "empty_body")
+    assert rr.trip_wants_recover("consecutive_invalid", "runner_compute_error")
+
+
+@pytest.mark.parametrize("trigger,kind", [("consecutive_invalid", "xml_parse"), ("consecutive_invalid", "other"),
+                                          ("consecutive_invalid", "step_budget_exceeded"), (None, "empty_body")])
+def test_wide_trigger_ignores_other_kinds(trigger, kind):
+    assert not rr.trip_wants_recover(trigger, kind, widen=True)
+
+
+def test_log_watch_needs_new_oom_lines(tmp_path):
+    log = tmp_path / "server.log"
+    log.write_bytes(OOM * 5)                      # old wedge, before the proxy started
+    w = rr.OomLogWatch(str(log))
+    assert not rr.trip_wants_recover("consecutive_invalid", "empty_body", watch=w, widen=True)
+    with open(log, "ab") as f:
+        f.write(b"normal line\n" + OOM)
+    assert rr.trip_wants_recover("consecutive_invalid", "empty_body", watch=w, widen=True)
+    w.mark()                                      # a repair started: that OOM is spent
+    assert not rr.trip_wants_recover("consecutive_invalid", "empty_body", watch=w, widen=True)
+
+
+def test_log_watch_reads_logpath_indirection_and_replaced_log(tmp_path):
+    a, b = tmp_path / "a.log", tmp_path / "b.log"
+    a.write_bytes(b"x" * 100)
+    lp = tmp_path / "server.logpath"
+    lp.write_text(str(a))
+    w = rr.OomLogWatch(str(lp))
+    lp.write_text(str(b))                         # runner restarted into a smaller new log
+    b.write_bytes(OOM)
+    assert w.grew()
+
+
+def test_log_watch_fail_closed_on_missing_log(tmp_path):
+    w = rr.OomLogWatch(str(tmp_path / "nope.log"))
+    assert not w.grew()
+    assert not rr.trip_wants_recover("consecutive_invalid", "empty_body", watch=w, widen=True)
+
+
+async def test_cooldown_and_mismatched_child_still_hold_for_wide_trigger(pidfile):
+    """The repair itself is unchanged: second start inside 10 min is rate-limited, a foreign child is refused."""
+    f = Fake(ps="1 /x/llama-server --port 5\n")   # ppid 1 != pidfile pid
+    rec = br.BackendRecycle("", clock=Clock(), action=make(pidfile, f))
+    emitted = []
+    assert rec.start(emitted.append)["recycle"] == "started"
+    await rec.task
+    assert emitted[0]["reason"] == "no_runner_child" and f.killed == []
+    assert rec.start(emitted.append)["recycle"] == "skipped_ratelimit"
