@@ -1,1 +1,0 @@
-sdist no longer ships `docs/`: hatch merged `.gitignore` negations (`!/docs/...`) into the sdist rules and re-included 296 docs files; `/docs/**` is now excluded (local `uv build --sdist`, n=1 build per commit, 2026-11-25: 1,161 -> 865 entries; wheel unchanged at 761). Regression test `test_sdist_does_not_ship_docs_audit_architecture` (slow).
