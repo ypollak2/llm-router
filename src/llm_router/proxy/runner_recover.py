@@ -16,6 +16,17 @@ the in-flight drain and the ledger event). Steps, each fail-closed:
 4. empty ``POST /api/generate`` {model, prompt "", keep_alive -1, num_ctx} reloads the model.
 At most ``MAX_PER_HOUR`` attempts per rolling hour; the next one returns ``skipped`` with
 ``reason=hourly_cap`` and ``alarm=True`` and nothing else is done.
+
+D-650 (2026-11-26) -- THE GAP. The 2026-11-26 19:50Z wedge was never repaired by the above: the breaker
+opened with ``trigger=consecutive_invalid`` and ``error_kind=empty_body`` (one ledger row, 19:51:11Z, read
+from proxy_calls.jsonl), and ``server.py`` started the recycler only for ``fast_empty``, ``crash_signature``
+and ``empty_burst``. The wedge ran until a human repaired it at 20:17Z
+(~/.rsi/research/primary-plan/v16/coord/realsave/DEVIATION-CAP2-RUNNER-WEDGE-20261126.md). Slow empties
+(each over ``EMPTY_BURST_MAX_ELAPSED_S``) therefore never reached the repair.
+:func:`trip_wants_recover` widens the trigger behind ``LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY`` (default off).
+A slow empty reply can also come from a healthy runner, so when ``LLM_ROUTER_RUNNER_LOG`` names the
+runner log (or a ``*.logpath`` file holding that path) the wider trigger also needs new
+``kIOGPUCommandBufferCallbackErrorOutOfMemory`` lines in it since the last repair (:class:`OomLogWatch`).
 """
 from __future__ import annotations
 
@@ -53,6 +64,72 @@ def enabled() -> bool:
 
 def pidfile_path() -> str:
     return os.environ.get("LLM_ROUTER_RUNNER_PIDFILE", "").strip()
+
+
+STRONG_TRIGGERS = frozenset({"fast_empty", "crash_signature", "empty_burst"})   # always recover (D-601)
+OOM_MARK = b"kIOGPUCommandBufferCallbackErrorOutOfMemory"
+MAX_LOG_SCAN = 8 * 1024 * 1024
+
+
+def empty_trip_enabled() -> bool:
+    """New flag LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY (default off): also recover on consecutive_invalid trips."""
+    return os.environ.get("LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY", "0").strip().lower() in {"1", "true", "on", "yes"}
+
+
+class OomLogWatch:
+    """Counts new Metal-OOM lines in the runner log since a baseline. Reads bytes only; never raises."""
+
+    def __init__(self, path: str, *, read=None) -> None:
+        self.path = path
+        self._read = read or self._read_file
+        self.baseline = self._size()
+
+    def _target(self) -> str:
+        if self.path.endswith(".logpath"):
+            try:
+                return open(self.path).read().strip()
+            except OSError:
+                return ""
+        return self.path
+
+    def _size(self) -> int:
+        try:
+            return os.stat(self._target()).st_size
+        except OSError:
+            return 0
+
+    def _read_file(self, start: int, n: int) -> bytes:
+        with open(self._target(), "rb") as f:
+            f.seek(start)
+            return f.read(n)
+
+    def grew(self) -> bool:
+        """True when OOM lines exist after the baseline. A shrunk or replaced log is read from byte 0."""
+        try:
+            size = self._size()
+            start = self.baseline if size >= self.baseline else 0
+            return OOM_MARK in self._read(max(start, size - MAX_LOG_SCAN), MAX_LOG_SCAN)
+        except Exception:  # noqa: BLE001 - an unreadable log means "not corroborated": no kill
+            return False
+
+    def mark(self) -> None:
+        self.baseline = self._size()
+
+
+def trip_wants_recover(trigger: str | None, error_kind: str | None, *, watch: "OomLogWatch | None" = None,
+                       widen: bool | None = None) -> bool:
+    """True when a breaker trip should start the runner repair. Strong triggers always do (D-601).
+    A ``consecutive_invalid`` trip of kind empty_body / runner_* does only with the new flag on, and
+    only with new OOM lines in the watched runner log. With no log watched it fails closed (no repair):
+    a slow-but-healthy runner can also produce empty replies, and a repair restarts it (review D-650 S1)."""
+    if trigger in STRONG_TRIGGERS:
+        return True
+    if not (empty_trip_enabled() if widen is None else widen):
+        return False
+    if trigger != "consecutive_invalid" or error_kind not in {"empty_body", "runner_oom", "runner_compute_error",
+                                                               "runner_empty_burst"}:
+        return False
+    return False if watch is None else watch.grew()
 
 
 async def _run(argv: list[str]) -> str:

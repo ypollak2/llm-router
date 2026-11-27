@@ -203,3 +203,191 @@ async def test_build_app_crash_signature_trip_runs_recover_action(tmp_path, monk
     assert f.killed == [(60001, signal.SIGTERM)] and len(f.posts) == 1
     assert f.posts[0][1]["model"] == "fake:1"
     await app.state.recycler.aclose()
+
+
+# D-650: the wider trigger. Fakes only: tmp_path files stand in for the runner log; nothing is killed.
+OOM = b"ggml_metal: kIOGPUCommandBufferCallbackErrorOutOfMemory\n"
+
+
+def test_strong_triggers_always_recover_even_with_flag_off(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY", raising=False)
+    for t in ("fast_empty", "crash_signature", "empty_burst"):
+        assert rr.trip_wants_recover(t, None)
+
+
+def test_slow_empty_trip_needs_the_flag(monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY", raising=False)
+    assert not rr.trip_wants_recover("consecutive_invalid", "empty_body")
+    monkeypatch.setenv("LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY", "1")
+    # no runner log watched: fail closed, a slow-but-healthy runner is not restarted (review D-650 S1)
+    assert not rr.trip_wants_recover("consecutive_invalid", "empty_body")
+    assert not rr.trip_wants_recover("consecutive_invalid", "runner_compute_error")
+
+
+def test_slow_empty_trip_with_flag_and_new_oom_lines_recovers(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY", "1")
+    log = tmp_path / "server.log"
+    log.write_bytes(b"")
+    w = rr.OomLogWatch(str(log))
+    log.write_bytes(OOM)
+    assert rr.trip_wants_recover("consecutive_invalid", "empty_body", watch=w)
+    assert rr.trip_wants_recover("consecutive_invalid", "runner_compute_error", watch=w)
+
+
+@pytest.mark.parametrize("trigger,kind", [("consecutive_invalid", "xml_parse"), ("consecutive_invalid", "other"),
+                                          ("consecutive_invalid", "step_budget_exceeded"), (None, "empty_body")])
+def test_wide_trigger_ignores_other_kinds(trigger, kind):
+    assert not rr.trip_wants_recover(trigger, kind, widen=True)
+
+
+def test_log_watch_needs_new_oom_lines(tmp_path):
+    log = tmp_path / "server.log"
+    log.write_bytes(OOM * 5)                      # old wedge, before the proxy started
+    w = rr.OomLogWatch(str(log))
+    assert not rr.trip_wants_recover("consecutive_invalid", "empty_body", watch=w, widen=True)
+    with open(log, "ab") as f:
+        f.write(b"normal line\n" + OOM)
+    assert rr.trip_wants_recover("consecutive_invalid", "empty_body", watch=w, widen=True)
+    w.mark()                                      # a repair finished ok: that OOM is spent
+    assert not rr.trip_wants_recover("consecutive_invalid", "empty_body", watch=w, widen=True)
+
+
+def test_log_watch_reads_logpath_indirection_and_replaced_log(tmp_path):
+    a, b = tmp_path / "a.log", tmp_path / "b.log"
+    a.write_bytes(b"x" * 100)
+    lp = tmp_path / "server.logpath"
+    lp.write_text(str(a))
+    w = rr.OomLogWatch(str(lp))
+    lp.write_text(str(b))                         # runner restarted into a smaller new log
+    b.write_bytes(OOM)
+    assert w.grew()
+
+
+def test_log_watch_fail_closed_on_missing_log(tmp_path):
+    w = rr.OomLogWatch(str(tmp_path / "nope.log"))
+    assert not w.grew()
+    assert not rr.trip_wants_recover("consecutive_invalid", "empty_body", watch=w, widen=True)
+
+
+async def test_cooldown_and_mismatched_child_still_hold_for_wide_trigger(pidfile):
+    """The repair itself is unchanged: second start inside 10 min is rate-limited, a foreign child is refused."""
+    f = Fake(ps="1 /x/llama-server --port 5\n")   # ppid 1 != pidfile pid
+    rec = br.BackendRecycle("", clock=Clock(), action=make(pidfile, f))
+    emitted = []
+    assert rec.start(emitted.append)["recycle"] == "started"
+    await rec.task
+    assert emitted[0]["reason"] == "no_runner_child" and f.killed == []
+    assert rec.start(emitted.append)["recycle"] == "skipped_ratelimit"
+
+
+async def _wiring_app(tmp_path, monkeypatch, pidfile, flag, with_log=True):
+    """build_app with a runner that answers slow empty replies (a healthy probe), fake kill/reload."""
+    from llm_router.proxy import backend_health as bh
+    from llm_router.proxy import server as ps
+    from tests.test_proxy_backend_health import _app
+
+    f = Fake()
+    real = rr.RunnerRecover
+    monkeypatch.setattr(rr, "RunnerRecover", lambda *a, **k: real(*a, run=f.run, kill=f.kill, reload=f.reload))
+    monkeypatch.delenv("LLM_ROUTER_BACKEND_RECYCLE_CMD", raising=False)
+    monkeypatch.delenv("LLM_ROUTER_RUNNER_AUTORECOVER", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_RUNNER_PIDFILE", pidfile)
+    monkeypatch.setenv("LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY", flag)
+    log = tmp_path / "server.log"
+    log.write_bytes(OOM * 3)                       # an old wedge, before the proxy started
+    if with_log:
+        monkeypatch.setenv("LLM_ROUTER_RUNNER_LOG", str(log))
+    else:
+        monkeypatch.delenv("LLM_ROUTER_RUNNER_LOG", raising=False)
+    monkeypatch.setattr(bh, "EMPTY_BURST_MAX_ELAPSED_S", 0.0)   # every empty reply counts as slow: no empty_burst
+
+    async def _choose(text, pinned, **_kw):
+        return {"task_type": "code", "complexity": "moderate",
+                "chain_head": ["ollama/fake:1"], "model": "ollama/fake:1"}
+    monkeypatch.setattr(ps, "choose_model", _choose)
+
+    class SlowEmpty:
+        async def complete(self, body, timeout_s):
+            return None, "empty response", {}
+
+        async def probe(self, timeout_s):
+            return True, None                      # healthy probe: no failed-probe recycle path
+
+    clock = Clock()
+    app = _app(tmp_path, SlowEmpty(), clock=clock, model="ollama/fake:1", num_ctx=131072, backend_fail_n=3)
+    return app, f, log, clock
+
+
+async def _trip(app, tmp_path, n_before):
+    """Post fresh conversations until one more consecutive_invalid trip row exists; return that row's health."""
+    from llm_router.proxy import ledger
+    from tests.test_proxy import _post, _req
+    for i in range(12):
+        body = _req()
+        body["messages"][0] = {"role": "user", "content": f"wiring conversation {n_before}-{i}"}
+        assert (await _post(app, body)).status_code == 200
+        rows = ledger.read_rows(tmp_path / "proxy_calls.jsonl", include_events=True)
+        trips = [r["backend_health"] for r in rows
+                 if (r.get("backend_health") or {}).get("trigger") == "consecutive_invalid"
+                 and (r.get("backend_health") or {}).get("state") == "tripped"]
+        if len(trips) > n_before:
+            return trips[-1]
+    raise AssertionError("no consecutive_invalid trip")
+
+
+async def test_build_app_slow_empty_trip_repairs_only_on_new_oom_lines(tmp_path, monkeypatch, pidfile):
+    """Review D-650 S3: server.py wiring of the wider trigger, OOM corroboration and mark-on-ok."""
+    from llm_router.proxy import ledger
+    app, f, log, clock = await _wiring_app(tmp_path, monkeypatch, pidfile, "1")
+    t1 = await _trip(app, tmp_path, 0)                     # old OOM lines only
+    assert "recycle" not in t1 and f.killed == []
+    with open(log, "ab") as fh:
+        fh.write(b"normal\n" + OOM)                        # a new wedge line
+    clock.t += 3600                                         # past the breaker cooldown and the repair limit
+    t2 = await _trip(app, tmp_path, 1)
+    assert t2["recycle"] == "started"
+    await asyncio.wait_for(app.state.recycler.task, 5)
+    assert f.killed == [(60001, signal.SIGTERM)] and len(f.posts) == 1
+    events = [r for r in ledger.read_rows(tmp_path / "proxy_calls.jsonl", include_events=True)
+              if r.get("event") == "backend_recycle"]
+    assert [e["backend_health"]["recycle"] for e in events] == ["ok"]
+    clock.t += 3600
+    t3 = await _trip(app, tmp_path, 2)                     # no new OOM since the ok repair: no second kill
+    assert "recycle" not in t3 and f.killed == [(60001, signal.SIGTERM)]
+    await app.state.recycler.aclose()
+
+
+async def test_build_app_slow_empty_trip_flag_off_never_repairs(tmp_path, monkeypatch, pidfile):
+    app, f, log, clock = await _wiring_app(tmp_path, monkeypatch, pidfile, "0")
+    with open(log, "ab") as fh:
+        fh.write(OOM)
+    t1 = await _trip(app, tmp_path, 0)
+    assert "recycle" not in t1 and f.killed == []
+    await app.state.recycler.aclose()
+
+
+async def test_build_app_flag_on_without_log_warns_and_never_repairs(tmp_path, monkeypatch, pidfile, capsys):
+    """Review D-650 fold S1: no runner log -> start-up warning on stderr, and a slow-empty trip kills nothing."""
+    app, f, log, clock = await _wiring_app(tmp_path, monkeypatch, pidfile, "1", with_log=False)
+    assert "LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY=1 has no effect" in capsys.readouterr().err
+    with open(log, "ab") as fh:
+        fh.write(OOM)
+    t1 = await _trip(app, tmp_path, 0)
+    assert "recycle" not in t1 and f.killed == []
+    await app.state.recycler.aclose()
+
+
+async def test_build_app_failed_repair_leaves_oom_lines_for_the_next_trip(tmp_path, monkeypatch, pidfile):
+    """Review D-650 fold S2: a repair that does not end ok does not spend the OOM lines."""
+    app, f, log, clock = await _wiring_app(tmp_path, monkeypatch, pidfile, "1")
+    f.reload_ok = False                                     # kill happens, reload fails -> result not ok
+    with open(log, "ab") as fh:
+        fh.write(OOM)
+    t1 = await _trip(app, tmp_path, 0)
+    assert t1["recycle"] == "started"
+    await asyncio.wait_for(app.state.recycler.task, 5)
+    assert len(f.killed) == 1
+    clock.t += 3600                                         # past cooldown and the repair limit; no new OOM line
+    t2 = await _trip(app, tmp_path, 1)
+    assert t2["recycle"] == "started"                       # the unspent OOM line still corroborates
+    await app.state.recycler.aclose()

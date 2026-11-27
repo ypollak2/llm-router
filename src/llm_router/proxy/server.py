@@ -527,6 +527,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     recycler = (BackendRecycle(recycle_cmd, clock=health_clock, action=recover_action)
                 if recycle_cmd or recover_action else None)
     recycle_cmd = recycle_cmd or ("runner_recover" if recover_action else "")
+    _runner_log = os.environ.get("LLM_ROUTER_RUNNER_LOG", "").strip()   # D-650: corroborates the wider trigger
+    oom_watch = runner_recover.OomLogWatch(_runner_log) if _runner_log and recover_action else None
+    if runner_recover.empty_trip_enabled() and oom_watch is None:
+        print("llm-router proxy: LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY=1 has no effect: it needs LLM_ROUTER_RUNNER_LOG "
+              "and the runner repair (LLM_ROUTER_RUNNER_PIDFILE, no LLM_ROUTER_BACKEND_RECYCLE_CMD)",
+              file=sys.stderr, flush=True)
     health = BackendHealth(cfg.backend_fail_n, cfg.backend_cooldown_s, clock=health_clock,
                            fast_empty=bool(recycle_cmd),
                            # A broken runner (runner_oom / runner_compute_error) stays broken until reloaded: with
@@ -600,6 +606,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         return recycler.wrap(backend) if recycler else backend
 
     def recycle_event(result):
+        # D-650 S2: OOM lines are spent only by a repair that finished ok, not by one that was skipped later.
+        if oom_watch is not None and isinstance(result, dict) and result.get("recycle") == "ok":
+            oom_watch.mark()
         write({"ts": time.time(), "event": "backend_recycle", "backend_health": result})
 
     async def warm_up() -> dict:
@@ -1004,8 +1013,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if tripped is not None:
                 row["backend_health"] = dict(row.get("backend_health") or {}, **tripped,
                                              error_kind=health.error_kind_for(choice["model"]))
-                if recycler and tripped["trigger"] in {"fast_empty", "crash_signature", "empty_burst"}:
-                    row["backend_health"].update(recycler.start(recycle_event) or {})
+                if recycler and runner_recover.trip_wants_recover(
+                        tripped["trigger"], row["backend_health"].get("error_kind"), watch=oom_watch):
+                    started = recycler.start(recycle_event) or {}
+                    row["backend_health"].update(started)
         _kind = error_kind((backend_outcome or (err,))[0]) if backend_t0 is not None else None
         if _kind not in (None, KIND_OTHER):   # fixed vocabulary, never the runner text; "other" adds nothing to ``detail``
             row["backend_error_kind"] = _kind

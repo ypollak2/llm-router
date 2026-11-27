@@ -284,6 +284,9 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # D-601: built-in wedge recovery of the dedicated runner (kill flag default on; inert without the pidfile path).
     "LLM_ROUTER_RUNNER_AUTORECOVER": ("llm_router", "proxy/runner_recover.py", 1),
     "LLM_ROUTER_RUNNER_PIDFILE": ("llm_router", "proxy/runner_recover.py", 1),
+    # D-650: also recover on a consecutive_invalid/empty_body trip (default off); optional runner log corroborates it.
+    "LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY": ("llm_router", "proxy/runner_recover.py", 1),
+    "LLM_ROUTER_RUNNER_LOG": ("llm_router", "proxy/server.py", 1),
     # Local-model web search (tools/web_search.py, search/backend.py): off by default.
     "LLM_ROUTER_WEB_SEARCH": ("llm_router", "tools/web_search.py", 1),
     "LLM_ROUTER_SEARXNG_URL": ("llm_router", "search/backend.py", 1),
