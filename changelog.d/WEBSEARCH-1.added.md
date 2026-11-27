@@ -1,1 +1,0 @@
-- Add `web_search` MCP tool for the local model (SearXNG backend), off by default behind `LLM_ROUTER_WEB_SEARCH=on`. Base URL `LLM_ROUTER_SEARXNG_URL`; the default http://127.0.0.1:8888 is intentional (8888 is also the usual Jupyter port, so set the variable if both run). Carries `_meta["anthropic/alwaysLoad"]` so Claude Code does not defer it.

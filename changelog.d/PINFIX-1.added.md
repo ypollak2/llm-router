@@ -1,1 +1,0 @@
-- Add step-scoped proxy pin repair with deterministic conversation A/B arms via `LLM_ROUTER_PINFIX` (default off), consecutive fallback limit `LLM_ROUTER_PINFIX_K` (default 3), and lifetime ceiling `LLM_ROUTER_PINFIX_MAX_FALLBACKS` (default 8).
