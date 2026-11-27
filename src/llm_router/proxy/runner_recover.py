@@ -120,7 +120,8 @@ def trip_wants_recover(trigger: str | None, error_kind: str | None, *, watch: "O
                        widen: bool | None = None) -> bool:
     """True when a breaker trip should start the runner repair. Strong triggers always do (D-601).
     A ``consecutive_invalid`` trip of kind empty_body / runner_* does only with the new flag on, and
-    (when a runner log is watched) only with new OOM lines in that log."""
+    only with new OOM lines in the watched runner log. With no log watched it fails closed (no repair):
+    a slow-but-healthy runner can also produce empty replies, and a repair restarts it (review D-650 S1)."""
     if trigger in STRONG_TRIGGERS:
         return True
     if not (empty_trip_enabled() if widen is None else widen):
@@ -128,7 +129,7 @@ def trip_wants_recover(trigger: str | None, error_kind: str | None, *, watch: "O
     if trigger != "consecutive_invalid" or error_kind not in {"empty_body", "runner_oom", "runner_compute_error",
                                                                "runner_empty_burst"}:
         return False
-    return True if watch is None else watch.grew()
+    return False if watch is None else watch.grew()
 
 
 async def _run(argv: list[str]) -> str:
