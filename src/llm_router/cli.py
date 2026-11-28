@@ -80,6 +80,7 @@ Usage:
     llm-router gateway          — run the OpenAI/Anthropic/Ollama-compatible gateway
     llm-router proxy [stats]    — opt-in per-call proxy for one Claude Code session (ANTHROPIC_BASE_URL)
     llm-router proxy-shim       — fail-open shim: main proxy, or Anthropic directly when it is down
+    llm-router fwdproxy         — beta, opt-in: local forward proxy so Claude Code Remote Control still routes (ca|install|uninstall|status)
     llm-router pi               — run the Pi coding agent on a local Ollama model (local agent profile)
     llm-router broker           — run the session broker
     llm-router cp               — control-plane client commands
@@ -928,7 +929,7 @@ _HELP_FLAGS = ("-h", "--help")
 # CLI-HELP-1: subcommands that print their own help for -h/--help in any
 # position (argparse, or an explicit check over all args).
 _OWN_HELP_ANYWHERE = frozenset({
-    "audit", "calibrate", "cp", "dev-refresh", "discover", "eligibility", "gc", "install", "inventory", "invoice",
+    "audit", "calibrate", "cp", "dev-refresh", "discover", "eligibility", "fwdproxy", "gc", "install", "inventory", "invoice",
     "judge", "kpi", "last", "learn", "local-check", "map", "migrate", "mod", "mode", "northstar", "ns-check", "pi", "policy", "prefer",
     "proxy", "redo-label", "redo-sample", "redo-score",
     "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
@@ -1110,6 +1111,10 @@ def main() -> None:
         # North Star mechanism check: reads the proxy ledger for one session.
         from llm_router.commands.ns_check import cmd_ns_check
         sys.exit(cmd_ns_check(args[1:]))
+    elif args and args[0] == "fwdproxy":
+        # Beta, opt-in: forward proxy for Remote Control (docs/fwdproxy.md).
+        from llm_router.commands.fwdproxy import cmd_fwdproxy
+        sys.exit(cmd_fwdproxy(args[1:]))
     elif args and args[0] == "pi":
         # Local agent profile: Pi + an Ollama model (integrations/pi/).
         from llm_router.commands.pi import cmd_pi

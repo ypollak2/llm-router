@@ -1,0 +1,130 @@
+#!/bin/sh
+# claude-rc: run Claude Code with Remote Control while API calls still go through the
+# llm-router proxy, via the local forward proxy (fwdproxy, :8789). exec's the real binary
+# (argv and exit code preserved). If the forward proxy or the router is not up, run
+# direct and unrouted (fail open, logged).
+# Env overrides (used by tests): FWD_HOST, FWD_PORT, LLM_ROUTER_PROXY_URL, CLAUDE_REAL_BIN,
+# LLM_ROUTER_WRAPPER_LOG, LLM_ROUTER_WRAPPER_HOME, FWD_SYS_ROOTS (system roots file for the
+# Python bundle).
+FWD_HOST=${FWD_HOST:-127.0.0.1}
+FWD_PORT=${FWD_PORT:-8789}
+PROXY_URL=${LLM_ROUTER_PROXY_URL:-http://127.0.0.1:8787}
+HOME_DIR=${LLM_ROUTER_WRAPPER_HOME:-$HOME}
+LOG=${LLM_ROUTER_WRAPPER_LOG:-$HOME_DIR/.llm-router/wrapper.log}
+PY_BUNDLE=$HOME_DIR/.llm-router/fwd-ca/py-bundle.pem
+
+_abs() { # resolve symlinks of a file path, print absolute path
+  p=$1
+  while [ -L "$p" ]; do
+    t=$(readlink "$p")
+    case $t in /*) p=$t ;; *) p=$(dirname "$p")/$t ;; esac
+  done
+  d=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$d" "$(basename "$p")"
+}
+
+SELF=$(_abs "$0" 2>/dev/null)
+
+# Resolve the real binary exactly as claude-wrapper.sh does.
+REAL=
+if [ -n "${CLAUDE_REAL_BIN:-}" ]; then
+  REAL=$(_abs "$CLAUDE_REAL_BIN" 2>/dev/null)
+else
+  for c in "$HOME_DIR/.local/bin/claude"; do
+    [ -e "$c" ] && r=$(_abs "$c" 2>/dev/null) && [ "$r" != "$SELF" ] && REAL=$r
+  done
+  if [ -z "$REAL" ]; then
+    for f in $(ls -1t "$HOME_DIR/.local/share/claude/versions/"* 2>/dev/null); do
+      [ -x "$f" ] && REAL=$f && break
+    done
+  fi
+fi
+if [ -z "$REAL" ] || [ ! -x "$REAL" ] || [ "$REAL" = "$SELF" ]; then
+  echo "claude-rc: no usable real claude binary (or recursion guard hit)" >&2
+  exit 127
+fi
+
+proxy_up() { # same check as claude-wrapper.sh
+  command -v curl >/dev/null 2>&1 || return 1
+  code=$(curl -s -m 1 -o /dev/null -w '%{http_code}' "$PROXY_URL/" 2>/dev/null)
+  [ -n "$code" ] && [ "$code" != "000" ]
+}
+
+fwd_up() { # bare TCP connect to the forward proxy (no bytes sent)
+  command -v nc >/dev/null 2>&1 || return 1
+  nc -z -w 1 "$FWD_HOST" "$FWD_PORT" >/dev/null 2>&1
+}
+
+if fwd_up && proxy_up; then
+  unset ANTHROPIC_BASE_URL
+  CA=$HOME_DIR/.llm-router/fwd-ca/ca.crt
+  # append to an existing NO_PROXY/no_proxy, never clobber the caller's entries
+  NP=${NO_PROXY:-${no_proxy:-}}
+  NO_PROXY=${NP:+$NP,}127.0.0.1,localhost,::1
+  no_proxy=$NO_PROXY
+  HTTPS_PROXY=http://$FWD_HOST:$FWD_PORT
+  https_proxy=$HTTPS_PROXY
+  # a caller's own NODE_EXTRA_CA_CERTS (other file) is kept: bundle = theirs + ours
+  if [ -n "${NODE_EXTRA_CA_CERTS:-}" ] && [ "$NODE_EXTRA_CA_CERTS" != "$CA" ] \
+     && [ "$NODE_EXTRA_CA_CERTS" != "$HOME_DIR/.llm-router/fwd-ca/bundle.pem" ] && [ -f "$NODE_EXTRA_CA_CERTS" ]; then
+    BUNDLE=$HOME_DIR/.llm-router/fwd-ca/bundle.pem
+    _BUNDLE="$BUNDLE.$$"
+    if ( umask 077; cat "$NODE_EXTRA_CA_CERTS" "$CA" > "$_BUNDLE" ) 2>/dev/null && \
+      chmod 600 "$_BUNDLE" && mv -f "$_BUNDLE" "$BUNDLE"; then
+      NODE_EXTRA_CA_CERTS=$BUNDLE
+    else
+      rm -f "$_BUNDLE"
+    fi
+  else
+    NODE_EXTRA_CA_CERTS=$CA
+  fi
+  export HTTPS_PROXY https_proxy NO_PROXY no_proxy NODE_EXTRA_CA_CERTS
+  # Python hook subprocesses ignore NODE_EXTRA_CA_CERTS: give them roots + our CA via
+  # SSL_CERT_FILE / REQUESTS_CA_BUNDLE (base = caller's SSL_CERT_FILE, else system roots).
+  # Limits: SSL_CERT_FILE reaches every child (git, curl, other Python): roots only in SSL_CERT_DIR
+  # or another OpenSSL cafile are not in the bundle (logged when SSL_CERT_DIR is set). The bundle is
+  # rebuilt each launch; a running session keeps the copy it started with.
+  BASE_ROOTS=
+  if [ -n "${SSL_CERT_FILE:-}" ] && [ "$SSL_CERT_FILE" != "$PY_BUNDLE" ] \
+     && [ -s "$SSL_CERT_FILE" ] && [ -r "$SSL_CERT_FILE" ]; then
+    BASE_ROOTS=$SSL_CERT_FILE
+  else
+    for c in "${FWD_SYS_ROOTS:-/private/etc/ssl/cert.pem}" /etc/ssl/cert.pem; do
+      [ -s "$c" ] && [ -r "$c" ] && BASE_ROOTS=$c && break
+    done
+  fi
+  _PY_BUNDLE="$PY_BUNDLE.$$"
+  if [ -n "$BASE_ROOTS" ] && ( umask 077; cat "$BASE_ROOTS" "$CA" > "$_PY_BUNDLE" ) 2>/dev/null && \
+    chmod 600 "$_PY_BUNDLE" && mv -f "$_PY_BUNDLE" "$PY_BUNDLE"; then
+    SSL_CERT_FILE=$PY_BUNDLE
+    export SSL_CERT_FILE
+    # a caller's own REQUESTS_CA_BUNDLE (another file) is left alone
+    if [ -z "${REQUESTS_CA_BUNDLE:-}" ] || [ "$REQUESTS_CA_BUNDLE" = "$PY_BUNDLE" ]; then
+      REQUESTS_CA_BUNDLE=$PY_BUNDLE
+      export REQUESTS_CA_BUNDLE
+    fi
+    if [ -n "${SSL_CERT_DIR:-}" ]; then
+      { printf '%s claude-rc py-bundle note: SSL_CERT_DIR set, its roots are not in %s pid=%s\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PY_BUNDLE" "$$" >> "$LOG"; } 2>/dev/null
+    fi
+  else
+    rm -f "$_PY_BUNDLE"
+    { mkdir -p "$(dirname "$LOG")" 2>/dev/null && \
+      printf '%s py-bundle-failed base=%s pid=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${BASE_ROOTS:-none}" "$$" >> "$LOG"; } 2>/dev/null
+  fi
+else
+  unset ANTHROPIC_BASE_URL HTTPS_PROXY https_proxy
+  # unset NODE_EXTRA_CA_CERTS only if we set it previously
+  if [ "${NODE_EXTRA_CA_CERTS:-}" = "$HOME_DIR/.llm-router/fwd-ca/ca.crt" ]; then
+    unset NODE_EXTRA_CA_CERTS
+  fi
+  # same for the Python bundle vars
+  if [ "${SSL_CERT_FILE:-}" = "$PY_BUNDLE" ]; then unset SSL_CERT_FILE; fi
+  if [ "${REQUESTS_CA_BUNDLE:-}" = "$PY_BUNDLE" ]; then unset REQUESTS_CA_BUNDLE; fi
+  { mkdir -p "$(dirname "$LOG")" 2>/dev/null && \
+    printf '%s fallback-direct-unrouted fwd=%s:%s proxy=%s pid=%s real=%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$FWD_HOST" "$FWD_PORT" "$PROXY_URL" "$$" "$REAL" >> "$LOG"; } 2>/dev/null
+  echo "claude-rc: forward proxy or llm-router not up; this session is UNROUTED (direct to Anthropic)" >&2
+fi
+exec "$REAL" "$@"

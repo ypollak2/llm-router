@@ -66,6 +66,8 @@ CATEGORIES = frozenset(
 ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     # ── llm_router  (154) ──
     "LLM_ROUTER_ADMIN_ACTIONS_PATH": ("llm_router", "admin_actions.py", 1),
+    # opt-in forward proxy (beta): listen port the install command writes into the service file
+    "FWDPROXY_PORT": ("llm_router", "commands/fwdproxy.py", 1),
     "LLM_ROUTER_AGENTIC_MODEL": ("llm_router", "hooks/agent-route.py", 1),
     "LLM_ROUTER_AGENTS_CONFIG": ("llm_router", "tools/agents.py", 1),
     "LLM_ROUTER_AGENT_POLICY_MODE": ("llm_router", "router.py", 1),
