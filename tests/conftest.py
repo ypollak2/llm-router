@@ -89,6 +89,15 @@ for _x in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME
     os.environ.pop(_x, None)
 _real_home_guard.install()
 
+# SUITE-GUARD-1 (2026-11-28): block live Ollama in every child Python process.
+# The in-process guard below only covers the pytest process; hook subprocesses
+# inherit env but not monkeypatches. A test-only sitecustomize.py patches socket
+# connect/connect_ex to refuse ports 11434 and 11435, and appends one line per
+# refusal (port, PYTEST_CURRENT_TEST, argv[:3]) to SUITE_OLLAMA_REFUSAL_LOG.
+from tests._child_ollama_guard import install as _install_child_guard  # noqa: E402
+
+_CHILD_GUARD_DIR = _install_child_guard()
+
 # TESTLEAK (2026-10-29): `install_hooks.install()` calls
 # `agentic_registry.populate_in_background()`, which starts a detached
 # `python -m llm_router.agentic_registry` (start_new_session=True). That child has
@@ -1391,6 +1400,9 @@ def _close_db_connections():
 @pytest.fixture(autouse=True)
 def _hermetic_reachability(request, monkeypatch):
     if request.node.get_closest_marker("requires_ollama"):
+        # SUITE-GUARD-1: a test that genuinely needs the daemon must not hand the child
+        # guard to its children either.
+        monkeypatch.delenv("SUITE_BLOCK_LIVE_OLLAMA", raising=False)
         yield
         return
 
@@ -1413,11 +1425,19 @@ def _hermetic_reachability(request, monkeypatch):
             port = int(address[1]) if isinstance(address, tuple) and len(address) >= 2 else None
         except (TypeError, ValueError):
             port = None
-        if port == 11434:
+        if port in (11434, 11435):
+            # Log the refusal so a swallowed exception leaves evidence.
+            try:
+                log = os.environ.get("SUITE_OLLAMA_REFUSAL_LOG")
+                if log:
+                    with open(log, "a", encoding="utf-8") as fh:
+                        fh.write("%s\t%s\t%r\n" % (port, os.environ.get("PYTEST_CURRENT_TEST", "-"), sys.argv[:3]))
+            except Exception:
+                pass
             raise OSError(
-                "live Ollama connection blocked in tests (localhost:11434). "
+                "live Ollama connection blocked in tests (localhost:%d). "
                 "Mark the test @pytest.mark.requires_ollama if it genuinely needs the "
-                "daemon; otherwise stub the call. See _hermetic_reachability in conftest."
+                "daemon; otherwise stub the call. See _hermetic_reachability in conftest." % port
             )
         return _real_connect(self, address)
 
