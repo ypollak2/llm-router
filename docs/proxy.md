@@ -5,9 +5,12 @@ session. Every `/v1/messages` call is passed through to Anthropic unchanged,
 except the step classes the router's policy allows, which a non-Claude,
 tool-capable model serves in Anthropic format.
 
-It is off by default. Nothing installs it, and nothing changes your settings,
-hooks or `~/.claude.json`. It only affects a session you start with the variable
-set.
+It is off by default. `llm-router proxy` itself installs nothing and changes none
+of your settings, hooks or `~/.claude.json`; it only affects a session you start
+with the variable set. Two separate, explicit commands make it permanent:
+`llm-router install --proxy-default` (every Claude Code session, with a fail-open
+shim) and `llm-router setup-local` (a dedicated local model on a 48 GB+ Mac, see
+"Local routing setup" below).
 
 ## Enable it for one session
 
@@ -343,7 +346,7 @@ carries `mixed_history: true` and keeps the one-retry-without-thinking guard. Th
 `--serve local-agent` with a stray `--tiers` setting is still refused; without the flag the preflight keeps
 requiring `--tiers off`.
 
-Start-up preflight (D-445): `_local_agent_preflight` checks the resident model and `NUM_PARALLEL`. Old tiers-off local-agent mode first loads a non-resident model (it posts `/api/chat`) and refuses to start (rc 2) when the preflight fails. Combined mode never loads the model inline: the start delay is bounded by the lsof/ps/GET checks only, a non-resident model is a refusal, and after a reboot with the model not loaded local stays off until the model is loaded (the flip script pre-loads it) and the proxy is restarted. Any exception inside the preflight (bad URL, unreadable source) is also turned into a refusal line `preflight error: <Type>: <msg>` in combined mode. Combined mode degrades instead: each refusal is written to stderr as `llm-router proxy: local-agent DISABLED (tier path only): ...`, the proxy starts, local serving is off for the process lifetime, and every turn takes the tier path with ledger `local_mode.reason` `preflight_refused` (detail = the refusals). A restart re-runs the preflight. The live proxy carries all Claude Code traffic, so a down model must not stop it starting.
+Start-up preflight (D-445): `_local_agent_preflight` checks the resident model and `NUM_PARALLEL`. Old tiers-off local-agent mode first loads a non-resident model (it posts `/api/chat`) and refuses to start (rc 2) when the preflight fails. Combined mode never loads the model inline: the start delay is bounded by the lsof/ps/GET checks only, a non-resident model is a refusal, and after a reboot with the model not loaded local stays off until the model is loaded and the proxy is restarted. This repo ships no flip script; `llm-router setup-local` installs a login job that does it (see "Local routing setup").  Any exception inside the preflight (bad URL, unreadable source) is also turned into a refusal line `preflight error: <Type>: <msg>` in combined mode. Combined mode degrades instead: each refusal is written to stderr as `llm-router proxy: local-agent DISABLED (tier path only): ...`, the proxy starts, local serving is off for the process lifetime, and every turn takes the tier path with ledger `local_mode.reason` `preflight_refused` (detail = the refusals). A restart re-runs the preflight. The live proxy carries all Claude Code traffic, so a down model must not stop it starting.
 
 **Preflight.** The proxy refuses to start (message on stderr, exit 2) unless: `--model ollama/<tag>` is given
 and resident with `num_ctx >= 32768` (the old tiers-off mode loads it first if absent; combined mode does not load it and refuses instead); the Ollama server's own
@@ -1234,3 +1237,36 @@ Evidence for the ten-word line (own replication with the loaders of `scripts/rel
 **"0 Reply OK probes".** `ack_probes` counts `door_call` rows that are fixed-reply probes (`hold_policy.is_ack_probe`: a reply verb and at most two words of answer, in 12 words or fewer) and did not carry the owner's prompt, held or not. The `probe` rows exist only while a hold is in force, because the hook cannot see a hold that was never written; a probe a ROUTE hint provokes with nothing held is in the `door_call` rows only. The shape test is a heuristic and can miss a probe phrased another way, so the transcript audit stays the check. `llm-router doctor` shows the `blocked_holds` counter (organic sessions, last 7 days; unknown, never 0, when no organic prompt was recorded).
 
 First-token deadline (rv40): old local-agent mode has the hedge off on purpose (`cmd_proxy` sets `--hedge-s off`; a first call pays 14-25 s of prompt evaluation). Combined mode defaults to `local_mode.COMBINED_FIRST_TOKEN_S` (30 s): a local step with no first token by then falls back to the tier path (ledger reason `hedge_timeout`, D-442 pin to Claude unchanged) instead of holding the live path for the whole step budget (69.5 s seen). `--hedge-s` overrides it, `--hedge-s off` removes it.
+
+
+## Local routing setup (`llm-router setup-local`, 48 GB+ Mac)
+
+Opt-in and separate from `install` (which never runs it). It refuses below 48 GB of RAM and when
+another Ollama's resident models plus this one would pass 75% of RAM (the same rule as
+`scripts/release/quality_gate.py`, PR #992; on 2026-11-27, 22.4 GB on :11435 beside an 18.6 GB model on
+:11434 was 40.9 of 51.5 GB and caused Metal out-of-memory n=3 times).
+
+What it does, in order: RAM gate, `ollama` on PATH, peer-memory check, consent (shows the roughly
+22 GB download; without a terminal it needs `--yes`), then a supervised `com.llm_router.local-ollama`
+service (`ollama serve` on 127.0.0.1:11435, `OLLAMA_KEEP_ALIVE=-1`, `OLLAMA_MAX_LOADED_MODELS=1`),
+the pull of `qwen3.6:35b-a3b-coding`, a preload at the window the proxy asks for (131072, keep-alive
+-1), and three `.env` keys (`LLM_ROUTER_LOCAL_MODEL_URL`, `LLM_ROUTER_LOCAL_MODEL`,
+`LLM_ROUTER_WINDOW_STEP=131072`) written only when unset. The window is not in the model table (32768);
+it comes from `LLM_ROUTER_WINDOW_STEP`, so the key is part of the setup.
+
+Then `llm-router install --proxy-default`: because setup-local left a sentinel, the main proxy job gets
+`--serve local-agent --local-with-tiers --model ollama/qwen3.6:35b-a3b-coding --ollama-url
+http://127.0.0.1:11435 --trim none --keep-alive -1` after its usual `--steps/--tiers`. An already
+loaded plist is rewritten but not reloaded: unload then load it (never bootout).
+`llm-router doctor` has a "Local routing" block; any failing row prints `local routing: NONE` and
+the fix. `llm-router uninstall` stops and removes the service, the sentinel and the `.env` lines it
+wrote; the model stays unless `--purge-models`.
+
+After a reboot nothing manual is needed: the `com.llm_router.local-ollama` service restarts the Ollama
+server, and the one-shot `com.llm_router.local-ollama-preload` login job runs `llm-router setup-local
+--preload`. That waits up to 120 s for :11435, refuses (non-zero, logged, nothing loaded) when another
+Ollama's resident models would overrun GPU memory, loads the model pinned at the proxy's window, and,
+only when proxy-default is installed, restarts `com.llm_router.proxy` (the proxy decides local serving
+once at start, so one that started before the model was resident stays tier-only until restarted). One
+line per run goes to `~/.llm-router/logs/local-ollama-preload.log`. Setup writes the preload job's file
+but does not start it; uninstall removes both jobs.

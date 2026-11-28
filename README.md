@@ -160,6 +160,18 @@ is routed; `off` disables that. Full modes and per-host overrides:
 
 ---
 
+### Local routing (48 GB+ Mac)
+
+Opt-in; plain `install` never does this. It downloads about 22 GB and keeps about 22 GB of memory loaded.
+
+```bash
+llm-router setup-local          # refuses below 48 GB RAM; asks first (`--yes` to consent headless)
+llm-router install --proxy-default   # point Claude Code at the proxy with the local model
+llm-router doctor               # "Local routing" block: any failing row prints `local routing: NONE`
+```
+
+`llm-router uninstall` removes the service (the model stays; `--purge-models` removes it).
+
 ## Reference
 
 The default MCP surface shows **12 front-door tools** (the `CONSOLIDATED_TOOLS` set in

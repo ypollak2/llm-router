@@ -418,6 +418,8 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_LOCAL_MODEL": ("llm_router", "toolkit/adapters/ollama.py", 1),
     "LLM_ROUTER_LOCAL_MAX_OTHER_VRAM_GB": ("llm_router", "toolkit/adapters/ollama.py", 1),
     "LLM_ROUTER_LOCAL_MODEL_URL": ("llm_router", "toolkit/adapters/ollama.py", 1),
+    # setup-local --preload peer list; same variable scripts/release/quality_gate.py reads.
+    "QUALITY_GATE_PEER_OLLAMA_URLS": ("llm_router", "local_ollama.py", 1),
     # Memory guard (ensure_fits): no local model load past what this machine's memory allows.
     "LLM_ROUTER_LOCAL_QUEUE": ("llm_router", "toolkit/local_gate.py", 1),
     "LLM_ROUTER_LOCAL_SLOTS": ("llm_router", "toolkit/local_gate.py", 1),

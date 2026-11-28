@@ -22,6 +22,7 @@ Usage:
     llm-router install --host all         — install / print all host configs
     llm-router uninstall        — remove hooks and MCP registration
     llm-router uninstall --purge — also delete ~/.llm-router/ (usage DB, .env, logs)
+    llm-router uninstall --purge-models — also remove the local model that `setup-local` pulled
     llm-router setup            — interactive wizard: configure providers and API keys
     llm-router init-policy      — interactive wizard: choose or create a routing policy (v7.5.0)
     llm-router status           — show routing status, today's savings, subscription pressure
@@ -72,6 +73,7 @@ Usage:
     llm-router welcome          — the post-install orientation screen
     llm-router onboard          — interactive onboarding walkthrough
     llm-router update           — re-sync hooks, rules and MCP config from this version
+    llm-router setup-local [--yes] — opt-in local routing on a 48 GB+ Mac: supervised Ollama on :11435 with qwen3.6 pinned resident
     llm-router dev-refresh      — reinstall from a source checkout (developers)
     llm-router init-claude-memory — write CLAUDE.md routing guidance into this repo
 
@@ -854,6 +856,7 @@ _KNOWN_SUBCOMMANDS = frozenset(
         "uninstall",
         "update",
         "setup",
+        "setup-local",
         "status",
         "probe",
         "welcome",
@@ -932,7 +935,7 @@ _OWN_HELP_ANYWHERE = frozenset({
     "audit", "calibrate", "cp", "dev-refresh", "discover", "eligibility", "fwdproxy", "gc", "install", "inventory", "invoice",
     "judge", "kpi", "last", "learn", "local-check", "map", "migrate", "mod", "mode", "northstar", "ns-check", "pi", "policy", "prefer",
     "proxy", "redo-label", "redo-sample", "redo-score",
-    "quickstart", "replay", "resolve", "retrospect", "run", "serve", "snapshot", "stats",
+    "quickstart", "replay", "resolve", "retrospect", "run", "serve", "setup-local", "snapshot", "stats",
     "statusline", "team-sync", "test-delta", "verify", "welcome", "why",
 })
 # ...only when the flag comes straight after the subcommand (`okf --help`,
@@ -1041,6 +1044,10 @@ def main() -> None:
     elif args and args[0] == "setup":
         from llm_router.commands.setup import cmd_setup
         sys.exit(cmd_setup(args[1:]))
+    elif args and args[0] == "setup-local":
+        # Opt-in local routing (48 GB+): dedicated supervised Ollama + pinned qwen3.6. Never run by install.
+        from llm_router.commands.setup_local import cmd_setup_local
+        sys.exit(cmd_setup_local(args[1:]))
     elif args and args[0] == "status":
         from llm_router.commands.status import cmd_status
         sys.exit(cmd_status(args[1:]))
