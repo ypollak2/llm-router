@@ -120,6 +120,29 @@ an EMPTY answer with no recorded error is classified as a backend failure
 same fail-loud/`--skip-quality` semantics rather than folded into "quality
 regression" — because it isn't one; nothing was measured.
 
+## A second Ollama server: check GPU memory BEFORE the probe loads anything
+
+The warm-up probe itself loads `TARGET_MODEL`. When the router's main local
+model lives on its own Ollama server (`LLM_ROUTER_LOCAL_MODEL_URL`, e.g.
+`:11435`), that server's resident model and the gate's model share one Apple
+GPU, and the two servers cannot evict each other. 2026-11-27, 48 GB Mac:
+qwen3.6:35b-a3b-coding (22.4 GB, pinned on :11435) plus qwen3-coder:30b
+(18.6 GB, loaded on :11434 by this gate) = 40.9 GB of 51.5 GB RAM. Ollama
+logged Metal OutOfMemory, the probe got an empty answer, and the :11435 runner
+wedged ("decode() failed: Compute error") until it was stopped and reloaded.
+That happened at 14:49Z and 14:50Z (this gate, PRV step 12) and at 15:44Z (a
+by-hand probe).
+
+`_peer_memory_conflict()` runs first and only reads (`GET /api/ps`,
+`GET /api/tags`): if `TARGET_MODEL` is not already resident here and the
+peer servers' resident bytes plus `TARGET_MODEL`'s file size exceed
+`GPU_MEMORY_FRACTION` (0.75, Metal's usual working-set cap) of physical RAM,
+the gate refuses, with the same fail-loud / `--skip-quality` semantics as
+contention, and never sends the probe. Peers: `LLM_ROUTER_LOCAL_MODEL_URL`
+(environment, else the router's state `.env`) plus a comma-separated
+`QUALITY_GATE_PEER_OLLAMA_URLS`. To run the gate, free the peer first
+(`OLLAMA_HOST=<peer> ollama stop <model>`) and reload it afterwards.
+
 ## Unavailable or contended backend: fail loud, not silent
 
     unavailable/contended, no --skip-quality   -> exit 1, release blocked
@@ -164,6 +187,12 @@ TARGET_MODEL = os.environ.get("BENCH_LOCAL_MODEL", "qwen3-coder:30b")
 # slot), which is exactly what this bound is meant to catch. See "Detecting
 # contention" above.
 WARMUP_TIMEOUT_S = 45
+# Share of physical RAM that resident models on this server's peers plus
+# TARGET_MODEL may use before loading TARGET_MODEL would overrun the GPU — see
+# "A second Ollama server" above (40.9 of 51.5 GB OOMed: 0.79 > 0.75).
+GPU_MEMORY_FRACTION = 0.75
+PEER_URLS_ENV = "QUALITY_GATE_PEER_OLLAMA_URLS"
+LOCAL_MODEL_URL_ENV = "LLM_ROUTER_LOCAL_MODEL_URL"
 
 # Pinned pair — see "Why an easy task AND a hard task" above.
 EASY_TASK = "qa-max-value"
@@ -215,6 +244,100 @@ def _resident_model_note() -> str | None:
         return (f"Ollama's one model slot is currently held by "
                 f"{', '.join(others)}, not {TARGET_MODEL}")
     return None
+
+
+def _get_json(url: str) -> dict | None:
+    """GET `url` as JSON; None on any failure (a peer that does not answer
+    holds no memory this check can see)."""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=3) as resp:
+            return json.loads(resp.read())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _state_env_value(key: str) -> str:
+    """`key` from the router's state `.env` (where the live router reads
+    LLM_ROUTER_LOCAL_MODEL_URL), or "" when absent/unreadable."""
+    try:
+        from llm_router import paths
+        env_file = paths.regular_file_or_none(paths.state_path(".env"))
+        if env_file is None:
+            return ""
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            name, sep, value = line.strip().partition("=")
+            if sep and name.strip() == key:
+                return value.strip().strip("'\"")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _peer_ollama_urls() -> list[str]:
+    """Other Ollama servers on this machine whose resident models share the GPU
+    with OLLAMA_BASE_URL's. See "A second Ollama server" above."""
+    local_model_url = (os.environ.get(LOCAL_MODEL_URL_ENV, "").strip()
+                       or _state_env_value(LOCAL_MODEL_URL_ENV))
+    raw = [local_model_url, *os.environ.get(PEER_URLS_ENV, "").split(",")]
+    base = OLLAMA_BASE_URL.rstrip("/").replace("127.0.0.1", "localhost")
+    urls: list[str] = []
+    for u in raw:
+        u = u.strip().rstrip("/")
+        if u and u.replace("127.0.0.1", "localhost") != base and u not in urls:
+            urls.append(u)
+    return urls
+
+
+def _physical_memory_bytes() -> int | None:
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
+def _peer_memory_conflict() -> str | None:
+    """Would loading TARGET_MODEL next to the peers' resident models overrun
+    GPU memory? Read-only (`/api/ps`, `/api/tags`); returns the reason, or None
+    when it fits or cannot be decided. See "A second Ollama server" above."""
+    peers = _peer_ollama_urls()
+    if not peers:
+        return None
+    here = _get_json(f"{OLLAMA_BASE_URL}/api/ps") or {}
+    if any((m.get("model") or m.get("name")) == TARGET_MODEL
+           for m in here.get("models", [])):
+        return None  # already loaded: the probe adds nothing
+    resident: list[str] = []
+    peer_bytes = 0
+    for url in peers:
+        ps = _get_json(f"{url}/api/ps")
+        if ps is None:
+            print(f"note: peer Ollama {url} did not answer /api/ps; its GPU "
+                  "memory is not counted.")
+        for m in (ps or {}).get("models", []):
+            size = int(m.get("size") or 0)
+            peer_bytes += size
+            resident.append(f"{m.get('model') or m.get('name')} on {url} "
+                            f"({size / 1e9:.1f} GB)")
+    if not peer_bytes:
+        return None
+    tags = _get_json(f"{OLLAMA_BASE_URL}/api/tags") or {}
+    target_bytes = next((int(m.get("size") or 0) for m in tags.get("models", [])
+                         if (m.get("model") or m.get("name")) == TARGET_MODEL), 0)
+    total = _physical_memory_bytes()
+    if not target_bytes or not total:
+        print(f"note: GPU-memory check undecided ({TARGET_MODEL} size "
+              f"{'unknown' if not target_bytes else 'known'}, RAM "
+              f"{'unknown' if not total else 'known'}); peers hold "
+              f"{peer_bytes / 1e9:.1f} GB. Proceeding to the probe.")
+        return None
+    need = peer_bytes + target_bytes
+    if need <= GPU_MEMORY_FRACTION * total:
+        return None
+    return (f"loading {TARGET_MODEL} ({target_bytes / 1e9:.1f} GB) next to "
+            f"{', '.join(resident)} needs {need / 1e9:.1f} GB, over "
+            f"{GPU_MEMORY_FRACTION:.0%} of {total / 1e9:.1f} GB RAM; that "
+            "overruns GPU memory (Metal OutOfMemory) and can wedge the peer. "
+            "Free the peer first: OLLAMA_HOST=<peer> ollama stop <model>")
 
 
 def _warm_up_probe() -> str | None:
@@ -340,6 +463,19 @@ def main(argv: list[str] | None = None) -> int:
         return _fail_loud([
             "Local backend (Ollama) is unreachable — the answer-quality bench "
             "did not run.",
+        ])
+
+    # Before the probe: the probe itself loads TARGET_MODEL. See "A second
+    # Ollama server" above.
+    overload = _peer_memory_conflict()
+    if overload:
+        if args.skip_quality:
+            return _skip(args.skip_quality,
+                        f"Local backend would OVERRUN GPU memory, not run: {overload}")
+        return _fail_loud([
+            "Local backend would OVERRUN GPU memory next to another Ollama "
+            "server; the bench was not started:",
+            f"  {overload}",
         ])
 
     # A different resident model is CONTEXT, not a verdict — see
