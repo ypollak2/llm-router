@@ -85,35 +85,19 @@ def test_in_process_guard_refuses_ollama_ports(port):
 # (d) Red-check: remove the PYTHONPATH injection and see (a) fail.
 # ---------------------------------------------------------------------------
 def test_red_check_no_pythonpath_fails():
-    """Without PYTHONPATH pointing at the guard dir, the child connects
-    (or gets a plain ECONNREFUSED), proving the guard depends on it."""
-    env = os.environ.copy()
-    # Clear PYTHONPATH entirely — the guard dir is no longer on sys.path
-    # so sitecustomize never fires.
-    env.pop("PYTHONPATH", None)
-    env.pop(_GUARD_FLAG, None)
-
-    code = (
-        "import socket; "
-        "try: "
-        "    s = socket.socket(); "
-        "    s.connect(('127.0.0.1', 11434)); "
-        "    s.close(); "
-        "    print('CONNECTED') "
-        "except ConnectionRefusedError: "
-        "    print('ECONNREFUSED') "
-        "except OSError as e: "
-        "    print('OTHER:' + str(e))"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True, text=True, env=env, timeout=10,
-    )
-    output = (result.stdout or result.stderr or "")
-    # Without the guard, we should NOT see the guard message.
-    assert "live Ollama connection blocked in tests" not in output, (
-        "Without PYTHONPATH the guard should not fire — this is a regression if it does."
-    )
+    """The child guard depends on the PYTHONPATH injection: without it the child's
+    socket.connect is the stdlib one; with it, the guard's wrapper. Checked by name,
+    so this test never opens a connection to a live port."""
+    probe = "import socket; print(socket.socket.connect.__name__)"
+    bare = os.environ.copy()
+    bare.pop("PYTHONPATH", None)
+    bare.pop(_GUARD_FLAG, None)
+    without = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                             text=True, env=bare, timeout=10).stdout.strip()
+    with_guard = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                                text=True, env=os.environ.copy(), timeout=10).stdout.strip()
+    assert without == "connect", without
+    assert with_guard == "_connect", with_guard
 
 
 # ---------------------------------------------------------------------------
