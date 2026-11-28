@@ -396,16 +396,16 @@ def test_unknown_model_writes_a_visible_row_that_is_not_a_saving(temp_home):
     _assert_unknown_row(_one(temp_home))
 
 
-def test_unpriced_current_model_keeps_its_name_and_counts_no_money(temp_home):
-    """Fable 5.2 is current but unpriced in llm_router.pricing: a row naming it, no stand-in price."""
+def test_fable_5_2_is_priced_so_a_fable_agent_row_is_a_known_row(temp_home):
+    """Fable 5.2 was current but unpriced (an UNKNOWN row, no money); D-626 priced it from the published
+    table ($8 in / $40 out per MTok, pricing page 2026-11-26): the row now names it and carries a cost."""
     from llm_router import pricing
 
-    assert pricing.price_for("claude-fable-5-2") is None  # if this starts failing, price it and drop this test
+    assert pricing.price_for("claude-fable-5-2") is not None
     _run_hook_with_payload(_agent_payload(model="fable"), temp_home)
     row = _one(temp_home)
-    _assert_unknown_row(row, model="claude-fable-5-2")
-    assert row["reason"].endswith("unpriced_model")
-    assert row["baseline_model"] is None
+    assert row["model"] == "claude-fable-5-2" and row["potential_cost_usd"] > 0
+    assert not row["reason"].endswith("unpriced_model")
 
 
 def test_unknown_full_id_is_not_priced_as_something_else(temp_home):

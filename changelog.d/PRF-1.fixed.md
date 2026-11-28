@@ -1,1 +1,0 @@
-- Fix the release gate passing a test run it never read: `release.sh` step 2 used to accept a timeout (exit 124) whenever "[100%]" was printed. A timeout is now a failure, and a pass needs exit 0 plus a junit file in which at least one test ran with 0 failures and 0 errors. The test suite no longer writes to the controlling terminal (`/dev/tty`).

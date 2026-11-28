@@ -1,11 +1,38 @@
-"""Contain only the check subprocess, never edit application or host-side Git.
+"""Contain only the check subprocess; never edit the application.
 
-macOS uses (allow default): deny-default breaks pytest on current macOS. Reads
-outside HOME remain possible. The short Mach broker denylist is best-effort,
-not a complete XPC boundary. Descendants inherit confinement, but setsid can
-escape the caller's process-group teardown. This is not a VM/resource boundary.
+No host-side process runs for the persistence report either: apply_tool diffs pure-Python
+stat snapshots of ROOT (git status would run repo filters/fsmonitor on the host).
+
+macOS uses (allow default): deny-default breaks pytest on current macOS. Reads of
+/Volumes, /Users, /private/var/folders and /private/tmp are denied except ROOT,
+this run's TEMP and the runtime grants (bin/lib of a runtime prefix, never its
+root); other system paths stay readable. The Mach broker denylist is a probed,
+best-effort list (read-only bootstrap_look_up from inside, Darwin 25.5, n=7 names),
+not a complete XPC boundary: best effort, not a security boundary against a hostile
+repo. launchd job submission itself was NOT tested (a copied launchctl is killed by
+the OS outside the sandbox, so there is no positive control). Descendants inherit
+confinement; apply_tool kills setsid() descendants after the check by pgrep -P walk
+and an env-marker sweep (best effort: SIP binaries hide their env, a hostile process
+can clear it). Resource limits (apply_tool, via check_sandbox.resource_limiter):
+RLIMIT_FSIZE 256 MB everywhere; RLIMIT_NPROC (macOS only) = this uid's process count
+at launch + 128. The limit is set in the check's own process tree, so it binds only that
+tree, not the user's other processes; the kernel compares it with the uid-wide count, so
+a snapshot that is stale by more than 128 new processes during the 60 s can fail a
+legitimate check's fork (a false CHECK_FAILED). Linux gets no NPROC limit: the kernel
+counts threads per uid there, which `ps` cannot match, and --unshare-pid plus
+--die-with-parent already bound the tree. 16 MB of captured output. Framework builds
+under HOME (Versions/X/Python, Resources) and npm <prefix>/etc/npmrc fall outside the
+bin/lib grants (S7) and are not readable by a check. No CPU/memory limit beyond the 60 s wall clock.
 Executables and their interpreter installations must be trusted.
-The Linux backend is unverified on a real Linux host.
+The Linux backend (bubblewrap) is exercised on a real ubuntu-24.04 host by the
+CI job `linux-sandbox` (.github/workflows/ci.yml): every non-macOS test in
+tests/test_check_sandbox.py must run, and the job fails if any is skipped. The
+macOS behavioural tests (test_macos_*) are deselected there and run only locally.
+ROOT must not be HOME, an ancestor of HOME, or "/", and ROOT/.git is read-only
+inside the sandbox on both backends (a check cannot plant hooks or git config).
+Known difference: when ROOT/.git does not exist, macOS denies creating it (the
+profile denies the path) while Linux allows it (nothing to ro-bind); wrap() never
+creates anything in the user's repository to hide that.
 """
 from __future__ import annotations
 
@@ -18,6 +45,10 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
+
+
+MARKER_VAR = "LLM_CHECK_ID"
 
 
 class SandboxUnavailable(RuntimeError):
@@ -28,8 +59,119 @@ ENV_ALLOWLIST = {"PATH", "HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR",
                  "VIRTUAL_ENV", "PYTHONDONTWRITEBYTECODE", "CI", "NO_COLOR"}
 
 
+_run = threading.local()
+
+
+def set_marker(marker):
+    """Per-run id (this thread) that environment() puts in the check's env so a sweep can find it."""
+    _run.marker = marker
+
+
+def current_marker():
+    return getattr(_run, "marker", None)
+
+
 def environment():
-    return {k: v for k, v in os.environ.items() if k in ENV_ALLOWLIST or k.startswith("LC_")}
+    env = {k: v for k, v in os.environ.items() if k in ENV_ALLOWLIST or k.startswith("LC_")}
+    if current_marker():
+        env[MARKER_VAR] = current_marker()
+    # A check must not leave .pyc files: a planted one runs on the next unsandboxed import.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+FSIZE_BYTES = 256 * 1024 * 1024   # RLIMIT_FSIZE: largest file any process of the check may write
+NPROC_HEADROOM = 128              # RLIMIT_NPROC = this uid's current process count + headroom
+
+
+def _uid_process_count():
+    """Processes of this uid now (macOS). The kernel compares the uid-wide count with the
+    process's own limit, so the limit must be this count plus headroom, not a bare number."""
+    try:
+        listing = subprocess.run(["/bin/ps", "-U", str(os.getuid()), "-o", "pid="],
+                                 capture_output=True, text=True, timeout=5, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return len(listing.split())
+
+
+def resource_limiter():
+    """preexec_fn that bounds file size (all OSes) and the uid-wide process count (macOS only).
+
+    Inherited through sandbox-exec and bwrap; binds only the check's tree. Not a CPU/memory
+    limit (60 s wall clock only). Without a process count, FSIZE alone is applied.
+    """
+    import resource
+
+    count = _uid_process_count()
+    nproc = count + NPROC_HEADROOM if count is not None and platform.system() == "Darwin" else None
+    fsize = FSIZE_BYTES
+
+    def apply():
+        resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize))
+        if nproc is not None:
+            hard = resource.getrlimit(resource.RLIMIT_NPROC)[1]
+            limit = nproc if hard == resource.RLIM_INFINITY else min(nproc, hard)
+            resource.setrlimit(resource.RLIMIT_NPROC, (limit, limit))
+    return apply
+
+
+def _children(pid):
+    try:
+        out = subprocess.run(["/usr/bin/pgrep", "-P", str(pid)], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [int(p) for p in out.split()]
+
+
+def descendants(root_pid):
+    """Pids below root_pid found by walking pgrep -P (macOS). Snapshot it BEFORE killing the
+    group: once a parent dies its setsid() children are reparented and can no longer be found."""
+    if platform.system() != "Darwin":
+        return set()
+    found, pending = set(), [root_pid]
+    while pending and len(found) < 5000:
+        for child in _children(pending.pop()):
+            if child not in found:
+                found.add(child)
+                pending.append(child)
+    return found
+
+
+def kill_survivors(known, marker):
+    """macOS: SIGKILL check descendants that left the process group (setsid), after killpg.
+
+    Best effort, two sources: `known` (descendants() snapshot taken while the root lived;
+    finds children even if they scrubbed their env) and a sweep of this uid's processes
+    whose environment carries the per-run marker (finds reparented descendants; `ps -E`
+    shows no env for SIP-protected binaries and a hostile process can clear its env).
+    Returns the sorted pids that were still alive and signalled.
+    """
+    import signal
+
+    if platform.system() != "Darwin":
+        return []
+    found = set(known)
+    if marker:
+        try:
+            listing = subprocess.run(["/bin/ps", "-E", "-ww", "-U", str(os.getuid()), "-o", "pid=,command="],
+                                     capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            listing = ""
+        needle = f"{MARKER_VAR}={marker}"
+        for line in listing.splitlines():
+            head, _, rest = line.strip().partition(" ")
+            if head.isdigit() and needle in rest and int(head) != os.getpid():
+                found.add(int(head))
+    killed = []
+    for pid in sorted(found):
+        try:
+            os.kill(pid, 0)
+            os.kill(pid, signal.SIGKILL)
+            killed.append(pid)
+        except OSError:
+            pass
+    return killed
 
 
 def _path(value):
@@ -52,6 +194,55 @@ def _runtime_grant(path):
             or any(path == home or path in home.parents for home in homes)):
         raise SandboxUnavailable(f"runtime dir too broad: {path}")
     return str(path)
+
+
+def _under_system(path):
+    """macOS /System (incl. /System/Volumes/Data, which firmlinks to /Users); case-insensitive."""
+    return len(path.parts) > 1 and path.parts[1].lower() == "system"
+
+
+def _strip_data_volume(path):
+    parts = path.parts
+    if [p.lower() for p in parts[1:4]] == ["system", "volumes", "data"]:
+        return Path("/", *parts[4:])
+    return path
+
+
+def _check_root(root):
+    """Refuse a ROOT that would re-grant HOME (the allow ROOT rule outranks the HOME deny).
+
+    Compared by file identity, not by string: on case-insensitive APFS '/users/me'
+    names the same directory as '/Users/me'. Fewer than 2 path components
+    ('/', '/usr', '/etc', '/Users', '/home', '/opt', ...) is always refused.
+    """
+    import pwd
+
+    refusal = "root covers HOME or a system directory"
+    named = Path(os.path.abspath(os.fspath(root)))  # lexical: /etc stays /etc, no symlink followed
+    if len(named.parts) < 3:
+        raise SandboxUnavailable(f"{refusal}: {named}")
+    if _under_system(named):
+        raise SandboxUnavailable(f"{refusal}: {named}")
+    path = Path(_path(root))
+    if _under_system(path):
+        raise SandboxUnavailable(f"{refusal}: {path}")
+    # macOS /etc, /var, /tmp resolve into /private: treat '/private' like '/'.
+    floor = 4 if len(path.parts) > 1 and path.parts[1].lower() == "private" else 3
+    if len(path.parts) < floor:
+        raise SandboxUnavailable(f"{refusal}: {path}")
+    homes = {Path(_path(os.environ.get("HOME") or Path.home())),
+             Path(_path(pwd.getpwuid(os.getuid()).pw_dir))}
+    bare = _strip_data_volume(path)
+    for home in homes:
+        if _inside(_strip_data_volume(home), bare):  # firmlink view of the same tree
+            raise SandboxUnavailable(f"{refusal}: {path}")
+        for ancestor in (home, *home.parents):
+            try:
+                same = os.path.samefile(path, ancestor)
+            except OSError:
+                same = path == ancestor
+            if same:
+                raise SandboxUnavailable(f"root covers HOME or a system directory: {path}")
 
 
 def _inside(path, root):
@@ -154,6 +345,33 @@ def _runtime_dirs(executable, root=None):
     return sorted(dirs)
 
 
+def _narrow_grants(dirs, root):
+    """S7: grant only the bin/lib/Frameworks subtrees of a runtime prefix, never its root.
+
+    A prefix root holds files a check has no business reading (.npmrc, pip.conf, etc/npmrc,
+    credentials next to a conda/nvm install). The one root file python needs is pyvenv.cfg,
+    returned separately as a single-file grant. Dirs that are not prefix-shaped (a bare
+    bin dir, system dirs, anything inside ROOT) pass through unchanged.
+    Returns (dirs, files).
+    """
+    out, files = set(), set()
+    for name in dirs:
+        path = Path(name)
+        system = any(_inside(path, Path(d)) for d in _SYSTEM_DIRS)
+        if system or _inside(path, root) or not _is_runtime_prefix(path):
+            out.add(name)
+            continue
+        for sub in ("bin", "lib", "lib64", "Frameworks"):
+            real = (path / sub)
+            if real.is_dir():
+                target = Path(_path(real))
+                if _inside(target, Path(_path(path))):
+                    out.add(_runtime_grant(target))
+        if (path / "pyvenv.cfg").is_file():
+            files.add(_path(path / "pyvenv.cfg"))
+    return sorted(out), sorted(files)
+
+
 def _symlink_hops(path):
     """Every symlink met while resolving *path*, as (link path, raw target), in resolution order."""
     hops, pending, done = [], list(Path(os.path.abspath(path)).parts[1:]), Path("/")
@@ -226,7 +444,10 @@ _MAC_PROFILE = '''(version 1)
 (allow file-write* (subpath (param "ROOT")) (subpath (param "TEMP"))
     (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")
     (literal "/dev/urandom") (literal "/dev/random"))
-(deny file-read-data (subpath (param "HOME")) (subpath (param "USER_HOME")))
+; Last match wins: keep .git read-only so a check cannot plant hooks or config.
+(deny file-write* (subpath (param "GIT")))
+(deny file-read-data (subpath (param "HOME")) (subpath (param "USER_HOME"))
+    (subpath "/Volumes") (subpath "/Users") (subpath "/private/var/folders") (subpath "/private/tmp"))
 (allow file-read-data (subpath (param "ROOT")) (subpath (param "TEMP")) {runtime})
 (deny process-exec (literal "/usr/bin/open") (literal "/usr/bin/osascript")
     (literal "/usr/bin/pbcopy") (literal "/usr/bin/pbpaste") (literal "/usr/bin/launchctl"))
@@ -235,7 +456,12 @@ _MAC_PROFILE = '''(version 1)
     (global-name "com.apple.lsd.mapdb") (global-name "com.apple.windowserver.active")
     (global-name "com.apple.coreservices.launchservicesd")
     (global-name "com.apple.pasteboard.1") (global-name "com.apple.securityd")
-    (global-name "com.apple.securityd.xpc"))
+    (global-name "com.apple.securityd.xpc")
+    ; S2 probe (bootstrap_look_up from inside the sandbox, 2026-11-25, Darwin 25.5, n=7 names):
+    ; these were still reachable: Keychain, quarantine, ServiceManagement job submission.
+    (global-name "com.apple.SecurityServer") (global-name "com.apple.secd")
+    (global-name "com.apple.coreservices.quarantine-resolver")
+    (global-name "com.apple.xpc.smd") (global-name "com.apple.pboard"))
 '''
 
 
@@ -261,12 +487,13 @@ def wrap(argv, root):
     backend = "/usr/bin/sandbox-exec" if system == "Darwin" else shutil.which("bwrap") if system == "Linux" else None
     if not backend:
         raise SandboxUnavailable("bwrap missing" if system == "Linux" else f"unsupported OS: {system}")
+    _check_root(root)  # before anything resolves or touches the directory
     root = _path(root)
     home = _path(os.environ.get("HOME", Path.home()))
     try:
         if system == "Linux":
             _scan_root_sockets(root)
-        runtimes = _runtime_dirs(argv[0], root)
+        runtimes, runtime_files = _narrow_grants(_runtime_dirs(argv[0], root), Path(root))
         reason = _probe(system, backend)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         raise SandboxUnavailable(str(exc)) from exc
@@ -280,9 +507,12 @@ def wrap(argv, root):
         if system == "Darwin":
             import pwd
 
-            params = {"ROOT": root, "HOME": home, "USER_HOME": _path(pwd.getpwuid(os.getuid()).pw_dir), "TEMP": scratch}
+            params = {"ROOT": root, "HOME": home, "USER_HOME": _path(pwd.getpwuid(os.getuid()).pw_dir), "TEMP": scratch,
+                      "GIT": root + "/.git"}
             params.update({f"R{i}": value for i, value in enumerate(runtimes)})
-            rules = " ".join(f'(subpath (param "R{i}"))' for i in range(len(runtimes)))
+            params.update({f"F{i}": value for i, value in enumerate(runtime_files)})
+            rules = " ".join([f'(subpath (param "R{i}"))' for i in range(len(runtimes))]
+                             + [f'(literal (param "F{i}"))' for i in range(len(runtime_files))])
             command = [backend]
             for key, value in params.items():
                 command.extend(["-D", f"{key}={value}"])
@@ -292,7 +522,7 @@ def wrap(argv, root):
             # --new-session detaches from the controlling terminal: no /dev/tty writes
             # and no TIOCSTI input injection (CVE-2017-5226).
             command = [backend, "--unshare-all", "--die-with-parent", "--new-session", "--clearenv"]
-            mounts = {"/usr", "/bin", "/etc", *glob.glob("/lib*"), *runtimes}
+            mounts = {"/usr", "/bin", "/etc", *glob.glob("/lib*"), *runtimes, *runtime_files}
             for path in sorted(mounts):
                 if Path(path).exists():
                     command += ["--ro-bind", _path(path), path]
@@ -307,7 +537,11 @@ def wrap(argv, root):
                     made.add(link)
                     command += ["--symlink", target, link]
             command += ["--dev", "/dev", "--proc", "/proc", "--bind", root, root,
-                        "--bind", scratch, scratch, "--chdir", root]
+                        "--bind", scratch, scratch]
+            if os.path.lexists(root + "/.git"):
+                # After the ROOT bind so it overrides it; a linked-worktree .git file works too.
+                command += ["--ro-bind", root + "/.git", root + "/.git"]
+            command += ["--chdir", root]
             for key, value in env.items():
                 command += ["--setenv", key, value]
             command += ["--", *argv]

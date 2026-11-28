@@ -1,6 +1,6 @@
 [project]
 name = "llm-routing"
-version = "16.0.1"
+version = "16.1.0"
 description = "Multi-LLM router MCP server — smart complexity routing, budget-aware model selection, 20+ providers (Claude, OpenAI, Gemini, Ollama, etc.)"
 readme = "README.md"
 license = "MIT"
@@ -170,6 +170,11 @@ exclude = [
     "/architecture/",
     "/demo/",
     "/docs/",
+    # "/docs/**" too: .gitignore un-ignores parts of /docs/ (!/docs/BENCHMARKS.md,
+    # !/docs/releases/** ...) and hatch merges .gitignore into the sdist rules, so
+    # "/docs/" alone left 296 of docs' tracked files in the 16.0.1 sdist
+    # (tar listing, n=1 build, 2026-11-25). "/audit/" and "/architecture/" were fine.
+    "/docs/**",
     "/research/",
     "/deprecation/",
     "/scripts/",

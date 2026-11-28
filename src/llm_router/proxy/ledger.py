@@ -38,6 +38,11 @@ Row fields:
                   null for a continuation or side call); the character length
                   of the text the tier classifier reads. Null on a failure and
                   absent on rows written before the fix.
+  prev_tool_error true when a tool result in the newest user turn carries ``is_error``, false when none
+                  does, null when the call is not a continuation (flag only, D-626)
+  prev_tier_rewritten  true/false: the session's previous tier-decided Claude call was / was not a
+                  rewrite (served != requested); null for its first call or after a proxy restart
+                  (D-626: lets ``rewrite_quality`` compare what follows rewritten and other steps)
   prev_tools      names of the tool calls the newest tool results answer
   prev_tool_class ``proxy.tool_classes`` class of those calls (technical_op |
                   edit | exec | agent | web | other), null when not a
@@ -333,15 +338,21 @@ ENGINE_FIELD_DEFAULTS = {"cls_layer": None, "cls_confidence": None, "cls_reason"
 
 def write_row(row: dict, path: Path | None = None) -> None:
     target = path or ledger_path()
-    for k, v in ENGINE_FIELD_DEFAULTS.items():
-        if row.get(k) is None:
-            row[k] = v
-    # W0-1: the proxy ledger stamps inventory_sig HERE, at write time, not at decision time; the
-    # signature is keyed on the map token so it lags the decision only if the map changed in between.
-    if row.get("inventory_sig") is None:
-        from llm_router import decision_stamp
+    # Event rows (lifecycle, health, alarms) must not get ENGINE_FIELD_DEFAULTS:
+    # cls_layer/policy fields are only meaningful for decision rows; inventory_sig
+    # is a routing-decision stamp. Without this guard, event rows get
+    # served_by=anthropic (via annotate) + ENGINE_FIELD_DEFAULTS, making them look
+    # like Claude calls to readers that count by served_by.
+    if not row.get("event"):
+        for k, v in ENGINE_FIELD_DEFAULTS.items():
+            if row.get(k) is None:
+                row[k] = v
+        # W0-1: the proxy ledger stamps inventory_sig HERE, at write time, not at decision time; the
+        # signature is keyed on the map token so it lags the decision only if the map changed in between.
+        if row.get("inventory_sig") is None:
+            from llm_router import decision_stamp
 
-        row["inventory_sig"] = decision_stamp.inventory_sig()
+            row["inventory_sig"] = decision_stamp.inventory_sig()
     try:
         state_files.private_dir(target.parent)
         with state_files.open_private(target, "a", encoding="utf-8") as fh:
@@ -354,8 +365,13 @@ def write_row(row: dict, path: Path | None = None) -> None:
 
 def read_rows(path: Path | None = None, days: float | None = None, *,
               slim_before: float | None = None,
-              slim_keep: Iterable[str] = ()) -> list[dict]:
+              slim_keep: Iterable[str] = (), include_events: bool = False) -> list[dict]:
     """The ledger rows, read one line at a time (never the whole file as one string).
+
+    A lifecycle row (truthy ``event``, e.g. ``backend_recycle``) is not a call, so it is dropped unless
+    ``include_events``. Ledgers written before this fix hold such rows with ``served_by="anthropic"``;
+    dropping them here, once, keeps every counting reader (``stats``, ``proxy_session_cost``, the
+    receipt, the liveness checks) from counting them as Claude calls. No production reader needs them.
 
     ``days`` drops rows older than the window. ``slim_before`` keeps every row but reduces one whose
     numeric ``ts`` is older than it to the keys in ``slim_keep`` (value copied, key present only when
@@ -376,6 +392,8 @@ def read_rows(path: Path | None = None, days: float | None = None, *,
             except ValueError:
                 continue
             if not isinstance(row, dict):
+                continue
+            if row.get("event") and not include_events:
                 continue
             ts = row.get("ts")
             # A row without a timestamp cannot be placed in a window: it is kept
@@ -481,24 +499,65 @@ def _served_runs(rows: list[dict]) -> list[tuple[list[dict], dict | None, dict |
     return runs
 
 
-def _net_avoided(rows: list[dict]) -> tuple[float, int]:
-    """``(net_avoided_usd, n)``, an UPPER BOUND over realized saving — see the
-    module docstring ("NET AVOIDED"). May be negative. ``n`` counts served
-    RUNS that were priceable (a known model on at least one step), not served
-    steps: a run of N consecutive served steps is priced ONCE, at its first
-    priceable step, because it is one point where a real Anthropic call was
-    deferred, not N — see the module docstring for why summing every step in
-    the run double/triple-counted the local model's own extra internal turns.
+#: A session needs at least this many control calls (forwarded calls that follow a forwarded
+#: call) before its own mean cache write is used as the baseline; fewer falls back to the
+#: window-wide mean. See coord/SAVINGS-ESTIMATOR-METHOD-20261125.md (D-612).
+BASELINE_MIN_CONTROL_CALLS = 5
 
-    Unknown usage (``usage`` recorded as null, see :func:`usage_unknown`) is NOT
-    excluded here, and reads as zero tokens in two places: a ``nxt`` row with
-    unknown usage adds no extra cache-write cost (this keeps the figure an upper
-    bound, never below the truth), and an unknown ``prefix`` row gives a zero
-    prefix context (which prices the counterfactual low). Both are deliberate,
-    labelled approximations of an upper bound, not measurements."""
+
+def _row_write_usd(row: dict) -> float | None:
+    """USD of the cache write of one forwarded/fallback row at its own model; ``None`` when its
+    usage is unknown (null) or the model is unpriced."""
+    if usage_unknown(row):
+        return None
+    u = normalize_usage(row.get("usage"))
+    return _price_tokens(row.get("served_model") or row.get("requested_model") or "",
+                         cache_creation_5m=u["cache_creation_5m"], cache_creation_1h=u["cache_creation_1h"])
+
+
+def _write_baselines(rows: list[dict]) -> tuple[dict[str, float], float | None]:
+    """``(per_session_mean, window_mean)`` of the cache-write USD of CONTROL calls: forwarded/
+    fallback rows whose immediately preceding row in the same session (``ts`` order) is also
+    forwarded/fallback, i.e. ordinary calls that did not follow a served run. A session appears
+    in the first dict only with >= :data:`BASELINE_MIN_CONTROL_CALLS` priced control calls;
+    ``window_mean`` is ``None`` when the window has no priced control call. Unknown-usage rows
+    are never controls. Method: coord/SAVINGS-ESTIMATOR-METHOD-20261125.md (D-612)."""
+    by_session: dict[str, list[dict]] = {}
+    for r in rows:
+        by_session.setdefault(r.get("session_id") or "", []).append(r)
+    per_session: dict[str, float] = {}
+    all_writes: list[float] = []
+    for sid, srows in by_session.items():
+        ordered = sorted(srows, key=lambda r: r.get("ts") or 0)
+        writes: list[float] = []
+        for prev, cur in zip(ordered, ordered[1:]):
+            if (prev.get("decision") in (DECISION_FORWARDED, DECISION_FALLBACK)
+                    and cur.get("decision") in (DECISION_FORWARDED, DECISION_FALLBACK)):
+                w = _row_write_usd(cur)
+                if w is not None:
+                    writes.append(w)
+        all_writes.extend(writes)
+        if len(writes) >= BASELINE_MIN_CONTROL_CALLS:
+            per_session[sid] = sum(writes) / len(writes)
+    return per_session, (sum(all_writes) / len(all_writes) if all_writes else None)
+
+
+def _net_avoided_detail(rows: list[dict], only: "set[int] | None" = None) -> dict:
+    """The work of :func:`_net_avoided`, with the exclusion counts. Keys: ``total``, ``n``,
+    ``excluded_unknown_usage`` (runs whose next real call has usage recorded as null: excluded,
+    never guessed), ``excluded_no_baseline`` (runs whose next call wrote cache but no control
+    call exists in the window to price an ordinary write: excluded, never guessed),
+    ``fallback_baseline_runs`` (counted runs priced with the window-wide baseline).
+
+    ``only``: ``id()`` of rows; when given, only runs whose FIRST row is one of them are priced
+    (the baselines still come from all ``rows``). The savings rollup uses it to give a run, and the
+    toll of its next call, to the day the run starts in (D-627)."""
+    per_session, window_mean = _write_baselines(rows)
     total = 0.0
-    n = 0
+    n = excl_unknown = excl_nobase = fallback = 0
     for run, prefix, nxt in _served_runs(rows):
+        if only is not None and id(run[0]) not in only:
+            continue
         prefix_u = normalize_usage(prefix.get("usage")) if prefix is not None else None
         prefix_ctx = (prefix_u["cache_read_input_tokens"] + prefix_u["cache_creation_input_tokens"]
                       if prefix_u is not None else 0)
@@ -515,15 +574,55 @@ def _net_avoided(rows: list[dict]) -> tuple[float, int]:
             break  # the run's first priceable step is the one deferred call.
         if run_would_have is None:
             continue
-        extra_write = 0.0
+        toll = 0.0
+        used_fallback = False
         if nxt is not None:
-            nxt_u = normalize_usage(nxt.get("usage"))
-            extra_write = _price_tokens(nxt.get("requested_model") or "",
-                                        cache_creation_5m=nxt_u["cache_creation_5m"],
-                                        cache_creation_1h=nxt_u["cache_creation_1h"]) or 0.0
-        total += run_would_have - extra_write
+            if usage_unknown(nxt):
+                excl_unknown += 1
+                continue
+            next_write = _row_write_usd(nxt)
+            if next_write is None:  # unpriced next call: excluded and counted, never read as 0
+                excl_unknown += 1
+                continue
+            if next_write > 0:
+                sid = nxt.get("session_id") or ""
+                if sid in per_session:
+                    baseline = per_session[sid]
+                elif window_mean is not None:
+                    baseline, used_fallback = window_mean, True
+                else:
+                    excl_nobase += 1
+                    continue
+                toll = max(0.0, next_write - baseline)
+        total += run_would_have - toll
         n += 1
-    return total, n
+        fallback += used_fallback
+    return {"total": total, "n": n, "excluded_unknown_usage": excl_unknown,
+            "excluded_no_baseline": excl_nobase, "fallback_baseline_runs": fallback}
+
+
+def _net_avoided(rows: list[dict]) -> tuple[float, int]:
+    """``(net_avoided_usd, n)``, an UPPER BOUND over realized saving — see the
+    module docstring ("NET AVOIDED"). May be negative. ``n`` counts served
+    RUNS that were priceable (a known model on at least one step), not served
+    steps: a run of N consecutive served steps is priced ONCE, at its first
+    priceable step, because it is one point where a real Anthropic call was
+    deferred, not N — see the module docstring for why summing every step in
+    the run double/triple-counted the local model's own extra internal turns.
+
+    Re-cache toll (D-612, coord/SAVINGS-ESTIMATOR-METHOD-20261125.md): the next real
+    call's cache write counts against the run only ABOVE what an ordinary call writes,
+    ``toll = max(0, next_write - baseline)``. ``baseline`` is the mean cache-write USD of
+    the session's control calls (forwarded calls that follow a forwarded call) when it
+    has >= :data:`BASELINE_MIN_CONTROL_CALLS`, else the window-wide mean. (The old rule
+    charged 100% of that write; on the live ledger 7 d to 2026-11-25 08:25Z the next call
+    after a served run wrote $0.0587 * 57.7% while a control call wrote a mean $0.0184,
+    n=1,099 vs n=10,621, proxy_calls.jsonl.) A run whose next call has null usage, or
+    whose next call wrote cache with no control call in the window to compare against, is
+    EXCLUDED, not guessed; use :func:`_net_avoided_detail` for those counts. An unknown
+    ``prefix`` row still gives a zero prefix context (prices the counterfactual low)."""
+    d = _net_avoided_detail(rows)
+    return d["total"], d["n"]
 
 
 def tier_counterfactual_cost(row: dict) -> float | None:
@@ -565,13 +664,39 @@ def tier_stats(rows: list[dict]) -> dict | None:
                   and not str(r["response_model"]).startswith(str(r.get("served_model")))]
     actual = counterfactual = 0.0
     priced = 0
+    # The same C figure split by what earned it (owner D-626): a rewrite (served != requested) is a model
+    # swap; any other priced tier row (a tier_switch on the requested model) is a cache cost, not a swap.
+    rw_n = rw_neg_n = 0
+    rw_neg_usd = rw_usd = 0.0
+    other_n, other_usd = 0, 0.0
+    pairs: dict[tuple[str, str], list] = {}
+    rw_unpriced = {"rewritten": 0, "usage_unknown": 0, "unknown_model": 0}
+    other_unpriced = {"usage_unknown": 0, "unknown_model": 0}
     for r in tiered:
+        is_rw = (r.get("served_model") or r.get("requested_model")) != r.get("requested_model")
         a, c = anthropic_cost(r), tier_counterfactual_cost(r)
         if a is None or c is None:
+            if is_rw:
+                rw_unpriced["rewritten"] += 1
+            bucket = rw_unpriced if is_rw else other_unpriced
+            bucket["usage_unknown" if usage_unknown(r) else "unknown_model"] += 1
             continue
         actual += a
         counterfactual += c
         priced += 1
+        d = c - a
+        if is_rw:
+            rw_n += 1
+            rw_usd += d
+            if d < 0:
+                rw_neg_n += 1
+                rw_neg_usd += d
+            pr = pairs.setdefault((str(r.get("requested_model")), str(r.get("served_model"))), [0, 0.0])
+            pr[0] += 1
+            pr[1] += d
+        else:
+            other_n += 1
+            other_usd += d
     switch_cost = [r["tier_switch_cost_usd"] for r in switches if isinstance(r.get("tier_switch_cost_usd"), (int, float))]
     # What the switched calls actually paid in cache writes (from Anthropic's
     # own usage), next to the estimate: the estimate assumes the whole prefix
@@ -603,6 +728,18 @@ def tier_stats(rows: list[dict]) -> dict | None:
         "est_counterfactual_requested_usd": round(counterfactual, 4),
         "est_saving_usd": round(counterfactual - actual, 4),
         "priced_n": priced,
+        # C by part: rewrites (model swaps) gross, every other priced tier row, and what stayed unpriced.
+        "rewrites_priced_n": rw_n, "rewrites_gross_usd": round(rw_usd, 4),
+        "rewrites_negative_n": rw_neg_n, "rewrites_negative_usd": round(rw_neg_usd, 4),
+        "nonrewrite_priced_n": other_n, "nonrewrite_usd": round(other_usd, 4),
+        "rewritten_unpriced": rw_unpriced["rewritten"],
+        "rewritten_unpriced_usage_unknown": rw_unpriced["usage_unknown"],
+        "rewritten_unpriced_unknown_model": rw_unpriced["unknown_model"],
+        "nonrewrite_unpriced_usage_unknown": other_unpriced["usage_unknown"],
+        "nonrewrite_unpriced_unknown_model": other_unpriced["unknown_model"],
+        "nonrewrite_unpriced": other_unpriced["usage_unknown"] + other_unpriced["unknown_model"],
+        "rewrite_pairs": [[f, t, v[0], round(v[1], 4)] for (f, t), v in
+                          sorted(pairs.items(), key=lambda kv: -kv[1][0])],
     }
 
 
@@ -715,7 +852,8 @@ def stats(rows: list[dict]) -> dict:
     # ("NET AVOIDED"). An UPPER BOUND with its n, never a measured saving —
     # paired_realized_saving() is the only measured figure — and it may be
     # negative.
-    avoided, avoided_n = _net_avoided(rows)
+    avoided_d = _net_avoided_detail(rows)
+    avoided, avoided_n = avoided_d["total"], avoided_d["n"]
 
     def _cc(rs: list[dict]) -> list[float]:
         return [normalize_usage(r.get("usage"))["cache_creation_input_tokens"] for r in rs]
@@ -759,6 +897,8 @@ def stats(rows: list[dict]) -> dict:
             # UPPER BOUND, not a measured saving; may be negative — see the
             # module docstring ("NET AVOIDED") and paired_realized_saving().
             "net_avoided_usd": round(avoided, 4), "net_avoided_n": avoided_n,
+            "net_avoided_excluded_unknown_usage": avoided_d["excluded_unknown_usage"],
+            "net_avoided_excluded_no_baseline": avoided_d["excluded_no_baseline"],
             "cache_creation_median_after_served_turn": _median(_cc(mixed)), "after_served_n": len(mixed),
             "cache_creation_median_clean_history": _median(_cc(clean)), "clean_n": len(clean),
         },

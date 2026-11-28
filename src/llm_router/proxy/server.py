@@ -94,7 +94,13 @@ from llm_router.local_context_guard import ContextOverflow
 from llm_router.proxy.loop_guard import (
     DEFAULT_MAX_CONSECUTIVE,
     DEFAULT_REPEAT_WINDOW,
+    REASON_CACHE_BLOCK_CAP,
     REASON_LOOP_GUARD,
+    REASON_MAIN_STEP_CAP,
+    BlockCap,
+    incoming_blocks,
+    local_main_max_steps,
+    local_max_blocks,
     TRIGGER_CAP,
     TRIGGER_REPEAT,
     LoopGuard,
@@ -508,6 +514,7 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         cold_guard.GUARD.ttl_s = cold_guard.ttl_from_keep_alive(cfg.keep_alive)
     http = client or httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     legacy_guard = LoopGuard(cfg.loop_max_consecutive, cfg.loop_repeat_window)
+    block_cap = BlockCap()  # LLM_ROUTER_LOCAL_MAX_BLOCKS; inert (never consulted) while the flag is off
     # Stops sending steps to a crashed local backend (proxy.backend_health).
     from llm_router.proxy import runner_recover
     from llm_router.proxy.backend_recycle import BackendRecycle, recycle_after_failed_probe, recycle_command
@@ -520,6 +527,12 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     recycler = (BackendRecycle(recycle_cmd, clock=health_clock, action=recover_action)
                 if recycle_cmd or recover_action else None)
     recycle_cmd = recycle_cmd or ("runner_recover" if recover_action else "")
+    _runner_log = os.environ.get("LLM_ROUTER_RUNNER_LOG", "").strip()   # D-650: corroborates the wider trigger
+    oom_watch = runner_recover.OomLogWatch(_runner_log) if _runner_log and recover_action else None
+    if runner_recover.empty_trip_enabled() and oom_watch is None:
+        print("llm-router proxy: LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY=1 has no effect: it needs LLM_ROUTER_RUNNER_LOG "
+              "and the runner repair (LLM_ROUTER_RUNNER_PIDFILE, no LLM_ROUTER_BACKEND_RECYCLE_CMD)",
+              file=sys.stderr, flush=True)
     health = BackendHealth(cfg.backend_fail_n, cfg.backend_cooldown_s, clock=health_clock,
                            fast_empty=bool(recycle_cmd),
                            # A broken runner (runner_oom / runner_compute_error) stays broken until reloaded: with
@@ -593,6 +606,9 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
         return recycler.wrap(backend) if recycler else backend
 
     def recycle_event(result):
+        # D-650 S2: OOM lines are spent only by a repair that finished ok, not by one that was skipped later.
+        if oom_watch is not None and isinstance(result, dict) and result.get("recycle") == "ok":
+            oom_watch.mark()
         write({"ts": time.time(), "event": "backend_recycle", "backend_health": result})
 
     async def warm_up() -> dict:
@@ -636,14 +652,39 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
     def parent_main_of(body: dict) -> bool | None:
         return thread_main.get(thread_parent(body)) if is_thread_continue(body) else None
 
+    # D-626: was the PREVIOUS Claude call of this session a tier rewrite? One bool per session on the next
+    # row, so rewritten and non-rewritten steps can be compared by what follows them. Bounded; a miss
+    # (restart, first call) leaves the field null, never False.
+    last_rewritten: OrderedDict[str, bool] = OrderedDict()
+
+    def remember_rewrite(row: dict) -> None:
+        sid = row.get("session_id")
+        if row.get("event") or not isinstance(sid, str) or row.get("decision") not in (
+                ledger.DECISION_FORWARDED, ledger.DECISION_FALLBACK) or not row.get("tier_reason"):
+            return
+        row["prev_tier_rewritten"] = last_rewritten.get(sid)
+        last_rewritten[sid] = (row.get("served_model") or row.get("requested_model")) != row.get("requested_model")
+        last_rewritten.move_to_end(sid)
+        while len(last_rewritten) > _THREAD_MAIN_MAX:
+            last_rewritten.popitem(last=False)
+
     def write(row: dict) -> None:
         remember_thread(row)
-        # Real Anthropic spend per call (PR 8). Never lets accounting cost a row.
-        try:
-            cost_accounting.annotate(row, prefixes.get(row.get("session_id")))
-            prefixes.update(row)
-        except Exception as exc:  # noqa: BLE001 - the ledger row matters more than its cost fields
-            failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
+        remember_rewrite(row)
+        # Event rows (lifecycle, health, alarms) must not get cost fields:
+        # annotate() sets served_by="anthropic" when decision != "served",
+        # which makes readers count them as Claude calls.
+        if not row.get("event"):
+            try:
+                cost_accounting.annotate(row, prefixes.get(row.get("session_id")))
+                prefixes.update(row)
+            except Exception as exc:  # noqa: BLE001 - the ledger row matters more than its cost fields
+                failopen.record("LR-FO-PROXY-LEDGER-COST", exc)
+        blocks_key = row.pop("_blocks_key", None)
+        blocks_in = row.pop("_blocks_in", None)  # set only with LLM_ROUTER_LOCAL_MAX_BLOCKS on; never serialized
+        if blocks_in is not None and "blocks_since_claude" not in row:
+            served = len(row.get("served_blocks") or []) if row.get("decision") == ledger.DECISION_SERVED else None
+            row["blocks_since_claude"] = block_cap.settle(blocks_key, blocks_in, served)
         lane_a.ensure_fields(row)  # every continuation row, served or not, carries lane_a_reason/_conf
         row.pop(KEEPALIVE_WRITTEN, None)
         ledger.write_row(row, cfg.ledger_path)
@@ -766,6 +807,24 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_LOOP_GUARD,
                        detail=exhausted, added_latency_s=round(time.monotonic() - t0, 3),
                        loop_guard_trigger=trigger)
+            return None
+        main_cap = local_main_max_steps()
+        if main_cap > 0 and row.get("is_main_thread") is True and guard.served_count(guard_key) >= main_cap:
+            # D-640: a main-thread local run ends at N steps so the return to Claude stays inside the prompt
+            # cache; the guard streak ends with the Claude step, and the hand-off never pins (see below).
+            n_run = guard.served_count(guard_key)
+            guard.reset(guard_key)
+            row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_MAIN_STEP_CAP,
+                       detail=f"main_step_cap:{n_run}", main_step_cap=n_run,
+                       added_latency_s=round(time.monotonic() - t0, 3))
+            return None
+        blocks_in = row.get("_blocks_in")
+        blocks_pending = block_cap.would_reach(row.get("_blocks_key"), blocks_in if blocks_in is not None else 0, local_max_blocks())
+        if blocks_pending is not None:
+            # Hand off before the cache's ~20-block lookback is lost; the guard streak ends with the Claude step.
+            guard.reset(guard_key)
+            row.update(decision=ledger.DECISION_FALLBACK, reason=REASON_CACHE_BLOCK_CAP,
+                       detail=f"cache_block_cap:{blocks_pending}", added_latency_s=round(time.monotonic() - t0, 3))
             return None
         try:
             from llm_router import capability_filter
@@ -954,8 +1013,10 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             if tripped is not None:
                 row["backend_health"] = dict(row.get("backend_health") or {}, **tripped,
                                              error_kind=health.error_kind_for(choice["model"]))
-                if recycler and tripped["trigger"] in {"fast_empty", "crash_signature", "empty_burst"}:
-                    row["backend_health"].update(recycler.start(recycle_event) or {})
+                if recycler and runner_recover.trip_wants_recover(
+                        tripped["trigger"], row["backend_health"].get("error_kind"), watch=oom_watch):
+                    started = recycler.start(recycle_event) or {}
+                    row["backend_health"].update(started)
         _kind = error_kind((backend_outcome or (err,))[0]) if backend_t0 is not None else None
         if _kind not in (None, KIND_OTHER):   # fixed vocabulary, never the runner text; "other" adds nothing to ``detail``
             row["backend_error_kind"] = _kind
@@ -1412,11 +1473,19 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
                 # refusals can also arise inside complete(), before generation starts.
                 failed = attempted and row.get("reason") not in {"local_queue_timeout", "memory_budget"}
                 cause = lm.pinfix_outcome(key, True) if failed else None
+                if row.get("reason") == REASON_CACHE_BLOCK_CAP:
+                    row["pin_skipped"] = "cache_block_cap"  # same ledger field as the control arm
+                elif row.get("reason") == REASON_MAIN_STEP_CAP:
+                    row["pin_skipped"] = "main_step_cap"
                 if cause is not None:
                     lm.set_pin(key, local_mode.PIN_CLAUDE, local_mode.REASON_PINNED_STICKY)
                     row["local_mode"]["pin_change"] = "local->claude"
                     if cause == "fallback_ceiling":
                         row["local_mode"]["pinfix_cause"] = cause
+            elif row.get("reason") == REASON_CACHE_BLOCK_CAP:
+                row["pin_skipped"] = "cache_block_cap"  # a hand-off for the prompt cache, not a local failure
+            elif row.get("reason") == REASON_MAIN_STEP_CAP:
+                row["pin_skipped"] = "main_step_cap"  # D-640 hand-off, not a local failure
             elif (loop_guard_cap_no_pin_on() and row.get("reason") == REASON_LOOP_GUARD
                     and row.get("loop_guard_trigger") == TRIGGER_CAP):
                 row["pin_skipped"] = "loop_guard_cap"
@@ -2000,6 +2069,8 @@ def build_app(cfg: ProxyConfig, *, client=None, backend_factory=None, health_clo
             "stream": bool(body.get("stream")), "requested_model": body.get("model"),
             "auth": ledger.auth_kind(request.headers),
             "mixed_history": has_served_turn(body), "thinking_retry": False,
+            **({"_blocks_in": incoming_blocks(body),
+                "_blocks_key": conversation_key(body, session_id_of(body))} if local_max_blocks() else {}),
             # GE1: the kind of call (continuation / turn_first / subagent_first /
             # subagent_turn / harness_turn / side_call), the class of the tools its results answer, and why a
             # continuation could not be served faithfully. Serving eligibility is

@@ -36,6 +36,22 @@
           "attempted": 873
         }
       }
+    },
+    {
+      "release": "16.1.0",
+      "audit_version": 2,
+      "used_rate": 0.5763546798029556,
+      "used": 234,
+      "attempted": 406,
+      "ci95": [
+        0.527794,
+        0.623484
+      ],
+      "window_days": 30,
+      "recorded_at": "2026-11-27T21:00:40.948013+00:00",
+      "artifact_sha256": "22a1077771ededd08f8c620369eb89e389d17a055fffbce623288f39e21de88e",
+      "not_applicable": 1,
+      "tolerance_alpha": 0.05
     }
   ]
 }

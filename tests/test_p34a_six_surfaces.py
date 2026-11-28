@@ -212,10 +212,19 @@ VERIFIED_TODAY_USD, VERIFIED_TODAY_N = 0.5, 1
 
 
 def test_statusline_money_is_the_today_oracle(six):
+    from llm_router import ledger_view as lv
+
     usd, n = _saved_six("today")
     line = _statusline(six)
     est, est_n = usd - VERIFIED_TODAY_USD, n - VERIFIED_TODAY_N
-    assert f"~${est:,.2f} est. saved\u00b7today n={est_n}" in line, line
+    # D-611: the estimate is the combined figure; its n adds the proxy's local-served steps of today (the
+    # fixture's served proxy rows are all ``served`` with no model, so they price $0 and the dollars are unchanged)
+    since = lv.resolve("today", now=NOW).since_ts
+    local_steps = sum(1 for ln in (six.home / "proxy_calls.jsonl").read_text().splitlines()
+                      if (r := json.loads(ln))["decision"] == "served" and since <= r["ts"] <= NOW
+                      and not str(r.get("prefix_outcome") or "").startswith("refused"))
+    assert local_steps >= 1                                  # something to check
+    assert f"~${est:,.2f} est. saved\u00b7today n={est_n + local_steps}" in line, line
     assert f"${VERIFIED_TODAY_USD:,.2f} verified saved\u00b7today n={VERIFIED_TODAY_N}" in line, line
     assert f"~${usd:,.2f} est" not in line, line            # verified and estimated are never one figure
     # the extra row is outside today but inside 24h: a wrong money window prints another figure

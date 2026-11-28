@@ -920,6 +920,175 @@ def money_fragment(measured_usd: float | None, estimated_usd: float | None) -> s
     return " · ".join(parts) if parts else "~$0.00 est. saved"
 
 
+# ── combined saving: usage.db + proxy local net + proxy tier (D-611, D-613, D-614) ──────────────
+
+def a_trace_ids(bounds: Bounds, *, db_path=None, timeout_s: float = 0.5) -> frozenset:
+    """``trace_id`` / ``correlation_id`` values of the ``routing_decisions`` and ``usage`` rows in
+    ``bounds``: the calls ``usage.db`` already counts (the dedupe key against proxy rows, see the
+    module docstring). Empty without a database or the columns."""
+    out: set[str] = set()
+    con = _connect(db_path, timeout_s)
+    if con is None:
+        return frozenset()
+    try:
+        for table, names in (("routing_decisions", ("trace_id",)), ("usage", ("trace_id", "correlation_id"))):
+            cols = _columns(con, table)
+            if not cols:
+                continue
+            where, params = bounds.sql(cols)
+            for name in names:
+                if name in cols:
+                    out.update(r[0] for r in con.execute(  # nosec B608 -- table/column are constants above
+                        f"SELECT DISTINCT {name} FROM {table} WHERE {where} AND {name} IS NOT NULL "
+                        f"AND {name} != ''", params))
+    except sqlite3.Error:
+        return frozenset(out)
+    finally:
+        con.close()
+    return frozenset(out)
+
+
+def calendar_bounds(days: int, *, now=None) -> Bounds:
+    """The last ``days`` local calendar days including today: since local midnight ``days - 1`` days ago."""
+    from datetime import timedelta
+
+    until = _now_ts(now)
+    start = datetime.fromtimestamp(until).replace(hour=0, minute=0, second=0, microsecond=0)
+    start -= timedelta(days=days - 1)
+    return Bounds(f"{days}d", f"{days}d", start.timestamp(), until)
+
+
+def combined_saved(bounds: Bounds, *, db_path=None, proxy_path=None, rollup_path=None,
+                   timeout_s: float = 1.0) -> "tuple[Figure, dict]":
+    """THE saving figure: ``usage.db`` money (A, :func:`money_window` ``unverified_usd``) plus the
+    proxy's local-served net (B, ``proxy.ledger._net_avoided`` per served run, may be negative) plus
+    its tier-rewrite saving (C, ``tier_stats``), each from its own source and deduped by
+    ``trace_id`` (a proxy row whose ``trace_id`` is a ``usage.db`` row is dropped from B and C).
+
+    Returns ``(Figure, parts)``. ``Figure.value`` is the total, ``n`` = A calls + B local steps + C
+    rewritten calls, kind ``estimated``; ``value`` None (never a partial total) when the proxy part
+    is not available (``na_reason``, e.g. the rollup of closed days is still building). ``parts`` is
+    JSON-ready: ``A`` / ``B`` / ``C`` each with its dollars, its n, its ``excluded`` (rows it could
+    not price, counted and left out) and its ``since`` (the source's earliest row day), plus
+    ``verified_usd`` (A's measured part, shown apart, never summed)."""
+    from llm_router import savings_rollup
+
+    mw = money_window(bounds, db_path=db_path, timeout_s=timeout_s)
+    pp = savings_rollup.proxy_parts(bounds, ledger=proxy_path, rollup=rollup_path, db_path=db_path)
+    a_excl = _unpriced_rows(bounds, db_path)
+    # C by part (D-626), from the same rollup sums as C itself: C = rewrites gross + non-rewrite tier rows.
+    c_parts = None
+    if pp["available"]:
+        c_parts = {
+            "rewrites_n": pp["c_rw_priced"], "rewrites_gross": pp["c_rw_usd"],
+            "rewrites_negative_n": pp["c_rw_neg_n"], "rewrites_negative_usd": pp["c_rw_neg_usd"],
+            "tier_switch_cost": pp["c_other_usd"], "tier_switch_n": pp["c_other_n"],
+            "net": pp["c_usd"],
+            "rewrite_pairs": sorted(([k.split(">")[0], k.split(">")[1], v[0], round(v[1], 4)]
+                                     for k, v in pp["c_pairs"].items()), key=lambda x: -x[2]),
+            "unpriced_rewritten": pp["c_unpriced"],
+            "unpriced_other_usage_unknown": pp["c_unpriced_usage_unknown"],
+            "unpriced_other_unknown_model": pp["c_unpriced_unknown_model"],
+        }
+    parts = {
+        "window": bounds.label,
+        "A": {"usd": round(mw.unverified_usd, 6), "n": mw.unverified_calls, "excluded": a_excl,
+              "verified_usd": round(mw.verified_usd, 6), "verified_n": mw.verified_calls,
+              "duplicates": mw.duplicate_calls, "since": _earliest_day(db_path)},
+        "B": {"usd": pp["b_net"], "n": pp["b_steps"], "runs": pp["b_runs"], "excluded": pp["b_unpriced"],
+              "late_old_rows": pp.get("late_old_rows", 0),
+              "since": pp["first_day"]},
+        "C": {"usd": pp["c_usd"], "n": pp["c_rewritten"], "excluded": pp["c_unpriced"],
+              "since": pp["first_day"]},
+        "C_parts": c_parts,
+        "dedup_dropped": pp["dropped"],
+        "proxy_available": pp["available"], "proxy_na_reason": pp["na_reason"],
+    }
+    n = mw.unverified_calls + pp["b_steps"] + pp["c_rewritten"]
+    if not pp["available"]:
+        return Figure(None, n, bounds.label, _iso(bounds.until_ts), "usage.db + proxy ledger", "estimated",
+                      pp["na_reason"]), parts
+    total = mw.unverified_usd + pp["b_net"] + pp["c_usd"]
+    return Figure(round(total, 6), n, bounds.label, _iso(bounds.until_ts), "usage.db + proxy ledger",
+                  "estimated"), parts
+
+
+def _unpriced_rows(bounds: Bounds, db_path) -> int:
+    """``savings_stats`` rows of ``bounds`` whose ``cost_state`` is not ``known``: counted in A at the
+    saving they recorded (about $0), listed so the history can say how many rows rest on an unknown cost."""
+    con = _connect(db_path, 0.5)
+    if con is None:
+        return 0
+    try:
+        cols = _columns(con, _JSONL_TABLE)
+        if "cost_state" not in cols:
+            return 0
+        where, params = bounds.sql(cols)
+        return int(con.execute(  # nosec B608 -- table is a module constant, where/params are bound
+            f"SELECT COUNT(*) FROM {_JSONL_TABLE} WHERE {where} AND cost_state != 'known'", params).fetchone()[0])
+    except sqlite3.Error:
+        return 0
+    finally:
+        con.close()
+
+
+def _earliest_day(db_path) -> str | None:
+    """Earliest ``usage.db`` row day over the tables :func:`money_window` reads (UTC date text)."""
+    con = _connect(db_path, 0.5)
+    if con is None:
+        return None
+    best: str | None = None
+    try:
+        for table in (_LEGACY_TABLE, *_PLATFORM_TABLES, _JSONL_TABLE):
+            if _table_exists(con, table) and "timestamp" in _columns(con, table):
+                v = con.execute(f"SELECT MIN(timestamp) FROM {table}").fetchone()[0]  # nosec B608
+                if v and (best is None or str(v)[:10] < best):
+                    best = str(v)[:10]
+    except sqlite3.Error:
+        return best
+    finally:
+        con.close()
+    return best
+
+
+def _signed(v: float) -> str:
+    return f"{'-' if v < 0 else '+'}${abs(v):,.2f}"
+
+
+def render_saved(fig: Figure, parts: dict, *, short: bool = False) -> str:
+    """The ONE text of a combined figure (the router line and the money segment both call this).
+
+    positive: ``saved ~$1.09 est. (n=95: 4 hook/MCP · 53 local steps/38 runs · 0 tier, today)``;
+    ``short`` is ``~$X est. 30d``. Net <= 0 (D-613): ``saved n/a (net <= 0: local -$X, other +$Y,
+    <window>)``, never ``~$0`` and never only the positive part. Proxy part not built: ``n/a`` with
+    the reason. No row behind it: ``n/a (n=0, <window>)``."""
+    w = parts["window"]
+    a, b, c = parts["A"], parts["B"], parts["C"]
+    if fig.value is None:
+        why = fig.na_reason or "unknown"
+        return f"{w} n/a ({why})" if short else f"saved n/a ({why}, {w})"
+    if fig.n == 0:
+        return f"{w} n/a (n=0)" if short else f"saved n/a (n=0, {w})"
+    if fig.value <= 0:
+        why = f"net <= 0: local {_signed(b['usd'])}, other {_signed(a['usd'] + c['usd'])}"
+        return f"{w} n/a ({why})" if short else f"saved n/a ({why}, {w})"
+    if short:
+        return f"~${fig.value:,.2f} est. {w}"
+    return (f"saved ~${fig.value:,.2f} est. (n={fig.n:,}: {a['n']:,} hook/MCP · {b['n']:,} local steps/"
+            f"{b['runs']:,} runs · {c['n']:,} tier, {w})")
+
+
+def savings_line(*, now=None, db_path=None, proxy_path=None, rollup_path=None) -> dict:
+    """Today and the last 30 calendar days, each through :func:`combined_saved`, and the one text
+    both status-line surfaces print: ``<today> · <30d short>`` (D-614). JSON-ready."""
+    now = _now_ts(now)
+    kw = dict(db_path=db_path, proxy_path=proxy_path, rollup_path=rollup_path)
+    today, tparts = combined_saved(resolve("today", now=now), **kw)
+    d30, dparts = combined_saved(calendar_bounds(30, now=now), **kw)
+    return {"today": today.to_dict(), "today_parts": tparts, "d30": d30.to_dict(), "d30_parts": dparts,
+            "text": render_saved(today, tparts) + " · " + render_saved(d30, dparts, short=True)}
+
+
 def _percentile(sorted_vals: list[float], pct: float) -> float:
     """Nearest-rank percentile of a non-empty sorted list."""
     rank = max(1, -(-int(pct * len(sorted_vals)) // 100))

@@ -1,1 +1,0 @@
-Fix `verify-release.py` trusting the pytest exit code alone: its test step now writes `--junitxml` to a temp file and passes only if the junit shows at least one test run with 0 failures and 0 errors, as `release.sh` does since #942. A missing or unreadable junit file, or a run that collected nothing, is a failure; a timeout stays a failure.

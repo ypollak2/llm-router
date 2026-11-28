@@ -154,6 +154,7 @@ REASON_PREFLIGHT_REFUSED = "preflight_refused"  # combined mode only: local serv
 EXEMPT_COORDINATOR = "coordinator_session"
 EXEMPT_SUBAGENT = "subagent_thread"
 EXEMPT_COORDINATOR_MAIN = "exempt_coordinator_main"  # PR-D: a coordinator session's main thread only
+EXEMPT_MAIN = "exempt_main_thread"  # D-649: ANY session's main thread
 
 #: D-455: which exempt classes refuse local serving. Read per request from this variable.
 EXEMPT_POLICY_ENV = "LLM_ROUTER_LOCAL_EXEMPT"
@@ -169,6 +170,8 @@ def exempt_policy(raw: str | None = None) -> tuple[str, bool, bool, str | None]:
     the main thread of a coordinator session; it cannot be combined with ``coordinator`` (that would be
     ambiguous: invalid). The tuple shape is unchanged: ``coordinator_exempt`` is True only for the whole-session
     ``coordinator`` token; ``coordinator_main`` shows in ``effective`` (``coordinator_main_exempt(effective)``).
+    D-649: ``main`` (alone or with the others) refuses local serving for ANY session's main thread, and
+    ``main_exempt(effective)`` reads it; with ``coordinator_main`` it wins. Its refusal never touches a sub-agent call.
     KPI classification does not read this."""
     if raw is None:
         raw = os.environ.get(EXEMPT_POLICY_ENV)
@@ -178,12 +181,20 @@ def exempt_policy(raw: str | None = None) -> tuple[str, bool, bool, str | None]:
     tokens = [t.strip() for t in text.split(",")]
     if tokens == ["none"]:
         return "none", False, False, None
-    if (tokens and all(t in ("coordinator", "coordinator_main", "subagent") for t in tokens)
+    if (tokens and all(t in ("coordinator", "coordinator_main", "main", "subagent") for t in tokens)
             and not ("coordinator" in tokens and "coordinator_main" in tokens)):
-        coord, main, sub = "coordinator" in tokens, "coordinator_main" in tokens, "subagent" in tokens
-        return (",".join(n for n, on in (("coordinator", coord), ("coordinator_main", main), ("subagent", sub)) if on),
-                coord, sub, None)
+        coord, main, sub = "coordinator" in tokens, "main" in tokens, "subagent" in tokens
+        # D-649: ``main`` covers every session's main thread, so ``coordinator_main`` beside it is redundant
+        # (allowed; ``main`` wins and the token is dropped from the effective value).
+        cmain = "coordinator_main" in tokens and not main
+        return (",".join(n for n, on in (("coordinator", coord), ("coordinator_main", cmain), ("main", main),
+                                         ("subagent", sub)) if on), coord, sub, None)
     return EXEMPT_POLICY_DEFAULT, True, True, (raw or "").strip()[:80]
+
+
+def main_exempt(effective: str) -> bool:
+    """True when ``exempt_policy()[0]`` holds the ``main`` token (D-649)."""
+    return "main" in effective.split(",")
 
 
 def coordinator_main_exempt(effective: str) -> bool:
@@ -407,9 +418,20 @@ def exempt_reason(body: dict, session_id: str | None,
     from llm_router.proxy.steps import is_main_thread, is_subagent_request
 
     effective, coord_exempt, sub_exempt, _ = policy if policy is not None else exempt_policy()
-    main_exempt = coordinator_main_exempt(effective)  # PR-D
+    cmain_exempt = coordinator_main_exempt(effective)  # PR-D
     problem = None
-    if coord_exempt or main_exempt:
+    if main_exempt(effective):
+        # D-649: every session's main thread stays on Claude; same thread evidence as coordinator_main below
+        # (unknown or unreadable evidence counts as main). It reads no overrides file, so it cannot fail closed.
+        # A sub-agent call falls through to the checks below. The pin is per thread (cache_cost.conversation_key
+        # hashes the thread's first message), so this refusal does not pin a sub-agent's conversation.
+        try:
+            is_sub = is_subagent_request(body) or is_main_thread(body, parent_main) is False
+        except Exception:  # noqa: BLE001
+            is_sub = False
+        if not is_sub:
+            return EXEMPT_MAIN, None
+    if coord_exempt or cmain_exempt:
         try:
             problem = session_kind.overrides_problem()
             kind = session_kind.override_of(session_id)

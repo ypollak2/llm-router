@@ -264,6 +264,18 @@ def test_idle_no_hook_turns_does_not_fire(tmp_path, monkeypatch):
     _assert_quiet_everywhere(replay, "quiet", monkeypatch)
 
 
+def test_event_rows_alone_do_not_count_as_proxy_rows(tmp_path):
+    # review SHOULD 1 (fix/ledger-event-rows): a backend_recycle lifecycle row inside the window is not a
+    # proxied call, so the raw-tail path must still read SILENT during the outage.
+    replay = Replay(tmp_path).outage()
+    with pl.ledger_path().open("a", encoding="utf-8") as fh:
+        for i in range(1, 13):
+            fh.write(json.dumps({"ts": replay.t(LAST_ROW + 600.0 * i), "event": "backend_recycle",
+                                 "backend_health": {"recycle": "ok"}}) + "\n")
+    s = plv.ledger_silence(now=replay.t(EVAL))
+    assert s["silent"] and s["proxy_rows"] == 0
+
+
 def test_rows_present_does_not_fire(tmp_path, monkeypatch):
     replay = Replay(tmp_path)
     # The proxy kept writing through the outage window: one row every 10 min.

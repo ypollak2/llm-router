@@ -326,12 +326,12 @@ def step_fields(body: dict, on_error: Callable[[Exception], None] | None = None,
         return {"step_class": step_kind(body, parent_main), "prev_tools": prev_tools(body),
                 "prev_tool_class": prev_tool_class(body),
                 "prev_tool_targets": prev_tool_targets(body), "step_ineligible": step_ineligible(body),
-                "step_error": False}
+                "prev_tool_error": prev_tool_error(body), "step_error": False}
     except Exception as exc:  # noqa: BLE001 - a labelling error must not fail the call
         if on_error is not None:
             on_error(exc)
         return {"step_class": STEP_UNKNOWN, "prev_tools": [], "prev_tool_class": None,
-                "prev_tool_targets": [], "step_ineligible": None, "step_error": True}
+                "prev_tool_targets": [], "step_ineligible": None, "prev_tool_error": None, "step_error": True}
 
 
 def step_ineligible(body: dict) -> str | None:
@@ -374,6 +374,19 @@ def prev_tool_class(body: dict) -> str | None:
 def prev_tools(body: dict) -> list[str]:
     """Names of the tool calls the newest tool results answer (shape only)."""
     return [b.get("name", "") for b in _prev_tool_uses(body)]
+
+
+def prev_tool_error(body: dict) -> bool | None:
+    """True when a tool result in the newest user turn carries ``is_error`` (the previous call's tool
+    failed), False when it carries none, ``None`` when the call is not a continuation. A flag only: no
+    result text is read into the row (D-626, the quality signal for tier rewrites)."""
+    if step_kind(body) != STEP_CONTINUATION:
+        return None
+    msgs = non_system(body.get("messages") or [])
+    content = msgs[-1].get("content") if msgs and isinstance(msgs[-1], dict) else None
+    if not isinstance(content, list):
+        return None
+    return any(isinstance(b, dict) and b.get("type") == "tool_result" and bool(b.get("is_error")) for b in content)
 
 
 def prev_tool_targets(body: dict) -> list[dict]:

@@ -1,0 +1,139 @@
+{
+ "cycles": 40,
+ "descriptive_window": 32768,
+ "kind": "retention (model-free, $0)",
+ "label": "REPORT-ONLY (D-619/D-620): never blocks the release gate",
+ "n_items": 120,
+ "primary_window": 65536,
+ "reference_bar": 0.02,
+ "seed": 20261125,
+ "set": "fid_long_120",
+ "set_hash": "1d5a5e5c1f1f2146c5038042cd0796f688231dbedceefef4ca3a963d901d76ae",
+ "wall_seconds": 1.4,
+ "windows": {
+  "32768": {
+   "by_category": {
+    "early_assistant": {
+     "better": 0,
+     "both": 0,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 20
+    },
+    "early_tool": {
+     "better": 0,
+     "both": 0,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 20
+    },
+    "early_user_mid": {
+     "better": 0,
+     "both": 0,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 20
+    },
+    "first_user": {
+     "better": 0,
+     "both": 20,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 0
+    },
+    "mid_tool": {
+     "better": 0,
+     "both": 0,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 20
+    },
+    "recent": {
+     "better": 0,
+     "both": 20,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 0
+    }
+   },
+   "total": {
+    "better": 0,
+    "both": 40,
+    "n": 120,
+    "neither": 0,
+    "pack_mode": 120,
+    "worse": 80,
+    "worse_minus_better_over_n": 0.6667
+   },
+   "window": 32768
+  },
+  "65536": {
+   "by_category": {
+    "early_assistant": {
+     "better": 0,
+     "both": 0,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 20
+    },
+    "early_tool": {
+     "better": 0,
+     "both": 0,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 20
+    },
+    "early_user_mid": {
+     "better": 0,
+     "both": 0,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 20
+    },
+    "first_user": {
+     "better": 0,
+     "both": 20,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 0
+    },
+    "mid_tool": {
+     "better": 0,
+     "both": 0,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 20
+    },
+    "recent": {
+     "better": 0,
+     "both": 20,
+     "n": 20,
+     "neither": 0,
+     "pack_mode": 20,
+     "worse": 0
+    }
+   },
+   "total": {
+    "better": 0,
+    "both": 40,
+    "n": 120,
+    "neither": 0,
+    "pack_mode": 120,
+    "worse": 80,
+    "worse_minus_better_over_n": 0.6667
+   },
+   "window": 65536
+  }
+ }
+}

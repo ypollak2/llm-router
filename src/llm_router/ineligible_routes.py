@@ -181,6 +181,8 @@ def _read_proxy(path: Path, since: float, until: float) -> list[dict]:
                 d = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(d, dict) or d.get("event"):  # lifecycle rows are not routes
+                continue
             t = d.get("ts")
             if isinstance(d, dict) and isinstance(t, (int, float)) and since <= t <= until:
                 rows.append({"model": d.get("served_model"), "provider": d.get("served_by"),
