@@ -20,7 +20,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from llm_router import local_ollama as lo, paths, proxy_default as pd
+from llm_router import failopen, local_ollama as lo, paths, proxy_default as pd, state_files
 from llm_router.commands.proxy_default import _bold, _green, _red, _stale_plist_note, _read_or_none
 
 _HELP = f"""\
@@ -61,8 +61,10 @@ def run_setup_local(
         return fail(str(exc))
     ollama_bin = which("ollama")
     if not ollama_bin:
-        return fail("the `ollama` program was not found on PATH. Install it from https://ollama.com/download, "
-                    "then run `llm-router setup-local` again. Nothing was changed.")
+        from llm_router.runtime_offer import runtime_offer
+
+        return fail("the `ollama` program was not found on PATH. " + runtime_offer(system, api_keys=False)
+                    + "\nThen run `llm-router setup-local` again. Nothing was changed.")
     own_resident = lo.is_resident(fetch)
     conflict = lo.peer_conflict([u for u in peer_urls if u.rstrip("/") != lo.URL], fetch, total_gb,
                                 own_resident=own_resident)
@@ -140,11 +142,10 @@ def _log_preload(line: str) -> None:
 
     try:
         p = paths.state_path("logs", "local-ollama-preload.log")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a") as fh:
+        with state_files.open_private(p, "a") as fh:
             fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {line}\n")
-    except OSError:
-        pass
+    except OSError as exc:
+        failopen.record("SETUP-LOCAL-PRELOAD-LOG-WRITE", exc)
 
 
 def _restart_command(system: str, dest: Path) -> str:

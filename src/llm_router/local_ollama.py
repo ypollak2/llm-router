@@ -29,7 +29,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from llm_router import paths, proxy_default as pd
+from llm_router import failopen, paths, proxy_default as pd, state_files
 
 MODEL = "qwen3.6:35b-a3b-coding"
 PORT = 11435
@@ -82,20 +82,20 @@ def write_sentinel(*, system: str, ollama_bin: str, env_written: dict[str, str],
     prior = (read_sentinel() or {}).get("env_written")
     env_written = {**(prior if isinstance(prior, dict) else {}), **env_written}
     p = sentinel_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({
-        "enabled": True, "model": MODEL, "port": PORT, "window": WINDOW, "label": LABEL,
-        "system": system, "ollama_bin": ollama_bin, "preload_label": preload_label,
-        "env_written": env_written,  # exactly the lines this command added, nothing else
-        "installed_at": time.time(),
-    }, indent=2) + "\n")
+    with state_files.open_private(p, "w") as fh:
+        fh.write(json.dumps({
+            "enabled": True, "model": MODEL, "port": PORT, "window": WINDOW, "label": LABEL,
+            "system": system, "ollama_bin": ollama_bin, "preload_label": preload_label,
+            "env_written": env_written,  # exactly the lines this command added, nothing else
+            "installed_at": time.time(),
+        }, indent=2) + "\n")
 
 
 def remove_sentinel() -> None:
     try:
         sentinel_path().unlink(missing_ok=True)
-    except OSError:
-        pass
+    except OSError as exc:
+        failopen.record("SETUP-LOCAL-SENTINEL-REMOVE", exc)
 
 
 # ── gates ───────────────────────────────────────────────────────────────────
@@ -234,8 +234,8 @@ def install_service(ollama_bin: str, *, system: str, home: Path) -> tuple[Path, 
     """Write the service file; never starts it (the caller activates through an injected runner)."""
     dest, activate = pd.service_target(system, home, label=LABEL)
     content = render_ollama_plist(ollama_bin, home) if system == "Darwin" else render_systemd_unit(ollama_bin)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(content)
+    with state_files.open_private(dest, "w") as fh:
+        fh.write(content)
     return dest, activate
 
 
@@ -282,8 +282,8 @@ def install_preload_service(python: str, *, system: str, home: Path) -> Path:
     """Write the preload job's file. It is NOT started here: it runs at the next login (and
     ``setup-local`` itself has just loaded the model)."""
     dest, _ = pd.service_target(system, home, label=PRELOAD_LABEL)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(render_preload_plist(python, home) if system == "Darwin" else render_preload_systemd_unit(python))
+    with state_files.open_private(dest, "w") as fh:
+        fh.write(render_preload_plist(python, home) if system == "Darwin" else render_preload_systemd_unit(python))
     return dest
 
 
@@ -336,10 +336,9 @@ def write_env(environ: dict[str, str]) -> tuple[dict[str, str], list[str]]:
         else:
             written[key] = value
     if written:
-        env_path.parent.mkdir(parents=True, exist_ok=True)
         prior = env_path.read_text() if env_path.exists() else ""
         lead = "" if not prior or prior.endswith("\n") else "\n"
-        with open(env_path, "a") as fh:
+        with state_files.open_private(env_path, "a") as fh:
             fh.write(lead + "".join(f"{k}={v}\n" for k, v in written.items()))
     return written, kept
 
@@ -355,7 +354,8 @@ def remove_env(written: dict[str, str]) -> list[str]:
     keep = [ln for ln in lines if ln.strip() not in drop]
     removed = [ln.strip() for ln in lines if ln.strip() in drop]
     if removed:
-        env_path.write_text("".join(keep))
+        with state_files.open_private(env_path, "w") as fh:
+            fh.write("".join(keep))
     return removed
 
 

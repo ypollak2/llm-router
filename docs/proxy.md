@@ -1242,8 +1242,9 @@ First-token deadline (rv40): old local-agent mode has the hedge off on purpose (
 ## Local routing setup (`llm-router setup-local`, 48 GB+ Mac)
 
 Opt-in and separate from `install` (which never runs it). It refuses below 48 GB of RAM and when
-another Ollama's resident models plus this one would pass 75% of RAM (the Metal out-of-memory case
-of 2026-11-27, 22.4 GB on :11435 beside an 18.6 GB model on :11434).
+another Ollama's resident models plus this one would pass 75% of RAM (the same rule as
+`scripts/release/quality_gate.py`, PR #992; on 2026-11-27, 22.4 GB on :11435 beside an 18.6 GB model on
+:11434 was 40.9 of 51.5 GB and caused Metal out-of-memory n=3 times).
 
 What it does, in order: RAM gate, `ollama` on PATH, peer-memory check, consent (shows the roughly
 22 GB download; without a terminal it needs `--yes`), then a supervised `com.llm_router.local-ollama`

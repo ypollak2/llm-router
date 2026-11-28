@@ -198,7 +198,7 @@ def test_peer_boundary_exactly_75_percent_passes():
 def test_missing_ollama_binary_refuses_before_writing(tmp_path):
     box = Box(ollama=None)
     r = box.run(tmp_path / "home")
-    assert r["ok"] is False and "ollama" in r["error"] and "ollama.com/download" in r["error"]
+    assert r["ok"] is False and "ollama" in r["error"] and "install" in r["error"] and "Nothing was changed" in r["error"]
     _nothing_written(tmp_path, box)
 
 

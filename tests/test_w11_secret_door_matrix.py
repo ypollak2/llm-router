@@ -259,6 +259,7 @@ SINK_FILES: dict[str, tuple[int, str, str]] = {
     'codex_agent.py': (1, 'primitive', 'the CLI runner itself; every caller has its own row'),
     'commands/doctor.py': (3, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'commands/pi.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
+    'commands/setup_local.py': (2, 'probe', 'loopback-only (hostname checked before every call): GET /api/version, /api/ps, /api/tags and one empty-prompt generate to load the model; no user text'),
     'commands/update.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'commands/verify.py': (1, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),
     'config.py': (2, 'probe', 'health, discovery, usage, pricing or update request; no prompt text'),

@@ -47,6 +47,9 @@ ALLOWLIST: dict[str, str] = {
         "num_ctx table keyed by model tag; a lookup for a model already chosen",
     "src/llm_router/router.py":
         "_SLOW_MODEL_MARKERS: a guard that keeps escalation OUT of slow models; selects nothing",
+    "src/llm_router/local_ollama.py":
+        "MODEL constant of the opt-in `llm-router setup-local`: the one model that command pulls and "
+        "pins on its own :11435 server (owner decision 2026-11-28); no routing path reads it as a default",
     "src/llm_router/toolkit/adapters/ollama.py":
         "_KV_REGISTRY: memory-guard KV size keyed by model tag; a lookup for a model already chosen",
 }
