@@ -54,6 +54,7 @@
     "policy_id": "none",
     "policy_stage": "none",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -219,6 +220,7 @@
     "prefix_common_with_prev": null,
     "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -391,6 +393,7 @@
     "prefix_common_with_prev": null,
     "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -555,6 +558,7 @@
     "policy_id": "none",
     "policy_stage": "none",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -725,6 +729,7 @@
     "prefix_common_with_prev": null,
     "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -844,6 +849,7 @@
     "prefix_common_with_prev": null,
     "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -966,6 +972,7 @@
     "prefix_common_with_prev": null,
     "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -1111,6 +1118,7 @@
     "policy_id": "none",
     "policy_stage": "none",
     "prev_tool_class": null,
+    "prev_tool_error": null,
     "prev_tool_targets": [],
     "prev_tools": [],
     "reason": "not_eligible",
@@ -1244,6 +1252,7 @@
     "policy_id": "none",
     "policy_stage": "none",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -1407,6 +1416,7 @@
     "prefix_common_with_prev": null,
     "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -1510,6 +1520,7 @@
     "prefix_common_with_prev": 6,
     "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -1668,6 +1679,7 @@
     "policy_id": "none",
     "policy_stage": "none",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -1852,6 +1864,7 @@
     "policy_id": "none",
     "policy_stage": "none",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -1990,6 +2003,7 @@
     "policy_id": "none",
     "policy_stage": "none",
     "prev_tool_class": null,
+    "prev_tool_error": null,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -2153,6 +2167,7 @@
     "prefix_common_with_prev": null,
     "prefix_sha_sys": "83bfc92a5973a2df",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -2355,6 +2370,7 @@
     "policy_id": "none",
     "policy_stage": "none",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -2496,6 +2512,7 @@
     "policy_id": "none",
     "policy_stage": "none",
     "prev_tool_class": "edit",
+    "prev_tool_error": false,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -2634,6 +2651,7 @@
     "policy_id": "none",
     "policy_stage": "none",
     "prev_tool_class": null,
+    "prev_tool_error": null,
     "prev_tool_targets": [
      {
       "h": "64740f7a6805",
@@ -2773,6 +2791,7 @@
     "policy_id": "none",
     "policy_stage": "none",
     "prev_tool_class": null,
+    "prev_tool_error": null,
     "prev_tool_targets": [],
     "prev_tools": [],
     "reason": "routing_off",

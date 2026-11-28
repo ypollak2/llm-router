@@ -201,7 +201,8 @@ def test_unavailable_reply_and_ledger(tmp_path, monkeypatch, mode):
     seen = []
     monkeypatch.setattr(apply, "_execute_check", lambda *a: (seen.append(a), (0, "ok"))[1])
     result = apply.llm_apply(json.dumps([dict(file="a.py", old_string="1", new_string="2")]), "python -m pytest", str(root))
-    assert "check: NOT sandboxed (probe failed deliberately)" in result
+    assert "NOT sandboxed (probe failed deliberately)" in result if mode == "auto" else \
+        "Check not run: no usable sandbox (probe failed deliberately)" in result
     row = json.loads((tmp_path / "ledger/apply_ledger.jsonl").read_text())
     assert row["sandboxed"] is False
     assert row["check_ran"] == (mode == "auto") == bool(seen)
@@ -267,7 +268,10 @@ def test_mac_profile_parameters_and_scrub(tmp_path, monkeypatch):
         assert all(Path(grant) != home and Path(grant) not in home.parents
                    for grant in runtime_values)
         assert str(tmp_path) not in runtime_values
-        assert '/private/tmp' not in profile and '/private/var/folders' not in profile
+        # S1: these paths now appear in the read DENY rule; they must never be in an allow rule.
+        allows = " ".join(line for line in profile.splitlines() if line.startswith("(allow"))
+        assert '/private/tmp' not in allows and '/private/var/folders' not in allows
+        assert profile.index('(subpath "/private/tmp")') < profile.index('(allow file-read-data')
     finally:
         cleanup()
 
@@ -662,3 +666,424 @@ def test_symlink_hops_follow_link_before_dotdot(tmp_path):
     assert str(tmp_path / "store/alias") in links
     # Positive control: the resolution lands where the OS resolves it.
     assert (tmp_path / "entry").resolve() == (runtime / "python").resolve()
+
+
+# --- fail-closed fixes M1-M4 (REVIEW-SANDBOX-SECURITY-20261125) ---
+
+def test_default_mode_is_require_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.delenv("LLM_ROUTER_APPLY_SANDBOX", raising=False)
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: None)
+    seen = []
+    monkeypatch.setattr(apply, "_execute_check", lambda *a: (seen.append(a), (0, "ok"))[1])
+    with pytest.raises(sandbox.SandboxUnavailable, match="bwrap missing"):
+        apply._run_check([sys.executable], tmp_path)
+    assert not seen
+
+
+@pytest.mark.parametrize("which", ["home", "parent", "root"])
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_root_covering_home_refused(tmp_path, monkeypatch, system, which):
+    home = tmp_path / "users" / "me"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(sandbox.platform, "system", lambda: system)
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "")
+    root = {"home": home, "parent": home.parent, "root": Path("/")}[which]
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME"):
+        sandbox.wrap([sys.executable], root)
+
+
+def test_root_beside_home_allowed(tmp_path, monkeypatch):
+    home = tmp_path / "users" / "me"
+    root = tmp_path / "work" / "repo"
+    home.mkdir(parents=True)
+    root.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "")
+    argv, cleanup = sandbox.wrap([sys.executable], root)
+    cleanup()
+    assert str(root.resolve()) in argv
+
+
+def test_linux_git_dir_read_only_after_root_bind(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "")
+    (tmp_path / ".git").mkdir()
+    argv, cleanup = sandbox.wrap([sys.executable], tmp_path)
+    cleanup()
+    git = str(tmp_path.resolve()) + "/.git"
+    i = argv.index("--ro-bind", argv.index("--bind"))
+    assert argv[i:i + 3] == ["--ro-bind", git, git]
+    assert argv.index("--bind") < i
+
+
+def test_mac_profile_denies_git_writes_last(tmp_path, monkeypatch):
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "")
+    argv, cleanup = sandbox.wrap([sys.executable], tmp_path)
+    cleanup()
+    profile = argv[argv.index("-p") + 1]
+    assert f"GIT={tmp_path.resolve()}/.git" in argv
+    assert profile.index('(deny file-write* (subpath (param "GIT")))') > profile.index('(allow file-write* (subpath (param "ROOT"))')
+
+
+def test_macos_git_dir_write_denied_source_write_allowed(mac):
+    root, _ = mac
+    (root / ".git" / "hooks").mkdir(parents=True)
+    code = ("import pathlib\n"
+            "pathlib.Path('src.txt').write_text('ok')\n"
+            "for p in ('.git/hooks/pre-commit', '.git/config'):\n"
+            "    try:\n        pathlib.Path(p).write_text('x'); print('WROTE', p)\n"
+            "    except OSError: print('DENIED', p)\n")
+    argv, cleanup = sandbox.wrap([sys.executable, "-c", code], root)
+    try:
+        out = subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=60).stdout
+    finally:
+        cleanup()
+    assert "DENIED .git/hooks/pre-commit" in out and "DENIED .git/config" in out
+    assert (root / "src.txt").read_text() == "ok" and not (root / ".git/config").exists()
+
+
+def test_docstring_names_ci_job_not_unverified():
+    doc = sandbox.__doc__
+    assert "unverified" not in doc and "linux-sandbox" in doc
+
+
+# --- review round 2: identity-based ROOT check ---
+
+def _wrap_linux(monkeypatch, root):
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "")
+    return sandbox.wrap([sys.executable], root)
+
+
+@pytest.mark.parametrize("which", ["home", "parent"])
+def test_macos_case_variant_root_of_home_refused(tmp_path, monkeypatch, which):
+    home = tmp_path / "Users" / "Me"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    target = home if which == "home" else home.parent
+    variant = Path(str(target.resolve()).swapcase())
+    if not variant.exists() or variant == target.resolve():
+        pytest.skip("case-sensitive filesystem: case variants name different directories")
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME"):
+        _wrap_linux(monkeypatch, variant)
+
+
+def test_relative_root_covering_home_refused(tmp_path, monkeypatch):
+    home = tmp_path / "a" / "b" / "me"
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path / "a" / "b")
+    for rel in (".", "..", "me", "../b/me"):
+        with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME"):
+            _wrap_linux(monkeypatch, rel)
+
+
+def test_home_unset_falls_back_to_pw_dir(tmp_path, monkeypatch):
+    import pwd
+
+    monkeypatch.delenv("HOME", raising=False)
+    fake = tmp_path / "x" / "y" / "pwhome"
+    fake.mkdir(parents=True)
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: type("P", (), {"pw_dir": str(fake)})())
+    assert "HOME" not in os.environ
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME"):
+        _wrap_linux(monkeypatch, fake)
+
+
+@pytest.mark.parametrize("root", ["/usr", "/etc", "/opt", "/"])
+def test_system_roots_refused(tmp_path, monkeypatch, root):
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
+        _wrap_linux(monkeypatch, root)
+
+
+def test_refusal_message_names_opt_out(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_ROUTER_APPLY", "on")
+    monkeypatch.delenv("LLM_ROUTER_APPLY_SANDBOX", raising=False)
+    monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "ledger"))
+    monkeypatch.setenv("PATH", str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setattr(sandbox.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(sandbox, "_probe", lambda *a: "probe failed deliberately")
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / "a.py").write_text("x = 1\n")
+    result = apply.llm_apply(json.dumps([dict(file="a.py", old_string="1", new_string="2")]), "python -m pytest", str(root))
+    assert "no usable sandbox (probe failed deliberately)" in result
+    assert "LLM_ROUTER_APPLY_SANDBOX=auto" in result
+
+
+@pytest.mark.parametrize("root", ["/tmp", "/var", "/etc", "/private", "/private/etc", "/private/var", "/private/tmp"])
+def test_private_alias_roots_refused(tmp_path, monkeypatch, root):
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
+        _wrap_linux(monkeypatch, root)
+
+
+def test_macos_symlink_to_private_var_refused(tmp_path, monkeypatch):
+    if not Path("/private/var").is_dir():
+        pytest.skip("no /private/var on this OS")
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    link = tmp_path / "work" / "link"
+    link.parent.mkdir()
+    link.symlink_to("/private/var")
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
+        _wrap_linux(monkeypatch, link)
+
+
+@pytest.mark.parametrize("root", ["/System", "/System/Volumes", "/System/Volumes/Data", "/system/volumes/data"])
+def test_system_volume_roots_refused(tmp_path, monkeypatch, root):
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
+        _wrap_linux(monkeypatch, root)
+
+
+def test_data_volume_prefix_stripped_before_home_compare(tmp_path, monkeypatch):
+    # Isolates the /System/Volumes/Data strip only on Linux (no /System there, so the
+    # ancestor walk falls back to string compare). On macOS the samefile walk already
+    # refuses this case; the strip is defence in depth there.
+    monkeypatch.setenv("HOME", "/System/Volumes/Data" + str(tmp_path / "h"))
+    with pytest.raises(sandbox.SandboxUnavailable, match="root covers HOME or a system directory"):
+        _wrap_linux(monkeypatch, tmp_path)
+
+
+def test_normal_temp_repo_still_allowed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    argv, cleanup = _wrap_linux(monkeypatch, repo)
+    cleanup()
+    assert str(repo.resolve()) in argv
+
+
+def test_macos_reads_outside_home_denied(mac, tmp_path):
+    """S1: canaries in /Users/Shared, this user's tmp parent, /private/tmp, /Volumes stay unreadable."""
+    import tempfile
+
+    root, _ = mac
+    made = []
+    try:
+        canaries = []
+        for parent in (Path("/Users/Shared"), Path(tempfile.gettempdir()), Path("/private/tmp")):
+            try:
+                path = Path(tempfile.mkdtemp(prefix="s1-canary-", dir=parent)) / "secret"
+            except OSError:
+                continue
+            made.append(path.parent)
+            path.write_text("secret")
+            canaries.append(path)
+        assert any(str(c).startswith(("/private/var/folders", "/var/folders")) or
+                   str(c).startswith(tempfile.gettempdir()) for c in canaries)
+        for path in canaries:
+            code = f"print(open({str(path)!r}).read())"
+            assert run_python(root, code, False).returncode == 0   # positive control
+            result = run_python(root, code, True)
+            assert result.returncode != 0 and "PermissionError" in result.stderr, (path, result)
+        # /Volumes: open the directory itself (no listing of its contents).
+        code = "import os; os.close(os.open('/Volumes', os.O_RDONLY))"
+        assert run_python(root, code, False).returncode == 0
+        result = run_python(root, code, True)
+        assert result.returncode != 0 and "PermissionError" in result.stderr, result
+    finally:
+        for parent in made:
+            shutil.rmtree(parent, ignore_errors=True)
+
+
+_LOOKUP = ("import ctypes,sys; lib=ctypes.CDLL('/usr/lib/libSystem.B.dylib'); port=ctypes.c_uint32(); "
+           "bp=ctypes.c_uint32.in_dll(lib,'bootstrap_port'); lib.bootstrap_look_up.argtypes=["
+           "ctypes.c_uint32,ctypes.c_char_p,ctypes.POINTER(ctypes.c_uint32)]; "
+           "sys.exit(lib.bootstrap_look_up(bp.value, sys.argv[1].encode(), ctypes.byref(port)))")
+
+
+@pytest.mark.parametrize("service", ["com.apple.pasteboard.1", "com.apple.SecurityServer",
+                                     "com.apple.coreservices.quarantine-resolver", "com.apple.xpc.smd"])
+def test_macos_mach_lookup_denied_with_positive_control(mac, service):
+    """S2: read-only bootstrap_look_up (no job submitted, nothing written) is refused inside."""
+    root, _ = mac
+    argv = [sys.executable, "-c", _LOOKUP, service]
+    base = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+    if base.returncode != 0:
+        pytest.skip(f"{service} not reachable outside the sandbox on this macOS")
+    wrapped, cleanup = sandbox.wrap(argv, root)
+    try:
+        result = subprocess.run(wrapped, cwd=root, capture_output=True, text=True, timeout=15)
+    finally:
+        cleanup()
+    assert result.returncode != 0, f"{service} reachable inside the sandbox"
+
+
+def _run_limited(tmp_path, code):
+    return apply._execute_check([sys.executable, "-c", code], tmp_path)
+
+
+def test_fsize_limit_stops_disk_fill(tmp_path, monkeypatch):
+    """S3: a check writing without end is cut at RLIMIT_FSIZE (2 MB here, 256 MB shipped)."""
+    monkeypatch.setattr(sandbox, "FSIZE_BYTES", 2 * 1024 * 1024)
+    code = ("import os\nf=open('fill','wb')\nfor _ in range(4096):\n"
+            "    try: f.write(b'y'*65536); f.flush()\n    except OSError as e: print('EFBIG', e.errno); break\n")
+    rc, tail = _run_limited(tmp_path, code)
+    assert "EFBIG" in tail and (tmp_path / "fill").stat().st_size <= 2 * 1024 * 1024
+    assert sandbox.FSIZE_BYTES == 2 * 1024 * 1024
+
+
+@pytest.mark.timing
+@pytest.mark.skipif(platform.system() != "Darwin", reason="RLIMIT_NPROC is applied on macOS only (check_sandbox.py: Linux gets no NPROC limit)")
+def test_macos_nproc_limit_bounds_fork_canary(tmp_path, monkeypatch):
+    """S3: bounded fork canary (<=200 children, killed at the end) hits EAGAIN under the per-uid cap."""
+    count = sandbox._uid_process_count()
+    assert count, "ps must report this uid's processes"
+    monkeypatch.setattr(sandbox, "NPROC_HEADROOM", 40)
+    code = ("import os, time, signal\nkids=[]\nresult='no-limit'\n"
+            "for _ in range(200):\n"
+            "    try: pid=os.fork()\n    except OSError as e: result='EAGAIN' if e.errno==%d else repr(e)" % errno.EAGAIN + "; break\n"
+            "    if pid==0:\n        time.sleep(30); os._exit(0)\n    kids.append(pid)\n"
+            "for k in kids:\n    os.kill(k, signal.SIGKILL)\n    os.waitpid(k, 0)\n"
+            "print(result, len(kids))\n")
+    started = __import__("time").monotonic()
+    rc, tail = _run_limited(tmp_path, code)
+    assert "EAGAIN" in tail, tail
+    assert int(tail.split()[-1]) < 200 and __import__("time").monotonic() - started < 30
+
+
+@pytest.mark.timing
+def test_output_cap_kills_flooding_check(tmp_path, monkeypatch):
+    """S3: captured output is capped (1 MB here, 16 MB shipped) and the group is killed."""
+    monkeypatch.setattr(apply, "_OUTPUT_CAP", 1024 * 1024)
+    code = "import sys, time\nwhile True: sys.stdout.write('z'*65536); sys.stdout.flush(); time.sleep(0.002)\n"
+    started = __import__("time").monotonic()
+    rc, tail = _run_limited(tmp_path, code)
+    assert rc == -9 and "output exceeded" in tail
+    assert __import__("time").monotonic() - started < 30
+
+
+def test_macos_limits_survive_sandbox_exec(mac, monkeypatch):
+    """S3: the limits are inherited through sandbox-exec into the contained check."""
+    monkeypatch.setattr(sandbox, "FSIZE_BYTES", 1024 * 1024)
+    root, _ = mac
+    code = "import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE)[0], resource.getrlimit(resource.RLIMIT_NPROC)[0])"
+    argv, cleanup = sandbox.wrap([sys.executable, "-c", code], root)
+    try:
+        rc, tail = apply._execute_check(argv, root)
+    finally:
+        cleanup()
+    fsize, nproc = tail.split()
+    assert rc == 0 and int(fsize) == 1024 * 1024 and 0 < int(nproc) < 100_000
+
+
+def _detached_child_code(pidfile):
+    return ("import os, sys, time\n"
+            "if os.fork() == 0:\n"
+            "    os.setsid()\n"
+            f"    open({str(pidfile)!r}, 'w').write(str(os.getpid()))\n"
+            "    time.sleep(60); os._exit(0)\n"
+            "time.sleep(0.5)\n")   # parent exits normally; the child is reparented to launchd
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def test_macos_setsid_child_killed_after_check(mac):
+    """S4: a setsid() descendant outlives killpg; the marker sweep must kill it. Positive control first."""
+    root, _ = mac
+    pidfile = root / "child.pid"
+    # positive control: the unmodified group teardown leaves the detached child running
+    proc = subprocess.Popen([sys.executable, "-c", _detached_child_code(pidfile)], cwd=root, start_new_session=True)
+    proc.wait()
+    control = int(pidfile.read_text())
+    try:
+        assert _alive(control), "control: setsid child should survive killpg-only teardown"
+    finally:
+        os.kill(control, 9)
+    pidfile.unlink()
+    sandbox.set_marker("s4marker0123")
+    argv, cleanup = sandbox.wrap([sys.executable, "-c", _detached_child_code(pidfile)], root)
+    try:
+        apply._execute_check(argv, root)
+    finally:
+        sandbox.set_marker(None)
+        cleanup()
+    child = int(pidfile.read_text())
+    try:
+        import time
+        for _ in range(20):
+            if not _alive(child):
+                break
+            time.sleep(0.1)
+        assert not _alive(child)
+    finally:
+        if _alive(child):
+            os.kill(child, 9)
+
+
+def test_runtime_prefix_grants_only_bin_and_lib(tmp_path):
+    """S7: the prefix root (and its .npmrc / etc/npmrc) is never granted; pyvenv.cfg is a single-file grant."""
+    prefix = _fake_install(tmp_path / "toolchain")
+    (prefix / ".npmrc").write_text("//registry:_authToken=canary")
+    (prefix / "etc").mkdir()
+    (prefix / "etc/npmrc").write_text("canary")
+    (prefix / "pyvenv.cfg").write_text("home = x\n")
+    root = tmp_path / "repo"
+    root.mkdir()
+    dirs, files = sandbox._narrow_grants([str(prefix.resolve())], root)
+    resolved = prefix.resolve()
+    assert str(resolved) not in dirs
+    assert set(dirs) == {str(resolved / "bin"), str(resolved / "lib")}
+    assert files == [str(resolved / "pyvenv.cfg")]
+
+
+def test_non_prefix_and_in_root_grants_pass_through(tmp_path):
+    bare = tmp_path / "just-bin"
+    bare.mkdir()
+    root = tmp_path / "repo"
+    (root / ".venv/lib/python3.12").mkdir(parents=True)
+    (root / ".venv/lib/python3.12/os.py").write_text("")
+    dirs, files = sandbox._narrow_grants([str(bare.resolve()), str((root / ".venv").resolve())], root.resolve())
+    assert set(dirs) == {str(bare.resolve()), str((root / ".venv").resolve())} and files == []
+
+
+def test_macos_prefix_canary_unreadable_while_runtime_works(mac, tmp_path):
+    """S7 behavioural: a venv-shaped prefix outside ROOT runs python, its .npmrc canary stays unreadable."""
+    root, _ = mac
+    prefix = tmp_path / "toolchain"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "bin/python").symlink_to(sys.executable)
+    (prefix / "pyvenv.cfg").write_text(f"home = {Path(sys.executable).resolve().parent}\n")
+    canary = prefix / ".npmrc"
+    canary.write_text("//registry:_authToken=canary")
+    code = (f"import sys\nprint('prefix', sys.prefix)\n"
+            f"try: print(open({str(canary)!r}).read())\nexcept PermissionError: print('DENIED')\n")
+    argv, cleanup = sandbox.wrap([str(prefix / "bin/python"), "-c", code], root)
+    try:
+        result = subprocess.run(argv, cwd=root, capture_output=True, text=True, timeout=30)
+    finally:
+        cleanup()
+    assert result.returncode == 0, result.stderr
+    assert "DENIED" in result.stdout and "authToken" not in result.stdout
+
+
+def test_nproc_limit_is_macos_only(monkeypatch):
+    """S3: Linux counts threads per uid (ps counts processes), so only FSIZE is set there."""
+    import resource
+
+    calls = []
+    monkeypatch.setattr(resource, "setrlimit", lambda which, value: calls.append(which))
+    monkeypatch.setattr(sandbox, "_uid_process_count", lambda: 500)
+    for system, expect_nproc in (("Linux", False), ("Darwin", True)):
+        calls.clear()
+        monkeypatch.setattr(sandbox.platform, "system", lambda s=system: s)
+        sandbox.resource_limiter()()
+        assert (resource.RLIMIT_NPROC in calls) is expect_nproc
+        assert resource.RLIMIT_FSIZE in calls

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 
@@ -74,7 +75,32 @@ def test_two_processes_lose_no_counts(home):
     procs = [subprocess.Popen([sys.executable, "-c", code]) for _ in range(2)]
     assert [p.wait(timeout=60) for p in procs] == [0, 0]
     c = judge_sampler.counters()["gateway"]
-    assert c["seen"] == 400 and c["picked"] == 40 and c["lock_skipped"] == 0
+    # No count may be LOST: a call that timed out on the lock is recorded as
+    # lock_skipped (flushed at exit), so seen + lock_skipped always equals calls.
+    assert c["seen"] + c["lock_skipped"] == 400
+    assert c["seen"] > 0 and c["lock_skipped"] <= 400
+    # picked is exactly what the systematic sampler yields for the items actually seen
+    assert c["picked"] == sum(judge_sampler._is_pick("gateway", k, 0.1) for k in range(c["seen"]))
+
+
+def test_lock_skip_in_short_lived_process_is_not_lost_at_exit(home):
+    """Deterministic: the child times out on a held lock and exits; its skip must reach disk."""
+    code = (
+        "from llm_router import judge_sampler as j\n"
+        "j._BLOCKING_TIMEOUT_S = 0.05\n"
+        "assert j.pick('gateway') is False\n"
+        "print('skipped', flush=True)\n"
+    )
+    with exclusive_lock(home / "judge_sampler.json.lock", timeout=0):
+        child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+        for line in child.stdout:  # failopen may log first; the pick timed out while we hold the lock
+            if line.strip() == "skipped":
+                break
+        else:
+            raise AssertionError("child never reported its skipped pick")
+    assert child.wait(timeout=60) == 0  # its exit-time flush now gets the lock
+    c = judge_sampler.counters()["gateway"]
+    assert c["lock_skipped"] == 1 and c.get("seen", 0) == 0
 
 
 def test_hook_lock_failure_fails_open_and_is_counted(home):
@@ -144,3 +170,43 @@ def test_corrupt_state_is_repaired_and_judging_continues(tmp_path, monkeypatch, 
     picks = sum(judge_sampler.pick("sdk") for _ in range(20))
     assert picks == 2
     assert judge_sampler.counters()["sdk"]["seen"] == 20
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+def test_forked_child_does_not_reflush_parents_pending_skips(home):
+    code = (
+        "import os, sys\n"
+        "from llm_router import judge_sampler as j\n"
+        "j._BLOCKING_TIMEOUT_S = 0.05\n"
+        "assert j.pick('gateway') is False\n"
+        "print('skipped', flush=True)\n"
+        "sys.stdin.readline()  # wait until the lock is free again\n"
+        "j._BLOCKING_TIMEOUT_S = 2.0\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
+        "    sys.exit(0)  # a normal exit runs atexit in the child\n"
+        "os.waitpid(pid, 0)\n"
+    )
+    with exclusive_lock(home / "judge_sampler.json.lock", timeout=0):
+        child = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True)
+        for line in child.stdout:
+            if line.strip() == "skipped":
+                break
+        else:
+            raise AssertionError("parent never reported")
+    child.stdin.write("go\n")
+    child.stdin.flush()
+    assert child.wait(timeout=60) == 0
+    assert judge_sampler.counters()["gateway"]["lock_skipped"] == 1
+
+
+def test_exit_flush_that_cannot_lock_is_recorded(home):
+    code = (
+        "from llm_router import judge_sampler as j\n"
+        "j._BLOCKING_TIMEOUT_S = 0.05\n"
+        "j.pick('gateway')\n"
+    )
+    with exclusive_lock(home / "judge_sampler.json.lock", timeout=0):
+        assert subprocess.run([sys.executable, "-c", code], timeout=60, capture_output=True).returncode == 0
+    assert "exit flush" in (home / "fail_open.jsonl").read_text()

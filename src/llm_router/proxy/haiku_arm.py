@@ -47,6 +47,7 @@ WHY_CLASSIFY_ERROR = "classify_error"
 WHY_NOT_MAIN_THREAD = "not_main_thread"
 WHY_HARNESS_TURN = "harness_turn"  # main thread, newest turn only a notification or command echo
 WHY_SESSION_KIND = "session_kind"
+WHY_WARM_CACHE = "tier_skip_warm_cache"  # LLM_ROUTER_TIER_COLD_CACHE_ONLY: the requested model's cache is warm
 WHY_MATCHED = "matched:"  # + the pattern, the reason of an assigned row
 TREATMENT_RETRIED = "treatment_retried_original"  # Haiku 4xx'd; the original (pinned model) body was sent
 DEFAULT_ELIGIBLE = (("query", "simple"),)

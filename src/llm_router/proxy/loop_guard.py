@@ -50,6 +50,12 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 
 REASON_LOOP_GUARD = "loop_guard"
+# Hand-off to Claude because a further local step would push the content blocks added since the last Claude
+# call past LLM_ROUTER_LOCAL_MAX_BLOCKS (see BlockCap). Not a failure: it never pins the session to Claude.
+REASON_CACHE_BLOCK_CAP = "cache_block_cap"
+# Hand-off to Claude because a MAIN-thread local run reached LLM_ROUTER_LOCAL_MAIN_MAX_STEPS consecutive local
+# steps (see local_main_max_steps). Not a failure: it never pins the session to Claude.
+REASON_MAIN_STEP_CAP = "main_step_cap"
 # Which trigger tripped; the proxy reads this structured value (row["loop_guard_trigger"]), never the detail string.
 TRIGGER_CAP = "cap"
 TRIGGER_REPEAT = "repeat"
@@ -138,6 +144,11 @@ class LoopGuard:
             return f"consecutive_served_exceeded:{n}"
         return None
 
+    def served_count(self, session_id: str | None) -> int:
+        """Consecutive local steps served in this session's current streak (0 when none)."""
+        st = self._sessions.get(session_id) if session_id else None
+        return st.consecutive_served if st is not None else 0
+
     def repeat_hit(self, session_id: str | None, message: dict) -> tuple[str, str] | None:
         """``(tool name, sha256[:10] of the repeated signature)`` when this served
         candidate repeats a recent one, else ``None``. The hash makes a repeat
@@ -206,3 +217,94 @@ class LoopGuard:
             self._prev_window.move_to_end(session_id)
         self._bound(self._prev_window)
         return TRIGGER_CAP
+
+
+def local_max_blocks() -> int:
+    """LLM_ROUTER_LOCAL_MAX_BLOCKS: integer, unset/0/garbage = off (today's behaviour). The cap on content blocks
+    added to a conversation since the last Claude-served step. Anthropic's prompt-cache prefix lookup reaches only
+    ~20 blocks back from the client's breakpoint, so a local run that adds more makes the next Claude call re-write
+    the whole conversation (~/.rsi/research/primary-plan/v16/coord/realsave/CACHE-WRITE-RCA-20261125.md: 80% of
+    cache-write tokens on 39 post-local Claude rows were redundant). Suggested value 14; not defaulted."""
+    try:
+        raw = os.environ.get("LLM_ROUTER_LOCAL_MAX_BLOCKS")
+        if raw is None or not str(raw).strip():
+            return 0
+        return max(0, int(raw.strip()))
+    except ValueError:
+        return 0
+
+
+def local_main_max_steps() -> int:
+    """LLM_ROUTER_LOCAL_MAIN_MAX_STEPS: integer, unset/0/garbage = off (today's behaviour). On the MAIN thread a
+    local run is handed back to Claude after this many consecutive local steps (the effective cap is
+    min(loop guard cap, N)); sub-agent threads keep the loop guard cap. D-640: coord/design/
+    RESEARCH-FABLE-GAPS-QUALITY-20261126.md section C, returns to Claude after 6-8 local steps missed the prompt
+    cache 8 of 8 while runs of 5 or fewer hit 15 of 23. Suggested value 5; not defaulted."""
+    try:
+        raw = os.environ.get("LLM_ROUTER_LOCAL_MAIN_MAX_STEPS")
+        if raw is None or not str(raw).strip():
+            return 0
+        return max(0, int(raw.strip()))
+    except ValueError:
+        return 0
+
+
+def incoming_blocks(body: dict) -> int:
+    """Content blocks the client added since the previous reply: the ``tool_result`` blocks of the final user
+    message. Structure only; no text is read or kept."""
+    msgs = body.get("messages") if isinstance(body, dict) else None
+    if not msgs or not isinstance(msgs[-1], dict) or msgs[-1].get("role") != "user":
+        return 0
+    content = msgs[-1].get("content")
+    if not isinstance(content, list):
+        return 0
+    return sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result")
+
+
+#: Assistant blocks reserved for the step being decided: the common local reply is text + tool_use (2). The
+#: reply size is unknown until the backend answers; a bigger reply (parallel tool calls) can still overshoot.
+RESERVED_REPLY_BLOCKS = 2
+
+
+class BlockCap:
+    """Count of content blocks since the last Claude-served step (assistant blocks served locally plus the
+    client's tool_result blocks), keyed by CONVERSATION (cache_cost.conversation_key), not session id: side calls
+    and sub-agents share the session id but have their own first message, so their non-served rows must not reset
+    the main thread's count. In memory, bounded; only keys and integers.
+
+    Not counted: Claude's own reply block(s) and the tool_result that answers them after a reset, so the real
+    lookback distance at the next Claude call runs about 1-2 blocks above the counter. A cap of 14 plus that
+    margin plus the reserved reply (RESERVED_REPLY_BLOCKS) stays under the ~20-block lookback."""
+
+    def __init__(self, max_states: int = 4096):
+        self._n: dict[str, int] = OrderedDict()
+        self.max_states = max_states
+
+    def pending(self, session_id: str | None, incoming: int) -> int:
+        n = self._n.get(session_id) if session_id else None
+        return (n if n is not None else 0) + incoming
+
+    def would_reach(self, session_id: str | None, incoming: int, cap: int) -> int | None:
+        """The pending count when serving one more local step (RESERVED_REPLY_BLOCKS assistant blocks) would
+        reach ``cap``, else ``None``."""
+        if cap <= 0 or not session_id:
+            return None
+        n = self.pending(session_id, incoming)
+        return n if n + RESERVED_REPLY_BLOCKS >= cap else None
+
+    def settle(self, session_id: str | None, incoming: int, served_blocks: int | None) -> int | None:
+        """A step finished. ``served_blocks`` is the block count when served locally, ``None`` when Claude takes
+        the call (the count resets). Returns the count to record on the row: blocks since the last Claude step
+        as that step's request saw them, plus the served ones."""
+        if not session_id:
+            return None
+        n = self.pending(session_id, incoming)
+        if served_blocks is None:
+            self._n.pop(session_id, None)
+            return n
+        n += served_blocks
+        self._n[session_id] = n
+        self._n.move_to_end(session_id)
+        while len(self._n) > self.max_states:
+            self._n.popitem(last=False)
+        return n

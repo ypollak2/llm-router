@@ -72,7 +72,8 @@ def test_every_unknown_field_prints_na_with_its_n_and_window():
     for f in fields[1:4]:
         assert "(n=" in f or "(n/a" in f, f
     assert fields[3] == "quality n/a (n=0 verdicts, 7d)" and "Codex n/a (n/a, 5h)" in fields[2], line   # W8: n has its unit
-    assert fields[4] == "saved n/a (3 of 10 active hours)", fields[4]     # one n/a, not "n/a (n/a (...))"
+    # D-611: the saved field is the combined money figure; an unmeasured work-hours figure is omitted, not printed as n/a
+    assert fields[4] == "saved n/a (money figure unavailable)", fields[4]
 
 
 def test_offload_is_unknown_when_no_lane_is_quality_sampled_and_a_rate_when_one_is():
@@ -132,9 +133,10 @@ async def test_saved_is_worked_out_from_the_measured_turn_burn(p35):  # noqa: F8
     # no quota_samples.jsonl in the bare P35 home: a turn off Claude, but no measured burn to multiply it by
     fig = snap.saved_field([_action()], NOW)
     assert fig.value is None and fig.na_reason == "n/a (quota saved unknown)", fig
-    assert snap.render_line({**UNKNOWN_FIELDS, "saved": fig.to_dict()}).endswith("saved n/a (quota saved unknown)")
+    assert snap.render_line({**UNKNOWN_FIELDS, "saved": fig.to_dict()}).endswith("saved n/a (money figure unavailable)")
     d = snap.refresh(host="claude_code", session_id=SID, now=NOW)    # and no turn off Claude today either: n=0 first
-    assert d["fields"]["saved"]["value"] is None and d["line"].endswith("saved n/a (n=0 turns off Claude, today)")
+    saved = d["line"].split(" | ")[4]
+    assert d["fields"]["saved"]["value"] is None and saved.startswith("saved ") and "work-hours" not in saved   # n=0: omitted (D-611)
     seed_snapshot_extras(p35.home)
     # 2 turns off Claude today x 2.0 pp per turn / 3.0 pp per active hour (hand oracle in test_p35_fixtures)
     assert snap.refresh(host="claude_code", session_id=SID, now=NOW)["fields"]["saved"]["value"] == pytest.approx(4 / 3)
@@ -171,7 +173,7 @@ async def test_saved_with_no_turn_off_claude_is_na_never_zero(p35):  # noqa: F81
     fig = snap.saved_field([_action(first=False)], NOW)                # burn and rate known, n=0 turns
     assert fig.value is None and fig.n == 0 and fig.na_reason == "n=0 turns off Claude, today", fig
     fields = {**UNKNOWN_FIELDS, "saved": fig.to_dict()}
-    assert snap.render_line(fields).endswith("saved n/a (n=0 turns off Claude, today)")
+    assert snap.render_line(fields).endswith(" | saved n/a (money figure unavailable)")   # n=0: work-hours omitted (D-611)
 
 
 def test_saved_with_no_turn_and_no_rate_names_the_n_0_turns(tmp_path, monkeypatch):
@@ -182,8 +184,7 @@ def test_saved_with_no_turn_and_no_rate_names_the_n_0_turns(tmp_path, monkeypatc
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path))
     fig = snap.saved_field([], NOW)
     assert (fig.value, fig.n, fig.na_reason) == (None, 0, "n=0 turns off Claude, today"), fig
-    assert snap.render_line({**UNKNOWN_FIELDS, "saved": fig.to_dict()}).endswith(
-        "saved n/a (n=0 turns off Claude, today)")
+    assert snap.render_line({**UNKNOWN_FIELDS, "saved": fig.to_dict()}).endswith(" | saved n/a (money figure unavailable)")
 
 
 def test_claude_5h_names_its_one_poll_and_is_never_a_value_with_n_0(tmp_path, monkeypatch):

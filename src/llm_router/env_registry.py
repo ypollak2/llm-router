@@ -213,6 +213,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_TRACE": ("llm_router", "trace.py", 1),
     "LLM_ROUTER_DISCOVERY_TTL_HOURS": ("llm_router", "model_discovery.py", 1),
     "LLM_ROUTER_RESCAN_INTERVAL_S": ("llm_router", "discovery_rescan.py", 1),
+    "LLM_ROUTER_REASK_PARAPHRASE": ("llm_router", "reask_detect.py", 1),
     "LLM_ROUTER_TRANSCRIPT_SCAN_CAP_MB": ("llm_router", "hooks/auto-route.py", 1),
     "LLM_ROUTER_CONTEXT_INJECTION": ("llm_router", "context_injection.py", 1),
     "LLM_ROUTER_CACHE_LAYOUT": ("llm_router", "cache_layout.py", 1),
@@ -242,6 +243,7 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_COLD_GUARD": ("llm_router", "proxy/cold_guard.py", 1),
     "LLM_ROUTER_DEADLINE_CAP_S": ("llm_router", "proxy/deadline.py", 1),
     "LLM_ROUTER_PREFILL_TOK_S": ("llm_router", "proxy/deadline.py", 1),
+    "LLM_ROUTER_TIER_COLD_CACHE_ONLY": ("llm_router", "proxy/cache_cost.py", 1),
     "LLM_ROUTER_PROXY_KEEPALIVE": ("llm_router", "proxy/keepalive.py", 1),
     "LLM_ROUTER_PROXY_KEEPALIVE_AFTER_S": ("llm_router", "proxy/keepalive.py", 1),
     "LLM_ROUTER_PROXY_KEEPALIVE_INTERVAL_S": ("llm_router", "proxy/keepalive.py", 1),
@@ -279,6 +281,12 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PROXY_LOOP_MAX_CONSECUTIVE": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_PROXY_LOOP_REPEAT_WINDOW": ("llm_router", "proxy/server.py", 1),
     "LLM_ROUTER_BACKEND_RECYCLE_CMD": ("llm_router", "proxy/backend_recycle.py", 1),
+    # D-601: built-in wedge recovery of the dedicated runner (kill flag default on; inert without the pidfile path).
+    "LLM_ROUTER_RUNNER_AUTORECOVER": ("llm_router", "proxy/runner_recover.py", 1),
+    "LLM_ROUTER_RUNNER_PIDFILE": ("llm_router", "proxy/runner_recover.py", 1),
+    # D-650: also recover on a consecutive_invalid/empty_body trip (default off); optional runner log corroborates it.
+    "LLM_ROUTER_RUNNER_RECOVER_ON_EMPTY": ("llm_router", "proxy/runner_recover.py", 1),
+    "LLM_ROUTER_RUNNER_LOG": ("llm_router", "proxy/server.py", 1),
     # Local-model web search (tools/web_search.py, search/backend.py): off by default.
     "LLM_ROUTER_WEB_SEARCH": ("llm_router", "tools/web_search.py", 1),
     "LLM_ROUTER_SEARXNG_URL": ("llm_router", "search/backend.py", 1),
@@ -287,6 +295,14 @@ ENV_REGISTRY: dict[str, tuple[str, str, int]] = {
     "LLM_ROUTER_PINFIX_K": ("llm_router", "proxy/local_mode.py", 1),
     "LLM_ROUTER_PINFIX_MAX_FALLBACKS": ("llm_router", "proxy/local_mode.py", 1),
     "LLM_ROUTER_LOOP_GUARD_CAP_NO_PIN": ("llm_router", "proxy/server.py", 1),
+    # Cap on content blocks added since the last Claude step (suggested 14, off when unset/0): keeps the next
+    # Claude call inside the prompt cache's ~20-block lookback (proxy/loop_guard.py BlockCap).
+    "LLM_ROUTER_HANDOVER_AT": ("llm_router", "hooks/status-bar.py", 1),
+    "LLM_ROUTER_LOCAL_MAX_BLOCKS": ("llm_router", "proxy/loop_guard.py", 1),
+    # Main-thread cap on consecutive local steps before a hand-back to Claude (suggested 5, off when unset/0;
+    # proxy/loop_guard.py local_main_max_steps). Sub-agent threads keep the loop guard cap. Caveat: the legacy
+    # guard's streak is keyed by session id and may include sub-agent steps; the PINFIX guard is per conversation.
+    "LLM_ROUTER_LOCAL_MAIN_MAX_STEPS": ("llm_router", "proxy/loop_guard.py", 1),
     # Local-serving alarm (proxy/local_alarm.py), default off; population label for bench proxies (proxy/obs_fields.py).
     "LLM_ROUTER_LOCAL_ALARM": ("llm_router", "proxy/local_alarm.py", 1),
     "LLM_ROUTER_POP_LABEL": ("llm_router", "proxy/obs_fields.py", 1),

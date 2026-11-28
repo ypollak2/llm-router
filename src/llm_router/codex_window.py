@@ -257,10 +257,30 @@ def release(token: float | None, now: float | None = None) -> None:
         failopen.record("CHZ-FO-CODEX-WINDOW-RELEASE", exc)
 
 
+def refusals_today(now: float | None = None) -> tuple[int, dict[str, int]]:
+    """Attempts refused before any Codex process started today (UTC), from ``agent_route_codex_refusals.json``:
+    ``(total, {reason_code: n})``. They are not charged to the budget or window; this is where they stay visible.
+    A missing, unreadable or older-dated file is ``(0, {})``."""
+    from datetime import datetime, timezone
+    try:
+        data = json.loads(paths.state_path("agent_route_codex_refusals.json").read_text(encoding="utf-8"))
+        today = datetime.fromtimestamp(time.time() if now is None else now, timezone.utc).date().isoformat()
+        if not isinstance(data, dict) or data.get("date") != today:
+            return 0, {}
+        by = {str(k): int(v) for k, v in (data.get("by_reason") or {}).items()}
+        return max(0, int(data.get("count", 0))), by
+    except (OSError, ValueError, TypeError):
+        return 0, {}
+
+
 def status_line(now: float | None = None) -> str:
-    """``codex: 3/15 used this window, resets 21:14`` (no reset clause when unused)."""
+    """``codex: 3/15 used this window, resets 21:14`` (no reset clause when unused); when attempts were refused before
+    start today, ``; refused before start: 2 today (no_ignore_rules 2)`` follows."""
     s = snapshot(now)
     line = f"codex: {s.used}/{s.budget} used this window"
     if s.resets_at is not None:
         line += f", resets {_clock(s.resets_at)}"
+    total, by = refusals_today(now)
+    if total:
+        line += f"; refused before start: {total} today (" + ", ".join(f"{k} {v}" for k, v in sorted(by.items())) + ")"
     return line

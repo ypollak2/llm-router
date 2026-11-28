@@ -144,7 +144,7 @@ from pathlib import Path
 from llm_router import session_kind
 from llm_router.proxy import escalation, haiku_arm, lane_a
 from llm_router.proxy import quota_pressure as quota_pressure_mod
-from llm_router.proxy.cache_cost import ConvState, Stickiness, conversation_key, switch_cost_usd
+from llm_router.proxy.cache_cost import ConvState, Stickiness, cold_cache_only, conversation_key, switch_cost_usd
 from llm_router.proxy.translate import HAIKU55_MAX_OUTPUT_TOKENS, haiku_is_legacy
 from llm_router.proxy.steps import (
     STEP_CONTINUATION, STEP_HARNESS_TURN, STEP_SUBAGENT_FIRST, STEP_SUBAGENT_TURN, STEP_TURN_FIRST, has_client_tools,
@@ -433,6 +433,14 @@ class _TimedSticky:
     def is_cold(self, state) -> bool:
         with self._p("stickiness"):
             return self._s.is_cold(state)
+
+    def note_served(self, *args, **kwargs):
+        with self._p("stickiness"):
+            return self._s.note_served(*args, **kwargs)
+
+    def served_warm(self, *args, **kwargs):
+        with self._p("stickiness"):
+            return self._s.served_warm(*args, **kwargs)
 
 
 def with_complexity_knn(base=None):
@@ -984,7 +992,7 @@ class ClaudeTierPolicy:
 
     async def _pinned_or_arm(self, body: dict, session_id: str | None, classify, requested: str | None,
                              req_tier: Tier, phases: _Phases,
-                             block: "_HaikuBlock | None" = None) -> TierDecision:
+                             block: "_HaikuBlock | None" = None, sticky=None) -> TierDecision:
         """A ``pinned_models`` request: lane A may serve a confident continuation step on Haiku
         (default off); otherwise the request goes to the D-31 arm (``_pinned_arm_or_keep``), and
         the lane's reason and confidence ride on the decision either way."""
@@ -999,18 +1007,21 @@ class ClaudeTierPolicy:
                                 chain_head=lane.chain_head, lane_a_reason=lane.reason,
                                 lane_a_conf=lane.conf, detail=lane_a.DETAIL_PROBE if lane.probe else None,
                                 lane_a_probe_id=lane.probe_id)
-        decision = await self._pinned_arm_or_keep(body, session_id, classify, requested, req_tier, phases, block)
+        decision = await self._pinned_arm_or_keep(body, session_id, classify, requested, req_tier, phases, block,
+                                                  sticky)
         decision.lane_a_reason, decision.lane_a_conf = lane.reason, lane.conf
         return decision
 
     async def _pinned_arm_or_keep(self, body: dict, session_id: str | None, classify, requested: str | None,
                                   req_tier: Tier, phases: _Phases,
-                                  block: "_HaikuBlock | None" = None) -> TierDecision:
+                                  block: "_HaikuBlock | None" = None, sticky=None) -> TierDecision:
         """A ``pinned_models`` request: kept, unless the D-31 arm takes the turn.
 
         The hash decides first, so the classifier runs only for the in-bucket turns
         (about ``haiku_arm_share`` of them). Every gate below reuses an existing rule.
-        Stickiness is neither read nor written: a pinned conversation has no tier state."""
+        Stickiness is neither read nor written: a pinned conversation has no tier state, except that
+        with ``LLM_ROUTER_TIER_COLD_CACHE_ONLY`` the cache age of the requested model is read (see
+        ``cache_cost.cold_cache_only``): a warm cache keeps the pin (``WHY_WARM_CACHE``)."""
         def keep() -> TierDecision:
             return TierDecision(requested, requested, req_tier.name, REASON_CONFIG_PINNED)
 
@@ -1077,6 +1088,11 @@ class ClaudeTierPolicy:
         matched = haiku_arm.match(self.haiku_arm_eligible, task, cx)
         if matched is None:
             return stay(haiku_arm.WHY_NOT_SIMPLE_QA, task, cx)
+        if sticky is not None and cold_cache_only() and sticky.served_warm(
+                conversation_key(body, session_id), requested, unseen_warm=not first):
+            # D-643: the rewrite would write this conversation's prefix again on Haiku while the
+            # requested model's cache is still warm. Keep the pin; the ledger says why.
+            return stay(haiku_arm.WHY_WARM_CACHE, task, cx)
         return TierDecision(requested, haiku.model, haiku.name, REASON_HAIKU_REWRITE, switched=True,
                             task_type=task, complexity=cx, body_rewrite=REWRITE_HAIKU,
                             proposed_tier=haiku.name, arm=haiku_arm.ARM_NAME,
@@ -1104,7 +1120,9 @@ class ClaudeTierPolicy:
             return TierDecision(requested, requested, self.family_tier(requested), REASON_UNKNOWN_MODEL,
                                 detail=STEP_ERROR)
         if _canonical(requested) in self.pinned:
-            return TierDecision(requested, requested, name, REASON_CONFIG_PINNED, detail=STEP_ERROR)
+            decision = TierDecision(requested, requested, name, REASON_CONFIG_PINNED, detail=STEP_ERROR)
+            self._note_pinned_served(body, session_id, sticky, decision)
+            return decision
         if not has_client_tools(body):
             return TierDecision(requested, requested, name, REASON_SIDE_CALL, detail=STEP_ERROR)
         pin = escalation.explicit_pin(body)
@@ -1182,7 +1200,20 @@ class ClaudeTierPolicy:
             decision.lane_a_reason = lane_a.R_NOT_PINNED  # lane A only ever applies to a pinned model
         decision.phases_ms = phases.ms
         decision.haiku_block = block.reason
+        self._note_pinned_served(body, session_id, sticky, decision)
         return decision
+
+    def _note_pinned_served(self, body: dict, session_id: str | None, sticky, decision: TierDecision) -> None:
+        """Cold-cache gate input: a pinned conversation's call that stayed on its requested model
+        re-armed that model's cache; one rewritten to another tier did not. Off = no work."""
+        try:
+            if (cold_cache_only() and _canonical(decision.requested_model) in self.pinned
+                    and _canonical(decision.served_model) == _canonical(decision.requested_model)):
+                sticky.note_served(conversation_key(body, session_id), decision.requested_model)
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must never cost a call
+            from llm_router import failopen
+
+            failopen.record("LR-FO-PROXY-TIER-COLD-NOTE", exc)
 
     async def _decide(self, body: dict, session_id: str | None, sticky: Stickiness,
                       classify, pressure: float | None, phases: _Phases | None = None,
@@ -1198,7 +1229,7 @@ class ClaudeTierPolicy:
         if req_tier is None:
             return TierDecision(requested, requested, self.family_tier(requested), REASON_UNKNOWN_MODEL)
         if _canonical(requested) in self.pinned:
-            return await self._pinned_or_arm(body, session_id, classify, requested, req_tier, phases, block)
+            return await self._pinned_or_arm(body, session_id, classify, requested, req_tier, phases, block, sticky)
         if not has_client_tools(body):
             return keep(REASON_SIDE_CALL)
         with phases("stickiness"):

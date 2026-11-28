@@ -1,1 +1,0 @@
-- Fix `scripts/release/verify-release.py` passing a test run that timed out: `run_tests()` accepted a `TimeoutExpired` whenever "[100%]" had been printed. A timeout is now a failure, matching `release.sh` (#942).

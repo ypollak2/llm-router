@@ -1,1 +1,0 @@
-- Fix the memory guard treating a resident model loaded with a larger window than requested as "already loaded": Ollama keys a runner on num_ctx, so any window that differs from the request is a reload and is now counted against the budget.

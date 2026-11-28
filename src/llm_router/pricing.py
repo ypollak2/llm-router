@@ -238,7 +238,9 @@ _ANTHROPIC: dict[str, Price] = {
     # Fable 5.1 and Claude Mythos 5.1 are priced at 0.025x the base input price"
     # (checked 2026-10-10). So the $0.25 read is explicit; writes derive.
     "claude-mythos-5-1": Price("claude-mythos-5-1", 10.00, 50.00, cache_read=0.25),
-    # Fast mode (research preview, Claude API first-party only). Pricing page
+    # Claude Fable 5.2: $8/$10/$16/$0.20/$40 (pricing page, "Model pricing", 2026-11-26).
+    # Cache hits and refreshes at 0.025x the base input price ($0.20).
+    "claude-fable-5-2": Price("claude-fable-5-2", 8.00, 40.00, cache_read=0.20),
     # "Fast mode pricing", re-checked 2026-09-29 against the raw .md: Opus 5.5
     # $8/$40; Opus 5 / Opus 4.8 $10/$50 — "Prompt caching multipliers apply on
     # top of fast mode pricing". So each keeps its base model's cache ratios:
@@ -370,6 +372,7 @@ _LONG_CONTEXT_AT_STANDARD_RATES: frozenset[str] = frozenset({
     "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1",
     "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
     "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6",
+    "claude-fable-5-2",
 })
 
 # Not handled: the 1.1x `inference_geo: "us"` multiplier (Claude 4.6+, pricing
@@ -388,9 +391,9 @@ _LONG_CONTEXT_AT_STANDARD_RATES: frozenset[str] = frozenset({
 # "haiku" -> claude-haiku-4-5, "fable" -> claude-fable-5), so this map and that one
 # deliberately differ for sonnet, haiku and fable. tests/test_cc_usage_track.py pins
 # the one relationship that must hold: opus agrees, and every target here is a
-# known id or (claude-fable-5-2 today) a current model with no price, which
-# `price_for` answers with None rather than with a stand-in. Add the Fable 5.2
-# price here only from the published pricing page.
+# known id or a current model with no price, which
+# `price_for` answers with None rather than with a stand-in. A price is added
+# only from the published pricing page (Fable 5.2: added 2026-11-26, D-626).
 CLAUDE_CODE_MODEL_ALIASES: dict[str, str] = {
     "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5-5",

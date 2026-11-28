@@ -983,26 +983,110 @@ def test_net_avoided_prices_a_cache_read_and_a_reply_not_a_whole_call():
     assert an["net_avoided_usd"] < 0.02
 
 
-def test_net_avoided_subtracts_the_next_calls_extra_cache_write():
-    """A served run followed by a real call that had to re-establish a large
-    cache costs the session more than the step avoided: net goes negative."""
-    rows = [
-        {"decision": "forwarded", "reason": "not_eligible", "step_class": None, "session_id": "s",
-         "requested_model": "claude-sonnet-5", "usage": {"cache_read_input_tokens": 1_000}},
-        {"decision": "served", "step_class": "continuation", "session_id": "s",
+def _ctl_rows(n: int, write_tokens: int, sid: str = "s", t0: int = 100) -> list[dict]:
+    """n control calls (forwarded after forwarded), each writing ``write_tokens`` of 1h cache."""
+    return [{"decision": "forwarded", "reason": "not_eligible", "session_id": sid, "ts": t0 + i,
+             "requested_model": "claude-sonnet-5",
+             "usage": {"cache_creation_input_tokens": write_tokens,
+                       "cache_creation": {"ephemeral_1h_input_tokens": write_tokens,
+                                          "ephemeral_5m_input_tokens": 0}}} for i in range(n)]
+
+
+def _run_then_next(write_tokens: int | None, sid: str = "s", t0: int = 1000) -> list[dict]:
+    """A served run (prefix row wrote 10_000 1h tokens = a control call at the baseline, so the
+    served step reads a 10_000-token prefix + 10 output tokens) then a real call."""
+    usage = None if write_tokens is None else {
+        "cache_creation_input_tokens": write_tokens,
+        "cache_creation": {"ephemeral_1h_input_tokens": write_tokens, "ephemeral_5m_input_tokens": 0}}
+    return [
+        {"decision": "forwarded", "session_id": sid, "ts": t0, "requested_model": "claude-sonnet-5",
+         "usage": {"cache_creation_input_tokens": 10_000,
+                   "cache_creation": {"ephemeral_1h_input_tokens": 10_000, "ephemeral_5m_input_tokens": 0}}},
+        {"decision": "served", "step_class": "continuation", "session_id": sid, "ts": t0 + 1,
          "requested_model": "claude-sonnet-5", "backend_usage": {"output_tokens": 10}},
-        {"decision": "forwarded", "reason": "policy_kept", "step_class": "continuation", "session_id": "s",
+        {"decision": "forwarded", "session_id": sid, "ts": t0 + 2, "requested_model": "claude-sonnet-5",
+         "usage": usage},
+    ]
+
+
+WOULD_HAVE = 0.0021  # (10_000 * 0.20 + 10 * 10) / 1e6
+
+
+def test_toll_zero_when_next_call_writes_exactly_the_baseline():
+    # 5 control calls x 10_000 tokens 1h @ $4/MTok = $0.04 each; the next call writes the same.
+    d = ledger._net_avoided_detail(_ctl_rows(5, 10_000) + _run_then_next(10_000))
+    assert d["total"] == pytest.approx(WOULD_HAVE, abs=1e-6)
+    assert d["n"] == 1 and d["fallback_baseline_runs"] == 0
+
+
+def test_toll_is_only_the_write_above_baseline():
+    # baseline $0.04, next writes 3x = $0.12 -> toll 2x baseline = $0.08.
+    d = ledger._net_avoided_detail(_ctl_rows(5, 10_000) + _run_then_next(30_000))
+    assert d["total"] == pytest.approx(WOULD_HAVE - 0.08, abs=1e-6)
+    # a next call writing LESS than the baseline never turns the toll into a credit
+    d = ledger._net_avoided_detail(_ctl_rows(5, 10_000) + _run_then_next(1_000))
+    assert d["total"] == pytest.approx(WOULD_HAVE, abs=1e-6)
+
+
+def test_session_with_too_few_control_calls_uses_the_window_baseline():
+    other = _ctl_rows(6, 20_000, sid="other")  # 5 controls at $0.08
+    own = _ctl_rows(2, 10_000)  # session "s": 1 + 1 (the prefix row) = 2 controls < 5
+    rows = other + own + _run_then_next(30_000)
+    per_session, window = ledger._write_baselines(rows)
+    assert "s" not in per_session and "other" in per_session
+    d = ledger._net_avoided_detail(rows)
+    assert d["fallback_baseline_runs"] == 1
+    assert d["total"] == pytest.approx(WOULD_HAVE - (0.12 - window), abs=1e-6)
+
+
+def test_unknown_usage_on_the_next_call_is_excluded_and_counted():
+    d = ledger._net_avoided_detail(_ctl_rows(5, 10_000) + _run_then_next(None))
+    assert d["n"] == 0 and d["total"] == 0.0 and d["excluded_unknown_usage"] == 1
+    s = ledger.stats(_ctl_rows(5, 10_000) + _run_then_next(None))
+    assert s["anthropic"]["net_avoided_excluded_unknown_usage"] == 1
+    assert s["anthropic"]["net_avoided_n"] == 0
+
+
+def test_next_write_with_no_control_call_in_the_window_is_excluded_not_guessed():
+    d = ledger._net_avoided_detail(_run_then_next(30_000))
+    assert d["n"] == 0 and d["excluded_no_baseline"] == 1
+
+
+def _big_write_run(sid: str, t0: int) -> list[dict]:
+    """Prefix (a 10_000-token 1h write = control at baseline), a served step, then a real call that writes 50_000."""
+    return [
+        {"decision": "forwarded", "reason": "not_eligible", "step_class": None, "session_id": sid, "ts": t0,
          "requested_model": "claude-sonnet-5",
+         "usage": {"cache_creation_input_tokens": 10_000,
+                   "cache_creation": {"ephemeral_1h_input_tokens": 10_000, "ephemeral_5m_input_tokens": 0}}},
+        {"decision": "served", "step_class": "continuation", "session_id": sid, "ts": t0 + 1,
+         "requested_model": "claude-sonnet-5", "backend_usage": {"output_tokens": 10}},
+        {"decision": "forwarded", "reason": "policy_kept", "step_class": "continuation", "session_id": sid,
+         "ts": t0 + 2, "requested_model": "claude-sonnet-5",
          "usage": {"cache_creation_input_tokens": 50_000,
                    "cache_creation": {"ephemeral_1h_input_tokens": 50_000, "ephemeral_5m_input_tokens": 0}}},
     ]
-    s = ledger.stats(rows)
-    an = s["anthropic"]
-    # would-have: (1_000 * 0.20 + 10 * 10) / 1e6 = 0.0003
-    # extra write: 50_000 * 4.00 (1h) / 1e6 = 0.2
-    assert an["net_avoided_usd"] == pytest.approx(0.0003 - 0.2, abs=1e-6)
-    assert an["net_avoided_usd"] < 0, "a served step is not counted as a saving when the gap cost more to close"
-    assert an["net_avoided_n"] == 1  # still counted: negative is a real answer, not "unpriced"
+
+
+def test_net_avoided_charges_only_the_write_above_the_session_baseline():
+    """Net goes negative, but only by the write above what an ordinary call writes (D-612).
+    Every row has a ts; the session has 5 controls at $0.04 (per-session path)."""
+    rows = _ctl_rows(5, 10_000) + _big_write_run("s", 1000)
+    d = ledger._net_avoided_detail(rows)
+    # would-have (10_000-token prefix read + 10 out) 0.0021; toll = 0.2 - mean(0.04 x 6 controls) = 0.16
+    assert d["total"] == pytest.approx(0.0021 - 0.16, abs=1e-6)
+    assert d["fallback_baseline_runs"] == 0 and d["n"] == 1
+    assert ledger.stats(rows)["anthropic"]["net_avoided_usd"] < 0
+
+
+def test_net_avoided_charges_only_the_write_above_the_window_baseline():
+    """Same run in a session with 1 control call: priced against the window mean ($0.08 of 'other')."""
+    rows = _ctl_rows(6, 20_000, sid="other") + _big_write_run("s", 1000)
+    per_session, window = ledger._write_baselines(rows)
+    assert "s" not in per_session
+    d = ledger._net_avoided_detail(rows)
+    assert d["fallback_baseline_runs"] == 1
+    assert d["total"] == pytest.approx(0.0021 - (0.2 - window), abs=1e-6)
 
 
 def test_net_avoided_skips_a_run_whose_model_is_unknown():
