@@ -198,7 +198,12 @@ def test_the_broader_inheritance_count_is_recorded():
     # the fixed argv `<sys.executable> -m llm_router.map_rediscovery --once`; not model-
     # or caller-supplied. It must inherit: the child discovers API keys from the
     # environment, and a scrubbed env would report every key as removed.
-    assert len(inheriting) <= 61, (
+    # 61 -> 62 (#969 fwdproxy): `llm-router fwdproxy ca` in
+    # llm_router/commands/fwdproxy.py runs the fixed packaged script
+    # `/bin/sh make-ca.sh` with the operator's own CLI args; not model- or
+    # caller-supplied argv. It must inherit: make-ca.sh reads HOME,
+    # FWDPROXY_CA_DIR and OPENSSL from the environment.
+    assert len(inheriting) <= 62, (
         f"{len(inheriting)} subprocess sites inherit the environment, up from "
         "51. If a new one runs caller-supplied argv, add it to "
         "MODEL_ARGV_SITES; if not, raise this number deliberately."
