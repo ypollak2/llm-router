@@ -22,6 +22,7 @@ from llm_router.commands import setup_local as sl
 from llm_router.proxy import ledger
 
 REAL_CALLS: list[str] = []
+_EXPECT_TRIPS = [False]
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +30,7 @@ def _sandbox(monkeypatch, tmp_path):
     import llm_router.install_hooks as ih
 
     REAL_CALLS.clear()
+    _EXPECT_TRIPS[0] = False
     monkeypatch.setenv("LLM_ROUTER_HOME", str(tmp_path / "state"))
     monkeypatch.setattr(ih, "_SETTINGS_PATH", tmp_path / ".claude" / "settings.json")
     for k in lo.ENV_KEYS:
@@ -48,7 +50,11 @@ def _sandbox(monkeypatch, tmp_path):
     # The default arguments were bound to the real subprocess.run at import: patch them too.
     monkeypatch.setitem(pd.activate_service.__kwdefaults__, "runner", _trip("activate_service default runner"))
     monkeypatch.setitem(pd.deactivate_service.__kwdefaults__, "runner", _trip("deactivate_service default runner"))
-    return tmp_path
+    yield tmp_path
+    # activate/deactivate_service swallow exceptions, so a raise alone proves nothing: check the record.
+    if not _EXPECT_TRIPS[0]:
+        assert REAL_CALLS == [], f"a test reached the real machine: {REAL_CALLS}"
+    REAL_CALLS.clear()
 
 
 class Box:
@@ -304,7 +310,7 @@ def test_a_rerun_is_idempotent(tmp_path):
     first = (_state(tmp_path) / ".env").read_text()
     assert box.run(home)["ok"]
     assert (_state(tmp_path) / ".env").read_text() == first  # keys not appended twice
-    assert lo.read_sentinel()["env_written"] == {}  # second run wrote nothing, so records nothing
+    assert lo.read_sentinel()["env_written"] == lo.ENV_KEYS  # the re-run wrote nothing but must not forget run 1
 
 
 # ── window: the num_ctx question ────────────────────────────────────────────
@@ -344,6 +350,25 @@ def test_a_value_set_in_the_process_environment_wins_too(tmp_path):
     r = box.run(tmp_path / "home", environ={"LLM_ROUTER_WINDOW_STEP": "65536"})
     assert r["ok"]
     assert "WINDOW_STEP" not in (_state(tmp_path) / ".env").read_text()
+
+
+def test_uninstall_after_a_rerun_removes_all_three_keys(tmp_path):
+    home = tmp_path / "home"
+    box = Box()
+    assert box.run(home)["ok"]
+    assert box.run(home)["ok"]  # re-run: finds the keys set, writes none
+    sl.uninstall_local_ollama(home=home, system="Darwin", runner=box.runner)
+    left = (_state(tmp_path) / ".env").read_text()
+    assert not any(k in left for k in lo.ENV_KEYS), left
+
+
+def test_peer_urls_include_the_quality_gate_list(monkeypatch):
+    monkeypatch.setenv("QUALITY_GATE_PEER_OLLAMA_URLS", "http://127.0.0.1:11500, http://127.0.0.1:11501/,"
+                       f"{lo.URL}")
+    got = lo.peer_urls()
+    assert "http://127.0.0.1:11500" in got and "http://127.0.0.1:11501" in got and lo.URL not in got
+    monkeypatch.delenv("QUALITY_GATE_PEER_OLLAMA_URLS")
+    assert "http://127.0.0.1:11500" not in lo.peer_urls()
 
 
 # ── the proxy plist gets the local-agent args only when the sentinel exists ──
@@ -682,6 +707,7 @@ def test_no_test_in_this_file_reached_a_real_runner(tmp_path):
 
 
 def test_the_guard_trips_on_a_real_call():
+    _EXPECT_TRIPS[0] = True  # this test calls the real things on purpose; the teardown stands down
     with pytest.raises(AssertionError, match="real subprocess.run"):
         subprocess.run(["true"])
     ok, detail = pd.activate_service(Path("/nonexistent"), "true")  # swallows the error by design...

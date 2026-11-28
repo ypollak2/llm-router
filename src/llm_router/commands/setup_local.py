@@ -232,12 +232,11 @@ def cmd_setup_local(args: list[str]) -> int:
     import time
 
     from llm_router import hardware, model_pull
-    from llm_router.toolkit.adapters.ollama import get_ollama_url
 
     if "--preload" in args:
         return run_preload(system=platform.system(), home=Path.home(), probe_fn=hardware.probe,
                            fetch=_real_fetch, post=_real_post, runner=subprocess.run, sleep=time.sleep,
-                           peer_urls=[get_ollama_url()])
+                           peer_urls=lo.peer_urls())
 
     def _progress_stream(url: str, body: dict):
         last = -1
@@ -256,7 +255,7 @@ def cmd_setup_local(args: list[str]) -> int:
         system=platform.system(), home=Path.home(), environ=dict(os.environ),
         probe_fn=hardware.probe, which=shutil.which, fetch=_real_fetch, post=_real_post,
         runner=subprocess.run, stream=_progress_stream, ask=input, sleep=time.sleep,
-        peer_urls=[get_ollama_url()], python=sys.executable,
+        peer_urls=lo.peer_urls(), python=sys.executable,
     )
     for a in result["actions"]:
         print(f"  {_green('✓')}  {a}")

@@ -90,7 +90,7 @@ install into another host, see [Works With](#works-with). The daily KPI job is i
 
 ### Local routing (48 GB+ Mac)
 
-Opt-in; plain `install` never does this. It downloads about 22 GB and keeps 22.4 GB of memory loaded.
+Opt-in; plain `install` never does this. It downloads about 22 GB and keeps about 22 GB of memory loaded.
 
 ```bash
 llm-router setup-local          # refuses below 48 GB RAM; asks first (`--yes` to consent headless)

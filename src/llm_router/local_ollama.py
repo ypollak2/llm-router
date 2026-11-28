@@ -42,7 +42,8 @@ WINDOW = 131072
 RESIDENT_GB = 22.4
 #: Metal's usual working-set cap, as in scripts/release/quality_gate.py GPU_MEMORY_FRACTION (#992).
 GPU_MEMORY_FRACTION = 0.75
-#: Approximate download, shown at consent time. The real size comes from /api/pull progress.
+#: Approximate download, shown at consent time ("about 22 GB"). Source: `ollama list` on 2026-11-28 shows
+#: qwen3.6:35b-a3b-coding as 22 GB; /api/ps resident size on 2026-11-27 was 22,384,570,530 B (= RESIDENT_GB).
 DOWNLOAD_GB = 22.0
 LABEL = pd.LOCAL_OLLAMA_LABEL
 SYSTEMD_UNIT = "llm_router-local-ollama"
@@ -76,6 +77,10 @@ def read_sentinel() -> dict | None:
 
 def write_sentinel(*, system: str, ollama_bin: str, env_written: dict[str, str],
                    preload_label: str | None = None) -> None:
+    """``env_written`` is MERGED over the previous sentinel's: a re-run that finds its keys already set
+    writes nothing, and must not make uninstall forget the lines an earlier run added."""
+    prior = (read_sentinel() or {}).get("env_written")
+    env_written = {**(prior if isinstance(prior, dict) else {}), **env_written}
     p = sentinel_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({
@@ -133,6 +138,21 @@ def peer_conflict(peer_urls: list[str], fetch: Fetch, total_gb: float | None,
             f"over {GPU_MEMORY_FRACTION:.0%} of {total_gb:.1f} GB RAM; that overruns GPU memory "
             "(Metal OutOfMemory) and can wedge the other server. Free it first: "
             "`OLLAMA_HOST=<peer> ollama stop <model>`. Nothing was changed.")
+
+
+def peer_urls() -> list[str]:
+    """Other Ollama servers whose resident models share the GPU: the default server plus the
+    comma-separated ``QUALITY_GATE_PEER_OLLAMA_URLS`` (same list as scripts/release/quality_gate.py)."""
+    import os
+
+    from llm_router.toolkit.adapters.ollama import get_ollama_url
+
+    out: list[str] = []
+    for u in [get_ollama_url(), *os.environ.get("QUALITY_GATE_PEER_OLLAMA_URLS", "").split(",")]:
+        u = u.strip().rstrip("/")
+        if u and u != URL and u not in out:
+            out.append(u)
+    return out
 
 
 # ── probes (GET only) and preload ────────────────────────────────────────────
