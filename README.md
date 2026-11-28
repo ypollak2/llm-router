@@ -88,6 +88,18 @@ through MCP tools and local models. Adding provider keys widens the pool;
 nothing requires them. See **[guide/PROVIDERS.md](guide/PROVIDERS.md)**. To
 install into another host, see [Works With](#works-with). The daily KPI job is installed only with consent (`install --schedule-daily`, or Y when asked; `--no-schedule` skips); `uninstall` removes it.
 
+### Local routing (48 GB+ Mac)
+
+Opt-in; plain `install` never does this. It downloads about 22 GB and keeps 22.4 GB of memory loaded.
+
+```bash
+llm-router setup-local          # refuses below 48 GB RAM; asks first (`--yes` to consent headless)
+llm-router install --proxy-default   # point Claude Code at the proxy with the local model
+llm-router doctor               # "Local routing" block: any failing row prints `local routing: NONE`
+```
+
+`llm-router uninstall` removes the service (the model stays; `--purge-models` removes it).
+
 Python agents route in-process, no server: `from llm_router import Router; r = Router(budget_usd=0.50).run("...")` (`await .arun(...)` in async code; `BudgetExceeded` when the cap is spent).
 
 ---

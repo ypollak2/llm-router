@@ -1064,6 +1064,45 @@ def _proxy_default_section(issues: list[str]) -> None:
         print(f"    {_dim(f'proxy-default check unavailable: {exc}')}")
 
 
+def _local_ollama_section(issues: list[str], *, fetch=None, probe_fn=None, port_up=None,
+                          settings_base_url=None, environ=None, ledger_rows=None, now=None) -> None:
+    """Local-routing rows (`llm-router setup-local`). Silent hint when it was never set up; otherwise
+    one row per requirement, and any "no" prints ``local routing: NONE`` with the fix. Every probe is
+    injectable so a test never reaches the machine."""
+    try:
+        import json as _json
+        import os as _os
+        import time as _time
+
+        from llm_router import hardware as _hw, local_ollama as _lo, proxy_default as _pd
+        from llm_router.commands.setup_local import _real_fetch
+        from llm_router.install_hooks import settings_path
+        from llm_router.proxy import ledger as _ledger
+
+        if _lo.read_sentinel() is None:
+            print(f"    {_dim('not set up — llm-router setup-local (48 GB+ Mac) to enable local routing')}")
+            return
+        if settings_base_url is None:
+            try:
+                settings_base_url = (_json.loads(settings_path().read_text()).get("env") or {}).get("ANTHROPIC_BASE_URL")
+            except (OSError, ValueError, AttributeError):
+                settings_base_url = None
+        rows = _lo.routing_rows(
+            total_gb=(probe_fn or _hw.probe)().get("total_gb"), fetch=fetch or _real_fetch,
+            port_up=port_up or (lambda p: _pd.proxy_health("127.0.0.1", p, timeout=1.0)),
+            settings_base_url=settings_base_url, environ=environ if environ is not None else dict(_os.environ),
+            ledger_rows=ledger_rows if ledger_rows is not None else _ledger.read_rows(days=1),
+            now=now if now is not None else _time.time())
+        bad = [name for name, ok, _d in rows if not ok]
+        for name, ok, detail in rows:
+            print(_ok(f"{name}  ({detail})") if ok else _fail(f"{name}  ({detail})"))
+        if bad:
+            print(_fail("local routing: NONE", fix="llm-router setup-local   (then: llm-router install --proxy-default)"))
+            issues.append(f"local routing is set up but not live: {', '.join(bad)}")
+    except Exception as exc:  # noqa: BLE001 — doctor must still finish
+        print(f"    {_dim(f'local-routing check unavailable: {exc}')}")
+
+
 def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     """Comprehensive health check — verify every component is wired up.
 
@@ -1752,6 +1791,10 @@ def _run_doctor(host: Optional[str] = None) -> tuple[int, list[str]]:
     print()
     print(_bold("  Proxy-default (ANTHROPIC_BASE_URL)"))
     _proxy_default_section(issues)
+
+    print()
+    print(_bold("  Local routing (llm-router setup-local)"))
+    _local_ollama_section(issues)
 
     print()
     print(_bold("  Daily KPI scheduler"))

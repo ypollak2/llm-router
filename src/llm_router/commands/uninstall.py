@@ -164,6 +164,17 @@ def _run_uninstall(flags: list[str] | None = None, *, schedule: dict | None = No
         actions.extend(uninstall_proxy_default())
     except Exception as e:
         actions.append(f"proxy-default cleanup skipped: {e}")
+    # Local routing (`llm-router setup-local`): after the proxy-default teardown, so nothing still sends
+    # to :11435 while it stops. Keeps the model unless --purge-models.
+    try:
+        from llm_router.commands.setup_local import uninstall_local_ollama
+        import platform
+        import subprocess
+        actions.extend(uninstall_local_ollama(
+            home=Path.home(), system=platform.system(), runner=subprocess.run,
+            purge_models="--purge-models" in (flags or [])))
+    except Exception as e:
+        actions.append(f"local-routing cleanup skipped: {e}")
     for a in actions:
         print(f"  {a}")
 

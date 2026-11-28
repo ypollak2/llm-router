@@ -48,8 +48,12 @@ LABEL = "com.llm_router.proxy"
 SHIM_LABEL = "com.llm_router.proxy-shim"
 DEFAULT_PORT = 8787
 DEFAULT_UPSTREAM_PORT = 8797
+#: The dedicated local-model Ollama (`llm-router setup-local`, `local_ollama.py`). Its own label:
+#: never the main proxy's, so unloading one job cannot take the other down.
+LOCAL_OLLAMA_LABEL = "com.llm_router.local-ollama"
 #: launchd label -> systemd user unit name.
-_SYSTEMD_UNITS = {LABEL: "llm_router-proxy", SHIM_LABEL: "llm_router-proxy-shim"}
+_SYSTEMD_UNITS = {LABEL: "llm_router-proxy", SHIM_LABEL: "llm_router-proxy-shim",
+                  LOCAL_OLLAMA_LABEL: "llm_router-local-ollama"}
 DEFAULT_STEPS = "off"
 DEFAULT_TIERS = "conversation"
 _SENTINEL_NAME = "proxy_default.json"
@@ -164,7 +168,10 @@ def proxy_health(host: str = "127.0.0.1", port: int = DEFAULT_PORT, timeout: flo
 
 def render_launchd_plist(
     python: str, home: Path, *, port: int, steps: str, tiers: str, label: str = LABEL,
+    extra_args: tuple[str, ...] | list[str] = (),
 ) -> str:
+    # ``extra_args`` (the local-agent flags once `setup-local` has run) go after --tiers; empty = byte-identical.
+    extra = "".join(f"\n        <string>{a}</string>" for a in extra_args)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -178,7 +185,7 @@ def render_launchd_plist(
         <string>proxy</string>
         <string>--port</string><string>{port}</string>
         <string>--steps</string><string>{steps}</string>
-        <string>--tiers</string><string>{tiers}</string>
+        <string>--tiers</string><string>{tiers}</string>{extra}
     </array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
@@ -234,10 +241,14 @@ WantedBy=default.target
 """
 
 
-def render_systemd_user_unit(python: str, *, port: int, steps: str, tiers: str) -> str:
+def render_systemd_user_unit(
+    python: str, *, port: int, steps: str, tiers: str,
+    extra_args: tuple[str, ...] | list[str] = (),
+) -> str:
     # No `label` parameter: unlike a launchd plist, a systemd unit carries no
     # label field of its own -- `service_target` below is what maps `LABEL`
     # to the actual unit NAME (llm_router-proxy.service).
+    extra = "".join(f" {shlex.quote(a)}" for a in extra_args)
     return f"""[Unit]
 Description=LLM Router default Claude Code proxy
 After=network-online.target
@@ -245,7 +256,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={python} -m llm_router.cli proxy --port {port} --steps {steps} --tiers {tiers}
+ExecStart={python} -m llm_router.cli proxy --port {port} --steps {steps} --tiers {tiers}{extra}
 Restart=on-failure
 RestartSec=5
 
@@ -307,6 +318,7 @@ def install_service(
     steps: str = DEFAULT_STEPS,
     tiers: str = DEFAULT_TIERS,
     write: bool = True,
+    extra_args: tuple[str, ...] | list[str] = (),
 ) -> tuple[Path, str]:
     """Render and (by default) write the per-user proxy service file.
 
@@ -320,9 +332,9 @@ def install_service(
     home = home or Path.home()
     dest, activate = service_target(system, home)
     content = (
-        render_launchd_plist(python, home, port=port, steps=steps, tiers=tiers)
+        render_launchd_plist(python, home, port=port, steps=steps, tiers=tiers, extra_args=extra_args)
         if system == "Darwin"
-        else render_systemd_user_unit(python, port=port, steps=steps, tiers=tiers)
+        else render_systemd_user_unit(python, port=port, steps=steps, tiers=tiers, extra_args=extra_args)
     )
     if write:
         dest.parent.mkdir(parents=True, exist_ok=True)

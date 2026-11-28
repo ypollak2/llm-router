@@ -41,7 +41,7 @@ import sys
 import time
 from pathlib import Path
 
-from llm_router import install_manifest, paths, proxy_default as pd
+from llm_router import install_manifest, local_ollama, paths, proxy_default as pd
 
 
 # ── ANSI helpers (respect NO_COLOR / non-tty) — same small block every
@@ -172,6 +172,9 @@ def install_proxy_default(
     main_port = upstream_port if shim else port
     wait = {"runner": runner, "home": home, "health_retries": health_retries,
             "health_interval_s": health_interval_s}
+    # `llm-router setup-local` leaves a sentinel; only then does the main proxy get the local-agent
+    # flags. Without it this is byte-identical to before.
+    local_args = local_ollama.proxy_args(home)
 
     prior = pd.read_sentinel() or {}
     own_shim_layout = (
@@ -187,6 +190,18 @@ def install_proxy_default(
             f"nothing written or restarted."
         )
         reused = True
+        # The proxy plist predates `setup-local`: write the new flags, never restart (launchd keeps the
+        # loaded plist until the owner unloads and loads it).
+        if local_args:
+            _d, _ = pd.service_target(system, home)
+            _before = _read_or_none(_d)
+            if _before is not None and "--serve" not in _before:
+                _dest, _ = pd.install_service(system=system, home=home, port=main_port, steps=steps,
+                                              tiers=tiers, extra_args=local_args)
+                actions.append(f"Wrote {_dest} with the local-agent arguments")
+                _note = _stale_plist_note(_dest, _before, pd.LABEL)
+                if _note:
+                    actions.append(_note)
     elif not own_shim_layout and pd.proxy_health("127.0.0.1", port, timeout=1.0):
         actions.append(
             f"Found a proxy already answering on 127.0.0.1:{port} — reusing it "
@@ -218,6 +233,7 @@ def install_proxy_default(
                 before = _read_or_none(_d)
                 dest, activate_cmd = pd.install_service(
                     system=system, home=home, port=main_port, steps=steps, tiers=tiers,
+                    extra_args=local_args,
                 )
             except RuntimeError as exc:
                 return {"ok": False, "actions": actions, "error": str(exc), "reused": False}
