@@ -346,7 +346,7 @@ carries `mixed_history: true` and keeps the one-retry-without-thinking guard. Th
 `--serve local-agent` with a stray `--tiers` setting is still refused; without the flag the preflight keeps
 requiring `--tiers off`.
 
-Start-up preflight (D-445): `_local_agent_preflight` checks the resident model and `NUM_PARALLEL`. Old tiers-off local-agent mode first loads a non-resident model (it posts `/api/chat`) and refuses to start (rc 2) when the preflight fails. Combined mode never loads the model inline: the start delay is bounded by the lsof/ps/GET checks only, a non-resident model is a refusal, and after a reboot with the model not loaded local stays off until the model is loaded and the proxy is restarted. This repo ships no flip script: `llm-router setup-local` (safe to re-run) loads the model and pins it, then restart the proxy (`launchctl kickstart -k gui/$(id -u)/com.llm_router.proxy`). The `com.llm_router.local-ollama` service restarts the Ollama server at login but does not reload the model by itself. Any exception inside the preflight (bad URL, unreadable source) is also turned into a refusal line `preflight error: <Type>: <msg>` in combined mode. Combined mode degrades instead: each refusal is written to stderr as `llm-router proxy: local-agent DISABLED (tier path only): ...`, the proxy starts, local serving is off for the process lifetime, and every turn takes the tier path with ledger `local_mode.reason` `preflight_refused` (detail = the refusals). A restart re-runs the preflight. The live proxy carries all Claude Code traffic, so a down model must not stop it starting.
+Start-up preflight (D-445): `_local_agent_preflight` checks the resident model and `NUM_PARALLEL`. Old tiers-off local-agent mode first loads a non-resident model (it posts `/api/chat`) and refuses to start (rc 2) when the preflight fails. Combined mode never loads the model inline: the start delay is bounded by the lsof/ps/GET checks only, a non-resident model is a refusal, and after a reboot with the model not loaded local stays off until the model is loaded and the proxy is restarted. This repo ships no flip script; `llm-router setup-local` installs a login job that does it (see "Local routing setup").  Any exception inside the preflight (bad URL, unreadable source) is also turned into a refusal line `preflight error: <Type>: <msg>` in combined mode. Combined mode degrades instead: each refusal is written to stderr as `llm-router proxy: local-agent DISABLED (tier path only): ...`, the proxy starts, local serving is off for the process lifetime, and every turn takes the tier path with ledger `local_mode.reason` `preflight_refused` (detail = the refusals). A restart re-runs the preflight. The live proxy carries all Claude Code traffic, so a down model must not stop it starting.
 
 **Preflight.** The proxy refuses to start (message on stderr, exit 2) unless: `--model ollama/<tag>` is given
 and resident with `num_ctx >= 32768` (the old tiers-off mode loads it first if absent; combined mode does not load it and refuses instead); the Ollama server's own
@@ -1260,3 +1260,12 @@ loaded plist is rewritten but not reloaded: unload then load it (never bootout).
 `llm-router doctor` has a "Local routing" block; any failing row prints `local routing: NONE` and
 the fix. `llm-router uninstall` stops and removes the service, the sentinel and the `.env` lines it
 wrote; the model stays unless `--purge-models`.
+
+After a reboot nothing manual is needed: the `com.llm_router.local-ollama` service restarts the Ollama
+server, and the one-shot `com.llm_router.local-ollama-preload` login job runs `llm-router setup-local
+--preload`. That waits up to 120 s for :11435, refuses (non-zero, logged, nothing loaded) when another
+Ollama's resident models would overrun GPU memory, loads the model pinned at the proxy's window, and,
+only when proxy-default is installed, restarts `com.llm_router.proxy` (the proxy decides local serving
+once at start, so one that started before the model was resident stays tier-only until restarted). One
+line per run goes to `~/.llm-router/logs/local-ollama-preload.log`. Setup writes the preload job's file
+but does not start it; uninstall removes both jobs.

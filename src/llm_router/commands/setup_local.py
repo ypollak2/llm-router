@@ -29,6 +29,7 @@ llm-router setup-local — opt-in local routing (needs {lo.MIN_RAM_GB} GB+ RAM)
 Usage:
   llm-router setup-local          Ask, then install (a terminal is required to be asked)
   llm-router setup-local --yes    Consent to the download and the background service
+  llm-router setup-local --preload  Reload the model after a reboot (run by the login job; exits non-zero on failure)
   llm-router setup-local --help   Show this help (no changes made)
 
 Installs a supervised Ollama on 127.0.0.1:{lo.PORT} for {lo.MODEL} (about {lo.DOWNLOAD_GB:.0f} GB
@@ -41,7 +42,7 @@ Undo with `llm-router uninstall` (models are kept; `--purge-models` removes {lo.
 
 def run_setup_local(
     *, yes: bool, stdin_tty: bool, system: str, home: Path, environ: dict[str, str],
-    probe_fn, which, fetch, post, runner, stream, ask, sleep, peer_urls: list[str],
+    probe_fn, which, fetch, post, runner, stream, ask, sleep, peer_urls: list[str], python: str,
     ready_retries: int = 30, ready_interval_s: float = 1.0,
 ) -> dict:
     """Returns ``{"ok": bool, "actions": [...], "error": str | None}``. Every dependency is injected."""
@@ -92,8 +93,10 @@ def run_setup_local(
     note = _stale_plist_note(dest, before, lo.LABEL)
     if note:
         actions.append(note)
+    pre = lo.install_preload_service(python, system=system, home=home)
+    actions.append(f"Wrote {pre} (reloads the model at login; not started now)")
     # Recorded before the service starts: if anything below fails, `llm-router uninstall` can still stop it.
-    lo.write_sentinel(system=system, ollama_bin=ollama_bin, env_written={})
+    lo.write_sentinel(system=system, ollama_bin=ollama_bin, env_written={}, preload_label=lo.PRELOAD_LABEL)
     ok, detail = pd.activate_service(dest, activate, runner=runner)
     if not ok:
         return fail(f"could not start the local Ollama service (`{activate}`): {detail or 'unknown error'}")
@@ -124,12 +127,64 @@ def run_setup_local(
     actions.append(f"{lo.MODEL} resident at window {lo.WINDOW}, kept loaded (keep_alive -1)")
 
     written, kept = lo.write_env(environ)
-    lo.write_sentinel(system=system, ollama_bin=ollama_bin, env_written=written)
+    lo.write_sentinel(system=system, ollama_bin=ollama_bin, env_written=written, preload_label=lo.PRELOAD_LABEL)
     for key, value in written.items():
         actions.append(f"Set {key}={value} in {paths.state_path('.env')}")
     for key in kept:
         actions.append(f"Kept your existing {key} (an explicit value is never overridden)")
     return {"ok": True, "actions": actions, "error": None}
+
+
+def _log_preload(line: str) -> None:
+    import time
+
+    try:
+        p = paths.state_path("logs", "local-ollama-preload.log")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {line}\n")
+    except OSError:
+        pass
+
+
+def _restart_command(system: str, dest: Path) -> str:
+    if system == "Linux":
+        return f"systemctl --user restart {pd._SYSTEMD_UNITS[pd.LABEL]}"  # noqa: SLF001
+    return pd.launchd_activate_command(dest, pd.LABEL)  # kickstart -k when loaded
+
+
+def run_preload(*, system: str, home: Path, probe_fn, fetch, post, runner, sleep, peer_urls: list[str],
+                retries: int = 120, interval_s: float = 1.0) -> int:
+    """``setup-local --preload``: after a reboot, wait for :11435, check peer memory, load the model
+    pinned at the proxy's window, then restart the proxy so its start-up preflight sees it resident.
+    One log line per run; any failure returns non-zero (never 0 on failure)."""
+    def done(rc: int, msg: str) -> int:
+        _log_preload(f"rc={rc} {msg}")
+        if rc:
+            print(f"llm-router setup-local --preload: {msg}", file=sys.stderr)
+        return rc
+
+    if lo.read_sentinel() is None:
+        return done(1, "local routing is not set up (no sentinel); run `llm-router setup-local`")
+    if not lo.wait_ready(fetch, sleep, retries=retries, interval_s=interval_s):
+        return done(1, f"{lo.URL} did not answer within {retries * interval_s:.0f}s; model not loaded")
+    conflict = lo.peer_conflict([u for u in peer_urls if u.rstrip("/") != lo.URL], fetch,
+                                (probe_fn() or {}).get("total_gb"), own_resident=lo.is_resident(fetch))
+    if conflict:
+        return done(1, f"not loading: {conflict}")
+    if not lo.preload(post) or not lo.is_resident(fetch):
+        return done(1, f"{lo.MODEL} did not load at window {lo.WINDOW}")
+    msg = f"{lo.MODEL} resident at window {lo.WINDOW}"
+    # The proxy decides local serving ONCE, at start (proxy/server.py:2663 sets local_disabled for the
+    # process lifetime; :565 hands it to LocalModeState), so a proxy that started before the model was
+    # loaded stays tier-only until restarted. Restart it, and only when proxy-default is installed.
+    if pd.read_sentinel() is not None:
+        dest = pd.service_target(system, home, label=pd.LABEL)[0]
+        ok, detail = pd.activate_service(dest, _restart_command(system, dest), runner=runner)
+        if not ok:
+            return done(1, f"{msg}; could not restart the proxy: {detail or 'unknown error'}")
+        msg += "; proxy restarted"
+    return done(0, msg)
 
 
 def _real_fetch(url: str) -> dict | None:
@@ -167,7 +222,7 @@ def cmd_setup_local(args: list[str]) -> int:
     if any(a in ("--help", "-h", "help") for a in args):
         print(_HELP)
         return 0
-    unknown = [a for a in args if a != "--yes"]
+    unknown = [a for a in args if a not in ("--yes", "--preload")]
     if unknown:
         print(f"llm-router setup-local: unknown argument {unknown[0]!r}; see `llm-router setup-local --help`",
               file=sys.stderr)
@@ -178,6 +233,11 @@ def cmd_setup_local(args: list[str]) -> int:
 
     from llm_router import hardware, model_pull
     from llm_router.toolkit.adapters.ollama import get_ollama_url
+
+    if "--preload" in args:
+        return run_preload(system=platform.system(), home=Path.home(), probe_fn=hardware.probe,
+                           fetch=_real_fetch, post=_real_post, runner=subprocess.run, sleep=time.sleep,
+                           peer_urls=[get_ollama_url()])
 
     def _progress_stream(url: str, body: dict):
         last = -1
@@ -196,7 +256,7 @@ def cmd_setup_local(args: list[str]) -> int:
         system=platform.system(), home=Path.home(), environ=dict(os.environ),
         probe_fn=hardware.probe, which=shutil.which, fetch=_real_fetch, post=_real_post,
         runner=subprocess.run, stream=_progress_stream, ask=input, sleep=time.sleep,
-        peer_urls=[get_ollama_url()],
+        peer_urls=[get_ollama_url()], python=sys.executable,
     )
     for a in result["actions"]:
         print(f"  {_green('✓')}  {a}")
@@ -228,13 +288,14 @@ def uninstall_local_ollama(*, home: Path, system: str, runner, purge_models: boo
                            else f"WARN could not remove model {lo.MODEL}: {(res.stderr or res.stdout or '').strip()}")
         except Exception as exc:  # noqa: BLE001
             actions.append(f"WARN could not remove model {lo.MODEL}: {exc}")
-    try:
-        dest, _ = pd.service_target(system, home, label=lo.LABEL)
-    except (RuntimeError, KeyError):
-        dest = None
-    if dest is not None:
-        ok, detail = pd.deactivate_service(system, dest, runner=runner, label=lo.LABEL)
-        actions.append(f"Stopped the local Ollama service{'' if ok else f' (best-effort: {detail})'}")
+    # The preload job first: nothing should reload the model while the server goes away.
+    for label, what in ((lo.PRELOAD_LABEL, "model preload job"), (lo.LABEL, "local Ollama service")):
+        try:
+            dest, _ = pd.service_target(system, home, label=label)
+        except (RuntimeError, KeyError):
+            continue
+        ok, detail = pd.deactivate_service(system, dest, runner=runner, label=label)
+        actions.append(f"Stopped the {what}{'' if ok else f' (best-effort: {detail})'}")
         if dest.exists():
             try:
                 dest.unlink()

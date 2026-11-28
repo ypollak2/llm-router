@@ -51,9 +51,12 @@ DEFAULT_UPSTREAM_PORT = 8797
 #: The dedicated local-model Ollama (`llm-router setup-local`, `local_ollama.py`). Its own label:
 #: never the main proxy's, so unloading one job cannot take the other down.
 LOCAL_OLLAMA_LABEL = "com.llm_router.local-ollama"
+#: One-shot login job that reloads the model after a reboot (`setup-local --preload`).
+LOCAL_PRELOAD_LABEL = "com.llm_router.local-ollama-preload"
 #: launchd label -> systemd user unit name.
 _SYSTEMD_UNITS = {LABEL: "llm_router-proxy", SHIM_LABEL: "llm_router-proxy-shim",
-                  LOCAL_OLLAMA_LABEL: "llm_router-local-ollama"}
+                  LOCAL_OLLAMA_LABEL: "llm_router-local-ollama",
+                  LOCAL_PRELOAD_LABEL: "llm_router-local-ollama-preload"}
 DEFAULT_STEPS = "off"
 DEFAULT_TIERS = "conversation"
 _SENTINEL_NAME = "proxy_default.json"

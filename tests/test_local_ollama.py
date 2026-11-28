@@ -115,7 +115,7 @@ class Box:
             yes=yes, stdin_tty=tty, system=system, home=home, environ=environ if environ is not None else {},
             probe_fn=self.probe, which=self.which, fetch=self.fetch, post=self.post, runner=self.runner,
             stream=self.stream, ask=self.ask, sleep=lambda s: None, peer_urls=list(peers),
-            ready_retries=3, ready_interval_s=0.0)
+            ready_retries=3, ready_interval_s=0.0, python="/py")
 
 
 def _state(tmp_path) -> Path:
@@ -424,8 +424,9 @@ def test_uninstall_stops_removes_and_keeps_the_model(tmp_path):
     assert plist.exists()
     box.commands.clear()
     acts = sl.uninstall_local_ollama(home=home, system="Darwin", runner=box.runner)
-    assert box.commands == [f"launchctl unload {plist}"]  # stop BEFORE delete, as proxy-default does
-    assert not plist.exists() and not lo.sentinel_path().exists()
+    pre = home / "Library" / "LaunchAgents" / f"{lo.PRELOAD_LABEL}.plist"
+    assert box.commands == [f"launchctl unload {pre}", f"launchctl unload {plist}"]  # stop BEFORE delete
+    assert not plist.exists() and not pre.exists() and not lo.sentinel_path().exists()
     assert (_state(tmp_path) / ".env").read_text().strip() == ""
     assert any("Kept the downloaded model" in a for a in acts)
     assert not any("ollama" in str(c) and "rm" in str(c) for c in box.commands)
@@ -560,6 +561,115 @@ def test_cli_dispatches_setup_local(monkeypatch):
         cli.main()
     assert e.value.code == 0 and seen == [["--yes"]]
     assert "setup-local" in cli._KNOWN_SUBCOMMANDS
+
+
+# ── reboot safety: `setup-local --preload` and the login job ─────────────────
+
+def _fresh_sentinel():
+    lo.write_sentinel(system="Darwin", ollama_bin="/x/ollama", env_written={}, preload_label=lo.PRELOAD_LABEL)
+
+
+def _preload(box, home, *, retries=3, peers=("http://127.0.0.1:11434",), probe=None):
+    return sl.run_preload(system="Darwin", home=home, probe_fn=probe or box.probe, fetch=box.fetch,
+                          post=box.post, runner=box.runner, sleep=lambda s: None, peer_urls=list(peers),
+                          retries=retries, interval_s=0.0)
+
+
+def _log_text():
+    return (_state_dir() / "logs" / "local-ollama-preload.log").read_text()
+
+
+def _state_dir():
+    from llm_router import paths
+    return paths.llm_router_home()
+
+
+def test_preload_plist_renders_run_once_at_login():
+    t = lo.render_preload_plist("/py", Path("/h"))
+    assert lo.PRELOAD_LABEL == "com.llm_router.local-ollama-preload"
+    for needle in ("<string>/py</string>", "<string>llm_router.cli</string>", "<string>setup-local</string>",
+                   "<string>--preload</string>", "<key>RunAtLoad</key><true/>", "<key>KeepAlive</key><false/>"):
+        assert needle in t, needle
+    assert "StartInterval" not in t
+    assert "--preload" in lo.render_preload_systemd_unit("/py") and "oneshot" in lo.render_preload_systemd_unit("/py")
+
+
+def test_setup_writes_the_preload_job_records_it_and_does_not_start_it(tmp_path):
+    home = tmp_path / "home"
+    box = Box()
+    assert box.run(home)["ok"]
+    pre = home / "Library" / "LaunchAgents" / f"{lo.PRELOAD_LABEL}.plist"
+    assert "--preload" in pre.read_text() and "<string>/py</string>" in pre.read_text()
+    assert lo.read_sentinel()["preload_label"] == lo.PRELOAD_LABEL
+    assert not any(lo.PRELOAD_LABEL in str(c) for c in box.commands)  # written, not loaded
+
+
+def test_preload_success_loads_pinned_at_the_proxy_window_and_logs_one_line(tmp_path):
+    _fresh_sentinel()
+    box = Box()
+    box.up = True
+    assert _preload(box, tmp_path) == 0
+    _url, body = box.posts[0]
+    assert body["keep_alive"] == -1 and body["options"]["num_ctx"] == lo.WINDOW
+    assert box.commands == []  # no proxy sentinel: nothing restarted
+    log = _log_text().splitlines()
+    assert len(log) == 1 and "rc=0" in log[0]
+
+
+def test_preload_failure_is_non_zero_when_the_server_never_answers(tmp_path, capsys):
+    _fresh_sentinel()
+    box = Box()  # never comes up
+    assert _preload(box, tmp_path) == 1
+    assert box.posts == [] and "rc=1" in _log_text() and "did not answer" in capsys.readouterr().err
+
+
+def test_preload_failure_is_non_zero_when_the_model_does_not_load(tmp_path):
+    _fresh_sentinel()
+    box = Box()
+    box.up = True
+    box.post = lambda url, body: None
+    assert _preload(box, tmp_path) == 1 and "did not load" in _log_text()
+
+
+def test_preload_without_setup_is_non_zero(tmp_path):
+    box = Box()
+    box.up = True
+    assert _preload(box, tmp_path) == 1 and box.posts == []
+
+
+def test_preload_peer_refusal_skips_the_load_and_the_restart(tmp_path):
+    _fresh_sentinel()
+    pd.write_sentinel(port=8787, steps="off", tiers="conversation", label=pd.LABEL, system="Darwin")
+    box = Box(peer_models=[{"model": "qwen3-coder:30b", "size": 20e9}])
+    box.up = True
+    assert _preload(box, tmp_path) == 1
+    assert box.posts == [] and box.commands == []
+    assert "not loading" in _log_text()
+
+
+def test_preload_kickstarts_the_proxy_only_when_its_sentinel_exists(tmp_path):
+    _fresh_sentinel()
+    box = Box()
+    box.up = True
+    assert _preload(box, tmp_path) == 0 and box.commands == []
+    pd.write_sentinel(port=8787, steps="off", tiers="conversation", label=pd.LABEL, system="Darwin")
+    assert _preload(box, tmp_path) == 0
+    assert len(box.commands) == 1
+    assert f"kickstart -k gui/$(id -u)/{pd.LABEL}" in box.commands[0] and "bootout" not in box.commands[0]
+
+
+def test_preload_failed_proxy_restart_is_non_zero(tmp_path):
+    _fresh_sentinel()
+    pd.write_sentinel(port=8787, steps="off", tiers="conversation", label=pd.LABEL, system="Darwin")
+    box = Box(activate_rc=1)
+    box.up = True
+    assert _preload(box, tmp_path) == 1 and "could not restart the proxy" in _log_text()
+
+
+def test_cli_preload_flag_dispatches_to_run_preload(monkeypatch):
+    seen = []
+    monkeypatch.setattr(sl, "run_preload", lambda **kw: seen.append(kw) or 7)
+    assert sl.cmd_setup_local(["--preload"]) == 7 and len(seen) == 1
 
 
 # ── the guard ───────────────────────────────────────────────────────────────

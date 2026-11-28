@@ -46,6 +46,7 @@ GPU_MEMORY_FRACTION = 0.75
 DOWNLOAD_GB = 22.0
 LABEL = pd.LOCAL_OLLAMA_LABEL
 SYSTEMD_UNIT = "llm_router-local-ollama"
+PRELOAD_LABEL = pd.LOCAL_PRELOAD_LABEL
 _SENTINEL_NAME = "local_ollama.json"
 
 #: What ``setup-local`` persists to the state ``.env`` (explicit-set-wins, recorded, removed on uninstall).
@@ -73,12 +74,13 @@ def read_sentinel() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def write_sentinel(*, system: str, ollama_bin: str, env_written: dict[str, str]) -> None:
+def write_sentinel(*, system: str, ollama_bin: str, env_written: dict[str, str],
+                   preload_label: str | None = None) -> None:
     p = sentinel_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({
         "enabled": True, "model": MODEL, "port": PORT, "window": WINDOW, "label": LABEL,
-        "system": system, "ollama_bin": ollama_bin,
+        "system": system, "ollama_bin": ollama_bin, "preload_label": preload_label,
         "env_written": env_written,  # exactly the lines this command added, nothing else
         "installed_at": time.time(),
     }, indent=2) + "\n")
@@ -215,6 +217,54 @@ def install_service(ollama_bin: str, *, system: str, home: Path) -> tuple[Path, 
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(content)
     return dest, activate
+
+
+def render_preload_plist(python: str, home: Path) -> str:
+    """Runs once at login (RunAtLoad, no KeepAlive, no StartInterval): reload the model after a reboot."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{PRELOAD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python}</string>
+        <string>-m</string>
+        <string>llm_router.cli</string>
+        <string>setup-local</string>
+        <string>--preload</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><false/>
+    <key>StandardOutPath</key><string>{home}/.llm-router/logs/local-ollama-preload.out.log</string>
+    <key>StandardErrorPath</key><string>{home}/.llm-router/logs/local-ollama-preload.err.log</string>
+</dict>
+</plist>
+"""
+
+
+def render_preload_systemd_unit(python: str) -> str:
+    return f"""[Unit]
+Description=LLM Router: reload the local model after login
+After=llm_router-local-ollama.service
+Wants=llm_router-local-ollama.service
+
+[Service]
+Type=oneshot
+ExecStart={python} -m llm_router.cli setup-local --preload
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def install_preload_service(python: str, *, system: str, home: Path) -> Path:
+    """Write the preload job's file. It is NOT started here: it runs at the next login (and
+    ``setup-local`` itself has just loaded the model)."""
+    dest, _ = pd.service_target(system, home, label=PRELOAD_LABEL)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(render_preload_plist(python, home) if system == "Darwin" else render_preload_systemd_unit(python))
+    return dest
 
 
 # ── what the proxy plist gets once this is set up ────────────────────────────
